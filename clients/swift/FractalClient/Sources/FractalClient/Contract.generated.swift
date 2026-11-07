@@ -75,10 +75,12 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case setsList = "sets.list"
     case setsGet = "sets.get"
     case capabilitiesGet = "capabilities.get"
+    case deviceCommandGet = "device-command.get"
     case documentGet = "document.get"
     case documentsList = "documents.list"
     case documentReferencesGet = "document-references.get"
     case publicationDefinition = "publication.definition"
+    case missionDeclarationGet = "mission-declaration.get"
     case subjectDefinition = "subject.definition"
     case mailBacklogSummary = "mail-backlog.summary"
     case sloList = "slo.list"
@@ -110,6 +112,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case agentDeclarationGet = "agent-declaration.get"
     case statusHistoryGet = "status-history.get"
     case agentQueueGet = "agent-queue.get"
+    case agentRelatedRunsGet = "agent-related-runs.get"
     case harnessInventoryGet = "harness-inventory.get"
     case runtimesList = "runtimes.list"
     case runtimesGet = "runtimes.get"
@@ -161,10 +164,12 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .setsList: "/v1/client/sets",
     .setsGet: "/v1/client/sets/{id}",
     .capabilitiesGet: "/v1/client/capabilities",
+    .deviceCommandGet: "/v1/client/device-commands/{id}",
     .documentGet: "/v1/client/documents/content",
     .documentsList: "/v1/client/documents",
     .documentReferencesGet: "/v1/client/document-references",
     .publicationDefinition: "/v1/client/publication-definition",
+    .missionDeclarationGet: "/v1/client/mission-declaration",
     .subjectDefinition: "/v1/client/subject-definition",
     .mailBacklogSummary: "/v1/client/mail-backlog",
     .sloList: "/v1/client/slo",
@@ -196,6 +201,7 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .agentDeclarationGet: "/v1/client/agent-declarations/{id}",
     .statusHistoryGet: "/v1/client/status-history/{id}",
     .agentQueueGet: "/v1/client/agent-queues/{id}",
+    .agentRelatedRunsGet: "/v1/client/agent-related-runs/{id}",
     .harnessInventoryGet: "/v1/client/harness-inventory/{id}",
     .runtimesList: "/v1/client/runtimes",
     .runtimesGet: "/v1/client/runtimes/{id}",

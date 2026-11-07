@@ -297,7 +297,11 @@ pkgs.testers.runNixOSTest {
             f"--setenv=PATH=/run/current-system/sw/bin -- {st} up"
         )
     )
-    machine.wait_for_file("/run/user/1000/st3.sock")
+    socket_present = "test -S /run/user/1000/fractal.sock"
+    # LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-11-01-socket-names-fractal — DELETE at contraction
+    socket_present += " || test -S /run/user/1000/st3.sock"
+    # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-socket-names-fractal
+    machine.wait_until_succeeds(socket_present)
     # The socket file appears while the daemon is still starting ("the API is not ready"), so the
     # file is not readiness. Ready means a daemon API read answers: `st clients` is read-only and
     # fails until then.

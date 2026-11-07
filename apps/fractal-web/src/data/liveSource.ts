@@ -1,5 +1,6 @@
 import { ClientError, FractalClient, isTransient } from '@fractal/client'
-import { Runtime, Snapshot, decodeUnknownSync } from '@fractal/client/schema'
+import { sidebarPins } from './sidebarPins.ts'
+import { Runtime, Snapshot, TimelinePage, decodeUnknownSync } from '@fractal/client/schema/read'
 import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
 import {
   Fractal,
@@ -14,8 +15,9 @@ import {
   type FractalOptions,
   type SyncStatus,
   syncStatusFromFailure,
-  openPtySession,
-} from '@fractal/sdk/effect'
+  decodeConversationChunk,
+} from '@fractal/sdk/read'
+import { loadMutations, loadPty } from './lazySdk.ts'
 import { Effect, Fiber, Layer, ManagedRuntime, Metric, Option, Schema, Stream, SubscriptionRef } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
@@ -76,6 +78,9 @@ import { gatewayObjectives } from './objectivesSource.ts'
  * transport failures trigger the published fallback immediately instead of waiting this long. */
 export const ROSTER_FIRST_SNAPSHOT_DEADLINE_MS = 3_000
 
+/** Generated page framing with the SDK's tolerant decoder owning individual entries. */
+const historyPage = Schema.Struct({ ...TimelinePage.fields, items: Schema.Array(Schema.Unknown) })
+
 /** The owned source registry and runtime teardown handle. */
 export interface LiveSource {
   readonly source: DataSource
@@ -105,6 +110,7 @@ interface RetainedFeed<A> {
 
 interface RetainedConversation extends RetainedFeed<ConversationPage> {
   readonly send: AttachmentPort['send']
+  readonly loadOlder: () => Promise<void>
 }
 
 interface PendingSend {
@@ -175,6 +181,7 @@ export const liveSource = ({
     baseUrl,
     // Remove the browser receiver workaround after Fractal #1040 / #1247 lands.
     fetchImpl: fetch,
+    ...(options.socket === undefined ? {} : { socket: options.socket }),
   })
   const registry = AtomRegistry.make()
   const readRefusal = Atom.keepAlive(Atom.make<string | undefined>(undefined))
@@ -194,6 +201,7 @@ export const liveSource = ({
     registry,
   })
   const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
+  const followInterests = new Map<string, () => boolean>()
   const objectives = gatewayObjectives({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
   const runtime = ManagedRuntime.make(
     FractalLive({
@@ -258,7 +266,10 @@ export const liveSource = ({
         options.onDiagnostics?.(event)
       },
     }).pipe(
-      Layer.provide(BrowserFractalPlatform({ adoptEarlyCollections })),
+      Layer.provide(BrowserFractalPlatform({
+        adoptEarlyCollections,
+        hasInterest: (key) => followInterests.get(key)?.(),
+      })),
       Layer.provideMerge(Metric.enableRuntimeMetricsLayer),
       Layer.merge(Layer.succeed(SubjectReadPort, subjectReads)),
       Layer.merge(sessionTraceLayer ?? gatewaySessionTraceLayer(client).pipe(
@@ -356,6 +367,9 @@ export const liveSource = ({
     const syncData = Atom.keepAlive(Atom.make<FeedSync<A>>(syncLatest))
     let unmount: (() => void) | undefined
     const data = Atom.make<Feed<A>>(latest)
+    // Registry disposal is deferred. Admission must use current demand, not wait
+    // for the outgoing interest's finalizer before freeing its warm socket slot.
+    const hasInterest = () => visible && !registry.ensureNode(interest).canBeRemoved
     const following = Atom.make((get): Feed<A> => {
       let active = true
       if (readRejection !== undefined)
@@ -405,12 +419,17 @@ export const liveSource = ({
       const resolving = resolve(get)
       const previous = previousFiber
       spec = undefined
+      let boundKey: string | undefined
       let freshnessFiber: Fiber.Fiber<void, unknown> | undefined
       let initialReadFiber: Fiber.Fiber<void> | undefined
       let initialReadDeadlineFiber: Fiber.Fiber<void> | undefined
       let initialReadConnectionFiber: Fiber.Fiber<void> | undefined
       const fiber = runtime.runFork(
         Effect.gen(function* () {
+          // Finish atom acquisition before transport callbacks can reenter the registry.
+          // In particular, eviction must not unsubscribe while the new interest's mount
+          // is still installing its ownership and has not returned its release handle.
+          yield* Effect.yieldNow
           // Release the old socket slot before binding the replacement owner.
           if (previous !== undefined) yield* Fiber.interrupt(previous)
           if (readRejection !== undefined) {
@@ -429,6 +448,8 @@ export const liveSource = ({
           const boundSpec = yield* resolving
           spec = boundSpec
           const key = followKey(boundSpec)
+          boundKey = key
+          followInterests.set(key, hasInterest)
           const startInitialRead = () => {
             if (initialRead === undefined || initialReadFiber !== undefined || !active
               || readRejection !== undefined || terminalFailure || latest._tag !== 'Waiting') return
@@ -569,13 +590,15 @@ export const liveSource = ({
                     initialReadFiber?.interruptUnsafe()
                     initialReadDeadlineFiber?.interruptUnsafe()
                     initialReadConnectionFiber?.interruptUnsafe()
+                    if (boundKey !== undefined && followInterests.get(boundKey) === hasInterest)
+                      followInterests.delete(boundKey)
                     if (!active) return
                     ended = true
                     // Interest can return between SDK eviction and this finalizer. Its
                     // acquisition saw ended=false, so completion must hand demand back
                     // to a new run too. Wait until this fiber finishes before refreshing.
-                    if (visible && !terminalFailure && readRejection === undefined) queueMicrotask(() => {
-                      if (!active || !visible || !ended || terminalFailure || readRejection !== undefined) return
+                    if (hasInterest() && !terminalFailure && readRejection === undefined) queueMicrotask(() => {
+                      if (!active || !hasInterest() || !ended || terminalFailure || readRejection !== undefined) return
                       ingest.flush()
                       registry.refresh(following)
                     })
@@ -752,6 +775,12 @@ export const liveSource = ({
   const messageSnapshot = (): Promise<ConversationPortResult<string>> =>
     runtime.runPromise(
       Effect.gen(function* () {
+        const loaded = yield* loadMutations.pipe(Effect.result)
+        if (loaded._tag === 'Failure') return {
+          _tag: 'Refused' as const, reason: 'snapshot-unavailable' as const,
+          detail: loaded.failure.message,
+        }
+        const { makeMutations } = loaded.success
         const fractal = yield* Fractal
         const statuses = yield* SubscriptionRef.get(fractal.syncStatuses)
         let freshest: typeof Snapshot.Type | undefined
@@ -765,7 +794,7 @@ export const liveSource = ({
             freshest = decoded.value
         }
         if (freshest !== undefined) return { _tag: 'Success' as const, value: freshest.id }
-        return yield* fractal.snapshot.pipe(
+        return yield* makeMutations({ ...options, fetch }).snapshot.pipe(
           Effect.map((value): ConversationPortResult<string> => ({ _tag: 'Success', value })),
           Effect.catch((failure) => Effect.succeed<ConversationPortResult<string>>({
             _tag: 'Refused', reason: 'snapshot-unavailable',
@@ -792,6 +821,10 @@ export const liveSource = ({
     let painted = false
     let publishedItems: ConversationPage['items'] = []
     let changedFrom = Infinity
+    let older: ConversationPage['older']
+    let olderRequest: Promise<void> | undefined
+    let sessionId: string | undefined
+    let generation = 0
     const projectPage = (): ConversationPage => {
       const projection = timeline.project()
       const hadPending = pending.size > 0
@@ -811,6 +844,8 @@ export const liveSource = ({
         ...(timeline.header === undefined ? {} : { header: timeline.header }),
         ...(lastSendId === undefined ? {} : { lastSendId }),
         hasOlder: timeline.hasOlder,
+        ...(timeline.olderCursor === undefined ? {} : { olderCursor: timeline.olderCursor }),
+        ...(older === undefined ? {} : { older }),
         change: { from: publishedItems, index: changedFrom },
         ...(timeline.observation === undefined ? {} : { observation: timeline.observation }),
       }
@@ -836,6 +871,12 @@ export const liveSource = ({
             if (event._tag !== 'Observed') return event
             ux?.().switchDataReady(ref)
             const previousSize = timeline.size
+            if (event.value.replace) {
+              generation += 1
+              older = undefined
+              olderRequest = undefined
+              sessionId = event.value.sessionId
+            }
             timeline.apply(event.value)
             // Entries are identity-deduplicated by the retained timeline, not counted per chunk.
             incrDebug('Wf.conversationEntries', timeline.size - previousSize)
@@ -848,6 +889,40 @@ export const liveSource = ({
       if (!retained.publish(page)) return
       publishedItems = page.items
       changedFrom = Infinity
+    }
+    const loadOlder = (): Promise<void> => {
+      if (olderRequest !== undefined) return olderRequest
+      const cursor = timeline.olderCursor
+      if (cursor === undefined || sessionId === undefined) return Promise.resolve()
+      const requestedGeneration = generation
+      const requestedSession = sessionId
+      older = { _tag: 'Loading' }
+      publishPending()
+      olderRequest = (async () => {
+        try {
+          // Opaque continuations retain the server's cursor-bound page size.
+          const response = await client.timelineList(requestedSession, { cursor })
+          // Keep entries raw for the SDK's tolerant per-entry/block decoder.
+          const page = decodeUnknownSync(historyPage)(response.value)
+          if (generation !== requestedGeneration) return
+          timeline.prepend(decodeConversationChunk({
+            kind: 'conversation', collection: 'conversation', id: ref,
+            session_id: page.session_id, replace: false, items: page.items,
+            has_more: page.page.has_more,
+            ...(Option.isNone(page.page.next_cursor) ? {} : { older_cursor: page.page.next_cursor.value }),
+          }))
+          older = undefined
+        } catch (cause) {
+          if (generation !== requestedGeneration) return
+          older = { _tag: 'Failed', detail: cause instanceof Error ? cause.message : String(cause) }
+        } finally {
+          if (generation === requestedGeneration) {
+            olderRequest = undefined
+            publishPending()
+          }
+        }
+      })()
+      return olderRequest
     }
     const send: AttachmentPort['send'] = async (request) => {
       const idempotencyKey = request._tag === 'Resend' ? request.idempotencyKey : crypto.randomUUID()
@@ -922,7 +997,7 @@ export const liveSource = ({
         return { _tag: 'Refused', reason: 'failed', detail }
       }
     }
-    return { ...retained, send }
+    return { ...retained, send, loadOlder }
   })
   const recentConversations = new Map<string, RetainedConversation>()
   const retainConversation = (ref: string) => {
@@ -1129,6 +1204,7 @@ export const liveSource = ({
     },
     source: {
       mode: 'live',
+      pins: sidebarPins(client),
       subjectReads,
       nativeDetails,
       objectives,
@@ -1160,6 +1236,7 @@ export const liveSource = ({
         retainConversation(ref).prefetch()
       },
       retryConversation: (ref) => retainConversation(ref).retry(),
+      loadOlder: (ref) => retainConversation(ref).loadOlder(),
       resources,
       terminal,
       terminalInterest: (ref) => retainTerminal(ref).interest,
@@ -1177,7 +1254,9 @@ export const liveSource = ({
       // Same origin and transport as `client`; the gateway injects the credential and keeps the
       // capability subprotocol on the WebSocket upgrade.
       terminalRaw: {
-        open: (options) => openPtySession({ ...options, baseUrl, fetch }),
+        open: (options) => loadPty.pipe(
+          Effect.flatMap(({ openPtySession }) => openPtySession({ ...options, baseUrl, fetch })),
+        ),
       },
       // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
       terminalInput: gatewayTerminalInput({

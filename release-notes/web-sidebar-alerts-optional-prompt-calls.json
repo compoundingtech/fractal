@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Encode native optional prompt calls at the Alerts view boundary",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "Consume the current native prompt schema without changing it."},
+  "rules": {"status": "none", "detail": "No rule changes."},
+  "compatibility": {"status": "none", "detail": "Current main decodes unavailable prompt calls as Option. Encode the existing native schema before passing prompt facts to the wire-shaped view projection."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}

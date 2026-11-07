@@ -1,6 +1,8 @@
 import { ClientError, type FractalClient } from '@fractal/client'
-import * as Native from '@fractal/client/schema'
+import * as Native from '@fractal/client/schema/read'
 import type { TerminalScreen } from '@fractal/client/schema'
+import { Effect } from 'effect'
+import { loadTerminalSchema } from '../data/lazySdk.ts'
 
 import { makeActionTerminalInput, type TerminalInputAttempt, type TerminalInputOutcome } from './actionTerminalInput.ts'
 import type { TerminalInputPortFactory } from './orderedTerminalInput.ts'
@@ -77,6 +79,12 @@ export const gatewayTerminalInput = ({
         submit: async (wire: TerminalInputWire, attempt): Promise<TerminalInputOutcome> => {
           const before = admitted(attempt)
           if ('_tag' in before) return before
+          let schema
+          try {
+            schema = await Effect.runPromise(loadTerminalSchema)
+          } catch {
+            return unconfirmed
+          }
           const snapshotId = await snapshot()
           if (snapshotId === undefined) return unconfirmed
           // The fence reads the screen as it is now; the transport admits the post again.
@@ -96,7 +104,7 @@ export const gatewayTerminalInput = ({
               },
               parameters: { terminal_id: terminalRef, mode: wire.mode, value: wire.value },
             })
-            const result = Native.decodeUnknownSync(Native.ActionResult)(response.value)
+            const result = Native.decodeUnknownSync(schema.ActionResult)(response.value)
             return result.status === 'rejected'
               ? { _tag: 'Refused', reason: 'The gateway rejected this input. Queued keys were dropped.' }
               : { _tag: 'Delivered' }

@@ -42,6 +42,9 @@ impl From<io::Error> for Error {
 /// Enumerate a single directory. Hidden entries, symlinks and special files are never returned.
 /// The caller owns actor/session fences and pagination; this function never accepts a new root
 /// from an HTTP request and never opens or reads an entry's contents.
+/// Roots must first pass native inventory admission, which resolves trusted cwd aliases and
+/// binds the canonical path to WorkspaceIdentity. Never canonicalize here: a later symlink
+/// replacement of the admitted root or its ancestors must be refused, not followed.
 pub fn list(root: &Path, identity: &fractal_drivers::harness_inventory::WorkspaceIdentity,
     directory: &str, prefix: &str) -> Result<Listing, Error> {
     if directory.len() > 4096 || Path::new(directory).is_absolute() {
@@ -189,10 +192,23 @@ mod tests {
             device: metadata.dev().to_string(), inode: metadata.ino().to_string(),
         }
     }
+    fn admit(root: &Path, native: &fractal_drivers::harness_inventory::WorkspaceIdentity)
+        -> anyhow::Result<std::path::PathBuf> {
+        let frame = serde_json::json!({
+            "type": "inventory", "session_id": "native-one",
+            "workspace": root, "workspace_identity": native,
+            "observed_at": "2026-11-06T00:00:00Z",
+            "dynamic_commands": "unsupported", "commands": [],
+        });
+        let snapshot = fractal_drivers::harness_inventory::observation(
+            &frame, "omp", Some("native-one"), "runtime-one")?.unwrap();
+        Ok(snapshot.workspace.unwrap().into())
+    }
     #[test]
     fn root_visible_metadata_is_filtered_without_following_external_links() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
+        let admitted = admit(root.path(), &identity(root.path())).unwrap();
         std::fs::write(root.path().join("alpha.rs"), "visible").unwrap();
         std::fs::write(root.path().join("beta.rs"), "visible").unwrap();
         std::fs::write(root.path().join(".env"), "private").unwrap();
@@ -201,25 +217,26 @@ mod tests {
         std::fs::write(outside.path().join("outside.rs"), "never read").unwrap();
         std::os::unix::fs::symlink(outside.path(), root.path().join("external")).unwrap();
         std::os::unix::fs::symlink(outside.path().join("outside.rs"), root.path().join("external.rs")).unwrap();
-        assert_eq!(list(root.path(), &identity(root.path()), "", "").unwrap().entries, vec![
+        assert_eq!(list(&admitted, &identity(root.path()), "", "").unwrap().entries, vec![
             Entry { name: "alpha-dir".into(), directory: true },
             Entry { name: "alpha.rs".into(), directory: false },
             Entry { name: "beta.rs".into(), directory: false },
         ]);
-        assert_eq!(list(root.path(), &identity(root.path()), "", "alpha.").unwrap().entries,
+        assert_eq!(list(&admitted, &identity(root.path()), "", "alpha.").unwrap().entries,
             vec![Entry { name: "alpha.rs".into(), directory: false }]);
-        assert!(matches!(list(root.path(), &identity(root.path()), "../", ""), Err(Error::InvalidDirectory)));
-        assert!(matches!(list(root.path(), &identity(root.path()), "/absolute", ""), Err(Error::InvalidDirectory)));
-        assert!(matches!(list(root.path(), &identity(root.path()), ".state", ""), Err(Error::InvalidDirectory)));
-        assert!(matches!(list(root.path(), &identity(root.path()), "external", ""), Err(Error::Io(_))));
+        assert!(matches!(list(&admitted, &identity(root.path()), "../", ""), Err(Error::InvalidDirectory)));
+        assert!(matches!(list(&admitted, &identity(root.path()), "/absolute", ""), Err(Error::InvalidDirectory)));
+        assert!(matches!(list(&admitted, &identity(root.path()), ".state", ""), Err(Error::InvalidDirectory)));
+        assert!(matches!(list(&admitted, &identity(root.path()), "external", ""), Err(Error::Io(_))));
     }
     #[test]
     fn scan_ceiling_counts_hidden_entries_even_when_filter_matches_nothing() {
         let root = tempfile::tempdir().unwrap();
+        let admitted = admit(root.path(), &identity(root.path())).unwrap();
         for index in 0..=MAX_ENTRIES {
             std::fs::write(root.path().join(format!(".hidden-{index}")), "").unwrap();
         }
-        assert!(matches!(list(root.path(), &identity(root.path()), "", "missing"), Err(Error::ScanLimit)));
+        assert!(matches!(list(&admitted, &identity(root.path()), "", "missing"), Err(Error::ScanLimit)));
     }
     #[test]
     fn replaced_root_or_symlink_ancestor_cannot_substitute_an_outside_workspace() {
@@ -231,11 +248,48 @@ mod tests {
         std::fs::create_dir(outside.path().join("workspace")).unwrap();
         std::fs::write(outside.path().join("workspace/private"), "never enumerate").unwrap();
         let native = identity(&root);
-        std::fs::rename(&parent, base.path().join("original")).unwrap();
-        std::os::unix::fs::symlink(outside.path(), &parent).unwrap();
+        let root = admit(&root, &native).unwrap();
+        let parent = root.parent().unwrap();
+        std::fs::rename(parent, base.path().join("original")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), parent).unwrap();
         assert!(matches!(list(&root, &native, "", ""), Err(Error::Io(_))));
-        std::fs::remove_file(&parent).unwrap();
+        std::fs::remove_file(parent).unwrap();
         std::fs::create_dir_all(&root).unwrap();
         assert!(matches!(list(&root, &native, "", ""), Err(Error::Changed)));
+    }
+    #[test]
+    fn symlinked_tmp_is_admitted_but_replacements_cannot_redirect_inventory() {
+        let base = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let actual = base.path().join("actual");
+        std::fs::create_dir_all(actual.join("workspace")).unwrap();
+        std::fs::create_dir(outside.path().join("workspace")).unwrap();
+        std::fs::write(actual.join("workspace/visible"), "").unwrap();
+        std::fs::write(outside.path().join("workspace/private"), "never enumerate").unwrap();
+        let tmp = base.path().join("tmp");
+        std::os::unix::fs::symlink(&actual, &tmp).unwrap();
+        let alias = tmp.join("workspace");
+        let native = identity(&alias);
+        let admitted = admit(&alias, &native).unwrap();
+        assert_eq!(admitted, actual.join("workspace").canonicalize().unwrap());
+        assert_eq!(list(&admitted, &native, "", "").unwrap().entries,
+            vec![Entry { name: "visible".into(), directory: false }]);
+
+        // A changed alias cannot supply new admission evidence for the original held cwd.
+        std::fs::remove_file(&tmp).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &tmp).unwrap();
+        assert!(admit(&alias, &native).is_err());
+        // The admitted canonical path is independent of subsequent alias changes.
+        assert_eq!(list(&admitted, &native, "", "").unwrap().entries[0].name, "visible");
+
+        // Neither a symlinked canonical root nor its replaced ancestor may be followed.
+        std::fs::rename(&admitted, actual.join("original")).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("workspace"), &admitted).unwrap();
+        assert!(matches!(list(&admitted, &native, "", ""), Err(Error::Io(_))));
+        std::fs::remove_file(&admitted).unwrap();
+        std::fs::rename(actual.join("original"), &admitted).unwrap();
+        std::fs::rename(&actual, base.path().join("original")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &actual).unwrap();
+        assert!(matches!(list(&admitted, &native, "", ""), Err(Error::Io(_))));
     }
 }

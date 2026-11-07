@@ -195,6 +195,9 @@ impl FractalRuntime {
         migrate_local_usage_seen(connection)?;
         // Before the projection backfills, which fold marks in.
         message_marks::create_table(connection)?;
+        message_outbox::create_table(connection)?;
+        stream_mirror::create_table(connection)?;
+        relayed_closes::create_table(connection)?;
         backfill_message_index(connection)?;
         idle_mail::create_schema(connection)?;
         unread_mail::create_schema(connection)?;
@@ -214,6 +217,8 @@ impl FractalRuntime {
         coordination::create_schema(connection)?;
         // After every projection its triggers maintain.
         message_marks::create_triggers(connection)?;
+        relayed_closes::create_triggers(connection)?;
+        stream_mirror::create_triggers(connection)?;
         stop_deferral::create_schema(connection)?;
         publication_facts::create_schema(connection)?;
         glass_heads::create_schema(connection)?;
@@ -427,7 +432,7 @@ impl Runtime for FractalRuntime {
         _connection: &Connection,
         _batch: &ReplicaBatch,
         claim: &ClaimRecord,
-    ) -> Result<ReplicatedClaimAdmission, St3Error> {
+    ) -> Result<ReplicatedClaimAdmission, FractalError> {
         classify_replicated_claim_with_registry(claim, self.claim_registry())
     }
 
@@ -435,7 +440,7 @@ impl Runtime for FractalRuntime {
         &self,
         _batch: &ReplicaBatch,
         claim: &ClaimRecord,
-    ) -> Option<Result<ReplicatedClaimAdmission, St3Error>> {
+    ) -> Option<Result<ReplicatedClaimAdmission, FractalError>> {
         // The registry is this build's schema, fixed for the process.
         Some(classify_replicated_claim_with_registry(claim, self.claim_registry()))
     }
@@ -444,7 +449,7 @@ impl Runtime for FractalRuntime {
         &self,
         store: &GraphStore,
         input: &ClaimInput,
-    ) -> Result<(ClaimRecord, bool), St3Error> {
+    ) -> Result<(ClaimRecord, bool), FractalError> {
         append_claim_fenced_outcome(store, input, None)
     }
 
@@ -503,11 +508,11 @@ impl Runtime for FractalRuntime {
         transaction: &Transaction<'_>,
         origin: &str,
         through: u64,
-    ) -> Result<IncrementalProjection, St3Error> {
+    ) -> Result<IncrementalProjection, FractalError> {
         try_project_simple_replication_tx(transaction, origin, through)
     }
 
-    fn replay_from_nothing(&self, transaction: &Transaction<'_>) -> Result<(), St3Error> {
+    fn replay_from_nothing(&self, transaction: &Transaction<'_>) -> Result<(), FractalError> {
         replay_graph_from_nothing_tx(transaction)
     }
 
@@ -515,22 +520,37 @@ impl Runtime for FractalRuntime {
         &self,
         transaction: &Transaction<'_>,
         progress: &mut dyn FnMut(ReplayProgress),
-    ) -> Result<(), St3Error> {
+    ) -> Result<(), FractalError> {
         replay_graph_from_nothing_with_progress_tx(transaction, progress)
     }
 
-    fn after_projection(&self, transaction: &Transaction<'_>) -> Result<(), St3Error> {
+    fn after_projection(&self, transaction: &Transaction<'_>) -> Result<(), FractalError> {
         projectors::run_hooks(projectors::FLUSH, transaction).map_err(internal)?;
         holds::stage("lease-renewals", || reapply_local_work_lease_renewals_tx(transaction))
     }
 
+    fn delete_trimmed_claims_tx(
+        &self,
+        transaction: &Transaction<'_>,
+        claims: &[ClaimTombstone],
+        delete: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<()> {
+        resources::delete_trimmed_tx(transaction, claims, delete)
+    }
+
     fn rebuild_deferred(&self, transaction: &Transaction<'_>, budget: std::time::Duration) -> Result<bool> {
-        resources::flush_deferred_preparation(transaction, budget)
+        // The subjects a trim's steps left pending first, then the preparation its deletes deferred.
+        let started = std::time::Instant::now();
+        if resources::flush_pending(transaction, budget)? {
+            return Ok(true);
+        }
+        resources::flush_deferred_preparation(transaction, budget.saturating_sub(started.elapsed()))
     }
 
     fn deferred_pending(&self, connection: &Connection) -> Result<bool> {
         Ok(connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_deferred)",
+            "SELECT EXISTS(SELECT 1 FROM local_resource_preparation_deferred)
+                OR EXISTS(SELECT 1 FROM local_resource_projection_pending)",
             [],
             |row| row.get(0),
         )?)
@@ -542,6 +562,7 @@ impl Runtime for FractalRuntime {
         // The native connection signal makes the no-work boundary SQL-free.
         resources::flush_preparation(transaction)?;
         completion_state::flush(transaction)?;
+        run_eta::flush(transaction)?;
         let budget = client_messages::finalize_commit(transaction)?;
         #[cfg(any(test, feature = "test-support"))]
         {
@@ -703,7 +724,7 @@ impl Runtime for FractalRuntime {
 const AGENT_ROSTER_READ_LATELY: std::time::Duration = std::time::Duration::from_secs(300);
 
 const SHARED_PROJECTION_LAYOUT: &str =
-    "st3.shared-projections.slo-breach-episodes-declared-resource-edges-ordered-membership.v1";
+    "st3.shared-projections.slo-breach-episodes-declared-resource-edges-arrangement-placement-migration.v1";
 
 /// The replication `schema_digest`: the claim vocabulary digest and the shared projection layout.
 pub fn compatibility_digest(registry_digest: &str) -> String {

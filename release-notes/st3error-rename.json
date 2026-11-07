@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Rename the Rust error alias to FractalError across the workspace",
+  "replay": { "status": "none", "detail": "Only Rust type references and documentation naming the type change; replay behavior is unchanged." },
+  "schema": { "status": "none", "detail": "No serialized names, wire formats, schemas, or stored state change." },
+  "rules": { "status": "none", "detail": "Error codes, messages, validation, and authority checks remain unchanged." },
+  "compatibility": { "status": "changed", "detail": "Rust callers use FractalError with no old-name re-export. Johannes approved this single cross-workspace PR in step-run/01a190b94f337f82920592e438966af1/ask-a27ce1a6cb6c92aee1ede5f5d47c80b1 (answer: one-pr). Runtime compatibility surfaces remain unchanged." },
+  "downtime": { "status": "none", "detail": "No service restart is required." },
+  "manual": { "status": "none", "detail": "No operator action or data cleanup is required." },
+  "recovery": { "status": "none", "detail": "Reverting restores the previous Rust alias without rewriting data." }
+}

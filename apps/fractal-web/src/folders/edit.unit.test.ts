@@ -1,6 +1,6 @@
 import { FractalClient, type ActionOf, type Arrangement, type ErrorEnvelope } from '@fractal/client'
 import { ArrangementEditParameters, ActionResult, decodeUnknownSync } from '@fractal/client/schema'
-import { ActionRefused, ActionTransportFailure, arrangementActions, type ActionFailure } from '@fractal/sdk/effect'
+import { ActionRefused, ActionTransportFailure, arrangementActions, type ActionFailure } from '@fractal/sdk/mutations'
 import { Effect, Schema } from 'effect'
 import { describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { arrangementSidebarDoc } from './client.ts'

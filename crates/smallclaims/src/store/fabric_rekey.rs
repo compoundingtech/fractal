@@ -168,7 +168,7 @@ impl Store {
                 }
             }
         }
-        self.publish_fleet_endpoints_locked(fields["mode"].as_str().unwrap_or(&own.mode), &endpoints, build)
+        self.publish_fleet_endpoints_locked(fields["mode"].as_str().unwrap_or(&own.mode), &endpoints, build, None)
     }
 }
 
@@ -187,7 +187,7 @@ mod tests {
         store.admit_fleet_anchor("rekey-test", key.public(), "listening").unwrap();
         store.publish_fleet_endpoints("listening", &[json!({
             "transport":"fabric","node":"a".repeat(64),"protocol":"fractal/fleet/rekey-test"
-        })], "test").unwrap();
+        })], "test", None).unwrap();
         key
     }
 
@@ -256,7 +256,7 @@ mod tests {
             assert_eq!(current_endpoints(&store), authenticated, "membership rejects the forgery");
             store.publish_fleet_endpoints("listening", &[json!({
                 "transport":"fabric", "node":"a".repeat(64), "protocol":"fractal/fleet/rekey-test"
-            })], "test").unwrap();
+            })], "test", None).unwrap();
             let published = store.latest_claim("host/anchor", Some("fleet.member-endpoints")).unwrap().unwrap();
             assert_eq!(published.origin, "anchor");
             assert_eq!(published.body["fields"]["endpoints"], json!(authenticated));
@@ -278,12 +278,12 @@ mod tests {
         assert_eq!(routes.len(), 1, "signed rekey metadata must never become a route");
         store.publish_fleet_endpoints("listening", &[json!({
             "transport":"fabric","node":"c".repeat(64),"protocol":"fractal/fleet/rekey-test"
-        })], "test").unwrap();
+        })], "test", None).unwrap();
         assert_eq!(current_endpoints(&store), prepared);
         request.action = FabricRekeyAction::Commit;
         assert!(store.fabric_rekey_at(&request, "test", 1002).unwrap());
         assert!(!store.fabric_rekey_at(&request, "test", 1003).unwrap());
-        store.publish_fleet_endpoints("listening", &[], "test").unwrap();
+        store.publish_fleet_endpoints("listening", &[], "test", None).unwrap();
         let committed = current_endpoints(&store);
         assert!(committed.iter().any(|entry| entry["transport"] == "fabric" && entry["node"] == request.next_node));
         request.action = FabricRekeyAction::Abort;

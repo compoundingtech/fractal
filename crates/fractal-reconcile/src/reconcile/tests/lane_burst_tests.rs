@@ -23,7 +23,7 @@ fn now() -> u64 {
 
 fn laned(runtime: Arc<FakeRuntime>, store: &Arc<Store>) -> Reconciler<FakeRuntime> {
     Reconciler::new(store.clone(), runtime, "node".into(), Arc::new(Notify::new()))
-        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside }))
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 54 * G }, outside: two_gib_outside, burst_lane: None }))
 }
 
 fn seat(store: &Store, name: &str, lane: &str) -> MemberSpec {
@@ -157,6 +157,84 @@ fn after_a_daemon_restart_a_raised_slice_counts_and_its_renewed_burst_holds_it_a
     assert_eq!(reconciler.seat_admission.status.burst_granted(builder), Some(burst));
     hold(&reconciler, &store, builder, &member);
     assert_eq!(reconciler.seat_admission.status.state().lane_raised.get(builder), Some(&burst));
+}
+
+#[test]
+fn a_burst_granted_before_a_daemon_restart_keeps_its_lane_and_its_holder_s_renewal_restores_it() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let runtime = Arc::new(FakeRuntime::default());
+    let member = seat(&store, "builder", "capacity cores=2 memory=\"4G\"");
+    let builder = "agent/node.builder";
+    let burst = Capacity { cores: 8, memory: 24 * G };
+    // A new daemon: the slice is still raised, and the run in it holds less than the seat's own
+    // lane at this moment, so nothing but the found raise keeps it from coming down (2026-11-05).
+    *runtime.lane_live.lock().unwrap() = Some(burst);
+    *runtime.lane_held.lock().unwrap() = Some(2 * G);
+    let reconciler = laned(runtime.clone(), &store);
+    let status = &reconciler.seat_admission.status;
+    reconciler.find_raised_lanes().unwrap();
+    reconciler.reconcile_lane_bursts().unwrap();
+    hold(&reconciler, &store, builder, &member);
+    assert!(runtime.lanes_resized.lock().unwrap().is_empty(), "the found raise stays until its holder renews");
+    assert_eq!(status.state().lane_raised.get(builder), Some(&burst));
+    // The holder's renewal says it holds the burst, and the slice still holds it: restored as granted, not asked again.
+    assert!(status.burst_ask(builder, burst, "st-test", now(), true, burst).1);
+    assert!(status.state().lane_found.is_empty());
+    reconciler.reconcile_lane_bursts().unwrap();
+    assert_eq!(status.burst_granted(builder), Some(burst));
+    hold(&reconciler, &store, builder, &member);
+    assert!(runtime.lanes_resized.lock().unwrap().is_empty());
+    // Restored once: later renewals renew it.
+    let (renewed, restored) = status.burst_ask(builder, burst, "st-test", now(), true, burst);
+    assert!(renewed.granted && !restored);
+}
+
+#[test]
+fn a_raise_found_at_a_daemon_restart_counts_at_once_so_another_seat_s_burst_waits_and_the_reserve_is_held() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let runtime = Arc::new(FakeRuntime::default());
+    let burst = Capacity { cores: 8, memory: 24 * G };
+    // Room for one burst beside the other lanes: 40G, of which seats outside lanes hold 2G.
+    let reconciler = Reconciler::new(store.clone(), runtime.clone(), "node".into(), Arc::new(Notify::new()))
+        .with_lane_host(Some(LaneHost { room: Capacity { cores: 14, memory: 40 * G }, outside: two_gib_outside, burst_lane: Some(burst) }));
+    let status = &reconciler.seat_admission.status;
+    seat(&store, "builder", "capacity cores=2 memory=\"4G\"");
+    *runtime.lane_live.lock().unwrap() = Some(burst);
+    // The first pass reads the slices before it judges anything, the builder's wake included.
+    reconciler.find_raised_lanes().unwrap();
+    *runtime.lane_live.lock().unwrap() = None;
+    seat(&store, "other", "capacity cores=2 memory=\"4G\"");
+    let other = "agent/node.other";
+    assert_eq!(reconciler.held_lanes(other, now()).unwrap(), 24 * G);
+    // The builder's raise holds the whole reserve a start keeps for a burst.
+    let reserve = reconciler.burst_reserve("agent/node.third", Capacity { cores: 2, memory: 4 * G }).unwrap();
+    assert_eq!((reserve.full, reserve.kept), (20 * G, 0));
+    // Another seat's ask, made before the builder's holder renews: it waits for the room the raise holds.
+    status.burst_hold(other, burst, "st-test", now());
+    reconciler.reconcile_lane_bursts().unwrap();
+    assert_eq!(status.burst_granted(other), None);
+    let wait = status.state().lane_bursts.iter().find(|burst| burst.subject == other).and_then(|burst| burst.wait.clone());
+    assert!(wait.as_deref().is_some_and(|wait| wait.contains("does not fit")), "{wait:?}");
+}
+
+#[test]
+fn a_raise_found_at_a_daemon_restart_that_no_holder_renews_within_a_lease_comes_down() {
+    let store = Arc::new(Store::open_memory("node").unwrap());
+    let runtime = Arc::new(FakeRuntime::default());
+    let member = seat(&store, "builder", "capacity cores=2 memory=\"4G\"");
+    let builder = "agent/node.builder";
+    let base = Capacity { cores: 2, memory: 4 * G };
+    *runtime.lane_live.lock().unwrap() = Some(Capacity { cores: 8, memory: 24 * G });
+    *runtime.lane_held.lock().unwrap() = Some(2 * G);
+    let lease_ms = u128::from(fractal_runtime::seat_admission_status::BURST_LEASE_SECS) * 1000;
+    let reconciler = laned(runtime.clone(), &store).with_started_at_for_test(now_ms() - lease_ms - 1);
+    let status = &reconciler.seat_admission.status;
+    reconciler.find_raised_lanes().unwrap();
+    reconciler.reconcile_lane_bursts().unwrap();
+    assert!(status.state().lane_found.is_empty());
+    hold(&reconciler, &store, builder, &member);
+    assert_eq!(*runtime.lanes_resized.lock().unwrap(), [(member.runtime_id.clone(), base)]);
+    assert_eq!(status.state().lane_raised.get(builder), None);
 }
 
 /// A seat declared on this host that is not running, waiting for room since `since`.

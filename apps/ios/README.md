@@ -81,7 +81,7 @@ Pure Node tests are colocated in `diagnosticsQueue.test.mjs` and `diagnosticsRed
 
 For a step-by-step setup, see [build and run the iOS app](../../docs/site/guides/ios-app.md), including prerequisites, simulator and device builds, and pairing.
 
-With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lockfile` from the repository root. Corepack provisions the root's pnpm 12.15.0; the single install covers the client, views and iOS packages. Alternatively, `nix develop .#web` supplies pnpm 12.15.0, Node 24.20, Bun 1.4.2 and Buck2. Then from this directory run `pnpm typecheck`, `pnpm test`, and `pnpm exec expo prebuild --platform ios --clean --no-install`. Install CocoaPods, run `pnpm run pods` (the wrapper sets `LANG` and `LC_ALL` to `en_US.UTF-8`), and open the generated `ios/fractal.xcworkspace` in Xcode. For daily development, build the Debug scheme for an iOS Simulator and run `pnpm start` for Metro. Keep normal simulator code signing enabled: building with `CODE_SIGNING_ALLOWED=NO` leaves the app without a usable Keychain, so device pairing fails. A physical device is optional for this development proof.
+With Node 24 and Corepack, run `corepack enable` and `pnpm install --frozen-lockfile` from the repository root. Corepack provisions the root's pnpm 12.17.0; the single install covers the client, views and iOS packages. Alternatively, `nix develop .#web` supplies pnpm 12.17.0, Node 24.20, Bun 1.4.2 and Buck2. Then from this directory run `pnpm typecheck`, `pnpm test`, and `pnpm exec expo prebuild --platform ios --clean --no-install`. Install CocoaPods, run `pnpm run pods` (the wrapper sets `LANG` and `LC_ALL` to `en_US.UTF-8`), and open the generated `ios/fractal.xcworkspace` in Xcode. For daily development, build the Debug scheme for an iOS Simulator and run `pnpm start` for Metro. Keep normal simulator code signing enabled: building with `CODE_SIGNING_ALLOWED=NO` leaves the app without a usable Keychain, so device pairing fails. A physical device is optional for this development proof.
 
 Before installing from a fresh checkout without devenv, run
 `python3 scripts/prepare-pnpm-source-inputs.py prepare` from the repository
@@ -199,7 +199,7 @@ verify the installed build independently of pairing or proof-only UI.
 The embedded `EXPO_PUBLIC_FRACTAL_BUILD` revision (legacy `EXPO_PUBLIC_ST3_BUILD`)
 also appears in connected-client diagnostics.
 
-Prerequisites are Python 3, Git, Node 24, pnpm 12.15.0, CocoaPods, Xcode, and `gate-slot`
+Prerequisites are Python 3, Git, Node 24, pnpm 12.17.0, CocoaPods, Xcode, and `gate-slot`
 in the scheduler's PATH. The build takes a heavy admission slot, runs under
 `taskpolicy -c utility` and `nice -n 19`, and caps Xcode parallelism at four jobs.
 Utility QoS yields to interactive work without restricting a native build to
@@ -411,7 +411,7 @@ registered/environment summary. Revocation or expiry also removes the registrati
 
 The app reaches its member over its saved gateway (Tailscale, the local network or HTTPS) unless the person turns on **Fabric** under Fleet › carrier. Fabric needs a build that links the native bridge: build with `FRACTAL_FABRIC=1 pnpm run pods` after building the Rust framework (see [the module's README](modules/fractal-fabric/README.md)). A build without it is the ordinary app and shows no carrier setting.
 
-With Fabric on, each foreground opens a fresh native listener on the loopback address the bridge returns (the only loopback address the app accepts; it is never saved), the client talks to it, and the background stops it. The paired bearer and the enrolled signing key are the same ones the saved gateway uses, so a device already paired to the member needs only the setting and a grant, not a new pairing. A new pairing made while the bridge is open goes over fabric. The member exposes its paired-only client socket as one fabric service and grants this phone's node ID (shown in Fleet › carrier) that one service, inbound-only, on fabric 0.2.41 or later, so the member never dials or probes the phone. After `st devices fabric enable` on the member, a pairing made with `st devices pair NAME --fabric-gateway` does this (the person chooses per pairing; without the flag nothing is granted): a member that offers `fabric-gateway-grant` receives the phone's node ID with the pairing and grants it, `st devices revoke` removes the grant, and a grant that failed is shown after pairing ([st grants paired phones](../../docs/st3/ios-fabric-protocol.md#st-grants-paired-phones)). A member without it is granted by hand: `fabric add PHONE_NODE_ID NAME --inbound-only --allow SERVICE`.
+With Fabric on, each foreground opens a fresh native listener on the loopback address the bridge returns (the only loopback address the app accepts; it is never saved), the client talks to it, and the background stops it. The paired bearer and the enrolled signing key are the same ones the saved gateway uses, so a device already paired to the member needs only the setting and a grant, not a new pairing. A new pairing made while the bridge is open goes over fabric. The member exposes its paired-only client socket as one fabric service and grants this phone's node ID (shown in Fleet › carrier) that one service, inbound-only, on fabric 0.2.41 or later, so the member never dials or probes the phone. After `st devices fabric enable` on the member, a pairing made with `st devices pair NAME --fabric-gateway` does this (the person chooses per pairing; without the flag nothing is granted): a member that offers `fabric-gateway-grant` receives the phone's node ID with the pairing and grants it, `st devices revoke` removes the grant, and a grant that failed is shown after pairing ([Fractal grants paired phones](../../docs/st3/ios-fabric-protocol.md#fractal-grants-paired-phones)). A member without it is granted by hand: `fabric add PHONE_NODE_ID NAME --inbound-only --allow SERVICE`.
 
 <!-- arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read -->
 The target is `node=NODE_ID&service=NAME` (and an optional `addr=` hint): paste it under Fleet › carrier. A build can carry one: put `EXPO_PUBLIC_FRACTAL_FABRIC_DEFAULT='node=…&service=…'` in an ignored `.env` on the build host and that build opens on Fabric with the target preset, until the person chooses otherwise. The legacy `EXPO_PUBLIC_ST3_FABRIC_DEFAULT` is read only when the preferred name is absent. A build from the repository carries none and stays on its saved gateway. Never commit a target, a node ID or a link.
@@ -432,6 +432,25 @@ Folder groups start open; busy groups start collapsed above 30 items. Device-loc
 and previously seen rows are scoped to the gateway and person. Missing rows stay marked
 unavailable. Edits use `arrangement.edit` and the live winning registers, with Sidebar
 created only on the first edit.
+
+Run `pnpm --dir apps/ios test sidebarBehavior.test.mjs` from the repository root
+to replay the schema-validated shared v1 vectors through the native feed, view and
+edit planners. The runner's explicit divergence table locks down the current
+flat-folder presentation, UTF-16 ties and native planner validation differences;
+it does not claim recursive layouts, structured refusal parity or v2 support.
+
+`sidebarMemberships.ts` and the exported membership feed conversions are unwired:
+the active sidebar still follows its existing v1 path. The read model stages pages,
+retains a stale last-complete base, joins collection epochs/frontiers and bounds
+automatic restarts to three attempts. Epochs must be supplied by a capable daemon;
+missing epochs refuse rather than deriving a frontier from whole-host snapshots.
+HTTP 404 and 422 `unsupported-membership-paging-contract` produce `Unsupported`
+(needs a newer daemon). HTTP 422 `invalid-membership-cursor` yields `InvalidCursor`;
+500 `membership-frontier-inconsistent` yields `FrontierInconsistent`. These states
+retain stale complete data without retries. Both collection-v1 HTTP 409 codes
+(`membership-frontier-reset`/`membership-collection-changed`) restart at page one.
+Legacy HTTP 410 cursor expiry is not a collection-v1 restart signal.
+Run `pnpm --dir apps/ios test sidebarMemberships.test.mjs` for its paging contract.
 
 The tabs are Now, Resources, Fleet and Spaces. Earlier tab aliases, tab links and stored
 tab orders are intentionally retired. A fresh workspace names its host and points to

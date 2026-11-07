@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "st-test resolves transport spellings and pinned repository rename aliases to one pool identity. The repository's former-name key stays canonical to reuse existing warm trees. Local and file remote path case and nondefault ports stay distinct so unrelated repositories do not share a pool.",
+  "replay": {
+    "status": "none",
+    "detail": "Local test-runner pool selection only; no graph or replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database or wire schema change. An optional repo-aliases.json object in the selected configuration directory maps exact normalized spellings to canonical pool identities."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Signing and verification rules are unchanged. Aliases are read only from the pinned accepted base. The new data file is included in the existing ci-script-tests lane definition and input paths, but is not a gate PROTECTED file."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Older bases without alias data keep their existing remote identities. The former-name pool remains warm. Non-GitHub path case, local/file paths, nondefault ports and unknown schemes such as fabric:// may change pool key once; unknown schemes now keep the whole URL. Duplicate pools remain eligible for existing global least-recently-used eviction when the pool cap is enabled and exceeded. With the cap off or not exceeded, idle duplicates can persist indefinitely. No pool migration, idle-age timer or special deletion path is added."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "None. Existing tree locks continue to protect active runs, including runs using former pool keys."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "None required by this change. Pool selection leaves retired pools untouched. Operations may independently clear unlocked duplicate build output after rollout under its existing cleanup policy; the runner needs no manual migration."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the runner and alias data to restore previous pool selection. Existing pools remain usable until ordinary cap eviction removes their idle trees."
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Convergence oracle pins its droppable kinds and tests them against the retention policy (#4869)",
+  "replay": {"status": "none", "detail": "Only the convergence test oracle changes."},
+  "schema": {"status": "none", "detail": "No claim, registry or storage schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and RULES_VERSION are unchanged. The oracle accepts the same droppable kinds as before, now from its own list, which a fast test keeps equal to the set retention.toml derives."},
+  "compatibility": {"status": "none", "detail": "No production behavior changes, so mixed-version fleets with the previous release are unaffected."},
+  "downtime": {"status": "none", "detail": "Test-only change; no deployment or restart."},
+  "manual": {"status": "none", "detail": "No user configuration or setup change."},
+  "recovery": {"status": "none", "detail": "No product recovery change."}
+}

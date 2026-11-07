@@ -1,5 +1,5 @@
 import type { CollectionSocket } from '@fractal/client'
-import { Fractal, FractalLive } from '@fractal/sdk/effect'
+import { Fractal, FractalLive } from '@fractal/sdk/read'
 import { Effect, Stream } from 'effect'
 import { expect, it } from 'vitest'
 import { installPageLifecycle } from './pageLifecycle.ts'

@@ -3,12 +3,14 @@
 // Clients that omit that token retain the legacy message-list shape and paging contract.
 import { API_VERSION } from './Models.generated.ts';
 import type {
+    AgentRelatedRuns, DeviceCommand, DeviceCommandRequest, DeviceResult,
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
+    MissionDeclaration,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, PrivateNotesSubject, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
@@ -333,11 +335,11 @@ export class FractalClient {
             method, headers, ...(body === undefined ? {} : { body: raw ? (body as BodyInit) : JSON.stringify(body) }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
-        // Old routers can return an empty 404 for this collection; do not parse it as JSON
-        // or try a history endpoint. This route has no missing-item 404 meaning.
-        if (response.status === 404 && path.split('?')[0] === '/v1/client/schedules') {
+        // These projections have no missing-item 404, including an old router's empty response.
+        const relatedRuns = path.startsWith('/v1/client/agent-related-runs/');
+        if (response.status === 404 && (relatedRuns || path.split('?')[0] === '/v1/client/schedules')) {
             throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
-                request_id: '', code: 'unsupported-capability', message: 'This server does not support schedules.list; upgrade the server',
+                request_id: '', code: 'unsupported-capability', message: `This server does not support ${relatedRuns ? 'agent-related-runs.get' : 'schedules.list'}; upgrade the server`,
                 retryable: false, details: {} }, 404);
         }
         let payload: unknown;
@@ -461,6 +463,15 @@ export class FractalClient {
 
     async pushUnregister(requestOptions: RequestOptions = {}): Promise<PushRegistrationResponse> {
         return this.request('DELETE', '/v1/client/push-registration', undefined, undefined, undefined, requestOptions);
+    }
+
+    /** Issue one expiring foreground command; never retried or replayed by the client. */
+    async deviceCommand(command: DeviceCommandRequest, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DeviceCommand>> {
+        return this.request('POST', '/v1/client/device-commands', command, undefined, undefined, requestOptions);
+    }
+
+    async deviceResult(result: DeviceResult, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DeviceCommand>> {
+        return this.request('POST', '/v1/client/device-results', result, undefined, undefined, requestOptions);
     }
 
     async beginPairing(request: PairingBegin, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PairingChallenge>> {
@@ -671,10 +682,12 @@ export class FractalClient {
     async hostRepositories(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HostRepositories>> { return this.get(`/v1/client/hosts/${encodeURIComponent(routedId(id))}/repositories`, undefined, requestOptions); }
     async setsList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/sets' + query(options), undefined, requestOptions); }
     async setsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/sets/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
+    async deviceCommandGet(id: string, options: { wait?: boolean } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DeviceCommand>> { return this.get(`/v1/client/device-commands/${encodeURIComponent(id)}` + query(options), undefined, requestOptions); }
     async documentGet(name: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DocumentContent>> { return this.get('/v1/client/documents/content' + query({ name }), undefined, requestOptions); }
     async documentsList(options: { prefix?: string; history?: boolean; cursor?: string; limit?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DocumentsPage>> { return this.get('/v1/client/documents' + query(options), undefined, requestOptions); }
     async documentReferencesGet(subject: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DocumentReferences>> { return this.get('/v1/client/document-references' + query({ subject }), undefined, requestOptions); }
     async publicationDefinition(subject: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<PublicationDefinition>> { return this.get('/v1/client/publication-definition' + query({ subject }), undefined, requestOptions); }
+    async missionDeclarationGet(mission: string, revision?: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<MissionDeclaration>> { return this.get('/v1/client/mission-declaration' + query({ mission, revision }), undefined, requestOptions); }
     async subjectDefinition(subject: string, showEnvValues = false, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SubjectDefinition>> { return this.get('/v1/client/subject-definition' + query({ subject, show_env_values: showEnvValues }), undefined, requestOptions); }
     async mailBacklogSummary(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<MailBacklog>> { return this.get('/v1/client/mail-backlog', undefined, requestOptions); }
     async sloList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<SloList>> { return this.get('/v1/client/slo', undefined, requestOptions); }
@@ -706,6 +719,7 @@ export class FractalClient {
     async agentDeclarationGet(id: string, revision?: string, showEnvValues = false, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AgentDeclaration>> { return this.get(`/v1/client/agent-declarations/${encodeURIComponent(routedId(id))}` + query({ revision, show_env_values: showEnvValues }), undefined, requestOptions); }
     async statusHistoryGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<StatusHistory>> { return this.get(`/v1/client/status-history/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async agentQueueGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AgentQueue>> { return this.get(`/v1/client/agent-queues/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
+    async agentRelatedRunsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AgentRelatedRuns>> { return this.get(`/v1/client/agent-related-runs/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async harnessInventoryGet(id: string, options: HarnessInventoryQuery, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessInventory>> { return this.get(`/v1/client/harness-inventory/${encodeURIComponent(routedId(id))}` + query({ ...options, limit: options.limit ?? undefined, cursor: options.cursor ?? undefined }), undefined, requestOptions); }
     async runtimesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/runtimes' + query(options), undefined, requestOptions); }
     async runtimesGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/runtimes/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }

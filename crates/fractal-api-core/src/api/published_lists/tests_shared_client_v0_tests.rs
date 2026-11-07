@@ -70,19 +70,12 @@ pub fn fold(store: &Store) -> (Arc<Publication<MissionRows>>, bool) {
     let list = store.published_missions_list();
     list.start();
     let now = now_ms();
-    let (base, generation) = list.base();
-    let changed = match fold_missions(store, base.as_deref()).unwrap() {
-        Some((publication, changed)) => {
-            list.publish(publication, generation).expect("no projection replaced meanwhile");
-            changed
-        }
-        None => false,
-    };
+    let changed = refresh_until_published(store, |store| store.published_missions_list(), fold_missions);
     let publication = list.newest().expect("a published list");
     assert_eq!(publication.cut, store.index().unwrap(), "published at the current cut");
     let expected = oracle(store);
     assert_eq!(rows(&publication), expected, "the published rows are the direct fold's");
-    let (fresh, _) = fold_missions(store, None).unwrap().unwrap();
+    let (fresh, _) = folded_at_once(fold_missions(store, None, None));
     assert_eq!(rows(&fresh), expected, "a fold from nothing agrees");
     // Every window a socket holds is the direct read's, including its bound and continuation.
     for limit in [1, 2, 200] {
@@ -100,6 +93,33 @@ pub fn fold(store: &Store) -> (Arc<Publication<MissionRows>>, bool) {
         assert_eq!(mission_window(&publication.rows, limit).unwrap(), direct, "limit {limit}");
     }
     (publication, changed)
+}
+
+/// Fold a list as its refresher does until a fold publishes or finds it current, each going on
+/// from the rows the one before left pending. Whether any row changed.
+pub fn refresh_until_published<R>(store: &Store, list: fn(&Store) -> &PublishedList<R>, fold: Fold<R>) -> bool {
+    let list = list(store);
+    for _ in 0..100 {
+        let (base, pending, generation) = list.base_and_pending();
+        match fold(store, base.as_deref(), pending).unwrap() {
+            Folded::Published(publication, changed) => {
+                list.publish(publication, generation).expect("no projection replaced meanwhile");
+                return changed;
+            }
+            Folded::Current => return false,
+            Folded::Pending(rows) => list.keep_pending(rows, generation, base.is_none()),
+        }
+    }
+    panic!("the list never published");
+}
+
+/// A fold that reaches one cut in itself, as one with nothing changing meanwhile does.
+pub fn folded_at_once<R>(folded: anyhow::Result<Folded<R>>) -> (Publication<R>, bool) {
+    match folded.unwrap() {
+        Folded::Published(publication, changed) => (publication, changed),
+        Folded::Current => panic!("the fold found its base current"),
+        Folded::Pending(_) => panic!("the fold left its rows pending"),
+    }
 }
 
 pub fn app_state(root: &std::path::Path) -> AppState {

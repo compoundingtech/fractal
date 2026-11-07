@@ -456,3 +456,237 @@ fn renewal_poll_and_driver_share_all_held_states_including_blocked_and_verifying
         assert!(renewal.store.work_for_renewal(actor).unwrap().is_empty(), "{status}");
     }
 }
+
+/// A ready step whose assignee holds one wake for it among `mail` other messages.
+fn ready_step_with_mail(mail: usize) -> Renewal {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("claim.sqlite3"), "node").unwrap();
+    let source = "version 2\nmission \"mailbox\" state=\"ready\" { goal \"Hold work.\"; step \"work\" { assigned-to \"agent/node.worker\" } }";
+    let intent = crate::graph::parse_test_intent(source, "node").unwrap();
+    let plan = store
+        .mission(&intent, IntentInput { kdl: source.into(), source_name: None })
+        .unwrap();
+    store.apply(&intent, &plan.subject_tokens, "mailbox-mission").unwrap();
+    let run = store
+        .create_mission_run(&MissionRunRequest {
+            mission: "mailbox".into(),
+            revision: None,
+            workspace: "/tmp".into(),
+            requester: Some("person/test".into()),
+            mode: Some("run".into()),
+            inputs: BTreeMap::new(),
+            idempotency_key: "mailbox-run".into(),
+        })
+        .unwrap();
+    let subject = run.steps[0].subject.clone();
+    store.set_step_state(&subject, "ready", None).unwrap();
+    let step = store.step_run(&subject).unwrap().unwrap();
+    let send = |message: String, tags: Vec<String>| {
+        store
+            .append_claim(&ClaimInput {
+                subject: message.clone(),
+                kind: "message.sent".into(),
+                actor: Some("daemon/runtime".into()),
+                fields: serde_json::from_value(json!({
+                    "from": "daemon/runtime", "to": "agent/node.worker", "content": "A note.",
+                    "status": "sent", "in_reply_to": null, "tags": tags,
+                }))
+                .unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(message),
+            })
+            .unwrap();
+    };
+    for index in 0..mail {
+        send(format!("message/mailbox-{index}"), Vec::new());
+    }
+    send(
+        "message/mailbox-wake".into(),
+        vec![format!("st3-work:{}@{}@{}@worker", step.subject, step.attempt, step.readiness_epoch)],
+    );
+    Renewal { _directory: directory, store, subject }
+}
+
+#[test]
+fn a_claim_and_a_completion_hold_the_writer_for_the_same_work_whatever_the_assignees_mail() {
+    let mut costs = Vec::new();
+    for mail in [0, 400] {
+        let step = ready_step_with_mail(mail);
+        let (claim, complete) = (format!("mailbox-claim-{mail}"), format!("mailbox-complete-{mail}"));
+        step.store.work_action(&step.subject, "claim", &request(&claim, None)).unwrap();
+        step.store
+            .work_action(&step.subject, "complete", &WorkRequest {
+                evidence: vec!["doc/mailbox".into()],
+                ..request(&complete, Some("done"))
+            })
+            .unwrap();
+        let (claim, complete) = (writer_work(&claim), writer_work(&complete));
+        eprintln!(
+            "work writer mail={mail} claim: statements={} vm_steps={}; complete: statements={} vm_steps={}",
+            claim.statements, claim.vm_steps, complete.statements, complete.vm_steps,
+        );
+        costs.push((claim, complete));
+    }
+    let (short, long) = (costs[0], costs[1]);
+    for (name, short, long) in [("claim", short.0, long.0), ("completion", short.1, long.1)] {
+        assert_eq!(long.statements, short.statements, "a {name}'s writer statements grew with the assignee's mail");
+        assert!(
+            long.vm_steps <= short.vm_steps + short.vm_steps / 4,
+            "a {name}'s writer work grew with the assignee's mail: {} to {} VM steps",
+            short.vm_steps,
+            long.vm_steps,
+        );
+    }
+}
+
+#[test]
+fn a_claim_holds_the_writer_for_the_same_work_whatever_the_seats_queue_history() {
+    let mut costs = Vec::new();
+    for history in [0, 400] {
+        let step = ready_step_with_mail(0);
+        // Moves among runs that have since finished, as a seat that reorders its queue every
+        // day collects: none of them places a queued run, so none can change today's order.
+        for index in 0..history {
+            let (placement, anchor) = match index % 3 {
+                0 => ("top", None),
+                1 => ("after", Some(format!("mission-run/finished-{}", index - 1))),
+                _ => ("before", Some(format!("mission-run/finished-{}", index / 2))),
+            };
+            let mut fields = BTreeMap::from([
+                ("run".to_owned(), json!(format!("mission-run/finished-{index}"))),
+                ("placement".to_owned(), json!(placement)),
+            ]);
+            if let Some(anchor) = anchor {
+                fields.insert("anchor".into(), json!(anchor));
+            }
+            step.store
+                .append_claim(&ClaimInput {
+                    subject: "agent/node.worker".into(),
+                    kind: seat_queue::MOVED_CLAIM.into(),
+                    actor: Some("person/operator".into()),
+                    fields,
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: Some(format!("history-move-{index}")),
+                })
+                .unwrap();
+        }
+        let claim = format!("history-claim-{history}");
+        step.store.work_action(&step.subject, "claim", &request(&claim, None)).unwrap();
+        let claim = writer_work(&claim);
+        eprintln!(
+            "work writer queue moves={history} claim: statements={} vm_steps={}",
+            claim.statements, claim.vm_steps,
+        );
+        costs.push(claim);
+    }
+    let (short, long) = (costs[0], costs[1]);
+    // Each named-run probe is a statement: probing every run the moves name made 400 more.
+    assert_eq!(long.statements, short.statements, "a claim probed runs no queued run is placed against");
+    // The one moves read still reads each move in canonical order, about 70 VM steps a move
+    // (#5215 follow-up); a per-move query or probe costs more than this bound.
+    assert!(
+        long.vm_steps <= short.vm_steps + 80 * 400,
+        "a claim's writer work per queue move grew: {} to {} VM steps over 400 moves",
+        short.vm_steps,
+        long.vm_steps,
+    );
+}
+
+#[test]
+fn a_claim_and_a_completion_answer_the_wake_the_writer_answered_when_it_read_it() {
+    let step = ready_step_with_mail(20);
+    let (store, subject) = (&step.store, step.subject.as_str());
+    for (action, key) in [("claim", "wake-claim"), ("complete", "wake-complete")] {
+        let request = WorkRequest { evidence: vec!["doc/mailbox".into()], ..request(key, Some("done")) };
+        let answered = store.work_action(subject, action, &request).unwrap();
+        assert_eq!(timeless(&answered), timeless(&view_enriched_in_writer(store, subject)), "{action}");
+        assert_eq!(answered.wake.as_ref().map(|wake| wake.attempts), Some(1), "{action}");
+        // An exact retry replays a view cached without its wake, and reads the wake again.
+        let replay = store.work_action(subject, action, &request).unwrap();
+        assert_eq!(timeless(&replay), timeless(&answered), "{action} retry");
+    }
+}
+
+fn refresh_fixture() -> (Renewal, fractal_store::store::refresh_intake::Seal) {
+    let renewal = claimed_step(0);
+    let store = &renewal.store;
+    let source = "version 2\nagent \"node.worker\" { command \"true\" }\n";
+    let intent = crate::graph::parse_test_intent(source, "node").unwrap();
+    let plan = store.mission(&intent, IntentInput { kdl: source.into(), source_name: None }).unwrap();
+    store.apply(&intent, &plan.subject_tokens, "refresh-declaration").unwrap();
+    store.append_claim(&ClaimInput {
+        subject: "agent/node.worker".into(), kind: "runtime.observed".into(), actor: None,
+        fields: serde_json::from_value(json!({"status":"running","incarnation_id":"current"})).unwrap(),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let token = fractal_store::store::current_desired_row(&store.readers.get(), "agent/node.worker").unwrap().unwrap().claim_id;
+    let seal = fractal_store::store::refresh_intake::Seal {
+        operation: "refresh-operation".into(), incumbent: "current".into(),
+        desired_token: token, activity_epoch: store.refresh_activity_epoch("agent/node.worker").unwrap(),
+    };
+    (renewal, seal)
+}
+
+// The winner owns the single writer while the opponent is launched. No timing sleeps.
+fn refresh_writer_barrier(store: &Store, winner: impl FnOnce(&Connection) + Send, opponent: impl FnOnce() + Send) {
+    static RACES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _race = RACES.lock().unwrap();
+    let (entered, wait) = std::sync::mpsc::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        scope.spawn(move || store.connection.batched(move |tx| { winner(tx); entered.send(()).unwrap(); resume.recv().unwrap(); Ok::<_, rusqlite::Error>(()) }).unwrap().unwrap());
+        wait.recv().unwrap();
+        let opponent = scope.spawn(opponent);
+        while smallclaims::windows::holds::report()["waiting"]["writer"].as_u64().unwrap() == 0 { std::thread::yield_now(); }
+        release.send(()).unwrap();
+        opponent.join().unwrap();
+    });
+}
+
+#[test]
+fn refresh_intake_claim_wins_and_held_renew_complete_remain_available() {
+    let (renewal, mut seal) = refresh_fixture();
+    let store = &renewal.store;
+    store.work_action(&renewal.subject, "release", &request("refresh-release", None)).unwrap();
+    assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
+    store.work_action(&renewal.subject, "claim", &request("refresh-claim-wins", None)).unwrap();
+    seal.activity_epoch = store.refresh_activity_epoch("agent/node.worker").unwrap();
+    assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
+    refresh_writer_barrier(store, |_| {}, || assert!(!store.seal_refresh_intake("agent/node.worker", &seal).unwrap()));
+    store.work_action(&renewal.subject, "renew", &request("refresh-renew", None)).unwrap();
+    store.work_action(&renewal.subject, "complete", &request("refresh-complete", None)).unwrap();
+    assert!(store.seal_refresh_intake("agent/node.worker", &seal).unwrap());
+}
+
+#[test]
+fn refresh_intake_seal_wins_and_owner_unseal_restores_admission() {
+    let (renewal, seal) = refresh_fixture();
+    let store = &renewal.store;
+    store.work_action(&renewal.subject, "release", &request("refresh-release", None)).unwrap();
+    assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
+    refresh_writer_barrier(store, |tx| assert!(fractal_store::store::refresh_intake::seal_tx(tx, "agent/node.worker", &seal).unwrap()), || {
+        assert_eq!(store.work_action(&renewal.subject, "claim", &request("refresh-refused", None)).unwrap_err().code, "refresh-intake-sealed");
+        assert!(!store.admit_refresh_mutation("agent/node.worker", "current", "mutation").unwrap());
+    });
+    assert!(!store.unseal_refresh_intake("agent/node.worker", "other-operation").unwrap());
+    assert!(store.unseal_refresh_intake("agent/node.worker", &seal.operation).unwrap());
+    store.work_action(&renewal.subject, "claim", &request("refresh-restored", None)).unwrap();
+    assert!(store.admit_refresh_mutation("agent/node.worker", "current", "mutation").unwrap());
+}
+
+#[test]
+fn refresh_intake_mutation_wins_and_stale_epoch_cannot_seal() {
+    let (renewal, mut seal) = refresh_fixture();
+    let store = &renewal.store;
+    store.work_action(&renewal.subject, "release", &request("refresh-release", None)).unwrap();
+    assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
+    let stale = seal.clone();
+    refresh_writer_barrier(store, |tx| assert!(fractal_store::store::refresh_intake::admit_mutation_tx(tx, "agent/node.worker", "current", "mutation").unwrap()), || assert!(!store.seal_refresh_intake("agent/node.worker", &seal).unwrap()));
+    store.complete_refresh_mutation("agent/node.worker", "current", "mutation").unwrap();
+    assert!(!store.seal_refresh_intake("agent/node.worker", &stale).unwrap());
+    seal.activity_epoch = store.refresh_activity_epoch("agent/node.worker").unwrap();
+    assert!(store.prepare_refresh_intake("agent/node.worker", &seal).unwrap());
+    assert!(store.seal_refresh_intake("agent/node.worker", &seal).unwrap());
+}

@@ -187,6 +187,7 @@ pub fn plan_staged(planner: &StagedPlanner<'_>) -> Result<()> {
     // envelopes are each disjoint, so a step applied to all of its groups at once decides as
     // the sequential loop does.
     loop {
+        smallclaims::store::checkpoint_accounting::plan_iteration();
         let mut changed = false;
         // Newest first, so a claim kept back here can witness the ones before it.
         let mut keep = staging.prepare_cached(/* sqlite-large-value: allow-for-now lv-h30059d79413f owner=fractal_store::store::checkpoint_rules::staged TODO=prepare-body-and-predecessor-values */ "UPDATE claims SET dropped=0 WHERE pos=?1")?;

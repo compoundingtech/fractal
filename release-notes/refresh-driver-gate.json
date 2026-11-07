@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Define incarnation-owned synchronous driver admission gates for idle refresh",
+  "replay": {"status": "none", "detail": "No claim or replay changes."},
+  "schema": {"status": "none", "detail": "No persisted schema changes."},
+  "rules": {"status": "none", "detail": "The shared protocol defaults to unsupported. No harness opts in and no refresh is actuated."},
+  "compatibility": {"status": "none", "detail": "Existing harness behavior is unchanged. Support requires serializing every execution start with the gate."},
+  "downtime": {"status": "none", "detail": "No migration is required."},
+  "manual": {"status": "none", "detail": "No configuration or operator action is required."},
+  "recovery": {"status": "none", "detail": "Closed gates require their exact incarnation, owner sequence and epoch receipt to reopen; dropping a receipt never releases a seal. Adapters must recover uncertain seals without recreating open admission."}
+}

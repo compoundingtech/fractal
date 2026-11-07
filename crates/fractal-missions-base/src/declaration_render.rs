@@ -2,7 +2,7 @@
 use kdl::KdlNode;
 use crate::gate_render::{block, node, property, render_gate_node, scalar, text};
 use crate::loop_render::comment;
-use crate::model::{BaselineSpec, GateSpec, ProductSpec, St3Error, WorkSelector};
+use crate::model::{BaselineSpec, GateSpec, ProductSpec, FractalError, WorkSelector};
 
 pub fn protection(root: &mut KdlNode, human: bool, reviewer: Option<&str>, timeout: Option<u64>) {
     if human { property(root, "revisions", "human-only"); }
@@ -29,7 +29,7 @@ pub fn common_body(
     baselines: &[BaselineSpec],
     products: &[ProductSpec],
     gates: &[GateSpec],
-) -> Result<Vec<KdlNode>, St3Error> {
+) -> Result<Vec<KdlNode>, FractalError> {
     let mut children = Vec::new();
     children.extend(goals.iter().map(|goal| text("goal", goal)));
     children.extend(constraints.iter().map(|constraint| text("constraint", constraint)));
@@ -42,17 +42,17 @@ pub fn common_body(
     for baseline in baselines {
         let predicates = baseline.gates.iter().map(|gate|
             Ok(render_gate_node(gate)?.children().unwrap().nodes()[0].clone()))
-            .collect::<Result<_, St3Error>>()?;
+            .collect::<Result<_, FractalError>>()?;
         children.push(block(text("baseline", &baseline.name), predicates));
     }
     if !products.is_empty() {
         let products = products.iter().map(|product| {
             let kind = product.subject.split('/').next().ok_or_else(||
-                St3Error::new("unrenderable-mission", "product has no subject kind"))?;
+                FractalError::new("unrenderable-mission", "product has no subject kind"))?;
             let fields = product.fields.iter().map(|(name, value)| Ok(node(name, [scalar(value)?])))
-                .collect::<Result<_, St3Error>>()?;
+                .collect::<Result<_, FractalError>>()?;
             Ok(block(text(kind, &product.subject), fields))
-        }).collect::<Result<_, St3Error>>()?;
+        }).collect::<Result<_, FractalError>>()?;
         children.push(block(node("produces", []), products));
     }
     children.extend(gates.iter().map(render_gate_node).collect::<Result<Vec<_>, _>>()?);

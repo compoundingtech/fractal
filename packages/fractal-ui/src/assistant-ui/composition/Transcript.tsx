@@ -50,7 +50,10 @@ export interface TranscriptTurn {
 }
 /** `Unavailable` is the whole status: one host reason line and no sync line. `detail` may be diagnostic, so it stays behind "Show details". `action` is the host's recovery, e.g. `{ label: 'Try again', onPress }`. */
 export type TranscriptAvailability = { readonly _tag: 'Available' } | { readonly _tag: 'Unavailable'; readonly reason: string; readonly detail?: string; readonly action?: { readonly label: string; readonly onPress: () => void } }
-export type TranscriptHistory = { readonly _tag: 'Complete' } | { readonly _tag: 'HasOlder'; readonly onLoadEarlier?: () => void }
+/** The host's request for history before the loaded window: in flight, or failed with Retry. Diagnostics stay with the host. */
+export type TranscriptOlderRequest = { readonly _tag: 'Loading' } | { readonly _tag: 'Failed' }
+/** `HasOlder` is the boundary's presence; `Complete` removes it. `older` is optional request state for `onLoadEarlier`. */
+export type TranscriptHistory = { readonly _tag: 'Complete' } | { readonly _tag: 'HasOlder'; readonly onLoadEarlier?: () => void; readonly older?: TranscriptOlderRequest }
 export interface TranscriptProps {
   readonly turns: readonly TranscriptTurn[]
   readonly title: string
@@ -394,6 +397,23 @@ function HistoryRange({ total, start, shown, materializing, earlierId, firstId, 
       <Button aria-label="Show all messages" data-testid="transcript-history-all" onPress={() => reveal('all')} {...stylex.props(styles.historyLoad)}>Show all</Button></>}
   </div>
 }
+/** One in-lane row: one button changes label across idle, loading and failed, so focus stays on it. */
+function HistoryBoundary({ history }: { readonly history: Extract<TranscriptHistory, { readonly _tag: 'HasOlder' }> }) {
+  const loading = history.older?._tag === 'Loading', failed = history.older?._tag === 'Failed'
+  const node = React.useRef<HTMLDivElement>(null)
+  // Complete history (or a window that no longer starts at the top) removes this row; keep keyboard focus in the lane.
+  React.useLayoutEffect(() => {
+    const boundary = node.current
+    return () => {
+      if (boundary !== null && boundary.contains(boundary.ownerDocument.activeElement)) boundary.closest<HTMLElement>('[data-testid="transcript-scroll"]')?.focus({ preventScroll: true })
+    }
+  }, [])
+  return <div ref={node} data-testid="history-boundary" data-state={loading ? 'loading' : failed ? 'failed' : 'idle'} aria-busy={loading} {...stylex.props(styles.historyBoundary)}>
+    <span aria-live="polite" data-testid="history-boundary-note" {...stylex.props(styles.historyNote)}>{failed ? "Couldn't load earlier messages" : 'Earlier messages not loaded'}</span>
+    {/* Not RAC `isPending`: its focus announcement points a live-region `role="img"` at this button's id, which dangles once Complete removes the button. */}
+    {history.onLoadEarlier !== undefined && <Button aria-disabled={loading || undefined} onPress={loading ? undefined : history.onLoadEarlier} {...stylex.props(styles.historyLoad, loading && styles.historyPending)}>{loading ? 'Loading earlier messages…' : failed ? 'Retry' : 'Load earlier messages'}</Button>}
+  </div>
+}
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
 export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, renderToolDetail, onRetrySync, onRetryRun, onRetrySend, sendAvailability, resolveImage, onLoadImage, renderInlineReference, attachmentImages, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, renderTurnFooter, showSeatHeader = true, active = true, tailRef }: TranscriptProps) {
   const scrollId = React.useId()
@@ -432,14 +452,15 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
       return true
     }
     const committed = turns.flatMap(turn => {
-      if (turn.prompt !== undefined && !visible(turn.prompt.id)) return []
-      const pendingIndex = turn.items.findIndex(item => !visible(item.id))
-      if (pendingIndex === -1) return [turn]
-      // Keep the existing turn mounted while waiting, and defer only its pending suffix.
-      const items = turn.items.slice(0, pendingIndex)
-      if (turn.prompt === undefined && items.length === 0) return []
+      // Adoption can split either end of a turn: a pending prompt or earlier item must
+      // not hide the already-published suffix while an older page is being prepared.
+      const prompt = turn.prompt !== undefined && visible(turn.prompt.id) ? turn.prompt : undefined
+      const pendingItems = turn.items.some(item => !visible(item.id))
+      if (prompt === turn.prompt && !pendingItems) return [turn]
+      const items = pendingItems ? turn.items.filter(item => visible(item.id)) : turn.items
+      if (prompt === undefined && items.length === 0) return []
       const itemIds = new Set(items.map(item => item.id))
-      return [{ ...turn, items, work: { ...turn.work, calls: turn.work.calls.filter(call => itemIds.has(call.id)) } }]
+      return [{ ...turn, prompt, items, work: { ...turn.work, calls: turn.work.calls.filter(call => itemIds.has(call.id)) } }]
     })
     return { committed, stranded }
   }, [published, turns, adoptionEpoch, runtimeIds])
@@ -497,7 +518,7 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
       {(startIndex, revealRow) => {
         const bound = sourceWindow(sourceRows, startIndex)
         return <>
-          {history._tag === 'HasOlder' && bound.start === 0 && <div data-testid="history-boundary" {...stylex.props(styles.historyBoundary)}><span {...stylex.props(styles.historyNote)}>Earlier messages not loaded</span>{history.onLoadEarlier !== undefined && <Button onPress={history.onLoadEarlier} {...stylex.props(styles.historyLoad)}>Load earlier messages</Button>}</div>}
+          {history._tag === 'HasOlder' && bound.start === 0 && <HistoryBoundary history={history} />}
           {committed.length === 0 ? empty : <TranscriptSearch turns={committed} rowIds={rowIds} startIndex={bound.start} revealRow={revealRow} {...stylex.props(styles.timeline)}>
             <MountedTurns turns={committed} sourceTurns={sourceTurns} rowIds={rowIds} start={bound.start} pinnedPrompt={bound.pinnedPrompt} pinnedReasoning={bound.pinnedReasoning} stranded={stranded} now={now} tailRef={tailRef} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />
           </TranscriptSearch>}
@@ -556,6 +577,7 @@ const styles = stylex.create({
   historyCount: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', fontVariantNumeric: 'tabular-nums' },
   visuallyHidden: { position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap', borderWidth: 0 },
   historyLoad: { minHeight: g.controlSm, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
+  historyPending: { cursor: 'progress', color: ink.fgMuted, ':hover': { color: ink.fgMuted } },
   unavailableAction: { minHeight: g.controlSm, marginTop: s.xs, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   unavailableDetails: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: s.xs, maxWidth: g.lane },
   unavailableDetail: { margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted, overflowWrap: 'anywhere' },

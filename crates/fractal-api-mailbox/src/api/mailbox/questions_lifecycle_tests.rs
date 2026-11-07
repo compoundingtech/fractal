@@ -70,10 +70,10 @@ async fn native_session_lifetimes_survive_transport_and_end_with_the_driver() {
         let session_dir = dir.parent().unwrap().join("sessions").join("omp");
         std::fs::create_dir_all(&session_dir).unwrap();
         fractal_drivers::omp_session::record_channel_binding(
-            &session_dir, "example/question", "question-runtime", "owner", "native-session", None, None,
+            &session_dir, "example/question", "example/question", "owner", "native-session", None, None,
         ).unwrap();
         fractal_drivers::omp_session::confirm_channel_binding(
-            &session_dir, &dir, "example/question", "question-runtime", "owner", sequence, "native-session", None,
+            &session_dir, &dir, "example/question", "example/question", "owner", sequence, "native-session", None,
         ).unwrap();
         let birth = fractal_runtime::process_start_token;
         let generation = QuestionGeneration {
@@ -112,7 +112,7 @@ async fn native_session_lifetimes_survive_transport_and_end_with_the_driver() {
         if matches!(scenario, "switch" | "lost-switch-close") {
             // Pending successor alone proves the predecessor ended; readiness is not needed.
             fractal_drivers::omp_session::record_channel_binding(
-                &session_dir, "example/question", "question-runtime", "owner", "successor-session", None, None,
+                &session_dir, "example/question", "example/question", "owner", "successor-session", None, None,
             ).unwrap();
         } else if scenario == "lost-shutdown-close" {
             writer.observe(ActivityObservation::new(Activity::Ended, BlockedOn::None, InputBuffer::Unknown)

@@ -22,6 +22,7 @@ mod legacy_start_closure;
 pub use legacy_start_closure::{LegacyStartClosureEvidence, LegacyStartClosureProof, LegacyStartProofUnavailable, ProcfsHidesProcesses};
 mod producer;
 
+mod registry_snapshot;
 const SPAWN_PUBLICATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SPAWN_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const PTY_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
@@ -268,6 +269,7 @@ pub struct PtyRuntime {
     command_timeout: Duration,
     command_environment: Option<BTreeMap<String, String>>,
     unlaned_seat: Option<crate::UnlanedSeatPlacement>,
+    registry_snapshot: std::sync::Arc<Mutex<registry_snapshot::RegistrySnapshot>>,
 }
 
 impl std::fmt::Debug for PtyRuntime {
@@ -291,6 +293,7 @@ impl PtyRuntime {
             command_timeout: PTY_COMMAND_TIMEOUT,
             command_environment: None,
             unlaned_seat: None,
+            registry_snapshot: std::sync::Arc::default(),
         }
     }
 
@@ -324,7 +327,9 @@ impl PtyRuntime {
     }
 
     pub fn snapshot(&self) -> Result<Vec<PtyObservation>> {
-        self.sessions()?.into_iter().map(observation).collect()
+        crate::procfs::require_matching_procfs()?;
+        self.registry_snapshot.lock().map_err(|_| anyhow::anyhow!("PTY snapshot lock poisoned"))?
+            .sessions(&self.root)?.into_iter().map(observation).collect()
     }
 
     /// Observe one immutable runtime id without enumerating the PTY registry.
@@ -1599,6 +1604,7 @@ mod tests {
         let configured = runtime.with_unlaned_seat(Some(crate::seat_placement::tests::policy()));
         assert!(configured.unlaned_seat.is_some());
     }
+    use crate::test_executable::fake_executable;
     use std::fs;
     use std::io::{Read as _, Write as _};
     use std::os::unix::net::UnixListener;
@@ -1690,22 +1696,6 @@ mod tests {
         let pid = child.id();
         assert!(child.wait().unwrap().success());
         assert!(!process_runs(pid).unwrap());
-    }
-
-    fn fake_executable(root: &Path, name: &str, body: &str) -> PathBuf {
-        let source = root.join(format!("{name}.source"));
-        let binary = root.join(name);
-        fs::write(&source, body).unwrap();
-        // A parallel test can fork while this process owns a writable file.
-        // Let install create the executable so no child inherits that writer.
-        let output = Command::new("install")
-            .args(["-m", "700"])
-            .arg(&source)
-            .arg(&binary)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "install failed: {output:?}");
-        binary
     }
 
     /// A fake `pty` whose `run` records its arguments and launch count, then runs `on_run`, which

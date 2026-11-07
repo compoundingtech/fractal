@@ -1,5 +1,5 @@
 import type { FractalClient } from '@fractal/client'
-import * as Native from '@fractal/client/schema'
+import * as Native from '@fractal/client/schema/read'
 
 import { conversationPortFailure, hasConversationCapability } from './conversationPort.ts'
 import type { ContentSearchPort } from './source.ts'

@@ -29,7 +29,7 @@ latest state. The repository resource keeps only its own facts, such as `reposit
 | `mentions` | `mentions`: the newest mention of each GitHub login in the item's body or comments (`login`, `by`, `url`, `at`), up to 50 |
 
 The member that polls a repository also keeps each item's full facts, every head it has had and
-the keyed events of each change in its GitHub plugin mirror, which `st gh prs|pr|checks` read; a
+the keyed events of each change in its GitHub plugin mirror, which `fractal gh prs|pr|checks` read; a
 newer `vcs.item.state` is read over an item's observed facts. See [plugins](plugins.md).
 
 `vcs.repository`, `vcs.issue`, and `vcs.pull-request` carry optional GitHub `node_id` facts.
@@ -127,7 +127,7 @@ The local file provider supports `status`, `path`, `content_hash`, `size`, `mode
 
 A planner or authorized producing agent authors the watch as a mission that owns one observer
 and one subscription. Its delivery target is explicit, never inferred from the caller's terminal
-environment. The standalone watch is a seat's GitHub issue or pull request watch (`st gh watch`, below).
+environment. The standalone watch is a seat's GitHub issue or pull request watch (`fractal gh watch`, below).
 
 ```kdl
 version 2
@@ -347,7 +347,7 @@ person at once. Each item closes when the observer observes again.
 
 Every observer on every host shares the token's hourly GitHub budget, as do `gh` and CI. The daemon
 counts each GitHub request against the observer that sent it, and keeps the counts and the budget
-from GitHub's latest rate-limit headers in memory. `st doctor` shows the remaining budget, how much
+from GitHub's latest rate-limit headers in memory. `fractal doctor` shows the remaining budget, how much
 of the current window this host's observers spent, and each observer's requests in the last hour
 and since the daemon started. A 304 answer to a conditional request is free, so it is counted
 apart. Request counts are not resource facts: an unchanged listing records no claim.
@@ -411,7 +411,7 @@ delivers nothing more. A review or triage request keeps the key as before.
 
 ## A seat's GitHub watch
 
-`st gh watch OWNER/REPO#N` gives the seat that runs it one watch on that issue or pull request. The
+`fractal gh watch OWNER/REPO#N` gives the seat that runs it one watch on that issue or pull request. The
 seat wakes once for each new comment or review on it, each time the required checks on its current
 head move into pass or fail, when an open pull request changes head, enters or leaves draft, or joins
 or leaves the merge queue, and a last time when it closes or merges, which ends the watch.
@@ -428,8 +428,8 @@ subscription "watch/acme/garden/12/example/planner" {
 ```
 
 The daemon declares the watch for the seat, which owns it; no mission run does. Watching a thread
-twice keeps the one watch and takes the new deadline. `st gh unwatch` ends a seat's own watch, and a
-person ends any seat's with `--agent`. `st gh ls` lists a seat's watches, running and ended in the
+twice keeps the one watch and takes the new deadline. `fractal gh unwatch` ends a seat's own watch, and a
+person ends any seat's with `--agent`. `fractal gh ls` lists a seat's watches, running and ended in the
 last day, and `--all` every seat's.
 
 Every watch of a repository, from any host, uses one standing observer,
@@ -438,6 +438,21 @@ it on its host, which polls immediately, then every three minutes while active. 
 observations back off to six then ten minutes; any changed observed fact resets three minutes.
 After a daemon restart the first poll is immediate again. The host stops the observer once no
 running subscription uses it. No issue or pull request has a poller of its own.
+
+To move polling to another member, for example when the polling member cannot be reached, a
+person on that member stops the observer:
+
+```kdl
+version 2
+stop "observer/github/OWNER/REPO"
+```
+
+`fractal apply FILE --as person/NAME` declares the observer stopped, as a host does when nothing uses
+it. The member's next pass, for any watch it holds, declares the observer again there, with the
+same resource. That member then polls on from the cursor in the observer's newest
+`observer.observed` claim (below), so it delivers what changed in between once and nothing twice.
+The stop takes no reason, and only a person may write it: an agent's is refused with
+`observer-stop-person-only`.
 
 The standing observer records into `resource/github/OWNER/REPO`, unless another observer of the
 repository runs: then it records into that observer's resource and keeps that resource from then
@@ -491,10 +506,10 @@ or stopping its seat does not itself remove the watch. A deadline gives one fina
 the watch even while the seat is stopped. Each ending also stops that watch's declaration.
 
 Every fleet agent posts as one GitHub login, so a login cannot say which seat wrote a comment.
-`st gh comment OWNER/REPO#N --body-file FILE` posts through the seat's daemon, records the new
+`fractal gh comment OWNER/REPO#N --body-file FILE` posts through the seat's daemon, records the new
 comment's GitHub ID as the seat's (`github.posted` on `github-post/OWNER/REPO/KIND/ID`), and
 watches the thread unless `--no-watch`; `--review approve|request-changes|comment` posts a pull
-request review instead. `st gh own URL` records a comment or review posted some other way, and
+request review instead. `fractal gh own URL` records a comment or review posted some other way, and
 refuses one whose author is not the login this host posts as. The first seat to record an ID keeps
 it.
 
@@ -556,14 +571,14 @@ retries automatically with bounded backoff. No burst size asks a person to relea
 The queue is visible with:
 
 ```sh
-st missions requests subscription/NAME
+fractal missions requests subscription/NAME
 ```
 
 It shows open requests as `pending`, oldest first. A person can cancel a request with
-`st missions cancel-request REQUEST --as person/operator --reason "the work is no longer needed"`.
+`fractal missions cancel-request REQUEST --as person/operator --reason "the work is no longer needed"`.
 A cancelled request never starts.
 
-`st missions release` releases a legacy held request; automatic intake does not need it.
+`fractal missions release` releases a legacy held request; automatic intake does not need it.
 
 An optional `requester` names one exact agent or person as the run's requester.
 
@@ -648,7 +663,7 @@ A run revision that no longer declares an owned observer or subscription stops i
 A stopped subscription records `subscription.mission-request-cancelled` for each request it has not
 started. Runs it already started continue. Only the host that declared a subscription starts its runs.
 
-The GitHub pull request provider observes the final merge or closure change. `st gh watch` ends after 14 days when `--until` is omitted and prints `active until <deadline>` with the stored deadline. `--until 4h` or an RFC 3339 time selects another deadline; `--until none` explicitly keeps the watch without a deadline. An explicit unwatch or the thread's close/merge also ends it. Existing indefinite declarations keep their stored lifetime across upgrade and restart. Running `st gh watch` again on a thread without `--until` now replaces an indefinite or earlier deadline with a fresh fourteen days; previously, an omitted deadline meant indefinite. A watch that reaches its deadline ends and its owner is told with a message, so automation that registers once and expects the watch to persist must re-register or pass `--until none`. This GitHub alias default does not change the lifetime of other subscriptions.
+The GitHub pull request provider observes the final merge or closure change. `fractal gh watch` ends after 14 days when `--until` is omitted and prints `active until <deadline>` with the stored deadline. `--until 4h` or an RFC 3339 time selects another deadline; `--until none` explicitly keeps the watch without a deadline. An explicit unwatch or the thread's close/merge also ends it. Existing indefinite declarations keep their stored lifetime across upgrade and restart. Running `fractal gh watch` again on a thread without `--until` now replaces an indefinite or earlier deadline with a fresh fourteen days; previously, an omitted deadline meant indefinite. A watch that reaches its deadline ends and its owner is told with a message, so automation that registers once and expects the watch to persist must re-register or pass `--until none`. This GitHub alias default does not change the lifetime of other subscriptions.
 
 A `when` condition gates delivery; it does not stop the subscription. Use an explicit unwatch or
 mission cancellation to stop it.

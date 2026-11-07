@@ -17,6 +17,16 @@ export function testRunnerUserAgent(browser) {
   return testRunnerUserAgents.get(browser)
 }
 
+// The inert probe's localStorage keys, read once more after a residue. A failed read is
+// reported in its place: the residue error, not the probe's, is what fails the case.
+export async function reauditStorage(probe) {
+  try {
+    return { localStorage: await probe.evaluate(() => Object.keys(localStorage)) }
+  } catch (error) {
+    return { error: String(error?.message ?? error) }
+  }
+}
+
 // Chromium's HTTP resource cache is intentionally retained: the job's server and
 // bundle are immutable. Cache Storage and every other origin storage type are not.
 export async function createIsolatedKitWorker(browser, base, { workerId = null } = {}) {
@@ -101,9 +111,7 @@ export async function createIsolatedKitWorker(browser, base, { workerId = null }
       } catch (error) {
         if (!error.isolation) throw error
         const probe = auditPages.get(error.isolation.origin)
-        const reaudit = probe && inertAudit(error.isolation.origin, probe)
-          ? { localStorage: await probe.evaluate(() => Object.keys(localStorage)) }
-          : null
+        const reaudit = probe && inertAudit(error.isolation.origin, probe) ? await reauditStorage(probe) : null
         throw residualError({ ...error.isolation, reaudit })
       }
     }

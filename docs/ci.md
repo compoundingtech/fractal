@@ -23,6 +23,27 @@ successful change detection; failure and cancellation still fail. Main and manua
 require execution when web inputs changed. Evidence-skipped queue work is followed by
 the exact-source hosted proof described above.
 
+Sidebar fixture validation is part of the required `genie-freshness` check on pull requests
+and merge groups, before the TypeScript and web consumers. Each executing Rust test
+partition also runs it before nextest. The generator source is `fleet.yml.genie.ts`;
+regenerate with `nix develop .#genie --command genie`. The gate runs
+`node --test scripts/check-sidebar-fixtures.test.mjs` and
+`node scripts/check-sidebar-fixtures.mjs`, with failures stopping the lane. Local and
+signed freshness evidence runs the same commands through `scripts/ci-genie-freshness`.
+
+### Swift client execution
+
+`swift-client` is an optional, path-filtered Workspace CI lane on GitHub-hosted Linux.
+It compiles and tests `clients/swift/FractalClient` with the digest-pinned official
+Swift 6.0.3 image because the repository's Nix Swift package is 5.10.1, below the
+package's Swift tools 6.0 requirement. `scripts/ci-swift-client` mounts the checkout
+read-only, including shared fixtures, and places compiler output and caches in tmpfs.
+The lane uses the ordinary Workspace CI events and ready-PR admission.
+Changes to Swift clients, Swift templates, codegen sources, shared client fixtures,
+or the lane definition select execution; manual dispatch always selects it.
+It does not register a required context or sign/consume reusable evidence:
+its result is hosted execution proof only, not a replacement for a merge gate.
+
 The generated `Workspace CI` workflow (`.github/workflows/fleet.yml`) replaces the fleet's
 former Linux `st/ci` execution. The retained macOS workflow (`.github/workflows/macos.yml`) is
 disabled in GitHub Actions; it does not currently run on PRs or main pushes. The required checks
@@ -305,7 +326,7 @@ Nextest's final summary retains flaky outcomes. The four test lanes (`linux-test
 nextest's `Summary` line (`scripts/ci-nextest-flaky`, tested by `scripts/ci-nextest-flaky-test` in
 `genie-freshness`), prints `nextest flaky: N` and sets the `nextest` step's `flaky` output. When it is
 not 0 the lane uploads a one-day artifact named `nextest-flaky-<lane>-<N>`, holding the final `FLAKY`
-lines, for `st slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
+lines, for `fractal slo`'s `flakes` objective, which reads only the name (`docs/st3/profiling.md`). The
 upload is `continue-on-error`, and a lane covered by evidence uploads nothing.
 
 Fractal integration fixtures use the separate `fractal-fixture` executable, built automatically by
@@ -590,7 +611,7 @@ inside `nix develop .#web`, using its Node and pnpm toolchain without Corepack s
 The client, shared views and iOS app share one root `pnpm-lock.yaml`; install scripts
 are disabled by the workspace configuration.
 The store cache key is
-`typescript-client-<os>-node24.18.0-pnpm12.15.0-<sha256 of pnpm-lock.yaml>`.
+`typescript-client-<os>-node24.18.0-pnpm12.17.0-<sha256 of pnpm-lock.yaml>`.
 The lockfile fingerprint uses `sha256sum` in Bash so the Nix runner needs no Node 20
 `hashFiles` helper when it evaluates the cache key.
 
@@ -598,7 +619,7 @@ The effect-utils GVS shared-store default and `pnpm:store:retire` task do not
 relocate this workspace's stores: Fractal uses the hoisted linker, a plain
 `nix develop .#web` shell (not the upstream pnpm devenv tasks), explicit
 `${{ runner.temp }}/pnpm-store` in CI, and a sandbox-local `$TMPDIR/store`
-for the fixed-output installation. Store cache keys track pnpm 12.15.0;
+for the fixed-output installation. Store cache keys track pnpm 12.17.0;
 no legacy-store retirement is needed for this cutover.
 
 After the root frozen install, `nix develop .#web -c bash scripts/ci-typescript-client` runs the client's
@@ -678,7 +699,7 @@ their sandbox flags and declared-input boundary remain unchanged.
   shell closure is cached (below). Timed lanes check toolchain/Buck-root
   identity, run `pnpm install --frozen-lockfile`, then `buck2 build //:typecheck`.
   It restores the pnpm store with key
-  `fractal-web-pnpm-<os>-pnpm12.15.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
+  `fractal-web-pnpm-<os>-pnpm12.17.0-node24.20.0-<hashFiles pnpm-lock.yaml>`;
   only Main upkeep's `warm-fractal-web` saves this cache. The app production build
   lane runs Vite with `apps/fractal-web/vite.config.ts` and `--configLoader runner`
   into a fresh temporary output directory, removed on exit. Build errors fail the
@@ -923,7 +944,7 @@ Calling-thread CPU excludes host descheduling and unrelated Node worker-thread C
 Each report includes all samples and host load averages; load never skips the lane or
 changes its thresholds.
 
-The web shell supplies pnpm 12.15.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
+The web shell supplies pnpm 12.17.0, Node 24.20, Bun 1.4.2 and Buck2 from the pinned
 effect-utils input; the Rust shells are unchanged. An empty `.buckroot` marks the Buck
 root; Genie generates `.buckconfig`, root `BUCK` and `buck2/toolchains/BUCK` from `buck2/root.ts`,
 mirroring `effect-utils.lib.mkConsumerBuckRoot` with cell `fractal`. Remote caching

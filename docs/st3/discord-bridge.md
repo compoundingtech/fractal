@@ -37,14 +37,14 @@ local token prompt and does not route to an agent. The token's application,
 channel's server/type and bot account are checked before importing messages.
 
 For a foreground run, use the enrolled bridge program seat's terminal on the
-machine running st. Its inherited `ST_AGENT` must identify that seat, whose
+machine running Fractal. Its inherited `ST_AGENT` must identify that seat, whose
 declaration grants the route's `st3.adapter.sources` and destination. An ordinary
 terminal without that identity cannot import native messages. The managed program
 seat recipe below supplies the identity automatically.
 
 ```sh
 python3 -I scripts/fractal-discord-bridge run --agent agent/example/discord-test \
-  --socket "${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/st3.sock"
+  --socket "${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/fractal.sock"
 ```
 
 Replace the invented agent subject with the intended existing agent. Paste the
@@ -83,18 +83,18 @@ adapt the invented paths, placement and subjects in
 preview and apply that declaration:
 
 ```sh
-st apply /path/to/discord-bridge.kdl --dry-run --as agent/example/operator
-st apply /path/to/discord-bridge.kdl --as agent/example/operator
-st agents show agent/example/discord-bridge
-st terminals peek agent/example/discord-bridge
+fractal apply /path/to/discord-bridge.kdl --dry-run --as agent/example/operator
+fractal apply /path/to/discord-bridge.kdl --as agent/example/operator
+fractal agents show agent/example/discord-bridge
+fractal terminals peek agent/example/discord-bridge
 ```
 
-The top-level program seat uses `argv` to run Python directly in st's managed PTY,
+The top-level program seat uses `argv` to run Python directly in Fractal's managed PTY,
 without a model harness. It remains independent of finite verification missions.
 `restart "always"` restarts an exit, subject to Fractal's crash-loop guard. To stop it
-durably, use `st agents stop agent/example/discord-bridge --as agent/example/operator`;
+durably, use `fractal agents stop agent/example/discord-bridge --as agent/example/operator`;
 Ctrl-C alone allows the supervisor to restart it. To resume, use the corresponding
-`st agents start` command. `st terminals attach agent/example/discord-bridge`
+`fractal agents start` command. `fractal terminals attach agent/example/discord-bridge`
 opens its terminal; Ctrl-\\ detaches. The runtime keeps running across SSH
 disconnects. Reboot startup depends on the existing Fractal daemon starting on that host.
 
@@ -107,11 +107,11 @@ The recorded Fractal sender is the Discord account `external/discord/user/<id>`,
 example `external/discord/user/404`; it is never an existing native Fractal person. Server
 ownership, Discord display names and mentions do not change that identity or the
 configured destination. The body carries server, channel and message provenance;
-the private state records the route and Discord/st message mappings. Imports use the route-scoped native adapter endpoint and the selected program-seat
+the private state records the route and Discord/Fractal message mappings. Imports use the route-scoped native adapter endpoint and the selected program-seat
 declaration. The Unix socket is not exposed to Discord.
 
 Discord replies to imported messages or exported agent replies preserve their
-st reply links. A reply to an unmapped historical message starts a new st
+Fractal reply links. A reply to an unmapped historical message starts a new Fractal
 conversation. Unrelated Fractal messages, another agent's messages, other Discord
 authors, bot/webhook messages and other channels are not forwarded. One bot
 installation and one state file should own the route.
@@ -167,7 +167,7 @@ author, channel, text, reference and nonce when present:
 ```sh
 python3 -I scripts/fractal-discord-bridge status --agent agent/example/discord-test
 python3 -I scripts/fractal-discord-bridge resolve --agent agent/example/discord-test \
-  --socket "${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/st3.sock" \
+  --socket "${XDG_RUNTIME_DIR:-$HOME/.local/state/st3/run}/fractal.sock" \
   --fractal-message message/0123456789abcdef --discord-message 505 --part 0
 ```
 

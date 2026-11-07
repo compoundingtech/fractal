@@ -225,6 +225,28 @@ pub fn snapshot() -> Result<Environment> {
         )
 }
 
+/// The captured environment without waiting on a login shell: the last capture, refreshed in
+/// the background once it is older than the refresh interval, or `None` while a capture runs and
+/// nothing has been captured. For reads that must answer at once, such as a diagnostic (#5209).
+pub fn snapshot_ready() -> Option<Result<Environment>> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static REFRESHING: AtomicBool = AtomicBool::new(false);
+    // A capture holds the lock while the shell starts; never wait behind it.
+    let cache = cache().try_lock().ok()?;
+    let stale = cache.captured.as_ref().is_none_or(|(at, _)| at.elapsed() >= REFRESH_INTERVAL);
+    let captured = cache.captured.as_ref().map(|(_, result)| result.clone().map_err(anyhow::Error::msg));
+    drop(cache);
+    if stale && !REFRESHING.swap(true, Ordering::AcqRel) {
+        std::thread::spawn(|| {
+            if let Err(error) = snapshot() {
+                eprintln!("st3: capturing the daemon environment: {error:#}");
+            }
+            REFRESHING.store(false, Ordering::Release);
+        });
+    }
+    captured
+}
+
 pub const HARNESSES: &[&str] = &["claude", "codex", "opencode", "pi", "omp"];
 
 /// The same login PATH that the daemon resolves before starting a seat.

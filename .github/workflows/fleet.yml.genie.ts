@@ -1,3 +1,4 @@
+import { swiftClientJobs } from './swift-client.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { withQueueWatch } from './queue-watch.ts'
 import { readyPRJobs, readyPullRequestTypes } from './ready-pr.ts'
@@ -81,6 +82,13 @@ const rustTestJunitUpload = (name: string) => [
   },
 ]
 
+// Run before Rust fixture consumers; the required freshness lane also covers all client lanes.
+const sidebarFixtureStep = nixDevelopStep({
+  name: 'Validate public sidebar fixtures and scrubber self-tests',
+  flake: '.#genie',
+  command: ['bash', '-euc', 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'],
+})
+
 // One Linux gate stage: its own runner (ci1 or Namespace, see pickRunnerJob) and caches, the common
 // setup, then scripts/ci-linux.
 const baseLinuxStageJob = ({
@@ -117,6 +125,7 @@ const baseLinuxStageJob = ({
   env: { ...buildEnv, ...env, CI_CACHE_DEV_SHELL: 'default' },
   steps: [
     ...setup,
+    sidebarFixtureStep,
     {
       name: 'Summarize tested revision',
       run: `printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' "$(git rev-parse HEAD)" "$(nproc)" "$(free -h | awk '/^Mem:/ {print $2 " memory"}')" >> "$GITHUB_STEP_SUMMARY"`,
@@ -493,6 +502,7 @@ fi`,
       steps: skipIfCovered('genie-freshness', [
         ...genieSetupSteps,
         megarepoApplyStep,
+        sidebarFixtureStep,
         { ...nixDevelopStep({ name: 'Check license coverage, runner selection and generated files', flake: '.#genie', command: ['bash', 'scripts/ci-genie-freshness'] }), id: 'freshness' },
         { name: 'Save Nix outputs', if: `success() && env.CI_LOCAL_CACHES != '1' && ${optionalQueueCacheSave}`, run: 'bash scripts/ci-nix-cache save' },
         ...evidenceStepSteps('genie-freshness', ['bash', 'scripts/ci-genie-freshness'], ['freshness']),
@@ -547,7 +557,8 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
           uses: 'actions/cache@v5',
           with: {
             path: pnpmStoreEnv.pnpm_config_store_dir,
-            key: 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.15.0-${{ steps.lockfiles.outputs.hash }}',
+            key: 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.17.0-${{ steps.lockfiles.outputs.hash }}',
+            'restore-keys': 'typescript-client-${{ runner.os }}-node24.18.0-pnpm12.17.0-',
           },
         },
         // The web shell stages the pinned pnpm source inputs before the frozen root install.
@@ -556,6 +567,7 @@ printf 'hash=%s\\n' "$lockfiles_hash" >> "$GITHUB_OUTPUT"`,
         ...evidenceStepSteps('typescript-client', ['bash', 'scripts/ci-typescript-client'], ['install', 'client']),
       ]),
     },
+    ...swiftClientJobs,
     // Shadow: the same checks as Nix derivations, signed as `nix` records on a ci1 runner (merge groups only). Not a
     // required check, not in any `needs`, and its notes are retained but not published until the verifier accepts
     // the `nix` kind. Without the Nix daemon's signing key the records are unsigned and a verifier rejects them.
@@ -933,7 +945,7 @@ python3 "$RUNNER_TEMP/evidence-base/scripts/evidence-publish" --notes "$RUNNER_T
     // workspace-ci embeds scripts/ci-fractal-web-changes; its consumed-input list is authoritative.
     ...buildFractalWebJobs(context),
   }),
-}, {"evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "evidence-note-rust-tests": "Signs per-crate notes from the test shards' JUnit reports; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-clippy": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-fleet-compat": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-ci-script-tests": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-rust-tests": "Verifies Git notes only (and fetches the manifests it reads); builds nothing and never skips a check.", "evidence-presign-notice": "Reads the gates' decision lines and the pull request's file list; builds nothing.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."}))))
+}, {"swift-client-changes": "Classifies Git paths only; builds nothing.", "swift-client": "Uses a digest-pinned container and ephemeral compiler output; no reusable build cache.", "evidence-source": "Retains Git source objects only; builds nothing and has no signing key.", "pick-runner": "Runner selection uses live API state and builds nothing.", "upgrade-impact": "Runs Python/Git classification checks without downloads or compilation.", "namespace-capacity": "Capacity is live API state and builds nothing.", "linux-gate": "Collects completed checks and builds nothing.", "evidence-note-linux-gate": "Signs the aggregate gate result from workflow context; builds nothing.", "evidence-note-rust-tests": "Signs per-crate notes from the test shards' JUnit reports; builds nothing.", "fractal-web-changes": "Diffs two fetched commits without blobs and builds nothing.", "fractal-web": "Collects the detection and execution results and builds nothing.", "evidence-gate-linux-gate": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-clippy": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-linux-fleet-compat": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-typescript-client": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-genie-freshness": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-ci-script-tests": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-fractal-web": "Verifies Git notes only; builds nothing and never skips a check.", "evidence-gate-rust-tests": "Verifies Git notes only (and fetches the manifests it reads); builds nothing and never skips a check.", "evidence-presign-notice": "Reads the gates' decision lines and the pull request's file list; builds nothing.", "nix-evidence-genie-freshness": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies.", "nix-evidence-typescript-client": "Builds check derivations in the runner's Nix store; a store hit is the record's own cache_hit input, so no Actions cache applies."}))))
 }
 
 export const fleetWorkflow = buildFleetWorkflow()

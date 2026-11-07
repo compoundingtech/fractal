@@ -45,6 +45,14 @@ pub fn request_stop() {
     STOP.store(true, Ordering::SeqCst);
 }
 
+/// The reason on the ended record of a provider its driver stopped.
+pub const DRIVER_STOPPED: &str = "driver-stopped";
+
+/// Whether the driver asked for the stop, so the provider's end is the driver's and not its own.
+pub(crate) fn driver_stop_requested() -> bool {
+    DRIVER_STOP.load(Ordering::SeqCst)
+}
+
 /// Set by a driver that is about to re-execute itself into a replaced st binary. Every wrapper
 /// loop that sees it returns [`Detached`] with what the next image needs to adopt its provider,
 /// and leaves the provider, its terminal, and its observed record exactly as they are.
@@ -834,6 +842,37 @@ mod tests {
             harness_state::read(&harness_state::harness_state_path(root.path()), None).unwrap();
         assert_eq!(record.state, harness_state::Activity::Ended);
         assert_eq!(record.exit.as_deref(), Some("exit 0"));
+    }
+
+    /// The ended record of a provider its driver stopped says so (#4743); a provider's own end
+    /// carries no reason. The stop itself signals this process's group, so the fenced-driver
+    /// test in crates/fractal/tests/terminal_binding drives it end to end.
+    #[test]
+    fn a_provider_its_driver_stops_ends_with_the_drivers_reason() {
+        let _stop_exclusive = stop_flag_tests();
+        let ended = |driver_stopped: bool| {
+            let root = tempfile::tempdir().unwrap();
+            let observer = SessionObserver::new_claude_with_primary_ownership(
+                root.path(),
+                "h.native",
+                "native",
+                false,
+            )
+            .unwrap();
+            if driver_stopped {
+                request_stop();
+            }
+            observer.ended("signal 15");
+            DRIVER_STOP.store(false, Ordering::SeqCst);
+            STOP.store(false, Ordering::SeqCst);
+            harness_state::read(&harness_state::harness_state_path(root.path()), None).unwrap()
+        };
+        let own = ended(false);
+        assert_eq!((own.state, own.reason), (harness_state::Activity::Ended, None));
+        let stopped = ended(true);
+        assert_eq!(stopped.state, harness_state::Activity::Ended);
+        assert_eq!(stopped.exit.as_deref(), Some("signal 15"));
+        assert_eq!(stopped.reason.as_deref(), Some(DRIVER_STOPPED));
     }
 
     /// n6: an unspawnable provider is a terminal outcome — the claim placeholder must not stand.

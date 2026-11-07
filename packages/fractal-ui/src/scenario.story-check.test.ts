@@ -229,6 +229,29 @@ test('sidebar tab contracts retain both widths through story-local policy tags',
   }
 })
 
+test('main focus plays and new app layout policies survive tag-derived selection', () => {
+  const tabs = storyModules['./assistant-ui/sidebar/SidebarTabs.stories.tsx']
+  expect(tabs).toBeDefined()
+  const focus = tabs!['OverlayFocusReturn']
+  expect(isStory(focus)).toBe(true)
+  if (!isStory(focus)) throw new Error('Missing sidebar overlay focus-return story')
+  expect(composeStory(focus, tabs!.default, {}, 'OverlayFocusReturn').tags).toContain('critical')
+  expect(focus.play).toBeTypeOf('function')
+  for (const [file, names] of [
+    ['../../../apps/fractal-web/src/web/AlertsTab.stories.tsx', ['Served', 'BoundedScroll']],
+    ['../../../apps/fractal-web/src/monitor/UsagePane.stories.tsx', ['AllStates', 'Populated']],
+  ] as const) {
+    const module = storyModules[file]
+    expect(module, file).toBeDefined()
+    for (const name of names) {
+      const story = module![name]
+      expect(isStory(story), `${file} ${name}`).toBe(true)
+      if (!isStory(story)) throw new Error(`Missing app layout story ${file} ${name}`)
+      expect(composeStory(story, module!.default, {}, name).tags).toEqual(expect.arrayContaining(['critical', 'both-widths']))
+    }
+  }
+})
+
 test('configured inventory discovers app stories in a new nested source folder', () => {
   const directory = mkdtempSync(nodePath.join(tmpdir(), 'scenario-inventory-'))
   try {

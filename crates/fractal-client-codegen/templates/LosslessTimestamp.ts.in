@@ -1,0 +1,32 @@
+
+const LOSSLESS_DATE_TIME = new RegExp(DATE_TIME.source + "(?![\\s\\S])", "u")
+/** Validates RFC3339 without normalizing its spelling or discarding submillisecond precision. */
+const validLosslessInstant = (wire: string): boolean => {
+  if (!LOSSLESS_DATE_TIME.test(wire)) return false
+  const year = Number(wire.slice(0, 4)), month = Number(wire.slice(5, 7)), day = Number(wire.slice(8, 10))
+  const hour = Number(wire.slice(11, 13)), minute = Number(wire.slice(14, 16)), second = Number(wire.slice(17, 19))
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+  const days = month === 2 && leap ? 29 : DAYS_IN_MONTH[month - 1]
+  if (days === undefined || day < 1 || day > days || hour > 23 || minute > 59 || second > 60) return false
+  const instant = Date.parse(second === 60 ? wire.slice(0, 17) + "59" + wire.slice(19) : wire)
+  if (Number.isNaN(instant)) return false
+  if (second !== 60) return true
+  const utc = new Date(instant)
+  return utc.getUTCHours() === 23 && utc.getUTCMinutes() === 59
+}
+const isLosslessInstant = Schema.makeFilter(validLosslessInstant, { expected: "an RFC3339 instant; leap seconds only at 23:59 UTC" })
+const losslessProjection = (wire: string): Option.Option<DateTime.Utc> => wire.slice(17, 19) === "60"
+  ? Option.none() : Option.some(DateTime.makeUnsafe(Date.parse(wire)))
+/** Original wire spelling plus a millisecond projection; leap seconds have no DateTime.Utc representation. */
+const LosslessTimestamp = Schema.Struct({
+  wire: Schema.String.check(isLosslessInstant),
+  instant: Schema.Option(Schema.DateTimeUtc)
+}).check(Schema.makeFilter((value) => {
+  const expected = losslessProjection(value.wire)
+  return Option.isNone(expected) ? Option.isNone(value.instant)
+    : Option.isSome(value.instant) && DateTime.toEpochMillis(value.instant.value) === DateTime.toEpochMillis(expected.value)
+}, { expected: "a timestamp projection consistent with its wire spelling" }))
+const losslessFromIso = SchemaTransformation.transform({
+  decode: (wire: string) => ({ wire, instant: losslessProjection(wire) }),
+  encode: (value: typeof LosslessTimestamp.Type) => value.wire
+})

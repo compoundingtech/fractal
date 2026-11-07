@@ -34,7 +34,7 @@ large-value threshold is accepted; the guard checks source-site exceptions, not 
 
 ## Retention and local observations
 
-A claim kind of `local` retention (`st schema show KIND`) is an observation that only the node
+A claim kind of `local` retention (`fractal schema show KIND`) is an observation that only the node
 that made it reads. The daemon records it in `local_observations` instead of the claim log. It gets
 no batch, no envelope and no digest, so it never replicates and trimming it never changes what a
 peer holds. Every node computes the same graph from the same admitted claims. The daemon trims
@@ -48,7 +48,7 @@ back and its longest writer hold. Searching inside the writer's statement held t
 before, and readers merge those claims with the local rows. `daemon.diagnostic` is local: no
 control logic reads it, so a daemon's diagnostics (reconcile failures, kill survivors, checkpoint
 proof and trim failures) stay in its local log, and its OpenTelemetry logs carry them when a
-collector is configured. `/v1/claims` and `st trace show` list only those older builds wrote.
+collector is configured. `/v1/claims` and `fractal trace show` list only those older builds wrote.
 A consumer's delivery, read or close of a message may be a local mark instead of a
 lifecycle claim (`local_message_marks`): like a local observation it never replicates and is
 outside every digest. A reader takes a message's lifecycle claims or its marks, whichever is
@@ -157,7 +157,7 @@ configuration lives in `[observations.otlp]`; `OTEL_EXPORTER_OTLP_*` in a native
 controls an exporter in its hooks.
 
 Fresh native seats publish activity, context, account limits and normalized timeline operations
-through an st-owned observation outbox, `st-harness-events.sqlite`, in their explicit observation
+through a Fractal-owned observation outbox, `st-harness-events.sqlite`, in their explicit observation
 directory. Matching producers commit a snapshot or timeline operation and its queued event in
 one SQLite transaction with full synchronization. A pipe wake notifies the native driver;
 it publishes the ordered events to `/v1/harness-events` and deletes only the acknowledged prefix.
@@ -209,9 +209,9 @@ an actor, reason, and explicit expiry. They are separate from reachability, obse
 and the harness's own approval/compaction holds. Inspect, set, and release them with:
 
 ```sh
-st agents hold agent/example/worker
-st agents hold agent/example/worker --for 15m --reason "Quiet interval" --as person/alex
-st agents hold agent/example/worker --release --reason "Resume delivery" --as person/alex
+fractal agents hold agent/example/worker
+fractal agents hold agent/example/worker --for 15m --reason "Quiet interval" --as person/alex
+fractal agents hold agent/example/worker --release --reason "Resume delivery" --as person/alex
 ```
 
 `GET /v1/delivery/hold?subject=agent/example/worker` returns the current decision and whether
@@ -318,8 +318,11 @@ order from the same admitted claims.
 | `claims_stored` | Local | Claims stored here per kind and writing node and their body bytes, counted on insert and never lowered by deletes; not replicated, in no digest, not in backups. |
 | `local_limit_stops` | Local | Seats this node's limits policy stopped, once per account and weekly window. |
 | `local_message_marks` | Local | A consumer's delivery, read and close of a graph message recorded on this member instead of as a lifecycle claim. Never replicated, in no digest; carried by version 4 backups; the hourly trim removes superseded marks after seven days. |
-| `local_message_staged` | Local | A seat's native transport staging a graph message, recorded on this member instead of a `message.staged` claim. Read today; written once a release that reads it exists (`message_marks::RECORDS_STAGED`), since a release reading marks but not stagings would offer the mail again after a rollback. Never replicated, in no digest, not backed up (a restored staging is in flight again); the hourly trim removes it seven days after a later lifecycle supersedes it. |
+| `local_message_staged` | Local | A seat's native transport staging a graph message, recorded on this member instead of a `message.staged` claim. Written while marks are on and every other member advertises `message_staged_reads` (`marks_switch::staged_switched_tx`); until then a staging stays a claim. A release reading marks but not stagings (v0.3.25 and earlier) would offer the mail again after a rollback. Never replicated, in no digest, not backed up (a restored staging is in flight again); the hourly trim removes it seven days after a later lifecycle supersedes it. |
 | `local_message_mark_events` | Local | One row per mark or staging written, read by mailbox wakes and changes the way they read lifecycle claims. Never replicated, in no digest, not backed up; the hourly trim keeps the newest 16,384. |
+| `local_message_outbox` | Local | A `message.sent` a graph write queued in its own transaction for the messages shard, which is a separate database (`message_outbox::enqueue_tx`); the daemon drains each row to the shard after the commit, exactly once by subject, and a message the shard refuses three times, or every message on a member whose shard did not open, goes to the graph as a legacy claim. Never replicated, in no digest, not backed up: a backup export drains it first and refuses while a row remains. Idle in this build: nothing queues yet. |
+| `local_stream_sent` | Local | Each stream item this member's messages shard holds, mirrored into the graph's file for the graph's own mail indexes (`stream_mirror::mirror`): its sender's fields and accepted time. Its insert folds the item's idle-mail row and unread row and queues its held-mail and usage work, as a graph `message.sent` claim's triggers do; the folds read it wherever they read the graph's sends, and a subject the graph also holds is the graph's. Every member mirrors every item it holds, whoever the recipient, so members holding the same mail count it alike. Never replicated, in no digest, not backed up: the daemon rebuilds it from the shard at start, from the cursors `stream_mirror_sent_through` and `stream_mirror_lifecycle_through` in `meta`. |
+| `local_stream_lifecycle` | Local | This member's lifecycle steps for its stream items (the shard's `stream_lifecycle`), mirrored with `local_stream_sent`: each moves the idle, unread and held indexes as a lifecycle claim or mark of its kind does. Never replicated, in no digest, not backed up; rebuilt from the shard. |
 | `local_mailbox_argv_bindings` | Local | Launch-argv binding evidence for native mailbox ownership. |
 | `local_mailbox_bindings` | Local | Stable binding request tokens mapped to daemon-allocated epochs. Lost acknowledgements retry the same binding; retired tokens cannot allocate a successor. Excluded from replicated projection digests. |
 | `local_mailbox_leases` | Local | Authenticated native custody for each subject/component, including exact runtime/provider/session/sequence, process birth, token/epoch and revocation. Retained across daemon restart; excluded from replicated projection digests. |
@@ -406,11 +409,11 @@ Admission validates each claim and blob independently. Invalid or unknown record
 
 Projection uses admitted claims and keeps the last good graph when one reduction fails.
 
-`st doctor` compares the operation projection with the claim log.
+`fractal doctor` compares the operation projection with the claim log.
 
 An idempotent claim stores a keyed hash of the caller key in its `_operation` metadata.
 
-`st claim --idempotency-key KEY` opts a public claim into this contract.
+`fractal claim --idempotency-key KEY` opts a public claim into this contract.
 
 The claim stores the canonical request digest and canonical claim ID.
 
@@ -456,14 +459,24 @@ filtering. Admission limits count live entries only; replication retains converg
 Claim history, absent winners, hidden edges and folder tombstones have no new drop rule.
 
 Version-2 arrangements have folder-only bodies and consume ordered memberships.
-Version-1 placements remain intact and are not treated as empty membership pages or
-implicitly converted. Canonical-winner-preserving migration of existing placements is
-separate from this primitive. The combined layout identity is
-`st3.shared-projections.person-directive-notes-declared-resource-edges-ordered-membership.v1`; older layouts continue exchanging claims
-but do not compare incompatible projection maps.
-Concurrent v1/v2 creates preserve any unrepaired v1 creation or placement authority.
-Projection caches that effective layout in an existing explicit-version register; pure
-legacy layouts gain no synthetic register, and reads/admission use an indexed lookup.
+Unmigrated version-1 placements remain intact and refuse membership pages rather than
+pretending to be empty. Explicit `membership.migrate` retains an authority marker and
+backfills original placement winner bytes/revisions into ordered pair heads atomically.
+Historical placement registers remain replay-boundary sources, not active v2 placements.
+Late replicated legacy placements feed the same ordered LWW pair reducer; local legacy
+placement writes refuse after cutover. Rebuild uses the identical conversion in
+`fractal-store`; arrangement admission and lifecycle integration remain in `fractal-seats`.
+The combined layout identity is
+`st3.shared-projections.slo-breach-episodes-declared-resource-edges-arrangement-placement-migration.v1`;
+older layouts continue exchanging claims but do not compare incompatible projection maps.
+The retained `st3` digest namespace is a compatibility identity, not a package name.
+Checkpoint rules advance from 25 to 26 without adding any claim-drop rule.
+Concurrent v1/v2 creates preserve unrepaired v1 authority unless explicit migration activates
+membership authority. Reads/admission consult the indexed retained marker/version registers;
+pure legacy layouts gain no synthetic register.
+Migrated containers retain and refresh their lifecycle dependency even with zero pair heads,
+including on name/folder edits and retirement. Historical placement-count admission applies
+only to effective v1 layouts; inactive source heads cannot block v2 folder/name edits.
 Repairing a retained arrangement or membership original rebuilds both dependent projections,
 including the container revision and reverse edges, so operations omitted by a replacement
 cannot remain visible. Incremental projection and rebuild both exclude repaired originals.

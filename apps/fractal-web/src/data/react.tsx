@@ -1,7 +1,7 @@
 import { RegistryContext, useAtomValue } from '@effect/atom-react'
 /** Shared derivations over SDK-decoded and generated rows, installed once per data source. */
 import type { Attention, Mission } from '@fractal/client/schema'
-import type { DecodedAgent as AgentRow } from '@fractal/sdk/effect'
+import type { DecodedAgent as AgentRow } from '@fractal/sdk/read'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { createContext, type ReactNode, useContext } from 'react'

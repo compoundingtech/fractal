@@ -43,6 +43,7 @@ pub mod raw_terminal;
 pub mod resources;
 pub mod search;
 pub mod arrangements;
+pub mod membership_paging;
 pub mod conversation_blocks;
 pub mod conversation_delivery;
 pub mod conversation_participants;
@@ -52,6 +53,7 @@ pub mod published_missions;
 pub mod collection_ivm;
 pub mod summary;
 pub mod assistant;
+pub mod related_runs;
 
 pub const LOCAL_PERSON_HEADER: &str = "x-st3-person";
 
@@ -634,6 +636,7 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"owned-sets", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"glasses", "version":2, "state":if glass_person(session, false).is_ok() && glass_person(session, true).is_ok() { "granted" } else { "ungranted" }}));
     capabilities.push(json!({"id":"arrangements", "version":2, "state":if session.allows("read.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
+    capabilities.push(json!({"id":"arrangement-placement-migration", "version":1, "state":if session.allows("control.arrangements") && acting_party(session) { "granted" } else { "ungranted" }}));
     capabilities.extend(ACTIONS.iter().map(|action| {
         if *action == "harness.answer" {
             return super::harness_questions::capability(state, session);
@@ -995,9 +998,21 @@ pub fn mission_list_cards_with(
         let active = overview["counts"].as_object().unwrap().iter()
             .filter(|(state,_)| !matches!(state.as_str(),"completed"|"failed"|"cancelled"))
             .map(|(_,count)| count.as_u64().unwrap_or(0)).sum::<u64>();
+        let run_subjects = newest.iter().filter_map(|run| run["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+        let run_states = store.mission_run_states_for_runs(&run_subjects)?;
+        let latest_finished = newest.iter().find(|run| matches!(run["status"].as_str(), Some("completed" | "failed" | "cancelled")));
+        let timing_runs = newest.iter().filter(|run|
+            !matches!(run["status"].as_str(), Some("completed" | "failed" | "cancelled"))
+                || latest_finished.is_some_and(|latest| latest["id"] == run["id"]))
+            .filter_map(|run| run["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
+        let previews = run_subjects.iter().map(|run| {
+            Ok((run.as_str(), crate::performance::task("mission_collection/steps", || store.mission_step_preview_at(run, at_unix_ms))?))
+        }).collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        let subjects = previews.values().flat_map(|(_, _, steps)| steps.iter().map(|step| step.subject.clone())).collect::<Vec<_>>();
+        let timing = store.mission_step_timestamps_for_runs(&timing_runs, Some(&subjects))?;
         let details = newest.iter().rev().map(|run| {
             let run_id=run["id"].as_str().expect("run header id");
-            let (total,done,steps)=crate::performance::task("mission_collection/steps", || store.mission_step_preview_at(run_id, at_unix_ms))?;
+            let (total,done,steps)=&previews[run_id];
             let terminal=matches!(run["status"].as_str(),Some("completed"|"failed"|"cancelled"));
             let scheduler_fault=store.reconcile_fault(run_id, crate::reconcile::FIRST_READINESS_FAULT_SCOPE)?;
             let must_act=if terminal {"nobody"} else if attention.contains(run_id) {"you"}
@@ -1009,6 +1024,8 @@ pub fn mission_list_cards_with(
                 "id":step.subject,"path":step.step,"title":step.title,"state":client_work_state(&step.status),
                 "attempt":step.attempt,"assignee":step.assigned_to,"claimant":step.claimant,
                 "agentless":step.agentless,"since":client_timestamp(step.updated_at_unix_ms),
+                "started_at":timing.get(step.subject.as_str()).and_then(|times| times.0),
+                "completed_at":timing.get(step.subject.as_str()).and_then(|times| times.1),
                 "keep_open":crate::mission::step_keeps_open(definition.map(|d| &d.mission), &step.step),
                 "progress_at": null,
                 "blocked_reason":step.blocked_reason.as_deref().or_else(|| scheduler_fault.as_deref().filter(|_| step.status=="pending")),"blockers":step.blockers,
@@ -1022,6 +1039,9 @@ pub fn mission_list_cards_with(
                 "current_steps":current,"must_act":must_act,
                 "blocker":scheduler_fault.map(|reason| json!({"step":steps.first().map(|step| &step.subject),"reason":reason,"scope":crate::reconcile::FIRST_READINESS_FAULT_SCOPE})),
                 "state_since":client_timestamp(run["updated_at_unix_ms"].as_u64().unwrap_or(0) as u128),
+                "started_at":run["created_at_unix_ms"].as_u64(),
+                "completed_at":run_states.get(run_id).and_then(|state| state.completed_at_unix_ms),
+                "eta":if terminal {None} else {store.mission_run_eta(run_id, at_unix_ms)?},
                 "steps":shown
             }))
         }).collect::<anyhow::Result<Vec<_>>>()?;
@@ -1622,11 +1642,10 @@ pub fn operation_reports() -> std::sync::MutexGuard<'static, BTreeMap<usize, Ope
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Start the first diagnostic report off the request path and hand its operation audit to the
-/// startup repair. Only this first report shares its audit; refreshes inspect current state.
-pub fn start_operation_report(
-    state: &AppState,
-) -> Option<tokio::sync::oneshot::Receiver<anyhow::Result<Vec<String>>>> {
+/// Start the first diagnostic report off the request path. It reads the last operation audit
+/// rather than making one: the daemon's first audit waits until the reconnect window has passed.
+/// Return whether this call started it.
+pub fn start_operation_report(state: &AppState) -> bool {
     let key = Arc::as_ptr(&state.store) as usize;
     let mut reports = operation_reports();
     if reports.get(&key).is_some_and(|report| {
@@ -1635,7 +1654,7 @@ pub fn start_operation_report(
             .upgrade()
             .is_some_and(|store| Arc::ptr_eq(&store, &state.store))
     }) {
-        return None;
+        return false;
     }
     reports.insert(
         key,
@@ -1647,29 +1666,15 @@ pub fn start_operation_report(
         },
     );
     drop(reports);
-    let (audit_sender, audit_receiver) = tokio::sync::oneshot::channel();
     let state = state.clone();
-    std::thread::spawn(move || refresh_operation_report(&state, key, Some(audit_sender)));
-    Some(audit_receiver)
+    std::thread::spawn(move || refresh_operation_report(&state, key));
+    true
 }
 
-pub fn refresh_operation_report(
-    state: &AppState,
-    key: usize,
-    startup_audit: Option<tokio::sync::oneshot::Sender<anyhow::Result<Vec<String>>>>,
-) {
-    let report = if let Some(sender) = startup_audit {
-        // The store keeps this audit's result, which the report's operation check reads.
-        let drift = state.store.operation_projection_drift();
-        let report = doctor_report(state);
-        // The repair owns these findings, including any scan error. It re-derives just the
-        // drifted rows from current claims, never reuses expected values from this snapshot.
-        let _ = sender.send(drift);
-        report
-    } else {
-        doctor_report(state)
-    };
-    let checks = report.ok().map(|report| Arc::new(report.0.checks));
+pub fn refresh_operation_report(state: &AppState, key: usize) {
+    let checks = crate::profile::task("operations.doctor_report", || doctor_report(state))
+        .ok()
+        .map(|report| Arc::new(report.0.checks));
     let mut reports = operation_reports();
     let Some(report) = reports.get_mut(&key) else {
         return;

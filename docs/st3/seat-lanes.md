@@ -126,7 +126,7 @@ lane (an `app-lanes-<seat>.slice` directly in `app-lanes.slice`), and that slice
 holds a real `memory.max` and a real `cpu.max` quota. Limits anywhere else do not count. In place,
 the check runs with `BUILDS_SLICE_ACTIVE=1`, so a cargo front door that reads only that variable keeps
 its cargo in the cap. Outside every cap, a caller that names a seat (`ST_AGENT`, as a unit the
-seat started without `--slice` does) asks the daemon for the seat's slice (`st agents lane AGENT`,
+seat started without `--slice` does) asks the daemon for the seat's slice (`fractal agents lane AGENT`,
 the reconciler's own name for it) and, when the kernel shows that slice in `app-lanes.slice` with
 both limits, starts the check in a scope there, with `BUILDS_SLICE_ACTIVE=1` and
 `FRACTAL_LANE_SLICE`. Otherwise it starts the check in `builds.slice` as before, and a seat's run says
@@ -151,8 +151,17 @@ empties on its own. The lane outlives it until the seat stops for good (above).
 
 ## The host guard
 
-The kernel OOM-kills inside a lane on purpose. A host guard that counts every `oom_kill` in the user
-slice would read that as a fault, so it counts only the kills outside lanes:
+The kernel OOM-kills inside a lane on purpose. `scripts/fractal-test` names such a kill, which
+otherwise leaves only a bare exit: before a check that builds, it reads the `oom_kill` count in
+`memory.events` of each memory limit the check runs under (its own cap, else the seat's lane it runs
+in, and builds.slice, where the host's sccache server compiles), and a check that fails while one grew
+says `killed by the lane's memory limit (SLICE): N OOM kills at memory.max X while it ran`. Only the
+innermost limit that counted kills is named, since a kill counts in every cgroup above it too. A
+limit is shared with what else runs under it (builds.slice with every run's compiles, a lane with the
+run's other checks and the seat's harness), so a kill it names may be theirs.
+
+A host guard that counts every `oom_kill` in the user slice would read a lane's kills as a fault, so
+it counts only the kills outside lanes:
 
 ```
 oom_kill(user.slice/user-UID.slice/memory.events)
@@ -249,27 +258,37 @@ limit shrinks what `nproc` reports. From that room, admission takes:
   seen running (for up to ten minutes): the lane caps it, so its size is firm;
 - what the seats outside lanes hold that the kernel cannot take back, the anonymous and kernel memory
   of each seat scope in the user manager's `app.slice`. Nothing caps such a seat, so a reservation
-  could not bound it; page cache is left out, since pressure reclaims it.
+  could not bound it; page cache is left out, since pressure reclaims it;
+- the room kept for one burst (below, "Bursts"): what a burst raises the host's smallest live laned
+  seat by (one that runs or was admitted to start, since only such a seat's run asks for a burst),
+  the seat starting among them. A burst raises a seat to the burst lane (8 cores/24G, `build` in
+  `.st/lane-bursts.json`, which `scripts/fractal-test` asks for; a test holds the two together), so
+  on a host of 8G seats it keeps 16G. While a burst is held its raise already counts in its seat's
+  lane, so the reserve keeps only what is left of it. A host whose room for lanes could never hold
+  the burst lane keeps none, since every burst there is refused. Starts may not use it; bursts may. Without it,
+  seats that start while no run builds would take the room every later burst needs, and each run
+  would wait out its `--queue-limit`.
 
 Memory must fit; cores only need to fit the host's room for lanes, since CPU quotas may oversubscribe
 and weights decide under contention. A seat that does not fit is not started (no workspace, no start
-claim), and its reason shows where admission reasons show (`st agents show`'s `ADMISSION` line, the
+claim), and its reason shows where admission reasons show (`fractal agents show`'s `ADMISSION` line, the
 list, the tree and `agents start`), naming the host's free room:
 
 ```
-lane 8 cores/30.0G does not fit: 28.0G free of the 54.0G this host gives lanes (other lanes hold 24.0G, seats outside lanes 2.0G)
+lane 8 cores/30.0G does not fit: 12.0G free of the 54.0G this host gives lanes (other lanes hold 24.0G, seats outside lanes 2.0G, kept for a burst 16.0G)
 ```
 
 Seats wait in order: a smaller lane that would fit does not pass the first seat in line ("waits
 behind …, first in line for room"), so a large lane is not starved. A lane larger than the host can
-ever give waits out of line and holds no one back. A seat leaves the line when it is no longer tried
+ever give, or than it gives beside the burst reserve ("does not fit beside the … this host keeps from
+starts for a burst"), waits out of line and holds no one back. A seat leaves the line when it is no longer tried
 for a start: suspended, stopped, no longer owned, or not tried for six minutes (a crash loop, a
 workspace error). Room is held only for a seat that starts, after any envelope admission also lets it.
 A waiting seat is tried again every 30 seconds, since what seats outside lanes hold changes without a
 claim. A seat without a lane is not held.
 
 To start a waiting seat now despite its fit, for the day a stale measurement holds a seat that must
-run: `st agents restart AGENT --ignore-fit --reason TEXT --as ACTOR`. The restart request records who
+run: `fractal agents restart AGENT --ignore-fit --reason TEXT --as ACTOR`. The restart request records who
 asked (`--as`, a person or an agent acting for one) and why (`ignore_fit` and `reason` on its
 `runtime.action.requested` claim); the daemon logs both when the seat starts, and its lane then holds
 room like any other start.
@@ -298,34 +317,58 @@ burst that can never fit), and then holds the burst while its standard input sta
 a 90-second lease every 30 seconds. It gives the burst back when its input closes: when the run that
 started it ends, however it ends. A holder killed outright stops renewing, and the daemon drops the
 burst when its lease lapses; each such drop is counted (`bursts dropped by lease` in
-`st doctor --performance`), so a holder that crashes shows. The actor must be the seat itself, and
+`fractal doctor --performance`), so a holder that crashes shows. The actor must be the seat itself, and
 only the seat's own host answers. While that daemon cannot be reached (a restart), the holder waits
 for it as it waits for room, saying so, rather than answering: the run that asked bounds the wait.
 
 The live lane is the largest, in each dimension, of the seat's own lane, each step it holds and its
 burst. A burst fits as a step's raise does: the raised lane must fit the host's room for lanes
-beside the other lanes and what seats outside lanes hold. Bursts wait in the order they asked, so a
+beside the other lanes and what seats outside lanes hold, the room admission keeps from starts for a
+burst included (`fractal doctor --performance` shows it on its `LANE BURSTS` line, as admission last judged
+it for a seat's start, naming that seat). Bursts wait in the order they asked, so a
 small one does not pass the first in line; one larger than the host can ever give is refused at
 once. A seat that has waited 15 minutes or more to start, first in line for room, is served before
 more bursts: a new burst waits behind it, so a stream of bursts cannot keep it from starting. It
 does so only while that seat would fit once every step's raise and burst on the host were given
-back; one that waits for another seat to stop gains nothing from it, so bursts go on beside it. A
+back, beside the burst reserve; one that waits for another seat to stop gains nothing from it, so bursts go on beside it. A
 waiting burst's reason starts `burst lane`. While held, admission counts the seat at the raised
 lane. Released, its cores come back at once and its memory once the lane holds less than it
-will allow, as a step's lowering does. Bursts live in the daemon's memory: after a daemon restart
-the slice is still raised and counts, as any raise does, and the holder's next renewal holds it
-again.
+will allow, as a step's lowering does. Bursts live in the daemon's memory, and a slice outlives a
+daemon restart. Before it judges any room, a new daemon reads each laned seat's slice once: one raised
+above the seat's own (a burst's, or a step's the daemon has not judged yet) counts as held at once
+(in other lanes' room and the burst reserve, so no start or other burst gets that room) and stays
+raised for one burst lease (90 s) after the daemon started. The holder renews at a third of the lease
+the daemon names and says it holds the burst. A renewal that meets a missing socket waits for the
+daemon to come back (up to the client's daemon wait, 30 s by default), and one that fails is tried
+again after 5 s rather than a whole renewal later, so a restarted daemon hears it well inside the
+lease. A daemon with no record of it restores the grant when it
+is such a found raise (or the daemon has not read the slices yet) and the slice still holds the burst
+lane. A burst that lapsed while the daemon ran is asked anew. A raise no holder renews
+within that lease goes back to what the seat's steps hold. Once granted, a holder answered anything but
+`granted` (a renewal that reached a daemon that could not restore it, or a lease that lapsed) prints
+`lost` and why, gives the burst back and exits non-zero, rather than letting its run go on in a lane
+it no longer holds.
 
 A burst is tied to the command, not to a step, so a seat in `work wait` holds only its base and
 its steps. A seat without a lane, or a host with lanes off, holds no burst: the holder answers
 `none`.
 
-`scripts/fractal-test` asks for one before it takes a pool tree (a tree held while its run waits
-for room is a tree nobody can use), sized by `.st/lane-bursts.json` for a run that builds (any
-check in `BUILDS`); a run that builds nothing asks for none. It waits up to `--queue-limit`, prints
+`scripts/fractal-test` asks for one at the pool tree, sized by `.st/lane-bursts.json` for a run
+that builds (any check in `BUILDS`); a run that builds nothing asks for none. A run asks only once
+it could take a free tree (first in the tree order, or past the fallback for a tree the run ahead
+left), and takes the tree only once the burst is granted. It holds no tree while the burst waits,
+so the run behind may take that tree after the fallback, and a burst granted while no tree is free
+is given back and asked again when one is: no run holds a burst without a tree or a tree without
+its burst. The tree is cleared of orphans only as the granted run takes it, so one given back while the ask waits has
+nothing in it signalled. Once its burst is granted a run takes a free tree at once, even if the build slots
+have filled during the ask: its build then waits for a slot in the tree. A run that hands over to main's newer copy while it waits, or before a top-up round, keeps its burst, or its ask and
+its place in the host's order: the holder is the run's child, and the exec keeps it and its pipes,
+so the newer copy holds the same burst or reads the answer to the same ask. A run with no pool tree asks before its checks. Either way, a branch that does not merge with the base is refused before any ask. It waits up to
+`--queue-limit` for each ask (a burst given back and asked again starts a new one), prints
 each reason, and records `burst` (the size held, or none and why) and `burst_wait_s` in the run's
 `runs.jsonl` line, which `scripts/fractal-test-report` shows as its own line beside the tree and
-slot waits. A fractal or daemon without bursts holds none, says so, and the checks run in the lane
+slot waits. A burst its holder says was lost while the run held it fails the run with a `lane-burst
+LOST` row that says why: from then on its checks ran in the seat's own lane. A fractal or daemon without bursts holds none, says so, and the checks run in the lane
 as it is. Its compiles still go to the host's sccache server in `builds.slice` (above): the burst
 bounds the rest of the run.
 

@@ -6,13 +6,43 @@ pub async fn fleet_publish_endpoints(
 ) -> Result<Json<Value>, ApiError> {
     let store = state.store.clone();
     let written = blocking_store(move || {
-        store.publish_fleet_endpoints(&request.mode, &request.endpoints, env!("CARGO_PKG_VERSION"))
+        store.publish_fleet_endpoints(&request.mode, &request.endpoints, env!("CARGO_PKG_VERSION"), None)
     })
     .await?;
     if written {
         signal_changed(&state);
     }
     Ok(Json(json!({ "published": written })))
+}
+
+#[derive(Deserialize)]
+pub struct FleetTransportChange {
+    actor: String,
+    mutation_id: String,
+    mode: String,
+    endpoints: Vec<Value>,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+pub async fn change_transports(
+    State(state): State<AppState>,
+    Json(request): Json<FleetTransportChange>,
+) -> Result<Json<Value>, ApiError> {
+    let actor = person_or_agent_actor(&request.actor, "invalid-transport-actor")?;
+    if request.mutation_id.is_empty() {
+        return Err(ApiError::bad(FractalError::new("invalid-transport-mutation", "mutation_id is required")));
+    }
+    if request.dry_run {
+        return Ok(Json(json!({"authorized": true})));
+    }
+    let store = state.store.clone();
+    let written = blocking_store(move || store.publish_fleet_endpoints(
+        &request.mode, &request.endpoints, env!("CARGO_PKG_VERSION"),
+        Some((&actor, &request.mutation_id)),
+    )).await?;
+    signal_changed(&state);
+    Ok(Json(json!({"published": written})))
 }
 
 /// Publish the configured trust root, not an exporter's proposed replacement key.
@@ -83,7 +113,7 @@ pub async fn fleet_invite_create(
 ) -> Result<Json<FleetInviteCreated>, ApiError> {
     concrete_person(&request.person)?;
     let fleet_id = state.fleet_id.clone().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "not-in-a-fleet",
             "this node is not in a fleet; run st fleet create first",
         ))
@@ -241,7 +271,12 @@ pub async fn fleet_leave_claim(
 ) -> Result<Json<ClaimRecord>, ApiError> {
     concrete_person(&request.person)?;
     let store = state.store.clone();
-    let claim = blocking_action(move || store.leave_fleet(&request.person)).await?;
+    let claim = blocking_action(move || {
+        let shard_high_water = crate::store::messages_shard::leave_high_water(&store)
+            .map_err(smallclaims::error::internal)?;
+        store.leave_fleet(&request.person, &shard_high_water)
+    })
+    .await?;
     signal_changed(&state);
     Ok(Json(claim))
 }
@@ -305,7 +340,7 @@ pub async fn fleet_pairing_admission(
     Json(request): Json<FleetPairingAdmission>,
 ) -> Result<Json<smallclaims::fleet::handshake::JoinResponse>, ApiError> {
     let fleet_id = state.fleet_id.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new("not-in-a-fleet", "this node is not in a fleet"))
+        ApiError::bad(FractalError::new("not-in-a-fleet", "this node is not in a fleet"))
     })?;
     let sponsor_key = state.store.member_public_key().ok_or_else(|| {
         ApiError::internal(anyhow::anyhow!("this fleet has no member signing key"))

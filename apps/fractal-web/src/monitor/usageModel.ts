@@ -79,6 +79,6 @@ export const money = (microusd: number): string => {
   return dollars < 100 ? `$${dollars.toFixed(2)}` : `$${Math.round(dollars)}`
 }
 
-/** An api-key account's month so far; a + when some tokens had no price. No tone: st serves none for credits. */
-export const creditsText = (credits: Native.UsageCredits): string =>
-  `credits ${money(credits.used_microusd)}${credits.unpriced_tokens > 0 ? '+' : ''} of ${money(credits.budget_microusd)} this month`
+/** Credit spend has its own served start, independent of the usage rows' requested window. */
+export const creditsText = (credits: Native.UsageCredits, untilMs: number): string =>
+  `credits ${money(credits.used_microusd)}${credits.unpriced_tokens > 0 ? '+' : ''} of ${money(credits.budget_microusd)} · ${new Date(credits.period_start_ms).toISOString()} to ${new Date(untilMs).toISOString()} UTC`

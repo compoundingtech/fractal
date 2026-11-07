@@ -7,9 +7,9 @@
  * them differently. Native actionable asks are the needs-you authority: a subject needs an
  * answer when an answerable attention row names it (`source_id`, `requester_id` or `mission_id`).
  */
-import * as Fractal from '@fractal/client/schema'
+import * as Fractal from '@fractal/client/schema/read'
 import { classifySubagentDriver } from '@fractal/client'
-import { decodedUsageEquivalence, type DecodedAgent, type DecodedUsageSummary } from '@fractal/sdk/effect'
+import { decodedUsageEquivalence, type DecodedAgent, type DecodedUsageSummary } from '@fractal/sdk/read'
 import * as DateTime from 'effect/DateTime'
 import * as Option from 'effect/Option'
 import * as Schema from 'effect/Schema'

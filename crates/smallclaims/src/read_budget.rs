@@ -21,6 +21,8 @@ type CancellationWaker = Mutex<Option<Waker>>;
 struct State {
     parent: Option<ReadBudget>,
     deadline: Option<Instant>,
+    #[cfg(any(test, feature = "test-support"))]
+    now: Option<Arc<dyn Fn() -> Instant + Send + Sync>>,
     work: Option<WorkClock>,
     route: Arc<str>,
     callsite: &'static Location<'static>,
@@ -61,6 +63,8 @@ impl ReadBudget {
         Self(Arc::new(State {
             parent: None,
             deadline: Some(Instant::now() + duration),
+            #[cfg(any(test, feature = "test-support"))]
+            now: None,
             work: None,
             route: route.into(),
             callsite: Location::caller(),
@@ -71,6 +75,30 @@ impl ReadBudget {
         }))
     }
 
+    /// Inject a monotonic clock for synchronous deadline tests. Advancing this clock
+    /// does not drive real thread or Tokio timers.
+    #[cfg(any(test, feature = "test-support"))]
+    #[track_caller]
+    pub fn with_clock_for_test(
+        route: impl Into<Arc<str>>,
+        duration: Duration,
+        now: Arc<dyn Fn() -> Instant + Send + Sync>,
+    ) -> Self {
+        let mut budget = Self::new(route, duration);
+        let state = Arc::get_mut(&mut budget.0).expect("a new budget has one owner");
+        state.deadline = Some(now() + duration);
+        state.now = Some(now);
+        budget
+    }
+
+    fn now(&self) -> Instant {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(now) = &self.0.now {
+            return now();
+        }
+        Instant::now()
+    }
+
     /// A streaming operation owns its cancellation independently of the request
     /// that returned its headers. Dropping the stream still interrupts its reads.
     #[track_caller]
@@ -78,6 +106,8 @@ impl ReadBudget {
         Self(Arc::new(State {
             parent: None,
             deadline: None,
+            #[cfg(any(test, feature = "test-support"))]
+            now: None,
             work: None,
             route: route.into(),
             callsite: Location::caller(),
@@ -91,13 +121,15 @@ impl ReadBudget {
     /// An event wait may last longer than one query. A child does not extend its parent.
     #[track_caller]
     pub fn child(&self, duration: Duration) -> Self {
-        let deadline = match (self.0.deadline, Instant::now().checked_add(duration)) {
+        let deadline = match (self.0.deadline, self.now().checked_add(duration)) {
             (Some(parent), Some(child)) => Some(parent.min(child)),
             (parent, child) => parent.or(child),
         };
         Self(Arc::new(State {
             parent: Some(self.clone()),
             deadline,
+            #[cfg(any(test, feature = "test-support"))]
+            now: self.0.now.clone(),
             work: None,
             route: self.0.route.clone(),
             callsite: Location::caller(),
@@ -120,6 +152,8 @@ impl ReadBudget {
         Ok(Self(Arc::new(State {
             parent: Some(self.clone()),
             deadline: self.0.deadline,
+            #[cfg(any(test, feature = "test-support"))]
+            now: self.0.now.clone(),
             work: Some(WorkClock {
                 worker: std::thread::current().id(),
                 deadline: used.saturating_add(duration),
@@ -150,7 +184,7 @@ impl ReadBudget {
 
     pub fn expired(&self) -> bool {
         self.0.cancelled.load(Ordering::Acquire)
-            || self.0.deadline.is_some_and(|deadline| Instant::now() >= deadline)
+            || self.0.deadline.is_some_and(|deadline| self.now() >= deadline)
             || self.0.parent.as_ref().is_some_and(Self::expired)
             || self.0.work.as_ref().is_some_and(WorkClock::expired)
     }
@@ -164,7 +198,7 @@ impl ReadBudget {
                 "st3: read cancelled route={:?} callsite={} deadline_elapsed={} work_elapsed={}",
                 self.0.route,
                 self.0.read_site.get().copied().unwrap_or(self.0.callsite),
-                self.0.deadline.is_some_and(|deadline| Instant::now() >= deadline),
+                self.0.deadline.is_some_and(|deadline| self.now() >= deadline),
                 self.0.work.as_ref().is_some_and(WorkClock::expired),
             );
         }
@@ -180,7 +214,7 @@ impl ReadBudget {
 
     pub fn remaining(&self) -> Duration {
         self.0.deadline.map_or(Duration::MAX, |deadline| {
-            deadline.saturating_duration_since(Instant::now())
+            deadline.saturating_duration_since(self.now())
         })
     }
     /// Wait for cancellation or the existing wall deadline, including parent cancellation.
@@ -196,14 +230,14 @@ impl ReadBudget {
     /// Cancellation-only work does not install an artificial timer.
     pub(crate) async fn deadline_elapsed(&self) {
         match self.0.deadline {
-            Some(deadline) => tokio::time::sleep(deadline.saturating_duration_since(Instant::now())).await,
+            Some(deadline) => tokio::time::sleep(deadline.saturating_duration_since(self.now())).await,
             None => std::future::pending().await,
         }
     }
 
     pub(crate) fn park(&self) {
         match self.0.deadline {
-            Some(deadline) => std::thread::park_timeout(deadline.saturating_duration_since(Instant::now())),
+            Some(deadline) => std::thread::park_timeout(deadline.saturating_duration_since(self.now())),
             None => std::thread::park(),
         }
     }
@@ -379,6 +413,28 @@ mod tests {
         stream.cancel();
         assert!(stream.check().is_err());
         assert!(child.check().is_err());
+    }
+
+    #[test]
+    fn an_injected_clock_spends_parent_and_child_deadlines() {
+        let now = Arc::new(Mutex::new(Instant::now()));
+        let clock = now.clone();
+        let parent = ReadBudget::with_clock_for_test(
+            "/clock", Duration::from_secs(10), Arc::new(move || *clock.lock().unwrap()),
+        );
+        let child = parent.child(Duration::from_secs(3));
+        *now.lock().unwrap() += Duration::from_secs(2);
+        assert!(!parent.expired());
+        assert!(!child.expired());
+        assert_eq!(child.remaining(), Duration::from_secs(1));
+        *now.lock().unwrap() += Duration::from_secs(1);
+        assert!(child.expired());
+        assert!(!parent.expired());
+        let bounded = parent.child(Duration::from_secs(20));
+        assert_eq!(bounded.remaining(), Duration::from_secs(7));
+        *now.lock().unwrap() += Duration::from_secs(7);
+        assert!(parent.expired());
+        assert!(bounded.expired());
     }
 
     #[test]

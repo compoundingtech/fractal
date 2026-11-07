@@ -131,8 +131,11 @@ def validate_receipt(receipt, require_origin=False):
 
 
 def fixture_cgroups(lane, prefix):
+    """The fixture cgroups under `lane`. One that goes while the walk reads it, as other scopes in a
+    shared slice do, left nothing behind: the kernel removes only a cgroup with no processes and no
+    child cgroups. Any other unreadable directory fails the count."""
     def failed(error):
-        if not (isinstance(error, FileNotFoundError) and Path(error.filename) == lane):
+        if not (isinstance(error, FileNotFoundError) and Path(error.filename).is_relative_to(lane)):
             raise error
     return sum(Path(directory).name.startswith(prefix) for directory, children, files in os.walk(lane, onerror=failed))
 
@@ -260,6 +263,33 @@ sys.path.insert(0, str(pathlib.Path(sys.argv[0]).parent))
 runpy.run_path(sys.argv[0], run_name="__main__")
 '''
     return subprocess.Popen([sys.executable, "-c", script, str(number), slot, "--", "sleep", "60"],
+                            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def signal_while_waiting(env, number):
+    # Deliver the signal while the wrapper is blocked reading its watchdog's result, to a thread that is
+    # not the one reading. The C handler runs at once, but a Python handler runs only between bytecodes of
+    # the main thread, which stays blocked in read(): the same as a signal that lands after the
+    # interpreter's last check and before the read enters the kernel, as a preempted wrapper on a loaded
+    # host takes it (merge group 600ee8b8, 2026-11-06). A stop that waits for the Python handler never
+    # reaches the watchdog, and the run goes on for its whole sleep.
+    script = '''import os, runpy, signal, sys, threading, time
+number = int(sys.argv.pop(1))
+wrapper = os.getpid()
+read = os.read
+def waiting(fd, size):
+    if size == 32 and os.getpid() == wrapper:
+        def deliver():
+            time.sleep(0.3)
+            signal.pthread_kill(threading.get_ident(), number)
+        threading.Thread(target=deliver, daemon=True).start()
+    return read(fd, size)
+os.read = waiting
+sys.argv = sys.argv[1:]
+sys.path.insert(0, os.path.dirname(sys.argv[0]))
+runpy.run_path(sys.argv[0], run_name="__main__")
+'''
+    return subprocess.Popen([sys.executable, "-c", script, str(number), slot, "--for", "waiting", "--", "sleep", "60"],
                             env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
@@ -431,9 +461,20 @@ for helper, call in ((fixture_listing, "check_output"), (stop_fixture, "run")):
 with tempfile.TemporaryDirectory() as receipt_tmp:
     sink = Path(receipt_tmp)
     assert fixture_cgroups(sink / "missing", "fixture-") == 0
-    for error in (PermissionError(13, "denied", str(sink)), FileNotFoundError(2, "gone", str(sink / "child"))):
+    for error in (PermissionError(13, "denied", str(sink)), PermissionError(13, "denied", str(sink / "child")),
+                  FileNotFoundError(2, "gone", "/elsewhere")):
         with patch.object(os, "walk", side_effect=lambda lane, onerror: onerror(error)), TestCase().assertRaises(type(error)):
             fixture_cgroups(sink, "fixture-")
+    # A cgroup removed between its listing and its read, as a scope that ends does, is gone (#5235).
+    (sink / "fixture-ending").mkdir()
+    listed = os.walk
+    def ends_while_walked(lane, onerror):
+        for directory, children, files in listed(lane, onerror=onerror):
+            for child in children:
+                (Path(directory) / child).rmdir()
+            yield directory, children, files
+    with patch.object(os, "walk", side_effect=ends_while_walked):
+        assert fixture_cgroups(sink, "fixture-") == 0
     record = {}
     with TestCase().assertRaises(FileNotFoundError):
         peak(record, sink)
@@ -545,6 +586,32 @@ try:
     assert not alive(zombie.pid)
 finally:
     zombie.wait()
+
+# A ticket enters the line already locked. A scan between a ticket's creation and its lock,
+# another waiter's or a status read's, took it for a gone waiter's and removed it: that waiter
+# was never shown in line and never became first (#5235).
+with tempfile.TemporaryDirectory() as tmp:
+    import importlib.machinery, importlib.util
+    loader = importlib.machinery.SourceFileLoader("ci_perf_slot", slot)
+    perf_slot = importlib.util.module_from_spec(importlib.util.spec_from_loader(loader.name, loader))
+    loader.exec_module(perf_slot)
+    directory = Path(tmp)
+    (directory / "line").mkdir()
+    unscanned_lock, scans = perf_slot.lock, []
+    def scanned_first(fd, nonblocking=True):
+        if not scans:  # another process scans the line just before the ticket's lock
+            scans.append(fd)
+            with patch.object(perf_slot, "lock", unscanned_lock):
+                perf_slot.line(directory)
+        return unscanned_lock(fd, nonblocking)
+    with patch.object(perf_slot, "lock", scanned_first):
+        ticket, ticket_fd = perf_slot.join_line(directory, "racing")
+    try:
+        assert perf_slot.line(directory) == [ticket], "a scan removed the ticket of a waiter joining the line"
+        assert sorted(path.name for path in directory.iterdir()) == ["line"], "nothing is left beside the line"
+    finally:
+        os.close(ticket_fd)
+    assert perf_slot.line(directory) == [], "the ticket of a waiter that is gone is removed"
 
 if sys.argv[1:] == ["--helpers-only"]:
     print("passed: ci-perf-slot helpers")
@@ -744,6 +811,18 @@ with receipt_sink(os.environ.get("CI_PERF_SLOT_RECEIPT_DIR")) as receipt, tempfi
         pid = stopped.pid
         assert stopped.wait(10) == 128 + number
         assert not alive(pid) and not holder.exists()
+
+    # A signal the wrapper takes while blocked waiting for its watchdog stops the run too, even when no
+    # Python handler can run until that wait ends.
+    for number in (signal.SIGINT, signal.SIGTERM):
+        stopped = signal_while_waiting(env, number)
+        try:
+            code = stopped.wait(10)
+        except subprocess.TimeoutExpired:
+            stopped.kill()
+            raise AssertionError("a signal during the wait did not stop the run: %s" % stopped.communicate()[1])
+        assert code == 128 + number, stopped.stderr.read()
+        assert not holder.exists() and "perf slot free" in status()
 
     # The publication itself is the readiness boundary: even a signal before
     # the watchdog forks must return only after cleanup, not leave a record.

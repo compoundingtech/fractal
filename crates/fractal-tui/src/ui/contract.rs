@@ -3,7 +3,7 @@
 //! Fractal TUI writes these files and the iOS app tests against them, so both apps clean the same
 //! transcripts the same way, use the same words and colours, draw a conversation's entries
 //! by the same rules, and share one demo world.
-//! Run `STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract` after an intended change.
+//! Run `FRACTAL_TUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract` after an intended change.
 
 use super::adapt;
 use super::demo;
@@ -201,7 +201,7 @@ fn sorted_keys(value: Value) -> Value {
 
 #[test]
 fn the_shared_client_contract_matches_tui() {
-    let update = std::env::var_os("STUI_UPDATE_CONTRACT").is_some();
+    let update = std::env::var_os("FRACTAL_TUI_UPDATE_CONTRACT").is_some();
     for (name, value) in files() {
         let path = root().join(name);
         let text = serde_json::to_string_pretty(&sorted_keys(value)).unwrap() + "\n";
@@ -210,10 +210,10 @@ fn the_shared_client_contract_matches_tui() {
             continue;
         }
         let current = std::fs::read_to_string(&path)
-            .unwrap_or_else(|_| panic!("{name} is missing; run with STUI_UPDATE_CONTRACT=1"));
+            .unwrap_or_else(|_| panic!("{name} is missing; run with FRACTAL_TUI_UPDATE_CONTRACT=1"));
         assert!(
             current == text,
-            "{name} no longer matches Fractal TUI; if the change is intended, run STUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract and update the iOS app"
+            "{name} no longer matches Fractal TUI; if the change is intended, run FRACTAL_TUI_UPDATE_CONTRACT=1 cargo test -p fractal-tui contract and update the iOS app"
         );
     }
 }
@@ -255,11 +255,11 @@ fn scenario_demo_first_frames_match_golden() {
         actual.push('\n');
     }
     let path = PathBuf::from(test_env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/scenario-demo.golden");
-    if std::env::var_os("STUI_UPDATE_CONTRACT").is_some() {
+    if std::env::var_os("FRACTAL_TUI_UPDATE_CONTRACT").is_some() {
         std::fs::write(&path, &actual).unwrap();
     } else {
         assert_eq!(std::fs::read_to_string(path).unwrap(), actual,
-            "scenario demo frames drifted; regenerate with STUI_UPDATE_CONTRACT=1");
+            "scenario demo frames drifted; regenerate with FRACTAL_TUI_UPDATE_CONTRACT=1");
     }
 }
 

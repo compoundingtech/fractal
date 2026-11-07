@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Integrate open Fractal PRs and publish an immutable production build.
 
-Version 13: resolve attribution probe roots against the build helper's cwd.
+Version 14: refuse host-capacity pressure before selection or candidate writes.
 """
 import contextlib, datetime, fcntl, hashlib, json, math, os, pathlib, re, shutil, subprocess, tempfile, time
 import sys
@@ -50,7 +50,7 @@ try:
 except (ValueError, TypeError) as error:
     raise SystemExit(f'invalid integrator trust configuration: {error}')
 PR_METADATA_FIELDS = 'number,headRefName,headRefOid,baseRefName,baseRefOid,changedFiles,isDraft,author,isCrossRepository,headRepositoryOwner'
-INTEGRATOR_VERSION = 13
+INTEGRATOR_VERSION = 14
 DEPENDENCY_SANDBOX_VERSION = candidate_sandbox.DEPENDENCY_POLICY
 try:
     SELECTION_BUDGET_SECONDS = float(os.environ.get('FRACTAL_INTEGRATOR_SELECTION_BUDGET_SECONDS', '60'))
@@ -394,15 +394,35 @@ def prepare_dependencies():
         inputs.update(path.encode()); inputs.update(candidate_sandbox.read_regular(C/path))
     cache=L/'metadata-cache'/inputs.hexdigest()
     if cache.exists():
-        if cache.stat().st_size:
+        # Read even empty entries so cache I/O errors cannot become cache misses.
+        if not cache.read_bytes():
+            install()
+            return
+        # Outputs can change without changing generator inputs. Check without
+        # mutating the index/worktree; a stale patch is a miss, not a tick failure.
+        checked=git('apply','--check','--index',cache,capture=True,check=False,
+                    stable_messages=True)
+        if checked.returncode == 0:
             git('apply','--index',cache)
             git('commit','-m','live-r3: reuse generated dependency metadata')
-        install()
-        return
+            install()
+            return
+        # Git apply.c: apply_fragments emits "patch failed"; check_patch emits
+        # the summary and missing/existing index-path diagnostics. Everything
+        # else (including mixed corruption/I/O diagnostics) must remain fatal.
+        errors=[line for line in (checked.stderr or '').splitlines() if line]
+        applicability=re.compile(r'error: (?:patch failed: .+:[0-9]+|.+: (?:patch does not apply|does not exist in index|already exists in index))')
+        if (checked.returncode != 1 or checked.stdout or not errors or
+                not all(applicability.fullmatch(line) for line in errors)):
+            raise RuntimeError(f'metadata cache check failed ({checked.returncode}) for {cache}'
+                               f'\nstdout:\n{checked.stdout or ""}\nstderr:\n{checked.stderr or ""}')
     before=text('rev-parse','HEAD')
     regenerate()
     cache.parent.mkdir(exist_ok=True)
-    cache.write_text(git('diff','--binary',before,'HEAD',capture=True).stdout if before!=text('rev-parse','HEAD') else '')
+    with tempfile.TemporaryDirectory(dir=cache.parent) as temporary:
+        replacement=pathlib.Path(temporary)/'patch'
+        replacement.write_text(git('diff','--binary',before,'HEAD',capture=True).stdout if before!=text('rev-parse','HEAD') else '')
+        replacement.replace(cache)
 
 def probe_revision(revision):
     git('checkout','--detach',revision)
@@ -524,7 +544,7 @@ def regenerate():
         git('commit', '-m', 'live-r3: regenerate merged dependency metadata')
 
 def run(args, cwd=None, capture=False, check=True, timeout=None, *,
-        sandbox_shell=None, network=False, package=None):
+        sandbox_shell=None, network=False, package=None, stable_git_messages=False):
     started=time.monotonic()
     category = ('fetch' if 'fetch' in args else 'merge' if args[0]=='git' else
                 'install' if 'pnpm' in args else 'regenerate' if 'genie' in args or 'scripts/ci-fractal-web-licenses' in args else
@@ -549,11 +569,14 @@ def run(args, cwd=None, capture=False, check=True, timeout=None, *,
             host_git = command[0] == 'git'
             if command[0] == 'git':
                 command = ['python3', '-I', str(SCRIPT_DIR/'host-git.py'), *command[1:]]
+            host_env={**os.environ, 'CI':'1'}
+            if host_git and stable_git_messages:
+                host_env.update(LC_ALL='C', LANGUAGE='C')
             result=subprocess.run(command, cwd=SCRIPT_DIR, text=True,
                                   stdout=subprocess.PIPE if capture or log_capture else None,
                                   stderr=subprocess.PIPE if capture or log_capture or host_git else None,
                                   check=check and not log_capture and not host_git, timeout=timeout,
-                                  env={**os.environ, 'CI':'1'})
+                                  env=host_env)
             if host_git:
                 if not capture and result.stderr:
                     print(result.stderr, end='', file=sys.stderr, flush=True)
@@ -576,7 +599,9 @@ def run(args, cwd=None, capture=False, check=True, timeout=None, *,
     finally:
         if TIMINGS is not None:
             TIMINGS[category]=TIMINGS.get(category,0)+round((time.monotonic()-started)*1000)
-def git(*args, capture=False, check=True): return run(['git','-C',C,*args], capture=capture, check=check)
+def git(*args, capture=False, check=True, stable_messages=False):
+    return run(['git','-C',C,*args], capture=capture, check=check,
+               stable_git_messages=stable_messages)
 def text(*args): return git(*args,capture=True).stdout.strip()
 def digest(root):
     h=hashlib.sha256()
@@ -790,7 +815,6 @@ def compatible_recorded_stack(stack, heads, row):
 
 def tick():
     global TIMINGS, REGISTRY_BASE, SELECTION_DEADLINE
-    candidate_sandbox.validate_configuration()
     start=time.monotonic(); row={'ts':datetime.datetime.now(datetime.timezone.utc).isoformat(),'sha':None,'main':None,'included':[],'skipped':[],'selection':[],'build':'failed','ms':0}
     row['integratorVersion']=INTEGRATOR_VERSION
     TIMINGS=row['timingsMs']={}
@@ -798,9 +822,13 @@ def tick():
     pin=json.loads(pin_path.read_text()) if pin_path.exists() else None
     row['pinnedBase']=None
     lock=open(L/('live-r3-dry-run.lock' if DRY_RUN else 'live-r3.lock'),'a')
+    capacity_prechecked=False
     try:
         try: fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         except BlockingIOError: row.update(build='skipped',reason='lock-held'); return
+        candidate_sandbox.capacity_precheck()
+        capacity_prechecked=True
+        candidate_sandbox.validate_configuration()
         SELECTION_DEADLINE = time.monotonic() + SELECTION_BUDGET_SECONDS
         # Trust metadata is fetched before any PR files or executable content.
         permission_cache={}
@@ -950,7 +978,7 @@ def tick():
     except Exception as e:
         row['error']=str(e)
         if isinstance(e,subprocess.CalledProcessError) and e.returncode == 75:
-            row.update(build='error', reason='capacity-refused', retryable=True,
+            row.update(build='capacity-refused', reason='capacity-refused', retryable=True,
                        error=f'capacity-refused: retryable host capacity refusal; previous build retained: {e}')
         if isinstance(e,subprocess.CalledProcessError):
             detail=((e.stdout or '') + '\n' + (e.stderr or '')).strip()
@@ -960,9 +988,15 @@ def tick():
     finally:
         SELECTION_DEADLINE = None
         observe_served(row)
+        if not capacity_prechecked and row.get('reason') == 'capacity-refused':
+            # Served identity is known, but no candidate was selected to compare.
+            row['current']=None
         row['ms']=round((time.monotonic()-start)*1000)
         row['timingsMs']['other']=max(0,row['ms']-sum(row['timingsMs'].values()))
-        publish_skips(row)
+        # A refused precheck has no new selection to publish. Preserve the last
+        # selection/metadata state and append only the normal tick observation.
+        if capacity_prechecked or row.get('reason') != 'capacity-refused':
+            publish_skips(row)
         TIMINGS=None
         with (L/('live-r3-dry-run.jsonl' if DRY_RUN else 'live-r3.jsonl')).open('a') as f: f.write(json.dumps(row,separators=(',',':'))+'\n')
         print(json.dumps(row),flush=True)

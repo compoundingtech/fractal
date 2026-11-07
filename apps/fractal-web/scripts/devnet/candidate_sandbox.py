@@ -114,6 +114,18 @@ def bootstrap_env(home):
             'NIX_CONFIG': 'experimental-features = nix-command flakes\n'}
 
 
+def capacity_precheck():
+    """Exercise the sandbox bootstrap's authoritative Nix policy, without a build."""
+    nix = shutil.which('nix')
+    if not nix:
+        raise RuntimeError('Nix is required to realize the pinned sandbox tools')
+    # eval and build share agent-nix's memory-pressure preflight. A literal needs
+    # no flake, store realization, temporary HOME, or candidate filesystem access.
+    return subprocess.run([nix, 'eval', *NIX_OPTIONS, '--expr', 'null'],
+                          cwd=TRUSTED_CHECKOUT, env=bootstrap_env('/nonexistent'),
+                          check=True, capture_output=True, text=True)
+
+
 @functools.lru_cache(maxsize=1)
 def tools():
     if required('FRACTAL_INTEGRATOR_SANDBOX') != 'bwrap':

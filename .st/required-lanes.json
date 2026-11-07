@@ -748,6 +748,8 @@
         "crates/fractal-seats",
         "crates/fractal-seats-base",
         "crates/fractal-secrets",
+        "crates/fractal-sidebar",
+        "crates/fractal-socket-discovery",
         "crates/fractal-storage-version",
         "crates/fractal-store",
         "crates/fractal-telemetry",

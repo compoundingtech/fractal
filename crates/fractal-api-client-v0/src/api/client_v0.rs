@@ -43,8 +43,10 @@ pub mod conversation_blocks;
 pub mod harness_inventory;
 pub mod harness_questions;
 pub mod inventory;
+pub mod mission_declaration;
 pub mod raw_terminal;
 pub mod private_notes;
+pub mod quota;
 mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
@@ -109,6 +111,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(request_latency),
         )
         .route("/v1/client/usage", get(usage_period))
+        .route("/v1/client/quota", get(quota::read))
         .route("/v1/client/slo", get(slo_list))
         .route("/v1/client/slo/history", get(slo_history))
         .route("/v1/client/clients", get(clients_list))
@@ -117,6 +120,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(subject_definition),
         )
         .route("/v1/client/publication-definition", get(publication_definition))
+        .route("/v1/client/mission-declaration", get(mission_declaration::get))
         .route("/v1/client/now", get(now))
         .route("/v1/client/machines", get(machines))
         .route("/v1/client/hosts/{*id}", get(host_repositories))
@@ -132,6 +136,7 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
             get(agent_declaration),
         )
         .route("/v1/client/agent-queues/{*id}", get(agent_queue))
+        .route("/v1/client/agent-related-runs/{*id}", get(related_runs::get))
         .route("/v1/client/status-history/{*id}", get(status_history))
         .route("/v1/client/harness-inventory/{*id}", get(harness_inventory::read))
         .route("/v1/client/harness-questions", get(harness_questions::list))
@@ -435,7 +440,7 @@ pub async fn collection_stream(
     let selected = super::wire_names::selected_protocol(&protocols, COLLECTION_SUBPROTOCOL)
         .ok_or_else(|| validation("the collection WebSocket requires exactly one supported collections protocol"))?
         .to_owned();
-    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
+    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms(), super::client_presence::StreamCategory::Collections);
     Ok(websocket
         .protocols([selected])
         .on_upgrade(move |socket| collection_stream_socket(socket, state, session, presence, upgrade)))
@@ -2709,7 +2714,7 @@ pub async fn agent_workspace(
                 return Ok(None);
             };
             if !status.conflicts.is_empty() {
-                return Err(anyhow::anyhow!(St3Error::new(
+                return Err(anyhow::anyhow!(FractalError::new(
                     "validation-failed",
                     "agent has conflicting declarations",
                 )));
@@ -2738,7 +2743,7 @@ pub async fn agent_workspace(
                     return Ok(Some((client_snapshot_at(&state, index), value)));
                 }
                 if desired.kind != "stop" || claim.predecessors.len() != 1 {
-                    return Err(anyhow::anyhow!(St3Error::new(
+                    return Err(anyhow::anyhow!(FractalError::new(
                         "validation-failed",
                         "agent has no unambiguous prior declaration",
                     )));
@@ -2788,7 +2793,7 @@ pub async fn agent_declaration(
     }
     let kdl = crate::graph::render_agent_desired_kdl(&tree, &uris).map_err(ApiError::bad)?;
     let accountable = fractal_schema::accountable::from_desired(&tree)
-        .map_err(|e| ApiError::bad(St3Error::new(e.code, e.message)))?.map(str::to_owned);
+        .map_err(|e| ApiError::bad(FractalError::new(e.code, e.message)))?.map(str::to_owned);
     let mut value = json!({
         "id": subject,
         "revision": revision,
@@ -2821,7 +2826,7 @@ pub async fn usage_period(
         .since_ms
         .unwrap_or(until_ms.saturating_sub(86_400_000));
     if since_ms > until_ms {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-usage-period",
             "usage start must be before its end",
         )));
@@ -2871,7 +2876,7 @@ pub async fn subject_definition(
         require_scope(&session, "read.declarations")?;
     }
     if !query.subject.starts_with("agent/") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "a definition subject must start with `agent/`; missions are published revisions \
              without a canonical declaration",
@@ -2918,7 +2923,7 @@ pub async fn subject_definition(
     if serde_json::to_vec(&value).map_err(ApiError::internal)?.len()
         > CLIENT_MAX_RESPONSE_BYTES - 4096
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "the applied definition exceeds the client response limit",
         )));
@@ -2944,7 +2949,7 @@ pub async fn publication_definition(
         .iter()
         .any(|prefix| query.subject.starts_with(prefix))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "a publication definition subject must start with agent/, mission/, or schedule/",
         )));
@@ -2969,7 +2974,7 @@ pub async fn publication_definition(
         .len()
         > CLIENT_MAX_RESPONSE_BYTES - 4096
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "validation-failed",
             "the published definition exceeds the client response limit",
         )));
@@ -2998,6 +3003,7 @@ fn session_claim_actor(session: &ClientSession) -> String {
         "requester".into()
     }
 }
+
 
 fn mission_visualization(
     store: &Store,
@@ -3094,6 +3100,7 @@ fn mission_resources_filtered(
     selected_id: Option<&str>,
     page_ids: Option<&[String]>,
 ) -> anyhow::Result<Vec<Value>> {
+    let at_unix_ms = client_now_ms();
     let human_attention_runs = store.human_attention_runs()?;
     let mut missions = BTreeMap::<String, Vec<MissionRunView>>::new();
     // A detail or a page reads only its own missions' runs, definitions, seats and states.
@@ -3233,6 +3240,11 @@ fn mission_resources_filtered(
             let latest_finished = runs.iter().rev().find(|run| {
                 matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
             });
+            let timing_runs = runs.iter().filter(|run|
+                !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
+                    || latest_finished.is_some_and(|latest| latest.subject == run.subject))
+                .map(|run| run.subject.clone()).collect::<Vec<_>>();
+            let timing = store.mission_step_timestamps_for_runs(&timing_runs, None)?;
             let run_details = runs
                 .iter()
                 .map(|header| {
@@ -3364,6 +3376,8 @@ fn mission_resources_filtered(
                                     "agentless": step.agentless,
                                     "keep_open": crate::mission::step_keeps_open(definition.map(|(definition, _)| definition), &step.step),
                                     "since": client_timestamp(step.updated_at_unix_ms),
+                                    "started_at": timing.get(step.subject.as_str()).and_then(|times| times.0),
+                                    "completed_at": timing.get(step.subject.as_str()).and_then(|times| times.1),
                                     "last_progress": step.progress_summary,
                                     "progress_at": step.progress_at_unix_ms.map(client_timestamp),
                                     "blocked_reason": step.blocked_reason.as_deref().or_else(|| run.scheduler_fault.as_deref().filter(|_| step.status == "pending")),
@@ -3393,6 +3407,13 @@ fn mission_resources_filtered(
                         "current_steps": current_steps,
                         "must_act": must_act,
                         "state_since": client_timestamp(state_since),
+                        "started_at": run.created_at_unix_ms,
+                        "completed_at": run_state.and_then(|state| state.completed_at_unix_ms),
+                        "eta": if matches!(run.status.as_str(), "completed" | "failed" | "cancelled") {
+                            None
+                        } else {
+                            store.mission_run_eta(&run.subject, at_unix_ms)?
+                        },
                         "outcome": outcome,
                         "last_progress": last_progress,
                         "blocker": blocker,
@@ -3608,7 +3629,7 @@ fn observer_subscription_detail_at(
         || (!id.starts_with(&format!("{kind}/"))
             && id.len() + kind.len() + 1 > MAX_DETAIL_KEY_BYTES)
     {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "projection-detail-too-large",
             "observer/subscription detail ID exceeds the 4096 byte key budget",
         )
@@ -3651,7 +3672,7 @@ fn observer_subscription_detail_at(
         // Source bytes bound JSON decoding and rendering; escaping can enlarge the output.
         // Refuse the complete item rather than truncate any field or fall back to a list.
         if serde_json::to_vec(&value)?.len() + serde_json::to_vec(snapshot)?.len() > 512 * 1024 {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "projection-detail-too-large",
                 "observer/subscription detail output exceeds the 512 KiB response budget",
             )
@@ -3672,7 +3693,7 @@ async fn observer_subscription_detail(
         state.store.clone().read_snapshot(|index| {
             use crate::store::observer_subscription_detail::{DetailBudget, MAX_DETAIL_KEY_BYTES};
             if state.node.len() > MAX_DETAIL_KEY_BYTES {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "projection-detail-too-large",
                     "observer/subscription detail host metadata exceeds the 4096 byte budget",
                 )
@@ -3690,7 +3711,7 @@ async fn observer_subscription_detail(
                 observer_subscription_detail_at(&state, kind, &id, &snapshot, &mut budget)
             })?;
             let value = value.ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "not-found",
                     format!("{kind} `{}` does not exist", client_detail_id(kind, &id)),
                 )
@@ -3847,7 +3868,7 @@ fn operation_checks(
             {
                 report.refreshing = true;
                 let state = state.clone();
-                std::thread::spawn(move || refresh_operation_report(&state, key, None));
+                std::thread::spawn(move || refresh_operation_report(&state, key));
             }
             return Ok(report.checks.clone());
         }
@@ -4052,6 +4073,7 @@ pub async fn missions(
                 native_only: query.native_only,
                 items_digest: "sql-page".into(),
                 before_index: None,
+                before_stream_index: None,
                 after_key: after_key.clone(),
                 expires_at_unix_ms,
             })
@@ -5424,7 +5446,7 @@ pub async fn conversation_stream(
     } else {
         conversation_read_now(&state, &session, &session_id, query.after.as_deref())?;
     }
-    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
+    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms(), super::client_presence::StreamCategory::Conversation);
     presence.follow("conversation", format!("conversation:{id}"));
     Ok(websocket
         .protocols([selected])
@@ -6311,7 +6333,7 @@ pub async fn terminal_stream(
         query.incarnation.as_deref(),
         stream_capability,
     )?;
-    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms());
+    let presence = super::client_presence::open_stream(&state.node, &session, &headers, super::client_now_ms(), super::client_presence::StreamCategory::Terminal);
     presence.follow("terminal", format!("terminal:{id}"));
     Ok(websocket
         .protocols([selected.to_owned()])
@@ -7347,7 +7369,7 @@ fn validate_message_session(
 
 fn import_lookup_error(error: anyhow::Error) -> ApiError {
     if error.is::<crate::external_sessions::AmbiguousSession>() {
-        ApiError::bad(St3Error::new("ambiguous-import-session", error.to_string()))
+        ApiError::bad(FractalError::new("ambiguous-import-session", error.to_string()))
     } else {
         ApiError::internal(error)
     }
@@ -7389,7 +7411,7 @@ async fn import_external_session_action(
     }
 
     let import = crate::external_sessions::import_seat(&external).map_err(|error| {
-        ApiError::bad(St3Error::new("invalid-import-session", error.to_string()))
+        ApiError::bad(FractalError::new("invalid-import-session", error.to_string()))
     })?;
     let seat_intent = parse_intent(&import.kdl, &state.node).map_err(ApiError::bad)?;
     let seat_preview = state
@@ -7403,7 +7425,7 @@ async fn import_external_session_action(
         )
         .map_err(ApiError::bad)?;
     if !seat_preview.blockers.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-import-seat",
             seat_preview.blockers.join("; "),
         )));
@@ -8027,7 +8049,7 @@ async fn dispatch_action(
             .0;
             Ok(vec![result.subject])
         }
-        "attention.resolve" => Err(ApiError::bad(St3Error::new(
+        "attention.resolve" => Err(ApiError::bad(FractalError::new(
             "attention-migrated",
             "attention is a view; complete or remedy its source",
         ))),
@@ -8063,7 +8085,7 @@ async fn dispatch_action(
                         Err(error) => Some(format!("can only be answered in the seat's terminal: {}", error.message)),
                     };
                     if let Some(refused) = refused {
-                        return Err(ApiError::bad(St3Error::new(
+                        return Err(ApiError::bad(FractalError::new(
                             "stale-fence",
                             format!("{}{refused}", fractal_client::PROMPT_REFUSAL_PREFIX),
                         )));
@@ -8152,7 +8174,7 @@ async fn dispatch_action(
                             .get("evidence")
                             .map(|value| {
                                 serde_json::from_value::<Vec<String>>(value.clone()).map_err(|_| {
-                                    ApiError::bad(St3Error::new(
+                                    ApiError::bad(FractalError::new(
                                         "validation-failed",
                                         "evidence must be an array of strings",
                                     ))
@@ -8166,7 +8188,7 @@ async fn dispatch_action(
                             .get("answer")
                             .map(|value| {
                                 serde_json::from_value(value.clone()).map_err(|_| {
-                                    ApiError::bad(St3Error::new(
+                                    ApiError::bad(FractalError::new(
                                         "validation-failed",
                                         "answer takes an optional id and optional text",
                                     ))
@@ -9206,7 +9228,7 @@ fn validate_action_admission(
         ));
     }
     if request.action_type == "attention.resolve" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "attention-migrated",
             "attention is a view; complete or remedy its source",
         )));
@@ -10661,7 +10683,7 @@ mission "queue-parity" state="ready" {
     #[test]
     fn terminal_contention_preserves_retryable_code_and_service_close() {
         for code in ["database-busy", "database-locked"] {
-            let envelope = terminal_stream_error(&ApiError::bad(St3Error::new(code, "fixture contention")));
+            let envelope = terminal_stream_error(&ApiError::bad(FractalError::new(code, "fixture contention")));
             assert_eq!(envelope["code"], code);
             assert_eq!(envelope["retryable"], true);
             assert_eq!(terminal_error_close_code(envelope["code"].as_str().unwrap()), 1011);
@@ -11760,8 +11782,12 @@ mission "differential" state="ready" {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn fresh_agent_roster_waits_for_a_healthy_attempt_and_plain_reads_do_not() {
+        const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abe";
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
+        state.store.bind_fleet(FLEET).unwrap();
+        let edge = Store::open_memory("edge").unwrap();
+        edge.bind_fleet(FLEET).unwrap();
         let mut recorded = crate::api::roster_stage_recorded().subscribe();
         let subject = "agent/fresh-pause";
         let append = |fields: Value| {
@@ -11796,8 +11822,23 @@ mission "differential" state="ready" {
             .await.expect("the refresher publishes the asked-for cut").unwrap();
 
         // Unchanged: plain reads during the pause answer from the publication and do not cut it
-        // short, however many ask.
-        let idle = append(json!({"state":"idle", "driver":"codex", "incarnation_id":"one"}));
+        // short, however many ask. The change comes from a peer: a claim this node wrote would
+        // cut the pause itself.
+        edge.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "harness.observed".into(), actor: None,
+            fields: serde_json::from_value(json!({"state":"idle", "driver":"codex",
+                "incarnation_id":"one"})).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let exchange = edge
+            .export_replication_exchange(FLEET, &state.store.replication_inventory().unwrap())
+            .unwrap();
+        state.store.receive_replication_exchange("edge", FLEET, &exchange).unwrap();
+        state.store.validate_replication_backlog().unwrap();
+        state.store.apply_replication_repairs().unwrap();
+        state.store.project_replication_backlog().unwrap();
+        let idle = state.store.index().unwrap();
+        assert!(idle > working, "the peer's claim reached this node");
         for _ in 0..3 {
             let (Extension(snapshot), Json(page)) = list(false).await.unwrap();
             assert!(snapshot.store_index < idle, "a plain read answers from the publication");
@@ -14906,8 +14947,12 @@ subscription "watch/source" {
         assert_eq!(statements(40), few.get());
     }
 
+    /// The first report since a start reads the last audit and never makes one: on a busy
+    /// host's store the audit read 335k statements in the first minute after a restart, while
+    /// every reconnecting client waited on the same disk. The daemon audits after that window,
+    /// and later reports show what it found.
     #[test]
-    fn startup_operation_audit_is_shared_and_later_reports_are_fresh() {
+    fn the_first_report_does_not_audit_and_later_reports_show_the_audit() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         state.store.append_client_claim(&ClaimInput {
@@ -14932,10 +14977,16 @@ subscription "watch/source" {
             at: Instant::now(),
             refreshing: true,
         });
-        let (sender, receiver) = tokio::sync::oneshot::channel();
-        refresh_operation_report(&state, key, Some(sender));
-        let drift = receiver.blocking_recv().unwrap().unwrap();
+        refresh_operation_report(&state, key);
+        assert!(state.store.last_operation_audit().is_none(), "the first report audited");
+        let checks = operation_checks(&state).unwrap().unwrap();
+        let projection = checks.iter().find(|check| check.name == "operation-projection").unwrap();
+        assert_eq!(projection.status, "warn");
+        assert!(projection.message.starts_with("no operation audit has finished since the daemon started"), "{}", projection.message);
+
+        let drift = state.store.operation_projection_drift().unwrap();
         assert_eq!(drift.len(), 1);
+        refresh_operation_report(&state, key);
         let checks = operation_checks(&state).unwrap().unwrap();
         let projection = checks.iter().find(|check| check.name == "operation-projection").unwrap();
         assert_eq!(projection.status, "fail");
@@ -14947,7 +14998,7 @@ subscription "watch/source" {
                 .find(|check| check.name == "operation-projection").unwrap().status
         };
         // Doctor reports the last audit and never audits inline: it still shows the drift the
-        // startup audit found until the next audit runs.
+        // audit found until the next audit runs.
         assert_eq!(projection_status(), "fail");
         assert!(state.store.operation_projection_drift().unwrap().is_empty());
         assert_eq!(projection_status(), "pass");
@@ -14955,7 +15006,7 @@ subscription "watch/source" {
         assert_eq!(projection_status(), "pass");
         assert_eq!(state.store.operation_projection_drift().unwrap().len(), 1);
         assert_eq!(projection_status(), "fail");
-        refresh_operation_report(&state, key, None);
+        refresh_operation_report(&state, key);
         let checks = operation_checks(&state).unwrap().unwrap();
         assert_eq!(checks.iter().find(|check| check.name == "operation-projection").unwrap().status, "fail");
     }
@@ -14986,7 +15037,7 @@ subscription "watch/source" {
         assert_eq!(pending[0]["severity"], "info");
         assert_eq!(pending[0]["state"], "running");
         assert_eq!(pending[0]["updated_at"], "2026-09-30T00:00:00Z");
-        refresh_operation_report(&state, key, None);
+        refresh_operation_report(&state, key);
         let report = operation_resources(&state, "2026-09-30T00:00:00Z").unwrap();
         assert!(
             report.iter().all(|item| item["state"] != "running"),
@@ -15008,11 +15059,9 @@ subscription "watch/source" {
         // A started report is made on its own thread, and a second start keeps it.
         let other = tempfile::tempdir().unwrap();
         let started = test_state(other.path());
-        let audit = start_operation_report(&started).unwrap();
-        let drift = audit.blocking_recv().unwrap().unwrap();
-        assert!(drift.is_empty());
+        assert!(start_operation_report(&started));
         crate::store::STATEMENTS_RUN.with(|run| run.set(0));
-        assert!(!started.store.repair_operation_projection_drift_from_audit(&drift).unwrap());
+        assert!(!started.store.repair_operation_projection_drift_from_audit(&[]).unwrap());
         assert_eq!(crate::store::STATEMENTS_RUN.with(std::cell::Cell::get), 0);
         let deadline = Instant::now() + Duration::from_secs(30);
         while operation_checks(&started).unwrap().is_none() {
@@ -15023,7 +15072,8 @@ subscription "watch/source" {
             std::thread::sleep(Duration::from_millis(10));
         }
         let made = operation_checks(&started).unwrap().unwrap();
-        assert!(start_operation_report(&started).is_none());
+        assert!(started.store.last_operation_audit().is_none());
+        assert!(!start_operation_report(&started));
         assert!(Arc::ptr_eq(
             &made,
             &operation_checks(&started).unwrap().unwrap()
@@ -15406,7 +15456,7 @@ subscription "watch/source" {
 
     #[test]
     fn steady_errors_preserve_store_conflicts_and_distinguish_terminal_lifetime() {
-        let conflict = ApiError::internal(anyhow::Error::new(St3Error::new(
+        let conflict = ApiError::internal(anyhow::Error::new(FractalError::new(
             "stale-subject",
             "the resource changed",
         )));
@@ -15802,7 +15852,7 @@ subscription "watch/source" {
     #[test]
     fn typed_identity_conflicts_preserve_client_wire_codes() {
         for code in ["identity-cycle", "identity-occupied", "identity-retired-source"] {
-            let error = ApiError::bad(St3Error::new(code, "identity conflict"));
+            let error = ApiError::bad(FractalError::new(code, "identity conflict"));
             assert_eq!(error.status, StatusCode::CONFLICT);
             let envelope = client_error_envelope(error.status,
                 &json!({"code":error.code,"message":error.message}), "request/identity");
@@ -16262,6 +16312,19 @@ mission "example/looped" state="ready" {
         assert_eq!(current_run["current_steps"].as_array().unwrap().len(), 0);
         assert!(current_run["state_since"].is_string());
         assert!(current_run["outcome"].is_null());
+        assert_eq!(current_run["started_at"], second.created_at_unix_ms as u64);
+        assert!(current_run["completed_at"].is_null());
+        let published = mission_list_cards_with(&state.store, &["mission/example/looped".into()], client_now_ms(), &BTreeSet::new()).unwrap();
+        for run in looped["run_details"].as_array().unwrap() {
+            let card_run = published[0]["run_details"].as_array().unwrap().iter()
+                .find(|candidate| candidate["id"] == run["id"]).unwrap();
+            for key in ["started_at", "completed_at"] {
+                assert_eq!(card_run[key], run[key], "{key}");
+            }
+        }
+        let first_completed = looped["run_details"].as_array().unwrap().iter()
+            .find(|run| run["id"] == first.subject).unwrap()["completed_at"].clone();
+        assert!(first_completed.is_u64());
 
         state
             .store
@@ -16295,6 +16358,7 @@ mission "example/looped" state="ready" {
             "its work shipped before it was cancelled"
         );
         assert_eq!(finished["state_since"], finished["outcome"]["at"]);
+        assert_eq!(finished["completed_at"], first_completed);
 
         // Retired once no run is open, the mission leaves the current view at once, even with
         // a run that ended moments ago, and its history names it retired.
@@ -16322,6 +16386,62 @@ mission "example/looped" state="ready" {
         assert_eq!(retired["state"], "retired");
     }
 
+    #[test]
+    fn mission_eta_uses_card_cut_and_detail_snapshot_and_is_null_without_samples_or_when_finished() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "eta-node");
+        let mission = "mission/example/eta";
+        let source = "version 2\nmission \"example/eta\" state=\"ready\" {\n goal \"Finish.\"\n concurrent-runs max=2\n step \"work\" { agentless; }\n}\n";
+        let intent = crate::graph::parse_intent(source, "eta-node").unwrap();
+        let preview = state.store.mission(&intent, crate::model::IntentInput {
+            kdl: source.into(), source_name: None,
+        }).unwrap();
+        state.store.apply_as(&intent, &preview.subject_tokens, "publish-eta", Some("person/operator")).unwrap();
+        let start = |key: &str| state.store.create_mission_run(&crate::model::MissionRunRequest {
+            mission: "example/eta".into(), revision: None, workspace: root.path().display().to_string(),
+            requester: Some("person/operator".into()), mode: None, inputs: BTreeMap::new(),
+            idempotency_key: key.into(),
+        }).unwrap();
+        let first = start("eta-first");
+        let cards = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+        assert_eq!(cards[0]["run_details"][0].get("eta"), Some(&Value::Null));
+        let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+        assert_eq!(detail[0]["run_details"][0].get("eta"), Some(&Value::Null));
+        state.store.set_step_state(&first.steps[0].subject, "working", None).unwrap();
+        state.store.set_step_state(&first.steps[0].subject, "completed", None).unwrap();
+        let cards = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+        assert!(cards[0]["run_details"][0]["completed_at"].is_null());
+        let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+        for run in [&cards[0]["run_details"][0], &detail[0]["run_details"][0]] {
+            assert_eq!(run["eta"], json!({"remaining_low_ms":0,"remaining_high_ms":0,"basis":{"method":"per-step","samples":0},"as_of":run["eta"]["as_of"]}));
+            let schema: Value = serde_json::from_str(include_str!("../../../../docs/st3/client-v0/schemas/client-v0.schema.json")).unwrap();
+            assert!(jsonschema::options().with_draft(jsonschema::Draft::Draft202012).build(&schema["$defs"]["MissionRunSummary"]["properties"]["eta"]).unwrap().is_valid(&run["eta"]));
+        }
+        state.store.set_mission_run_state(&first.id, "completed", "terminal", Some("done")).unwrap();
+        let second = start("eta-second");
+        let cut = client_now_ms();
+        let cards = mission_list_cards_with(&state.store, &[mission.into()], cut, &BTreeSet::new()).unwrap();
+        let runs = cards[0]["run_details"].as_array().unwrap();
+        let open = runs.iter().find(|run| run["id"] == second.subject).unwrap();
+        let expected = state.store.mission_run_eta(&second.subject, cut).unwrap().unwrap();
+        assert_eq!(open["eta"], expected);
+        assert_eq!(open["eta"]["as_of"], json!(cut));
+        assert_eq!(open["eta"]["basis"], json!({"method":"per-step","samples":1}));
+        assert_eq!(open["eta"].as_object().unwrap().len(), 4);
+        assert!(open["eta"]["remaining_low_ms"].is_u64());
+        assert!(open["eta"]["remaining_high_ms"].is_u64());
+        assert!(runs.iter().find(|run| run["id"] == first.subject).unwrap()["eta"].is_null());
+        let before = client_now_ms();
+        let detail = mission_resources(&state.store, state.store.index().unwrap(), true, Some(mission)).unwrap();
+        let after = client_now_ms();
+        let runs = detail[0]["run_details"].as_array().unwrap();
+        let open = runs.iter().find(|run| run["id"] == second.subject).unwrap();
+        let detail_cut = u128::from(open["eta"]["as_of"].as_u64().unwrap());
+        assert!((before..=after).contains(&detail_cut));
+        assert_eq!(open["eta"], state.store.mission_run_eta(&second.subject, detail_cut).unwrap().unwrap());
+        assert!(runs.iter().find(|run| run["id"] == first.subject).unwrap()["eta"].is_null());
+    }
+
     /// A mission's detail reads only its own runs, seats and states, and says what the whole
     /// history says about them.
     #[test]
@@ -16329,8 +16449,9 @@ mission "example/looped" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "detail-node");
         for mission in ["example/detail", "example/neighbor"] {
+            let steps = (0..25).map(|index| format!("step \"do-{index:02}\" {{ agentless; }}\n")).collect::<String>();
             let source = format!(
-                "version 2\nmission \"{mission}\" state=\"ready\" {{\n  goal \"Finish.\"\n  concurrent-runs max=10\n  step \"do\" {{ assigned-to \"agent/doer\" }}\n}}\n"
+                "version 2\nmission \"{mission}\" state=\"ready\" {{\n  goal \"Finish.\"\n  concurrent-runs max=10\n  {steps}}}\n"
             );
             let intent = crate::graph::parse_intent(&source, "detail-node").unwrap();
             let preview = state
@@ -16352,7 +16473,7 @@ mission "example/looped" state="ready" {
                     Some("person/operator"),
                 )
                 .unwrap();
-            for run in 0..2 {
+            for run in 0..3 {
                 let view = state
                     .store
                     .create_mission_run(&crate::model::MissionRunRequest {
@@ -16365,7 +16486,11 @@ mission "example/looped" state="ready" {
                         idempotency_key: format!("{mission}-{run}"),
                     })
                     .unwrap();
-                if run == 0 {
+                for step in &view.steps {
+                    state.store.set_step_state(&step.subject, "working", None).unwrap();
+                }
+                if run < 2 {
+                    state.store.set_step_state(&view.steps[0].subject, "completed", None).unwrap();
                     for phase in ["cleanup-completed", "terminal"] {
                         state
                             .store
@@ -16382,6 +16507,26 @@ mission "example/looped" state="ready" {
             let detail = mission_resources(&state.store, index, true, Some(mission)).unwrap();
             assert_eq!(detail.len(), 1);
             let detail = &detail[0];
+            let finished = detail["run_details"].as_array().unwrap().iter()
+                .filter(|run| run["status"] == "completed").collect::<Vec<_>>();
+            assert_eq!(finished.len(), 2);
+            assert!(finished[0]["steps"][0]["started_at"].is_null());
+            assert!(finished[0]["steps"][0]["completed_at"].is_null());
+            assert!(finished[1]["steps"][0]["started_at"].is_u64());
+            assert!(finished[1]["steps"][0]["completed_at"].is_u64());
+            assert_eq!(finished[1]["steps"].as_array().unwrap().len(), 25);
+            assert!(finished[1]["steps"][24]["started_at"].is_u64(), "detail keeps full-step timing");
+            let before = crate::store::missions::MISSION_TIMING_SUBJECTS_READ.with(std::cell::Cell::get);
+            let published = mission_list_cards_with(&state.store, &[mission.into()], client_now_ms(), &BTreeSet::new()).unwrap();
+            let read = crate::store::missions::MISSION_TIMING_SUBJECTS_READ.with(std::cell::Cell::get) - before;
+            assert_eq!(read, 40, "only 20 preview subjects from the open and latest finished runs");
+            for run in finished {
+                let card_run = published[0]["run_details"].as_array().unwrap().iter()
+                    .find(|candidate| candidate["id"] == run["id"]).unwrap();
+                for key in ["started_at", "completed_at"] {
+                    assert_eq!(card_run["steps"][0][key], run["steps"][0][key], "{key}");
+                }
+            }
             for field in [
                 "runs",
                 "state",

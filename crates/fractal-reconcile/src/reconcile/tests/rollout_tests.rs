@@ -10,11 +10,17 @@ struct Runtime {
     observation: Mutex<Option<RuntimeObservation>>,
     starts: Mutex<Vec<MemberSpec>>,
     stops: Mutex<Vec<String>>,
+    binary: Mutex<String>,
     /// Stops that time out although the process exits just after, as a PTY daemon that
     /// outlives `pty kill`'s seven-second wait does.
     late_stops: Mutex<u32>,
 }
 impl RuntimeControl for Runtime {
+    fn launch_contract(&self, store: &Store, desired: &DesiredSubject, _: &MemberSpec) -> Result<crate::launch_contract::Contract> {
+        crate::launch_contract::capture(store, desired, &BTreeMap::from([
+            ("provider".into(), self.binary.lock().unwrap().clone()),
+        ]))
+    }
     fn start_operation(&self, id: &str, _: bool, incarnation: &str) -> Result<Option<String>> {
         Ok(self.starts.lock().unwrap().iter().enumerate()
             .find(|(index, member)| member.runtime_id == id && incarnation == format!("replacement-{}", index + 1))
@@ -397,12 +403,25 @@ impl Seat {
 #[test]
 fn rollout_drains_then_resumes_once_across_disk_reopens() {
     let mut seat = Seat::new();
+    let original = seat.runtime.launch_contract(&seat.store, &seat.desired(), seat.desired().member.as_ref().unwrap()).unwrap();
+    let token = seat.store.selected_desired_token(SUBJECT).unwrap().unwrap();
+    seat.append("runtime.action.succeeded", json!({
+        "action":"start", "desired_token":token, "incarnation_id":"original-1",
+        "launch_contract":original,
+    }));
     seat.publish(
         2,
         "second",
         Some(Policy::when_idle(30 * 60 * 1000, false)),
         false,
     );
+    *seat.runtime.binary.lock().unwrap() = "replacement binary".into();
+    let declared = seat.runtime.launch_contract(&seat.store, &seat.desired(), seat.desired().member.as_ref().unwrap()).unwrap();
+    let running = crate::contract::running(&seat.store, SUBJECT, "original-1").unwrap().unwrap();
+    assert_eq!(running, original, "publication must not relabel the running process");
+    assert_eq!(declared.drift(&running), Some(crate::launch_contract::Drift {
+        prompt: true, binary: true,
+    }));
     seat.step();
     assert_eq!(seat.operation().phase, "draining");
     assert!(rollout::hold_render(&seat.store, &seat.desired()).unwrap());
@@ -486,6 +505,12 @@ fn rollout_drains_then_resumes_once_across_disk_reopens() {
     assert_eq!(seat.operation().phase, "running");
     assert!(!seat.operation().holds_intake());
     assert_eq!(seat.runtime.starts.lock().unwrap().len(), 1);
+    let running = crate::contract::running(&seat.store, SUBJECT, "replacement-1").unwrap().unwrap();
+    assert_eq!(running, declared, "successful refresh records the new launch contract");
+    assert_eq!(declared.drift(&running), Some(crate::launch_contract::Drift {
+        prompt: false, binary: false,
+    }));
+    assert_eq!(crate::contract::running(&seat.store, SUBJECT, "original-1").unwrap(), Some(original));
 }
 
 #[test]

@@ -9,8 +9,8 @@ use smallclaims::error::internal;
 use std::path::PathBuf;
 use crate::store::harness_questions::QuestionWitness;
 
-fn refused(reason: impl Into<String>) -> St3Error {
-    St3Error::new("stale-mailbox-session", reason)
+fn refused(reason: impl Into<String>) -> FractalError {
+    FractalError::new("stale-mailbox-session", reason)
 }
 
 pub(crate) fn source_agent_dir(state: &AppState, fence: &Fence) -> PathBuf {
@@ -39,8 +39,8 @@ pub(super) fn with_claude_primary<T>(
     fence: &Fence,
     peer: &NativeDeliveryPeer,
     captured: Option<fractal_drivers::claude_process::Process>,
-    action: impl FnOnce() -> Result<T, St3Error>,
-) -> Result<(T, Option<fractal_drivers::claude_process::Process>), St3Error> {
+    action: impl FnOnce() -> Result<T, FractalError>,
+) -> Result<(T, Option<fractal_drivers::claude_process::Process>), FractalError> {
     use fractal_drivers::claude_process::{self, Caller};
     if peer.transport != "claude-channel" {
         return action().map(|v| (v, None));
@@ -117,7 +117,7 @@ pub(super) fn with_claude_primary<T>(
         Ok((value, Some(wrapper)))
     })
     .map_err(|e| {
-        e.downcast::<St3Error>().unwrap_or_else(|e| {
+        e.downcast::<FractalError>().unwrap_or_else(|e| {
             if claude_process::failure_kind(&e) == Some(claude_process::FailureKind::Unavailable) {
                 unavailable(claude_process::diagnostic(&e))
             } else {
@@ -133,21 +133,15 @@ fn physical_wrapper(
     state: &AppState,
     fence: &Fence,
     legacy_peer: Option<&NativeDeliveryPeer>,
-) -> Result<fractal_drivers::claude_process::Process, St3Error> {
+) -> Result<fractal_drivers::claude_process::Process, FractalError> {
     use fractal_drivers::claude_process;
     let dir = source_agent_dir(state, fence);
-    let desired = state
+    let member = state
         .store
-        .desired_subjects_named(std::slice::from_ref(&fence.subject))
-        .map_err(internal)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| refused("seat no longer declared"))?;
-    let member = desired
-        .member
+        .mailbox_member_named(&fence.subject)?
+        .ok_or_else(|| refused("seat no longer declared"))?
         .ok_or_else(|| refused("seat intentionally stopped"))?;
-    if desired.kind == "stop"
-        || member.host != state.node
+    if member.host != state.node
         || member.driver.as_deref() != Some("claude")
     {
         return Err(refused("Claude primary belongs to another live seat"));
@@ -278,7 +272,7 @@ pub fn episode(fence: &Fence) -> String {
 
 /// Decode ownership at the record's own stamp: observation freshness cannot erase a
 /// terminal ownership decision. This grants custody only, never fresh activity or readiness.
-fn decode_provider_authority(raw: &[u8]) -> Result<fractal_drivers::harness_state::Observed, St3Error> {
+fn decode_provider_authority(raw: &[u8]) -> Result<fractal_drivers::harness_state::Observed, FractalError> {
     use fractal_drivers::harness_state::{Activity, read_raw_at};
     let record: Value =
         serde_json::from_slice(raw).map_err(|_| refused("malformed provider authority"))?;
@@ -304,7 +298,7 @@ fn decode_provider_authority(raw: &[u8]) -> Result<fractal_drivers::harness_stat
     Ok(observed)
 }
 
-fn provider_authority(raw: &[u8]) -> Result<fractal_drivers::harness_state::Observed, St3Error> {
+fn provider_authority(raw: &[u8]) -> Result<fractal_drivers::harness_state::Observed, FractalError> {
     let observed = decode_provider_authority(raw)?;
     if observed.state == fractal_drivers::harness_state::Activity::Ended {
         return Err(refused("the provider authority is terminal"));
@@ -317,7 +311,7 @@ fn current_provider(
     fence: &Fence,
     agent_dir: &Path,
     owner: &Authority,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     current_provider_record(fence, agent_dir, owner)?;
     state.store.mailbox_session_active(fence, owner)
 }
@@ -326,7 +320,7 @@ fn current_provider_record(
     fence: &Fence,
     agent_dir: &Path,
     owner: &Authority,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let raw = fractal_drivers::harness_events::read_runtime_state(agent_dir, &fence.incarnation)
         .map_err(internal)?
         .ok_or_else(|| refused("the provider source disappeared"))?;
@@ -348,7 +342,7 @@ pub fn admit_report(
     fence: &Fence,
     peer: &NativeDeliveryPeer,
     raw: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let evaluated = std::cell::Cell::new(false);
     let check = |owner: Option<&Authority>| {
         evaluated.set(true);
@@ -361,7 +355,7 @@ pub fn admit_report(
                 return Err(anyhow::Error::new(refused("the report lease was superseded")));
             }
             Ok(())
-        }).map_err(|error| error.downcast::<St3Error>().unwrap_or_else(internal));
+        }).map_err(|error| error.downcast::<FractalError>().unwrap_or_else(internal));
         crate::otel::record_mailbox_fence_check(
             crate::otel::MailboxFenceCaller::Report, started.elapsed(),
         );
@@ -381,9 +375,9 @@ fn admit_report_with(
     fence: &Fence,
     peer: &NativeDeliveryPeer,
     raw: &str,
-    check: &dyn Fn(Option<&Authority>) -> Result<(), St3Error>,
+    check: &dyn Fn(Option<&Authority>) -> Result<(), FractalError>,
     evaluated: &std::cell::Cell<bool>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let report: Value = serde_json::from_str(raw).map_err(internal)?;
     if report["transport"].as_str() != Some(peer.transport)
         || report["pid"].as_u64() != Some(u64::from(peer.pid))
@@ -413,7 +407,7 @@ fn admit_report_with(
             check(Some(&owner)).map_err(anyhow::Error::new)
         },
     ).map_err(|error| {
-        error.downcast::<St3Error>().unwrap_or_else(|error| refused(error.to_string()))
+        error.downcast::<FractalError>().unwrap_or_else(|error| refused(error.to_string()))
     });
     if result.is_ok() || evaluated.get() {
         return result;
@@ -440,7 +434,7 @@ pub fn loss_if_current(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if fence.component != "delivery" {
         return Ok(());
     }
@@ -491,9 +485,10 @@ pub fn loss_if_current(
             })).map_err(internal)?, evidence: vec![], expected_subject: None,
             idempotency_key: Some(format!("{key}:lost:{}", previous.as_ref().map(|(request, _)| request.as_str()).unwrap_or("first"))),
         }, false)?;
+        crate::profile::note("mailbox loss: channel-lost fault filed");
         signal_changed(state);
         Ok(())
-    }).map_err(|error| error.downcast::<St3Error>().unwrap_or_else(|error| refused(error.to_string())))
+    }).map_err(|error| error.downcast::<FractalError>().unwrap_or_else(|error| refused(error.to_string())))
 }
 
 /// Inputs to a consumed replay, not authentication. Every report still goes
@@ -520,7 +515,7 @@ pub fn replay_proof_inputs(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
-) -> Result<ReplayProofInputs, St3Error> {
+) -> Result<ReplayProofInputs, FractalError> {
     let lease_owner = state.store.mailbox_lease_authority(fence)?
         .ok_or_else(|| refused("the consumed replay has no canonical lease"))?;
     let episode_key = episode(fence);
@@ -584,7 +579,7 @@ pub fn repair_proven(
     fence: &Fence,
     peer: &NativeDeliveryPeer,
     raw: &str,
-) -> Result<ReplayProofInputs, St3Error> {
+) -> Result<ReplayProofInputs, FractalError> {
     let Ok(report) = serde_json::from_str::<Value>(raw) else {
         return Err(refused("the delivery report is malformed"));
     };
@@ -668,12 +663,12 @@ struct BootstrapWitness {
     bound: bool,
 }
 
-fn unavailable(reason: impl Into<String>) -> St3Error {
-    St3Error::new("mailbox-authority-unavailable", reason)
+fn unavailable(reason: impl Into<String>) -> FractalError {
+    FractalError::new("mailbox-authority-unavailable", reason)
 }
 
-fn runtime_indeterminate(reason: impl Into<String>) -> St3Error {
-    St3Error::new(
+fn runtime_indeterminate(reason: impl Into<String>) -> FractalError {
+    FractalError::new(
         "mailbox-runtime-indeterminate",
         format!("the physical runtime cannot be proved: {}", reason.into()),
     )
@@ -691,7 +686,7 @@ fn physical_runtime_from_declaration(
     fence: &Fence,
     member: &crate::model::MemberSpec,
     terminal: Option<crate::model::DesiredSubject>,
-) -> Result<PhysicalRuntime, St3Error> {
+) -> Result<PhysicalRuntime, FractalError> {
     let Some(binding) = member.terminal_binding.as_ref() else {
         return Ok(PhysicalRuntime {
             id: member.runtime_id.clone(),
@@ -722,7 +717,7 @@ fn physical_runtime_from_declaration(
 #[cfg(test)]
 fn audit_terminal_binding_roster(
     desired: &[crate::model::DesiredSubject],
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let mut terminals = std::collections::BTreeMap::new();
     for terminal in desired.iter().filter(|subject| subject.kind != "stop") {
         let Some(member) = terminal.member.as_ref().filter(|member| {
@@ -769,7 +764,7 @@ fn physical_runtime(
     state: &AppState,
     fence: &Fence,
     member: &crate::model::MemberSpec,
-) -> Result<PhysicalRuntime, St3Error> {
+) -> Result<PhysicalRuntime, FractalError> {
     let terminal = match member.terminal_binding.as_ref() {
         Some(binding) => state
             .store
@@ -785,7 +780,7 @@ fn physical_runtime(
 fn validate_observed_physical(
     runtime: &PhysicalRuntime,
     physical: &fractal_runtime::PtyObservation,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     if physical.name != runtime.id
         || physical.status != "running"
         || physical
@@ -806,7 +801,7 @@ fn validate_observed_physical(
 
 fn validate_authority_identity(
     identity: pty_core::registry::DaemonIdentityCheck,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     match identity {
         pty_core::registry::DaemonIdentityCheck::Match => Ok(()),
         pty_core::registry::DaemonIdentityCheck::Unknown => Err(runtime_indeterminate(
@@ -822,7 +817,7 @@ fn validate_authority_identity(
 fn observe_physical_runtime(
     state: &AppState,
     runtime: &PhysicalRuntime,
-) -> Result<fractal_runtime::PtyObservation, St3Error> {
+) -> Result<fractal_runtime::PtyObservation, FractalError> {
     let physical = match fractal_runtime::PtyRuntime::new(state.pty_root.clone())
         .with_binary(state.pty_binary.to_string_lossy())
         .keyed_observation(&runtime.id)
@@ -850,8 +845,14 @@ fn validate_reobserved_physical(
     captured: &fractal_runtime::PtyObservation,
     current: &fractal_runtime::PtyObservation,
     peer_belongs: bool,
-) -> Result<(), St3Error> {
-    if current != captured || !peer_belongs {
+) -> Result<(), FractalError> {
+    // The title driver renames this label independently of channel binding. Keep
+    // every identity and binding field fenced, but allow that presentation change.
+    let expected = fractal_runtime::PtyObservation {
+        display_name: current.display_name.clone(),
+        ..captured.clone()
+    };
+    if current != &expected || !peer_belongs {
         return Err(refused(
             "the channel left or replaced the exact physical runtime",
         ));
@@ -867,7 +868,7 @@ fn validate_physical_runtime(
     runtime: &PhysicalRuntime,
     captured: &fractal_runtime::PtyObservation,
     peer_pid: u32,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let current = observe_physical_runtime(state, runtime)?;
     let peer_belongs = current
         .pid
@@ -880,7 +881,7 @@ fn terminal_identity(
     created_at: &str,
     daemon_pid: u32,
     stats: &pty_core::stats::StatsResult,
-) -> Result<u32, St3Error> {
+) -> Result<u32, FractalError> {
     if stats.name != name
         || stats.created_at.as_deref() != Some(created_at)
         || u32::try_from(stats.daemon.pid).ok() != Some(daemon_pid)
@@ -901,10 +902,10 @@ fn terminal_identity(
 impl BootstrapWitness {
     fn validate_with(
         &self,
-        stats: Result<pty_core::stats::StatsResult, St3Error>,
-        birth: impl Fn(u32) -> Result<u64, St3Error>,
+        stats: Result<pty_core::stats::StatsResult, FractalError>,
+        birth: impl Fn(u32) -> Result<u64, FractalError>,
         parent: impl Fn(u32) -> Option<u32>,
-    ) -> Result<(), St3Error> {
+    ) -> Result<(), FractalError> {
         let terminal = terminal_identity(&self.name, &self.created_at, self.daemon.0, &stats?)?;
         if terminal != self.terminal.0 {
             return Err(refused("the physical terminal child was replaced"));
@@ -937,7 +938,7 @@ impl BootstrapWitness {
         Ok(())
     }
 
-    fn validate(&self, state: &AppState) -> Result<(), St3Error> {
+    fn validate(&self, state: &AppState) -> Result<(), FractalError> {
         self.validate_with(
             terminal_stats(state, &self.name),
             process_birth,
@@ -946,12 +947,12 @@ impl BootstrapWitness {
     }
 }
 
-fn process_birth(pid: u32) -> Result<u64, St3Error> {
+fn process_birth(pid: u32) -> Result<u64, FractalError> {
     fractal_runtime::process_start_token(pid)
         .map_err(|error| unavailable(format!("process generation is unavailable: {error}")))
 }
 
-fn terminal_stats(state: &AppState, name: &str) -> Result<pty_core::stats::StatsResult, St3Error> {
+fn terminal_stats(state: &AppState, name: &str) -> Result<pty_core::stats::StatsResult, FractalError> {
     pty_client::query_stats_in_with_timeout(&state.pty_root, name, pty_client::STATS_TIMEOUT)
         .map_err(|error| unavailable(format!("the terminal identity is unavailable: {error}")))
 }
@@ -964,7 +965,7 @@ fn bootstrap_witness(
     peer: &NativeDeliveryPeer,
     peer_birth: u64,
     bound: bool,
-) -> Result<BootstrapWitness, St3Error> {
+) -> Result<BootstrapWitness, FractalError> {
     let daemon_pid = physical
         .pid
         .ok_or_else(|| unavailable("the runtime has no daemon identity"))?;
@@ -995,15 +996,13 @@ pub fn with_argv_channel<T>(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
-    action: impl FnOnce(&crate::model::MemberSpec, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
-) -> Result<Option<T>, St3Error> {
-    let desired = state.store.desired_subjects_named(std::slice::from_ref(&fence.subject))
-        .map_err(internal)?.into_iter().next()
-        .ok_or_else(|| refused("the seat is no longer declared"))?;
-    let member = desired.member.ok_or_else(|| refused("the seat is intentionally stopped"))?;
+    action: impl FnOnce(&crate::model::MemberSpec, &dyn Fn() -> Result<(), FractalError>) -> Result<T, FractalError>,
+) -> Result<Option<T>, FractalError> {
+    let member = state.store.mailbox_member_named(&fence.subject)?
+        .ok_or_else(|| refused("the seat is no longer declared"))?
+        .ok_or_else(|| refused("the seat is intentionally stopped"))?;
     if member.driver.is_some() { return Ok(None); }
-    if desired.kind == "stop"
-        || member.kind != crate::model::MemberKind::Agent
+    if member.kind != crate::model::MemberKind::Agent
         || member.host != state.node
         || member.terminal_binding.is_some()
         || !matches!(&member.launch, crate::model::LaunchSpec::Argv(argv) if !argv.is_empty())
@@ -1051,8 +1050,8 @@ pub fn with_argv_channel<T>(
     _state: &AppState,
     _fence: &Fence,
     _peer: &NativeDeliveryPeer,
-    _action: impl FnOnce(&crate::model::MemberSpec, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
-) -> Result<Option<T>, St3Error> {
+    _action: impl FnOnce(&crate::model::MemberSpec, &dyn Fn() -> Result<(), FractalError>) -> Result<T, FractalError>,
+) -> Result<Option<T>, FractalError> {
     Ok(None)
 }
 
@@ -1061,6 +1060,14 @@ pub fn with_argv_channel<T>(
 pub(super) fn question_generation_current(
     state: &AppState,
     generation: &crate::store::harness_questions::QuestionGeneration,
+) -> anyhow::Result<bool> {
+    question_generation_current_with(state, generation, |wrapper| wrapper.validate(state))
+}
+
+fn question_generation_current_with(
+    state: &AppState,
+    generation: &crate::store::harness_questions::QuestionGeneration,
+    validate: impl FnOnce(&BootstrapWitness) -> Result<(), FractalError>,
 ) -> anyhow::Result<bool> {
     let captured = &generation.witness;
     for (pid, token) in [captured.daemon, captured.terminal, captured.wrapper] {
@@ -1086,7 +1093,7 @@ pub(super) fn question_generation_current(
         .join("sessions").join("omp");
     let identity = generation.agent.strip_prefix("agent/").unwrap_or(&generation.agent);
     if !fractal_drivers::omp_session::native_question_session_current(
-        &session_dir, identity, &captured.runtime_name, &generation.owner_session, &generation.session,
+        &session_dir, identity, identity, &generation.owner_session, &generation.session,
     )? {
         return Ok(false);
     }
@@ -1095,7 +1102,7 @@ pub(super) fn question_generation_current(
         daemon: captured.daemon, terminal: captured.terminal, peer: captured.wrapper,
         bound: captured.bound,
     };
-    match wrapper.validate(state) {
+    match validate(&wrapper) {
         Ok(()) => {}
         Err(error) if error.code == "stale-mailbox-session" => return Ok(false),
         Err(error) => return Err(error.into()),
@@ -1108,8 +1115,8 @@ pub fn with_authority<T>(
     fence: &Fence,
     peer: &NativeDeliveryPeer,
     authenticated: impl FnOnce(),
-    action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
-) -> Result<T, St3Error> {
+    action: impl FnOnce(&Authority, &dyn Fn() -> Result<(), FractalError>) -> Result<T, FractalError>,
+) -> Result<T, FractalError> {
     with_authority_mode(state, fence, peer, true, authenticated, |owner, _, validate| action(owner, validate))
 }
 
@@ -1118,8 +1125,8 @@ pub(super) fn with_observation_authority<T>(
     state: &AppState,
     fence: &Fence,
     peer: &NativeDeliveryPeer,
-    action: impl FnOnce(&Authority, &QuestionWitness, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
-) -> Result<T, St3Error> {
+    action: impl FnOnce(&Authority, &QuestionWitness, &dyn Fn() -> Result<(), FractalError>) -> Result<T, FractalError>,
+) -> Result<T, FractalError> {
     // Question observation never records mailbox bind-refusal diagnostics or promotes custody.
     with_authority_mode(state, fence, peer, false, || {}, |owner, wrapper, validate| {
         let wrapper = wrapper.ok_or_else(|| refused("question wrapper witness unavailable"))?;
@@ -1137,8 +1144,8 @@ fn with_authority_mode<T>(
     peer: &NativeDeliveryPeer,
     promote: bool,
     authenticated: impl FnOnce(),
-    action: impl FnOnce(&Authority, Option<&BootstrapWitness>, &dyn Fn() -> Result<(), St3Error>) -> Result<T, St3Error>,
-) -> Result<T, St3Error> {
+    action: impl FnOnce(&Authority, Option<&BootstrapWitness>, &dyn Fn() -> Result<(), FractalError>) -> Result<T, FractalError>,
+) -> Result<T, FractalError> {
     if fence.epoch != 0 {
         state.store.check_mailbox_custody_fence(fence)?;
     }
@@ -1149,17 +1156,12 @@ fn with_authority_mode<T>(
             .find_map(|entry| entry.strip_prefix(&format!("{key}=")).map(str::to_owned))
     };
     let process_token = process_birth(peer.pid)?;
-    let desired = state
+    let member = state
         .store
-        .desired_subjects_named(std::slice::from_ref(&fence.subject))
-        .map_err(internal)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| refused("the seat is no longer declared"))?;
-    let member = desired
-        .member
+        .mailbox_member_named(&fence.subject)?
+        .ok_or_else(|| refused("the seat is no longer declared"))?
         .ok_or_else(|| refused("the seat is intentionally stopped"))?;
-    if desired.kind == "stop" || member.host != state.node {
+    if member.host != state.node {
         return Err(refused("the seat is stopped or belongs to another host"));
     }
     let provider = member
@@ -1248,7 +1250,7 @@ fn with_authority_mode<T>(
         .map(|(_, raw)| raw);
     let Some(bytes) = bytes else {
         if provider != "codex" || fence.component != "delivery" {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "mailbox-session-starting",
                 "waiting for provider ownership",
             ));
@@ -1298,7 +1300,7 @@ fn with_authority_mode<T>(
             let current = fractal_drivers::harness_events::read_bound_provider_state(&agent_dir)
                 .map_err(|error| unavailable(error.to_string()))?;
             if current != captured_source {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "mailbox-session-starting",
                     "provider ownership changed during bootstrap admission",
                 ));
@@ -1382,7 +1384,7 @@ fn with_authority_mode<T>(
     )
     .map_err(|error| {
         error
-            .downcast::<St3Error>()
+            .downcast::<FractalError>()
             .unwrap_or_else(|error| refused(error.to_string()))
     })
 }
@@ -1390,6 +1392,65 @@ fn with_authority_mode<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_runtime_key_keeps_question_generation_with_distinct_physical_id() {
+        use crate::{HarnessQuestionsStore, store::harness_questions::{
+            QuestionGeneration, QuestionObservation, QuestionWitness,
+        }};
+        use fractal_drivers::harness_state::{
+            Activity, BlockedOn, InputBuffer, Observation, Writer,
+        };
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let agent = "agent/example/question";
+        let dir = source_agent_dir(&state, &Fence::new(agent, "runtime-one", "questions"));
+        fractal_drivers::harness_events::enable(&dir, "runtime-one").unwrap();
+        let sequence = fractal_drivers::harness_state::claim(
+            &dir, "example/question", "omp", "owner",
+        ).unwrap();
+        let mut writer = Writer::new(&dir, "example/question", "omp", Some("example.question".into()))
+            .with_ownership("owner", sequence);
+        writer.observe(Observation::new(Activity::Active, BlockedOn::Human, InputBuffer::Unknown)).unwrap();
+        let sessions = dir.parent().unwrap().join("sessions/omp");
+        fractal_drivers::omp_session::record_channel_binding(
+            &sessions, "example/question", "example/question", "owner", "native-session", None, None,
+        ).unwrap();
+        fractal_drivers::omp_session::confirm_channel_binding(
+            &sessions, &dir, "example/question", "example/question", "owner", sequence, "native-session", None,
+        ).unwrap();
+        let question = state.store.observe_harness_question_digest(&QuestionObservation {
+            agent: agent.into(), runtime_incarnation: "runtime-one".into(), session: "native-session".into(),
+            native_id: fractal_schema::harness_questions::native_id_digest("call"),
+            questions: vec![fractal_schema::harness_questions::Question {
+                id: "q0".into(), options: 2, multi: false, required: true,
+            }],
+        }).unwrap();
+        let pid = std::process::id();
+        let process = (pid, fractal_runtime::process_start_token(pid).unwrap());
+        let generation = QuestionGeneration {
+            question: question.id.clone(), agent: agent.into(), runtime_incarnation: "runtime-one".into(),
+            session: "native-session".into(), owner_session: "owner".into(), owner_sequence: sequence,
+            witness: QuestionWitness { runtime_name: "example.question".into(), created_at: "physical".into(),
+                daemon: process, terminal: process, wrapper: process, bound: false },
+        };
+        state.store.retain_harness_question_generation(&generation).unwrap();
+        let index = state.store.index().unwrap();
+        let changed = fractal_drivers::harness_state::with_record_lock(&dir, || {
+            super::super::question_lifecycle::reconcile_generation(&state.store, &generation, || {
+                question_generation_current_with(&state, &generation, |wrapper| {
+                    // Only PTY stats are substituted; provider and process checks are real.
+                    assert_eq!(wrapper.name, "example.question");
+                    assert_eq!(wrapper.created_at, "physical");
+                    Ok(())
+                })
+            })
+        }).unwrap();
+        assert!(!changed);
+        assert_eq!(state.store.index().unwrap(), index);
+        assert!(state.store.harness_question_held(&question.id).unwrap().unwrap().resolution.is_none());
+        assert_eq!(state.store.harness_question_generation(&question.id).unwrap(), Some(generation));
+    }
 
 pub fn fixture_stats() -> pty_core::stats::StatsResult {
         serde_json::from_value(json!({
@@ -1545,9 +1606,46 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
-    fn changed_reobservation_is_refused_not_indeterminate() {
-        let captured = fractal_runtime::PtyObservation {
+    fn title_rename_preserves_physical_runtime_custody() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        std::fs::create_dir_all(&state.pty_root).unwrap();
+        let pid = std::process::id();
+        let path = state.pty_root.join("quartz.json");
+        let mut record = json!({
+            "daemonPid": pid,
+            "daemonStartToken": pty_core::registry::read_process_start_token(pid as i32).unwrap(),
+            "createdAt": "generation-1",
+            "tags": {"st3.subject": "agent/example/quartz"}
+        });
+        std::fs::write(&path, record.to_string()).unwrap();
+        let runtime = PhysicalRuntime {
+            id: "quartz".into(),
+            incarnation: format!("{pid}:generation-1"),
+            required_subject_tag: Some("agent/example/quartz".into()),
+        };
+        let captured = observe_physical_runtime(&state, &runtime).unwrap();
+        assert_eq!(captured.display_name, None);
+
+        // The title driver can rename the same PTY while its channel is binding.
+        record["displayName"] = json!("Quartz");
+        let renamed = path.with_extension("renamed");
+        std::fs::write(&renamed, record.to_string()).unwrap();
+        std::fs::rename(renamed, &path).unwrap();
+        assert_eq!(
+            observe_physical_runtime(&state, &runtime)
+                .unwrap()
+                .display_name
+                .as_deref(),
+            Some("Quartz")
+        );
+        validate_physical_runtime(&state, &runtime, &captured, pid).unwrap();
+    }
+
+    fn captured_physical() -> fractal_runtime::PtyObservation {
+        fractal_runtime::PtyObservation {
             name: "canonical-runtime".into(),
             status: "running".into(),
             exit_code: None,
@@ -1555,23 +1653,83 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
             created_at: Some("created".into()),
             display_name: Some("original".into()),
             tags: BTreeMap::from([("st3.subject".into(), "agent/example".into())]),
-        };
-        for current in [
-            fractal_runtime::PtyObservation {
-                display_name: Some("renamed".into()),
-                ..captured.clone()
-            },
-            fractal_runtime::PtyObservation {
-                tags: BTreeMap::from([("st3.subject".into(), "agent/replacement".into())]),
-                ..captured.clone()
-            },
-        ] {
-            assert_eq!(
-                validate_reobserved_physical(&captured, &current, true)
-                    .unwrap_err()
-                    .code,
-                "stale-mailbox-session"
-            );
+        }
+    }
+
+    fn assert_reobservation_refused(change: impl FnOnce(&mut fractal_runtime::PtyObservation)) {
+        let captured = captured_physical();
+        let mut current = captured.clone();
+        // A replacement that also changes its label must still be refused.
+        current.display_name = Some("renamed".into());
+        change(&mut current);
+        assert_eq!(
+            validate_reobserved_physical(&captured, &current, true)
+                .unwrap_err()
+                .code,
+            "stale-mailbox-session"
+        );
+    }
+
+    #[test]
+    fn reobserved_canonical_name_change_is_refused() {
+        assert_reobservation_refused(|current| current.name = "replacement".into());
+    }
+
+    #[test]
+    fn reobserved_pid_change_is_refused() {
+        assert_reobservation_refused(|current| current.pid = Some(43));
+        assert_reobservation_refused(|current| current.pid = None);
+    }
+
+    #[test]
+    fn reobserved_generation_change_with_reused_pid_is_refused() {
+        assert_reobservation_refused(|current| current.created_at = Some("replacement".into()));
+        assert_reobservation_refused(|current| current.created_at = None);
+    }
+
+    #[test]
+    fn reobserved_ended_status_is_refused() {
+        assert_reobservation_refused(|current| current.status = "exited".into());
+    }
+
+    #[test]
+    fn reobserved_exit_code_change_is_refused() {
+        assert_reobservation_refused(|current| current.exit_code = Some(0));
+    }
+
+    #[test]
+    fn reobserved_binding_tag_change_is_refused() {
+        assert_reobservation_refused(|current| {
+            current
+                .tags
+                .insert("st3.subject".into(), "agent/replacement".into());
+        });
+        assert_reobservation_refused(|current| current.tags.clear());
+        assert_reobservation_refused(|current| {
+            current.tags.insert("other".into(), "changed".into());
+        });
+    }
+
+    #[test]
+    fn reobserved_peer_outside_runtime_is_refused_after_title_rename() {
+        let captured = captured_physical();
+        let mut current = captured.clone();
+        current.display_name = Some("renamed".into());
+        assert_eq!(
+            validate_reobserved_physical(&captured, &current, false)
+                .unwrap_err()
+                .code,
+            "stale-mailbox-session"
+        );
+    }
+
+    #[test]
+    fn reobserved_title_changes_preserve_custody() {
+        let captured = captured_physical();
+        for display_name in [None, Some("renamed".into())] {
+            let mut current = captured.clone();
+            current.display_name = display_name;
+            validate_reobserved_physical(&captured, &current, true).unwrap();
         }
     }
 

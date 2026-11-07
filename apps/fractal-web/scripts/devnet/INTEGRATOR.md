@@ -362,16 +362,22 @@ not an automatic fallback that hides a failed immutable-cache build.
 
 Every tick reads `servedSha` from `/build-identity.json` (`rev`) at the published `devnet url <purpose> --remote` edge.
 `current` requires no `error`, a non-null `sha`, and equality with `servedSha`, not a disk build.
-A failed lookup/fetch/identity decode sets `servedSha=null`, `current=false`, and a short `servedError`; lock-held ticks are false.
+A failed lookup/fetch/identity decode sets `servedSha=null`, `current=false`, and a short `servedError`; lock-held ticks are false. Precheck capacity refusals instead leave freshness unknown (`current=null`).
 The `--local` probe records `localServedSha`/`localServedError` for diagnostics only; it never determines `current`.
-`build` is `built`, `skipped`, `failed`, `error`, or `dry-run`; it is not a freshness signal.
+`build` is `built`, `skipped`, `failed`, `capacity-refused`, or `dry-run`; it is not a freshness signal. Older capacity-refusal rows used `error`.
 Skipped `reason` is `unchanged`, `lock-held`, `selection-deadline`, or `known-built-tree`/`known-failed-tree`.
 Dry-run `reason` is `merged-and-regenerated-no-build-no-swap`; ordinary errors retain `build=failed`.
-Agent-nix capacity refusal (exit 75, `EX_TEMPFAIL`) records `build: "error"`,
-`reason: "capacity-refused"`, `retryable: true` and an `error` explaining that the
-previous build is retained. This is host pressure, not a candidate build failure.
+Agent-nix capacity refusal (exit 75, `EX_TEMPFAIL`) records
+`build: "capacity-refused"`, `reason: "capacity-refused"`, `retryable: true` and an
+`error` explaining that the previous build is retained. This is host pressure,
+not a candidate build failure. A refused precheck still observes `servedSha`
+and `localServedSha`, but leaves `sha`, `main` and `current` null because no
+candidate was selected. In-build refusals retain the factual `current` computed
+by served observation. Consumers must not count either form as a failed build
+or a freshness transition; legacy `build: "error"` rows with
+`reason: "capacity-refused"` have the same capacity meaning.
 The sandbox CLI preserves 75 through the build helper; integrator-side nix
-exceptions and refused attribution probes take the same retryable error path.
+exceptions and refused attribution probes take the same retryable capacity path.
 A refused candidate never enters the failed-tree cache or starts attribution;
 a refused probe aborts attribution without caching the tree or ejecting a PR.
 Failure-cache writes and tentative PR ejections are also withheld if the reduced

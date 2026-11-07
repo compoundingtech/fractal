@@ -47,7 +47,7 @@ pub fn stage_fractal(mut config: Config, config_path: Option<&Path>) -> Result<(
     #[cfg(target_os = "linux")]
     systemd(&spec, &lookup::systemd_path(UNITS[0])?, &lookup::systemd_path(UNITS[1])?, &mut NativeCommands("systemctl"))?;
     #[cfg(target_os = "macos")]
-    launchd(&spec, &lookup::launchd_path(LABELS[0])?, &lookup::launchd_path(LABELS[1])?, &launch_domain(), &mut NativeCommands("launchctl"))?;
+    launchd(&spec, &lookup::launchd_path(LABELS[0])?, &lookup::launchd_path(LABELS[1])?, unsafe { libc::getuid() }, &mut NativeCommands("launchctl"))?;
     crate::cli_println!("staged fractal services disabled; host cutover must migrate state and activate them");
     Ok(())
 }
@@ -98,7 +98,8 @@ fn systemd(spec: &ServiceSpec, daemon: &Path, replication: &Path, commands: &mut
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn launchd(spec: &ServiceSpec, daemon: &Path, replication: &Path, domain: &str, commands: &mut impl Commands) -> Result<()> {
+fn launchd(spec: &ServiceSpec, daemon: &Path, replication: &Path, uid: u32, commands: &mut impl Commands) -> Result<()> {
+    let domain = launchd_domain::resolve(uid, None, false, |domain| launchd_domain::probe(domain, commands.output(&["print", domain])?))?;
     for label in LABELS {
         let target = format!("{domain}/{label}");
         let output = commands.output(&["print", &target])?;
@@ -113,11 +114,16 @@ mod tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt as _;
 
-    struct Manager { calls: Vec<Vec<String>>, launchd: bool, active: bool }
+    struct Manager { calls: Vec<Vec<String>>, launchd: bool, active: bool, jobs: [Vec<&'static str>; 2] }
     impl Commands for Manager {
         fn program(&self) -> &str { "fake-manager" }
         fn output(&mut self, args: &[&str]) -> Result<std::process::Output> {
             self.calls.push(args.iter().map(|arg| (*arg).to_owned()).collect());
+            if args[0] == "print" && matches!(args[1], "gui/123" | "user/123") {
+                let jobs = self.jobs[usize::from(args[1].starts_with("user"))].iter().map(|label| format!("42 - {label}\n")).collect::<String>();
+                return Ok(std::process::Output { status: std::process::ExitStatus::from_raw(0),
+                    stdout: format!("{} = {{\n services = {{\n{jobs}}}\n}}", args[1]).into_bytes(), stderr: Vec::new() });
+            }
             Ok(std::process::Output {
                 status: std::process::ExitStatus::from_raw(if args[0] == "print" && !self.active { 113 << 8 } else { 0 }),
                 stdout: if self.launchd { Vec::new() } else if self.active { b"LoadState=loaded\nActiveState=active\n".to_vec() } else { b"LoadState=not-found\nActiveState=inactive\n".to_vec() },
@@ -143,9 +149,9 @@ mod tests {
                 client_gateway_socket: root.path().join("state/st3/client.sock"),
                 ..Config::default()
             }, 1024).unwrap();
-            let mut manager = Manager { calls: Vec::new(), launchd: is_launchd, active: false };
+            let mut manager = Manager { calls: Vec::new(), launchd: is_launchd, active: false, jobs: [vec!["com.compoundingtech.st3"], vec![]] };
             for _ in 0..2 {
-                if is_launchd { launchd(&spec, &daemon, &replication, "gui/123", &mut manager).unwrap(); }
+                if is_launchd { launchd(&spec, &daemon, &replication, 123, &mut manager).unwrap(); }
                 else { systemd(&spec, &daemon, &replication, &mut manager).unwrap(); }
             }
             assert!(fs::read_to_string(&daemon).unwrap().contains("state/fractal"));
@@ -163,11 +169,44 @@ mod tests {
             manager.active = true;
             let before = fs::read(&daemon).unwrap();
             let calls = manager.calls.len();
-            let result = if is_launchd { launchd(&spec, &daemon, &replication, "gui/123", &mut manager) }
+            let result = if is_launchd { launchd(&spec, &daemon, &replication, 123, &mut manager) }
                 else { systemd(&spec, &daemon, &replication, &mut manager) };
             assert!(result.is_err());
             assert_eq!(fs::read(&daemon).unwrap(), before);
-            assert_eq!(manager.calls.len(), calls + 1);
+            assert_eq!(manager.calls.len(), calls + if is_launchd { 3 } else { 1 });
+        }
+    }
+
+    #[test]
+    fn launchd_staging_discovers_domain_and_fails_closed_before_mutation() {
+        use launchd_domain::DomainError;
+        for (gui, user, selected) in [
+            (vec!["com.compoundingtech.st3"], vec![], Some("gui/123")),
+            (vec![], vec!["org.nix-community.home.smalltalk"], Some("user/123")),
+            (vec![], vec![], None),
+            (vec!["com.compoundingtech.st3"], vec!["org.nix-community.home.smalltalk"], None),
+            (vec!["com.compoundingtech.st3"], vec!["com.compoundingtech.fractal-apply"], None),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let daemon = root.path().join("daemon");
+            let replication = root.path().join("replication");
+            fs::write(&daemon, "unchanged").unwrap();
+            let spec = ServiceSpec::new("/opt/fractal", Config::default(), 1024).unwrap();
+            let mut manager = Manager { calls: Vec::new(), launchd: true, active: false, jobs: [gui, user] };
+            let result = launchd(&spec, &daemon, &replication, 123, &mut manager);
+            if let Some(domain) = selected {
+                result.unwrap();
+                assert!(replication.exists());
+                let mutations = manager.calls.iter().filter(|call| call[0] != "print").collect::<Vec<_>>();
+                assert_eq!(mutations.len(), 2);
+                assert!(mutations.iter().all(|call| call[0] == "disable" && call[1].starts_with(&format!("{domain}/"))));
+            } else {
+                let error = result.unwrap_err();
+                assert!(matches!(error.downcast_ref::<DomainError>(), Some(DomainError::LegacyDaemonNotLoaded { .. } | DomainError::AmbiguousLegacyDaemonDomain { .. } | DomainError::SplitLaunchdDomains { .. })));
+                assert_eq!(fs::read_to_string(&daemon).unwrap(), "unchanged");
+                assert!(!replication.exists());
+                assert_eq!(manager.calls, [vec!["print", "gui/123"], vec!["print", "user/123"]]);
+            }
         }
     }
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Open an agent in Fractal TUI's real terminal tab and check what the person sees, through real PTYs.
 
-stui (a production Ui, in the unit-test executable's worker) runs under one PTY, and the
+Fractal TUI (a production Ui, in the unit-test executable's worker) runs under one PTY, and the
 agent's program under the packaged `pty` daemon. Between them is a transparent relay that this
 harness can cut, refuse or let through, to drop the link the way a network does. Requires
 Python 3 and `pty` (CI provides both). Only the graph is invented: no real agent, daemon graph,
 or person's state; every case gets its own XDG_STATE_HOME.
 
-Cases, each one stui:
+Cases, each one TUI:
   default        no saved choice: opening an agent attaches its terminal
   migration      a device's old saved choice (terminal_first true or false) still attaches
   opt-in         conversation_first saved: the agent opens on its conversation; the palette
@@ -63,7 +63,7 @@ def screen(status):
     return "\n".join(status["text"])
 
 
-class Stui:
+class Tui:
     """One Fractal TUI worker, its program, and the relay between them."""
 
     def __init__(self, worker, directory, prefs=None):
@@ -77,7 +77,7 @@ class Stui:
         self.master, self.slave = pty.openpty()
         fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         self.env = {**os.environ, "TERM": "xterm-256color", "PTY_ROOT": str(self.registry),
-                    "STUI_PROBE_ROOT": str(self.root), "STUI_PROBE_SOCKET": str(self.root / "relay.sock"),
+                    "FRACTAL_TUI_PROBE_ROOT": str(self.root), "FRACTAL_TUI_PROBE_SOCKET": str(self.root / "relay.sock"),
                     "XDG_CONFIG_HOME": str(self.root / "config"),
                     "XDG_CACHE_HOME": str(self.root / "cache"),
                     "XDG_STATE_HOME": str(state), "HOME": str(self.root)}
@@ -231,128 +231,128 @@ class Stui:
         os.close(self.slave)
 
 
-def attached(stui):
-    return wait_for(stui.status, lambda status: status["pane"] == f"terminal:{AGENT}"
+def attached(tui):
+    return wait_for(tui.status, lambda status: status["pane"] == f"terminal:{AGENT}"
                     and status["attached"] and READY in screen(status), "attached terminal")
 
 
-def stays_on_conversation(stui, pane=f"agent:{AGENT}"):
+def stays_on_conversation(tui, pane=f"agent:{AGENT}"):
     # Longer than the dwell before attaching, so an attach would have happened.
     time.sleep(1.0)
-    status = stui.status()
+    status = tui.status()
     assert status["pane"] == pane, status["pane"]
     assert status["opened"] == 0, "a terminal was opened"
     return status
 
 
-def case_default(stui):
-    status = stui.status()
+def case_default(tui):
+    status = tui.status()
     assert not status["conversation_first"], "attaching is the default"
-    stui.action("open")
-    attached(stui)
+    tui.action("open")
+    attached(tui)
     print("default: no saved choice, opening an agent attaches its terminal")
 
 
 def case_migration(worker):
     for prefs in ({"terminal_first": True}, {"simple": True, "terminal_first": False}):
-        with tempfile.TemporaryDirectory(prefix="stui-attach-") as directory:
-            stui = Stui(worker, directory, prefs)
+        with tempfile.TemporaryDirectory(prefix="fractal-tui-attach-") as directory:
+            tui = Tui(worker, directory, prefs)
             try:
-                stui.start()
-                stui.action("open")
-                attached(stui)
+                tui.start()
+                tui.action("open")
+                attached(tui)
             finally:
-                stui.close()
+                tui.close()
     print("migration: an old saved terminal_first, true or false, still attaches")
 
 
-def case_opt_in(stui):
-    status = wait_for(stui.status, lambda status: status["conversation_first"], "saved choice read")
-    stui.action("open")
-    stays_on_conversation(stui)
+def case_opt_in(tui):
+    status = wait_for(tui.status, lambda status: status["conversation_first"], "saved choice read")
+    tui.action("open")
+    stays_on_conversation(tui)
     # The palette's setting, by name.
-    stui.send(b"\x0b")
+    tui.send(b"\x0b")
     time.sleep(0.2)
-    stui.send(b"conversation first")
-    wait_for(stui.status, lambda status: "Conversation first" in screen(status), "palette entry shown")
-    stui.send(b"\r")
-    wait_for(stui.status, lambda status: not status["conversation_first"], "palette turned it off")
+    tui.send(b"conversation first")
+    wait_for(tui.status, lambda status: "Conversation first" in screen(status), "palette entry shown")
+    tui.send(b"\r")
+    wait_for(tui.status, lambda status: not status["conversation_first"], "palette turned it off")
     print("opt-in: conversation first opens the conversation; its palette entry turns it off")
 
 
-def case_no_terminal(stui):
-    stui.action("open-unmanaged")
-    status = wait_for(stui.status, lambda status: (status["pane"] or "").startswith("agent:")
+def case_no_terminal(tui):
+    tui.action("open-unmanaged")
+    status = wait_for(tui.status, lambda status: (status["pane"] or "").startswith("agent:")
                       and status["pane"] != f"agent:{AGENT}", "agent without a terminal opened")
-    status = stays_on_conversation(stui, status["pane"])
+    status = stays_on_conversation(tui, status["pane"])
     assert status["flash"] is None, status["flash"]
     print("no-terminal: an agent without one opens its conversation, and nothing is said")
 
 
-def case_alert(stui):
-    stui.action("open")
-    attached(stui)
-    stui.action("alert")
-    status = wait_for(stui.status, lambda status: status["alerts"] and "1 alert" in screen(status),
+def case_alert(tui):
+    tui.action("open")
+    attached(tui)
+    tui.action("alert")
+    status = wait_for(tui.status, lambda status: status["alerts"] and "1 alert" in screen(status),
                       "alert over the terminal")
     body = status["body"]
     band = [alert["rect"] for alert in status["alerts"]]
     assert all(rect[1] < body[1] for rect in band), f"the alert is above the terminal: {band} {body}"
     assert status["focused"] and READY in screen(status), "the terminal still has the keys"
     # Keys go to the terminal, never to the alert: Enter and y answer nothing.
-    start = len(stui.wire_input)
-    stui.send(b"y\r")
-    wait_for(lambda: {"input": bytes(stui.wire_input[start:])},
+    start = len(tui.wire_input)
+    tui.send(b"y\r")
+    wait_for(lambda: {"input": bytes(tui.wire_input[start:])},
              lambda seen: b"y\r" in seen["input"], "typed keys reached the program")
-    assert stui.status()["answered"] == [], "a key answered the alert"
+    assert tui.status()["answered"] == [], "a key answered the alert"
     # A click shows it; a click on an answer answers it, and nothing reaches the program.
-    start = len(stui.wire_input)
-    stui.click(band[0])
-    status = wait_for(stui.status, lambda status: any(alert["tap"] == 'Answer("Yes")'
+    start = len(tui.wire_input)
+    tui.click(band[0])
+    status = wait_for(tui.status, lambda status: any(alert["tap"] == 'Answer("Yes")'
                                                       for alert in status["alerts"]), "alert shown")
     yes = next(alert["rect"] for alert in status["alerts"] if alert["tap"] == 'Answer("Yes")')
     assert yes[1] < status["body"][1], "the answer is above the terminal"
-    stui.click(yes)
-    wait_for(stui.status, lambda status: status["answered"] == ["ask/probe=Yes"], "answer sent")
+    tui.click(yes)
+    wait_for(tui.status, lambda status: status["answered"] == ["ask/probe=Yes"], "answer sent")
     time.sleep(0.2)
-    assert bytes(stui.wire_input[start:]) == b"", f"clicks reached the program: {bytes(stui.wire_input[start:])!r}"
+    assert bytes(tui.wire_input[start:]) == b"", f"clicks reached the program: {bytes(tui.wire_input[start:])!r}"
     # The card is the whole alert: nothing over the terminal sends the person to Inbox for it.
-    status = stui.status()
+    status = tui.status()
     assert all(alert["tap"] != "Open" for alert in status["alerts"]), status["alerts"]
     assert "open in Inbox" not in screen(status), "the band still offers open in Inbox"
     print("alert: shown on top of the attached terminal; keys reach the program; clicks show and answer it")
 
 
-def case_reconnect(stui):
-    stui.action("open")
-    attached(stui)
-    stui.cut()
-    status = wait_for(stui.status, lambda status: status["lost"] and "reconnecting:" in screen(status),
+def case_reconnect(tui):
+    tui.action("open")
+    attached(tui)
+    tui.cut()
+    status = wait_for(tui.status, lambda status: status["lost"] and "reconnecting:" in screen(status),
                       "reconnecting shown")
     shown = screen(status)
     assert status["lost"] in shown, "the reason is said"
     assert "Ctrl+\\ c conversation" in shown, "the key to the conversation is named"
     # Refused for a while: tries back off instead of looping.
-    stui.mode = "refuse"
+    tui.mode = "refuse"
     refused_from = time.monotonic()
     time.sleep(4.0)
-    with stui.lock:
-        tries = [at for at, mode in stui.accepted if at >= refused_from]
+    with tui.lock:
+        tries = [at for at, mode in tui.accepted if at >= refused_from]
     assert 1 <= len(tries) <= 3, f"{len(tries)} tries in 4s"
     gaps = [later - earlier for earlier, later in zip(tries, tries[1:])]
     assert all(gap >= 1.5 for gap in gaps), f"tries did not back off: {gaps}"
-    status = stui.status()
+    status = tui.status()
     assert "reconnecting:" in screen(status) and status["pane"] == f"terminal:{AGENT}"
     # Let through: the terminal comes back by itself.
-    stui.mode = "pass"
-    wait_for(stui.status, lambda status: status["attached"] and not status["lost"]
+    tui.mode = "pass"
+    wait_for(tui.status, lambda status: status["attached"] and not status["lost"]
              and READY in screen(status), "terminal back by itself", seconds=40)
     # Down again, the conversation is one keystroke away.
-    stui.cut()
-    wait_for(stui.status, lambda status: status["lost"], "reconnecting again")
-    stui.send(b"\x1b[92;5u")  # Ctrl+\ as a kitty-keyboard terminal sends it: the leader
-    stui.send(b"c")           # then c: the conversation
-    wait_for(stui.status, lambda status: status["pane"] == f"agent:{AGENT}", "Ctrl+\\ to the conversation")
+    tui.cut()
+    wait_for(tui.status, lambda status: status["lost"], "reconnecting again")
+    tui.send(b"\x1b[92;5u")  # Ctrl+\ as a kitty-keyboard terminal sends it: the leader
+    tui.send(b"c")           # then c: the conversation
+    wait_for(tui.status, lambda status: status["pane"] == f"agent:{AGENT}", "Ctrl+\\ to the conversation")
     print(f"reconnect: says why and the key; {len(tries)} tries in 4s refused, gaps {[round(gap, 1) for gap in gaps]}s; back by itself; Ctrl+\\ leaves")
 
 
@@ -377,13 +377,13 @@ def main():
             case_migration(args.worker)
             continue
         prefs, run = CASES[name]
-        with tempfile.TemporaryDirectory(prefix="stui-attach-") as directory:
-            stui = Stui(args.worker, directory, prefs)
+        with tempfile.TemporaryDirectory(prefix="fractal-tui-attach-") as directory:
+            tui = Tui(args.worker, directory, prefs)
             try:
-                stui.start()
-                run(stui)
+                tui.start()
+                run(tui)
             finally:
-                stui.close()
+                tui.close()
 
 
 if __name__ == "__main__":

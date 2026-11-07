@@ -63,7 +63,7 @@ export const useSidebarFolders = ({ roster, source = folders, query = '', collap
   }
   // Only a definitive typed refusal can be restaged. Unknown delivery is never a fresh user edit.
   // edit.ts prepareRetry drops the old request and drain recomputes intent after refresh.
-  const retry = snapshot.refusal?.reason._tag === 'Known' && snapshot.retryEdit !== undefined && snapshot.restoreUnavailable !== true
+  const retry = (snapshot.refusal?.reason._tag === 'Known' || snapshot.refusal?.retryableLoad === true) && snapshot.retryEdit !== undefined && snapshot.restoreUnavailable !== true
     ? () => { void snapshot.retryEdit?.() } : undefined
   const targets = new Map<string, string>()
   const attempted = new Set([...(snapshot.pendingTargets ?? []), ...(snapshot.refusal?.targets ?? [])])

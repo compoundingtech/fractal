@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Sidebar behavior format, independent of arrangement body version. Extend event variants only with passing production-path cases.",
+  "type": "object", "additionalProperties": false, "required": ["schemaVersion", "cases"],
+  "properties": {"schemaVersion": {"const": 1}, "cases": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/case"}}},
+  "$defs": {
+    "string": {"type": "string"},
+    "strings": {"type": "array", "items": {"type": "string"}},
+    "nullableString": {"type": ["string", "null"]},
+    "empty": {"type": "array", "maxItems": 0},
+    "case": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "initial", "catalog", "events", "identities", "checkpoints"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "initial": {"type": "object", "additionalProperties": false, "required": ["arrangement", "memberships", "journal"], "properties": {"arrangement": {"$ref": "#/$defs/arrangement"}, "memberships": {"type": "array", "items": {"$ref": "#/$defs/membership"}}, "journal": {"$ref": "#/$defs/empty"}}},
+        "catalog": {"$ref": "#/$defs/strings"},
+        "identities": {"type": "object", "additionalProperties": false},
+        "events": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/event"}},
+        "checkpoints": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"$ref": "#/$defs/checkpoint"}}
+      },
+      "oneOf": [
+        {"properties": {"initial": {"properties": {"arrangement": {"properties": {"body": {"properties": {"version": {"const": 1}}}}}, "memberships": {"$ref": "#/$defs/empty"}}}, "events": {"items": {"properties": {"type": {"const": "ProjectAndPlanV1"}}}}, "checkpoints": {"items": {"properties": {"moves": {"items": {"$ref": "#/$defs/v1Result"}}}}}}},
+        {"properties": {"initial": {"properties": {"arrangement": {"properties": {"body": {"properties": {"version": {"const": 2}}}}}}}, "events": {"items": {"oneOf": [{"properties": {"type": {"const": "ProjectV2"}, "moves": {"$ref": "#/$defs/empty"}}}, {"properties": {"type": {"const": "ProjectAndPlanV2"}}}]}}, "checkpoints": {"items": {"properties": {"moves": {"items": {"$ref": "#/$defs/v2Result"}}}}}}}
+      ]
+    },
+    "event": {
+      "description": "Pure v1/v2 projection and optional move plans, then rollup; neither dispatches effects or wire actions.",
+      "type": "object", "additionalProperties": false, "required": ["type", "moves", "needsYou"],
+      "properties": {"type": {"enum": ["ProjectAndPlanV1", "ProjectV2", "ProjectAndPlanV2"]}, "moves": {"type": "array", "items": {"$ref": "#/$defs/intent"}}, "needsYou": {"$ref": "#/$defs/strings"}}
+    },
+    "checkpoint": {
+      "type": "object", "additionalProperties": false, "required": ["tree", "moves", "rollup", "effects", "wireActions"],
+      "properties": {"tree": {"$ref": "#/$defs/tree"}, "moves": {"type": "array", "items": {"$ref": "#/$defs/result"}}, "rollup": {"type": "object", "additionalProperties": {"$ref": "#/$defs/rollup"}}, "effects": {"$ref": "#/$defs/empty"}, "wireActions": {"$ref": "#/$defs/empty"}}
+    },
+    "arrangement": {
+      "type": "object", "additionalProperties": false, "required": ["id", "kind", "owner", "revision", "updated_at", "deleted", "body", "resolved"],
+      "properties": {"id": {"$ref": "#/$defs/string"}, "kind": {"const": "arrangement"}, "owner": {"$ref": "#/$defs/string"}, "revision": {"$ref": "#/$defs/string"}, "updated_at": {"$ref": "#/$defs/string"}, "deleted": {"type": "boolean"}, "body": {"$ref": "#/$defs/body"}, "resolved": {"$ref": "#/$defs/resolved"}}
+    },
+    "membership": {"type": "object", "additionalProperties": false, "required": ["container", "member", "revision", "position"], "properties": {"container": {"$ref": "#/$defs/string"}, "member": {"$ref": "#/$defs/string"}, "revision": {"$ref": "#/$defs/string"}, "position": {"type": "object", "additionalProperties": false, "required": ["bucket", "key"], "properties": {"bucket": {"$ref": "#/$defs/nullableString"}, "key": {"$ref": "#/$defs/string"}}}}},
+    "body": {"oneOf": [{"$ref": "#/$defs/bodyV1"}, {"$ref": "#/$defs/bodyV2"}]},
+    "bodyV2": {"type": "object", "additionalProperties": false, "required": ["version", "name", "folders"], "properties": {"version": {"const": 2}, "name": {"$ref": "#/$defs/stringRegister"}, "folders": {"type": "object", "additionalProperties": {"$ref": "#/$defs/folder"}}}},
+    "bodyV1": {
+      "type": "object", "additionalProperties": false, "required": ["version", "name", "folders", "placements"],
+      "properties": {"version": {"const": 1}, "name": {"$ref": "#/$defs/stringRegister"}, "folders": {"type": "object", "additionalProperties": {"$ref": "#/$defs/folder"}}, "placements": {"type": "object", "additionalProperties": {"$ref": "#/$defs/placementRegister"}}}
+    },
+    "stringRegister": {"type": "object", "additionalProperties": false, "required": ["value", "revision"], "properties": {"value": {"$ref": "#/$defs/string"}, "revision": {"$ref": "#/$defs/string"}}},
+    "positionRegister": {"type": "object", "additionalProperties": false, "required": ["value", "revision"], "properties": {"value": {"type": "object", "additionalProperties": false, "required": ["parent", "key"], "properties": {"parent": {"$ref": "#/$defs/nullableString"}, "key": {"$ref": "#/$defs/string"}}}, "revision": {"$ref": "#/$defs/string"}}},
+    "placementRegister": {"type": "object", "additionalProperties": false, "required": ["value", "revision"], "properties": {"value": {"type": "object", "additionalProperties": false, "required": ["folder", "key"], "properties": {"folder": {"$ref": "#/$defs/nullableString"}, "key": {"$ref": "#/$defs/string"}}}, "revision": {"$ref": "#/$defs/string"}}},
+    "folder": {"type": "object", "additionalProperties": false, "required": ["name", "position", "tombstone"], "properties": {"name": {"$ref": "#/$defs/stringRegister"}, "position": {"$ref": "#/$defs/positionRegister"}, "tombstone": {"oneOf": [{"type": "null"}, {"type": "object", "additionalProperties": false, "required": ["value", "revision"], "properties": {"value": {"type": "boolean"}, "revision": {"$ref": "#/$defs/string"}}}]}}},
+    "resolved": {"type": "object", "additionalProperties": false, "required": ["parents", "folders"], "properties": {"parents": {"type": "object", "additionalProperties": {"$ref": "#/$defs/nullableString"}}, "folders": {"type": "object", "additionalProperties": {"$ref": "#/$defs/nullableString"}}}},
+    "node": {"oneOf": [
+      {"type": "object", "additionalProperties": false, "required": ["_tag", "id"], "properties": {"_tag": {"const": "Folder"}, "id": {"$ref": "#/$defs/string"}}},
+      {"type": "object", "additionalProperties": false, "required": ["_tag", "subject"], "properties": {"_tag": {"const": "Subject"}, "subject": {"$ref": "#/$defs/string"}}}
+    ]},
+    "parent": {"oneOf": [{"$ref": "#/$defs/node"}, {"type": "object", "additionalProperties": false, "required": ["_tag"], "properties": {"_tag": {"const": "Root"}}}]},
+    "intent": {"type": "object", "additionalProperties": false, "required": ["node", "parent", "before"], "properties": {"node": {"$ref": "#/$defs/node"}, "parent": {"$ref": "#/$defs/parent"}, "before": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/node"}]}}},
+    "source": {"enum": ["person", "fallback"]},
+    "tree": {"type": "object", "additionalProperties": false, "required": ["roots", "nodes", "arrangementRevision", "deletedFolders"], "properties": {"roots": {"type": "array", "items": {"$ref": "#/$defs/node"}}, "nodes": {"type": "object", "additionalProperties": {"$ref": "#/$defs/treeNode"}}, "arrangementRevision": {"$ref": "#/$defs/string"}, "deletedFolders": {"$ref": "#/$defs/strings"}}},
+    "treeNode": {"type": "object", "additionalProperties": false, "required": ["node", "parent", "shownUnder", "source", "children"], "properties": {"node": {"$ref": "#/$defs/node"}, "parent": {"$ref": "#/$defs/parent"}, "shownUnder": {"$ref": "#/$defs/parent"}, "source": {"$ref": "#/$defs/source"}, "children": {"type": "array", "items": {"$ref": "#/$defs/node"}}, "key": {"$ref": "#/$defs/string"}, "revision": {"$ref": "#/$defs/string"}}},
+    "rollup": {"type": "object", "additionalProperties": false, "required": ["needsYou", "display"], "properties": {"needsYou": {"type": "integer", "minimum": 0}, "display": {"const": "Always"}}},
+    "v2Result": {"type": "object", "additionalProperties": false, "required": ["_tag", "edit"], "properties": {"_tag": {"const": "PlannedV2"}, "edit": {"type": "object", "additionalProperties": false, "required": ["folders", "memberships"], "properties": {
+      "folders": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["op", "id", "parent", "key"], "properties": {"op": {"const": "folder.move"}, "id": {"$ref": "#/$defs/string"}, "parent": {"$ref": "#/$defs/nullableString"}, "key": {"$ref": "#/$defs/string"}}}},
+      "memberships": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["op", "member", "bucket", "key"], "properties": {"op": {"const": "place"}, "member": {"$ref": "#/$defs/string"}, "bucket": {"$ref": "#/$defs/nullableString"}, "key": {"$ref": "#/$defs/string"}}}}
+    }}}},
+    "result": {"oneOf": [{"$ref": "#/$defs/v1Result"}, {"$ref": "#/$defs/v2Result"}]},
+    "v1Result": {"oneOf": [
+      {"type": "object", "additionalProperties": false, "required": ["_tag", "intent"], "properties": {"_tag": {"const": "Planned"}, "intent": {"$ref": "#/$defs/intent"}}},
+      {"type": "object", "additionalProperties": false, "required": ["_tag", "refusal"], "properties": {"_tag": {"const": "Refused"}, "refusal": {"$ref": "#/$defs/refusal"}}}
+    ]},
+    "refusal": {"oneOf": [
+      {"type": "object", "additionalProperties": false, "required": ["_tag", "node"], "properties": {"_tag": {"enum": ["Self", "NodeMissing"]}, "node": {"$ref": "#/$defs/node"}}},
+      {"type": "object", "additionalProperties": false, "required": ["_tag", "node", "parent"], "properties": {"_tag": {"const": "NoChange"}, "node": {"$ref": "#/$defs/node"}, "parent": {"$ref": "#/$defs/parent"}}},
+      {"type": "object", "additionalProperties": false, "required": ["_tag", "parent", "cause"], "properties": {"_tag": {"const": "ParentNotAllowed"}, "parent": {"$ref": "#/$defs/parent"}, "cause": {"const": "SubjectParentUnsupported"}}},
+      {"type": "object", "additionalProperties": false, "required": ["_tag", "parent", "cause"], "properties": {"_tag": {"const": "ParentMissing"}, "parent": {"$ref": "#/$defs/parent"}, "cause": {"enum": ["Unknown", "FolderDeleted"]}}},
+      {"type": "object", "additionalProperties": false, "required": ["_tag", "before", "parent"], "properties": {"_tag": {"const": "AnchorMoved"}, "before": {"$ref": "#/$defs/node"}, "parent": {"$ref": "#/$defs/parent"}, "foundUnder": {"$ref": "#/$defs/parent"}}},
+      {"type": "object", "additionalProperties": false, "required": ["_tag", "node", "parent", "path"], "properties": {"_tag": {"const": "Cycle"}, "node": {"$ref": "#/$defs/node"}, "parent": {"$ref": "#/$defs/parent"}, "path": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["node", "source"], "properties": {"node": {"$ref": "#/$defs/node"}, "source": {"$ref": "#/$defs/source"}}}}}}
+    ]}
+  }
+}

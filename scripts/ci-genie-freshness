@@ -15,6 +15,11 @@ export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 cd "$(dirname "$0")/.."
 . scripts/ci-parallel-tests
 
+# Keep signed/local freshness evidence equivalent to the workflow's public-fixture gate.
+node --test scripts/check-sidebar-fixtures.test.mjs
+node scripts/check-sidebar-fixtures.mjs
+node --test scripts/check-sidebar-fixture-ci.test.mjs
+
 python3 scripts/ci-fractal-web-licenses --check-lockfile
 parallel_tests \
   ci-fractal-web-licenses-test check-sqlite-large-values-test check-public-repo-test check-native-names-test \

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import type { HarnessQuestion, Session } from '@fractal/client'
+import type { DeviceCommand, HarnessQuestion, Session } from '@fractal/client'
 import { Agent as AgentSchema, decodeUnknownSync } from '@fractal/client/schema'
 import { ANCHOR_MS, agent, buildWorld, foldSlice, genericVariants, terminalRecord, terminalRun, wireValues, type RawResource, type Slice, type SyncEvent, type TerminalRecord, type WorldDefinition } from '../src/index.ts'
 import { drawCast } from '../src/kit/cast.ts'
@@ -452,6 +452,21 @@ describe('foundation contracts', () => {
     const roster: Slice<'roster'> = { ...original.slices.roster, timeline: [{ _tag: 'changes', at_ms: 1_000, store: 0, upserts: [question], removes: [] }] }
     expect(decodeSlice(original.id, roster)).toEqual([])
     expect(() => foldSlice(roster, 1_000)).toThrow('a harness-question upsert has no place in this slice')
+    expect(original.slices.roster.state.resources).toBeUndefined()
+  })
+
+  it('rejects a strict-valid device-command in a roster rather than storing it as future data', () => {
+    const original = base()
+    const timestamp = new Date(original.now).toISOString()
+    const command: DeviceCommand = {
+      kind: 'device-command', id: 'device-command/foundation', revision: '1', updated_at: timestamp,
+      command_kind: 'phone.inspect', args: {}, device_id: 'device/foundation',
+      issued_at: timestamp, expires_at: new Date(original.now + 30_000).toISOString(),
+      issued_by: original.cast.agents[0]!.id, session_actor: original.cast.agents[0]!.id, state: 'pending',
+    }
+    const roster: Slice<'roster'> = { ...original.slices.roster, timeline: [{ _tag: 'changes', at_ms: 1_000, store: 0, upserts: [command], removes: [] }] }
+    expect(decodeSlice(original.id, roster)).toEqual([])
+    expect(() => foldSlice(roster, 1_000)).toThrow('a device-command upsert has no place in this slice')
     expect(original.slices.roster.state.resources).toBeUndefined()
   })
 

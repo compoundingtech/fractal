@@ -1,5 +1,5 @@
 import * as Atom from 'effect/reactivity/Atom'
-import type { FractalOptions } from '@fractal/sdk/effect'
+import type { FractalOptions } from '@fractal/sdk/read'
 import { wrapTraceFetch } from '../data/sdk-browser/trace.ts'
 
 import { getDebug, incrDebug, setDebug } from './meters.tsx'

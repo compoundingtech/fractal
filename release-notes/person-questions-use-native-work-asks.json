@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Keep factual replies in the conversation and route every new question or decision for a person through a native work ask, even while the person is present",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No tables, indexes or stored data formats change."},
+  "rules": {"status": "none", "detail": "Ask ownership, authorization and claim logic are unchanged. Only agent-facing guidance and transcript presentation change."},
+  "compatibility": {"status": "changed", "detail": "Person-message delivery, channel instructions, the skill and refusal guidance now require native asks for new questions and decisions. Conversation views hide the new delivery note and still recognize historical notes. Older clients may display the new note as part of a delivered message until updated."},
+  "downtime": {"status": "none", "detail": "No migration or downtime is required."},
+  "manual": {"status": "none", "detail": "No configuration changes are needed. Restart existing seats to pick up updated skill and channel instructions."},
+  "recovery": {"status": "none", "detail": "Reverting restores the earlier guidance without changing stored work or messages."}
+}

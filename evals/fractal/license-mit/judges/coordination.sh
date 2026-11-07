@@ -12,8 +12,8 @@ worker="agent/${FRACTAL_MISSION_RUN-${ST_MISSION_RUN-}}/lmc.worker"
 messages_to() {
   local recipient=$1
   jq -s 'add | unique_by(.subject)' \
-    <(st3 conversations ls "$recipient" --json) \
-    <(st3 conversations ls "$recipient" --archive --json)
+    <(fractal conversations ls "$recipient" --json) \
+    <(fractal conversations ls "$recipient" --archive --json)
 }
 
 worker_messages="$(messages_to "$worker")"

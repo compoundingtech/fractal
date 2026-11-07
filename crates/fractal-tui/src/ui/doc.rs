@@ -55,6 +55,7 @@ pub enum Hit {
     Subject,
     /// A split border: drag resizes, a second press evens its split.
     Resize,
+    SidebarResize,
     Key(char),
     Enter,
     Escape,

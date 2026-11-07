@@ -88,7 +88,7 @@ impl Store {
         &self,
         subject: &str,
         request: &AttentionRequest,
-    ) -> Result<AttentionRequestView, St3Error> {
+    ) -> Result<AttentionRequestView, FractalError> {
         self.request_attention_closing(
             subject,
             request,
@@ -108,19 +108,19 @@ impl Store {
         subject: &str,
         request: &AttentionRequest,
         closing: &AttentionClosing,
-    ) -> Result<AttentionRequestView, St3Error> {
+    ) -> Result<AttentionRequestView, FractalError> {
         let until = closing.until.as_deref();
         if let Some(closed_by) = closing.closed_by.as_deref()
             && !matches!(closed_by, "person" | "st")
         {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-closed-by",
                 format!("`{closed_by}` cannot close an attention request; use `person`"),
             ));
         }
         if let Some(until) = until {
             if !crate::model::STATUS_WAIT_CONDITIONS.contains(&until) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-attention-until",
                     format!(
                         "`{until}` is not a wait condition; use one of {}",
@@ -129,7 +129,7 @@ impl Store {
                 ));
             }
             if request.targets.is_empty() {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "invalid-attention-until",
                     "an until condition needs at least one target to watch",
                 ));
@@ -137,19 +137,19 @@ impl Store {
         }
         let reviewer = normalize_actor(&request.reviewer, "person");
         if !reviewer.starts_with("person/") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-reviewer",
                 "an attention reviewer must be a person subject",
             ));
         }
         if request.title.trim().is_empty() || request.reason.trim().is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-request",
                 "an attention request needs a title and a reason",
             ));
         }
         if !matches!(request.severity.as_str(), "warning" | "error") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-severity",
                 "attention severity must be warning or error",
             ));
@@ -157,7 +157,7 @@ impl Store {
         for target in &request.targets {
             fractal_schema::registry()
                 .validate_subject(target)
-                .map_err(|error| St3Error::new(error.code, error.message))?;
+                .map_err(|error| FractalError::new(error.code, error.message))?;
         }
         let actor = normalize_actor(&request.actor, "agent");
         let step = attention_closing_step(&self.readers.get(), &actor, request, closing)?;
@@ -192,7 +192,7 @@ impl Store {
         })?;
         self.attention_request(subject)
             .map_err(internal)?
-            .ok_or_else(|| St3Error::new("internal", "the attention request was not stored"))
+            .ok_or_else(|| FractalError::new("internal", "the attention request was not stored"))
     }
 
     /// Historical audit closure; current attention has no independent resolution.
@@ -200,9 +200,9 @@ impl Store {
         &self,
         subject: &str,
         request: &AttentionResolveRequest,
-    ) -> Result<AttentionRequestView, St3Error> {
+    ) -> Result<AttentionRequestView, FractalError> {
         if !matches!(request.outcome.as_str(), "resolved" | "dismissed") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-outcome",
                 "an attention outcome must be resolved or dismissed",
             ));
@@ -216,7 +216,7 @@ impl Store {
         // outlives everyone who could close it. The resolution records who closed it.
         let actor = normalize_actor(&request.actor, "person");
         if !(actor.starts_with("person/") || actor.starts_with("agent/")) {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-resolver",
                 format!("`{actor}` is neither a person nor an agent"),
             ));
@@ -225,7 +225,7 @@ impl Store {
             .attention_request(&subject)
             .map_err(internal)?
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "missing-attention-request",
                     format!("attention request `{subject}` does not exist"),
                 )
@@ -252,16 +252,16 @@ impl Store {
         })?;
         self.attention_request(&subject)
             .map_err(internal)?
-            .ok_or_else(|| St3Error::new("internal", "the attention resolution was not stored"))
+            .ok_or_else(|| FractalError::new("internal", "the attention resolution was not stored"))
     }
 
     pub fn withdraw_attention(
         &self,
         subject: &str,
         request: &AttentionWithdrawRequest,
-    ) -> Result<AttentionRequestView, St3Error> {
+    ) -> Result<AttentionRequestView, FractalError> {
         if request.reason.trim().is_empty() {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-withdrawal",
                 "an attention withdrawal needs a reason",
             ));
@@ -275,14 +275,14 @@ impl Store {
             .attention_request(&subject)
             .map_err(internal)?
             .ok_or_else(|| {
-                St3Error::new(
+                FractalError::new(
                     "missing-attention-request",
                     format!("attention request `{subject}` does not exist"),
                 )
             })?;
         let actor = normalize_actor(&request.actor, "agent");
         if actor != current.actor {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "wrong-attention-requester",
                 format!(
                     "attention request `{subject}` belongs to `{}`",
@@ -305,7 +305,7 @@ impl Store {
         })?;
         self.attention_request(&subject)
             .map_err(internal)?
-            .ok_or_else(|| St3Error::new("internal", "the attention withdrawal was not stored"))
+            .ok_or_else(|| FractalError::new("internal", "the attention withdrawal was not stored"))
     }
 
     pub fn attention_request(&self, subject: &str) -> Result<Option<AttentionRequestView>> {
@@ -879,7 +879,7 @@ fn attention_closing_step(
     actor: &str,
     request: &AttentionRequest,
     closing: &AttentionClosing,
-) -> Result<Option<(String, u64)>, St3Error> {
+) -> Result<Option<(String, u64)>, FractalError> {
     if let Some(step) = &closing.step {
         let row = connection
             .query_row(
@@ -890,13 +890,13 @@ fn attention_closing_step(
             .optional()
             .map_err(internal)?;
         let Some((status, attempt)) = row else {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "invalid-attention-step",
                 format!("`{step}` is not a step run on this host"),
             ));
         };
         if matches!(status.as_str(), "completed" | "failed" | "cancelled") {
-            return Err(St3Error::new(
+            return Err(FractalError::new(
                 "attention-step-ended",
                 format!("`{step}` already {status}, so its end cannot close a new request"),
             ));
@@ -934,7 +934,7 @@ fn attention_closing_step(
         } else {
             "it names".into()
         };
-        St3Error::new(
+        FractalError::new(
             "attention-closes-never",
             format!(
                 "attention request `{}` would stay open forever: {who} no target that can end (a step, run generation, mission, run, agent, observer, subscription, loop run, message, attention item or observed pull request), no --until condition and no --step; pass --person-closes when only a person can close it",

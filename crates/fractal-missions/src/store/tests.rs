@@ -3927,7 +3927,7 @@ fn a_running_runs_reporter_changes_by_its_own_claim_and_leaves_creation_alone() 
         .unwrap()
         .unwrap();
     let reports = || store.claims_for(run, Some(RUN_REPORT_KIND)).unwrap().len();
-    let code = |result: Result<MissionRunReportView, St3Error>| result.unwrap_err().code;
+    let code = |result: Result<MissionRunReportView, FractalError>| result.unwrap_err().code;
 
     // Only a person or the agent that requested the run may change it, and only to an
     // agent; a limit or completion means nothing without one.
@@ -6938,7 +6938,7 @@ fn a_retry_records_its_backoff_boundary() {
     };
     publish(
         r#"version 2
- mission "retry" state="ready" { goal "Run retry work."; step "work" { } } "#,
+ mission "retry" state="ready" { goal "Run retry work."; step "work" { agentless; }; step "z" { agentless; } } "#,
         "retry-mission",
     );
     let run = store
@@ -6953,6 +6953,7 @@ fn a_retry_records_its_backoff_boundary() {
         })
         .unwrap();
     let subject = &run.steps[0].subject;
+    store.set_step_state(subject, "working", None).unwrap();
     store
         .set_step_state(subject, "failed", Some("first attempt failed"))
         .unwrap();
@@ -6961,6 +6962,92 @@ fn a_retry_records_its_backoff_boundary() {
     assert_eq!(view.status, "pending");
     assert_eq!(view.attempt, 2);
     assert!(view.not_before_unix_ms.unwrap() >= view.updated_at_unix_ms + 59_000);
+    let timing = || store.mission_step_timestamps_for_runs(std::slice::from_ref(&run.subject), None).unwrap()[subject];
+    assert_eq!(timing(), (None, None), "new attempt has no execution");
+    store.set_step_state(subject, "working", None).unwrap();
+    assert!(timing().0.is_some(), "real agentless retry opens");
+    assert!(store.retry_step_for_feedback(subject, 2, "revise", "person/reviewer").unwrap());
+    assert_eq!(timing(), (None, None), "review feedback selects attempt 3");
+    store.set_step_state(subject, "working", None).unwrap();
+    let opened = timing().0;
+    store.set_step_state(subject, "completed", None).unwrap();
+    assert_eq!(timing().0, opened);
+    assert!(timing().1.is_some(), "attemptless terminal state belongs to attempt 3");
+    store.set_step_state(&run.steps[1].subject, "working", None).unwrap();
+    let before = STATEMENTS_RUN.with(std::cell::Cell::get);
+    let batch = store.mission_step_timestamps_for_runs(std::slice::from_ref(&run.subject), None).unwrap();
+    assert_eq!(STATEMENTS_RUN.with(std::cell::Cell::get) - before, 1, "one history query for both steps");
+    assert_eq!(batch.len(), 2);
+    assert!(batch[&run.steps[1].subject].0.is_some());
+}
+
+/// The detail route's timing read (`mission_step_timestamps_for_runs`, with no subject filter) starts
+/// from the runs' own current steps and seeks each one's claims by subject and kind: it never scans
+/// the store's step and work claims, so its work follows the runs read, not the store (#5108).
+#[test]
+fn step_timing_reads_seek_the_runs_own_steps() {
+    let store = Store::open_memory("node").unwrap();
+    let plan = query_plan(
+        &store,
+        &crate::store::missions::mission_step_timestamps_sql(),
+        rusqlite::params!["[\"run\"]", Option::<String>::None],
+    );
+    assert!(plan.iter().any(|row| row.contains("SEARCH claims USING INDEX claims_subject_kind_index")), "{plan:#?}");
+    assert!(plan.iter().any(|row| row.contains("USING INDEX step_runs_run_index")), "{plan:#?}");
+    assert!(!plan.iter().any(|row| row.starts_with("SCAN claims") || row.starts_with("SCAN s ") || row == "SCAN s"), "{plan:#?}");
+}
+
+/// The run-driven timing read returns the rows the claims-driven read of #5108 returned, in the same
+/// order: across two runs, a retried step, a step never started and a subject filter.
+#[test]
+fn step_timing_reads_return_what_the_store_wide_read_returned() {
+    let store = Store::open_memory("node").unwrap();
+    let runs = ["one", "two"].map(|key| {
+        publish_mission(
+            &store,
+            &format!(r#"version 2
+ mission "timed-{key}" state="ready" {{ goal "Time work."; step "a" {{ agentless; }}; step "b" {{ agentless; }}; step "c" {{ agentless; }} }} "#),
+            &format!("timed-{key}-mission"),
+        );
+        store.create_mission_run(&MissionRunRequest {
+            mission: format!("timed-{key}"), revision: None, workspace: "/tmp".into(), requester: Some("person/test".into()),
+            mode: Some("run".into()), inputs: BTreeMap::new(), idempotency_key: format!("timed-{key}"),
+        }).unwrap()
+    });
+    for run in &runs {
+        let (a, b) = (&run.steps[0].subject, &run.steps[1].subject);
+        store.set_step_state(a, "working", None).unwrap();
+        store.set_step_state(a, "failed", Some("first attempt failed")).unwrap();
+        store.retry_step(a, "retry policy", 0).unwrap();
+        store.set_step_state(a, "working", None).unwrap();
+        store.set_step_state(a, "completed", None).unwrap();
+        store.set_step_state(b, "working", None).unwrap();
+    }
+    let before_5108 = format!(
+        "SELECT claims.subject, s.attempt, claims.kind, claims.body, claims.accepted_at_unix_ms
+         FROM claims JOIN batches ON batches.id=claims.batch_id
+         JOIN step_runs s ON s.subject=claims.subject
+         JOIN mission_runs r ON r.id=s.run_id AND r.current_generation_id=s.generation_id
+         WHERE r.id IN (SELECT value FROM json_each(?1))
+           AND (?2 IS NULL OR claims.subject IN (SELECT value FROM json_each(?2)))
+           AND claims.kind IN ('step-run.state','step-run.carried','step-run.retried',
+               'work.claimed','work.failed','work.person-done','work.person-cancelled')
+         ORDER BY claims.subject, {CANONICAL_ORDER}");
+    let rows = |sql: &str, runs: &[&str], subjects: Option<&[&str]>| {
+        let connection = store.readers.get();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h297ac3fac461 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ sql).unwrap();
+        statement.query_map(
+            rusqlite::params![serde_json::to_string(runs).unwrap(), subjects.map(|subjects| serde_json::to_string(subjects).unwrap())],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?)),
+        ).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    let ids = runs.iter().map(|run| run.subject.trim_start_matches("mission-run/")).collect::<Vec<_>>();
+    let one_step = [runs[1].steps[0].subject.as_str()];
+    for (runs, subjects) in [(&ids[..], None), (&ids[..1], None), (&ids[..], Some(&one_step[..]))] {
+        let old = rows(&before_5108, runs, subjects);
+        assert!(!old.is_empty());
+        assert_eq!(rows(&crate::store::missions::mission_step_timestamps_sql(), runs, subjects), old, "{runs:?} {subjects:?}");
+    }
 }
 
 #[test]
@@ -7029,11 +7116,22 @@ mission "retry" state="ready" {
     store
         .work_action(subject, "claim", &request("claim-round-2"))
         .unwrap();
+    let timing = || store.mission_step_timestamps_for_runs(std::slice::from_ref(&run.subject), None).unwrap()[subject];
+    let first_opening = timing().0;
+    expire_work_lease_by_claim(&store, subject, "agent/node.worker", "current");
+    assert_eq!(store.step_run(subject).unwrap().unwrap().status, "ready");
+    assert_eq!(timing(), (first_opening, None), "expiry is not completion");
+    store.work_action(subject, "claim", &request("reclaim-round-2")).unwrap();
+    assert_eq!(timing(), (first_opening, None), "reclaim keeps first execution opening");
     let completed = store
         .work_action(subject, "complete", &request("complete-round-2"))
         .unwrap();
     assert_eq!(completed.status, "verifying");
     assert_eq!(completed.attempt, 2);
+    assert!(timing().0.is_some());
+    assert!(timing().1.is_none(), "submission is not terminal");
+    store.set_step_state(subject, "completed", None).unwrap();
+    assert!(timing().1.is_some(), "worker retry terminal state belongs to attempt 2");
 
     let connection = store.connection.lock().unwrap();
     let mut statement = connection
@@ -8084,6 +8182,8 @@ fn a_run_an_old_replay_ended_stays_over_with_claims_that_say_so() {
 fn a_person_sets_the_outcome_of_a_finished_run_and_every_node_shows_it() {
     let source = Store::open_memory("source").unwrap();
     let failed = failed_takeover_run(&source, &["deploy-check"]);
+    let completed_at = source.mission_run_states().unwrap()[&failed.subject].completed_at_unix_ms;
+    assert!(completed_at.is_some());
     let reason = "the deploy shipped after the check host came back";
     let completed = source
         .set_mission_run_outcome(
@@ -8123,6 +8223,7 @@ fn a_person_sets_the_outcome_of_a_finished_run_and_every_node_shows_it() {
         claim.accepted_at_unix_ms
     );
     assert_eq!(states[&failed.subject].outcome.as_ref(), Some(&outcome));
+    assert_eq!(states[&failed.subject].completed_at_unix_ms, completed_at);
     assert_eq!(
         source
             .set_mission_run_outcome(

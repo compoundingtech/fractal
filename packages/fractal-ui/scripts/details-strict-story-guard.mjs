@@ -30,6 +30,8 @@ export async function strictStoryGuard(page, base) {
     window.addEventListener('kit-a11y-timing', event => { window.__kitPlayTiming.a11y.push(event.detail) })
     window.__kitFilterBenchmark = []
     window.addEventListener('kit-filter-benchmark', event => { window.__kitFilterBenchmark.push(event.detail) })
+    window.__kitPrependBenchmark = []
+    window.addEventListener('kit-prepend-benchmark', event => { window.__kitPrependBenchmark.push(event.detail) })
     // A failed a11y report names its axe rules and the nodes that broke them (or the error that stopped axe),
     // so the failure message says what to fix.
     const summarize = result => result?.error ? { error: String(result.error?.message ?? result.error) } : { violations: (result?.violations ?? []).map(({ id, impact, nodes }) => ({ id, impact, nodes: nodes.map(({ target, html, failureSummary }) => ({ target, html: html.slice(0, 200), failureSummary })) })) }

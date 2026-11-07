@@ -283,7 +283,7 @@ where
 
     async fn publish_endpoints(&self, mode: &str, endpoints: &[Value]) -> Result<()> {
         self.store()
-            .publish_fleet_endpoints(mode, endpoints, env!("CARGO_PKG_VERSION"))
+            .publish_fleet_endpoints(mode, endpoints, env!("CARGO_PKG_VERSION"), None)
             .map(|_| ())
     }
 

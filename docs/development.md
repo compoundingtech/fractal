@@ -12,7 +12,7 @@ For Fractal claims, missions, replication, runtime ownership, or recovery, start
 
 ## CLI actor contract
 
-`st actor-contract --json` prints the actor syntax of the binary that runs it. It
+`fractal actor-contract --json` prints the actor syntax of the binary that runs it. It
 does not read config or call a daemon. The versioned `contract` has one entry for
 each callable clap command path, including hidden commands and optional parent
 commands. `aliases` lists other names under each canonical command. `contract_sha256` is
@@ -20,6 +20,19 @@ the SHA-256 of compact JSON for `contract`, not of the formatted output. The
 printer computes this digest; the checked-in snapshot omits it and the equality
 test compares the contract body. The printed `actor_semantics` reminder comes
 first: actor: none means no --as syntax.
+
+Operational reads accept optional leading `--as ACTOR` immediately after these
+leaf paths: `actor-contract`, `agents lane`,
+`agents rename-id proof verify`, `changes list`, `changes show`, `conversations export`,
+`fleet anchor show`, `gate ci-passed`, `gate merged`,
+`missions blocked`, `missions waiting-on`,
+`missions rename-id proof verify`, `recorder report`,
+`subject history`, `terminals peek`, `trace show`, and `validate`.
+The CLI emits a stderr read-attribution record with the actor and canonical command
+path; stdout, queried subjects, filters, and daemon authorization are unchanged.
+An agent caller must supply its literal environment identity; a different explicit
+actor or an empty/conflicting agent identity fails before the read, including offline
+commands. Omitting `--as` preserves the existing read behavior.
 
 Version policy:
 
@@ -55,7 +68,7 @@ After a deliberate CLI change, review the changed actor entries and regenerate
 the checked-in contract:
 
 ```sh
-st actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
+fractal actor-contract --json | jq 'del(.contract_sha256)' > docs/st3/actor-contract.json
 cargo nextest run -p fractal -E 'test(actor_contract)'
 ```
 
@@ -67,7 +80,7 @@ if an alias changes. Supplement coverage also compares the reviewed setup/UI,
 note and changes paths, including every descendant, against the real clap
 inventory. Additions or removals require reviewing the identity handlers named
 beside `implicit_person`; mutation tests exercise added setup/UI descendants and
-a removed UI descendant. `st ui open` resolves the configured person before
+a removed UI descendant. `fractal ui open` resolves the configured person before
 queueing a request in that person's terminal UI request directory.
 This is freshness coverage, not proof of live runtime fallback or authority.
 Host, account, repository and harness policy remains in the
@@ -295,7 +308,7 @@ domain must belong to a zone in the configured Cloudflare account.
 
 Materialize the pinned `effect-utils` member before installing dependencies,
 as described in [Fractal web diagnostics member](#fractal-web-diagnostics-member).
-Use the web shell's pnpm 12.15.0, not a separate global install:
+Use the web shell's pnpm 12.17.0, not a separate global install:
 
 ```sh
 mr apply --worktree-mode commit
@@ -502,7 +515,7 @@ wording consistent when both describe the same change.
 | `examples/fractal`, `docs` | Runnable declarations and documentation. |
 | `nix`, `flake.nix`, `scripts`, `.github` | Packaging, developer tools, and generated CI workflows. |
 
-The `fractal-tui` package is a library embedded in `st`; it has no standalone executable. Its existing
+The `fractal-tui` package is a library embedded in `fractal`; it has no standalone executable. Its existing
 Clippy baseline allowances remain under the `fractal-tui` package key because the library still owns
 the renderer and its existing lint baseline.
 Removing the binary does not rename the library or the protocol client identity.

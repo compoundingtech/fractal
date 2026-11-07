@@ -14,6 +14,37 @@ use axum::http::Request;
 use std::path::PathBuf;
 
 #[tokio::test]
+async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = state.store.clone();
+    let socket = root.path().join("bound.sock");
+    let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+    let (ready, waiting) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
+        reserved, router(state), Some(store.clone()), |_| Some("agent/example".into()),
+        move || { let _ = ready.send(()); },
+    ));
+    waiting.await.unwrap();
+    let client = crate::client::Client::unix(&socket);
+    let before = store.index().unwrap();
+    for (path, actor, allowed) in [
+        ("/v1/fleet/transports", "agent/example", true),
+        ("/v1/fleet/transports", "agent/other", false),
+        ("/v1/fleet/transports", "person/operator", false),
+        ("/v1/internal/fleet/endpoints", "agent/example", false),
+    ] {
+        let result: anyhow::Result<Value> = client.post(path, &json!({
+            "actor": actor, "mutation_id": "transport-test", "dry_run": true,
+            "mode": "dial-out", "endpoints": [],
+        })).await;
+        assert_eq!(result.is_ok(), allowed, "{path}: {actor}: {result:?}");
+        assert_eq!(store.index().unwrap(), before);
+    }
+    server.abort();
+}
+
+#[tokio::test]
 async fn fleet_leave_state_local_only_is_read_only_and_worker_absence_fails_closed() {
     let root = tempfile::tempdir().unwrap();
     let mut state = state(root.path());
@@ -1031,6 +1062,8 @@ async fn agent_detail_does_not_materialize_unrelated_cached_cards() {
             ])
         })
         .unwrap();
+    // The daemon captures its environment at start; the read never waits on the login shell.
+    crate::environment::snapshot().unwrap();
     let Json(card) = client_agents_detail(
         State(state),
         Extension(snapshot),
@@ -1043,6 +1076,14 @@ async fn agent_detail_does_not_materialize_unrelated_cached_cards() {
     assert_eq!(card["name"], "node.amber");
     assert!(card.get("todo").is_some());
     assert!(card.get("_status_source").is_none());
+    let contract = &card["launch_contract"];
+    // Nor does the read measure an executable (#5209): the contract is declared once the
+    // launcher's identity has settled off the request, and pending until then.
+    assert!(contract["declared"]["digest"].is_string() || contract["pending"] == true, "{contract}");
+    assert!(contract["running"].is_null());
+    assert!(contract["drift"].is_null(), "missing launch evidence is not convergence");
+    let decoded: fractal_client::Agent = serde_json::from_value(card.clone()).unwrap();
+    assert_eq!(decoded.launch_contract.as_ref(), Some(contract));
 }
 
 #[tokio::test]
@@ -1899,13 +1940,60 @@ fn doctor_shows_whether_marks_are_on_and_what_holds_them_off() {
     assert_eq!(state.store.refresh_marks_switch(&[]).unwrap(), (true, Vec::new()));
     let on = marks(&state);
     assert_eq!(on.status, "pass");
-    assert!(on.message.starts_with("on:"), "{on:?}");
+    assert!(on.message.starts_with("on: this member records its own seats' staging, delivery, read and close"), "{on:?}");
     state.configured_peers = vec!["birch".into()];
     assert!(!state.store.refresh_marks_switch(&state.configured_peers).unwrap().0);
     let held = marks(&state);
     assert_eq!(held.status, "pass");
     assert!(held.message.starts_with("off: lifecycle claims until every other member advertises message_view_reads=1"), "{held:?}");
     assert!(held.message.contains("birch: exchanges with this member outside its fleet membership"), "{held:?}");
+}
+
+/// While a seat's staging recorded as a mark has waited over a minute undelivered, doctor warns that
+/// rolling this member back below v0.3.26 would offer the mail again, and gives the steps. A fresh
+/// staging mark, in flight as mail ordinarily is, does not warn; the warning clears once the mail
+/// is delivered, and a staging claim never raises it.
+#[test]
+fn doctor_warns_of_undelivered_staging_marks_until_delivery() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let staging = |state: &AppState| {
+        doctor_report(state).unwrap().0.checks.into_iter().find(|check| check.name == "message-staging-rollback")
+    };
+    let seat = "agent/test/staging-seat";
+    for subject in ["message/staged-as-mark", "message/staged-as-claim"] {
+        state.store.append_claim(&ClaimInput {
+            subject: subject.into(),
+            kind: "message.sent".into(),
+            actor: Some("person/sender".into()),
+            fields: serde_json::from_value(json!({"from": "person/sender", "to": seat, "content": "hello", "status": "sent"})).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+    }
+    state.store.append_claim(&ClaimInput {
+        subject: "message/staged-as-claim".into(),
+        kind: "message.staged".into(),
+        actor: Some(seat.into()),
+        fields: serde_json::from_value(json!({"status": "staged"})).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let later = || client_now_ms() + 61_000;
+    assert!(staging(&state).is_none() && message_staging_check(&state, later()).is_none(), "a staging claim reads on every release");
+
+    crate::store::message_marks::record(&state.store, "message/staged-as-mark", "message.staged", seat).unwrap();
+    assert!(staging(&state).is_none(), "a fresh staging mark is in flight, not stalled");
+    let warned = message_staging_check(&state, later()).expect("a staging mark undelivered over a minute warns");
+    assert_eq!(warned.name, "message-staging-rollback");
+    assert_eq!(warned.status, "warn");
+    for part in ["1 message(s)", "over a minute ago", "message/staged-as-mark", "v0.3.25 or earlier would offer them again", "v0.3.26 is the safe floor", "roll every member to v0.3.26"] {
+        assert!(warned.message.contains(part), "{part}: {warned:?}");
+    }
+    crate::store::message_marks::record(&state.store, "message/staged-as-mark", "message.delivered", seat).unwrap();
+    assert!(message_staging_check(&state, later()).is_none(), "delivery clears it");
 }
 
 #[test]
@@ -4984,6 +5072,7 @@ async fn an_event_page_carries_the_streams_message_events_to_a_client_that_asks(
     .await
     .unwrap()
     .0;
+    let appended: smallclaims::claim::ClaimRecord = serde_json::from_value(appended).unwrap();
     let woke = tokio::time::timeout(Duration::from_secs(2), waiter)
         .await
         .expect("a stream item did not wake the waiter")
@@ -6869,6 +6958,73 @@ fn terminal_retirement_agent_cards_follow_lifecycle_at_the_snapshot_cut() {
     }
 }
 
+/// #4500: a seat whose declaration is a stop while its process still runs says it is stopping,
+/// and once the stop is deferred, what holds it.
+#[test]
+fn a_stop_declared_seat_that_still_runs_is_stopping_and_says_what_holds_it() {
+    let root = tempfile::tempdir().unwrap();
+    let store = state(root.path()).store;
+    let seat = "agent/example-held/worker";
+    let declare = parse_intent(
+        "version 2\nagent \"example-held/worker\" { command \"true\"; workspace \".\"; restart \"never\"; }\n",
+        store.origin(),
+    ).unwrap();
+    store.apply_internal(&declare, "held-card-declaration").unwrap();
+    let observe = |status: &str, key: &str| {
+        store.append_claim(&ClaimInput {
+            subject: seat.into(),
+            kind: "runtime.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("status".into(), json!(status)),
+                ("runtime_id".into(), json!("held-runtime")),
+                ("incarnation_id".into(), json!("held-incarnation")),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: Some(key.into()),
+        }).unwrap();
+    };
+    observe("running", "held-running");
+    let card = |store: &Store| {
+        client_agent_resources_uncached(store, true, store.index().unwrap())
+            .unwrap()
+            .into_iter()
+            .find(|card| card["id"] == seat)
+            .unwrap()
+    };
+    assert_eq!(card(&store)["stopping"], Value::Null, "a declared seat is not stopping");
+
+    let stop = parse_intent("version 2\nstop \"agent/example-held/worker\"\n", store.origin()).unwrap();
+    store.apply_internal(&stop, "held-card-stop").unwrap();
+    assert_eq!(card(&store)["stopping"], json!({"held": null}));
+
+    let token = store.selected_desired_token(seat).unwrap().unwrap();
+    store.append_claim(&ClaimInput {
+        subject: seat.into(),
+        kind: "harness.diagnostic".into(),
+        actor: None,
+        fields: BTreeMap::from([
+            ("severity".into(), json!("warning")),
+            ("status".into(), json!("waiting")),
+            ("code".into(), json!("stop-deferred")),
+            ("reason".into(), json!("the seat holds a message nobody has read")),
+            ("observed_since_ms".into(), json!(1)),
+            ("incarnation_id".into(), json!("held-incarnation")),
+        ]),
+        evidence: vec![token],
+        expected_subject: None,
+        idempotency_key: Some("held-diagnostic".into()),
+    }).unwrap();
+    assert_eq!(
+        card(&store)["stopping"],
+        json!({"held": "the seat holds a message nobody has read"})
+    );
+
+    observe("stopped", "held-stopped");
+    assert_eq!(card(&store)["stopping"], Value::Null, "a stopped seat is no longer stopping");
+}
+
 #[test]
 fn client_work_projection_includes_agentless_mission_steps() {
     let root = tempfile::tempdir().unwrap();
@@ -7696,9 +7852,10 @@ async fn a_send_or_reply_to_a_person_is_refused_and_an_agent_still_receives() {
         assert_eq!(body["code"], "person-has-no-inbox", "{key}");
         let text = body["message"].as_str().unwrap();
         assert!(text.starts_with("people do not have inboxes: print your answer in the chat"), "{text}");
-        let chat = text.find("print in the chat").unwrap();
+        let chat = text.find("print your answer in the chat").unwrap();
         assert!(chat < text.find("work ask").unwrap() && chat < text.find("work update").unwrap());
-        assert!(text.contains("only if the person asked for it"), "{text}");
+        assert!(text.contains("Any new question or decision for the person"), "{text}");
+        assert!(text.contains("even when the person is present"), "{text}");
     }
     assert_eq!(
         state.store.claims_for_kind_at("message.sent", None, true, 100).unwrap().claims.len(),
@@ -13198,13 +13355,13 @@ async fn harness_event_endpoint_requires_this_native_seats_local_peer_and_runtim
 #[test]
 fn identity_rename_refusals_keep_typed_http_statuses() {
     for code in ["identity-cycle", "identity-occupied", "identity-retired-source", "lifecycle-unavailable"] {
-        let error = ApiError::bad(St3Error::new(code, "rename refused"));
+        let error = ApiError::bad(FractalError::new(code, "rename refused"));
         assert_eq!(error.status, StatusCode::CONFLICT, "{code}");
         assert_eq!(error.code, code);
     }
-    assert_eq!(ApiError::bad(St3Error::new("identity-cross-kind", "wrong kind")).status,
+    assert_eq!(ApiError::bad(FractalError::new("identity-cross-kind", "wrong kind")).status,
         StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(ApiError::bad(St3Error::new("identity-unknown", "missing")).status,
+    assert_eq!(ApiError::bad(FractalError::new("identity-unknown", "missing")).status,
         StatusCode::NOT_FOUND);
 }
 
@@ -14143,16 +14300,22 @@ fn a_doctor_check_past_its_deadline_reports_timeout_and_the_next_check_still_run
 
 #[test]
 fn doctor_checks_after_the_total_is_spent_say_they_did_not_run() {
-    // The second check starts 600 ms in, well inside the total even on a loaded host, and
-    // ends past it.
-    let clock = DoctorClock::new(Duration::from_millis(1000), Duration::from_millis(100));
+    // Advance the actual shared budget's clock inside each check, without depending
+    // on whether the host schedules this test before a real-time deadline.
+    let now = Arc::new(std::sync::Mutex::new(Instant::now()));
+    let clock_now = now.clone();
+    let clock = DoctorClock::with_clock_for_test(
+        Duration::from_millis(1000), Duration::from_millis(100),
+        Arc::new(move || *clock_now.lock().unwrap()),
+    );
     let ran = std::cell::Cell::new(0);
     for _ in 0..2 {
-        clock.checks("slow-check", || {
+        let slow = clock.checks("slow-check", || {
             ran.set(ran.get() + 1);
-            std::thread::sleep(Duration::from_millis(600));
+            *now.lock().unwrap() += Duration::from_millis(600);
             Ok(Vec::new())
         });
+        assert_eq!(slow[0].status, "timeout");
     }
     assert_eq!(ran.get(), 2);
     let skipped = clock.checks("late-check", || {

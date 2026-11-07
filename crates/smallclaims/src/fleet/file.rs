@@ -264,6 +264,7 @@ impl FleetFile {
             file.sync_all()?;
         }
         fs::rename(&temporary, &path)?;
+        if let Err(error) = fs::remove_file(path.with_extension("transport-change.json")) && error.kind() != std::io::ErrorKind::NotFound { return Err(error.into()); }
         Ok(())
     }
 

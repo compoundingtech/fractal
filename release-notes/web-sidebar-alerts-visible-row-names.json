@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Include every visible Alerts row fact in its accessible name in reading order",
+  "replay": {"status": "none", "detail": "No replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "No accessibility exemptions."},
+  "compatibility": {"status": "none", "detail": "Names follow the visible title, wait age and served facts before spelling out the decorative attention glyph. Explicit text separators preserve voice targeting. Stories use the reader's current-time frame rather than comparing shifted instants with the committed fixture anchor."},
+  "downtime": {"status": "none", "detail": "No interruption is required."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "No persistent state or recovery changes."}
+}

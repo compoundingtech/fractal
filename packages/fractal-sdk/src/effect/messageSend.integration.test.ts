@@ -5,7 +5,7 @@ import type { ActionOf, CollectionSocket, ErrorEnvelope, Snapshot } from '@fract
 import { Effect } from 'effect'
 import { describe, expect } from 'vitest'
 
-import { ActionRefused, ActionTransportFailure, Fractal, FractalLive } from './mod.ts'
+import { ActionRefused, ActionTransportFailure, Fractal, FractalLive } from './compat.ts'
 
 const snapshot = (index: number): Snapshot => ({
   id: `snapshot/${index}`,

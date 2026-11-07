@@ -1,5 +1,5 @@
 import { FractalClient } from '@fractal/client'
-import { arrangementActions } from '@fractal/sdk/effect'
+import { arrangementActions } from '@fractal/sdk/mutations'
 import { catalog, loadWorld } from '@fractal/scenarios'
 import { createReplay, realClock } from '@fractal/scenarios/replay'
 import { fractalInventoryGateway } from '../data/arrangements.ts'

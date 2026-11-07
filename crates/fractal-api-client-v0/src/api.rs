@@ -82,7 +82,7 @@ use crate::model::{
     ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest,
     RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView,
     RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest,
-    SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView,
+    SessionLogChunk, SessionScreen, SessionSignalRequest, FractalError, StatusResponse, StepRunView,
     WorkRequest, WorkRetryRequest, WorkWakeRequest,
 };
 use crate::model::{PersonAskRequest, PersonStepResponse};

@@ -122,6 +122,79 @@ fn assert_conforms(validator: &jsonschema::Validator, context: &str, value: &Val
 }
 
 #[test]
+fn notice_internal_definitions_conform() {
+    let cases = fixture("notice-conformance.json");
+    let snapshot = &cases["snapshot"];
+    let validator = contract_validator("NoticeSnapshot");
+    assert_conforms(&validator, "full notice", snapshot);
+    let created = contract_validator("NoticeCreated");
+    assert_conforms(&created, "producer input", &snapshot["input"]);
+    for case in cases["invalid_snapshot"].as_array().unwrap() {
+        let mut invalid = snapshot.clone();
+        let pointer = case["pointer"].as_str().unwrap();
+        let (parent, key) = pointer.rsplit_once('/').unwrap();
+        invalid.pointer_mut(parent).unwrap().as_object_mut().unwrap()
+            .insert(key.into(), case["value"].clone());
+        assert!(!validator.is_valid(&invalid), "accepted {case}");
+    }
+    for (field, limit) in [("dedupe_key", 200), ("summary", 200), ("speech", 300), ("body", 20000)] {
+        let mut input = snapshot["input"].clone();
+        input[field] = Value::String("😀".repeat(limit));
+        assert_conforms(&created, field, &input);
+        input[field] = Value::String("😀".repeat(limit + 1));
+        assert!(!created.is_valid(&input), "accepted overlong {field}");
+    }
+    let mut minimal = snapshot["input"].clone();
+    for field in ["speech", "body", "expires_at"] {
+        minimal.as_object_mut().unwrap().remove(field);
+    }
+    assert_conforms(&created, "absent optional fields", &minimal);
+    minimal["links"] = serde_json::json!([]);
+    minimal["body"] = Value::String(String::new());
+    assert_conforms(&created, "empty optional body/links", &minimal);
+    minimal["links"] = Value::Array(vec![snapshot["input"]["links"][0].clone(); 11]);
+    assert!(!created.is_valid(&minimal));
+    for (field, definition, values) in [
+        ("delivery", "NoticeDelivery", "valid_delivery"),
+        ("integrity", "NoticeIntegrity", "valid_integrity"),
+    ] {
+        for value in cases[values].as_array().unwrap() {
+            assert_conforms(&contract_validator(definition), field, value);
+            let mut joined = snapshot.clone();
+            joined[field] = if field == "delivery" { serde_json::json!([value]) } else { value.clone() };
+            assert_conforms(&validator, field, &joined);
+        }
+    }
+    let mut controlled = snapshot.clone();
+    controlled["control_revision"] = serde_json::json!("control-v1");
+    for field in ["seen_at", "dismissed_at", "snoozed_until"] {
+        controlled[field] = snapshot["updated_at"].clone();
+    }
+    assert_conforms(&validator, "person controls", &controlled);
+    for field in ["control_revision", "seen_at", "dismissed_at", "snoozed_until"] {
+        let mut absent = snapshot.clone();
+        absent.as_object_mut().unwrap().remove(field);
+        assert!(!validator.is_valid(&absent), "accepted absent {field}");
+    }
+    let id = &snapshot["id"];
+    let fence = serde_json::json!({"notice_id": id, "source_revision": "source-v1", "control_revision": null});
+    assert_conforms(&contract_validator("NoticeFence"), "no control fence", &fence);
+    for definition in ["NoticeSeenParameters", "NoticeDismissParameters", "NoticeSnoozeParameters"] {
+        let validator = contract_validator(definition);
+        let mut params = serde_json::json!({"notice_id": id});
+        if definition == "NoticeSnoozeParameters" {
+            assert!(!validator.is_valid(&params));
+            params["until"] = Value::Null;
+            assert_conforms(&validator, "clear snooze", &params);
+            params["until"] = snapshot["updated_at"].clone();
+        }
+        assert_conforms(&validator, definition, &params);
+        params["actor"] = serde_json::json!("person/example");
+        assert!(!validator.is_valid(&params));
+    }
+}
+
+#[test]
 fn agents_publication_contract_is_complete_and_unbounded() {
     let validator = contract_validator("AgentsPublication");
     let resources = fixture("resources.json");

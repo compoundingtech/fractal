@@ -1,7 +1,8 @@
-// Frozen after #3982: six hosted 171-case commit samples, runs 40477033419–40482012045,
-// measured 2026-10-27; maximum rounded up to 0.1 seconds. Never raise.
-export const KIT_CPU_ANCHOR_SECONDS = 413.1
-const CPU_HEADROOM = 1.1
+// Frozen hosted 171-play anchor, normalized so inventory growth needs no re-anchor.
+export const KIT_CPU_ANCHOR_SECONDS_PER_PLAY = 413.1 / 171
+// Twenty successful commit receipts: max 2.475682 CPU s/play; 15% covers it
+// with 12.2% headroom while still rejecting twice the fastest observed cost.
+export const KIT_CPU_MARGIN = 0.15
 
 function roundSecondsToMilliseconds(seconds) {
   return Math.round(seconds * 1000) / 1000
@@ -16,14 +17,19 @@ export function kitPlayBudget(env) {
   return { wallGuardSeconds }
 }
 
-export function assessKitPlayCost({ wallGuardSeconds }, { elapsedSeconds, busyCoreMinutes, costRequired }) {
+export function assessKitPlayCost({ wallGuardSeconds }, { elapsedSeconds, busyCoreMinutes, costRequired, plays }) {
   const cpuSeconds = roundSecondsToMilliseconds(busyCoreMinutes * 60)
-  const cpuAnchorSeconds = costRequired ? KIT_CPU_ANCHOR_SECONDS : null
-  const maxCpuSeconds = cpuAnchorSeconds === null ? null : roundSecondsToMilliseconds(cpuAnchorSeconds * CPU_HEADROOM)
-  const overCpuBudget = maxCpuSeconds !== null && cpuSeconds > maxCpuSeconds
+  const cpuSecondsPerPlay = plays > 0 ? cpuSeconds / plays : null
+  const cpuAnchorSecondsPerPlay = costRequired ? KIT_CPU_ANCHOR_SECONDS_PER_PLAY : null
+  const maxCpuSecondsPerPlay = costRequired ? KIT_CPU_ANCHOR_SECONDS_PER_PLAY * (1 + KIT_CPU_MARGIN) : null
+  const cpuAnchorSeconds = costRequired ? roundSecondsToMilliseconds(cpuAnchorSecondsPerPlay * plays) : null
+  const maxCpuSeconds = costRequired ? roundSecondsToMilliseconds(maxCpuSecondsPerPlay * plays) : null
+  const overCpuBudget = costRequired && cpuSecondsPerPlay !== null && cpuSecondsPerPlay > maxCpuSecondsPerPlay
   const overWallGuard = wallGuardSeconds !== null && elapsedSeconds > wallGuardSeconds
   return {
     cpuSeconds, cpuAnchorSeconds, maxCpuSeconds, wallGuardSeconds, maxSeconds: wallGuardSeconds,
+    cpuSecondsPerPlay, cpuAnchorSecondsPerPlay, maxCpuSecondsPerPlay,
+    cpuMargin: costRequired ? KIT_CPU_MARGIN : null,
     overCpuBudget, overWallGuard, overBudget: overCpuBudget || overWallGuard,
   }
 }

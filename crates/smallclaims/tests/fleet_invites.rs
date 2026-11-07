@@ -375,3 +375,89 @@ fn a_removed_name_rejoins_only_from_a_store_that_never_wrote_as_it() {
         }
     ));
 }
+
+#[test]
+fn an_incomplete_join_replays_verdicts_only_on_the_paced_worker_after_removal() {
+    use smallclaims::{claim::ClaimInput, principal::Verdict};
+    use std::collections::BTreeMap;
+
+    let store = sponsor();
+    let node_key = Arc::new(MemberKey::generate().unwrap().0);
+    store.set_node_key(node_key).unwrap();
+    let mut claims = Vec::new();
+    for index in 0..128 {
+        claims.push(store.append_claim(&ClaimInput {
+            subject: format!("agent/sample-{index}"),
+            kind: "harness.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([("state".into(), serde_json::json!("ready"))]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap());
+    }
+    store.replication_snapshot().unwrap();
+    store.judge_claims(true).unwrap();
+    assert!(!store.verdicts_pending().unwrap());
+
+    let created = invite(&store, None, false);
+    let request = request(&code(&created, false), &joiner(), "birch", "listening");
+    assert!(matches!(
+        store.redeem_fleet_invite(&request).unwrap(),
+        FleetRedemption::Admitted { first: true, .. }
+    ));
+    // No paced loan has run since admission. A newly signed claim must not read Held
+    // behind a small root cursor after its ordinary judgment just verified it.
+    let fresh = store.append_claim(&ClaimInput {
+        subject: "agent/fresh-before-paced-job".into(),
+        kind: "harness.observed".into(),
+        actor: None,
+        fields: BTreeMap::from([("state".into(), serde_json::json!("ready"))]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    store.seal_local_batches().unwrap();
+    store.judge_claims_slice(true).unwrap();
+    assert_eq!(store.claim_verdict(&fresh.id).unwrap(), Verdict::Verified);
+    // The joiner never receives its answer or exchanges. Historical verdicts still
+    // remain queued, and a paced loan, not an ordinary exchange, starts judging them.
+    store.advance_signature_judgment().unwrap();
+    let queued = || store.readers.get().query_row(
+        "SELECT COUNT(*) FROM claim_verdict_queue", [], |row| row.get::<_, usize>(0),
+    ).unwrap();
+    assert!(queued() > 0);
+    store.remove_fleet_member("birch", "incomplete join", "person/example").unwrap();
+    let before = queued();
+    assert!(before > 0);
+    for index in 0..3 {
+        let fresh = store.append_claim(&ClaimInput {
+            subject: format!("agent/fresh-{index}"),
+            kind: "harness.observed".into(),
+            actor: None,
+            fields: BTreeMap::from([("state".into(), serde_json::json!("ready"))]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        // Exercise summary export, receipt, admission and projection, as the worker does.
+        let exchange = store.export_replication_summary(FLEET).unwrap();
+        store.receive_replication_exchange("alder", FLEET, &exchange).unwrap();
+        store.validate_replication_backlog().unwrap();
+        store.project_replication_backlog().unwrap();
+        assert_eq!(queued(), before, "exchanges must not drain historical verdicts");
+        assert_eq!(store.claim_verdict(&fresh.id).unwrap(), Verdict::Verified);
+    }
+    // No further exchange is needed: the same one-loan operation the paced job runs
+    // must finish the retained queue and leave every original verdict verified.
+    for _ in 0..256 {
+        if !store.verdicts_pending().unwrap() {
+            break;
+        }
+        store.advance_signature_judgment().unwrap();
+    }
+    assert!(!store.verdicts_pending().unwrap(), "the paced worker must converge");
+    for claim in claims {
+        assert_eq!(store.claim_verdict(&claim.id).unwrap(), Verdict::Verified);
+    }
+}

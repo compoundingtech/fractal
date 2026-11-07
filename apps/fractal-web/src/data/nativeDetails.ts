@@ -1,5 +1,5 @@
 import type * as Native from '@fractal/client/schema'
-import type { DecodedAgent } from '@fractal/sdk/effect'
+import type { DecodedAgent } from '@fractal/sdk/read'
 import type { DetailsOverview, DetailsReadFailure, DetailsSection, DetailsSpendRead, DetailsState, DetailsResource, TraceSeries, TraceFact, TraceCoverage, TraceAccumulationWindow } from '@fractal/ui/assistant-ui'
 import type { SyncStatus } from '@fractal/ui/assistant-ui/sync-status'
 import { DateTime, Duration, Option } from 'effect'

@@ -403,7 +403,7 @@ fn a_plain_client_finds_a_daemon_started_with_socket_elsewhere_past_a_dead_defau
     }
     let root = tempfile::tempdir().unwrap();
     let root = root.path();
-    for directory in ["home/.config/st3", "run", "state"] {
+    for directory in ["home/.config/st3", "run", "state", "roster"] {
         std::fs::create_dir_all(root.join(directory)).unwrap();
     }
     // The config names no socket: the daemon gets `--socket` in its state directory, as a
@@ -423,26 +423,33 @@ fn a_plain_client_finds_a_daemon_started_with_socket_elsewhere_past_a_dead_defau
             .args(["up", "--socket"])
             .arg(&socket)
             .args(["--web-listen", "off"])
+            // A daemon serves before its first agents roster is published; hold that moment.
+            .env("ST3_TEST_AGENT_ROSTER_BARRIER", root.join("roster"))
             .stdout(log.try_clone().unwrap())
             .stderr(log)
             .spawn()
             .unwrap(),
     );
     let deadline = Instant::now() + Duration::from_secs(60);
-    while fractal_daemon::startup::read(&socket).is_none_or(|readiness| readiness.status != "serving") {
+    while fractal_daemon::startup::read(&socket).is_none_or(|readiness| readiness.status != "serving")
+        || !root.join("roster/entered").exists()
+    {
         assert!(daemon.0.try_wait().unwrap().is_none(), "daemon exited: {}", std::fs::read_to_string(&log_path).unwrap());
         assert!(Instant::now() < deadline, "daemon did not serve: {}", std::fs::read_to_string(&log_path).unwrap());
         std::thread::sleep(Duration::from_millis(20));
     }
-    let plain = command(root)
-        .env_remove("ST3_ENDPOINT")
-        .env("ST3_DAEMON_WAIT", "0")
-        .args(["agents", "ls"])
-        .output()
-        .unwrap();
+    // Discovery is asked of a read the daemon answers once it serves. The agents roster is
+    // published after that (#5004): this client reaches the daemon and reads that it is not ready.
+    let plain = |args: &[&str]| command(root).env_remove("ST3_ENDPOINT").env("ST3_DAEMON_WAIT", "0").args(args).output().unwrap();
+    let roster = plain(&["agents", "ls"]);
+    assert!(!roster.status.success());
+    assert!(String::from_utf8_lossy(&roster.stderr).contains("agent-roster-not-ready"), "{roster:?}");
+    let documents = plain(&["documents", "ls"]);
     assert!(
-        plain.status.success(),
+        documents.status.success(),
         "a client with no endpoint did not find the daemon: {}",
-        String::from_utf8_lossy(&plain.stderr)
+        String::from_utf8_lossy(&documents.stderr)
     );
+    assert_eq!(String::from_utf8_lossy(&documents.stdout), "No documents.\n");
+    std::fs::write(root.join("roster/release"), b"").unwrap();
 }

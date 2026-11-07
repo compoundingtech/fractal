@@ -203,6 +203,9 @@ environment scrub, which would otherwise remove them.
 The limit counts the step's own running, not its wait in the host's build admission (#5068): `nix run` goes through the gate, which once held
 it for the whole 1200 s on a crowded host before it ran anything. The nix shim runs it as `exec build-admission start CLASS LABEL -- nix …`,
 and the gate execs nix once it is admitted, so the step waits exactly while its own process is the gate; st-test reads that every half second.
+The gate also says when it admits: st-test names a pipe in `BUILD_ADMISSION_NOTIFY_FD`, and the gate writes `admitted <time> <waited>` there just
+before the exec. That line ends the wait at once, with at least the gate's figure, which also covers an admission between two samples. A gate
+that does not write it leaves only the sample.
 The waits are bounded by `--queue-limit` instead, and a run that ends either way says how long it waited.
 
 ## 10. Step 5a: rust-tests in the default suite, signed from linux-gate's own run

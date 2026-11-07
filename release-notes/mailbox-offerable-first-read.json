@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "A mailbox stream's full read builds views only for mail it can offer (sent, staged or delivered). Read mail nobody closed is skipped on its newest claim or local mark, without reading the message's content. A seat's reconnect after a daemon restart reads a fraction of what it did",
+  "replay": {
+    "status": "none",
+    "detail": "No claim, projection or cache changes; nothing is replayed or rebuilt."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No table, index, view, trigger or storage version changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "A stream offers exactly the mail it offered before: the skipped mail is what it already dropped by status, and the status is decided by the view's own rule (newest canonical status, raised by a local mark). The legacy native poll and every other message listing are unchanged."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Mixed-version safe: the daemon reads differently and nothing else changes; no wire, client or stored-format change. Old and new drivers see the same frames."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rolling back restores the full view build of every unclosed message on a stream's full read."
+  }
+}

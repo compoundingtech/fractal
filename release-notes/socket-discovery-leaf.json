@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Share Unix socket resolution and nonblocking probing in a transport-independent leaf crate.",
+  "replay": {"status": "none", "detail": "Socket selection behavior is unchanged; no replay or backfill."},
+  "schema": {"status": "none", "detail": "No database or stored-data changes."},
+  "rules": {"status": "none", "detail": "Published, runtime and legacy socket precedence is unchanged."},
+  "compatibility": {"status": "none", "detail": "Internal dependency extraction only; no wire or command changes."},
+  "downtime": {"status": "none", "detail": "No downtime required."},
+  "manual": {"status": "none", "detail": "No operator action required."},
+  "recovery": {"status": "none", "detail": "Revert the change; no data recovery needed."}
+}

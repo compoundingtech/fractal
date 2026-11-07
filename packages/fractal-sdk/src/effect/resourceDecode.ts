@@ -1,4 +1,4 @@
-import { Agent, CollectionName, Resource, UsageSummary, decodeUnknownSync } from '@fractal/client/schema'
+import { Agent, CollectionName, Resource, UsageSummary, decodeUnknownSync } from '@fractal/client/schema/read'
 import { Schema, SchemaAST, SchemaTransformation } from 'effect'
 import type { Brand, DateTime, Duration, Option } from 'effect'
 import type { Issue } from 'effect/SchemaIssue'

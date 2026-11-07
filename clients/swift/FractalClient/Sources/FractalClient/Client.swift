@@ -289,10 +289,12 @@ public actor FractalClient {
     public func hostRepositories(id: String) async throws -> Envelope<HostRepositories> { try await get("v1/client/hosts/\(id)/repositories") }
     public func setsList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("sets", cursor: cursor, limit: limit, history: history) }
     public func setsGet(id: String) async throws -> Envelope<Resource> { try await resource("sets", id: id) }
+    public func deviceCommandGet(_ id: String, wait: Bool = false) async throws -> Envelope<DeviceCommand> { let escaped = id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(CharacterSet(charactersIn: "/"))) ?? id; return try await get("v1/client/device-commands/\(escaped)", query: [.init(name: "wait", value: String(wait))]) }
     public func documentGet(name: String) async throws -> Envelope<DocumentContent> { try await get("v1/client/documents/content", query: [.init(name: "name", value: name)]) }
     public func documentsList(prefix: String? = nil, history: Bool = false, cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<DocumentsPage> { var query: [URLQueryItem] = []; for (name, value) in [("prefix", prefix), ("cursor", cursor)] { if let value { query.append(.init(name: name, value: value)) } }; if history { query.append(.init(name: "history", value: "true")) }; if let limit { query.append(.init(name: "limit", value: String(limit))) }; return try await get("v1/client/documents", query: query) }
     public func documentReferencesGet(subject: String) async throws -> Envelope<DocumentReferences> { try await get("v1/client/document-references", query: [.init(name: "subject", value: subject)]) }
     public func publicationDefinition(subject: String) async throws -> Envelope<PublicationDefinition> { try await get("v1/client/publication-definition", query: [.init(name: "subject", value: subject)]) }
+    public func missionDeclarationGet(mission: String, revision: String? = nil) async throws -> Envelope<MissionDeclaration> { var query: [URLQueryItem] = [.init(name: "mission", value: mission)]; if let revision { query.append(.init(name: "revision", value: revision)) }; return try await get("v1/client/mission-declaration", query: query) }
     public func subjectDefinition(subject: String, showEnvValues: Bool = false) async throws -> Envelope<SubjectDefinition> { try await get("v1/client/subject-definition", query: [.init(name: "subject", value: subject), .init(name: "show_env_values", value: showEnvValues ? "true" : "false")]) }
     public func mailBacklogSummary() async throws -> Envelope<MailBacklog> { try await get("v1/client/mail-backlog") }
     public func sloList() async throws -> Envelope<SloList> { try await get("v1/client/slo") }
@@ -323,6 +325,7 @@ public actor FractalClient {
     public func agentWorkspaceGet(id: String) async throws -> Envelope<AgentWorkspace> { try await get("v1/client/agent-workspaces/\(id)") }
     public func agentDeclarationGet(id: String, revision: String? = nil, showEnvValues: Bool = false) async throws -> Envelope<AgentDeclaration> { var query: [URLQueryItem] = [.init(name: "show_env_values", value: showEnvValues ? "true" : "false")]; if let revision { query.append(.init(name: "revision", value: revision)) }; return try await get("v1/client/agent-declarations/\(id)", query: query) }
     public func statusHistoryGet(id: String) async throws -> Envelope<StatusHistory> { try await get("v1/client/status-history/\(id)") }
+    public func agentRelatedRunsGet(_ id: String) async throws -> Envelope<AgentRelatedRuns> { try await get("v1/client/agent-related-runs/\(Self.routedSessionID(id))") }
     public func harnessInventoryGet(id: String, options: HarnessInventoryQuery) async throws -> Envelope<HarnessInventory> { var query: [URLQueryItem] = [.init(name: "owner_host_id", value: options.ownerHostID), .init(name: "session_id", value: options.sessionID), .init(name: "native_session_id", value: options.nativeSessionID), .init(name: "runtime_incarnation", value: options.runtimeIncarnation), .init(name: "collection", value: options.collection)]; if let directory = options.directory { query.append(.init(name: "directory", value: directory)) }; if let prefix = options.prefix { query.append(.init(name: "prefix", value: prefix)) }; if let limit = options.limit { query.append(.init(name: "limit", value: String(limit))) }; if let cursor = options.cursor { query.append(.init(name: "cursor", value: cursor)) }; return try await get("v1/client/harness-inventory/\(id)", query: query) }
     public func runtimesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("runtimes", cursor: cursor, limit: limit, history: history) }
     public func runtimesGet(id: String) async throws -> Envelope<Resource> { try await resource("runtimes", id: id) }
@@ -427,6 +430,10 @@ public actor FractalClient {
     public func pushRegister(_ registration: PushRegistration) async throws -> PushRegistrationResponse { try await post("v1/client/push-registration", registration) }
     public func pushUnregister() async throws -> PushRegistrationResponse { try await request("v1/client/push-registration", query: [], method: "DELETE", body: nil) }
 
+    /// Issue one expiring foreground command, without durable receipt or replay.
+    public func deviceCommand(_ command: DeviceCommandRequest) async throws -> Envelope<DeviceCommand> { try await post("v1/client/device-commands", command) }
+    public func deviceResult(_ result: DeviceResult) async throws -> Envelope<DeviceCommand> { try await post("v1/client/device-results", result) }
+
     public func beginPairing(deviceName: String, personID: String) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", PersonPairingBegin(apiVersion: fractalClientAPIVersion, deviceName: deviceName, personID: personID)) }
     public func beginPairing(_ request: PairingBegin) async throws -> Envelope<PairingChallenge> { try await post("v1/client/pairings", request) }
     public func completePairing(pairingID: String, code: String, devicePublicKey: String) async throws -> Envelope<PairedSession> { try await post("v1/client/pairings/\(pairingID.replacingOccurrences(of: "pairing/", with: ""))/complete", PairingComplete(apiVersion: fractalClientAPIVersion, code: code, devicePublicKey: devicePublicKey)) }
@@ -522,15 +529,24 @@ public actor FractalClient {
         components.percentEncodedQuery = components.percentEncodedQuery?.replacingOccurrences(of: "+", with: "%2B")
         // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
         var request = URLRequest(url: components.url!); request.setValue(features, forHTTPHeaderField: "x-st3-features"); request.httpMethod = method; request.httpBody = body; request.setValue("application/json", forHTTPHeaderField: "Accept")
+        // DeviceCommandRequest.ttl_ms permits 60000 ms; allow the daemon's full deadline plus transport margin.
+        if method == "GET" && path.hasPrefix("v1/client/device-commands/")
+            && query.contains(where: { $0.name == "wait" && $0.value == "true" }) {
+            let deviceCommandMaximumTTL: TimeInterval = 60
+            let deviceCommandTransportMargin: TimeInterval = 5
+            request.timeoutInterval = deviceCommandMaximumTTL + deviceCommandTransportMargin
+        }
         if body != nil { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }; if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }; if let client { request.setValue(client, forHTTPHeaderField: "x-st3-client") }
         if let idempotencyKey { request.setValue(idempotencyKey, forHTTPHeaderField: "Idempotency-Key") }
         if let readAuthorization { request.setValue(readAuthorization.header, forHTTPHeaderField: "x-st3-scg-read-authorization") }
         applyTraceContext(to: &request)
         let (data, response) = try await session.data(for: request); let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         if let readAuthorization, data.count > readAuthorization.budget { throw AssistantReadRejected(reason: "assistant response exceeded max_response_bytes") }
-        if status == 404 && path == "v1/client/schedules" {
+        let relatedRuns = path.hasPrefix("v1/client/agent-related-runs/")
+        if status == 404 && (relatedRuns || path == "v1/client/schedules") {
+            let operation = relatedRuns ? "agent-related-runs.get" : "schedules.list"
             throw ErrorEnvelope(apiVersion: "st3.client.v0", errorVersion: "st3.client.error.v0", requestID: "",
-                code: .unsupportedCapability, message: "This server does not support schedules.list; upgrade the server",
+                code: .unsupportedCapability, message: "This server does not support " + operation + "; upgrade the server",
                 retryable: false, retryAfterMS: nil, details: [:])
         }
         if !(200..<300).contains(status) { throw try JSONDecoder().decode(ErrorEnvelope.self, from: data) }

@@ -329,7 +329,8 @@ fn a_restart_resumes_sealing_at_the_stored_cursor_and_a_store_without_one_still_
         assert_eq!(envelopes(), 3, "the restart sealed the batch written after the cursor");
         note(&store, "note/a", "four");
     }
-    // A store from before the cursor existed: no key, and the start finds the same place.
+    // A store from before the cursor existed: no key, and the start's recovery search finds
+    // the same place. Exchanges do not run it; the daemon's deferred pass does.
     rusqlite::Connection::open(&path)
         .unwrap()
         .execute("DELETE FROM meta WHERE key='seeded_batch_rowid'", [])
@@ -337,6 +338,8 @@ fn a_restart_resumes_sealing_at_the_stored_cursor_and_a_store_without_one_still_
     let store = open();
     assert!(cursor().is_some(), "the start stores the cursor it found");
     store.replication_snapshot().unwrap();
+    assert_eq!(envelopes(), 3, "an exchange does not search behind the cursor");
+    store.seal_local_batches().unwrap();
     assert_eq!(envelopes(), 4);
 }
 
