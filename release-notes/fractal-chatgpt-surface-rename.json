@@ -6,6 +6,6 @@
   "rules": {"status": "none", "detail": "No coordination rules change."},
   "compatibility": {"status": "changed", "detail": "MCP serverInfo and CLI help identify fractal-chatgpt. Call events emit only fractal_chatgpt::call; the hard allowlist temporarily accepts st_chatgpt::call too. The legacy st-chatgpt executable remains a bridged alias. Cached tool aliases and paired-socket compatibility are unchanged."},
   "downtime": {"status": "none", "detail": "No daemon downtime required."},
-  "manual": {"status": "required", "detail": "Before upgrading, configure mixed-version deployments with RUST_LOG=off,fractal_chatgpt::call=info,st_chatgpt::call=info. An old-target-only filter does not enable new-target events. New installations use packages.fractal-chatgpt and bin/fractal-chatgpt."},
+  "manual": {"status": "changed", "detail": "Before upgrading, configure mixed-version deployments with RUST_LOG=off,fractal_chatgpt::call=info,st_chatgpt::call=info. An old-target-only filter does not enable new-target events. New installations use packages.fractal-chatgpt and bin/fractal-chatgpt."},
   "recovery": {"status": "none", "detail": "The dual-target environment filter supports the previous adapter binary on rollback."}
 }
