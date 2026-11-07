@@ -543,12 +543,69 @@ fn work_claim_preserves_assignment_spelling_for_mixed_version_ownership() {
 }
 
 #[test]
+fn replicated_legacy_claimant_waits_for_row_and_checks_projected_eligibility() {
+    use fractal_store::store::{classify_replicated_claim_with_registry,
+        project_claim_isolated_tx, project_mission_run_update};
+
+    let source = Store::open_memory("node").unwrap();
+    let kdl = "version 2\nmission \"legacy-replica\" state=\"ready\" { goal \"Work.\"; step \"work\" { assigned-to \"agent/node/worker\"; } }";
+    let intent = crate::graph::parse_test_intent(kdl, "node").unwrap();
+    let plan = source.mission(&intent, IntentInput { kdl: kdl.into(), source_name: None }).unwrap();
+    source.apply(&intent, &plan.subject_tokens, "legacy-replica-definition").unwrap();
+    let run = source.create_mission_run(&MissionRunRequest {
+        mission: "legacy-replica".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/test".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "legacy-replica-run".into(),
+    }).unwrap();
+    let subject = &run.steps[0].subject;
+    source.set_step_state(subject, "ready", None).unwrap();
+    source.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h2bd292359425 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='node/worker' WHERE subject=?1", [subject],
+    ).unwrap();
+    let mut claim_request = request("legacy-replica-claim", None);
+    claim_request.actor = Some("agent/node/worker".into());
+    source.work_action(subject, "claim", &claim_request).unwrap();
+    let claim = source.claims_for(subject, Some("work.claimed")).unwrap().pop().unwrap();
+    assert_eq!(claim.body["fields"]["claimant"], json!("node/worker"));
+    assert!(classify_replicated_claim_with_registry(&claim, fractal_schema::registry()).is_ok());
+    let replica = Store::open_memory("replica").unwrap();
+    assert!(replica.step_run(subject).unwrap().is_none());
+    replica.import_replication("node", &source.export_replication(0).unwrap()).unwrap();
+    let projected = replica.step_run(subject).unwrap().unwrap();
+    assert_eq!(projected.claimant.as_deref(), Some("node/worker"));
+    assert_eq!(replica.claims_for(subject, Some("work.claimed")).unwrap()[0].body, claim.body);
+    replica.rebuild_claim_projections().unwrap();
+    assert_eq!(replica.step_run(subject).unwrap().unwrap().claimant.as_deref(), Some("node/worker"));
+    assert_eq!(replica.claims_for(subject, Some("work.claimed")).unwrap()[0].body, claim.body);
+
+    let mut connection = replica.connection.write();
+    let transaction = connection.transaction().unwrap();
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hac330e1ef0a3 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='agent/node/other', available_to='[]',
+         status='ready', lease_owner=NULL, lease_incarnation=NULL,
+         lease_expires_at_unix_ms=NULL WHERE subject=?1", [subject],
+    ).unwrap();
+    project_claim_isolated_tx(&transaction, "legacy-ownership-test", &claim, || {
+        project_mission_run_update(&transaction, &claim)
+    }).unwrap();
+    let owner: Option<String> = transaction.query_row(
+        "SELECT lease_owner FROM step_runs WHERE subject=?1", [subject], |row| row.get(0),
+    ).unwrap();
+    assert!(owner.is_none());
+    let defect: String = transaction.query_row(
+        "SELECT error_code FROM projection_health WHERE aggregate=?1",
+        [format!("legacy-ownership-test:{}", claim.id)], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(defect, "invalid-work-claimant");
+}
+
+#[test]
 fn work_claim_preserves_available_to_spelling_for_mixed_version_ownership() {
     for actor in ["node/worker", "agent/node/worker"] {
         for candidate in ["node/worker", "agent/node/worker"] {
             let step = ready_step_with_mail(0);
             step.store.connection.write().execute(
-                "UPDATE step_runs SET assignee=NULL, available_to=?2 WHERE subject=?1",
+                /* sqlite-large-value: allow-for-now lv-hbbb772f82848 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=NULL, available_to=?2 WHERE subject=?1",
                 params![step.subject, json!([candidate]).to_string()],
             ).unwrap();
             let mut claim = request("candidate-claim", None);
@@ -599,7 +656,7 @@ fn work_reads_match_legacy_and_canonical_actor_spellings() {
                 let owner = (field == "lease_owner").then_some(stored);
                 let status = if owner.is_some() { "claimed" } else { "ready" };
                 step.store.connection.write().execute(
-                    "UPDATE step_runs SET assignee=?2, available_to=?3, lease_owner=?4,
+                    /* sqlite-large-value: allow-for-now lv-hd60f12cbb0cd owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, available_to=?3, lease_owner=?4,
                      status=?5, lease_incarnation=?6, lease_expires_at_unix_ms=?7 WHERE subject=?1",
                     params![step.subject, assignee, available.to_string(), owner, status,
                         request("read", None).incarnation, (snapshot + 600_000).to_string()],
@@ -649,19 +706,19 @@ fn work_renewal_matches_legacy_and_canonical_holders() {
         for holder in ["node/worker", "agent/node/worker"] {
             let step = ready_step_with_mail(0);
             step.store.connection.write().execute(
-                "UPDATE step_runs SET assignee='agent/node/worker' WHERE subject=?1",
+                /* sqlite-large-value: allow-for-now lv-hd38e77dd6432 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='agent/node/worker' WHERE subject=?1",
                 [&step.subject],
             ).unwrap();
             let mut claim = request("holder-claim", None);
             claim.actor = Some(actor.into());
             step.store.work_action(&step.subject, "claim", &claim).unwrap();
             step.store.connection.write().execute(
-                "UPDATE step_runs SET lease_owner=?2 WHERE subject=?1",
+                /* sqlite-large-value: allow-for-now lv-h2102123ed04c owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_owner=?2 WHERE subject=?1",
                 params![step.subject, holder],
             ).unwrap();
             for status in ["claimed", "working", "verifying", "blocked"] {
                 step.store.connection.write().execute(
-                    "UPDATE step_runs SET status=?2 WHERE subject=?1",
+                    /* sqlite-large-value: allow-for-now lv-h28928374ca14 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2 WHERE subject=?1",
                     params![step.subject, status],
                 ).unwrap();
                 let held = step.store.work_for_renewal(actor).unwrap();
@@ -684,14 +741,14 @@ fn work_renew_release_and_completion_match_legacy_and_canonical_holders() {
             for (action, expected_status) in [("renew", "claimed"), ("release", "ready"), ("complete", "verifying")] {
                 let step = ready_step_with_mail(0);
                 step.store.connection.write().execute(
-                    "UPDATE step_runs SET assignee=?2 WHERE subject=?1",
+                    /* sqlite-large-value: allow-for-now lv-hd700e0550a21 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2 WHERE subject=?1",
                     params![step.subject, holder],
                 ).unwrap();
                 let mut claim = request("holder-action-claim", None);
                 claim.actor = Some(actor.into());
                 step.store.work_action(&step.subject, "claim", &claim).unwrap();
                 step.store.connection.write().execute(
-                    "UPDATE step_runs SET lease_owner=?2 WHERE subject=?1",
+                    /* sqlite-large-value: allow-for-now lv-ha0cd354483f3 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_owner=?2 WHERE subject=?1",
                     params![step.subject, holder],
                 ).unwrap();
                 let mut finish = claim.clone();
@@ -729,14 +786,14 @@ fn independent_work_capacity_refuses_second_admission_for_actor_aliases() {
             for status in ["claimed", "working", "verifying", "blocked"] {
                 let step = ready_step_with_mail(0);
                 step.store.connection.write().execute(
-                    "UPDATE step_runs SET assignee='agent/node/worker' WHERE subject=?1",
+                    /* sqlite-large-value: allow-for-now lv-h48c2f2d4b497 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='agent/node/worker' WHERE subject=?1",
                     [&step.subject],
                 ).unwrap();
                 let mut claim = request("capacity-first", None);
                 claim.actor = Some(actor.into());
                 step.store.work_action(&step.subject, "claim", &claim).unwrap();
                 step.store.connection.write().execute(
-                    "UPDATE step_runs SET lease_owner=?2, status=?3 WHERE subject=?1",
+                    /* sqlite-large-value: allow-for-now lv-h7d7fcc2328ee owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_owner=?2, status=?3 WHERE subject=?1",
                     params![step.subject, holder, status],
                 ).unwrap();
                 let declaration = "version 2\nagent \"node/worker\" { workspace \"/tmp\"; command \"true\"; restart \"never\"; }\nmission \"capacity-second\" state=\"ready\" { goal \"Another task.\"; step \"work\" { assigned-to \"agent/node/worker\"; } }";
@@ -759,7 +816,7 @@ fn independent_work_capacity_refuses_second_admission_for_actor_aliases() {
                 let second = &second.steps[0].subject;
                 step.store.set_step_state(second, "ready", None).unwrap();
                 step.store.connection.write().execute(
-                    "UPDATE step_runs SET assignee='agent/node/worker' WHERE subject=?1",
+                    /* sqlite-large-value: allow-for-now lv-h78e96a5b9d99 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='agent/node/worker' WHERE subject=?1",
                     [second],
                 ).unwrap();
                 claim.idempotency_key = "capacity-second-claim".into();

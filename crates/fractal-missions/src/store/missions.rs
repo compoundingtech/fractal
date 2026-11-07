@@ -86,6 +86,12 @@ fn physical_actor(connection: &Connection, actor: &str) -> Result<String, Fracta
     canonical_work_actor(&resolved)
 }
 
+/// Read filters historically accept bare seat names as well as qualified actors.
+/// Work-action admission deliberately uses `physical_actor` directly instead.
+fn physical_read_actor(connection: &Connection, actor: &str) -> Result<String, FractalError> {
+    physical_actor(connection, &normalize_actor(actor, "agent"))
+}
+
 fn canonical_work_actor(actor: &str) -> Result<String, FractalError> {
     fractal_schema::canonical_agent_actor(actor)
         .map(std::borrow::Cow::into_owned)
@@ -603,7 +609,7 @@ fn renew_nested_ancestor_leases_tx(
     let expiry = now.saturating_add(600_000);
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hdaafb8e69f1c owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs
+            /* sqlite-large-value: allow-for-now lv-heca706b36312 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs
              SET lease_expires_at_unix_ms=?1, updated_at_unix_ms=?2
              WHERE generation_id=?3
                AND substr(?4, 1, length(step_path) + 1)=step_path || '/'
@@ -5133,7 +5139,7 @@ impl MissionsStore for Store {
     fn work_for_renewal(&self, actor: &str) -> Result<Vec<StepRunView>> {
         let snapshot = now_ms();
         let connection = self.readers.get();
-        let actor = physical_actor(&connection, actor)?;
+        let actor = physical_read_actor(&connection, actor)?;
         let views = connection
             .prepare_cached(
                 "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
@@ -5362,7 +5368,7 @@ impl MissionsStore for Store {
             selected: Option<&BTreeSet<String>>,
         ) -> Result<Vec<StepRunView>> {
         let connection = self.readers.get();
-        let actor = actor.map(|value| physical_actor(&connection, value)).transpose()?;
+        let actor = actor.map(|value| physical_read_actor(&connection, value)).transpose()?;
         let actor_spellings = actor.as_deref().map(work_actor_spellings_json);
         let views = match selected {
             None => {
@@ -5500,7 +5506,7 @@ impl MissionsStore for Store {
             after: Option<&(u128, String)>,
         ) -> Result<(Vec<StepRunView>, bool)> {
         let connection = self.readers.get();
-        let actor = actor.map(|value| physical_actor(&connection, value)).transpose()?;
+        let actor = actor.map(|value| physical_read_actor(&connection, value)).transpose()?;
         let actor_spellings = actor.as_deref().map(work_actor_spellings_json);
         // Enrichment can clear a step's claimant, through its effective state alone, but
         // never changes its assignee, its candidates or its update time. So this finds every
@@ -5569,7 +5575,7 @@ impl MissionsStore for Store {
             snapshot_unix_ms: u128,
         ) -> Result<Option<StepRunView>> {
         let connection = self.readers.get();
-        let actor = actor.map(|value| physical_actor(&connection, value)).transpose()?;
+        let actor = actor.map(|value| physical_read_actor(&connection, value)).transpose()?;
         let view = connection
             .prepare_cached(
                 "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
@@ -5598,7 +5604,7 @@ impl MissionsStore for Store {
             include_agentless: bool,
         ) -> Result<Vec<StepRunView>> {
         let connection = self.readers.get();
-        let actor = actor.map(|value| physical_actor(&connection, value)).transpose()?;
+        let actor = actor.map(|value| physical_read_actor(&connection, value)).transpose()?;
         let mut statement = connection.prepare(
             "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                     lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints

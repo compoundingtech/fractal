@@ -6490,7 +6490,7 @@ mission "nested-work" state="ready" {
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h96d7cb75d46b owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0', lease_owner=?2 WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h414f4baa2072 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0', lease_owner=?2 WHERE subject=?1",
             params![parent.subject, holder],
         )
         .unwrap();
@@ -9584,7 +9584,7 @@ fn carried_claim_successor_matches_legacy_and_canonical_holders() {
             let carried = &adopted.steps.iter().find(|step| step.step == "work").unwrap().subject;
             assert_ne!(carried, old);
             store.connection.write().execute(
-                "UPDATE step_runs SET assignee='agent/node/worker', lease_owner=?2 WHERE subject=?1",
+                /* sqlite-large-value: allow-for-now lv-h76038fa53ef8 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='agent/node/worker', lease_owner=?2 WHERE subject=?1",
                 params![carried, holder],
             ).unwrap();
             let mut renew = carry_request("one", "alias-carry-renew");

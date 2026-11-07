@@ -317,7 +317,7 @@ fn published_work_keeps_persisted_legacy_assignments_and_available_seats_visible
         let assignee = (!available).then_some("garden/ash");
         let candidates = if available { r#"["garden/ash"]"# } else { "[]" };
         connection.execute(
-            "UPDATE step_runs SET assignee=?2, available_to=?3 WHERE subject=?1",
+            /* sqlite-large-value: allow-for-now lv-h16928b5eb896 owner=fractal_api_core::api::published_lists_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, available_to=?3 WHERE subject=?1",
             rusqlite::params![subject, assignee, candidates],
         ).unwrap();
         drop(connection);
