@@ -192,33 +192,44 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     flush_pending(tx)
 }
 
-fn capture_work(connection: &Connection) -> Result<()> {
-    transaction_work::install(connection)?;
-    // Custom queue writes include the notice authority's column-sensitive
-    // desired/run/step triggers. In particular, renewing a lease does not change
-    // declaration liveness and must not wake this finalizer.
-    for table in ["local_custom_dirty", "custom_registrations", "custom_sources",
-        "custom_dependencies", "identity_names", "identity_heads"] {
-        for action in ["INSERT", "UPDATE", "DELETE"] {
-            connection.execute_batch(&format!(
-                /* sqlite-large-value: allow-for-now lv-hfe7618035364 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */
-                "CREATE TEMP TRIGGER IF NOT EXISTS custom_work_{table}_{action}
-                 AFTER {action} ON main.{table} BEGIN SELECT custom_work_pending(); END;"
-            ))?;
+// The preparation fence uses these same exact catalog definitions. Keep notifier
+// installation and eligibility together: a trusted name alone never admits SQL.
+pub(super) fn work_notifier_definitions() -> &'static BTreeMap<String, String> {
+    static DEFINITIONS: std::sync::LazyLock<BTreeMap<String, String>> = std::sync::LazyLock::new(|| {
+        let mut definitions = BTreeMap::new();
+        for table in ["local_custom_dirty", "custom_registrations", "custom_sources",
+            "custom_dependencies", "identity_names", "identity_heads"] {
+            for action in ["INSERT", "UPDATE", "DELETE"] {
+                let name = format!("custom_work_{table}_{action}");
+                definitions.insert(name.clone(), format!(
+                    /* sqlite-large-value: allow-for-now lv-hb43fa7777c18 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */
+                    "CREATE TRIGGER {name} AFTER {action} ON main.{table} BEGIN SELECT custom_work_pending(); END"
+                ));
+            }
         }
-    }
-    for action in ["INSERT", "UPDATE", "DELETE"] {
-        let rows = match action { "INSERT" => &["NEW"][..], "DELETE" => &["OLD"][..], _ => &["OLD", "NEW"][..] };
-        let relevant = rows.iter().map(|row| format!(
+        for action in ["INSERT", "UPDATE", "DELETE"] {
+            let rows = match action { "INSERT" => &["NEW"][..], "DELETE" => &["OLD"][..], _ => &["OLD", "NEW"][..] };
+            let relevant = rows.iter().map(|row| format!(
             "({row}.kind_hint IN ('agent.renamed','mission.renamed','agent.retired','intent.desired','mission.published')
               OR {row}.kind_hint IS NULL)"
-        )).collect::<Vec<_>>().join(" OR ");
-        connection.execute_batch(&format!(
-            /* sqlite-large-value: allow-for-now lv-hd79f95d2fe80 owner=fractal_store::store::custom TODO=chunk-or-reference-exact-wire-values */
-            "CREATE TEMP TRIGGER IF NOT EXISTS custom_work_lifecycle_{action}
-             AFTER {action} ON main.replica_records WHEN {relevant}
-             BEGIN SELECT custom_work_pending(); END;"
-        ))?;
+            )).collect::<Vec<_>>().join(" OR ");
+            let name = format!("custom_work_lifecycle_{action}");
+            definitions.insert(name.clone(), format!(
+                /* sqlite-large-value: allow-for-now lv-hc38ba81818b8 owner=fractal_store::store::custom TODO=chunk-or-reference-exact-wire-values */
+                "CREATE TRIGGER {name} AFTER {action} ON main.replica_records WHEN {relevant} BEGIN SELECT custom_work_pending(); END"
+            ));
+        }
+        definitions
+    });
+    &DEFINITIONS
+}
+
+fn capture_work(connection: &Connection) -> Result<()> {
+    transaction_work::install(connection)?;
+    // Lease renewals do not change declaration liveness or wake this finalizer.
+    for definition in work_notifier_definitions().values() {
+        let body = definition.strip_prefix(/* sqlite-large-value: allow-for-now lv-h248251de0d26 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "CREATE TRIGGER ").expect("native notifier definition");
+        connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-h4711b40b27f6 owner=fractal_store::store::custom TODO=bound-or-reference-values-and-reclamation */ "CREATE TEMP TRIGGER IF NOT EXISTS {body}"))?;
     }
     Ok(())
 }
