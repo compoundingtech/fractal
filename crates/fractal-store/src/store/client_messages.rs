@@ -613,8 +613,7 @@ fn reminder_winners(transaction: &Transaction<'_>,reminder: &str,recipient: Opti
 /// winner: that header and its group's top candidates, nothing else. A fold with saved work on the
 /// subject keeps it, and the page reads the mark until that fold finishes. Once a later version
 /// has folded past the published cut, that cut's next winner shares its row with the live cut,
-/// where the later version wins, so a reader pinned there sees no winner for the group until the
-/// cut publishes (#5532).
+/// where the later version wins, so the page picks it for a reader pinned there (page_sql).
 pub(super) fn close_marked(transaction: &Transaction<'_>,subject: &str) -> Result<()> {
     #[cfg(any(test, feature = "test-support"))]
     if !transaction.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1))",[TABLE],|row|row.get::<_,bool>(0))? { return Ok(()); }
@@ -1300,20 +1299,43 @@ fn page_sql(person: bool,actor: bool,history: bool,current: bool,after: bool) ->
     // A stream item's header has no graph claim; ?7 bounds it to the stream items the page's
     // first read could see, as ?1 bounds graph headers to their claims.
     let base=messages_shard::STREAM_INDEX_BASE;
-    let branch=|index: &str,scope: &str,alive: &str| {
-        let range=|keyset: &str|format!("SELECT subject,born_index,sent_key,created_index,{flag} current,closed FROM local_client_message_selectors_v1 INDEXED BY {index} WHERE born_index>=0 AND {alive} {recipient_scope} {scope} {eligible} {keyset} AND NOT EXISTS(SELECT 1 FROM local_client_message_selectors_v1 quarantine WHERE quarantine.subject=local_client_message_selectors_v1.subject AND quarantine.born_index=-2 AND quarantine.created_index>?1) AND (CASE WHEN local_client_message_selectors_v1.created_index>={base} THEN local_client_message_selectors_v1.created_index<=?7 ELSE EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index WHERE claims.subject=local_client_message_selectors_v1.subject AND claims.store_index<=?1) END) ORDER BY sent_key DESC,subject LIMIT ?6");
+    let picked=|source: &str,scope: &str,alive: &str,pick: &str,current: &str| {
+        let range=|keyset: &str|format!("SELECT subject,born_index,sent_key,created_index,{current} current,closed FROM {source} WHERE born_index>=0 AND {alive} {recipient_scope} {scope} {pick} {keyset} AND NOT EXISTS(SELECT 1 FROM local_client_message_selectors_v1 quarantine WHERE quarantine.subject=local_client_message_selectors_v1.subject AND quarantine.born_index=-2 AND quarantine.created_index>?1) AND (CASE WHEN local_client_message_selectors_v1.created_index>={base} THEN local_client_message_selectors_v1.created_index<=?7 ELSE EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_index WHERE claims.subject=local_client_message_selectors_v1.subject AND claims.store_index<=?1) END) ORDER BY sent_key DESC,subject LIMIT ?6");
         if after {
             let tied=range("AND sent_key=?4 AND subject>?5");
             let earlier=range("AND sent_key<?4");
             format!("SELECT * FROM (SELECT * FROM ({tied}) UNION ALL SELECT * FROM ({earlier})) ORDER BY sent_key DESC,subject LIMIT ?6")
         } else { range("") }
     };
+    let branch=|index: &str,scope: &str,alive: &str|picked(&format!("local_client_message_selectors_v1 INDEXED BY {index}"),scope,alive,&eligible,flag);
+    // A cut's reminder winner whose header a later version retired after the cut keeps its
+    // currency there. When this member's closed mark has since closed it, the group's next row at
+    // the cut stands in for it: the top one, by version, that is neither closed nor marked. The
+    // retirements since the cut are read once: the closed winners among them, and the candidates
+    // among them, which join the group's live ones born by the cut.
+    let (candidates_index,group,winner_scope,group_by)=if person {
+        ("client_selector_recipient_reminder_candidates","AND c.recipient=w.recipient AND c.reminder=w.reminder AND c.mailbox=1","AND w.recipient=?2 AND w.mailbox=1","w.recipient,w.reminder")
+    } else { ("client_selector_reminder_candidates","AND c.reminder=w.reminder","","w.reminder") };
+    let live_next=format!("(SELECT c.version||' '||c.subject FROM local_client_message_selectors_v1 c INDEXED BY {candidates_index} WHERE c.born_index>=0 AND c.retired_index IS NULL AND c.born_index<=?1 AND c.closed=0 {group} AND NOT {} ORDER BY c.version DESC,c.subject DESC LIMIT 1)",marked("c.subject"));
+    // version is 20 digits, so the version-and-subject keys order as (version, subject).
+    let stand_in=format!("(SELECT stand_in.* FROM (\
+WITH since AS MATERIALIZED (SELECT subject,recipient,mailbox,closed,reminder,version,{flag} flag FROM local_client_message_selectors_v1 INDEXED BY client_selector_retired_cut \
+WHERE retired_index>?1 AND born_index>=0 AND born_index<=?1 AND reminder IS NOT NULL),\
+closed_winners AS (SELECT * FROM since w WHERE w.flag=1 {winner_scope} AND {}) \
+SELECT substr(max(next),22) subject FROM (SELECT {group_by},{live_next} next FROM closed_winners w \
+UNION ALL SELECT {group_by},c.version||' '||c.subject FROM closed_winners w JOIN since c ON c.closed=0 {group} AND NOT {}) w GROUP BY {group_by}\
+) next CROSS JOIN local_client_message_selectors_v1 stand_in WHERE stand_in.subject=next.subject AND {} LIMIT -1) local_client_message_selectors_v1",
+        marked("w.subject"),marked("c.subject"),
+        "stand_in.born_index>=0 AND stand_in.born_index<=?1 AND (stand_in.retired_index IS NULL OR stand_in.retired_index>?1)");
     let eligible_branch = |all: &str,live: &str,retired: &str,scope: &str| {
         if history { return branch(all,scope,alive); }
         if current { return branch(live,scope,alive); }
         let live = branch(live,scope,"retired_index IS NULL AND born_index<=?1");
         let retired = branch(retired,scope,"retired_index IS NOT NULL AND born_index<=?1 AND retired_index>?1");
-        format!("SELECT * FROM (SELECT * FROM ({live}) UNION ALL SELECT * FROM ({retired})) ORDER BY sent_key DESC,subject LIMIT ?6")
+        // By their primary key, before any page term: the stand-ins are a handful of subjects, and
+        // LIMIT keeps SQLite from merging those terms in and seeking them on a page index.
+        let stand_in = picked(&stand_in,scope,alive,&format!("AND {flag}=0"),"1");
+        format!("SELECT * FROM (SELECT * FROM ({live}) UNION ALL SELECT * FROM ({retired}) UNION ALL SELECT * FROM ({stand_in})) ORDER BY sent_key DESC,subject LIMIT ?6")
     };
     let candidates=if actor && !person {
         let sender=eligible_branch("client_selector_sender","client_selector_sender_eligible","client_selector_sender_retired_eligible","AND sender=?3");
@@ -2288,6 +2310,15 @@ mod tests {
             assert!(!plan.iter().any(|step|step.contains("client_selector_order") ||
                 (step.contains("client_selector_sender ") || step.contains("client_selector_recipient "))),
                 "closed/superseded versions cannot be the continuation's scan path: {plan:?}");
+            // A closed winner's stand-in: the retirements since the cut read once, the groups' live
+            // candidates from the reminder index, their retired ones by an index on that one read,
+            // and the stand-ins by their primary key.
+            let candidates = if person.is_some() { "client_selector_recipient_reminder_candidates" } else { "client_selector_reminder_candidates" };
+            for step in ["SEARCH local_client_message_selectors_v1 USING INDEX client_selector_retired_cut (retired_index>?)",
+                &format!("SEARCH c USING INDEX {candidates} ("),"SEARCH c USING AUTOMATIC",
+                "SEARCH stand_in USING PRIMARY KEY (subject=?"] {
+                assert!(plan.iter().any(|seen|seen.starts_with(step)), "a stand-in must {step}: {plan:?}");
+            }
         }
     }
 

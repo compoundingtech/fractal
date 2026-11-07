@@ -312,7 +312,7 @@ fn send_response_tx(
         &hex::encode(Sha256::digest(key.as_bytes()))[..16]
     );
     if overrides_default
-        && tx.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='message.sent')", [&subject], |row| row.get::<_, bool>(0)).map_err(internal)?
+        && fractal_store::store::message_sent::message_sent_tx(tx, &subject).map_err(internal)?
     {
         return Ok(());
     }

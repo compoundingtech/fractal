@@ -4,18 +4,22 @@
 //! A compound plan retains only the dependent identity: memberships must be replanned after folders.
 use crate::{paging::{Scope, Snapshot}, plan::{MoveIntent, V2Plan}};
 use fractal_schema::{arrangements, ordered_membership};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Identity { pub actor: String, pub action_id: String, pub idempotency_key: String }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Base { pub scope: Scope, pub snapshot: Snapshot, pub revision: String, pub ready: bool }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Operations { Folders(Vec<arrangements::Operation>), Memberships(Vec<ordered_membership::Operation>) }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Request { pub identity: Identity, pub fence: Base, pub operations: Operations }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Status { Intent, AwaitingPersistence, Sending, UnknownDelivery, AwaitingObservation, AwaitingCompletionPersistence, AwaitingFreshBase, Observed, Refused, PartiallyApplied }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Refusal { InvalidPlan, StaleFence, Unauthorized, DestinationMissing, Conflict, Storage }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effect { PersistPending, Send, ReadBase, PersistCompletion, PersistRemoval, Replan }
@@ -29,6 +33,23 @@ pub enum Event {
     /// Replan memberships against this complete post-folder base; deleted destinations refuse.
     Fresh(Base, Result<Vec<ordered_membership::Operation>, Refusal>),
 }
+/// Version failures are distinct from corrupt records and records belonging to another scope.
+#[derive(Debug)]
+pub enum RestoreError { Version(u32), InvalidRecord(serde_json::Error), ScopeMismatch }
+pub const JOURNAL_VERSION: u32 = 1;
+/// Includes bounded request payload plus identity history and journal envelope.
+pub const MAX_JOURNAL_BYTES: usize = 2 * ordered_membership::MAX_EDIT_BYTES;
+#[derive(Serialize)]
+struct Journal<'a> { version: u32, state: &'a Edits }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredJournal<'a> {
+    version: u32,
+    #[serde(borrow)]
+    state: &'a serde_json::value::RawValue,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Edits {
     scope: Scope,
     intent: MoveIntent,
@@ -39,6 +60,16 @@ pub struct Edits {
     folder_completed: bool,
     used: Vec<Identity>,
 }
+fn invalid_record(message: &str) -> RestoreError {
+    RestoreError::InvalidRecord(<serde_json::Error as serde::de::Error>::custom(message))
+}
+fn valid_identity(id: &Identity) -> bool {
+    [&id.actor, &id.action_id, &id.idempotency_key].iter().all(|value| !value.trim().is_empty() && value.len() <= 512)
+}
+fn check_journal_size(size: usize) -> Result<(), serde_json::Error> {
+    if size > MAX_JOURNAL_BYTES { return Err(<serde_json::Error as serde::de::Error>::custom("journal exceeds size limit")); }
+    Ok(())
+}
 impl Edits {
     pub fn new(scope: Scope, intent: MoveIntent) -> Self {
         Self { scope, intent, status: Status::Intent, refusal: None, request: None, dependent: None, folder_completed: false, used: Vec::new() }
@@ -46,11 +77,87 @@ impl Edits {
     pub fn intent(&self) -> Option<&MoveIntent> { (self.status != Status::Observed).then_some(&self.intent) }
     /// Send/replay effects always borrow this immutable request; never regenerate its identity/fence.
     pub fn request(&self) -> Option<&Request> { self.request.as_ref() }
+    /// Capture immediately for each persistence effect, before processing another event.
+    /// The host atomically replaces the scoped record and acknowledges only that write.
+    /// This contains identities and fences, never connection credentials or transport objects.
+    /// Encoding errors are storage failures: report `StorageFailed` for that identity/phase,
+    /// never a persistence acknowledgement. The same byte ceiling applies on recovery.
+    pub fn journal(&self) -> Result<Vec<u8>, serde_json::Error> {
+        let bytes = serde_json::to_vec(&Journal { version: JOURNAL_VERSION, state: self })?;
+        check_journal_size(bytes.len())?;
+        Ok(bytes)
+    }
+    /// Restore only host-owned durable bytes. New plans still require a fresh complete base.
+    /// Sending is ambiguous after a crash: re-persist, then replay the immutable request.
+    /// Observation/completion markers never replay an already completed step.
+    pub fn restore(bytes: &[u8], scope: &Scope) -> Result<(Self, Vec<Effect>), RestoreError> {
+        check_journal_size(bytes.len()).map_err(RestoreError::InvalidRecord)?;
+        let journal: StoredJournal<'_> = serde_json::from_slice(bytes).map_err(RestoreError::InvalidRecord)?;
+        if journal.version != JOURNAL_VERSION { return Err(RestoreError::Version(journal.version)); }
+        let mut state: Self = serde_json::from_str(journal.state.get()).map_err(RestoreError::InvalidRecord)?;
+        if state.scope != *scope {
+            return Err(RestoreError::ScopeMismatch);
+        }
+        state.validate_record()?;
+        let effects = match state.status {
+            Status::AwaitingPersistence | Status::Sending | Status::UnknownDelivery => {
+                state.status = Status::AwaitingPersistence; vec![Effect::PersistPending]
+            }
+            Status::AwaitingCompletionPersistence => vec![Effect::PersistCompletion],
+            Status::Observed => vec![Effect::PersistRemoval],
+            Status::Intent => vec![Effect::ReadBase, Effect::Replan],
+            Status::AwaitingObservation | Status::AwaitingFreshBase | Status::Refused | Status::PartiallyApplied => vec![Effect::ReadBase],
+        };
+        Ok((state, effects))
+    }
+    fn validate_record(&self) -> Result<(), RestoreError> {
+        let invalid = || invalid_record("inconsistent edit journal");
+        let mut actions = std::collections::BTreeSet::new();
+        let mut keys = std::collections::BTreeSet::new();
+        for id in &self.used {
+            if !valid_identity(id) || !actions.insert(&id.action_id) || !keys.insert(&id.idempotency_key) { return Err(invalid()); }
+        }
+        if self.dependent.as_ref().is_some_and(|id| !self.unused(id)) { return Err(invalid()); }
+        let folders = self.request.as_ref().is_some_and(|r| matches!(r.operations, Operations::Folders(_)));
+        if let Some(request) = &self.request {
+            if !self.valid_base(&request.fence) || !self.used.contains(&request.identity)
+                || arrangements::validate_actor(&self.scope.container, Some(&request.identity.actor)).is_err() { return Err(invalid()); }
+            let count = match &request.operations { Operations::Folders(ops) => ops.len(), Operations::Memberships(ops) => ops.len() };
+            if count == 0 || count > ordered_membership::MAX_OPERATIONS { return Err(invalid()); }
+            if let Operations::Folders(ops) = &request.operations
+                && ops.iter().any(|op| !matches!(op, arrangements::Operation::FolderCreate { .. } | arrangements::Operation::FolderRename { .. } | arrangements::Operation::FolderMove { .. } | arrangements::Operation::FolderDelete { .. })) { return Err(invalid()); }
+            let operations = match &request.operations {
+                Operations::Folders(ops) => serde_json::to_value(ops),
+                Operations::Memberships(ops) => serde_json::to_value(ops),
+            }.map_err(RestoreError::InvalidRecord)?;
+            let fields = std::collections::BTreeMap::from([
+                ("owner".into(), serde_json::json!(self.scope.owner)),
+                ("version".into(), serde_json::json!(2)), ("operations".into(), operations),
+            ]);
+            let admitted = match &request.operations {
+                Operations::Folders(_) => arrangements::operations(&self.scope.container, &fields).map(|_| ()),
+                Operations::Memberships(_) => ordered_membership::operations(&self.scope.container, &fields).map(|_| ()),
+            };
+            if admitted.is_err() { return Err(invalid()); }
+        } else if !self.used.is_empty() || self.folder_completed { return Err(invalid()); }
+        let valid = match self.status {
+            Status::Intent => self.refusal.is_none() && self.dependent.is_none(),
+            Status::Refused => self.refusal.is_some() && !self.folder_completed,
+            Status::PartiallyApplied => self.refusal.is_some() && self.folder_completed,
+            Status::AwaitingFreshBase => self.refusal.is_none() && folders && self.folder_completed && self.dependent.is_some(),
+            Status::AwaitingCompletionPersistence | Status::Observed => self.refusal.is_none() && self.request.is_some()
+                && (!folders || self.folder_completed) && (self.status != Status::Observed || self.dependent.is_none()),
+            Status::AwaitingPersistence | Status::Sending | Status::UnknownDelivery | Status::AwaitingObservation =>
+                self.refusal.is_none() && self.request.is_some(),
+        };
+        if !valid || (self.dependent.is_some() && !folders) { return Err(invalid()); }
+        Ok(())
+    }
     fn valid_base(&self, base: &Base) -> bool {
         base.ready && base.scope == self.scope && base.snapshot.host_id == self.scope.host && base.snapshot.projection_version == self.scope.projection
     }
     fn unused(&self, id: &Identity) -> bool {
-        !id.actor.is_empty() && !id.action_id.is_empty() && !id.idempotency_key.is_empty() && !self.used.iter().any(|used| used.action_id == id.action_id || used.idempotency_key == id.idempotency_key)
+        valid_identity(id) && !self.used.iter().any(|used| used.action_id == id.action_id || used.idempotency_key == id.idempotency_key)
     }
     fn refuse(&mut self, reason: Refusal) -> Vec<Effect> {
         self.refusal = Some(reason); self.status = if self.folder_completed { Status::PartiallyApplied } else { Status::Refused };
@@ -113,11 +220,12 @@ impl Edits {
 mod tests {
     use super::*;
     use crate::model::{NodeRef, Parent};
-    fn scope() -> Scope { Scope { owner: "owner-a".into(), container: "container-a".into(), endpoint: "endpoint-a".into(), host: "host-a".into(), projection: "1".into() } }
+    const FOLDER: &str = "01900000-0000-7000-8000-000000000001";
+    fn scope() -> Scope { Scope { owner: "person/test".into(), container: format!("arrangement/person/test/{FOLDER}"), endpoint: "endpoint-a".into(), host: "host-a".into(), projection: "1".into() } }
     fn base(n: u64) -> Base { Base { scope: scope(), snapshot: Snapshot { id: format!("snapshot-{n}"), host_id: "host-a".into(), store_index: n, projection_version: "1".into(), created_at: "created".into(), published_at: None }, revision: format!("revision-{n}"), ready: true } }
-    fn id(n: u64) -> Identity { Identity { actor: "actor-a".into(), action_id: format!("action-{n}"), idempotency_key: format!("key-{n}") } }
-    fn members() -> Vec<ordered_membership::Operation> { vec![ordered_membership::Operation::Place { member: "member-a".into(), bucket: Some("folder-a".into()), key: "a0".into() }] }
-    fn plan(folder: bool, member: bool) -> V2Plan { V2Plan { folders: if folder { vec![arrangements::Operation::FolderRename { id: "folder-a".into(), name: "Folder".into() }] } else { vec![] }, memberships: if member { members() } else { vec![] } } }
+    fn id(n: u64) -> Identity { Identity { actor: "person/test".into(), action_id: format!("action-{n}"), idempotency_key: format!("key-{n}") } }
+    fn members() -> Vec<ordered_membership::Operation> { vec![ordered_membership::Operation::Place { member: "agent/fleet/fixture-sidebar/member-a".into(), bucket: Some(FOLDER.into()), key: "a0".into() }] }
+    fn plan(folder: bool, member: bool) -> V2Plan { V2Plan { folders: if folder { vec![arrangements::Operation::FolderRename { id: FOLDER.into(), name: "Folder".into() }] } else { vec![] }, memberships: if member { members() } else { vec![] } } }
     fn state() -> Edits { Edits::new(scope(), MoveIntent { node: NodeRef::Subject { subject: "member-a".into() }, parent: Parent::Folder { id: "folder-a".into() }, before: None }) }
     fn stage(state: &mut Edits, folder: bool, member: bool) {
         assert_eq!(state.reduce(Event::Plan { base: base(1), plan: plan(folder, member), folder: id(1), membership: id(2) }), vec![Effect::PersistPending]);
@@ -270,6 +378,85 @@ mod tests {
         }
     }
     #[test]
+    fn journal_crash_replay_requires_matching_persistence_and_keeps_exact_request() {
+        for phase in 0..4 {
+            let mut original = state(); stage(&mut original, false, true);
+            if phase > 0 { original.reduce(Event::Persisted(id(2))); }
+            if phase == 2 { original.reduce(Event::Unknown(id(2))); }
+            if phase == 3 { original.reduce(Event::Ack(id(2))); }
+            let bytes = original.journal().unwrap();
+            let (mut restored, effects) = Edits::restore(&bytes, &scope()).unwrap();
+            assert_eq!(restored.request(), original.request()); assert_eq!(restored.intent(), original.intent());
+            assert!(restored.reduce(Event::Replay).is_empty());
+            if phase == 3 {
+                assert_eq!(effects, vec![Effect::ReadBase]);
+                assert_eq!(restored.status, Status::AwaitingObservation);
+                assert!(restored.reduce(Event::Persisted(id(2))).is_empty());
+            } else {
+                assert_eq!(effects, vec![Effect::PersistPending]);
+                for event in [Event::Persisted(id(99)), Event::Ack(id(2)), Event::Observed(id(2)), Event::CompletionPersisted(id(2))] {
+                    assert!(restored.reduce(event).is_empty());
+                }
+                assert_eq!(restored.reduce(Event::Persisted(id(2))), vec![Effect::Send]);
+                assert_eq!(restored.request(), original.request());
+                assert!(restored.reduce(Event::Persisted(id(2))).is_empty());
+            }
+        }
+    }
+    #[test]
+    fn journal_partial_completion_survives_every_dependent_step_boundary() {
+        let mut original = state(); stage(&mut original, true, true);
+        original.reduce(Event::Persisted(id(1))); original.reduce(Event::Observed(id(1)));
+        let (mut restored, effects) = Edits::restore(&original.journal().unwrap(), &scope()).unwrap();
+        assert_eq!(effects, vec![Effect::PersistCompletion]); assert!(restored.folder_completed);
+        assert!(restored.reduce(Event::Replay).is_empty());
+        assert!(restored.reduce(Event::Fresh(base(2), Ok(members()))).is_empty());
+        assert_eq!(restored.reduce(Event::CompletionPersisted(id(1))), vec![Effect::ReadBase]);
+        let (mut restored, effects) = Edits::restore(&restored.journal().unwrap(), &scope()).unwrap();
+        assert_eq!(effects, vec![Effect::ReadBase]); assert_eq!(restored.status, Status::AwaitingFreshBase);
+        assert!(restored.reduce(Event::CompletionPersisted(id(1))).is_empty());
+        assert_eq!(restored.reduce(Event::Fresh(base(1), Ok(members()))), vec![Effect::ReadBase]);
+        assert_eq!(restored.reduce(Event::Fresh(base(2), Ok(members()))), vec![Effect::PersistPending]);
+        let exact = restored.request().cloned().unwrap();
+        let (mut restored, effects) = Edits::restore(&restored.journal().unwrap(), &scope()).unwrap();
+        assert_eq!(effects, vec![Effect::PersistPending]); assert!(restored.folder_completed);
+        assert_eq!(restored.request(), Some(&exact)); assert_eq!(exact.identity, id(2));
+        assert_eq!(exact.fence, base(2)); assert!(matches!(exact.operations, Operations::Memberships(_)));
+        assert!(restored.reduce(Event::Persisted(id(1))).is_empty());
+        restored.reduce(Event::Persisted(id(2))); restored.reduce(Event::Refused(id(2), Refusal::Unauthorized));
+        let (mut restored, _) = Edits::restore(&restored.journal().unwrap(), &scope()).unwrap();
+        assert_eq!(restored.status, Status::PartiallyApplied); assert_eq!(restored.refusal, Some(Refusal::Unauthorized));
+        assert!(restored.intent().is_some()); assert!(restored.reduce(Event::Replay).is_empty());
+    }
+    #[test]
+    fn journal_observed_steps_never_reapply_even_if_removal_was_not_persisted() {
+        let mut original = state(); stage(&mut original, false, true);
+        original.reduce(Event::Persisted(id(2))); original.reduce(Event::Observed(id(2)));
+        let (mut restored, effects) = Edits::restore(&original.journal().unwrap(), &scope()).unwrap();
+        assert_eq!(effects, vec![Effect::PersistCompletion]); assert!(restored.reduce(Event::Replay).is_empty());
+        assert_eq!(restored.reduce(Event::CompletionPersisted(id(2))), vec![Effect::PersistRemoval]);
+        let (mut restored, effects) = Edits::restore(&restored.journal().unwrap(), &scope()).unwrap();
+        assert_eq!(effects, vec![Effect::PersistRemoval]); assert!(restored.intent().is_none());
+        for event in [Event::Replay, Event::Persisted(id(2)), Event::Observed(id(2)), Event::CompletionPersisted(id(2))] {
+            assert!(restored.reduce(event).is_empty());
+        }
+    }
+    #[test]
+    fn journal_refuses_versions_before_decoding_state_and_rejects_wrong_scope() {
+        for version in [0, JOURNAL_VERSION + 1, u32::MAX] {
+            let bytes = format!(r#"{{"version":{version},"state":{{"future":"unknown shape"}}}}"#);
+            assert!(matches!(Edits::restore(bytes.as_bytes(), &scope()), Err(RestoreError::Version(found)) if found == version));
+        }
+        let mut original = state(); stage(&mut original, false, true);
+        for field in 0..5 {
+            let mut other = scope();
+            match field { 0 => other.owner.push('b'), 1 => other.container.push('b'), 2 => other.endpoint.push('b'), 3 => other.host.push('b'), _ => other.projection.push('b') }
+            assert!(matches!(Edits::restore(&original.journal().unwrap(), &other), Err(RestoreError::ScopeMismatch)));
+        }
+        assert!(matches!(Edits::restore(br#"{"version":1,"state":{}}"#, &scope()), Err(RestoreError::InvalidRecord(_))));
+        assert!(matches!(Edits::restore(b"not json", &scope()), Err(RestoreError::InvalidRecord(_))));
+    }
+    #[test]
     fn late_pending_failure_cannot_refuse_observed_completion() {
         let mut state = state(); stage(&mut state, false, true);
         state.reduce(Event::Persisted(id(2))); state.reduce(Event::Ack(id(2))); state.reduce(Event::Observed(id(2)));
@@ -291,5 +478,86 @@ mod tests {
             assert_eq!(state.status, Status::AwaitingPersistence); assert_eq!(state.refusal, None);
         }
         assert_eq!(state.reduce(Event::Persisted(id(2))), vec![Effect::Send]);
+    }
+    fn refused_record(change: impl FnOnce(&mut serde_json::Value)) {
+        let mut original = state(); stage(&mut original, true, true);
+        let mut record: serde_json::Value = serde_json::from_slice(&original.journal().unwrap()).unwrap();
+        change(&mut record);
+        assert!(matches!(Edits::restore(&serde_json::to_vec(&record).unwrap(), &scope()), Err(RestoreError::InvalidRecord(_))));
+    }
+    #[test]
+    fn journal_rejects_missing_requests_in_active_and_complete_states() {
+        for status in ["AwaitingPersistence", "Sending", "UnknownDelivery", "AwaitingObservation", "AwaitingCompletionPersistence", "AwaitingFreshBase", "Observed"] {
+            refused_record(|r| { r["state"]["status"] = status.into(); r["state"]["request"] = serde_json::Value::Null; });
+        }
+    }
+    #[test]
+    fn journal_rejects_fresh_base_without_dependency_or_completion() {
+        for field in ["dependent", "folder_completed"] {
+            refused_record(|r| { r["state"]["status"] = "AwaitingFreshBase".into(); r["state"][field] = if field == "dependent" { serde_json::Value::Null } else { false.into() }; });
+        }
+    }
+    #[test]
+    fn journal_rejects_invalid_refusal_and_completion_statuses() {
+        for status in ["Intent", "Refused", "PartiallyApplied", "Observed", "AwaitingCompletionPersistence"] {
+            refused_record(|r| { r["state"]["status"] = status.into(); });
+        }
+    }
+    #[test]
+    fn journal_rejects_duplicate_empty_or_missing_used_identities() {
+        refused_record(|r| { let id = r["state"]["used"][0].clone(); r["state"]["used"].as_array_mut().unwrap().push(id); });
+        for field in ["actor", "action_id", "idempotency_key"] { refused_record(|r| { r["state"]["used"][0][field] = "".into(); }); }
+        refused_record(|r| { r["state"]["used"] = serde_json::json!([]); });
+    }
+    #[test]
+    fn journal_rejects_mismatched_snapshot_fences() {
+        for field in ["host_id", "projection_version"] { refused_record(|r| { r["state"]["request"]["fence"]["snapshot"][field] = "wrong".into(); }); }
+        refused_record(|r| { r["state"]["request"]["fence"]["scope"]["host"] = "wrong".into(); });
+    }
+    #[test]
+    fn journal_rejects_oversized_input_before_parsing() {
+        assert!(matches!(Edits::restore(&vec![b' '; MAX_JOURNAL_BYTES + 1], &scope()), Err(RestoreError::InvalidRecord(_))));
+    }
+    #[test]
+    fn journal_rejects_duplicate_and_excessive_operations() {
+        for count in [2, ordered_membership::MAX_OPERATIONS + 1] {
+            refused_record(|r| { let op = r["state"]["request"]["operations"]["Folders"][0].clone(); r["state"]["request"]["operations"]["Folders"] = serde_json::json!(vec![op; count]); });
+        }
+    }
+    #[test]
+    fn journal_rejects_oversized_operation_bytes_and_invalid_admission() {
+        refused_record(|r| { r["state"]["request"]["operations"]["Folders"][0]["name"] = "x".repeat(ordered_membership::MAX_EDIT_BYTES).into(); });
+        refused_record(|r| { r["state"]["request"]["operations"]["Folders"][0]["id"] = "invalid".into(); });
+    }
+    #[test]
+    fn journal_rejects_unknown_nested_fields_and_invalid_versions() {
+        for path in ["/state/request", "/state/request/identity", "/state/request/fence"] { refused_record(|r| { r.pointer_mut(path).unwrap()["extra"] = true.into(); }); }
+        refused_record(|r| { r.as_object_mut().unwrap().remove("version"); });
+        refused_record(|r| { r["version"] = "1".into(); });
+    }
+    #[test]
+    fn oversized_encoding_fails_the_persistence_barrier_without_sending() {
+        for phase in [Persistence::Pending, Persistence::Completion] {
+            let mut state = state(); stage(&mut state, false, true);
+            if phase == Persistence::Completion { state.reduce(Event::Persisted(id(2))); state.reduce(Event::Observed(id(2))); }
+            state.used.extend((3..40_000).map(id));
+            assert!(state.journal().is_err());
+            state.reduce(Event::StorageFailed { identity: id(2), phase });
+            assert_eq!(state.refusal, Some(Refusal::Storage));
+            assert!(state.reduce(Event::Persisted(id(2))).is_empty());
+            assert!(state.reduce(Event::CompletionPersisted(id(2))).is_empty());
+            assert!(state.reduce(Event::Replay).is_empty());
+        }
+    }
+    #[test]
+    fn journal_at_exact_size_ceiling_round_trips() {
+        let mut state = state(); stage(&mut state, false, true);
+        state.intent.before = Some(NodeRef::Subject { subject: String::new() });
+        let padding = MAX_JOURNAL_BYTES - state.journal().unwrap().len();
+        state.intent.before = Some(NodeRef::Subject { subject: "a".repeat(padding) });
+        let bytes = state.journal().unwrap(); assert_eq!(bytes.len(), MAX_JOURNAL_BYTES);
+        let (restored, effects) = Edits::restore(&bytes, &scope()).unwrap();
+        assert_eq!(restored.request(), state.request()); assert_eq!(restored.intent(), state.intent());
+        assert_eq!(effects, vec![Effect::PersistPending]); assert_eq!(restored.journal().unwrap(), bytes);
     }
 }
