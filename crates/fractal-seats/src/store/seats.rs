@@ -97,7 +97,8 @@ pub trait SeatsStore {
     /// can move an undeclared or stopped agent into history, so runtime.observed is not safe.
     fn agent_page_refs_unchanged(&self, after: u64, through: u64, refs: &[Value]) -> Result<bool>;
     /// Whether this node committed a claim an agent card reads after store index `after`, through
-    /// `through`. Claims other nodes wrote, and local claims about any other subject, are false.
+    /// `through`. Claims other nodes wrote, and local claims about any other subject, are false:
+    /// the roster's check for the local-commit scanner.
     fn local_agent_card_input_after(&self, after: u64, through: u64) -> Result<bool>;
     /// The last claim that can change an agent's status: one about an agent, or about the run
     /// or generation that owns it, whose row decides the agent's projection layer. Steps,
