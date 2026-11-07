@@ -1,12 +1,15 @@
 import { describe, expect, it } from '@effect/vitest'
-import type { Arrangement as ClientArrangement } from '@fractal/client'
+import type { Arrangement as ClientArrangement, OrderedMembership, Snapshot } from '@fractal/client'
 import { Schema } from 'effect'
 import vectors from '../../../../fixtures/clients/sidebar/behavior-v1.json'
 import { loadSidebarBehavior } from '../../../../scripts/sidebar-behavior-fixtures.mjs'
 import { arrangementSidebarDoc } from './client.ts'
-import { optimisticArrangement } from './edit.ts'
-import { canDrop, operationsForMove, restageMove, sidebarProjection, sidebarTree } from './sidebarAdapter.ts'
+import { MembershipEditor, optimisticArrangement } from './edit.ts'
+import { canDrop, membershipWriteRequest, membershipWriteResult, operationsForMove, planMembershipMove, restageMove, sidebarProjection, sidebarTree, type MembershipIntent } from './sidebarAdapter.ts'
 import type { SidebarMove, SidebarNode } from './sidebarContract.ts'
+import v2Vectors from '../../../../fixtures/clients/sidebar/behavior-v2.json'
+import { executeMembershipRead, MembershipPaging, type MembershipReadPort } from './memberships.ts'
+import { SidebarJournal, type SidebarJournalRequest } from './sidebarJournal.ts'
 
 loadSidebarBehavior(vectors)
 // Preserve the web's lazy SDK-schema boundary; this runner must not add an eager schema import.
@@ -129,4 +132,183 @@ describe('shared sidebar v1 through the production web adapter/editor', () => {
     expect(edited.body.version === 1 && edited.body.placements['agent/test/one']?.value).toEqual({ folder: parent, key: 'a2' })
     expect(sidebarProjection({ ...arrangementSidebarDoc(edited), roster }).folders[0]?.members).toEqual(['agent/test/one'])
   })
+})
+
+// Pre-activation component harness, not browser/socket activation evidence.
+const scaleArrangement = fixtureArrangement(v2Vectors.cases[0]!.initial.arrangement)
+const scaleFolder = Object.keys(scaleArrangement.body.folders)[0]!
+const scaleScope = { owner: scaleArrangement.owner, container: scaleArrangement.id, endpoint: 'endpoint/test', host: 'host/test', projection: 'client-projection.v0' }
+const scaleSnapshot = (index: number): Snapshot => ({ id: `snapshot/${index}`, host_id: scaleScope.host, store_index: index, projection_version: 'client-projection.v0', created_at: 'created', expires_at: 'expires' })
+const scaleRows = (count: number): OrderedMembership[] => Array.from({ length: count }, (_, i) => ({
+  id: `membership/${i}`, container: scaleArrangement.id, member: `agent/test/${i.toString().padStart(4, '0')}`,
+  revision: 'claim/test', position: { bucket: scaleFolder, key: 'a0' },
+}))
+const scaleIntent = (rows: readonly OrderedMembership[]): MembershipIntent => ({
+  node: { kind: 'subject', subject: rows.at(-1)!.member }, parent: null, before: null,
+})
+const scaleEditor = (intent: MembershipIntent) => {
+  const values = new Map<string, string>()
+  const journal = new SidebarJournal(scaleScope, {
+    getItem: key => values.get(key) ?? null, setItem: (key, value) => { values.set(key, value) }, removeItem: key => { values.delete(key) },
+  })
+  return new MembershipEditor(journal, intent)
+}
+const scaleIdentity = (name: string) => ({ actor: scaleScope.owner, action_id: `action/${name}`, idempotency_key: `key/${name}` })
+const scaleBase: SidebarJournalRequest['fence'] = { scope: scaleScope, revision: scaleArrangement.revision, ready: true, snapshot: scaleSnapshot(1) }
+const stageScale = (rows: readonly OrderedMembership[]) => {
+  const intent = scaleIntent(rows)
+  const plan = planMembershipMove(scaleArrangement, rows, intent)
+  expect(plan._tag).toBe('PlannedV2')
+  if (plan._tag !== 'PlannedV2') throw new Error('scale plan refused')
+  const editor = scaleEditor(intent)
+  expect(editor.reduce({ _tag: 'Plan', base: scaleBase, ...plan.edit, folder: scaleIdentity('folder'), membership: scaleIdentity('member') })).toEqual(['PersistPending'])
+  return editor
+}
+const pageScale = async (rows: readonly OrderedMembership[], unrelatedWrites = false) => {
+  const paging = new MembershipPaging()
+  const frontier = { epoch: 'epoch/test', changed_index: 1, live_count: rows.length }
+  let effects = paging.reduce({ _tag: 'Refresh', scope: scaleScope, generation: 1 })
+  let calls = 0
+  const port: MembershipReadPort = {
+    subscribe: async () => {},
+    read: async (_token, cursor) => {
+      const start = cursor === undefined ? 0 : Number(cursor)
+      const next = Math.min(start + 128, rows.length)
+      calls++
+      return { snapshot: scaleSnapshot(calls), value: {
+        collection: 'ordered-memberships', kind: 'page', filters: { person: scaleScope.owner, subject: scaleScope.container },
+        items: rows.slice(start, next), page: { limit: 128, has_more: next < rows.length, next_cursor: next < rows.length ? String(next) : null },
+        membership: { container: scaleScope.container, ...frontier },
+      } }
+    },
+  }
+  while (effects.length && effects[0]!._tag !== 'PersistBase') {
+    expect(effects).toHaveLength(1)
+    const effect = effects[0]!
+    if (unrelatedWrites) for (let write = 0; write < 100; write++)
+      expect(paging.reduce({ _tag: 'Metadata', token: effect.token, frontier })).toEqual([])
+    effects = paging.reduce(await executeMembershipRead(effect, port))
+    if (paging.status === 'Paging') expect(paging.complete).toBeUndefined()
+  }
+  expect(paging.status).toBe('Ready')
+  expect(paging.stale).toBe(false)
+  expect(paging.complete?.members).toEqual(rows)
+  expect(calls).toBe(Math.ceil(rows.length / 128))
+  return paging
+}
+
+describe('unwired web v2 scale/fault acceptance', () => {
+  for (const count of [1001, 4096]) {
+    it(`${count} live agents: full paging adapter, pending edit and exact unknown-delivery replay`, async () => {
+      const rows = scaleRows(count)
+      await pageScale(rows, true)
+      const editor = stageScale(rows)
+      // Pending intent/request is available synchronously, before persistence or network work.
+      expect(editor.state).toMatchObject({ status: 'AwaitingPersistence', intent: scaleIntent(rows) })
+      expect(editor.execute('Send')._tag).toBe('PersistenceRequired')
+      editor.execute('PersistPending')
+      const sent = editor.execute('Send')
+      if (sent._tag !== 'Applied' || !sent.request) throw new Error('persisted request missing')
+      const wire = membershipWriteRequest(sent.request)
+      expect(wire.parameters.operations).toEqual([{ op: 'place', member: rows.at(-1)!.member, bucket: null, key: expect.any(String) }])
+      editor.reduce(membershipWriteResult(sent.request, new Error('transport lost')))
+      expect(editor.state.status).toBe('UnknownDelivery')
+      editor.execute('PersistPending')
+      const restored = editor.journal.restore()
+      if (restored._tag !== 'Restored' || !restored.state) throw new Error('journal restore failed')
+      const replay = new MembershipEditor(editor.journal, scaleIntent(rows), restored.state)
+      replay.execute('PersistPending')
+      const resent = replay.execute('Send')
+      if (resent._tag !== 'Applied' || !resent.request) throw new Error('exact replay missing')
+      expect(membershipWriteRequest(resent.request)).toEqual(wire)
+      replay.reduce({ _tag: 'Refused', identity: scaleIdentity('member'), refusal: 'Unauthorized' })
+      expect(replay.state).toMatchObject({ status: 'Refused', refusal: 'Unauthorized' })
+    })
+  }
+  it('distinguishes complete-empty from unavailable and bounds invalidated scale attempts', () => {
+    const paging = new MembershipPaging()
+    expect(paging.complete).toBeUndefined()
+    let effects = paging.reduce({ _tag: 'Refresh', scope: scaleScope, generation: 1 })
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const effect = effects[0]!
+      if (effect._tag === 'PersistBase') throw new Error('unexpected complete view')
+      effects = paging.reduce({ _tag: 'Expired', token: effect.token })
+    }
+    expect(paging.status).toBe('Exhausted')
+    expect(effects).toEqual([])
+    const [fresh] = paging.reduce({ _tag: 'Refresh', scope: scaleScope, generation: 2 })
+    if (!fresh || fresh._tag === 'PersistBase') throw new Error('missing refresh')
+    paging.reduce({ _tag: 'Page', token: fresh.token, page: { frontier: { epoch: 'epoch/test', changed_index: 1, live_count: 0 }, snapshot: scaleSnapshot(1), members: [], has_more: false } })
+    expect(paging.status).toBe('Ready')
+    expect(paging.complete?.members).toEqual([])
+  })
+  it('plans a minimal tied-key rekey at the live-member bound without truncation', () => {
+    const rows = scaleRows(4096)
+    const intent: MembershipIntent = { node: { kind: 'subject', subject: rows.at(-1)!.member }, parent: scaleFolder, before: { kind: 'subject', subject: rows.at(-2)!.member } }
+    const plan = planMembershipMove(scaleArrangement, rows, intent)
+    expect(plan._tag).toBe('PlannedV2')
+    if (plan._tag !== 'PlannedV2') throw new Error('bounded rekey refused')
+    expect(plan.edit.memberships.map(row => row.member)).toEqual([rows.at(-1)!.member, rows.at(-2)!.member])
+    expect(plan.edit.memberships[0]!.key < plan.edit.memberships[1]!.key).toBe(true)
+  })
+  it('retains the last complete scale view across transport loss, refusal and obsolete attempts', async () => {
+    const paging = await pageScale(scaleRows(4096))
+    const complete = paging.complete
+    const [effect] = paging.reduce({ _tag: 'Refresh', scope: scaleScope, generation: 2 })
+    if (!effect || effect._tag === 'PersistBase') throw new Error('missing read')
+    paging.reduce({ _tag: 'TransportLost', token: effect.token })
+    expect(paging.status).toBe('Disconnected')
+    expect(paging.stale).toBe(true)
+    expect(paging.complete).toBe(complete)
+    paging.reduce({ _tag: 'Refresh', scope: scaleScope, generation: 3 })
+    expect(paging.reduce({ _tag: 'Refused', token: effect.token })).toEqual([])
+    expect(paging.status).toBe('Paging')
+    expect(paging.complete).toBe(complete)
+  })
+  it('admits a 1,024-folder ancestry without recursive planner overflow', () => {
+    const template = Object.values(scaleArrangement.body.folders)[0]!
+    const ids = Array.from({ length: 1024 }, (_, i) => `folder/${i}`)
+    const folders = Object.fromEntries(ids.map((id, i) => [id, { ...template, position: { ...template.position, value: { parent: ids[i - 1] ?? null, key: 'a0' } } }]))
+    const parents = Object.fromEntries(ids.map((id, i) => [id, ids[i - 1] ?? null]))
+    const base = { ...scaleArrangement, body: { ...scaleArrangement.body, version: 2 as const, folders }, resolved: { ...scaleArrangement.resolved!, parents } }
+    const rows = scaleRows(1001).map(row => ({ ...row, position: { bucket: ids.at(-1)!, key: 'a0' } }))
+    expect(planMembershipMove(base, rows, scaleIntent(rows))._tag).toBe('PlannedV2')
+    expect(planMembershipMove(base, rows, { node: { kind: 'folder', id: ids[0]! }, parent: ids.at(-1)!, before: null })).toEqual({ _tag: 'RefusedV2', refusal: 'Cycle' })
+  })
+  it('rejects a 1,025-operation atomic tied-key rekey and >1 MiB before dispatch', () => {
+    const tied = scaleRows(2048)
+    const mover = { ...scaleRows(1)[0]!, member: 'machine/mover', position: { bucket: null, key: 'a1' } }
+    const oversized = { ...mover, member: `machine/${'界'.repeat(350000)}` }
+    const cases = [
+      { rows: [...tied, mover], intent: { node: { kind: 'subject' as const, subject: mover.member }, parent: scaleFolder, before: { kind: 'subject' as const, subject: tied[1024]!.member } }, refusal: 'TooManyOperations' },
+      { rows: [oversized], intent: { node: { kind: 'subject' as const, subject: oversized.member }, parent: scaleFolder, before: null }, refusal: 'TooManyBytes' },
+    ]
+    for (const test of cases) {
+      const editor = scaleEditor(test.intent)
+      expect(planMembershipMove(scaleArrangement, test.rows, test.intent)).toEqual({ _tag: 'RefusedV2', refusal: test.refusal })
+      expect(editor.state.request).toBeNull()
+      expect(editor.execute('Send')._tag).toBe('PersistenceRequired')
+    }
+  })
+  it.skip('D #4739: reject the 4,097th live-member edit through the real daemon limit', () => {})
+  it.skip('D #4739: local-socket initial-load p95 <=1s with sustained unrelated daemon writes', () => {})
+  it.skip('PR21 host activation: browser overlay visible next animation frame; render p95 <=8ms; v2 <=2x v1', () => {})
+  it.skipIf(process.env.FRACTAL_SIDEBAR_PERF !== '1')('opt-in component p95 (not browser or local-socket evidence)', async () => {
+    const p95 = (values: number[]) => values.toSorted((a, b) => a - b)[Math.ceil(values.length * 0.95) - 1]!
+    for (const count of [1001, 4096]) {
+      const rows = scaleRows(count)
+      const planning: number[] = []
+      const loading: number[] = []
+      for (let sample = 0; sample < 110; sample++) {
+        const start = performance.now()
+        const plan = planMembershipMove(scaleArrangement, rows, scaleIntent(rows))
+        const planned = performance.now()
+        expect(plan._tag).toBe('PlannedV2')
+        await pageScale(rows)
+        if (sample >= 10) { planning.push(planned - start); loading.push(performance.now() - planned) }
+      }
+      process.stdout.write(`sidebar-scale-measurement ${JSON.stringify({ runner: `${process.platform}/${process.arch} ${process.version}`, count, plannerP95Ms: p95(planning), scriptedPagingP95Ms: p95(loading), projectionRenderBaseline: 'blocked: v2 host unwired; not an activation pass' })}\n`)
+      expect(p95(planning)).toBeLessThanOrEqual(4)
+    }
+  }, 60000)
 })
