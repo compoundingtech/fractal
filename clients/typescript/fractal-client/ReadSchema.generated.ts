@@ -1186,7 +1186,7 @@ export const AssistantMinimalReadMode = /*#__PURE__*/ (() => Schema.Literals(["a
 export type AssistantMinimalReadMode = typeof AssistantMinimalReadMode.Type
 export type AssistantMinimalReadModeEncoded = typeof AssistantMinimalReadMode.Encoded
 
-export const AssistantPrincipal = /*#__PURE__*/ (() => Schema.Literals(["assistant/chatgpt"]).annotate({ identifier: "AssistantPrincipal" }))()
+export const AssistantPrincipal = /*#__PURE__*/ (() => Schema.Literals(["assistant/chatgpt","assistant/mcp"]).annotate({ identifier: "AssistantPrincipal" }))()
 export type AssistantPrincipal = typeof AssistantPrincipal.Type
 export type AssistantPrincipalEncoded = typeof AssistantPrincipal.Encoded
 
@@ -2833,7 +2833,7 @@ export const PersonAnswerRecord = /*#__PURE__*/ (() => Schema.Struct({
   "evidence": optionalKey(Schema.Array(Id)),
   /** The ask resolved by itself at its deadline, not by the person. */
   "resolved_by": optionalKey(Schema.Literals(["deadline"])).annotate({ description: "The ask resolved by itself at its deadline, not by the person." }),
-  /** The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner. daemon/runtime when the ask's deadline, or its requester ending, resolved it. */
+  /** The actual answering principal, including assistant/chatgpt or assistant/mcp for an assistant response; never replaced by its grant owner. daemon/runtime when the ask's deadline, or its requester ending, resolved it. */
   "respondent": RespondentRef,
   /** External assistant attribution when the response was submitted through an assistant grant. */
   "sender_class": optionalKey(Schema.String).annotate({ description: "External assistant attribution when the response was submitted through an assistant grant." }),
@@ -4124,7 +4124,7 @@ export const ScgReadAuthorizationPayload = /*#__PURE__*/ (() => Schema.Struct({
   "execution_id": Schema.String.check(Schema.isMinCodePoints(1)),
   "expires_at_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "grant_id": Id,
-  "identity": Schema.Literal("chatgpt"),
+  "identity": Schema.Literals(["chatgpt","mcp"]),
   "issuer": PersonId,
   "key_id": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(128)),
   "max_response_bytes": AssistantResponseBytes,
