@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
-import { AppState } from 'react-native';
+import { AppState, unstable_batchedUpdates } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
@@ -39,6 +39,7 @@ import { DiagnosticsConnection } from './DiagnosticsConnection';
 import { recordDiagnosticCapabilities } from './diagnostics';
 import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
 import { nativePushPorts, pushWrite } from './pushNative';
+import { pairingCommitRouting, pairingTrustAllowed, type PairingRouting } from './pairingSecurity';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -60,7 +61,7 @@ const SIGNING_KEY = 'st3.device.signing';
 // signing key together. Old separate credential/signing entries remain readable until re-pair.
 const PROFILE_KEY = 'st3.device.profile';
 type PhoneSigning = DeviceKey & { handle?: string };
-type PhoneProfile = { url: string; credential: string; signing?: PhoneSigning; personRootFingerprint?: string };
+type PhoneProfile = { url: string; credential: string; signing?: PhoneSigning; personRootFingerprint?: string; routing?: PairingRouting };
 // Simplified conversations: this phone's own choice, on unless turned off, never synced.
 const SIMPLE_KEY = 'st3.conversation.simple';
 // Notifications: off by default, stored only on this phone. APNs tokens are never persisted here.
@@ -132,7 +133,7 @@ function useAppStore(proof?: FabricProfile) {
   const [order, setOrder] = useState<Tab[]>(tabOrder(null));
   const [url, setUrl] = useState(proof?.url ?? ''), [urlDraft, setUrlDraft] = useState('');
   const [credential, setCredential] = useState<string | null>(proof?.credential ?? null);
-  const [pairDraft, setPairDraft] = useState<{ gateway: string; id: string; code: string } | null>(null);
+  const [pairDraft, setPairDraft] = useState<{ gateway: string; id: string; code: string; scanned?: true } | null>(null);
   const [data, setData] = useState<Data>(emptyData);
   const [truncated, setTruncated] = useState<Partial<Record<keyof Data, boolean>>>({});
   const [loadErrors, setLoadErrors] = useState<Partial<Record<keyof Data, string>>>({});
@@ -376,19 +377,21 @@ function useAppStore(proof?: FabricProfile) {
     if (proof) return;
     let live = true;
     void (async () => {
-      const [available, choice, stored, storedList, fallback] = await Promise.all([
+      const [available, choice, stored, storedList, fallback, profile] = await Promise.all([
         fabricAvailable(),
         AsyncStorage.getItem(CARRIER_KEY).catch(() => null), AsyncStorage.getItem(FABRIC_TARGET_KEY).catch(() => null),
         AsyncStorage.getItem(FABRIC_MEMBERS_KEY).catch(() => null), AsyncStorage.getItem(FABRIC_FALLBACK_KEY).catch(() => null),
+        SecureStore.getItemAsync(PROFILE_KEY),
       ]);
       if (!live) return;
       const built = buildFabricDefault();
       setFabricBuilt(available);
       const saved = readFabricMembers(storedList, stored);
-      setFabricMemberList(saved.length ? saved : builtFabricMembers(built));
-      setCarrierChoice(choice === 'fabric' || choice === 'tailscale' ? choice : available && built ? 'fabric' : 'tailscale');
+      const routing = profile ? (JSON.parse(profile) as PhoneProfile).routing : undefined;
+      setFabricMemberList(routing?.members ?? (saved.length ? saved : builtFabricMembers(built)));
+      setCarrierChoice(routing?.carrier ?? (choice === 'fabric' || choice === 'tailscale' ? choice : available && built ? 'fabric' : 'tailscale'));
       setFallbackOn(fallback !== '0');
-    })();
+    })().catch(() => { if (live) setError('The saved pairing route could not be read.'); });
     return () => { live = false; };
   }, [proof]);
 
@@ -412,6 +415,10 @@ function useAppStore(proof?: FabricProfile) {
     if (saved.status === 'rejected') { setError('Secure credential storage is unavailable on this build.'); return; }
     const gateway = paired?.url ?? (u.status === 'fulfilled' ? u.value : null);
     const bearer = paired?.credential ?? (c.status === 'fulfilled' ? c.value : null);
+    if (paired?.routing) {
+      setFabricMemberList(paired.routing.members);
+      setCarrierChoice(paired.routing.carrier);
+    }
     if (gateway) { setUrl(gateway); setUrlDraft(gateway); }
     // Only the current four-tab order is read; old phone preferences are retired.
     if (o.status === 'fulfilled' && o.value) { try { setOrder(tabOrder(JSON.parse(o.value))); } catch { /* use default */ } }
@@ -689,7 +696,8 @@ function useAppStore(proof?: FabricProfile) {
     const requestFetch = gatewayFetch();
     // With fabric chosen and its bridge open, the pairing requests go over fabric to the same member: the
     // gateway typed (or saved) stays this device's identity and its fallback route.
-    const requestUrl = member ? fabricSnapshot.bridgeUrl : fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' ? fabricSnapshot.bridgeUrl : gateway;
+    // QR pairing always goes to its explicit gateway, never a different currently connected Fabric member.
+    const requestUrl = member ? fabricSnapshot.bridgeUrl : pairDraft?.scanned ? gateway : fabricBuilt && carrierChoice === 'fabric' && fabricSnapshot.phase === 'ready' ? fabricSnapshot.bridgeUrl : gateway;
     if (isFabricGatewayId(gateway) && requestUrl === gateway) throw new Error('Fabric is not connected yet, so there is nowhere to pair. Wait a moment and try again, or check the member\'s fabric grant for this phone.');
     const response = await requestFetch(`${requestUrl}/v1/client/capabilities?accepts=fabric-gateway-grant`);
     const text = await response.text();
@@ -718,7 +726,9 @@ function useAppStore(proof?: FabricProfile) {
         verify: verifyGrantSignature,
       });
       const signs = result.value.scopes.includes('control.messages');
+      const routing = member ? undefined : pairingCommitRouting({ carrier: carrierChoice, members: fabricMemberList }, !!pairDraft?.scanned);
       const next: PhoneProfile = { url: gateway, credential: result.value.credential,
+        ...(!member && (pairDraft?.scanned || old?.routing) ? { routing } : {}),
         ...(pin ? { personRootFingerprint: pin } : {}),
         ...(signs ? { signing: { key: made.key, storage: made.storage, handle: made.handle, person: result.value.person_id, chain: result.value.device_key_chain! } } : {}),
       };
@@ -736,7 +746,13 @@ function useAppStore(proof?: FabricProfile) {
       await SecureStore.deleteItemAsync(CREDENTIAL_KEY).catch(() => {});
       await SecureStore.deleteItemAsync(SIGNING_KEY).catch(() => {});
       await clearCachedProjection().catch(() => {});
-      setUrl(gateway); setUrlDraft(gateway); setCredential(next.credential); setPairDraft(null); setPairingIssue(''); setError(grantProblem);
+      unstable_batchedUpdates(() => {
+        if (next.routing) {
+          setFabricMemberList(next.routing.members);
+          setCarrierChoice(next.routing.carrier);
+        }
+        setUrl(gateway); setUrlDraft(gateway); setCredential(next.credential); setPairDraft(null); setPairingIssue(''); setError(grantProblem);
+      });
       // Paired over fabric alone: that member uses this device's own pairing.
       if (isFabricGatewayId(gateway) && fabricTarget && fabricGatewayId(fabricTarget) === gateway && !fabricTarget.device) {
         await saveFabricMembers(fabricMemberList.map(m => (sameFabricTarget(m, fabricTarget) ? { ...m, device: true as const } : m)));
@@ -766,9 +782,18 @@ function useAppStore(proof?: FabricProfile) {
     setOwnProfiles(held => { const next = new Map(held); next.delete(key); return next; });
     return true;
   }
+  /** Once present, route ownership lives with the credential, not in independently loaded preferences. */
+  async function saveProfileRouting(routing: PairingRouting): Promise<void> {
+    const raw = await SecureStore.getItemAsync(PROFILE_KEY);
+    if (!raw) return;
+    const profile: PhoneProfile = JSON.parse(raw);
+    if (profile.routing) await SecureStore.setItemAsync(PROFILE_KEY, JSON.stringify({ ...profile, routing }), { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
+  }
+
   /** Save the fabric members in the person's order: the list under its key, the device's member under the old key. */
   async function saveFabricMembers(next: FabricMember[]): Promise<void> {
     const list = fabricMembers(next);
+    await saveProfileRouting({ carrier: carrierChoice, members: list });
     const stored = storedFabricMembers(list);
     await Promise.all([
       stored.members ? AsyncStorage.setItem(FABRIC_MEMBERS_KEY, stored.members) : AsyncStorage.removeItem(FABRIC_MEMBERS_KEY),
@@ -787,12 +812,24 @@ function useAppStore(proof?: FabricProfile) {
       await AsyncStorage.setItem(URL_KEY, normalized); setUrl(normalized); setError('');
     },
     async pair(id: string, code: string, fingerprint: string, unpinned = false): Promise<boolean> {
+      if (!pairingTrustAllowed(!!pairDraft?.scanned, unpinned)) {
+        setError('A scanned pairing requires a separately verified fingerprint.');
+        return false;
+      }
       // With fabric chosen and a target saved, a device with no gateway pairs over fabric alone.
       const fabricOnly = !pairDraft && !url && fabricBuilt && carrierChoice === 'fabric' && fabricTarget ? fabricGatewayId(fabricTarget) : '';
       const gateway = pairDraft?.gateway ?? (url || fabricOnly);
       if (!gateway || !id.trim() || !code.trim()) return false;
       setBusy(true);
-      try { await completePairing(id.trim(), code.trim(), fingerprint, unpinned, gateway); push.resume(); return true; } catch (e) { setError(errorText(e)); return false; } finally { setBusy(false); }
+      try { await completePairing(id.trim(), code.trim(), fingerprint, unpinned, gateway); push.resume(); return true; } catch (e) {
+        setError(pairDraft?.scanned ? 'Could not pair this device. The previous pairing was kept. Check the separately copied fingerprint and start a fresh pairing on the trusted machine; inspect its devices if the code was consumed.' : errorText(e));
+        return false;
+      } finally { setBusy(false); }
+    },
+    /** A QR proposes only a draft; saved routing, credential and root pin remain untouched. */
+    prefillScannedPairing(gateway: string, id: string, code: string) {
+      setPairDraft({ gateway, id, code, scanned: true });
+      setPairingIssue('Enter the fingerprint copied separately from the trusted machine before completing this pairing.');
     },
     /** A Debug pairing link: the gateway, pairing id, and code all in one. */
     async pairFromLink(gatewayRaw: string, id: string, code: string) {
@@ -805,7 +842,10 @@ function useAppStore(proof?: FabricProfile) {
     },
     cancelPairDraft() { setPairDraft(null); setPairingIssue(''); },
     /** Choose the carrier. Fabric is an opt-in and needs a saved target; the saved gateway stays as it is. */
-    async setCarrier(choice: CarrierChoice) { await AsyncStorage.setItem(CARRIER_KEY, choice).catch(() => {}); setCarrierChoice(choice); },
+    async setCarrier(choice: CarrierChoice) {
+      await saveProfileRouting({ carrier: choice, members: fabricMemberList });
+      await AsyncStorage.setItem(CARRIER_KEY, choice).catch(() => {}); setCarrierChoice(choice);
+    },
     /** Add a member to the end of the fabric list from pasted text (`node=…&service=…`, or a link carrying them) and a name. */
     async saveFabricTarget(text: string, name = ''): Promise<boolean> {
       const target = fabricTargetFromText(text);
@@ -814,10 +854,10 @@ function useAppStore(proof?: FabricProfile) {
       if (fabricMemberList.length >= MAX_FABRIC_MEMBERS) { setError(`The list holds at most ${MAX_FABRIC_MEMBERS} members. Remove one first.`); return false; }
       const named = memberName(name);
       if (named && fabricMemberList.some(existing => sameName(existing.name, named))) { setError(`A member is already named ${named}.`); return false; }
-      // The first member of a phone paired over a gateway is the member it is paired with, as with today's
-      // single target. A phone paired over fabric alone already knows its member. Any other member is
-      // paired on its own: this device's credential never goes to it.
-      const device = !fabricMemberList.some(m => m.device) && (isFabricGatewayId(url) ? url === fabricGatewayId(target) : !fabricMemberList.length);
+      // A QR proves no relationship to a Fabric node. Never infer one from the first added target.
+      const rawProfile = await SecureStore.getItemAsync(PROFILE_KEY);
+      const boundRouting = rawProfile ? (JSON.parse(rawProfile) as PhoneProfile).routing : undefined;
+      const device = !fabricMemberList.some(m => m.device) && (isFabricGatewayId(url) ? url === fabricGatewayId(target) : !boundRouting && !fabricMemberList.length);
       await saveFabricMembers([...fabricMemberList, { ...target, name: named || defaultMemberName(fabricMemberList.length), ...(device ? { device: true as const } : {}) }]);
       setError('');
       return true;

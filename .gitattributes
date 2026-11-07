@@ -4,6 +4,7 @@ evals/**/_git/objects/** binary
 crates/fractal-client/src/generated.rs linguist-generated=true
 crates/fractal-client/src/contract.rs linguist-generated=true
 crates/fractal-client/src/lib.rs linguist-generated=true
+crates/fractal-client/src/notice_descriptors.generated.rs linguist-generated=true
 clients/typescript/fractal-client/*.generated.ts linguist-generated=true
 clients/swift/FractalClient/Sources/FractalClient/*.generated.swift linguist-generated=true
 clients/swift/FractalClient/Sources/FractalClient/Models.swift linguist-generated=true
@@ -18,3 +19,5 @@ apps/fractal-web/src/terminal/ghosttyKeyCodes.generated.ts linguist-generated=tr
 apps/fractal-web/src/terminal/assets/ghostty-key-encoder.generated.* linguist-generated=true
 # Written by Genie from the diagnostics package composition.
 pnpm-source-inputs.json linguist-generated=true
+# Captured by the pre-extraction TUI sidebar_golden test; retain as the widget parity baseline.
+fixtures/clients/sidebar/tui-v1.snapshot linguist-generated=true

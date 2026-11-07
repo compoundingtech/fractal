@@ -16,7 +16,7 @@ A second top-level agent, `agent/eval/seat-queue/chief`, is model-free and holds
 [free mode](../../../docs/site/reference/configuration.md#free-mode) any agent moves any seat's queue. The
 controller acts as the chief, as the free mode eval acts as its planner. While the seat holds
 alpha's first step, the chief moves charlie
-before bravo with `st agents queue move --as agent/eval/seat-queue/chief`. Alpha then waits on
+before bravo with `fractal agents queue move --as agent/eval/seat-queue/chief`. Alpha then waits on
 its sign-off gate as the head run. The controller approves the gate only after the seat has taken
 charlie's work, while the seat still holds that work.
 
@@ -40,4 +40,4 @@ They pass only if the seat did all of the following:
 - received no terminal input.
 
 If the agent finishes a step before the controller's move or gate approval lands, the controller
-fails and names the timing. That result says nothing about the agent or st3. Run the eval again.
+fails and names the timing. That result says nothing about the agent or fractal. Run the eval again.

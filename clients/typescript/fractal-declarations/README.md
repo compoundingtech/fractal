@@ -4,6 +4,8 @@ Typed authoring and deterministic KDL v2 encoding for Fractal agents, missions a
 
 For a runnable example and the offline validation workflow, see [Author a graph in TypeScript](../../../docs/clients/author-a-graph-in-typescript.md). The example shares agent objects across supervision, mission assignment and area metadata.
 
+Agents accept an optional `principal: 'person/NAME'`. Missions accept optional `capacity: { cores?, memory? }` using KDL size strings such as `'4G'`; omitted properties use the base lane. Steps accept optional capacity with at least one property, raising only the named parts of their seat's lane. Run `st validate` to check canonical people, lane bounds and that a step does not lower its seat's lane.
+
 ```ts
 import { encodeKdl } from '@fractal/declarations'
 import type { Agent, Mission, Schedule } from '@fractal/declarations'

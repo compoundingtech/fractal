@@ -3,8 +3,8 @@ use crate::declaration_syntax::{
     ensure_bare, ensure_no_children, ensure_no_properties, reject_unknown_children, unique_child,
 };
 use crate::model::{
-    DeclaredAdmission, DeclaredBudgets, DeclaredLane, DeclaredPriority, MissionSpec,
-    NormalizedIntent, St3Error,
+    DeclaredAdmission, DeclaredBudgets, DeclaredLane, DeclaredPriority, FractalError, MissionSpec,
+    NormalizedIntent,
 };
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -30,8 +30,8 @@ const BUDGETS: [(&str, &str); 4] = [
 struct Scope<'a>(&'a str, &'a str);
 
 impl Scope<'_> {
-    fn error(self, field: &str, requirement: &str) -> St3Error {
-        St3Error::new(
+    fn error(self, field: &str, requirement: &str) -> FractalError {
+        FractalError::new(
             "invalid-declared-admission",
             format!("{} '{}' {field} {requirement}", self.0, self.1),
         )
@@ -39,13 +39,13 @@ impl Scope<'_> {
         .with_detail("field", field)
     }
 
-    fn number(self, field: &str, value: Option<u64>) -> Result<u64, St3Error> {
+    fn number(self, field: &str, value: Option<u64>) -> Result<u64, FractalError> {
         value
             .filter(|v| (1..=MAX_SAFE_INTEGER).contains(v))
             .ok_or_else(|| self.error(field, INTEGER))
     }
 
-    fn size(self, field: &str, value: Option<&str>) -> Result<(), St3Error> {
+    fn size(self, field: &str, value: Option<&str>) -> Result<(), FractalError> {
         let value = value.ok_or_else(|| self.error(field, SIZE))?;
         let bytes =
             fractal_runtime::parse_lane_memory(value).map_err(|_| self.error(field, SIZE))?;
@@ -60,7 +60,7 @@ impl Scope<'_> {
         priority: Option<&DeclaredPriority>,
         lane: Option<&DeclaredLane>,
         budgets: Option<&DeclaredBudgets>,
-    ) -> Result<(), St3Error> {
+    ) -> Result<(), FractalError> {
         if matches!(priority, Some(DeclaredPriority::Unknown(_))) {
             return Err(self.error("declared_priority", "must be background or normal"));
         }
@@ -93,14 +93,14 @@ impl Scope<'_> {
         value: &Value,
         field: &str,
         requirement: &str,
-    ) -> Result<Option<T>, St3Error> {
+    ) -> Result<Option<T>, FractalError> {
         value
             .get(field)
             .map(|v| T::deserialize(v).map_err(|_| self.error(field, requirement)))
             .transpose()
     }
 
-    fn fields(self, value: &Value) -> Result<DeclaredAdmission, St3Error> {
+    fn fields(self, value: &Value) -> Result<DeclaredAdmission, FractalError> {
         let priority = self.decode(value, "declared_priority", "must be background or normal")?;
         let lane = self.decode(value, "declared_lane", "must be check or build")?;
         let budgets = value
@@ -119,7 +119,7 @@ impl Scope<'_> {
                         _ => return Err(self.error(&field, "is not a recognized declared budget")),
                     }
                 }
-                Ok::<_, St3Error>(
+                Ok::<_, FractalError>(
                     DeclaredBudgets::deserialize(value).expect("validated budget fields"),
                 )
             })
@@ -136,7 +136,7 @@ impl Scope<'_> {
         self,
         typed: &DeclaredAdmission,
         canonical: &DeclaredAdmission,
-    ) -> Result<(), St3Error> {
+    ) -> Result<(), FractalError> {
         for (field, agrees) in [
             ("declared_priority", typed.priority == canonical.priority),
             ("declared_lane", typed.lane == canonical.lane),
@@ -152,12 +152,12 @@ impl Scope<'_> {
         Ok(())
     }
 
-    fn desired(self, value: &Value) -> Result<DeclaredAdmission, St3Error> {
+    fn desired(self, value: &Value) -> Result<DeclaredAdmission, FractalError> {
         self.fields(&Value::Object(self.children(value, false)?))
     }
 
     // Canonical root children and budget leaves share duplicate and shape validation.
-    fn children(self, value: &Value, budget: bool) -> Result<Map<String, Value>, St3Error> {
+    fn children(self, value: &Value, budget: bool) -> Result<Map<String, Value>, FractalError> {
         let mut fields = Map::new();
         for child in value
             .get("children")
@@ -220,18 +220,18 @@ impl Scope<'_> {
     }
 }
 
-fn scalar(node: &KdlNode) -> Result<&KdlValue, St3Error> {
+fn scalar(node: &KdlNode) -> Result<&KdlValue, FractalError> {
     ensure_no_properties(node)?;
     ensure_no_children(node)?;
     let name = node.name().value();
     let [entry] = node.entries() else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "wrong-argument-count",
             format!("child `{name}` needs one scalar"),
         ));
     };
     if entry.ty().is_some() {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "unexpected-type",
             format!("child `{name}` cannot have an argument type annotation"),
         ));
@@ -239,9 +239,9 @@ fn scalar(node: &KdlNode) -> Result<&KdlValue, St3Error> {
     Ok(entry.value())
 }
 
-fn string<T: DeserializeOwned>(node: &KdlNode) -> Result<T, St3Error> {
+fn string<T: DeserializeOwned>(node: &KdlNode) -> Result<T, FractalError> {
     let value = scalar(node)?.as_string().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "expected-string",
             format!("child `{}` needs one string", node.name().value()),
         )
@@ -253,9 +253,9 @@ fn string<T: DeserializeOwned>(node: &KdlNode) -> Result<T, St3Error> {
     )
 }
 
-fn integer(node: &KdlNode, scope: Scope<'_>, field: &str) -> Result<u64, St3Error> {
+fn integer(node: &KdlNode, scope: Scope<'_>, field: &str) -> Result<u64, FractalError> {
     let KdlValue::Integer(value) = scalar(node)? else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "expected-integer",
             format!("child `{}` needs one integer", node.name().value()),
         ));
@@ -268,7 +268,7 @@ pub fn parse(
     document: &KdlDocument,
     kind: &str,
     subject: &str,
-) -> Result<DeclaredAdmission, St3Error> {
+) -> Result<DeclaredAdmission, FractalError> {
     let scope = Scope(kind, subject);
     let priority = unique_child(document, "declared-priority")?
         .map(string)
@@ -297,7 +297,7 @@ pub fn parse(
                 budgets.memory_max = unique_child(body, "memory-max")?.map(string).transpose()?;
                 budgets.disk_max = unique_child(body, "disk-max")?.map(string).transpose()?;
             }
-            Ok::<_, St3Error>(budgets)
+            Ok::<_, FractalError>(budgets)
         })
         .transpose()?;
     scope.validate(priority.as_ref(), lane.as_ref(), budgets.as_ref())?;
@@ -315,11 +315,11 @@ pub fn validate(
     priority: Option<&DeclaredPriority>,
     lane: Option<&DeclaredLane>,
     budgets: Option<&DeclaredBudgets>,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     Scope(kind, subject).validate(priority, lane, budgets)
 }
 
-pub fn validate_publication(intent: &NormalizedIntent) -> Result<(), St3Error> {
+pub fn validate_publication(intent: &NormalizedIntent) -> Result<(), FractalError> {
     for desired in intent.subjects.values() {
         let scope = Scope(&desired.kind, &desired.subject);
         let canonical = scope.desired(&desired.desired)?;
@@ -341,7 +341,7 @@ pub fn validate_publication(intent: &NormalizedIntent) -> Result<(), St3Error> {
     Ok(())
 }
 
-fn validate_mission(mission: &MissionSpec) -> Result<(), St3Error> {
+fn validate_mission(mission: &MissionSpec) -> Result<(), FractalError> {
     Scope("mission", &mission.subject).validate(
         mission.declared_priority.as_ref(),
         mission.declared_lane.as_ref(),
@@ -371,11 +371,11 @@ fn validate_mission(mission: &MissionSpec) -> Result<(), St3Error> {
     Ok(())
 }
 
-fn validate_declaration_source(source: &str, owner: &str) -> Result<(), St3Error> {
+fn validate_declaration_source(source: &str, owner: &str) -> Result<(), FractalError> {
     if !FIELDS.iter().any(|(name, _)| source.contains(name)) {
         return Ok(());
     }
-    fn walk(document: &KdlDocument) -> Result<(), St3Error> {
+    fn walk(document: &KdlDocument) -> Result<(), FractalError> {
         for node in document.nodes() {
             if let Some(children) = node.children() {
                 let kind = node.name().value();
@@ -409,7 +409,7 @@ fn validate_declaration_source(source: &str, owner: &str) -> Result<(), St3Error
 }
 
 /// Validate new claim input before typed decoding can discard nulls or unknown keys.
-pub fn validate_claim(kind: &str, subject: &str, body: &Value) -> Result<(), St3Error> {
+pub fn validate_claim(kind: &str, subject: &str, body: &Value) -> Result<(), FractalError> {
     let payload = body
         .get("fields")
         .and_then(|f| f.get("body"))
@@ -434,7 +434,7 @@ pub fn validate_claim(kind: &str, subject: &str, body: &Value) -> Result<(), St3
     Ok(())
 }
 
-fn validate_mission_json(owner: &str, value: &Value) -> Result<(), St3Error> {
+fn validate_mission_json(owner: &str, value: &Value) -> Result<(), FractalError> {
     let subject = value
         .get("subject")
         .and_then(Value::as_str)
@@ -468,7 +468,7 @@ fn validate_mission_json(owner: &str, value: &Value) -> Result<(), St3Error> {
 mod tests {
     use super::*;
 
-    fn parse_fields(source: &str) -> Result<DeclaredAdmission, St3Error> {
+    fn parse_fields(source: &str) -> Result<DeclaredAdmission, FractalError> {
         parse(
             &source.parse::<KdlDocument>().unwrap(),
             "agent",
