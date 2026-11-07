@@ -84,12 +84,11 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 5,
       steps: [
-        {
-          name: 'Check out the trusted dispatch ref, never the unvalidated candidate',
-          if: "github.event_name == 'workflow_dispatch'",
-          uses: 'actions/checkout@v4',
-          with: { ref: '${{ github.sha }}', 'persist-credentials': false, 'fetch-depth': 0 },
-        },
+        ...fullHistoryCheckoutSteps(
+          { ref: '${{ github.sha }}', 'persist-credentials': false },
+          { name: 'Check out the trusted dispatch ref, never the unvalidated candidate', if: "github.event_name == 'workflow_dispatch'" },
+          "github.event_name == 'workflow_dispatch'",
+        ),
         {
           name: 'Require main dispatch and a full first-parent main SHA',
           if: "github.event_name == 'workflow_dispatch'",
