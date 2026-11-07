@@ -72,8 +72,8 @@ const LaunchPreview = ({ alert }: { readonly alert: Native.Attention }): React.R
   )
 }
 
-const SUBJECT_ICONS: Readonly<Record<string, IconName>> = { pull_request: 'pull-request', document: 'pencil', link: 'globe', mission: 'checklist', agent: 'person', run: 'gauge', message: 'message' }
-const SUBJECT_KINDS: Readonly<Record<string, string>> = { pull_request: 'Pull request', document: 'Document', link: 'Link', mission: 'Mission', agent: 'Agent', run: 'Run', message: 'Message' }
+const SUBJECT_ICONS: Readonly<Record<string, IconName>> = { pull_request: 'pull-request', issue: 'alert', document: 'pencil', mission: 'checklist', run: 'gauge', step: 'checklist', agent: 'person', host: 'folder', commit: 'dot', link: 'globe' }
+const SUBJECT_KINDS: Readonly<Record<string, string>> = { pull_request: 'Pull request', issue: 'Issue', document: 'Document', mission: 'Mission', run: 'Run', step: 'Step', agent: 'Agent', host: 'Host', commit: 'Commit', link: 'Link' }
 
 /** A request's subjects as rows: a checked web link opens out, a ref the host can open opens in, and any other ref is shown to copy. */
 const subjectRows = (alert: Native.Attention, onOpenRef: ((ref: string) => void) | undefined, opensRef: (ref: string) => boolean): readonly DecisionSubject[] =>
