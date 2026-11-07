@@ -125,7 +125,7 @@ Neither exception adds a production writer or size/cost guarantee.
 
 ### Cold runtime reduction inventory (PR #1706)
 
-The `fractal_store::store` maintainer owns `lv-h5911198f6cf3` and `lv-ha1002d83b7ac`:
+The `fractal_store::store` maintainer owns `lv-hc44243b75520` and `lv-ha1002d83b7ac`:
 the first selects existing integer claim identities in descending canonical order, and the
 second hydrates one existing kind/body at a time until consumed fields resolve. Claim bodies
 and canonical subject/time keys remain inline; a decoded-row bound is not a byte-size bound.
