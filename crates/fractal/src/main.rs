@@ -2362,6 +2362,8 @@ enum SubjectCommand {
         #[arg(long = "kind", required = true)]
         kinds: Vec<String>,
     },
+    /// Fold the complete immutable decision.tree history without creating asks.
+    Decisions { subject: String },
 
     /// Show one typed subject card.
     Show(SubjectShowArgs),
@@ -11471,6 +11473,35 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
                 ))
                 .await?;
             print_value(&result, json_output)
+        }
+        SubjectCommand::Decisions { subject } => {
+            let version = if subject.starts_with("custom/decision/tree/v1/") { 1 }
+                else if subject.starts_with("custom/decision/tree/v2/") { 2 }
+                else { anyhow::bail!("expected a decision.tree v1 or v2 subject"); };
+            let kinds = fractal_schema::custom::decisions::input_kinds(version);
+            let basis_url = format!("/v1/custom/basis?subject={}&kinds={}",
+                urlencoding::encode(&subject), urlencoding::encode(&kinds.join(",")));
+            let basis: Value = client.get(&basis_url).await?;
+            let mut after = 0;
+            let mut inputs = Vec::new();
+            loop {
+                let page: ClaimsPage = client.get(&format!(
+                    "/v1/claims?subject={}&after_index={after}&order=asc&limit=500",
+                    urlencoding::encode(&subject))).await?;
+                if page.claims.is_empty() { break; }
+                for claim in page.claims {
+                    after = claim.store_index;
+                    inputs.push(fractal_schema::custom::decisions::Claim {
+                        id: claim.id, kind: claim.kind, actor: claim.actor,
+                        order: claim.store_index,
+                        fields: claim.body.get("fields").unwrap_or(&claim.body).clone(),
+                    });
+                }
+            }
+            let current: Value = client.get(&basis_url).await?;
+            anyhow::ensure!(basis == current, "decision inputs changed during read; read again");
+            let folded = fractal_schema::custom::decisions::fold(&subject, &inputs, basis);
+            print_value(&serde_json::to_value(folded)?, json_output)
         }
         SubjectCommand::Show(args) => {
             if args.references {
