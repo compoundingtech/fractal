@@ -296,11 +296,13 @@ impl<R: RuntimeControl> Reconciler<R> {
                 && now.saturating_sub(claim.accepted_at_unix_ms) < ATTEMPT_WINDOW_MS)
             .copied()
             .collect();
-        // So does the explicit restart that opened this budget, until it completes (#5523): the
-        // incarnation it is replacing is no failure of the new budget. One that completed and left
-        // the incarnation running (a restart blocked by rendering fails that way) owns nothing.
+        // So does the explicit restart that opened this budget, while the restart path will still
+        // carry it out (#5523): the incarnation it is replacing is no failure of the new budget. One
+        // that completed and left the incarnation running (a restart blocked by rendering fails
+        // that way), or that a newer restart request superseded, owns nothing.
         let explicit = match restarts.iter().copied().find(|claim| claim.store_index == reset && !automatic_request(claim)) {
-            Some(claim) if self.store.operation_claim(&format!("agent-restart-completed:{}", claim.id))?.is_none() => Some(claim),
+            Some(claim) if crate::restart::latest_request(&self.store, &subject.subject)?.is_some_and(|latest| latest.id == claim.id)
+                && self.store.operation_claim(&format!("agent-restart-completed:{}", claim.id))?.is_none() => Some(claim),
             _ => None,
         };
         if attempts.iter().map(|claim| **claim).chain(uncharged.iter().copied()).chain(explicit)

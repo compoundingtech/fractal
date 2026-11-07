@@ -899,6 +899,32 @@ fn a_failed_explicit_restart_leaves_its_incarnation_to_recovery() {
     assert_eq!(claim_incarnation(&attempts(&store)[0]), Some("orchid-one"));
 }
 
+/// Nor does one a newer restart-when-idle superseded: the restart path carries out only the newest
+/// request, and a blocked seat may never reach the idle boundary that one waits for.
+#[test]
+fn a_superseded_explicit_restart_leaves_its_incarnation_to_recovery() {
+    let (store, runtime, reconciler, desired) = setup();
+    let since = attachment(&store, "orchid-one", false);
+    explicit_restart(&store, "orchid-one");
+    store
+        .append_claim(&ClaimInput {
+            subject: SEAT.into(),
+            kind: "runtime.action.requested".into(),
+            actor: Some(SEAT.into()),
+            fields: BTreeMap::from([
+                ("action".into(), json!(crate::restart::WHEN_IDLE)),
+                ("incarnation_id".into(), json!("orchid-one")),
+            ]),
+            evidence: vec![store.selected_desired_token(SEAT).unwrap().unwrap()],
+            expected_subject: None,
+            idempotency_key: None,
+        })
+        .unwrap();
+    assert!(recover(&reconciler, &desired, "orchid-one", since + 10_000).unwrap());
+    assert_eq!(claim_incarnation(&attempts(&store)[0]), Some("orchid-one"));
+    assert!(runtime.stops.lock().unwrap().is_empty());
+}
+
 #[test]
 fn adopting_the_window_never_spends_historical_requests_or_uses_their_park_fault() {
     for same_incarnation in [false, true] {

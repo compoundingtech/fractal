@@ -11,7 +11,7 @@
   },
   "rules": {
     "status": "changed",
-    "detail": "Channel recovery treats the explicit restart that opened its budget as owning the incarnation that restart names until the restart completes, as it already treats its own requests: it charges no attempt for that incarnation and leaves it to the restart. A restart that completed without replacing the incarnation, such as one that failed because rendering was blocked, no longer owns it, and recovery charges it as before."
+    "detail": "Channel recovery treats the explicit restart that opened its budget as owning the incarnation that restart names until the restart completes, as it already treats its own requests: it charges no attempt for that incarnation and leaves it to the restart. A restart that completed without replacing the incarnation, such as one that failed because rendering was blocked, or that a newer restart request superseded, no longer owns it, and recovery charges it as before."
   },
   "compatibility": {
     "status": "none",
