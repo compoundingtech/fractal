@@ -11,7 +11,7 @@ though it needs its own answer and decision history.
 ## Identity and history
 
 A thread has an opaque durable identity in the `thread/` family. Its editable title, current
-state, participant set, message history and related items are read through that identity. A
+state, conversation, message history and related items are read through that identity. A
 new thread started from an Inbox item can commit its creation, origin link and first message
 together. A client may hold an unsent draft without publishing an empty thread.
 
@@ -21,10 +21,10 @@ message's delivery, visibility and retention. A separate identity makes rename, 
 reference from other resources explicit. The cost is a durable thread projection and admission
 rules for mutations and links.
 
-Every message still has its own message ID and ordinary sender attribution. Thread membership
-is explicit. A reply to a specific message retains an `in_reply_to` edge whose parent is in the
+Every message still has its own message ID and ordinary sender attribution. Its thread
+reference is explicit. A reply to a specific message retains an `in_reply_to` edge whose parent is in the
 same thread. The reply can be shown in an agent conversation and in the thread while remaining
-one message. Clients use authoritative order, current participant visibility and stable cursors.
+one message. Clients use authoritative order, current conversation visibility and stable cursors.
 Subjects, titles, text similarity, and agent incarnation are presentation or context data.
 
 ## Links and lifecycle
@@ -38,8 +38,9 @@ and show its full history without reopening it.
 
 The initial lifecycle is Open, Close and Reopen. Closing moves a thread into Recently closed
 threads, leaves history readable and keeps any linked ask answerable. An ordinary incoming reply
-to a closed thread joins its history without reopening it, adding an alert or resurrecting the
-Inbox row. Reopen is explicit. An authorized rename changes the shared title everywhere and
+from the agent joins closed history without reopening the thread, adding an alert or resurrecting
+the Inbox row. The owning person must explicitly reopen before sending a reply. A fresh linked
+ask can still show the closed thread. An authorized rename changes the shared title everywhere and
 preserves the thread, messages, links, unread state and current lifecycle.
 
 An embedded panel's disclosure state is local to its client and placement. A compact row carries
@@ -55,26 +56,35 @@ with real UI visibility and reviewed before client implementations treat it as r
 
 ## Daemon boundary
 
+Each thread belongs to one existing person and agent conversation. Reuse that conversation's
+principal identities, reader authorization, sender attribution and grant enforcement. The
+person can manage the thread's title and lifecycle. The agent can send replies and attach an
+ask it owns in that conversation. Threads do not add an audience editor, invitations or a
+second access list. A mission or session link makes the thread discoverable only to readers
+who could already read that conversation. A new agent incarnation can add session context
+while the thread keeps the same owning conversation.
+
 Use durable claims as authority and bounded, rebuildable projections for summaries by context
 and ordered message windows. Subscriptions advance by the same data and policy cut as their
-reads, with explicit reauthorization on scope, membership or source changes. A link is a
-reference only. It cannot confer participant membership, grant content access or reveal an
-otherwise inaccessible context's title. Direct reads and collection reads apply the same
+reads, with explicit reauthorization on scope or source changes. A link is a reference only.
+It cannot grant conversation access or reveal an otherwise inaccessible context's title. Direct reads and collection reads apply the same
 visibility rules. Filter unauthorized summaries, message edges, counts and source links before
 they leave the daemon.
 
 | Operation | Admission boundary |
 | --- | --- |
-| List, read or subscribe | A scoped client grant and reader access to the thread. Apply context authorization to context listings and source links. Bind cursors to the reader, scope, thread or context, and revision semantics. |
-| Start or reply | An attributed authenticated principal and the permitted creation or participant role. Validate an optional quoted parent against the same thread and its visibility. |
-| Rename, close or reopen | Thread lifecycle authority, separate from message delivery and access to an ask. |
-| Attach a follow-up | Authority to link the thread and authority to create or update the linked source. A link cannot broaden either audience. |
+| List, read or subscribe | The existing reader and grant checks for the owning conversation. Apply context authorization to context listings and source links. Bind cursors to the reader, scope, thread or context, and revision semantics. |
+| Start or reply | An attributed authenticated principal and the existing send authority for the owning conversation. Validate an optional quoted parent against the same thread and its visibility. |
+| Rename, close or reopen | The owning person through an authorized client action. Sending messages and answering asks confer no lifecycle authority. |
+| Attach a follow-up | Send authority in the owning conversation and authority to create or update the linked source. A link cannot broaden either audience. |
 | Answer an ask | The existing ask action and exact ask authority. The thread identity cannot authorize or stand in for an answer. |
 
 Writes validate authority inside the writer transaction. Bind idempotency to the actor,
 operation and target so retries record one fact, and reauthorize receipt recovery after
-revocation. The implementation must specify how rename and Close/Reopen races converge
-without resolving a linked ask or losing an accepted incoming reply. Existing historical
+revocation. Rename, Close and Reopen are fenced by the current revision of the affected
+metadata in the owning daemon transaction. A stale client refreshes and may retry. An
+accepted incoming reply remains append-only and does not change the title or lifecycle
+revision. Existing historical
 subject-based discussion remains readable through its existing path. There is no inferred
 migration from subjects to durable thread IDs.
 
@@ -84,8 +94,8 @@ migration from subjects to durable thread IDs.
 | --- | --- |
 | TUI, web and iOS | Start inline in Inbox, type and reply to a message, show a fresh linked ask with full discussion, and answer that ask independently. Use the same thread in Inbox, agent session, mission and a dedicated tab or screen. Compact embeds start collapsed. Web and terminal can reveal Reply on hover with accessible keyboard equivalents. Mobile supplies an equivalent touch action. |
 | TUI, web and iOS | Rename, close, list under Recently closed threads, read replies while closed, reopen, and retain selection and draft destination across navigation. State and unread progress agree when another authorized client changes them. |
-| MCP | Bounded list by readable context, get summary and read a message window through the daemon. A thread-content grant and participant visibility are both required. No transcript scraping or adapter-owned reconstruction. |
-| MCP writes | Use the same typed daemon actions and idempotency, with separate least-privilege grants for reply and lifecycle/link operations. Preserve assistant attribution. Production write issuance follows the [keyed issuer prerequisite](https://github.com/compoundingtech/fractal/pull/3324) and [assistant access review](https://github.com/compoundingtech/fractal/issues/3326). Expose only capabilities the current grant and daemon support. |
+| MCP | Bounded list by readable context, get summary and read a message window through the daemon. The existing conversation read grant and conversation visibility checks apply. No transcript scraping or adapter-owned reconstruction. |
+| MCP writes | Use the same typed daemon actions and idempotency, with the existing assistant grant checks. A conversation send grant confers no lifecycle or link authority. Preserve assistant attribution. Production write issuance follows the [keyed issuer prerequisite](https://github.com/compoundingtech/fractal/pull/3324) and [assistant access review](https://github.com/compoundingtech/fractal/issues/3326). Expose only capabilities the current grant and daemon support. |
 
 Implement and review behind capability negotiation. TUI, web, iOS and MCP are part of one
 release acceptance rather than independently inventing thread protocols. The MCP authorization
@@ -101,9 +111,7 @@ cross-thread quote, and a duplicated request key.
 
 ## Decisions before wire freeze
 
-Settle initial participant and lifecycle authority, whether a direct reply from a closed
-thread requires explicit reopening, how visibility changes affect retained history, and the
-revision/conflict rules for concurrent edits. Select the exact operation names, claim schemas,
+Select exact operation names, claim schemas,
 subscription shapes, and cursor format only when the fixture runs through the existing
 client boundary. The [original topic projection discussion](https://github.com/compoundingtech/fractal/issues/49)
 and [normalized conversation contract](conversation-normalization-design.md) provide context.
