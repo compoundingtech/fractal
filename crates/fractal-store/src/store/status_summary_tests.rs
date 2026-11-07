@@ -79,6 +79,176 @@ fn a_summary_takes_each_field_from_the_newest_observation_that_has_it() {
     }
 }
 
+#[test]
+fn notice_summary_does_not_advance_a_populated_shared_cache_over_a_claim_backlog() {
+    let store = seat_with(2);
+    let warm_cut = store.index().unwrap();
+    store.status_at(Some(SEAT), None, Some(warm_cut)).unwrap();
+    let before = {
+        let cache = store.fractal.subject_cache.lock().unwrap();
+        assert!(!cache.statuses.is_empty(), "exercise an already populated cache");
+        (cache.through, cache.statuses.len())
+    };
+    for index in 0..32 {
+        notice_raw_observation(
+            &store, "agent/example/backlog", "runtime.observed",
+            &format!("summary-backlog-{index}"), "backlog-origin", 100 + index,
+            json!({"status":"running", "incarnation_id":"unrelated"}),
+        );
+    }
+    let through = store.index().unwrap();
+    assert!(through > before.0, "the cache has a claim backlog to process");
+    for cut in [None, Some(through)] {
+        let summary = store.status_summary_at(SEAT, cut).unwrap();
+        assert_eq!(summary.store_index, through);
+        let cache = store.fractal.subject_cache.lock().unwrap();
+        assert_eq!((cache.through, cache.statuses.len()), before,
+            "an incarnation-only reduction must neither advance nor maintain the shared cache");
+    }
+}
+
+
+/// Model retained or replicated rows without the public append boundary rejecting reserved kinds.
+fn notice_raw_observation(
+    store: &Store,
+    subject: &str,
+    kind: &str,
+    id: &str,
+    origin: &str,
+    sequence: u64,
+    fields: serde_json::Value,
+) -> u64 {
+    let connection = store.connection.write();
+    let accepted = (1_700_000_000_000 + sequence).to_string();
+    connection
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h7da5f6391087 owner=fractal_store::store::status_summary_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES (?1,?2,?3,'fixture',?4)",
+            rusqlite::params![id, origin, sequence, accepted],
+        )
+        .unwrap();
+    connection
+        .execute(
+            /* sqlite-large-value: allow-for-now lv-h87bbf137f13b owner=fractal_store::store::status_summary_tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES (?1,?1,?2,?3,?4,?5,'[]',?6)",
+            rusqlite::params![id, subject, kind, origin, json!({"fields": fields}).to_string(), accepted],
+        )
+        .unwrap();
+    u64::try_from(connection.last_insert_rowid()).unwrap()
+}
+
+#[test]
+fn notice_incarnation_reduction_excludes_reserved_fields_and_source_identity_without_generic_guard() {
+    for (kind, safe_kind) in [("attention.notice", "runtime.observed"),
+        ("custom.attention.snapshot", "custom.health-observed")] {
+        let store = Store::open_memory("node").unwrap();
+        notice_raw_observation(
+            &store, SEAT, safe_kind, "safe-actual", "safe-origin", 1,
+            json!({"status": "running", "incarnation_id": "safe-incarnation"}),
+        );
+        notice_raw_observation(
+            &store, SEAT, kind, "reserved-later", "reserved-origin", 2,
+            json!({"status": "reserved-status", "incarnation_id": "reserved-incarnation"}),
+        );
+        const RESERVED_ONLY: &str = "agent/example/reserved-only";
+        notice_raw_observation(
+            &store, RESERVED_ONLY, kind, "reserved-only", "reserved-origin", 3,
+            json!({"status": "reserved-only-status", "incarnation_id": "reserved-only-incarnation"}),
+        );
+        // Deliberately bypass Store::status_summary_at's generic visibility guard: the
+        // incarnation fold and its source attribution must each exclude reserved kinds.
+        let connection = store.readers.get();
+        let (safe, _) = subject_status_at(&connection, SEAT, None, None, ClaimsReduction::Incarnation)
+            .unwrap().unwrap();
+        let actual = safe.actual.as_ref().unwrap();
+        assert_eq!(actual["status"], "running", "{kind}: {safe:?}");
+        assert_eq!(actual["incarnation_id"], "safe-incarnation", "{kind}: {safe:?}");
+        assert_eq!(safe.actual_claim.as_deref(), Some("safe-actual"), "{kind}: {safe:?}");
+        assert_eq!(safe.actual_origin.as_deref(), Some("safe-origin"), "{kind}: {safe:?}");
+
+        if let Some((reserved, _)) =
+            subject_status_at(&connection, RESERVED_ONLY, None, None, ClaimsReduction::Incarnation).unwrap()
+        {
+            assert!(reserved.actual.is_none(), "{kind}: {reserved:?}");
+            assert!(reserved.actual_claim.is_none(), "{kind}: {reserved:?}");
+            assert!(reserved.actual_origin.is_none(), "{kind}: {reserved:?}");
+        }
+    }
+}
+
+#[test]
+fn notice_status_summary_refuses_contamination_but_serves_the_safe_historical_cut() {
+    for kind in ["attention.notice", "custom.attention.snapshot"] {
+        let store = Store::open_memory("node").unwrap();
+        let safe_cut = notice_raw_observation(
+            &store, SEAT, "runtime.observed", "safe-actual", "safe-origin", 1,
+            json!({"status": "running", "incarnation_id": "safe-incarnation"}),
+        );
+        let contaminated_cut = notice_raw_observation(
+            &store, SEAT, kind, "reserved-later", "reserved-origin", 2,
+            json!({"status": "reserved-status", "incarnation_id": "reserved-incarnation"}),
+        );
+        for cut in [None, Some(contaminated_cut)] {
+            let error = store.status_summary_at(SEAT, cut).unwrap_err();
+            assert_eq!(
+                error.downcast_ref::<FractalError>().expect("explicit notice refusal").code,
+                "notices-unavailable",
+                "{kind} at {cut:?}: {error:?}",
+            );
+        }
+        let safe = store.status_summary_at(SEAT, Some(safe_cut)).unwrap().subjects.remove(0);
+        let actual = safe.actual.as_ref().unwrap();
+        assert_eq!(actual["status"], "running", "{kind}: {safe:?}");
+        assert_eq!(actual["incarnation_id"], "safe-incarnation", "{kind}: {safe:?}");
+        assert_eq!(safe.actual_claim.as_deref(), Some("safe-actual"), "{kind}: {safe:?}");
+        assert_eq!(safe.actual_origin.as_deref(), Some("safe-origin"), "{kind}: {safe:?}");
+    }
+}
+
+#[test]
+fn notice_status_summary_pins_visibility_fields_and_source_before_a_concurrent_reserved_append() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("summary.sqlite3");
+    let store = Store::open(&path, "node").unwrap();
+    notice_raw_observation(
+        &store, SEAT, "runtime.observed", "safe-actual", "safe-origin", 1,
+        json!({"status": "running", "incarnation_id": "safe-incarnation"}),
+    );
+    let writer = Store::open(&path, "node").unwrap();
+    STATUS_AFTER_DESIRED_READ.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || {
+            std::thread::spawn(move || {
+                notice_raw_observation(
+                    &writer, SEAT, "custom.attention.snapshot", "reserved-later", "reserved-origin", 2,
+                    json!({"status": "reserved-status", "incarnation_id": "reserved-incarnation"}),
+                );
+                // A safe observation also lands after the request's cut. Reserved-kind
+                // filtering alone cannot prevent a mixed snapshot from selecting this row.
+                notice_raw_observation(
+                    &writer, SEAT, "runtime.observed", "safe-after-cut", "safe-origin", 3,
+                    json!({"status": "stopped", "incarnation_id": "later-incarnation"}),
+                );
+            })
+            .join()
+            .unwrap();
+        }));
+    });
+    let safe = store.status_summary_at(SEAT, None).unwrap().subjects.remove(0);
+    assert!(
+        STATUS_AFTER_DESIRED_READ.with(|slot| slot.borrow().is_none()),
+        "the interleaving hook must run during the summary reduction",
+    );
+    let actual = safe.actual.as_ref().unwrap();
+    assert_eq!(actual["status"], "running", "{safe:?}");
+    assert_eq!(actual["incarnation_id"], "safe-incarnation", "{safe:?}");
+    assert_eq!(safe.actual_claim.as_deref(), Some("safe-actual"), "{safe:?}");
+    assert_eq!(safe.actual_origin.as_deref(), Some("safe-origin"), "{safe:?}");
+    let error = store.status_summary_at(SEAT, None).unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<FractalError>().expect("explicit notice refusal").code,
+        "notices-unavailable",
+        "{error:?}",
+    );
+}
+
 /// A small deterministic generator, so each seed's history can be replayed.
 struct Seeded(u64);
 
@@ -154,7 +324,7 @@ fn random_history(seed: u64) -> Store {
             let id = format!("history-batch-{index}");
             connection
                 .execute(
-                    /* sqlite-large-value: allow-for-now lv-h7da5f6391087 owner=fractal_store::store::status_summary_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES (?1,?2,?3,'fixture',?4)",
+                    /* sqlite-large-value: allow-for-now lv-hb4ac3d3059e1 owner=fractal_store::store::status_summary_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES (?1,?2,?3,'fixture',?4)",
                     rusqlite::params![id, origins[which], sequences[which], accepted.to_string()],
                 )
                 .unwrap();
