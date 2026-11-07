@@ -7,6 +7,14 @@ pub const MESSAGE_RELATION_FIELDS: &[&str] = &[
     "thread_origin_episode",
 ];
 
+/// Whether a message body contains a private thread relation, including legacy flat claims.
+pub fn message_has_relation(body: &serde_json::Value) -> bool {
+    MESSAGE_RELATION_FIELDS.iter().any(|field| {
+        body.get(*field).is_some()
+            || body.get("fields").and_then(|fields| fields.get(*field)).is_some()
+    })
+}
+
 /// Remove thread relations from a serving projection of a message.
 pub fn redact_message_relations(body: &mut serde_json::Value) {
     if let Some(fields) = body.get_mut("fields").and_then(serde_json::Value::as_object_mut) {
