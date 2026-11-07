@@ -57,7 +57,7 @@ test('oversized membership payload is refused before dispatch', () => {
 });
 test('full collision group exceeding one action refuses without dropping rekeys', () => {
   const { arrangement } = initial();
-  const memberships = Array.from({ length: 1024 }, (_, i) => ({ container: arrangement.id, member: `agent/test/${String(i).padStart(4, '0')}`, revision: 'claim/test', position: { bucket: b, key: 'a0' } }));
+  const memberships = Array.from({ length: 2048 }, (_, i) => ({ container: arrangement.id, member: `agent/test/${String(i).padStart(4, '0')}`, revision: 'claim/test', position: { bucket: b, key: 'a0' } }));
   memberships.push({ container: arrangement.id, member: 'agent/test/moved', revision: 'claim/test', position: { bucket: null, key: 'a0' } });
-  assert.deepEqual(planSidebarV2(arrangement, memberships, move(subject('agent/test/moved'), folder(b), subject('agent/test/0500'))), { error: { _tag: 'TooManyOperations', count: 1025 } });
+  assert.deepEqual(planSidebarV2(arrangement, memberships, move(subject('agent/test/moved'), folder(b), subject('agent/test/1024'))), { error: { _tag: 'TooManyOperations', count: 1025 } });
 });
