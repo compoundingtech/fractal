@@ -109,6 +109,16 @@ approval or implementation of the deferred authenticating model proxy.
 The October 11 requirement and #5019/#3268 define this boundary. Read-only device
 pairing or an unauthenticated local socket is not a substitute for service identity.
 
+The claim-backed external-grant core is
+`crates/fractal-api-core/src/api/client_v0/external_grants.rs`. Its closed profiles
+keep `assistant/chatgpt` and `assistant/mcp` in the same assistant profile; service
+issuance is disabled and service has no assistant route or disclosure rights.
+Several active grants of a principal's own profile are allowed, but a different
+active profile is refused. Historical `custom.client.assistant.v1.*` claim kinds
+and absent-principal legacy ChatGPT grants retain their existing meaning.
+Claims persist credential/code digests, never bearer tokens or pairing codes;
+grant projections expose neither credential material nor its digests.
+
 | ID | Criterion (observable and testable) | Milestone | Current state and evidence | Verification method |
 | --- | --- | --- | --- | --- |
 | R27 | A host user service outside a harness authenticates as a stable non-person subject provisioned by a person or a node, not as its invoking agent. | M1 | NOT STARTED: #5019/#3268; plugin/assistant primitives do not prove this consumer contract. | Restart unattended service and invoke from two agents; every read retains the same service subject. |

@@ -11,19 +11,7 @@ fn max_response_bytes() -> usize { MAX_RESPONSE_BYTES }
 pub const HEADER: &str = "x-st3-scg-read-authorization";
 pub(super) const USED: &str = "custom.client.assistant.v1.read-used";
 pub const OUTCOME: &str = "custom.client.assistant.v1.read-outcome";
-pub const ROUTES: &[(&str, &str)] = &[
-    ("summary", "read.assistant.summary"), ("attention", "read.assistant.attention"),
-    ("attention-content", "read.assistant.attention"),
-    ("attention-rich", "read.assistant.attention"), ("missions-rich", "read.assistant.missions"),
-    ("agents-rich", "read.assistant.agents"),
-    ("missions", "read.assistant.missions"), ("agents", "read.assistant.agents"),
-    ("conversation-content", "read.assistant.conversation"),
-    ("conversations", "read.assistant.conversation"),
-    ("conversation-detail", "read.assistant.conversation"),
-    ("conversation-timeline", "read.assistant.conversation"),
-    ("conversation-search", "read.assistant.conversation"),
-    ("terminal-content", "read.assistant.terminal"),
-];
+pub use super::super::external_grants::{ROUTES, authorize_route as route};
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -152,19 +140,6 @@ pub async fn pin(State(state): State<AppState>, Extension(session): Extension<Cl
     Ok(Json(projection(&state, &granted)?))
 }
 
-pub fn route(session: &ClientSession, request: &Request<Body>) -> Result<(), ApiError> {
-    if request.uri().path() == "/v1/client/assistant/propose" && request.method() == axum::http::Method::POST {
-        return Ok(());
-    }
-    let projection = request.uri().path().strip_prefix("/v1/client/assistant/");
-    let Some((_, scope)) = ROUTES.iter().find(|(route, _)| projection == Some(*route))
-        else { return Err(forbidden("assistants may access only explicit proof-bearing read projections")) };
-    if request.method() != axum::http::Method::GET || !session.allows(scope)
-        || request.headers().contains_key(axum::http::header::UPGRADE) {
-        return Err(forbidden("assistant read requires its exact scope"));
-    }
-    Ok(())
-}
 pub fn parameters(uri: &axum::http::Uri) -> Result<BTreeMap<String,String>, ApiError> {
     let mut result = BTreeMap::new();
     fn decode(value: &str) -> Result<String, ApiError> {
