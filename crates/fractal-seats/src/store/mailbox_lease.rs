@@ -985,6 +985,11 @@ mod tests {
         store
             .apply_internal(&stopped, "intentional-stop-fixture")
             .unwrap();
+        // A stop parsed from a person's or an agent's intent names no owning run, so it never
+        // keeps the mailbox of the declaration it ended, as a run's end does.
+        let ended = store.declaration_ended_by_stop("agent/eval.worker").unwrap().unwrap();
+        assert_eq!(ended.stop.owner_run, None);
+        assert!(ended.declaration.member.is_some());
         assert!(
             store.check_mailbox(&fence).is_err(),
             "a live wrapper must not read after intentional stop"
@@ -996,6 +1001,57 @@ mod tests {
                 .bind_mailbox_with_lease(&request(), Some(&authority(2)))
                 .is_err()
         );
+    }
+
+    /// A run's end stops its seats, but the reconciler keeps one running while it holds mail sent
+    /// before the stop. That seat keeps the mailbox of the declaration its stop ended, so it can
+    /// read that mail, until its runtime stops.
+    #[test]
+    fn a_seat_its_runs_end_stopped_keeps_its_mailbox_until_its_runtime_stops() {
+        let store = fixture();
+        let owner = authority(1);
+        let fence = store
+            .bind_mailbox_with_lease(&request(), Some(&owner))
+            .unwrap();
+        let mut stopped =
+            crate::graph::parse_intent("version 2\nstop \"agent/eval.worker\"", "node").unwrap();
+        for stop in stopped.subjects.values_mut() {
+            stop.owner_run = Some("mission-run/ended-run".into());
+        }
+        store.apply_internal(&stopped, "run-end-stop-fixture").unwrap();
+        store.check_mailbox(&fence).unwrap();
+        store.mailbox_session_active(&fence, &owner).unwrap();
+        assert!(!store.repair_mailbox(&fence, &owner).unwrap());
+        // The stream's reconnect after a daemon restart rebinds the same capability.
+        let rebound = store.bind_mailbox_with_lease(&fence, Some(&owner)).unwrap();
+        assert_eq!((rebound.token, rebound.epoch), (fence.token.clone(), fence.epoch));
+        // Another provider, or another incarnation, still cannot take the stopping seat.
+        let mut foreign = authority(2);
+        foreign.provider = "claude".into();
+        assert!(store.mailbox_session_active(&fence, &foreign).is_err());
+        let successor = Fence::new("agent/eval.worker", "successor", "delivery");
+        assert!(
+            store
+                .bind_mailbox_with_lease(&successor, Some(&authority(2)))
+                .is_err()
+        );
+        // Once nothing holds it the reconciler stops the runtime, and the lease ends with it.
+        store
+            .append_claim(&ClaimInput {
+                subject: "agent/eval.worker".into(),
+                kind: "runtime.observed".into(),
+                actor: Some("daemon/runtime".into()),
+                fields: serde_json::from_value(json!({"status":"stopped",
+                    "runtime_id":"eval.worker","incarnation_id":"current"}))
+                .unwrap(),
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some("runtime:current:stopped".into()),
+            })
+            .unwrap();
+        assert!(store.check_mailbox(&fence).is_err());
+        assert!(store.mailbox_session_active(&fence, &owner).is_err());
+        assert!(store.bind_mailbox_with_lease(&fence, Some(&owner)).is_err());
     }
 
     #[test]
