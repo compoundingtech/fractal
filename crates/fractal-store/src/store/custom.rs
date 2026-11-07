@@ -486,10 +486,55 @@ pub fn prepare(
     if input.subject.starts_with("custom/attention/source/") && creation.is_some() {
         return Err(fail("notices unavailable: producer input is immutable"));
     }
+    if decision_import_opening(&input.subject, &input.kind, input.actor.as_deref(), &f)
+        .map_err(|e| fail(e.to_string()))?
+        && tx.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1)",
+            [&input.subject], |row| row.get::<_, bool>(0)).map_err(internal)?
+    {
+        return Err(fail("decision import requires no earlier claim on the subject"));
+    }
     validate_fact(tx, &input.subject, &m, &input.kind, input.actor.as_deref(), &f, creation)
         .map_err(|e| fail(e.to_string()))?;
     Ok(Some(f))
 }
+// arn:lmig:axe:2026-10-08-decision-store-import: remove this exception after
+// import reconciliation, together with the v2 opened.import contract.
+fn decision_import_opening(
+    subject: &str,
+    kind: &str,
+    actor: Option<&str>,
+    fields: &BTreeMap<String, Value>,
+) -> Result<bool> {
+    if kind != "custom.decision.tree.v2.opened" {
+        return Ok(false);
+    }
+    let seat = fields.get("seat").and_then(Value::as_str);
+    if actor == seat {
+        anyhow::ensure!(!fields.contains_key("import"),
+            "decision seat-authored opening must not carry import");
+        return Ok(false);
+    }
+    anyhow::ensure!(actor == Some("agent/dotfiles/axe-contraction"),
+        "decision import actor must be agent/dotfiles/axe-contraction");
+    anyhow::ensure!(
+        fields.get("import") == Some(&json!({
+            "migration": "arn:lmig:axe:2026-10-08-decision-store-import"
+        })),
+        "decision import requires the exact import.migration ARN"
+    );
+    anyhow::ensure!(
+        fields.get("legacy_trees").and_then(Value::as_array).is_some_and(|paths| !paths.is_empty()),
+        "decision import requires non-empty legacy_trees"
+    );
+    anyhow::ensure!(
+        seat.and_then(|seat| seat.strip_prefix("agent/")).is_some_and(|seat_path|
+            !seat_path.starts_with("legacy/")
+                && subject == format!("custom/decision/tree/v2/{seat_path}")),
+        "decision import requires the canonical non-legacy seat subject"
+    );
+    Ok(true)
+}
+
 fn validate_fact(
     connection: &Connection,
     subject: &str,
@@ -508,6 +553,7 @@ fn validate_fact(
         .filter(|a| a.starts_with("agent/") || a.starts_with("person/"))
         .ok_or_else(|| anyhow::anyhow!("typed claim needs a concrete actor"))?;
     fractal_schema::registry().validate_subject(actor)?;
+    decision_import_opening(subject, kind, Some(actor), f)?;
     anyhow::ensure!(
         actor.starts_with("agent/") || actor.starts_with("person/"),
         "typed actor must be a person or agent"
@@ -1071,7 +1117,9 @@ impl Store {
         let seat_path = seat.strip_prefix("agent/")
             .ok_or_else(|| anyhow::anyhow!("decision seat must be an agent"))?;
         anyhow::ensure!(
-            creation.actor.as_deref() == Some(seat)
+            (creation.actor.as_deref() == Some(seat)
+                || decision_import_opening(subject, &creation.kind,
+                    creation.actor.as_deref(), &creation_fields)?)
                 && (subject == format!("custom/decision/tree/v{version}/{seat_path}")
                     || (version == 2 && subject.strip_prefix("custom/decision/tree/v2/legacy/")
                         .is_some_and(|spelling| !spelling.is_empty()))),
