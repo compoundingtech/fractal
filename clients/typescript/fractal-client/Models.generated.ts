@@ -1234,7 +1234,7 @@ export type Capabilities = {
   schemas: Array<string>;
   sender_class?: AssistantSenderClass;
   session_actor: Id;
-  transport: "unix" | "fabric-loopback";
+  transport: "unix" | "fabric-loopback" | "local-web";
 };
 
 export type Capability = {

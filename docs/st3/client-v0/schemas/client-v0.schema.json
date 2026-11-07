@@ -892,7 +892,7 @@
         "kind": { "const": "capabilities" },
         "machine_version": { "type": "string", "description": "Compile-time build identity of the responding daemon; absent on older servers." },
         "session_actor": { "$ref": "#/$defs/Id" },
-        "transport": { "enum": ["unix", "fabric-loopback"] },
+        "transport": { "enum": ["unix", "fabric-loopback", "local-web"] },
         "capabilities": { "type": "array", "items": { "$ref": "#/$defs/Capability" } },
         "limits": {
           "type": "object",

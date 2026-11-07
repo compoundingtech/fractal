@@ -1589,7 +1589,7 @@ export const Capabilities = /*#__PURE__*/ (() => Schema.Struct({
   "schemas": Schema.Array(Schema.String.check(Schema.isPattern(URI_REFERENCE, { expected: "an RFC 3986 URI reference" }))).check(Schema.isMinLength(1)),
   "sender_class": optionalKey(AssistantSenderClass),
   "session_actor": Id,
-  "transport": Schema.Literals(["unix","fabric-loopback"])
+  "transport": Schema.Literals(["unix","fabric-loopback","local-web"])
 }).annotate({ identifier: "Capabilities" }))()
 export type Capabilities = typeof Capabilities.Type
 export type CapabilitiesEncoded = typeof Capabilities.Encoded
