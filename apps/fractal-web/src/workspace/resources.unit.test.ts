@@ -129,6 +129,32 @@ describe('resource manager', () => {
     }))
   })
 
+  it('keeps a hidden mounted document held, so hiding and reactivating it neither releases nor reacquires', () => {
+    const fake = fakeDriver()
+    const manager = makeResourceManager(fake.driver)
+    let state = workspace(['document:doc/x'])
+    manager.reconcile(holdsOf(state))
+    const document = tabsOf(state.layout)[0]!
+    expect(fake.mounts.get('Document:doc/x')).toBe(1)
+    state = transition(state, { _tag: 'Open', pane: 'agent:agent/a0' }, { newId: () => 'tab-agent' })
+    expect(planTiers({ state, budget: defaultBudget }).get(document.id)).toBe('mounted')
+    manager.reconcile(holdsOf(state))
+    expect(fake.mounts.get('Document:doc/x')).toBe(1)
+    const { acquired, released } = manager.stats()
+    state = transition(state, { _tag: 'Activate', id: document.id }, counter())
+    manager.reconcile(holdsOf(state))
+    expect(fake.mounts.get('Document:doc/x')).toBe(1)
+    expect(manager.stats().released).toBe(released)
+    expect(manager.stats().acquired).toBe(acquired)
+  })
+
+  it('counts a hidden mounted document, declaration or resource against the data budget', () => {
+    const fake = fakeDriver()
+    const manager = makeResourceManager(fake.driver)
+    manager.reconcile(holdsOf(workspace([...agents, 'resource:mail/1', 'declaration:agent/a0', 'document:doc/x', 'agent:agent/a0'])))
+    expect(manager.stats().follows).toBeLessThanOrEqual(defaultBudget.data + 1)
+  })
+
   it('does not churn a socket when activating a warm tab', () => {
     const fake = fakeDriver()
     const manager = makeResourceManager(fake.driver)

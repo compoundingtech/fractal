@@ -82,7 +82,7 @@ export const desiredHolds = ({ tabs, tiers, views = {}, policyOf = corePolicyOf 
     const tier = tiers.get(tab.id) ?? 'cold'
     const subject = parsePane(tab.pane)
     const policy = policyOf(subject)
-    const data = tier === 'active' || (tier !== 'cold' && policy.keepWarm) ? policy.resources(subject) : []
+    const data = tier === 'active' || tier === 'mounted' || (tier === 'warm' && policy.keepWarm) ? policy.resources(subject) : []
     const agent = subject._tag === 'Conversation' || subject._tag === 'Terminal' ? subject.agent : undefined
     holds.set(tab.id, tier === 'active' && agent !== undefined && showsTerminal(tab, views[tab.id]) ? [...data, terminalScreen(agent)] : data)
   }

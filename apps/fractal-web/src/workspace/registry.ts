@@ -73,9 +73,9 @@ export const corePolicies: Readonly<Record<SubjectKind, KindPolicy>> = {
   Missions: { resources: () => fleetFeeds, keepWarm: true, domCost: 1, dataCost: 0 },
   Mission: { resources: () => fleetFeeds, keepWarm: true, domCost: 1, dataCost: 0 },
   Usage: { resources: () => [{ _tag: 'Shared', feed: 'usage' }], keepWarm: false, domCost: 1, dataCost: 0 },
-  Document: { resources: subject => subject._tag === 'Document' ? [{ _tag: 'Document', ref: subject.ref }] : [], keepWarm: false, domCost: 1, dataCost: 0 },
-  Declaration: { resources: subject => subject._tag === 'Declaration' ? [{ _tag: 'Declaration', ref: subject.ref }] : [], keepWarm: false, domCost: 1, dataCost: 0 },
-  Resource: { resources: subject => subject._tag === 'Resource' ? [{ _tag: 'Observed', ref: subject.ref }] : [], keepWarm: false, domCost: 1, dataCost: 0 },
+  Document: { resources: subject => subject._tag === 'Document' ? [{ _tag: 'Document', ref: subject.ref }] : [], keepWarm: false, domCost: 1, dataCost: 1 },
+  Declaration: { resources: subject => subject._tag === 'Declaration' ? [{ _tag: 'Declaration', ref: subject.ref }] : [], keepWarm: false, domCost: 1, dataCost: 1 },
+  Resource: { resources: subject => subject._tag === 'Resource' ? [{ _tag: 'Observed', ref: subject.ref }] : [], keepWarm: false, domCost: 1, dataCost: 1 },
   Unsupported: { resources: () => [], keepWarm: false, domCost: 0, dataCost: 0 },
 }
 
