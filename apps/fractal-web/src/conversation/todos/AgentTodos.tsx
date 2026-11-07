@@ -95,6 +95,7 @@ const styles = stylex.create({
   fold: { minWidth: 0 },
   foldSummary: { display: 'flex', alignItems: 'flex-start', gap: s.sm, minHeight: g.controlSm, boxSizing: 'border-box', paddingBlock: s.xs, marginInline: `calc(-1 * ${s.xs})`, paddingInline: s.xs, borderRadius: r.sm, color: c.fgSoft, cursor: 'pointer', listStyle: 'none', outline: 'none', ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outline: `${g.focusRing} solid ${c.primary}` }, '::-webkit-details-marker': { display: 'none' } },
   foldTouch: { minHeight: g.touchTarget, alignItems: 'center' },
+  foldChevron: { display: 'inline-flex', alignItems: 'center', height: t.metaLeading, flexShrink: 0, color: c.fgMuted },
   foldLabel: { flexGrow: 1, minWidth: 0, overflowWrap: 'anywhere' },
   foldCount: { flexShrink: 0, color: c.fgMuted, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums' },
   others: { display: 'flex', flexDirection: 'column', paddingTop: s.sm, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: c.border },
@@ -144,8 +145,10 @@ const TaskRows = ({ tasks, live }: { readonly tasks: readonly Task[]; readonly l
 /** A native disclosure: it stays in the page for find-in-page and needs no state to keep the plan short. */
 const Fold = ({ label, count, children }: { readonly label: React.ReactNode; readonly count?: string; readonly children: React.ReactNode }) => {
   const narrow = React.useContext(NarrowLayoutContext)
-  return <details {...stylex.props(styles.fold)}>
+  const [open, setOpen] = React.useState(false)
+  return <details onToggle={event => setOpen(event.currentTarget.open)} {...stylex.props(styles.fold)}>
     <summary {...stylex.props(styles.foldSummary, narrow && styles.foldTouch)}>
+      <span {...stylex.props(styles.foldChevron)}><Icon name={open ? 'chevron-down' : 'chevron-right'} size={12} /></span>
       <span {...stylex.props(styles.foldLabel)}>{label}</span>
       {count === undefined ? null : <span {...stylex.props(styles.foldCount)}>{count}</span>}
     </summary>
