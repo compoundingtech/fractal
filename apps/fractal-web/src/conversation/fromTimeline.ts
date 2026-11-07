@@ -346,7 +346,7 @@ const unsupported = (id: string, harness: string, recordKind: string, reason: Un
 /**
  * An entry's system records apart from whatever else it carries. `rest` holds no native record, so
  * neither a session prompt nor a tool list can follow visible content onto its item or disclosure.
- * `only` means nothing else is there to read: no other block, or a body that is the record's own copy.
+ * `sharedBodyIsRecord` drops the record's copy from the shared text; other blocks keep their meaning.
  */
 const systemRecordParts = <E extends Exclude<Entry, { type: 'truncation' }>>(entry: E) => {
   if (entry.type === 'unrecognized' || entry.type === 'reasoning') return undefined
@@ -362,10 +362,12 @@ const systemRecordParts = <E extends Exclude<Entry, { type: 'truncation' }>>(ent
   if (records.length === 0) return undefined
   const kept = blocks.filter(block => !records.some(record => record.block === block))
   const text = entry.type === 'content' ? entry.body.text ?? '' : ''
+  const sharedBodyIsRecord = records.some(({ block }) => bodyRepeatsRecord(block, text))
   return {
     records,
-    only: kept.every(block => block.kind === 'source_record') || records.some(({ block }) => bodyRepeatsRecord(block, text)),
-    rest: { ...entry, body: { ...entry.body, blocks: kept.map(block => block.kind === 'source_record' ? { ...block, payload: {} } : block) } } as E,
+    alone: kept.every(block => block.kind === 'source_record'),
+    sharedBodyIsRecord,
+    rest: { ...entry, body: { ...entry.body, ...(sharedBodyIsRecord ? { text: '' } : {}), blocks: kept.map(block => block.kind === 'source_record' ? { ...block, payload: {} } : block) } } as E,
   }
 }
 
@@ -375,13 +377,22 @@ interface BlockClassification {
   readonly native: boolean
   readonly fallback?: boolean
 }
+/** With the record's copy gone from a shared body, a text block has nothing left to say and takes no row. */
+const isEmptyProse = (item: ConversationItem | undefined) =>
+  item === undefined || (item._tag === 'Reasoning' && item.text.trim() === '')
+    || (item._tag === 'Text' && item.text.trim() === '' && item.attachments.length === 0)
+
 /** A record takes the entry's one row only when nothing else is there to read; beside content it gets its own hidden row. */
 const blockItems = (entry: Exclude<Entry, { type: 'truncation' }>): BlockClassification => {
   const parts = systemRecordParts(entry)
   if (parts === undefined) return classifyBlocks(entry)
   const rows = parts.records.map(({ block, index, item }) => ({ ...item, id: `${entry.id}#${block.id ?? index}` }))
   const rest = classifyBlocks(parts.rest)
-  if (!parts.only) return { ...rest, markers: [...rows, ...rest.markers] }
+  if (!parts.alone && !parts.sharedBodyIsRecord) return { ...rest, markers: [...rows, ...rest.markers] }
+  // Only content shares a body with its blocks, so only content reaches the fallback.
+  const own = parts.alone ? undefined : rest.native && !rest.fallback ? rest.primary
+    : parts.rest.type === 'content' ? itemOf({ entry: parts.rest, sessionActive: true }) : undefined
+  if (own !== undefined && !isEmptyProse(own)) return { markers: [...rows, ...rest.markers], primary: own, native: true, fallback: false }
   // Its native facts stay off the row, as an F2 marker's do.
   return { markers: [...rows.slice(1), ...rest.markers], primary: parts.records[0]!.item, native: true, fallback: false }
 }
