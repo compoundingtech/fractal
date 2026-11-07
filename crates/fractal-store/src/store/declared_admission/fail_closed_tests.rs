@@ -188,6 +188,38 @@ fn non_agent_desired_children_are_not_declared_admission() {
 }
 
 #[test]
+fn direct_claim_semantics_precede_the_publication_barrier() {
+    for (priority, expected) in [
+        ("urgent", "invalid-declared-admission"),
+        ("normal", "declared-admission-feature-barrier"),
+    ] {
+        for (subject, kind, fields) in [
+            ("agent/alder.new", "intent.desired", json!({
+                "kind": "agent",
+                "desired": {"children": [{"name": "declared-priority", "arguments": [priority]}]}
+            })),
+            ("mission/new", "mission.published", json!({
+                "body": {"subject": "mission/new", "declared_priority": priority}
+            })),
+        ] {
+            let store = Store::open_memory("alder").unwrap();
+            let before = store.index().unwrap();
+            let error = store.append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: kind.into(),
+                actor: Some("person/avery".into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap_err();
+            assert_eq!(error.code, expected, "{kind} {priority}");
+            assert_eq!(store.index().unwrap(), before);
+        }
+    }
+}
+
+#[test]
 fn publications_without_declared_admission_children_are_unchanged() {
     let store = Store::open_memory("alder").unwrap();
     publish(

@@ -76,7 +76,7 @@ fn declared_admission_unchanged_old_declarations_keep_claim_ids_and_body_bytes()
 }
 
 #[test]
-fn declared_admission_gate_precedes_invalid_typed_publication_and_writes_nothing() {
+fn declared_admission_invalid_typed_publication_writes_nothing() {
     let store = Store::open_memory("node").unwrap();
     let mut intent = crate::graph::parse_intent(OLD_DECLARATIONS, "node").unwrap();
     intent.missions.get_mut("old").unwrap().declared_budgets = Some(DeclaredBudgets {
@@ -86,7 +86,8 @@ fn declared_admission_gate_precedes_invalid_typed_publication_and_writes_nothing
     let error = store
         .apply(&intent, &BTreeMap::new(), "invalid-typed")
         .unwrap_err();
-    assert_eq!(error.code, "declared-admission-feature-barrier");
+    assert_eq!(error.code, "invalid-declared-admission");
+    assert_eq!(error.details["field"], "declared_budgets.cpu_seconds");
     assert!(declaration_claims(&store).is_empty());
 }
 
