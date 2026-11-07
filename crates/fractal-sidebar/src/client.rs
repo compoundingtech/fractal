@@ -215,7 +215,7 @@ mod write_tests {
             Member::Place { member: "agent/fleet/fixture-sidebar/other".into(), bucket: Some(FOLDER.into()), key: "a1".into() }]
     }
     fn folders() -> Vec<Folder> {
-        vec![Folder::FolderCreate { id: FOLDER.into(), name: "Test".into(), parent: None, key: "a0".into() },
+        vec![Folder::FolderCreate { id: "01900000-0000-7000-8000-000000000003".into(), name: "Test".into(), parent: None, key: "a0".into() },
             Folder::FolderRename { id: FOLDER.into(), name: "Renamed".into() },
             Folder::FolderMove { id: FOLDER.into(), parent: Some(OTHER_FOLDER.into()), key: "a1".into() },
             Folder::FolderDelete { id: OTHER_FOLDER.into() }]
