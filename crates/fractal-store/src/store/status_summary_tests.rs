@@ -136,6 +136,88 @@ fn notice_raw_observation(
 }
 
 #[test]
+fn cold_roster_actual_fields_and_source_do_not_walk_sparse_or_absent_field_history() {
+    fn fixture(rows: u64) -> Store {
+        let store = Store::open_memory("node").unwrap();
+        for index in 1..=rows {
+            let fields = if index == 1 {
+                json!({"status":"running","incarnation_id":"one","runtime_id":"runtime","extra":"full only"})
+            } else { json!({"status":"running"}) };
+            notice_raw_observation(&store, SEAT, "runtime.observed", &format!("observation-{index}"), "node", index, fields);
+        }
+        store
+    }
+    fn read(store: &Store) -> (smallclaims::sqlite::work::SqliteWork, Option<Value>) {
+        let connection = store.readers.get();
+        let cut = current_index(&connection).unwrap();
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let fields = roster_actual::fields(&connection, SEAT, cut).unwrap();
+        let source = roster_actual::source(&connection, SEAT, cut, None).unwrap().unwrap();
+        assert_eq!(source.1, "node");
+        assert!(source.2.is_empty());
+        (scope.finish(),fields)
+    }
+    let (few,many) = (fixture(50),fixture(3_000));
+    let (few_work,few_fields) = read(&few);
+    let (many_work,many_fields) = read(&many);
+    assert_eq!(few_fields,many_fields);
+    assert_eq!(many_fields.unwrap(),json!({"status":"running","incarnation_id":"one","runtime_id":"runtime"}));
+    assert!(many_work.vm_steps <= few_work.vm_steps + 2_000,
+        "cold roster walked history: few={few_work:?}, many={many_work:?}");
+}
+
+#[test]
+fn roster_field_selection_matches_sparse_null_transition_and_reserved_history_at_every_cut() {
+    let store = Store::open_memory("node").unwrap();
+    let transition = fractal_schema::registry().claims.iter().find(|(_,spec)|
+        spec.cardinality == fractal_schema::Cardinality::StateTransition && spec.fields.contains_key("status")
+    ).map(|(kind,_)| kind.clone()).expect("a status transition in the native registry");
+    let inputs = [
+        ("runtime.observed",json!({"status":"running","incarnation_id":"one","reason":"old"})),
+        ("runtime.observed",json!({"reason":null})),
+        ("runtime.observed",json!({"runtime_id":"runtime"})),
+        (transition.as_str(),json!({})),
+        ("attention.notice",json!({"status":"failed","incarnation_id":"reserved"})),
+    ];
+    let cuts = inputs.into_iter().enumerate().map(|(index,(kind,fields))|
+        notice_raw_observation(&store,SEAT,kind,&format!("field-{index}"),"node",index as u64+1,fields)
+    ).collect::<Vec<_>>();
+    let connection = store.readers.get();
+    for cut in cuts {
+        // The native fold is the oracle; reserved facts are excluded before decoding.
+        let mut reads = card_fold::CardReads::for_generic_reads(cut);
+        let mut full = store.agent_card_statuses(&connection,&[SEAT.into()],cut,&mut reads).unwrap()
+            .remove(SEAT).unwrap().0.actual;
+        if let Some(Value::Object(fields)) = &mut full {
+            fields.retain(|field,_| roster_actual::FIELDS.contains(&field.as_str()));
+        }
+        assert_eq!(roster_actual::fields(&connection,SEAT,cut).unwrap(),full,"cut={cut}");
+    }
+}
+
+#[test]
+fn roster_source_retains_the_full_folds_older_nonowner_nonterminal_candidate() {
+    let store = Store::open_memory("node").unwrap();
+    let inputs = [
+        ("owner",json!({"status":"running"})),
+        ("other",json!({"status":"running"})),
+        ("other",json!({"status":"stopped"})),
+    ];
+    let mut parsed = Vec::new();
+    for (index,(origin,fields)) in inputs.into_iter().enumerate() {
+        let id = format!("source-{index}");
+        notice_raw_observation(&store,SEAT,"runtime.observed",&id,origin,index as u64+1,fields.clone());
+        parsed.push((id,origin.to_owned(),json!({"fields":fields})));
+    }
+    let borrowed = parsed.iter().map(|(id,origin,body)|
+        (id.as_str(),"runtime.observed",origin.as_str(),body)).collect::<Vec<_>>();
+    let expected = select_actual_source(&borrowed,Some("owner"));
+    let connection = store.readers.get();
+    assert_eq!(roster_actual::source(&connection,SEAT,current_index(&connection).unwrap(),Some("owner")).unwrap(),expected);
+    assert_eq!(expected.unwrap().0,"source-1");
+}
+
+#[test]
 fn notice_incarnation_reduction_excludes_reserved_fields_and_source_identity_without_generic_guard() {
     for (kind, safe_kind) in [("attention.notice", "runtime.observed"),
         ("custom.attention.snapshot", "custom.health-observed")] {

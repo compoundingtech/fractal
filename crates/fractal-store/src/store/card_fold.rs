@@ -17,6 +17,7 @@ pub struct CardReads {
     desired: HashMap<String, Option<DesiredRow>>,
     actual: HashMap<String, ActualState>,
     pub(super) hide_reserved: bool,
+    roster: bool,
 }
 
 /// A subject's folded actual state and its selected actual-state claim: the claim, its origin
@@ -83,11 +84,15 @@ fn json_list<'a>(subjects: impl IntoIterator<Item = &'a String>) -> Result<Strin
 
 impl CardReads {
     pub fn new(index: u64) -> Self {
-        Self { index, owned: None, desired: HashMap::new(), actual: HashMap::new(), hide_reserved: false }
+        Self { index, owned: None, desired: HashMap::new(), actual: HashMap::new(), hide_reserved: false, roster: false }
     }
 
     pub fn for_generic_reads(index: u64) -> Self {
         Self { hide_reserved: true, ..Self::new(index) }
+    }
+
+    pub(super) fn for_roster(index: u64) -> Self {
+        Self { roster: true, ..Self::for_generic_reads(index) }
     }
 
     /// Read the declarations of `subjects` not read yet: one read of the set receipts, and one
@@ -194,6 +199,18 @@ impl CardReads {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
+        if self.roster {
+            for subject in missing {
+                let host = self.desired.get(&subject).and_then(Option::as_ref)
+                    .and_then(|row| row.member.as_deref())
+                    .and_then(|member| serde_json::from_str::<crate::model::MemberSpec>(member).ok())
+                    .map(|member| member.host);
+                let latest = roster_actual::fields(connection, &subject, self.index)?;
+                let source = roster_actual::source(connection, &subject, self.index, host.as_deref())?;
+                self.actual.insert(subject, ActualState { latest, source });
+            }
+            return Ok(());
+        }
         // The same claims `latest_actual_at` folds and `selected_actual_source_at` selects from:
         // the actual-state claims, the fold leaving out `harness.` in any case. The cross join
         // reads them one subject at a time, and each subject's rows are put in canonical order

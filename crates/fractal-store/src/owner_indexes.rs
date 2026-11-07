@@ -4,12 +4,23 @@ use std::{io::Write, path::Path, time::Duration};
 use anyhow::{Context as _, Result};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior};
 
-pub const INDEX_NAMES: [&str; 5] = [
+pub const INDEX_NAMES: [&str; 16] = [
     "claims_transport_pair_accepted_index",
     "claims_actual_accepted_index",
     "claims_runtime_origin_accepted_index",
     "claims_identity_runtime_id_accepted_index",
     "claims_identity_incarnation_id_accepted_index",
+    "claims_roster_status_accepted_index",
+    "claims_roster_incarnation_id_accepted_index",
+    "claims_roster_runtime_id_accepted_index",
+    "claims_roster_reachability_accepted_index",
+    "claims_roster_reason_accepted_index",
+    "claims_roster_restarting_from_accepted_index",
+    "claims_roster_mode_accepted_index",
+    "claims_roster_exit_code_accepted_index",
+    "claims_roster_exit_signal_accepted_index",
+    "claims_roster_actual_accepted_index",
+    "claims_roster_nonterminal_accepted_index",
 ];
 
 fn install(connection: &Connection) -> Result<()> {

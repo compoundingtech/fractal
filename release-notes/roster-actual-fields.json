@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Cold agent rosters select actual presentation fields without folding heartbeat history",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "changed", "detail": "Eleven additive local partial indexes on claims, installed by the existing owner-index preparation path. No replicated or claim schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Roster response fields and source authority are unchanged. Full generic status/card payloads remain unchanged. Roster and generic cached cards are separated by shape."},
+  "downtime": {"status": "none", "detail": "No required downtime; first-time index construction can delay opening large stores."},
+  "manual": {"status": "changed", "detail": "Prepare owner indexes offline on large stores before rollout; measure index space and ingest cost alongside cold-roster latency."},
+  "recovery": {"status": "none", "detail": "Reverting returns to the history fold; additive indexes may remain and are not replicated."}
+}
