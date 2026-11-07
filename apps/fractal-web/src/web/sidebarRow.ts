@@ -1,6 +1,7 @@
 import type { SidebarAgentRowData, SidebarAgentStatus, SidebarMissionContext } from '@fractal/ui/assistant-ui'
-import { statuses, type SidebarMissionInfo } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
+import { statuses, type SidebarMissionInfo, type SidebarOtherMission } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import type { Agent, DataSource, Feed } from '../data/source.ts'
+import type { SidebarAgent } from '../folders/sidebarContract.ts'
 import type { FeedSync } from '../data/feedSync.ts'
 import * as Atom from 'effect/reactivity/Atom'
 import type { AgentSubagent, AgentWork } from '../data/source.ts'
@@ -56,14 +57,50 @@ const workRun = ({ mission, work }: { readonly mission: Mission | undefined; rea
     runs.find(run => run.generation_id === mission?.run_generations[run.id])
 }
 
+/** The first current mission stays on the agent row; each further distinct one is a child row. One source for both. */
+const currentMissionWork = (agent: Agent) => {
+  const work = agent.currentWork?.[0]
+  const id = work?.missionId ?? agent.mission
+  const others = new Map<string, AgentWork>()
+  for (const other of agent.currentWork ?? []) if (other.missionId !== id && !others.has(other.missionId)) others.set(other.missionId, other)
+  return { work, id, others: [...others.values()] }
+}
+
+export const missionChildRowId = ({ parent, mission }: { readonly parent: string; readonly mission: string }): string =>
+  `wf/mission/${encodeURIComponent(parent)}/${encodeURIComponent(mission)}`
+
+/** The seat's tree children: further missions first, then subagents. Absent when the seat reports neither. */
+export const agentSeatChildren = (agent: Agent): readonly SidebarAgent[] | undefined => {
+  const missions = currentMissionWork(agent).others.map(work => ({
+    _tag: 'Agent' as const, id: missionChildRowId({ parent: agent.ref, mission: work.missionId }), subject: agent.ref, parent: agent.ref,
+    missionId: work.missionId, label: missionDisplayTitle({ title: undefined, work }),
+  }))
+  const subagents = agent.subagents?.map(child => ({
+    _tag: 'Agent' as const, id: subagentRowId({ parent: agent.ref, id: child.id }), subject: agent.ref, parent: agent.ref, childId: child.id,
+    // Roster AgentSubagent has only the parent session_id; the child reference exists
+    // only in SubagentSummary.conversation (conversation_blocks.rs), so this row cannot open.
+    label: child.description ?? child.id,
+  }))
+  return missions.length === 0 ? subagents : [...missions, ...(subagents ?? [])]
+}
+
+/** A child mission as its row draws it: the joined feeds when they hold it, otherwise only what the roster reported. */
+export const sidebarMissionChild = ({ agent, missionId, missions, attention }: {
+  readonly agent: Agent; readonly missionId: string
+  readonly missions?: readonly Mission[]; readonly attention?: readonly Attention[]
+}): SidebarOtherMission => {
+  const context = sidebarMissionContext({ agent, missions, attention })
+  const found = context._tag === 'Mission' ? context.alsoCurrent?.find(other => other.id === missionId) : undefined
+  return found ?? { id: missionId, slug: missionSlug(missionId), progress: { _tag: 'Unknown' }, step: { _tag: 'Unknown' } }
+}
+
 /** Join retained feeds only: no per-seat read, queue-size estimate, or synthetic decision handle. */
 export const sidebarMissionContext = ({ agent, missions = [], attention = [] }: {
   readonly agent: Agent
   readonly missions?: readonly Mission[]
   readonly attention?: readonly Attention[]
 }): SidebarMissionContext => {
-  const work = agent.currentWork?.[0]
-  const id = work?.missionId ?? agent.mission
+  const { work, id, others } = currentMissionWork(agent)
   if (id === undefined) return { _tag: 'None' }
   const titleOf = (missionId: string, source: AgentWork | undefined) =>
     missionDisplayTitle({ title: missions.find(mission => mission.id === missionId)?.title ?? missionId.replace(/^mission\//, ''), work: source })
@@ -73,16 +110,15 @@ export const sidebarMissionContext = ({ agent, missions = [], attention = [] }: 
       card.conversation_id === agent.ref || card.conversation_ids?.some(id => id === agent.ref) ||
       card.requester_id === agent.ref || card.source_id === agent.ref) &&
     (card.detail.trim().length > 0 || card.title.trim().length > 0))
-  const others = new Map<string, AgentWork>()
-  for (const other of agent.currentWork ?? []) if (other.missionId !== id && !others.has(other.missionId)) others.set(other.missionId, other)
+  const current = new Set(others.map(other => other.missionId))
   const queued = new Map<string, { readonly id: string; readonly slug: string; readonly title: string }>()
   for (const upcoming of agent.upcomingWork ?? []) {
-    if (upcoming.missionId === id || others.has(upcoming.missionId) || queued.has(upcoming.missionId)) continue
+    if (upcoming.missionId === id || current.has(upcoming.missionId) || queued.has(upcoming.missionId)) continue
     queued.set(upcoming.missionId, { id: upcoming.missionId, slug: missionSlug(upcoming.missionId), title: titleOf(upcoming.missionId, upcoming) })
   }
   return {
     _tag: 'Mission', id, slug: missionSlug(id), title: titleOf(id, work),
-    ...(others.size === 0 ? {} : { alsoCurrent: [...others.values()].map(other => {
+    ...(others.length === 0 ? {} : { alsoCurrent: others.map(other => {
       const run = workRun({ mission: missions.find(mission => mission.id === other.missionId), work: other })
       return { id: other.missionId, slug: missionSlug(other.missionId), title: titleOf(other.missionId, other), progress: run === undefined ? { _tag: 'Unknown' as const } : { _tag: 'Known' as const, ...run.progress }, step: { _tag: 'Step' as const, name: workStepName(other) } }
     }) }),

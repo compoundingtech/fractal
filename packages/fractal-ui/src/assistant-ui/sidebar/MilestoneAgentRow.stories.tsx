@@ -181,7 +181,7 @@ export const GlyphStates: Story = {
     await expect(new Set(frozen.map(row => glyph(row).innerHTML)).size).toBe(stateOrder.length)
     await expect(new Set(frozen.map(row => getComputedStyle(glyph(row)).color)).size).toBe(1)
     const byStatus = (rows: Element[], status: AgentStatus) => rows.find(row => row.getAttribute('data-status') === status)!
-    // Live keeps its accents; stale is an observation gap and shares the muted frozen tone, never danger red.
+    // Live working is the row's strongest neutral; stale is an observation gap and shares the muted frozen tone, never danger red.
     const frozenTone = getComputedStyle(glyph(frozen[0]!)).color
     await expect(getComputedStyle(glyph(byStatus(live, 'working'))).color).not.toBe(frozenTone)
     await expect(getComputedStyle(glyph(byStatus(live, 'stale'))).color).toBe(frozenTone)
@@ -222,10 +222,11 @@ export const TwoLineAndNesting: Story = {
     await expect(line2(root!).textContent).toBe('Working·build-2')
     await expect(line2(review!).textContent).toBe('Ended·build-2')
     for (const row of rows) {
-      await expect(line2(row).querySelector('[data-box="pill"], [data-row-field="spend"], [data-row-field="duration"]')).toBeNull()
+      await expect(line2(row).querySelector('[data-mission-ring], [data-row-field="spend"], [data-row-field="duration"]')).toBeNull()
     }
-    // Attention and unread share the trailing signal column.
-    await expect(root!.querySelector('[data-row-column="attention"]')).toHaveTextContent('!')
+    // A real ask is the status column's amber disc; unread stays in the trailing signal column.
+    await expect(root!.querySelector('[data-row-column="status"] [data-mark="needs-you"]')).not.toBeNull()
+    await expect(root!.querySelector('[data-row-column="attention"]')).toBeNull()
     await expect(checks!.querySelector('[data-row-signal="unread"]')).toHaveTextContent('2')
     // Nesting: subagents are level-2 tree rows, indented past a root-level leaf and aligned with each other.
     await expect(review!.closest('[role="row"]')).toHaveAttribute('aria-level', '2')
@@ -278,10 +279,10 @@ export const RowActions: Story = {
     const host = canvasElement.querySelector<HTMLElement>('[data-host="actions"]')!
     const root = await waitFor(() => { const row = [...host.querySelectorAll<HTMLElement>('[data-milestone-row]')].find(element => element.closest('[inert]') === null); expect(row).toBeDefined(); return row! })
     const gear = root.querySelector<HTMLElement>('[data-agent-menu]')!
-    // The trigger overlays line 2 without a track of its own: the row stays 48px and the `!` stays visible.
+    // The trigger overlays line 2 without a track of its own: the row stays 48px and the amber disc stays visible.
     await expect(Math.abs(root.getBoundingClientRect().height - 48)).toBeLessThanOrEqual(1)
     await expect(gear.getBoundingClientRect().top).toBeGreaterThanOrEqual(root.querySelector('[data-row-column="line2"]')!.getBoundingClientRect().top - 1)
-    await expect(root.querySelector('[data-row-column="attention"]')).toBeVisible()
+    await expect(glyph(root)).toBeVisible()
     // A pointer context menu opens the shared menu.
     await userEvent.pointer({ keys: '[MouseRight]', target: root.querySelector('[data-row-column="title"]')! })
     const menu = await waitFor(() => { const element = document.querySelector<HTMLElement>('[role="menu"]'); expect(element).not.toBeNull(); return element! })
@@ -398,7 +399,7 @@ export const RowActions: Story = {
   },
 }
 
-const neutralStates = ['idle', 'pending', 'offline', 'ended', 'suspended', 'retired', 'unobserved'] as const satisfies readonly AgentStatus[]
+const mutedStates = ['pending', 'stale', 'offline', 'ended', 'suspended', 'retired', 'unobserved'] as const satisfies readonly AgentStatus[]
 const allStatesPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async ({ canvasElement }) => {
   const surfaceRoot = within(canvasElement).getByTestId('all-states')
   const host = surfaceRoot.querySelector<HTMLElement>('[data-host="all-states"]')!
@@ -408,23 +409,19 @@ const allStatesPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async (
   await expect(rows.map(row => row.getAttribute('data-status'))).toEqual(stateOrder)
   const at = (status: AgentStatus) => glyph(rows.find(row => row.getAttribute('data-status') === status)!)
   const color = (status: AgentStatus) => getComputedStyle(at(status)).color
-  // G3: working and idle are bare discs told apart by tone; every other state draws its canonical shape over a faded disc.
-  for (const status of stateOrder) {
-    await expect(at(status)).toHaveAttribute('data-disc-refinement', 'G3')
-    await expect(at(status).children.length === 1).toBe(status === 'working' || status === 'idle')
-  }
-  await expect(new Set(stateOrder.map(status => `${at(status).innerHTML}|${color(status)}`)).size).toBe(stateOrder.length)
-  // Ended is not idle: a finished agent draws the stop shape, never the bare idle disc.
-  await expect(at('ended').innerHTML).not.toBe(at('idle').innerHTML)
+  // Marks: filled is active, hollow is at rest, and every state differs by shape or weight with color removed.
+  await expect(new Set(stateOrder.map(status => at(status).innerHTML.replace(/_r_[^"]*|«[^"]*/g, ''))).size).toBe(stateOrder.length)
+  await expect(at('working').querySelector('circle')).toHaveAttribute('fill', 'currentColor')
+  await expect(at('idle').querySelector('circle')).not.toHaveAttribute('fill', 'currentColor')
+  await expect(at('waiting').querySelector('circle')).not.toHaveAttribute('fill', 'currentColor')
+  await expect(at('waiting').innerHTML).not.toBe(at('idle').innerHTML)
+  // Color means act: only failure is colored here, and no quiet state borrows amber, red or blue.
   const probe = getComputedStyle(surfaceRoot.querySelector('[data-tone-probe]')!)
   const soft = probe.color, muted = probe.backgroundColor, danger = probe.borderTopColor
-  await expect(color('working')).not.toBe(soft)
-  await expect(color('waiting')).not.toBe(soft)
-  await expect(color('waiting')).not.toBe(color('working'))
-  for (const status of neutralStates) await expect(color(status)).toBe(soft)
-  // Stale is an observation gap: muted, never the danger red.
-  await expect(color('stale')).toBe(muted)
-  await expect(color('stale')).not.toBe(danger)
+  await expect(color('failed')).toBe(danger)
+  await expect(color('waiting')).toBe(soft)
+  await expect(color('idle')).toBe(soft)
+  for (const status of mutedStates) await expect(color(status)).toBe(muted)
   // The scheme reaches the surface: light renders on a light canvas, dark on a dark one (relative luminance of the canvas).
   const [red, green, blue] = getComputedStyle(surfaceRoot).backgroundColor.match(/\d+(\.\d+)?/g)!.map(Number)
   await expect((0.2126 * red! + 0.7152 * green! + 0.0722 * blue!) / 255 > 0.5).toBe(surfaceRoot.getAttribute('data-scheme') === 'light')
@@ -1000,7 +997,7 @@ const reachTitle = 'GatewaySchemaReconciliationAcrossEveryHost'
 const reachRows: readonly Row[] = [
   { ...base, ref: 'agent/example-reach-empty', title: reachTitle },
   { ...base, ref: 'agent/example-reach-time', title: reachTitle, lastTurn: { _tag: 'Known', kind: 'turn-completed', at: storyNow - 95_000 } },
-  { ...base, ref: 'agent/example-reach-waiting', title: 'Waiting on your answer', status: 'waiting', statusLabel: statuses.waiting.label, needsMe: true, lastTurn: { _tag: 'Known', kind: 'activity', at: storyNow - 30_000 } },
+  { ...base, ref: 'agent/example-reach-waiting', title: 'Waiting on an agent', status: 'waiting', statusLabel: statuses.waiting.label, lastTurn: { _tag: 'Known', kind: 'activity', at: storyNow - 30_000 } },
   { ...base, ref: 'agent/example-reach-needs', title: 'Working but asking', status: 'working', statusLabel: 'Working', needsMe: true },
 ]
 
@@ -1022,12 +1019,11 @@ export const TitleReach: StoryObj<{ scheme: Scheme }> = {
     // A last turn takes only its own width: the name column (title plus count) still ends before it, and gains everything the empty row gained.
     await expect(box(timed!, 'name').right).toBeLessThanOrEqual(box(timed!, 'time').left)
     await expect(box(empty!, 'name').width - box(timed!, 'name').width).toBeLessThanOrEqual(box(timed!, 'trailing').width + Number.parseFloat(getComputedStyle(timed!).columnGap) + 1)
-    // Waiting already says "Needs you" with its glyph: no third "!" signal. A working row asking for you keeps it, bold.
-    await expect(waiting!.querySelector('[data-row-column="attention"]')).toBeNull()
-    await expect(waiting!.querySelector('[data-row-field="status-label"]')).toHaveTextContent('Needs you')
-    const attention = needs!.querySelector<HTMLElement>('[data-row-column="attention"]')!
-    await expect(attention).toBeVisible()
-    await expect(getComputedStyle(attention).fontWeight).toBe('700')
+    // Waiting with no question is neutral. A real ask is the amber disc and says "Needs you", whatever the agent is doing.
+    await expect(waiting!.querySelector('[data-row-field="status-label"]')).toHaveTextContent('Waiting')
+    await expect(waiting!.querySelector('[data-row-column="status"] [data-mark="waiting"]')).not.toBeNull()
+    await expect(needs!.querySelector('[data-row-column="status"] [data-mark="needs-you"]')).not.toBeNull()
+    await expect(glyph(needs!)).toHaveAttribute('aria-label', expect.stringMatching(/^Needs you;/))
     // Hover: the ghost trigger shows over line 2's end, which fades beneath it instead of reserving a column.
     const trigger = empty!.querySelector<HTMLElement>('[data-agent-menu]')!
     await expect(getComputedStyle(trigger).opacity).toBe('0')

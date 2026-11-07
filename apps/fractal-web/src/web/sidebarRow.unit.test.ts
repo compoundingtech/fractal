@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import { sidebarRow, sidebarMissionFeeds } from './sidebarRow.ts'
+import { agentSeatChildren, missionChildRowId, sidebarMissionChild, sidebarRow, sidebarMissionFeeds } from './sidebarRow.ts'
+import { missionChildAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarMissionLine.tsx'
+import { rowAttention, rowStatusLabel } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { sidebarRowDescription } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarAgentRow.tsx'
 import { AgentRowDetails } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/RowOverlays.tsx'
 import { sidebarRowAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/rowPresentation.tsx'
@@ -142,8 +144,8 @@ describe('controlled native sidebar observations', () => {
     }
     expect(row({ activity: 'working', status: 'working' })).toMatchObject({ status: 'working', statusLabel: 'Working' })
     expect(row()).toMatchObject({ status: 'idle', statusLabel: 'Idle' })
-    expect(row({ activity: 'waiting', status: 'waiting' })).toMatchObject({ status: 'waiting', statusLabel: 'Needs you' })
-    expect(row({ activity: 'waiting', status: 'waiting for you (question)' })).toMatchObject({ status: 'waiting', statusLabel: 'Needs you' })
+    expect(row({ activity: 'waiting', status: 'waiting' })).toMatchObject({ status: 'waiting', statusLabel: 'Waiting' })
+    expect(row({ activity: 'waiting', status: 'waiting for you (question)' })).toMatchObject({ status: 'waiting', statusLabel: 'Waiting' })
     expect(row({ activity: 'errored', status: 'errored' })).toMatchObject({ status: 'failed', statusLabel: 'Failed' })
     expect(row({ state: 'stopped' }, true)).toMatchObject({ status: 'ended', statusLabel: 'Last verified · Ended' })
   })
@@ -378,4 +380,49 @@ it('queued mission projection preserves first occurrence order for arbitrary bou
     if (context?._tag !== 'Mission') return
     expect(context.queued.map(mission => mission.slug)).toEqual([...new Set(names.filter(name => name !== 'current'))])
   }))
+})
+
+describe('the row system', () => {
+  const hash = 'd45524b5ff5388299cd145fd8bef8c7e'
+  const work = (id: string, missionId: string, fields: { readonly title?: string; readonly goal?: string } = {}) => ({ id: `work/${id}`, missionId, runId: `run/${id}`, path: id, state: 'claimed', ...fields })
+  const multi: Agent = { ...agent, currentWork: [work('a', 'mission/example/first'), work('b', 'mission/example/second'), work('b2', 'mission/example/second'), work('c', `mission/person-ask/${hash}`, { goal: 'Ask about the release' })] }
+
+  it('says Waiting for a waiting agent, and Needs you only for the set the counts use', () => {
+    const waiting = { ...agent, activity: 'waiting' as const, status: 'waiting' }
+    const quiet = sidebarRow({ agent: waiting, stale: false })
+    expect(rowStatusLabel(quiet)).toBe('Waiting')
+    expect(rowAttention(quiet)).toBeUndefined()
+    const asked = sidebarRow({ agent: waiting, stale: false, needsMe: true })
+    expect(rowStatusLabel(asked)).toBe('Needs you')
+    expect(rowAttention(asked)).toBe('needs-you')
+    expect(sidebarRowAccessibleName(asked)).toContain('Needs you')
+    expect(rowStatusLabel(sidebarRow({ agent: waiting, stale: true, needsMe: true }))).toBe('Last verified · Needs you')
+  })
+
+  it('lets failure outrank an ask, and keeps other states uncolored', () => {
+    expect(rowAttention(sidebarRow({ agent: { ...agent, activity: 'errored' }, stale: false, needsMe: true }))).toBe('failed')
+    expect(rowAttention(sidebarRow({ agent: { ...agent, activity: 'working' }, stale: false }))).toBeUndefined()
+  })
+
+  it('makes each further current mission one child row, before subagents, and never labels one with a hash', () => {
+    const children = agentSeatChildren(multi)!
+    expect(children.map(child => child.missionId)).toEqual(['mission/example/second', `mission/person-ask/${hash}`])
+    expect(children.every(child => !child.label.includes(hash))).toBe(true)
+    expect(children[1]).toMatchObject({ id: missionChildRowId({ parent: agent.ref, mission: `mission/person-ask/${hash}` }), parent: agent.ref, label: 'Ask about the release' })
+    expect(agentSeatChildren(agent)).toBeUndefined()
+    expect(sidebarRow({ agent: multi, stale: false }).missionContext).toMatchObject({ id: 'mission/example/first', queued: [] })
+  })
+
+  it('names a child row without its hash, and draws it even when the mission feeds hold nothing', () => {
+    const child = sidebarMissionChild({ agent: multi, missionId: `mission/person-ask/${hash}` })
+    expect(missionChildAccessibleName({ ...child, title: 'Ask about the release' })).toBe('Ask about the release, Mission')
+    expect(missionChildAccessibleName({ id: 'mission/x', slug: hash, progress: { _tag: 'Unknown' }, step: { _tag: 'Unknown' } })).toBe('Untitled mission, Mission')
+    expect(sidebarMissionChild({ agent: agent, missionId: 'mission/gone' })).toMatchObject({ slug: 'gone', progress: { _tag: 'Unknown' } })
+  })
+
+  it('never speaks an ad hoc hash in the row name', () => {
+    const adHoc = sidebarRow({ agent: { ...agent, currentWork: [work('c', `mission/person-ask/${hash}`, { goal: 'Ask about the release' })] }, stale: false })
+    expect(sidebarRowAccessibleName(adHoc)).toContain('Mission Ask about the release')
+    expect(sidebarRowAccessibleName(adHoc)).not.toContain(hash)
+  })
 })
