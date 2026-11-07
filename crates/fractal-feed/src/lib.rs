@@ -904,8 +904,7 @@ async fn connected(
                         }
                     }
                     // The feed holds no ordered-membership window.
-                    CollectionEvent::MembershipSnapshot { .. } | CollectionEvent::MembershipChanges { .. }
-                        | CollectionEvent::ThreadWindow { .. } => {}
+                    CollectionEvent::MembershipSnapshot { .. } | CollectionEvent::MembershipChanges { .. } => {}
                 }
             }
             command = commands.recv() => match command {
