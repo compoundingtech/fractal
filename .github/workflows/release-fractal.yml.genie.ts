@@ -167,6 +167,10 @@ fi`,
       if: "github.event_name == 'push' && github.ref == 'refs/heads/main'",
       needs: 'embed',
       'runs-on': 'ubuntu-latest',
+      concurrency: {
+        group: 'fractal-release-mutation',
+        'cancel-in-progress': false,
+      },
       permissions: { contents: 'write' },
       env: { GH_TOKEN: '${{ github.token }}', GH_REPO: '${{ github.repository }}', SOURCE_SHA: '${{ github.sha }}' },
       steps: [
@@ -324,9 +328,9 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
       "needs": "assemble",
       "runs-on": "ubuntu-latest",
       "timeout-minutes": 15,
-      // One edge at a time; a superseded pending run is dropped, and the script never moves edge backwards.
+      // Serialize release mutations; a superseded pending run is dropped, and the script never moves edge backwards.
       "concurrency": {
-        "group": "fractal-edge-publish",
+        "group": "fractal-release-mutation",
         "cancel-in-progress": false
       },
       "permissions": {

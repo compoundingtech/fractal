@@ -82,7 +82,7 @@ export default githubWorkflow(auditCaches({
     release: {
       name: 'daily-release-candidate',
       needs: 'build',
-      if: "${{ !cancelled() && (needs.build.result == 'success' || needs.build.result == 'skipped') && inputs.mode != 'publish' }}",
+      if: "${{ !cancelled() && (needs.build.result == 'success' || needs.build.result == 'skipped') && inputs.mode != 'publish' && github.ref == 'refs/heads/main' }}",
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 20,
       concurrency: {
@@ -152,6 +152,7 @@ export default githubWorkflow(auditCaches({
     advance: {
       name: 'advance-compatibility-baselines',
       needs: 'publish',
+      if: "github.ref == 'refs/heads/main'",
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 20,
       permissions: { contents: 'write', actions: 'write', 'pull-requests': 'write' },

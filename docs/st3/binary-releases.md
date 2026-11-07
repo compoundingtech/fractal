@@ -249,10 +249,13 @@ the operator's summary to the draft notes; it defaults to empty. Publication pre
 that summary verbatim rather than regenerating it. `scripts/release-fractal-daily --dry-run`
 prints the candidate notes without creating a tag or draft.
 
-Candidate version selection, draft creation, cleanup, and publication share one job-level
-`fractal-release-mutation` concurrency group, with cancellation disabled. Builds never hold
-this mutation lock. Publication needs Contents write and Actions read only; its Actions
-access inspects the successful build and downloads proof, not dispatches.
+Candidate version selection, draft creation, cleanup, publication, and edge/embed release
+jobs share one job-level `fractal-release-mutation` concurrency group, with cancellation
+disabled. Edge and embed are not exempt: they also create or edit GitHub releases.
+Builds never hold this mutation lock. All write-permission release jobs are restricted to
+`refs/heads/main`; dispatch release operations with `--ref main`. Publication needs Contents
+write and Actions read only; its Actions access inspects the successful build and downloads
+proof, not dispatches.
 
 GitHub concurrency allows one running and one pending job, not an unbounded queue: a third
 arrival can cancel the older pending job even when `cancel-in-progress` is false. An
@@ -285,17 +288,21 @@ older candidate, append `-f allow_superseded=vX.Y.Z` to the command above, using
 exact selected older tag, not the newer tag or a boolean. The corresponding script option
 is `--allow-superseded "$ALLOW_SUPERSEDED"`; it must equal the selected tag to override.
 
-The dispatch requires a nonempty GO reference; it records the reference, SHA, publisher,
-and workflow run in the published release notes. The reference is an auditable
-Compounding Manager attestation of the Product Lead's exact-SHA GO, not an automated
-check of the referenced message's contents. No human-only environment review is required.
+The dispatch requires a nonempty `go_ref`; it records the reference, SHA, publisher,
+and workflow run in the published release notes. The Compounding Manager is accountable
+for ensuring that this dispatcher attestation references the Product Lead's actual GO
+for the exact full source SHA. Automation does not verify the referenced message's
+contents. No human-only environment review is required.
 The publisher refuses a non-draft or prerelease, a SHA that differs from the draft target,
 an existing immutable tag, or `RELEASE.json`, incomplete notes, or invalid
-checksums/archive sources. `CANDIDATE.json` identifies the build run and exact source.
-Publication requires that run to have succeeded in **Fractal tag release**, then downloads
-its original `fractal-release` artifact and checks source, checksums and equality with the
-candidate archives. Missing/expired build artifacts or an unsuccessful/mismatched run fail
-closed. Publish within the artifact's seven-day retention, or build a fresh candidate.
+checksums/archive sources. `CANDIDATE.json` binds the exact source, build run and build
+attempt to the canonical workflow's numeric ID and path (`.github/workflows/release-fractal.yml`),
+resolved through the GitHub API, not its display name. Publication requires that exact
+attempt to have succeeded, then downloads its original `fractal-release` artifact and
+checks source, checksums and equality with the candidate archives. Rerunning the build
+requires a fresh candidate; a later attempt cannot stand in for the recorded proof.
+Missing or expired artifacts and unsuccessful or mismatched workflow/run/attempt proof
+fail closed. Publish within the artifact's seven-day retention, or build a fresh candidate.
 It creates the selected tag at the exact approved source SHA if absent, publishes the
 existing bytes and notes, and proposes compatibility baselines.
 Candidate runs never advance baselines. Consumers must pin only published release tags,

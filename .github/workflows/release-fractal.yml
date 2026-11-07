@@ -503,6 +503,9 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     needs: embed
     runs-on: ubuntu-latest
+    concurrency:
+      group: fractal-release-mutation
+      cancel-in-progress: false
     permissions:
       contents: write
     env:
@@ -708,7 +711,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     concurrency:
-      group: fractal-edge-publish
+      group: fractal-release-mutation
       cancel-in-progress: false
     permissions:
       contents: write

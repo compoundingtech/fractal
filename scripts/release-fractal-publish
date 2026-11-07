@@ -53,15 +53,22 @@ def publish(tag, sha, go_ref, allow_superseded=''):
         run('sha256sum', '--check', 'SHA256SUMS', cwd=dist)
         run('python3', str(Path(__file__).resolve().with_name('release-fractal-manifest.py')), sha, cwd=dist)
         proof = json.loads((dist / 'CANDIDATE.json').read_text())
-        if proof['source'] != sha or type(proof['build_run']) is not int or proof['build_run'] <= 0:
+        if (proof['source'] != sha or type(proof['build_run']) is not int or proof['build_run'] <= 0
+                or type(proof['build_attempt']) is not int or proof['build_attempt'] <= 0):
             raise ValueError('candidate build proof does not identify this exact source')
         build_run = str(proof['build_run'])
+        workflow = json.loads(run('gh', 'api', f'repos/{repository}/actions/workflows/release-fractal.yml'))
+        identity = json.loads(run('gh', 'api', f'repos/{repository}/actions/runs/{build_run}'))
+        if identity['workflow_id'] != workflow['id']:
+            raise ValueError('candidate proof belongs to a different workflow ID')
+        if identity['run_attempt'] != proof['build_attempt']:
+            raise ValueError('candidate build was rerun; create a fresh candidate for that attempt')
         built = json.loads(run('gh', 'run', 'view', build_run, '--json',
-                               'status,conclusion,workflowName,event,headBranch,headSha,displayTitle'))
+                               'status,conclusion,event,headBranch,headSha,displayTitle'))
         exact_source = (built['headSha'] == sha if built['event'] == 'push'
                         else built['displayTitle'].startswith(f'Fractal candidate {sha} '))
         if (built['status'] != 'completed' or built['conclusion'] != 'success'
-                or built['workflowName'] != 'Fractal tag release' or built['headBranch'] != 'main'
+                or built['headBranch'] != 'main'
                 or built['event'] not in ('push', 'workflow_dispatch') or not exact_source):
             raise ValueError('candidate build run did not succeed at the exact approved SHA')
         # Do not trust an edited draft proof alone: compare it to the successful run artifact.

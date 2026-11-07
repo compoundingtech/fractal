@@ -323,6 +323,11 @@ def main():
     say(f'releasing {tag} from {sha} (run {run_id}), previous release {previous} at {since}')
 
     dist = pathlib.Path(tempfile.mkdtemp(prefix='fractal-release-'))
+    repository = os.environ.get('GH_REPO', 'compoundingtech/fractal')
+    build = json.loads(run('gh', 'api', f'repos/{repository}/actions/runs/{run_id}'))
+    if (build['status'] != 'completed' or build['conclusion'] != 'success'
+            or type(build['run_attempt']) is not int or build['run_attempt'] <= 0):
+        raise CommandFailed('selected build attempt is not successful')
     download_release(run_id, os.environ.get('GH_REPO', 'compoundingtech/fractal'), dist)
     # The same checks the tag workflow makes, so the bytes are proven before they are published.
     run('sha256sum', '--check', 'SHA256SUMS', cwd=dist)
@@ -333,7 +338,8 @@ def main():
     body_notes = dist / 'RELEASE-BODY.md'
     body_notes.write_text(body + '\n\n<!-- fractal-daily-candidate -->\n')
     (dist / 'UPGRADE-IMPACT.json').write_text(json.dumps(impact, indent=2) + '\n')
-    (dist / 'CANDIDATE.json').write_text(json.dumps({'source': sha, 'build_run': run_id}) + '\n')
+    (dist / 'CANDIDATE.json').write_text(json.dumps({
+        'source': sha, 'build_run': run_id, 'build_attempt': build['run_attempt']}) + '\n')
     assets = sorted(str(p) for pattern in ('*.tar.gz', '*.sha256') for p in dist.glob(pattern))
     assets += [str(dist / 'SHA256SUMS'), str(dist / 'RELEASE.json'), str(dist / 'UPGRADE-IMPACT.json'),
                str(dist / 'CANDIDATE.json'), str(notes)]

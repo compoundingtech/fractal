@@ -32,8 +32,10 @@ elif args[:2] == ['run', 'view']:
            'workflowName': 'Fractal tag release'}
     row.update(json.loads(os.environ['FAKE_RUN']))
     print(json.dumps(row))
-elif args[0] == 'api' and '/actions/runs/' in args[1]:
+elif args[0] == 'api' and args[1].endswith('/artifacts'):
     print(json.dumps([{'artifacts': [{'name': os.environ['FAKE_ARTIFACT'], 'expired': False}]}]))
+elif args[0] == 'api' and '/actions/runs/' in args[1]:
+    print(json.dumps({'status': 'completed', 'conclusion': 'success', 'run_attempt': 1}))
 elif args[0] == 'api' and args[-1] == 'repos/example/project/releases?per_page=100':
     print(json.dumps([[{'tag_name': 'v0.3.17', 'draft': False, 'prerelease': False,
                        'published_at': '2026-10-07T00:00:00Z', 'id': 17}]]))
@@ -49,6 +51,7 @@ elif args[:2] == ['release', 'create']:
     proof_path = next(pathlib.Path(asset) for asset in assets if pathlib.Path(asset).name == 'CANDIDATE.json')
     proof = json.loads(proof_path.read_text())
     assert proof['source'] == os.environ['FAKE_SHA'] and type(proof['build_run']) is int, proof
+    assert proof['build_attempt'] == 1, proof
     pathlib.Path(os.environ['FAKE_RECEIPT']).write_text(json.dumps({
         'body': body_path.read_text(),
         'assets': {pathlib.Path(asset).name: pathlib.Path(asset).read_text()
