@@ -382,7 +382,7 @@ mod tests {
         Reading {
             version: 1,
             objective: OBJECTIVE.into(),
-            member: "dev5".into(),
+            member: "node-sample-a".into(),
             start_ms: end_ms - MINUTES * MINUTE_MS,
             end_ms,
             observed_at_ms: end_ms,
@@ -403,15 +403,15 @@ mod tests {
     #[test]
     fn stale_future_wrong_member_and_invalid_counts_are_rejected() {
         let evidence = reading(1, MINUTES, MINUTES);
-        assert!(evidence.check("dev5", evidence.end_ms).is_ok());
+        assert!(evidence.check("node-sample-a", evidence.end_ms).is_ok());
         assert!(
             evidence
-                .check("dev5", evidence.end_ms + MAX_AGE_MS + 1)
+                .check("node-sample-a", evidence.end_ms + MAX_AGE_MS + 1)
                 .is_err()
         );
-        assert!(evidence.check("dev5", evidence.end_ms - 1).is_err());
-        assert!(evidence.check("dev3", evidence.end_ms).is_err());
-        assert!(reading(1, 0, 1).check("dev5", evidence.end_ms).is_err());
+        assert!(evidence.check("node-sample-a", evidence.end_ms - 1).is_err());
+        assert!(evidence.check("node-sample-b", evidence.end_ms).is_err());
+        assert!(reading(1, 0, 1).check("node-sample-a", evidence.end_ms).is_err());
         let payload = vec![b' '; MAX_BYTES as usize + 1];
         assert!(read_json::<Reading>(payload.as_slice()).is_err());
     }
@@ -423,7 +423,7 @@ mod tests {
         let policy = Policy {
             config: ReadinessSloConfig {
                 executor: "node".into(),
-                member: "dev5".into(),
+                member: "node-sample-a".into(),
                 reviewer: "agent/node.ops".into(),
                 evidence_file: dir.path().join("unused.json"),
             },
@@ -448,7 +448,7 @@ mod tests {
                 "readiness-pending-reviewer",
             )
             .unwrap();
-        let id = "slo-objective/node/fractal-api-readiness/dev5";
+        let id = "slo-objective/node/fractal-api-readiness/node-sample-a";
 
         // Crash after writing a pending miss but before appending the fault.
         let missed = reading(1, MINUTES, MINUTES - 11);
@@ -513,7 +513,7 @@ mod tests {
         let policy = Policy {
             config: ReadinessSloConfig {
                 executor: "node".into(),
-                member: "dev5".into(),
+                member: "node-sample-a".into(),
                 reviewer: "agent/node.ops".into(),
                 evidence_file: dir.path().join("unused.json"),
             },
@@ -548,7 +548,7 @@ mod tests {
             Some("agent")
         );
         let id = format!(
-            "slo-objective/{}/fractal-api-readiness/dev5",
+            "slo-objective/{}/fractal-api-readiness/node-sample-a",
             store.origin()
         );
         let missed = reading(1, MINUTES, MINUTES - 11);
