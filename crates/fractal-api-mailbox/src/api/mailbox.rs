@@ -498,10 +498,24 @@ fn retain_live_mail(
     recovered: &mut std::collections::BTreeSet<String>,
 ) -> anyhow::Result<()> {
     let mut live = Vec::new();
-    for message in messages.drain(..) {
+    for mut message in messages.drain(..) {
         let Some(sent) = sent_claim(store, &message)? else {
             continue;
         };
+        // The exact recipient and immutable message already selected by the mailbox own this
+        // context. Author-supplied tags and ordinary reply pointers carry no topic authority.
+        let fields = &sent.body["fields"];
+        if let Some(thread) = fields["thread_id"].as_str()
+            && let Some(operation) = sent.operation_id.as_deref()
+            && sent.subject == message.subject
+            && sent.store_index == message.created_index
+            && fields["from"].as_str() == Some(message.from.as_str())
+            && fields["to"].as_str() == Some(message.to.as_str())
+            && smallclaims::store::operation_tx(&store.graph.readers.get(), operation)?
+                .is_some_and(|(_, id, status)| id == sent.id && status == "active")
+        {
+            message.delivery_thread = Some(thread.to_owned());
+        }
         // `through` is a graph index and a stream item's is past them all, so a stream item
         // counts as after the connection by its accepted time alone.
         let after_connection = through.is_none_or(|index| message.created_index > index)
@@ -3818,6 +3832,42 @@ mod tests {
     #[tokio::test]
     async fn argv_desired_change_wakes_and_fences_bound_stream() {
         argv_changed_stream_control(false).await;
+    }
+
+    #[test]
+    fn delivery_adds_only_the_admitted_message_topic_context() {
+        use crate::store::{thread_delivery, thread_metadata};
+        let store = Store::open_memory("node").unwrap();
+        store.configure_thread_write_rollout([]);
+        let person = "person/operator";
+        let agent = "agent/reviewer";
+        let thread = "thread/review";
+        thread_metadata::apply(
+            &store, person, thread, "create", thread_metadata::Edit::Create { agent, title: "Review" },
+        ).unwrap();
+        let input = |subject: &str, fields: Value| ClaimInput {
+            subject: subject.into(), kind: "message.sent".into(), actor: Some(person.into()),
+            fields: serde_json::from_value(fields).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some(subject.into()),
+        };
+        let message = input("message/threaded", json!({
+            "from": person, "to": agent, "content": "Check tests.", "status": "sent",
+            "thread_id": thread,
+        }));
+        thread_delivery::append_reply(
+            &store, &message, thread_metadata::PersonAuthority::TrustedLocal, None,
+        ).unwrap();
+        let ordinary = input("message/ordinary", json!({
+            "from": person, "to": agent, "content": "Check CI.", "status": "sent",
+            "tags": ["st3-delivery-thread:thread/forged"],
+        }));
+        store.append_claim(&ordinary).unwrap();
+        let mut messages: Vec<_> = [message.subject, ordinary.subject].iter()
+            .map(|id| store.message(id).unwrap().unwrap()).collect();
+        assert!(messages.iter().all(|message| message.delivery_thread.is_none()));
+        retain_live_mail(&store, &mut messages, 0, None, &mut Default::default()).unwrap();
+        assert_eq!(messages[0].delivery_thread.as_deref(), Some(thread));
+        assert!(messages[1].delivery_thread.is_none());
     }
 
     /// A seat its run's end stopped, held by mail sent before the stop, keeps its stream: it is

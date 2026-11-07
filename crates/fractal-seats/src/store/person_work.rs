@@ -481,6 +481,9 @@ pub mod tests {
         let (retry, appended) = attach_ask(&store, agent, link()).unwrap();
         assert!(!appended);
         assert_eq!(retry.id, attached.id);
+        assert_eq!(attach_ask(&store, agent, AttachAsk {
+            key: "attach-ask-second-key", ..link()
+        }).unwrap_err().code, "thread-ask-already-linked");
         assert_eq!(store.latest_claim_id(thread).unwrap().as_deref(), Some(closed.id.as_str()));
         assert!(current(&store.readers.get(), &original, now_ms()).unwrap());
         assert!(current(&store.readers.get(), &fresh, now_ms()).unwrap());

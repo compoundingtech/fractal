@@ -75,7 +75,7 @@ fn store_error(error: FractalError) -> ApiError {
     match error.code {
         "thread-unavailable" => ApiError::not_found("the thread is unavailable"),
         "stale-thread-cursor" | "stale-thread-title" | "stale-subject" | "thread-closed"
-        | "thread-state-unchanged" => stale(&error.message),
+        | "thread-state-unchanged" | "thread-ask-already-linked" => stale(&error.message),
         "thread-authority-expired" | "device-key-not-enrolled" => forbidden(&error.message),
         "thread-rollout-unavailable" => ApiError {
             status: StatusCode::CONFLICT,
@@ -413,10 +413,10 @@ pub(super) async fn link_ask_action(
             let bound = current
                 .bound_agent
                 .as_deref()
-                .filter(|_| {
+                .filter(|bound| {
                     current.transport == "unix"
                         && current.assistant_write.is_none()
-                        && current.authority_actor.starts_with("agent/")
+                        && current.authority_actor.as_str() == *bound
                 })
                 .ok_or_else(|| forbidden("only the bound requesting agent can attach an ask"))?;
             validate_snapshot_fence(&state, &request.fence)?;
