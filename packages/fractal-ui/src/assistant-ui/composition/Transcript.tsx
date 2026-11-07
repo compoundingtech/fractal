@@ -3,7 +3,6 @@ import { createPortal } from 'react-dom'
 import * as stylex from '@stylexjs/stylex'
 import { MessagePrimitive, ThreadPrimitive, useAuiState } from '@assistant-ui/react'
 import { Button, Disclosure, DisclosurePanel, ProgressBar, VisuallyHidden } from 'react-aria-components'
-import type { ScenarioMountedWindow } from '@fractal/scenarios/storybook/check'
 import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/model'
 import { EmbraceScrollViewport, historyBatchSize, type ViewportAnchorHistory } from '../EmbraceScrollViewport'
 import { RuntimeAdoptedIds } from '../EmbraceRuntime'
@@ -29,12 +28,9 @@ import { useCopyFeedback, type CopyAction } from './useCopyFeedback'
 import { observeUserMessageOverflow, TranscriptActiveContext } from './user-message-overflow'
 import { TranscriptSearch } from './TranscriptSearch'
 import { useClockLabel } from '../../time/clock'
-import { NarrowLayoutContext } from './NarrowLayout'
+import { LiveRing } from './LiveRing'
+import { transcriptInitialSourceRowCount } from './transcript-window'
 
-/** Source rows (a prompt counts as one) the first commit mounts; the latest prompt and a reasoning run crossing the bound mount whole besides. */
-export const transcriptInitialSourceRowCount = 6
-/** Story-declared window tied to the same constant as the real initial mount. */
-export const transcriptMountedWindow: Extract<ScenarioMountedWindow, { readonly _tag: 'sourceRows' }> = { _tag: 'sourceRows', rows: transcriptInitialSourceRowCount }
 
 export type LiveActivityState = { readonly _tag: 'Working' } | { readonly _tag: 'WaitingForAnswer' }
 export interface TranscriptTurn {
@@ -59,7 +55,7 @@ export interface TranscriptProps {
   readonly title: string
   /** Omit when the host already owns the conversation's header band. */
   readonly showHeader?: boolean
-  /** With showHeader=false, preserve sync/run controls in the owning pane header's stable action slot. */
+  /** With showHeader=false, preserve sync controls in the owning pane header's stable action slot. */
   readonly headerActionsHost?: HTMLElement | null
   readonly sync: SyncStatus
   /** Omit to subscribe only elapsed/sync labels to the host HumanClockProvider. */
@@ -306,14 +302,7 @@ export function LiveActivity({ state, startedAt, now }: { readonly state: LiveAc
     return Number.isFinite(started) && started <= now ? formatWorkDuration(now - started) || '<1s' : ''
   }, now)
   const waiting = state._tag === 'WaitingForAnswer'
-  return <div data-testid="live-work" role="status" aria-label={waiting ? 'Waiting for your answer' : 'Response in progress'} {...stylex.props(styles.liveActivity)}><span aria-hidden="true" {...stylex.props(styles.liveRing, waiting && styles.waitingRing)} /><span data-testid="live-activity-label" {...stylex.props(styles.liveLabel)}>{`${waiting ? 'Waiting for your answer' : 'Working'}${duration === '' ? '' : ` · ${duration}`}`}</span></div>
-}
-function RunElapsed({ startedAt, now }: { readonly startedAt?: string; readonly now?: number }) {
-  const elapsed = useClockLabel(now => {
-    const started = Date.parse(startedAt ?? '')
-    return Number.isFinite(started) && started <= now ? ` · ${formatWorkDuration(now - started) || '<1s'}` : ''
-  }, now)
-  return <span data-testid="run-elapsed">Running{elapsed}</span>
+  return <div data-testid="live-work" role="status" aria-label={waiting ? 'Waiting for your answer' : 'Response in progress'} {...stylex.props(styles.liveActivity)}><LiveRing spinning={!waiting} /><span data-testid="live-activity-label" {...stylex.props(styles.liveLabel)}>{`${waiting ? 'Waiting for your answer' : 'Working'}${duration === '' ? '' : ` · ${duration}`}`}</span></div>
 }
 // Hosts using AssistantRuntimeProvider directly expose no adoption store; its absence never changes.
 const staticSubscription = () => () => undefined
@@ -417,7 +406,6 @@ function HistoryBoundary({ history }: { readonly history: Extract<TranscriptHist
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
 export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, renderToolDetail, onRetrySync, onRetryRun, onRetrySend, sendAvailability, resolveImage, onLoadImage, renderInlineReference, attachmentImages, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, renderTurnFooter, showSeatHeader = true, active = true, tailRef }: TranscriptProps) {
   const scrollId = React.useId()
-  const narrow = React.useContext(NarrowLayoutContext)
   const messages = useAuiState(state => state.thread.messages)
   // External-store runtimes adopt each snapshot in a passive effect, and the store publishes the
   // adopted messages a task later. A child effect runs before its provider's adoption effect, so
@@ -489,7 +477,6 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
   // One viewport row per source row, so the initial bound and history reveal count conversation items rather than turns.
   const rows = React.useMemo(() => sourceRows.map(row => ({ id: row.item.id, version: contentVersion(row.item) })), [sourceRows])
   const rowIds = React.useMemo(() => rows.map(row => row.id), [rows])
-  const running = [...committed].reverse().find(turn => turn.work.running)
   const progress = sync._tag === 'Progress' && sync.stage === 'reading' && sync.done !== undefined && sync.total !== undefined ? sync : undefined
   // Error copy is time-independent; time-bearing sync copy subscribes inside SyncLine.
   const failure = sync._tag === 'Failed' ? syncLine({ status: sync, label: 'conversation', now: now ?? observedAt, observedAt }) : undefined
@@ -504,7 +491,6 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
   const headerStatus = <>
     {progress !== undefined && <ProgressBar aria-label="Thread synchronization" value={progress.done} maxValue={progress.total} {...stylex.props(styles.progress)}><div {...stylex.props(styles.track)}><div {...stylex.props(styles.fill(`${progress.total === 0 ? 0 : progress.done! / progress.total! * 100}%`))} /></div></ProgressBar>}
     {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} inline={!showHeader} />}
-    {running !== undefined && <>{!narrow && <div role="progressbar" aria-label="Run in progress" aria-valuetext="Running" data-testid="run-progress" {...stylex.props(styles.runningProgress)}><span {...stylex.props(styles.runningSegment)} /></div>}<RunElapsed startedAt={running.work.startedAt} now={now} /></>}
   </>
   return <TurnFooterRenderer.Provider value={renderTurnFooter}><ToolDetailRenderer.Provider value={renderToolDetail}><TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><TranscriptAttachmentImagesContext.Provider value={attachmentImages}><RetrySend.Provider value={sendAvailability === undefined || sendAvailability._tag === 'Ready' ? onRetrySend : undefined}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
     {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>{headerStatus}</header>}
@@ -527,8 +513,6 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
     </EmbraceScrollViewport>{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
   </ThreadPrimitive.Root></RetrySend.Provider></TranscriptAttachmentImagesContext.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider></TranscriptActiveContext.Provider></ToolDetailRenderer.Provider></TurnFooterRenderer.Provider>
 }
-const runSweep = stylex.keyframes({ from: { transform: 'translateX(0%)' }, to: { transform: 'translateX(300%)' } })
-const liveSpin = stylex.keyframes({ from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } })
 const styles = stylex.create({
   frame: { minWidth: 0, minHeight: g.threadViewportMin, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
   header: { height: g.band, minHeight: g.band, position: 'relative', display: 'flex', alignItems: 'center', gap: s.md, paddingInlineStart: `max(${s.lg}, env(safe-area-inset-left, 0px))`, paddingInlineEnd: `max(${s.lg}, env(safe-area-inset-right, 0px))`, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
@@ -555,11 +539,7 @@ const styles = stylex.create({
   copy: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.icon, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, cursor: 'pointer', opacity: { default: 0, ':focus': 1 }, transitionProperty: 'opacity', transitionDuration: { default: m.fast, '@media (prefers-reduced-motion: reduce)': '0s' }, transitionTimingFunction: m.ease, ':hover': { color: ink.fg, backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})` } },
   copyVisible: { opacity: 1 },
   progress: { position: 'absolute', top: 0, left: 0, right: 0, height: g.progressSm }, track: { height: g.progressSm, backgroundColor: surface.rowActive, overflow: 'hidden' }, fill: (width: string) => ({ width, height: '100%', backgroundColor: accent.primary }),
-  runningProgress: { position: 'absolute', top: 0, left: 0, right: 0, height: g.progressSm, overflow: 'hidden', backgroundColor: surface.rowActive },
-  runningSegment: { display: 'block', width: '25%', height: '100%', backgroundColor: accent.primary, animationName: runSweep, animationDuration: m.pulse, animationTimingFunction: m.linear, animationIterationCount: 'infinite', animationDirection: 'alternate', '@media (prefers-reduced-motion: reduce)': { animationName: 'none', transform: 'translateX(150%)' } },
   liveActivity: { display: 'flex', alignItems: 'center', gap: s.sm, minHeight: g.toolRow, color: ink.fgMuted, fontSize: t.uiSize },
-  liveRing: { width: g.status, height: g.status, boxSizing: 'border-box', flexShrink: 0, borderRadius: r.full, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderTopColor: ink.fgMuted, animationName: liveSpin, animationDuration: m.spin, animationTimingFunction: m.linear, animationIterationCount: 'infinite', '@media (prefers-reduced-motion: reduce)': { animationName: 'none' } },
-  waitingRing: { animationName: 'none' },
   liveLabel: { color: ink.fgSoft },
   preview: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', marginBlockStart: s.xs2, marginInlineStart: g.textColumn, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingBlock: s.md, paddingInline: s.lg, gap: s.xs },
   output: { margin: 0, width: '100%', minWidth: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.metaLeading, color: ink.fgSoft }, outputCode: { fontFamily: t.fontMono, fontSize: t.codeSize },
