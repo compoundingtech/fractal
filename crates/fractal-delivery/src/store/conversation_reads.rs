@@ -123,7 +123,7 @@ fn conversation_owner_from_connection(
 /// logical-cut cache: a repair can rebuild that cache at the same claim frontier.
 pub fn owners_from_connection(connection: &Connection, through: u64) -> Result<Owners> {
     selected_index(current_index(connection)?, Some(through)).map_err(anyhow::Error::new)?;
-    let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hce3fba8082e0 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
+    let names = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hcedec9147930 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
         .query_map(params![through, "agent/", "agent0"], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut owners = Owners::new();
@@ -331,7 +331,7 @@ impl ConversationReadsStore for Store {
             _ => {
                 let connection = self.readers.get();
                 let names = connection
-                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-hcedec9147930 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
+                    .prepare_cached(/* sqlite-large-value: allow-for-now lv-hce3fba8082e0 owner=fractal_delivery::store::conversation_reads TODO=trace-statement-and-value-representation */ RANGE_SUBJECTS)?
                     .query_map(params![through, "agent/", "agent0"], |row| {
                         row.get::<_, String>(0)
                     })?

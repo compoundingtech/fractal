@@ -122,7 +122,7 @@ fn notice_raw_observation(
     let accepted = (1_700_000_000_000 + sequence).to_string();
     connection
         .execute(
-            /* sqlite-large-value: allow-for-now lv-hb4ac3d3059e1 owner=fractal_store::store::status_summary_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES (?1,?2,?3,'fixture',?4)",
+            /* sqlite-large-value: allow-for-now lv-h7da5f6391087 owner=fractal_store::store::status_summary_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES (?1,?2,?3,'fixture',?4)",
             rusqlite::params![id, origin, sequence, accepted],
         )
         .unwrap();
@@ -324,7 +324,7 @@ fn random_history(seed: u64) -> Store {
             let id = format!("history-batch-{index}");
             connection
                 .execute(
-                    /* sqlite-large-value: allow-for-now lv-h7da5f6391087 owner=fractal_store::store::status_summary_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES (?1,?2,?3,'fixture',?4)",
+                    /* sqlite-large-value: allow-for-now lv-hb4ac3d3059e1 owner=fractal_store::store::status_summary_tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES (?1,?2,?3,'fixture',?4)",
                     rusqlite::params![id, origins[which], sequences[which], accepted.to_string()],
                 )
                 .unwrap();
