@@ -1,7 +1,7 @@
 import type { Agent } from '../data/source.ts'
 import type { SidebarNode } from '../folders/sidebarContract.ts'
 import { isSidebarFiltering, matchesRow, parseSidebarQuery, sortMembers, type SidebarMatchRow } from '../shell/sidebar/filter.ts'
-import type { ShowRow } from '../shell/sidebar/show.ts'
+import { outsideFilterMenu, showRowFacts, type ShowRow } from '../shell/sidebar/show.ts'
 import type { SidebarFilters } from '../shell/sidebar/state.ts'
 import { sidebarRow, subagentRowId } from './sidebarRow.ts'
 
@@ -25,7 +25,7 @@ const matchRows = ({ agents, needsYou, asking, stale }: {
 const childDriverMap = (agents: readonly Agent[]): ReadonlyMap<string, string> =>
   new Map(agents.flatMap(agent => (agent.subagents ?? []).map((child): [string, string] => [subagentRowId({ parent: agent.ref, id: child.id }), child.driver])))
 
-/** Show menu counts: each row passes every filter outside the Show menu (`is:asking` and machines). */
+/** Filter menu counts: `others` is what lies outside the menu, free text and typed facets; the rest are reported facts. */
 export const liveShowRows = ({ agents, needsYou, asking, filters, stale }: {
   readonly agents: readonly Agent[]
   readonly needsYou: ReadonlySet<string>
@@ -34,8 +34,12 @@ export const liveShowRows = ({ agents, needsYou, asking, filters, stale }: {
   readonly stale: boolean
 }): readonly ShowRow[] => {
   const others = { ...parseSidebarQuery(filters.query), asking: false, machines: [] }
+  const outsideMenu = outsideFilterMenu(filters)
   const rows = matchRows({ agents, needsYou, asking, stale })
-  return agents.map(agent => ({ host: agent.host, asking: asking.has(agent.ref), others: matchesRow({ row: rows.get(agent.ref)!, filters, query: others }) }))
+  return agents.map(agent => {
+    const row = rows.get(agent.ref)!
+    return { host: agent.host, asking: asking.has(agent.ref), others: matchesRow({ row, filters: outsideMenu, query: others }), ...showRowFacts(row) }
+  })
 }
 
 /** View-only filtering keeps the canonical arrangement and its move fences untouched. */

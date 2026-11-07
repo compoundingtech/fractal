@@ -27,6 +27,29 @@ function ShowMenuHarness({ dark = true, width = 1440 }: { readonly dark?: boolea
   </main>
 }
 
+/** The sidebar's one Filter menu: its sections, a folded More, finished agents on by default, and Reset. */
+function FilterMenuHarness() {
+  const [selected, setSelected] = React.useState<ReadonlySet<string>>(new Set(['show:ended', 'show:retired']))
+  return <main data-scheme="dark" {...stylex.props(styles.canvas, styles.wide)}>
+    <div {...stylex.props(styles.bar)}>
+      <span {...stylex.props(styles.search)}>Find an agent</span>
+      <ShowMenu
+        label="Filter"
+        activeCount={[...selected].filter(key => !key.startsWith('show:')).length + 2 - [...selected].filter(key => key.startsWith('show:')).length}
+        groups={[
+          { id: 'attention', title: 'Attention', entries: [{ id: 'is:asking', label: 'Waiting for answer', count: 2 }] },
+          { id: 'machines', title: 'Machine', entries: [{ id: 'machine:host-a', label: 'host-a', count: 12 }, { id: 'machine:host-b', label: 'host-b', count: 1 }] },
+          { id: 'status', title: 'Status', entries: [{ id: 'status:working', label: 'Working', count: 6 }, { id: 'status:idle', label: 'Idle', count: 7 }], more: [{ id: 'status:offline', label: 'Offline', count: 0 }, { id: 'status:suspended', label: 'Suspended', count: 1 }] },
+          { id: 'finished', title: 'Finished', entries: [{ id: 'show:ended', label: 'Show ended', count: 3 }, { id: 'show:retired', label: 'Show retired', count: 4 }] },
+        ]}
+        actions={[{ id: 'reset', label: 'Reset filters', isDisabled: selected.size === 2 && selected.has('show:ended') && selected.has('show:retired'), onAction: () => setSelected(new Set(['show:ended', 'show:retired'])) }]}
+        selectedKeys={selected}
+        onSelectionChange={setSelected}
+      />
+    </div>
+  </main>
+}
+
 /** Tabular data rule: every count shares one right edge and uses tabular figures. */
 async function assertCountsAligned(menu: HTMLElement) {
   const counts = [...menu.querySelectorAll<HTMLElement>('[data-show-count]')]
@@ -109,12 +132,34 @@ export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
+  'FilterSections:contract-fixture',
   'Narrow440Dark:contract-fixture',
   'Narrow440Light:contract-fixture',
   'Wide1440Dark:contract-fixture',
   'Wide1440Light:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
+export const FilterSections: Story = {
+  render: () => <FilterMenuHarness />,
+  play: async ({ canvasElement }) => {
+    const page = within(canvasElement.ownerDocument.body)
+    await userEvent.click(within(canvasElement).getByRole('button', { name: 'Filter' }))
+    await expect(page.getByRole('menuitemcheckbox', { name: 'Show ended, 3' })).toHaveAttribute('aria-checked', 'true')
+    await expect(page.queryByRole('menuitemcheckbox', { name: 'Offline, 0' })).toBeNull()
+    await expect(page.getByRole('menuitem', { name: 'Reset filters' })).toHaveAttribute('aria-disabled', 'true')
+    await userEvent.click(page.getByRole('menuitem', { name: 'More' }))
+    await expect(page.getByRole('menuitemcheckbox', { name: 'Offline, 0' })).toBeVisible()
+    await expect(page.getByRole('menuitem', { name: 'Fewer' })).toBeVisible()
+    await userEvent.click(page.getByRole('menuitemcheckbox', { name: 'Show ended, 3' }))
+    await userEvent.click(page.getByRole('menuitemcheckbox', { name: 'Offline, 0' }))
+    await expect(within(canvasElement).getByRole('button', { name: /Filter.*2 active/ })).toBeVisible()
+    // A selected rare status keeps its section open; Reset closes the menu and clears every narrowing.
+    await expect(page.queryByRole('menuitem', { name: 'Fewer' })).toBeNull()
+    await userEvent.click(page.getByRole('menuitem', { name: 'Reset filters' }))
+    await waitFor(() => expect(page.queryByRole('menu')).toBeNull())
+    await expect(within(canvasElement).getByRole('button', { name: 'Filter' })).toBeVisible()
+  },
+}
 export const Wide1440Dark: Story = { play }
 export const Wide1440Light: Story = { args: { dark: false }, play }
 export const Narrow440Dark: Story = { args: { width: 440 }, globals: { viewport: { value: 'show440', isRotated: false } }, play }

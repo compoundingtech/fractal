@@ -146,7 +146,7 @@ function MissionInfoBody({ info, queued }: { readonly info: SidebarMissionInfo; 
 
 function QueuedList({ queued }: { readonly queued: Mission['queued'] }) {
   return <ul aria-label={`Queued ${queuedNoun(queued.length)}`} {...stylex.props(styles.queuedList)}>{queued.map(item => <li key={item.id} data-queued-mission={item.slug} {...stylex.props(styles.queuedItem)}>
-    <MissionMark slug={item.slug} /><span {...stylex.props(styles.ellipsis)}>{item.slug}</span>
+    <MissionMark slug={item.slug} /><span {...stylex.props(styles.ellipsis)}>{item.title ?? item.slug}</span>
   </li>)}</ul>
 }
 
