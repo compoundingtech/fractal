@@ -8,6 +8,7 @@ import { incrDebugRuntime, RenderProfiler } from '../telemetry/meters.tsx'
 
 import type { UnobservedFeed } from '../data/FeedState.tsx'
 import { useDataSource, useFeedInterest, useGrants, useTerminal, useTerminalConnected } from '../data/react.tsx'
+import { credentialExpiredMessage } from '../data/source.ts'
 import type { NativeSubjectProps } from '../resources/react.tsx'
 import { DomTerminal } from './DomTerminal.tsx'
 import { unavailableTerminalHistory } from './historySource.ts'
@@ -33,6 +34,7 @@ export const prepareTerminal = terminalFontsReady
 /** A terminal source publishes a human reason; a blank or placeholder detail falls back to fixed copy. */
 export const terminalUnobservedCopy = (feed: UnobservedFeed): string => {
   if (feed._tag === 'Waiting') return 'Loading terminal…'
+  if (feed.reason === 'unauthorized') return credentialExpiredMessage
   const reason = feed.detail.trim()
   if (reason !== '' && !/^(undefined|unknown|null)$/i.test(reason)) return reason
   return feed.reason === 'ungranted'

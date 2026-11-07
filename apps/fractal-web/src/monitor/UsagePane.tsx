@@ -9,7 +9,7 @@ import * as Aria from 'react-aria-components'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import type { ObjectivesSource } from '../data/objectivesSource.ts'
 import { useDataSource, useNow } from '../data/react.tsx'
-import type { Feed } from '../data/source.ts'
+import { credentialExpiredMessage, type Feed } from '../data/source.ts'
 import { bars, chartSummary, creditsText, forecastOf, leftText, safeLink, secondLine, sloGroups, spanText, toneOf } from './usageModel.ts'
 
 // The Usage screen: objectives and budgets from st's served rows, as the phone and the terminal UI's
@@ -20,12 +20,13 @@ type Unobserved = Exclude<Feed<unknown>, { readonly _tag: 'Observed' }>
 
 const Unread = ({ feed, what, onRetry }: { readonly feed: Unobserved; readonly what: string; readonly onRetry: () => void }) =>
   feed._tag === 'Waiting' ? <SystemNotice kind="loading" title={`Loading ${what}…`} />
+    : feed.reason === 'unauthorized' ? <SystemNotice kind="error" connection title={credentialExpiredMessage} />
     : feed.reason === 'unsupported' ? <SystemNotice kind="error" title={`The Fractal on this computer needs an update to show ${what}`} />
       : feed.reason === 'ungranted' ? <SystemNotice kind="error" title={`No access to ${what}`} detail="Read access has not been granted" />
         : <SystemNotice kind="error" title={`Could not read ${what}`} onRetry={onRetry} />
 
 const Stale = ({ feed }: { readonly feed: Feed<unknown> }) => feed._tag === 'Observed' && feed.error
-  ? <p role="status" {...stylex.props(styles.stale)}>Last reading: could not read again ({feed.error.detail})</p> : null
+  ? <p role="status" {...stylex.props(styles.stale)}>{feed.error.reason === 'unauthorized' ? credentialExpiredMessage : `Last reading: could not read again (${feed.error.detail})`}</p> : null
 
 /** `label` names this pane's landmark and prefixes its section landmarks, so several panes on one page stay distinct. */
 export const UsagePane = ({ label = 'Usage' }: { readonly label?: string } = {}): React.ReactNode => {
@@ -47,11 +48,12 @@ const Usage = ({ source, label }: { readonly source: ObjectivesSource; readonly 
   const [open, setOpen] = React.useState<string>()
   const rows = list._tag === 'Observed' ? list.value.rows : []
   const link = list._tag === 'Observed' ? safeLink(list.value.otel_ui_url) : null
+  const unauthorized = [list, accounts].some(feed => feed._tag === 'Unavailable' ? feed.reason === 'unauthorized' : feed._tag === 'Observed' && feed.error?.reason === 'unauthorized')
   return <>
     <header {...stylex.props(styles.header)}>
       <h2 {...stylex.props(styles.heading)}>Usage</h2>
       {list._tag === 'Observed' ? <span {...stylex.props(styles.meta)}>as of {spanText(now - list.value.as_of_unix_ms)} ago{list.freshness === 'stale' && !list.error ? ' · reading again…' : ''}</span> : null}
-      <Aria.Button onPress={source.refresh} {...stylex.props(styles.button)}>Refresh</Aria.Button>
+      {!unauthorized ? <Aria.Button onPress={source.refresh} {...stylex.props(styles.button)}>Refresh</Aria.Button> : null}
     </header>
     <div {...stylex.props(styles.body)}>
       <Stale feed={list} />
