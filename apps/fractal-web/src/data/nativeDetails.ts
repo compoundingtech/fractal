@@ -5,7 +5,7 @@ import type { SyncStatus } from '@fractal/ui/assistant-ui/sync-status'
 import { DateTime, Duration, Option } from 'effect'
 import { earliestChange } from '@fractal/ui/human-time/format'
 import { contextOccupancy } from './contextOccupancy.ts'
-import { credentialExpiredMessage, type Agent, type Feed } from './source.ts'
+import { credentialExpiredMessage, credentialNotice, type Agent, type Feed } from './source.ts'
 import type { NativeDeclarations } from './nativeDeclarations.ts'
 
 export interface NativeDetailsObservation {
@@ -13,6 +13,7 @@ export interface NativeDetailsObservation {
   readonly sections: readonly DetailsSection[]
   readonly trace: TraceSeries
   readonly state: DetailsState
+  readonly credentialNotice?: string
   readonly observedAt?: number
   readonly stale: boolean
   readonly nativeSessionId?: string
@@ -263,6 +264,7 @@ export const projectNativeDetails = ({ agentRef, agent, row: rowFeed, session: s
     nativeRootPending: rowFeed._tag === 'Waiting' || periodFeed._tag === 'Waiting',
     ...(incarnationId === undefined ? {} : { incarnationId }), ...(nativeHost === undefined ? {} : { host: nativeHost }), ...(projected?.harness === undefined ? {} : { harness: projected.harness }),
     ...(syncStatus === undefined ? {} : { syncStatus }), onRetry,
+    ...([rowFeed, agent, sessionFeed, sessionRead, periodFeed, declarations, missions, queue].some(feed => credentialNotice(feed)) ? { credentialNotice: credentialExpiredMessage } : {}),
     ...(spendRead === undefined ? {} : { spendRead }), ...(sessionFailure === undefined ? {} : { sessionFailure }),
     sessionPending: readPending(sessionRead),
     ...(nextChangeAt === undefined ? {} : { nextChangeAt }),

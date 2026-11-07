@@ -261,9 +261,8 @@ describe('OMP subagent activity on the production inspector', () => {
       <AgentDetailsPanel agentRef={ompAgentRef} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} detailsSupplement={() => unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })} />
     </DataSourceProvider>))
     const line = host.querySelector<HTMLElement>('[data-details-supplement]')!
-    const { trigger, panel } = why(line, 'Why? Subagent activity')
-    await act(async () => trigger.click())
-    expect(panel.textContent).toContain(credentialExpiredMessage)
+    expect(within(line).getByRole('status').textContent).toBe(credentialExpiredMessage)
+    expect(line.querySelector('button')).toBeNull()
     expect(line.textContent).not.toContain('private diagnostic')
   })
 

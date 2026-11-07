@@ -3,13 +3,14 @@ import type * as Native from '@fractal/client/schema'
 import { SystemNotice } from '@fractal/ui/assistant-ui/shell'
 import * as stylex from '@stylexjs/stylex'
 import * as Option from 'effect/Option'
+import * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
 
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import type { ObjectivesSource } from '../data/objectivesSource.ts'
 import { useDataSource, useNow } from '../data/react.tsx'
-import { credentialExpiredMessage, type Feed } from '../data/source.ts'
+import { credentialExpiredMessage, credentialNotice, waiting, type Feed } from '../data/source.ts'
 import { bars, chartSummary, creditsText, forecastOf, leftText, safeLink, secondLine, sloGroups, spanText, toneOf } from './usageModel.ts'
 
 // The Usage screen: objectives and budgets from st's served rows, as the phone and the terminal UI's
@@ -48,7 +49,9 @@ const Usage = ({ source, label }: { readonly source: ObjectivesSource; readonly 
   const [open, setOpen] = React.useState<string>()
   const rows = list._tag === 'Observed' ? list.value.rows : []
   const link = list._tag === 'Observed' ? safeLink(list.value.otel_ui_url) : null
-  const unauthorized = [list, accounts].some(feed => feed._tag === 'Unavailable' ? feed.reason === 'unauthorized' : feed._tag === 'Observed' && feed.error?.reason === 'unauthorized')
+  const history = useAtomValue(React.useMemo(() => open !== undefined && rows.some(row => row.id === open) ? source.history(open) : Atom.make<Feed<Native.SloHistory>>(waiting), [source, open, rows]))
+  const unauthorized = [list, accounts, history].some(feed => credentialNotice(feed))
+  if (unauthorized) return <SystemNotice kind="error" connection title={credentialExpiredMessage} />
   return <>
     <header {...stylex.props(styles.header)}>
       <h2 {...stylex.props(styles.heading)}>Usage</h2>
@@ -131,6 +134,7 @@ const Detail = ({ row, source, now }: { readonly row: Native.SloRow; readonly so
 const Chart = ({ id, kind, tone, source }: { readonly id: string; readonly kind: Native.SloRow['kind']; readonly tone: keyof typeof tones; readonly source: ObjectivesSource }): React.ReactNode => {
   const history = useAtomValue(source.history(id))
   const title = `${kind === 'budget' ? 'allowance' : 'error budget'} left, last 24 hours`
+  if (credentialNotice(history)) return <SystemNotice kind="error" connection title={credentialExpiredMessage} />
   if (history._tag !== 'Observed') return <Unread feed={history} what="the chart" onRetry={source.refresh} />
   return (
     <figure {...stylex.props(styles.chart)}>

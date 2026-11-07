@@ -8,7 +8,7 @@ import { incrDebugRuntime, RenderProfiler } from '../telemetry/meters.tsx'
 
 import type { UnobservedFeed } from '../data/FeedState.tsx'
 import { useDataSource, useFeedInterest, useGrants, useTerminal, useTerminalConnected } from '../data/react.tsx'
-import { credentialExpiredMessage } from '../data/source.ts'
+import { credentialExpiredMessage, credentialNotice } from '../data/source.ts'
 import type { NativeSubjectProps } from '../resources/react.tsx'
 import { DomTerminal } from './DomTerminal.tsx'
 import { unavailableTerminalHistory } from './historySource.ts'
@@ -167,6 +167,8 @@ export const TerminalDetail = React.memo(
     ].filter((reason) => reason !== undefined)
     const banner = reasons.length === 0 ? {} : { banner: <Note variant="warning" size="sm">{reasons.join(' ')}</Note> }
     const rawScreen = raw.snapshot?.screen
+    const refusal = credentialNotice(terminal)
+    if (refusal) return <p role="status" data-terminal-state="unauthorized" {...stylex.props(styles.unobserved)}>{refusal}</p>
     if (presentation._tag === 'Raw' && raw.handle !== undefined && rawScreen !== undefined && raw.preparation._tag === 'Session') {
       const handle = raw.handle
       const state = raw.preparation.state
@@ -210,7 +212,7 @@ export const TerminalDetail = React.memo(
           <p role="status" data-terminal-state={terminal._tag === 'Waiting' ? 'loading' : terminal.reason}>
             {terminalUnobservedCopy(terminal)}
           </p>
-          {terminal._tag === 'Unavailable' && terminal.retryable === true && source.retryTerminal !== undefined ? (
+          {terminal._tag === 'Unavailable' && terminal.reason === 'failed' && terminal.retryable === true && source.retryTerminal !== undefined ? (
             <button type="button" onClick={() => source.retryTerminal?.(address.ref)}>Retry</button>
           ) : null}
         </div>

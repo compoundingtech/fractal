@@ -2,7 +2,7 @@
 import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
-import { Agent, decodeUnknownSync } from '@fractal/client/schema'
+import { Agent, SloList, decodeUnknownSync } from '@fractal/client/schema'
 import type { Attention, Mission, TerminalScreen } from '@fractal/client/schema'
 import { openAgent, type ConnectionState, type DecodedAgent } from '@fractal/sdk/read'
 import * as Atom from 'effect/reactivity/Atom'
@@ -19,6 +19,9 @@ import './ConversationPane.tsx'
 import { FeedState } from '../data/FeedState.tsx'
 import { UsagePane } from '../monitor/UsagePane.tsx'
 import { projectNativeDetails } from '../data/nativeDetails.ts'
+import { CapturedChangesView } from './ChangesInspector.tsx'
+import { AgentTodos } from '../conversation/todos/AgentTodos.tsx'
+import { projectTodos } from '../conversation/todos/model.ts'
 
 // Only the build-time CSS runtime and absent jsdom layout APIs are substituted.
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
@@ -133,9 +136,29 @@ describe('RM1 workspace source states', () => {
     expect(host.textContent).not.toContain('private diagnostic')
     const details = projectNativeDetails({ agentRef: agent.id, agent: denied, row: denied, session: denied, period: denied, declarations: denied, missions: denied, queue: denied, now: 118_000, onRetry: refresh, reads: { refreshUsage: refresh, retrySession: refresh, retryQueue: refresh } })
     expect(details.overview.durations?.[0]?.detail).toBe(credentialExpiredMessage)
+    expect(details.credentialNotice).toBe(credentialExpiredMessage)
     expect(JSON.stringify(details)).not.toContain('private diagnostic')
     expect(details.spendRead ?? details.sessionFailure).toBeUndefined()
     expect(refresh).not.toHaveBeenCalled()
+  })
+  it.each(['dock', 'fill', 320] as const)('keeps rejected captured changes quiet at width %s', async width => {
+    const denied = unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })
+    await act(async () => root.render(<><CapturedChangesView feed={denied} width={width} /><AgentTodos state={projectTodos({ feed: denied, agentRef: agent.id })} /></>))
+    expect(host.querySelector('aside [role="status"]')?.textContent).toBe(credentialExpiredMessage)
+    expect(host.textContent?.split(credentialExpiredMessage)).toHaveLength(3)
+    expect(host.textContent).not.toMatch(/private diagnostic|Retry|Refresh/)
+    expect(host.querySelector('button')).toBeNull()
+  })
+  it('hides refresh when an opened objective history rejects the credential', async () => {
+    const value = decodeUnknownSync(SloList)({ as_of_unix_ms: 90_000_000, rows: [{ id: 'synthetic-budget', kind: 'budget', about: 'Synthetic allowance', current: '92% used', target: '100%', window: 'weekly', remaining_percent: 8, status: 'met', tone: 'yellow', explain: 'Synthetic allowance.', forecast_used_percent: 99, forecast_basis_minutes: 120, runs_out_at_unix_ms: 90_000_000 }], otel_ui_url: 'https://otel.example.invalid' })
+    const history = Atom.make(unavailable({ reason: 'unauthorized', detail: 'private diagnostic' }))
+    source = { ...source, objectives: { list: Atom.make(observed({ value })), accounts: Atom.make(waiting), history: () => history, refresh: vi.fn() } }
+    await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><UsagePane /></DataSourceProvider>))
+    const row = [...host.querySelectorAll('button')].find(button => button.textContent?.includes('Synthetic allowance'))!
+    await act(async () => row.click())
+    expect(host.querySelector('[role="status"]')?.textContent).toBe(credentialExpiredMessage)
+    expect(host.querySelector('button')).toBeNull()
+    expect(host.textContent).not.toContain('private diagnostic')
   })
 
   it('replaces roster loading with an observed empty roster, not a filter no-match', async () => {

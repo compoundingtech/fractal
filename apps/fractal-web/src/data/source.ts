@@ -65,6 +65,10 @@ export const readAuthorization = (error: { readonly status: number; readonly res
     : error.status === 403 || error.status === 401 ? 'ungranted' : undefined
 export const clientReadAuthorization = (error: unknown) => error instanceof ClientError ? readAuthorization(error) : undefined
 
+/** Recovery notices and controls agree, including refusals attached to retained values. */
+export const credentialNotice = (feed: Feed<unknown> | undefined): string | undefined =>
+  (feed?._tag === 'Unavailable' ? feed.reason : feed?._tag === 'Observed' ? feed.error?.reason : undefined) === 'unauthorized' ? credentialExpiredMessage : undefined
+
 /**
  * One followed projection as a feature sees it. Fixtures can produce every case (what `AllStates`
  * pins); live derives it from the SDK's `Observed<A>` (`value` + `freshness`) and follow errors.
