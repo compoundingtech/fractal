@@ -5,7 +5,6 @@ use fractal_schema::{notice, notice_receipt::{self, Outcome, Receipt, Surface}};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum ReceiptUnknownReason {
     MissingEvidence,
-    AuthorityUnavailable,
     AuthorityUnknown(String),
     RegistrationUnavailable,
     SourceUnavailable,
@@ -28,8 +27,8 @@ pub struct SurfaceDeliveryEvidence {
     pub evidence: DeliveryEvidence,
 }
 
-/// Approval must assess immutable receipt evidence, not the current runtime designation.
-/// No production implementation or configurable authorizer exists.
+/// Approval assesses authenticated receipt position against the historical owner chain,
+/// never an actor assertion, payload timestamp, or current runtime designation.
 pub(super) trait ReceiptAuthorizer {
     fn assess(&self, claim: &ClaimRecord, receipt: &Receipt) -> ReceiptAuthorization;
 }
@@ -39,11 +38,37 @@ pub(super) enum ReceiptAuthorization {
     Unknown { reason: String },
 }
 
+struct ChainAuthorizer<'a> {
+    connection: &'a Connection,
+    chain: Result<super::notice_acknowledgements::Chain, FractalError>,
+}
+
+impl ReceiptAuthorizer for ChainAuthorizer<'_> {
+    fn assess(&self, claim: &ClaimRecord, receipt: &Receipt) -> ReceiptAuthorization {
+        let authorization = match &self.chain {
+            Ok(chain) => chain.authorize(self.connection, claim, receipt, None),
+            Err(error) => return ReceiptAuthorization::Unknown {
+                reason: format!("{}: {}", error.code, error.message),
+            },
+        };
+        match authorization {
+            Ok(()) => ReceiptAuthorization::Authorized,
+            Err(error) => ReceiptAuthorization::Unknown {
+                reason: format!("{}: {}", error.code, error.message),
+            },
+        }
+    }
+}
+
 impl Store {
     pub fn notice_receipts(&self, source_id: &str) -> Result<Vec<SurfaceDeliveryEvidence>, FractalError> {
         let connection = self.readers.get();
         let tx = connection.unchecked_transaction().map_err(internal)?;
-        project(&tx, source_id, None).map_err(internal)
+        let authorizer = ChainAuthorizer {
+            connection: &tx,
+            chain: super::notice_acknowledgements::Chain::load(&tx, None),
+        };
+        project(&tx, source_id, &authorizer).map_err(internal)
     }
 }
 
@@ -65,7 +90,7 @@ fn registration_ready(connection: &Connection, index: usize) -> Result<bool> {
     }))
 }
 
-fn project(connection: &Connection, source_id: &str, authorizer: Option<&dyn ReceiptAuthorizer>) -> Result<Vec<SurfaceDeliveryEvidence>> {
+fn project(connection: &Connection, source_id: &str, authorizer: &dyn ReceiptAuthorizer) -> Result<Vec<SurfaceDeliveryEvidence>> {
     use ReceiptUnknownReason as Why;
     if notice::id_for_source(source_id).is_err() {
         return Ok(all_unknown(Why::SourceUnavailable));
@@ -128,10 +153,9 @@ fn project(connection: &Connection, source_id: &str, authorizer: Option<&dyn Rec
         }
     }
     Ok([Surface::Tray, Surface::Speech, Surface::Push, Surface::Log].into_iter().map(|surface| {
-        let evidence = match (authorizer, receipts.remove(&surface)) {
-            (None, _) => unknown(Why::AuthorityUnavailable),
-            (Some(_), None) => unknown(Why::MissingEvidence),
-            (Some(authorizer), Some((claim, receipt))) => match authorizer.assess(&claim, &receipt) {
+        let evidence = match receipts.remove(&surface) {
+            None => unknown(Why::MissingEvidence),
+            Some((claim, receipt)) => match authorizer.assess(&claim, &receipt) {
                 ReceiptAuthorization::Unknown { reason } => unknown(Why::AuthorityUnknown(reason)),
                 ReceiptAuthorization::Authorized => match receipt.outcome {
                     Outcome::Delivered { completed_at, evidence } => DeliveryEvidence::Delivered { receipt_claim: claim.id, completed_at, evidence },
