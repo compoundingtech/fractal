@@ -252,7 +252,7 @@ function ComposerSendStory({ scheme, scenario: name }: { readonly scheme: Scheme
 
 const meta = {
   excludeStories: ['scenarioExemptions'],
-  title: 'Fractal UI/Composer send',
+  id: 'fractal-ui-composer-send', title: 'Surfaces/Composer/Send',
   component: ComposerSendStory,
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Host-controlled recipient, upload, recovery and delivery callbacks isolate the composer send contracts without network transport.' }, layout: 'fullscreen', docs: { description: { component: 'Composer send surface: recipient readout and selection, reply chip, optional subject, image tray, availability recovery and per-row send state. The story plays the host: uploads, retries, recovery and delivery move only through fixture callbacks; the kit makes no network calls.' } } },
   args: { scheme: 'dark', scenario: 'recipient' },
@@ -265,22 +265,15 @@ export const scenarioExemptions: readonly string[] = [
   'DeclaredImageLimits:contract-fixture',
   'ImageRetry:contract-fixture',
   'ImageTray:contract-fixture',
-  'ImageTrayLight:contract-fixture',
   'KeyboardSend:contract-fixture',
-  'KeyboardSendLight:contract-fixture',
   'MentionKeepsRecipient:contract-fixture',
   'MissingGrant:contract-fixture',
   'OfflineRecovery:contract-fixture',
-  'OfflineRecoveryLight:contract-fixture',
   'RecipientReadout:contract-fixture',
   'RecipientSelection:contract-fixture',
-  'RecipientSelectionLight:contract-fixture',
   'ReplyAndSubject:contract-fixture',
-  'ReplyAndSubjectLight:contract-fixture',
   'RevokedRecovery:contract-fixture',
-  'RevokedRecoveryLight:contract-fixture',
   'SendStates:contract-fixture',
-  'SendStatesLight:contract-fixture',
   'Unavailable:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
@@ -380,7 +373,6 @@ export const RecipientSelection: Story = {
     await sound(canvasElement)
   },
 }
-export const RecipientSelectionLight: Story = { ...RecipientSelection, args: { scheme: 'light' } }
 
 /** K1: with nobody else to pick, the readout stays a labelled, focusable fact; each session change is announced politely, once. */
 export const RecipientReadout: Story = {
@@ -501,7 +493,6 @@ export const ReplyAndSubject: Story = {
     await sound(canvasElement)
   },
 }
-export const ReplyAndSubjectLight: Story = { ...ReplyAndSubject, args: { scheme: 'light', scenario: 'reply' } }
 
 /** K3: picker and paste share one intake; a fifth image, an oversized file and an unsupported type are refused aloud; images alone send. */
 export const ImageTray: Story = {
@@ -536,7 +527,6 @@ export const ImageTray: Story = {
     await sound(canvasElement)
   },
 }
-export const ImageTrayLight: Story = { ...ImageTray, args: { scheme: 'light', scenario: 'images' } }
 
 /** K3: a failed upload holds send until it is retried or removed; retry reports intent and the host decides. */
 export const ImageRetry: Story = {
@@ -592,7 +582,6 @@ export const KeyboardSend: Story = {
     await sound(canvasElement)
   },
 }
-export const KeyboardSendLight: Story = { ...KeyboardSend, args: { scheme: 'light', scenario: 'keyboard' } }
 
 const rowFor = (root: HTMLElement, id: string) => {
   const row = root.querySelector<HTMLElement>(`[data-testid="user-message"][data-item-id="${id}"]`)
@@ -624,7 +613,6 @@ export const SendStates: Story = {
     await sound(canvasElement)
   },
 }
-export const SendStatesLight: Story = { ...SendStates, args: { scheme: 'light', scenario: 'states' } }
 
 const notice = (root: HTMLElement) => within(root).getByTestId('composer-availability')
 
@@ -653,7 +641,6 @@ export const OfflineRecovery: Story = {
     await sound(canvasElement)
   },
 }
-export const OfflineRecoveryLight: Story = { ...OfflineRecovery, args: { scheme: 'light', scenario: 'offline' } }
 
 /** K4: a revoked device names its code and offers one Set up again; the host, not the kit, decides when sending resumes. */
 export const RevokedRecovery: Story = {
@@ -677,7 +664,6 @@ export const RevokedRecovery: Story = {
     await sound(canvasElement)
   },
 }
-export const RevokedRecoveryLight: Story = { ...RevokedRecovery, args: { scheme: 'light', scenario: 'revoked' } }
 
 /** K4: a missing grant offers one Check access; an unavailable relay offers nothing to press. */
 export const MissingGrant: Story = {

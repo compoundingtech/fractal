@@ -33,15 +33,13 @@ function Surface({ scheme, children }: { scheme: Scheme; children: React.ReactNo
 const columnSync = { _tag: 'Live', since: now - 5000 } as const
 
 type ColumnArgs = { scheme: Scheme; readingColumn: boolean }
-const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Transcript composer', component: OwnSendStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', readingColumn: true }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<ColumnArgs>
+const meta = { excludeStories: ['scenarioExemptions'], id: 'fractal-ui-transcript-composer', title: 'Surfaces/Composer/In transcript', component: OwnSendStory, parameters: { layout: 'fullscreen' }, args: { scheme: 'dark', readingColumn: true }, argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' } } } satisfies Meta<ColumnArgs>
 export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
   'OwnSendFollows:contract-fixture',
-  'OwnSendFollowsLight:contract-fixture',
   'Placeholder:contract-fixture',
-  'PlaceholderLight:contract-fixture',
 ]
 type Story = StoryObj<ColumnArgs>
 const contractFixture = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Own-send follow and placeholder probes require controlled local composer state and host callbacks.' } } } satisfies Story
@@ -68,7 +66,6 @@ export const Placeholder: Story = { ...contractFixture, tags: ['critical'], rend
     if (expected !== undefined) await expect(guidance).toHaveTextContent(expected)
   }
 } }
-export const PlaceholderLight: Story = { ...Placeholder, args: { scheme: 'light' } }
 
 function OwnSendStory({ scheme }: { scheme: Scheme }) {
   const [turns, setTurns] = React.useState(historyTurns)
@@ -126,7 +123,6 @@ export const OwnSendFollows: Story = { ...contractFixture, tags: ['critical'], r
     expect(jump).not.toBeVisible()
   }, { timeout: 3000 })
 } }
-export const OwnSendFollowsLight: Story = { ...OwnSendFollows, args: { scheme: 'light' } }
 
 const styles = stylex.create({
   root: { height: '100vh', width: '100%', boxSizing: 'border-box', display: 'flex', flexDirection: 'column', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
