@@ -167,7 +167,7 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
         scopes: requests.iter().map(|r| (r.id.as_str(), scope(r))).collect(),
         active: BTreeMap::new(), visiting: BTreeSet::new(), defects: Vec::new() };
     for request in &requests { guards.evaluate(request); }
-    let output = requests.iter().map(|request| {
+    let mut output: Vec<_> = requests.iter().map(|request| {
         let answer = answers[request.id.as_str()];
         let assumed = latest(request, "assumed").is_some();
         let status = if !guards.active[request.id.as_str()] { Status::Moot }
@@ -182,6 +182,9 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
             needs_ask: open && ask_links.is_empty(), ask_links }
     }).collect();
     defects.extend(guards.defects);
+    if !defects.is_empty() {
+        for request in &mut output { request.approval_gate = false; }
+    }
     Fold { basis, requests: output, defects }
 }
 

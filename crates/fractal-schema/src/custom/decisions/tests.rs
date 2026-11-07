@@ -84,3 +84,28 @@ fn v1_only_and_native_order() {
     assert_eq!(folded.basis["revision"],"v1");
     assert_eq!(input_kinds(1).len(),6);
 }
+
+#[test]
+fn v1_legacy_guard_shape() {
+    for (option, open) in [("yes", true), ("no", false)] {
+        let mut claims = vec![request("r1", 1),
+            claim("a", "answered", 2, json!({"request":"r1","selection":["yes"]})),
+            claim("r2", "requested", 3, json!({"q":2,"applies_when":[{"decision":"r1","option":option}]}))];
+        for claim in &mut claims { claim.kind = claim.kind.replace(".v2.", ".v1."); }
+        let folded = result(&claims);
+        assert!(folded.defects.is_empty());
+        assert_eq!(folded.requests[1].open, open);
+    }
+}
+
+#[test]
+fn provenance_ties_use_legacy_id_then_scope() {
+    for (legacy, scope, expected) in [("b", "one", "a2"), ("a", "two", "a2"), ("a", "zero", "a1")] {
+        let claims = vec![request("r", 1),
+            claim("a1", "answered", 3, json!({"request":"r","selection":[]})),
+            claim("a2", "answered", 2, json!({"request":"r","selection":[]})),
+            claim("p1", "provenance", 4, json!({"target":"a1","written_ms":100,"legacy_id":"a","source_scope":"one"})),
+            claim("p2", "provenance", 5, json!({"target":"a2","written_ms":100,"legacy_id":legacy,"source_scope":scope}))];
+        assert_eq!(result(&claims).requests[0].answer, Some(expected));
+    }
+}

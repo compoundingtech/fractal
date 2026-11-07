@@ -218,8 +218,8 @@ fractal schema register examples/fractal/decision-tree-v2.json --as agent/exampl
 V2 subjects use `custom/decision/tree/v2/<seat>` and claim kinds
 `custom.decision.tree.v2.*`. They retain the seven v1 kinds and their authority and fields,
 with one addition: `assumed.selection` is an optional array of up to 64 option strings.
-An assumption with no explicit selection uses its text as a singleton selection when evaluating
-guards. The v1 namespace is not an alias for v2; no v1 claim is rewritten or silently migrated.
+An assumption without an explicit selection cannot satisfy an option guard. The v1 namespace
+is not an alias for v2; no v1 claim is rewritten or silently migrated.
 
 | Added kind | Authority | Required fields | Optional fields |
 | --- | --- | --- | --- |
@@ -231,8 +231,8 @@ guards. The v1 namespace is not an alias for v2; no v1 claim is rewritten or sil
 The authority DSL has only `creator`, `owner`, and `recipient`; it has no general actor-union
 or field-equality policy. Because `requested` is owner-only, its requester is necessarily the
 owner, so owner authority implements requester-or-owner withdrawal without broadening admission.
-The fold still validates that a withdrawal refers to a request on this tree. `reason` is required;
-`duplicate_of` is optional and must name another request, not a human response.
+The fold matches withdrawals to request claims on this tree. `reason` is required;
+`duplicate_of` is an optional claim reference preserving the reported duplicate relationship.
 
 `recorded` is an accountable capture, not an impersonated `answered` claim. `recorder` must
 equal the actual writing actor; the DSL only admits the field's reference family, so a mismatch
@@ -249,9 +249,8 @@ how the source was found; `source_paths` preserves its path spellings. `legacy_i
 the source record, `source_scope` scopes its numeric question handles, `written_ms` preserves
 the source timestamp, and `actors` preserves the original actor spellings as strings. These
 are evidence, not authority, native claim order, or permission to rewrite a source. The generic
-schema bounds arrays but does not validate their members; the decision fold validates their
-domain shape. As with v1 claim references, existence checks alone do not establish the target
-kind or same-tree membership.
+schema bounds arrays but does not validate their members. As with v1 claim references,
+existence checks alone do not establish the target kind or same-tree membership.
 
 `ask_linked` records a relationship to an existing native work ask and its activation. It does
 not open, complete, cancel, approve, or delegate that ask. A decision answer, capture,
@@ -268,9 +267,9 @@ and not an instruction to append `status`. It does not write claims, documents, 
 registrations, or native asks. The generic source row retains its last-fact summaries and
 status-driven attention contract; it is not a substitute for folding all requests.
 
-The fold checks the opened tree's owner/seat/subject identity, same-tree request references,
-response and supersession references, and malformed domain fields. Invalid facts are defects,
-not silently accepted empty history. Provenance supplies a request's `source_scope`; requests
+The fold reports duplicate scoped request keys, malformed or cyclic guards, recorder mismatches,
+and dangling, cyclic or forked answer supersession as defects. Provenance supplies a request's
+`source_scope`; requests
 without provenance use the native tree subject as their scope. Source timestamps and numeric
 `q` handles do not replace canonical claim ordering.
 
@@ -303,9 +302,9 @@ provenance-marked imported answers and recorded captures remain historical respo
 Imported response heads are selected by `(written_ms, legacy_id, source_scope)`. The imported
 head is then merged with the newest native response using native claim order, which gives a
 total order for mixed imported and native history. Native-only history uses native claim
-order. Source order is never inferred from array order, local storage indexes, or `q`.
+order. Imported chronology is never inferred from array order, local storage indexes, or `q`.
 
-Supersession must resolve without choosing an arbitrary winner for conflicting forks.
+Supersession forks are reported as defects; a defective fold is not approval evidence.
 A withdrawal removes that request from the active pending set without fabricating an answer;
 its reason and duplicate relationship remain historical facts. `needs_ask` means the request
 is open and has no `ask_linked` facts; `ask_links` preserves the link fields without assuming
