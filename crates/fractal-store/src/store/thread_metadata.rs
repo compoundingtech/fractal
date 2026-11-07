@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[path = "thread_message_window.rs"]
+mod message_window;
+pub use message_window::{ThreadMessage, TimelineItem, TimelinePage, mixed_timeline};
+
 pub enum Edit<'a> {
     Create {
         agent: &'a str,
@@ -23,6 +27,9 @@ pub enum Edit<'a> {
 /// Server-established authority, never deserialized from an action body.
 pub enum PersonAuthority<'a> {
     TrustedLocal,
+    BoundAgent {
+        actor: &'a str,
+    },
     LocalWeb {
         expires_at: u128,
     },
@@ -34,7 +41,7 @@ pub enum PersonAuthority<'a> {
 }
 
 impl PersonAuthority<'_> {
-    fn check(&self, connection: &Connection, person: &str) -> Result<(), FractalError> {
+    pub(super) fn check(&self, connection: &Connection, person: &str) -> Result<(), FractalError> {
         let forbidden = || {
             FractalError::new(
                 "thread-authority-expired",
@@ -43,6 +50,7 @@ impl PersonAuthority<'_> {
         };
         match self {
             Self::TrustedLocal => Ok(()),
+            Self::BoundAgent { .. } => Err(forbidden()),
             Self::LocalWeb { expires_at } if *expires_at > now_ms() => Ok(()),
             Self::LocalWeb { .. } => Err(forbidden()),
             Self::Paired {
@@ -90,14 +98,7 @@ pub fn apply(
     key: &str,
     edit: Edit<'_>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
-    apply_as(
-        store,
-        person,
-        subject,
-        key,
-        edit,
-        PersonAuthority::TrustedLocal,
-    )
+    apply_inner(store, person, subject, key, edit, PersonAuthority::TrustedLocal, false)
 }
 
 pub fn apply_as(
@@ -107,6 +108,18 @@ pub fn apply_as(
     key: &str,
     edit: Edit<'_>,
     principal: PersonAuthority<'_>,
+) -> Result<(ClaimRecord, bool), FractalError> {
+    apply_inner(store, person, subject, key, edit, principal, true)
+}
+
+fn apply_inner(
+    store: &Store,
+    person: &str,
+    subject: &str,
+    key: &str,
+    edit: Edit<'_>,
+    principal: PersonAuthority<'_>,
+    require_rollout: bool,
 ) -> Result<(ClaimRecord, bool), FractalError> {
     if !person.starts_with("person/") {
         return Err(FractalError::new(
@@ -162,6 +175,9 @@ pub fn apply_as(
         idempotency_key: Some(key.into()),
     };
     let authority = |connection: &Connection| {
+        if require_rollout {
+            store.thread_write_rollout(connection)?;
+        }
         principal.check(connection, person)?;
         owned_creation(connection, subject, person, revision.is_none()).map(|_| ())
     };
@@ -222,13 +238,28 @@ fn unavailable() -> FractalError {
     FractalError::new("thread-unavailable", "the thread is unavailable")
 }
 
+/// Conflicting creation has no established owner. Do not expose its existence before
+/// verifying membership in a conversation.
+pub(super) fn creation_claim(
+    connection: &Connection,
+    subject: &str,
+) -> Result<Option<ClaimRecord>, FractalError> {
+    latest_applied_claim(connection, subject, "thread.created").map_err(|error| {
+        if error.code == "idempotency-conflict" {
+            unavailable()
+        } else {
+            error
+        }
+    })
+}
+
 fn owned_creation(
     connection: &Connection,
     subject: &str,
     person: &str,
     creating: bool,
 ) -> Result<Option<ClaimRecord>, FractalError> {
-    let Some(creator) = latest_applied_claim(connection, subject, "thread.created")? else {
+    let Some(creator) = creation_claim(connection, subject)? else {
         return if creating {
             Ok(None)
         } else {
@@ -349,7 +380,7 @@ pub fn latest_lifecycle_event(store: &Store, subject: &str) -> Result<Option<Eve
     })
 }
 
-fn latest_applied_claim(
+pub(super) fn latest_applied_claim(
     connection: &Connection,
     subject: &str,
     kind: &str,
@@ -588,10 +619,19 @@ pub struct StartFromAsk<'a> {
 }
 
 /// Atomically admit a thread and its first ordinary graph message from a current agent ask.
-/// This store path deliberately does not handle paired-device signing or message attachments.
+/// This convenience entry point is for trusted local callers.
 pub fn start_from_ask(
     store: &Store,
     start: StartFromAsk<'_>,
+) -> Result<(ClaimRecord, bool), FractalError> {
+    start_from_ask_as(store, start, PersonAuthority::TrustedLocal, None)
+}
+
+pub fn start_from_ask_as(
+    store: &Store,
+    start: StartFromAsk<'_>,
+    principal: PersonAuthority<'_>,
+    signature: Option<&smallclaims::principal::ClaimSignature>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
     let StartFromAsk {
         thread,
@@ -622,7 +662,11 @@ pub fn start_from_ask(
         || content.len() > 8 * 1024
         || content.starts_with("doc/")
         || first_message.fields.contains_key("attachments")
-        || first_message.fields.contains_key("in_reply_to")
+        || first_message
+            .fields
+            .get("in_reply_to")
+            .is_some_and(|value| !value.is_null())
+        || first_message.fields.contains_key("thread_quote_id")
         || title.trim().is_empty()
         || title.len() > 512
         || key.is_empty()
@@ -633,6 +677,34 @@ pub fn start_from_ask(
             "thread start requires a plain inline first message to the asking agent",
         ));
     }
+    let mut first_message = first_message.clone();
+    for (name, value) in [
+        ("thread_id", thread),
+        ("thread_origin_ask", ask),
+        ("thread_origin_episode", episode),
+    ] {
+        if first_message
+            .fields
+            .get(name)
+            .is_some_and(|current| current.as_str() != Some(value))
+        {
+            return Err(FractalError::new(
+                "invalid-thread-start",
+                "the first message context differs from the thread origin",
+            ));
+        }
+        first_message.fields.insert(name.into(), json!(value));
+    }
+    if signature.is_some()
+        && first_message.fields.get("title").and_then(Value::as_str) != Some(title)
+    {
+        return Err(FractalError::new(
+            "invalid-thread-start",
+            "the signed first message must name the thread title",
+        ));
+    }
+    let encoded_signature =
+        super::thread_delivery::verified_signature(&first_message, &principal, signature)?;
     let operation_id = operation_id_for_key(key);
     let digest = canonical_hash(&(
         "thread.start.v1",
@@ -658,6 +730,9 @@ pub fn start_from_ask(
     store
         .connection
         .batched(|tx| {
+            store.thread_write_rollout(tx)?;
+            principal.check(tx, person)?;
+            super::thread_delivery::check_enrollment(tx, &principal, person, signature)?;
             if let Some((saved_digest, canonical, state)) =
                 operation_tx(tx, &operation_id).map_err(internal)?
             {
@@ -719,18 +794,37 @@ pub fn start_from_ask(
                     "the first message already exists",
                 ));
             }
-            append_receipt_claim_tx(
-                tx,
-                &store.origin,
-                &first_message.subject,
+            if let Some(signature) = encoded_signature.as_deref() {
+                tx.execute(
+                    "INSERT OR REPLACE INTO expected_claim_signatures(subject,kind,actor,signature) VALUES (?1,'message.sent',?2,?3)",
+                    params![first_message.subject, person, signature],
+                ).map_err(internal)?;
+            }
+            // The typed transaction has already authorized this exact ask and sender.
+            // Retain the ordinary recipient and provenance checks before the admitted append.
+            retirements::admit_recipient(tx, Some(agent))?;
+            assistant_write::refuse_unverified(
                 "message.sent",
                 Some(person),
-                &message_body,
-                &[],
-                Some(&created.batch_id),
-                &format!("thread-start-message:{key}"),
-            )
-            .map_err(claim_append_error)?;
+                Some(person),
+                ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"]
+                    .iter().any(|field| first_message.fields.contains_key(*field)),
+            )?;
+            let mut message_body = message_body.clone();
+            smallclaims::store::idempotency::attach(
+                &mut message_body, &format!("thread-start-message:{key}"),
+            ).map_err(internal)?;
+            let message = append_admitted_claim_tx(
+                tx, &store.origin, &first_message.subject, "message.sent", Some(person),
+                &message_body, &[], Some(&created.batch_id),
+            ).map_err(claim_append_error)?;
+            register_operation_tx(tx, &message).map_err(internal)?;
+            if encoded_signature.is_some() {
+                tx.execute(
+                    "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind='message.sent' AND actor=?2",
+                    params![first_message.subject, person],
+                ).map_err(internal)?;
+            }
             register_operation_tx(tx, &created).map_err(internal)?;
             Ok((created, true))
         })

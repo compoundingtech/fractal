@@ -468,6 +468,8 @@ pub struct ClientSession {
     pub pairing_grant: Option<String>,
     /// Exact person-pairing completion authenticated by the request bearer.
     pub pairing_completion: Option<String>,
+    /// Seat identity bound by Unix peer provenance, never a request parameter.
+    pub bound_agent: Option<String>,
     /// Local-only push registrations belong to the member that issued this exact pairing.
     pub pairing_issued_here: bool,
     pub grant_expires_at: Option<u128>,
@@ -495,6 +497,7 @@ impl ClientSession {
             authority_actor: authority_actor.into(),
             pairing_grant: None,
             pairing_completion: None,
+            bound_agent: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
@@ -539,6 +542,7 @@ impl ClientSession {
                 authority_actor: "client/local/read-only".into(),
                 pairing_grant: None,
                 pairing_completion: None,
+                bound_agent: None,
                 pairing_issued_here: false,
             grant_expires_at: None,
                 assistant_write: None,
@@ -564,6 +568,7 @@ impl ClientSession {
             authority_actor: person.into(),
             pairing_grant: None,
             pairing_completion: None,
+            bound_agent: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
@@ -586,6 +591,7 @@ impl ClientSession {
             authority_actor: "client/pairing/completion".into(),
             pairing_grant: None,
             pairing_completion: None,
+            bound_agent: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
@@ -777,6 +783,7 @@ pub fn authenticate(
             let mut session = ClientSession::local(person)?;
             session.peer_process = request.extensions().get::<super::LocalPeer>()
                 .and_then(|peer| peer.peer_process.clone());
+            session.bound_agent = request.extensions().get::<super::BoundAgent>().map(|bound| bound.0.clone());
             session.local_peer = request.extensions().get::<super::BoundAgent>().is_some()
                 || request.extensions().get::<super::LocalPeer>()
                     .is_some_and(|peer| peer.ancestor.is_some())
@@ -896,6 +903,7 @@ pub fn paired_client_session(
         authority_actor: authority_actor.into(),
         pairing_grant: Some(paired.subject.clone()),
         pairing_completion: Some(paired.id.clone()),
+        bound_agent: None,
         pairing_issued_here: paired.origin == state.store.origin(),
         grant_expires_at: Some(expires_at),
         assistant_write: None,
@@ -4380,8 +4388,11 @@ pub struct Fence {
 }
 
 pub fn action_scope(action: &str) -> Option<&'static str> {
-    if matches!(action, "thread.rename" | "thread.close" | "thread.reopen") {
+    if matches!(action, "thread.rename" | "thread.close" | "thread.reopen" | "thread.start" | "thread.reply") {
         return Some("control.messages");
+    }
+    if action == "thread.link-ask" {
+        return Some("control.work");
     }
     if action == "harness.answer" {
         return Some("terminal.control");

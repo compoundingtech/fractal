@@ -181,9 +181,10 @@ pub mod tests {
 
     #[test]
     fn starting_thread_from_real_ask_commits_one_first_message_and_leaves_ask_pending() {
-        use crate::store::thread_metadata::{StartFromAsk, start_from_ask};
+        use crate::store::thread_metadata::{StartFromAsk, TimelineItem, mixed_timeline, start_from_ask};
 
         let (store, _, input) = fixture();
+        store.configure_thread_write_rollout([]);
         let ask = store.ask_person(&input).unwrap();
         let original = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
         let person = "person/avery";
@@ -209,6 +210,71 @@ pub mod tests {
         assert!(appended);
         assert_eq!(created.body["fields"]["origin_ask_episode"], original.id);
         assert_eq!(created.body["fields"]["first_message"], message.subject);
+        let read = mixed_timeline(&store, person, "thread/worker", None, 1).unwrap();
+        assert_eq!(read.items.len(), 1);
+        let TimelineItem::Message(first) = &read.items[0] else { panic!("expected the first message") };
+        assert_eq!(first.id, message.subject);
+        assert_eq!(first.content, "Could we check worker tests first?");
+        assert!(read.next_cursor.is_none());
+        assert!(mixed_timeline(&store, "person/other", "thread/worker", None, 1).is_err());
+        let (closed, _) = crate::store::thread_metadata::apply(
+            &store, person, "thread/worker", "close-worker",
+            crate::store::thread_metadata::Edit::Close { revision: &created.id },
+        ).unwrap();
+        let agent = original.actor.as_deref().unwrap();
+        crate::store::thread_delivery::append_reply(
+            &store,
+            &ClaimInput {
+                subject: "message/thread-reply".into(),
+                kind: "message.sent".into(),
+                actor: Some(agent.into()),
+                fields: serde_json::from_value(json!({
+                    "from": agent, "to": person, "content": "Worker tests pass.",
+                    "status": "sent", "thread_id": "thread/worker", "thread_quote_id": message.subject,
+                })).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("bound-thread-reply".into()),
+            },
+            crate::store::thread_metadata::PersonAuthority::BoundAgent { actor: agent },
+            None,
+        ).unwrap();
+        store.connection.batched(|tx| crate::store::append_receipt_claim_tx(
+            tx, store.origin(), "message/ordinary-reply", "message.sent", Some(agent),
+            &json!({"fields":{"from":agent,"to":person,"content":"Outside the thread.",
+                "status":"sent","in_reply_to":message.subject}}),
+            &[], None, "seed-ordinary-reply",
+        )).unwrap().unwrap();
+        let first_page = mixed_timeline(&store, person, "thread/worker", None, 1).unwrap();
+        let TimelineItem::Message(reply) = &first_page.items[0] else { panic!("expected the reply") };
+        assert_eq!(reply.thread_quote_id.as_deref(), Some(message.subject.as_str()));
+        let lifecycle = mixed_timeline(
+            &store, person, "thread/worker", first_page.next_cursor.as_deref(), 1,
+        ).unwrap();
+        let TimelineItem::Lifecycle(event) = &lifecycle.items[0] else { panic!("expected the close") };
+        assert_eq!(event.operation_id, closed.operation_id.unwrap());
+        let tail = mixed_timeline(&store, person, "thread/worker", lifecycle.next_cursor.as_deref(), 1).unwrap();
+        assert!(matches!(&tail.items[0], TimelineItem::Message(item) if item.id == message.subject));
+        assert!(tail.next_cursor.is_none());
+        let foreign_quote = crate::store::thread_delivery::append_reply(
+            &store,
+            &ClaimInput {
+                subject: "message/thread-foreign-quote".into(),
+                kind: "message.sent".into(),
+                actor: Some(agent.into()),
+                fields: serde_json::from_value(json!({
+                    "from": agent, "to": person, "content": "Unverified quote.", "status": "sent",
+                    "thread_id": "thread/worker", "thread_quote_id": "message/ordinary-reply",
+                })).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("foreign-thread-quote".into()),
+            },
+            crate::store::thread_metadata::PersonAuthority::BoundAgent { actor: agent },
+            None,
+        );
+        assert_eq!(foreign_quote.unwrap_err().code, "invalid-thread-message");
+        assert!(store.claims_for("message/thread-foreign-quote", None).unwrap().is_empty());
         let (retry, appended) = start_from_ask(&store, start("thread/worker", "start-thread", person)).unwrap();
         assert!(!appended);
         assert_eq!(retry.id, created.id);
@@ -247,6 +313,185 @@ pub mod tests {
             "thread-unavailable",
         );
         assert!(!start_from_ask(&store, start("thread/worker", "start-thread", person)).unwrap().1);
+    }
+
+    #[test]
+    fn enrolled_device_starts_thread_with_signed_ask_origin_and_first_message() {
+        use crate::store::thread_metadata::{PersonAuthority, StartFromAsk, start_from_ask_as};
+        use smallclaims::principal::{ClaimSignature, FIELDS_FORMAT, fields_signing_bytes};
+
+        let (store, _, input) = fixture();
+        store.configure_thread_write_rollout([]);
+        let ask = store.ask_person(&input).unwrap();
+        let original = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+        let person = "person/avery";
+        let actor = "client/paired/first-thread-fixture";
+        let grant = "custom/client/pairing-first-thread-fixture";
+        let thread = "thread/signed-start";
+        store.set_node_key(std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+        let (device, _) = smallclaims::fleet::MemberKey::generate().unwrap();
+        let chain = store.enroll_device_key(person, device.public(), "thread phone").unwrap();
+        let pairing = store.append_claim(&ClaimInput {
+            subject: grant.into(), kind: "custom.client.pairing-completed".into(), actor: None,
+            fields: BTreeMap::from([
+                ("person_id".into(), json!(person)),
+                ("session_actor".into(), json!(actor)),
+                ("device_public_key".into(), json!(device.public())),
+                ("expires_at_unix_ms".into(), json!(now_ms() as u64 + 60_000)),
+                ("scopes".into(), json!(["control.messages"])),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let message = ClaimInput {
+            subject: "message/signed-thread-first".into(), kind: "message.sent".into(), actor: Some(person.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(person)),
+                ("to".into(), json!(original.actor.as_deref().unwrap())),
+                ("content".into(), json!("Could we check worker tests first?")),
+                ("status".into(), json!("sent")),
+                ("title".into(), json!("Worker tests")),
+                ("thread_id".into(), json!(thread)),
+                ("thread_origin_ask".into(), json!(ask.subject)),
+                ("thread_origin_episode".into(), json!(original.id)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        };
+        let mut signature = ClaimSignature::sign(&device, "", person, None, chain, now_ms() as u64);
+        signature.format = Some(FIELDS_FORMAT.into());
+        signature.signed_fields = message.fields.keys().filter(|field| field.as_str() != "status").cloned().collect();
+        signature.signature = device.sign(&fields_signing_bytes(
+            &message.subject, &message.kind, message.actor.as_deref(), &json!(message.fields),
+            &signature.signed_fields, &signature.signer, None, &signature.key,
+            &signature.chain, &signature.nonce, signature.signed_at_unix_ms,
+        ));
+        let start = || StartFromAsk {
+            thread, title: "Worker tests", person, ask: &ask.subject, episode: &original.id,
+            key: "start-signed-thread", first_message: &message,
+        };
+        let authority = || PersonAuthority::Paired { grant, completion: &pairing.id, actor };
+        let (created, appended) = start_from_ask_as(&store, start(), authority(), Some(&signature)).unwrap();
+        assert!(appended);
+        assert_eq!(created.body["fields"]["first_message"], message.subject);
+        let delivered = store.claims_for(&message.subject, Some("message.sent")).unwrap();
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].body["fields"]["thread_origin_episode"], original.id);
+        assert_eq!(delivered[0].batch_id, created.batch_id);
+        assert_eq!(start_from_ask_as(&store, start(), authority(), Some(&signature)).unwrap().0.id, created.id);
+        use crate::store::thread_metadata::{Edit, TimelineItem, apply, mixed_timeline};
+        let agent = original.actor.as_deref().unwrap();
+        let reply = |subject: &str, from: &str, to: &str, quote: Option<&str>| {
+            let mut fields = BTreeMap::from([
+                ("from".into(), json!(from)),
+                ("to".into(), json!(to)),
+                ("content".into(), json!("The worker checks are ready.")),
+                ("status".into(), json!("sent")),
+                ("thread_id".into(), json!(thread)),
+            ]);
+            if let Some(quote) = quote {
+                fields.insert("thread_quote_id".into(), json!(quote));
+            }
+            ClaimInput {
+                subject: subject.into(),
+                kind: "message.sent".into(),
+                actor: Some(from.into()),
+                fields,
+                evidence: vec![],
+                expected_subject: None,
+                idempotency_key: Some(subject.into()),
+            }
+        };
+        let quoted = reply("message/signed-thread-quote", person, agent, Some(&message.subject));
+        let mut quote_signature = ClaimSignature::sign(
+            &device, "", person, None, signature.chain.clone(), now_ms() as u64,
+        );
+        quote_signature.format = Some(FIELDS_FORMAT.into());
+        quote_signature.signed_fields = quoted.fields.keys().filter(|field| field.as_str() != "status").cloned().collect();
+        quote_signature.signature = device.sign(&fields_signing_bytes(
+            &quoted.subject, &quoted.kind, quoted.actor.as_deref(), &json!(quoted.fields),
+            &quote_signature.signed_fields, &quote_signature.signer, None, &quote_signature.key,
+            &quote_signature.chain, &quote_signature.nonce, quote_signature.signed_at_unix_ms,
+        ));
+        let (_, sent) = crate::store::thread_delivery::append_reply(
+            &store, &quoted, authority(), Some(&quote_signature),
+        ).unwrap();
+        assert!(sent);
+        let (closed, _) = apply(&store, person, thread, "close-signed-thread", Edit::Close {
+            revision: &created.id,
+        }).unwrap();
+        let incoming = reply("message/signed-thread-incoming", agent, person, Some(&quoted.subject));
+        assert!(crate::store::thread_delivery::append_reply(
+            &store, &incoming, PersonAuthority::TrustedLocal, None,
+        ).unwrap().1);
+        let page = mixed_timeline(&store, person, thread, None, 4).unwrap();
+        assert!(matches!(&page.items[..], [
+            TimelineItem::Message(received), TimelineItem::Lifecycle(event),
+            TimelineItem::Message(quoted_item), TimelineItem::Message(first),
+        ] if received.id == incoming.subject && received.thread_quote_id.as_deref() == Some(quoted.subject.as_str())
+            && Some(event.operation_id.as_str()) == closed.operation_id.as_deref()
+            && quoted_item.id == quoted.subject && quoted_item.thread_quote_id.as_deref() == Some(message.subject.as_str())
+            && first.id == message.subject));
+        assert!(page.next_cursor.is_none());
+        assert!(current(&store.readers.get(), &original, now_ms()).unwrap());
+    }
+
+    #[test]
+    fn bound_requester_links_fresh_ask_to_closed_thread_without_answering_either() {
+        use crate::store::thread_links::{AttachAsk, DecisionHistory, attach_ask};
+        use crate::store::thread_metadata::{Edit, StartFromAsk, apply, start_from_ask};
+
+        let (store, _, mut input) = fixture();
+        store.configure_thread_write_rollout([]);
+        input.step = None;
+        let first_ask = store.ask_person(&input).unwrap();
+        let original = request(&store.readers.get(), &first_ask.subject).unwrap().unwrap();
+        let person = "person/avery";
+        let agent = original.actor.as_deref().unwrap();
+        let thread = "thread/linked";
+        let message = ClaimInput {
+            subject: "message/first-thread-link".into(), kind: "message.sent".into(), actor: Some(person.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(person)), ("to".into(), json!(agent)),
+                ("content".into(), json!("Check worker tests.")), ("status".into(), json!("sent")),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        };
+        let (created, _) = start_from_ask(&store, StartFromAsk {
+            thread, title: "Worker tests", person, ask: &first_ask.subject, episode: &original.id,
+            key: "start-thread-link", first_message: &message,
+        }).unwrap();
+        let (closed, _) = apply(&store, person, thread, "close-linked-thread", Edit::Close {
+            revision: &created.id,
+        }).unwrap();
+        input.idempotency_key = "follow-up-request".into();
+        let fresh_ask = store.ask_person(&input).unwrap();
+        let fresh = request(&store.readers.get(), &fresh_ask.subject).unwrap().unwrap();
+        assert_ne!(fresh.id, original.id);
+        let link = || AttachAsk {
+            thread, ask: &fresh_ask.subject, episode: &fresh.id, key: "attach-ask",
+            decision: Some(DecisionHistory { predecessor: &first_ask.subject, episode: &original.id,
+                reason: "New test result" }),
+        };
+        assert_eq!(attach_ask(&store, "agent/other", link()).unwrap_err().code, "thread-unavailable");
+        let ask_revision = store.latest_claim_id(&fresh_ask.subject).unwrap();
+        let (attached, appended) = attach_ask(&store, agent, link()).unwrap();
+        assert!(appended);
+        assert_eq!(store.latest_claim_id(&fresh_ask.subject).unwrap(), ask_revision);
+        assert_eq!(attached.body["fields"]["decision_predecessor_episode"], original.id);
+        assert_eq!(attached.body["fields"]["decision_reason"], "New test result");
+        let (retry, appended) = attach_ask(&store, agent, link()).unwrap();
+        assert!(!appended);
+        assert_eq!(retry.id, attached.id);
+        assert_eq!(store.latest_claim_id(thread).unwrap().as_deref(), Some(closed.id.as_str()));
+        assert!(current(&store.readers.get(), &original, now_ms()).unwrap());
+        assert!(current(&store.readers.get(), &fresh, now_ms()).unwrap());
+        store.finish_person_step(&PersonStepResponse {
+            delegation: None, subject: fresh_ask.subject.clone(), actor: person.into(),
+            summary: "Friday".into(), evidence: vec![], episode: None,
+            idempotency_key: "answer-linked-ask".into(), answer: None,
+        }, false).unwrap();
+        assert!(current(&store.readers.get(), &original, now_ms()).unwrap());
+        assert!(!current(&store.readers.get(), &fresh, now_ms()).unwrap());
+        assert!(!attach_ask(&store, agent, link()).unwrap().1);
     }
 
     #[test]
