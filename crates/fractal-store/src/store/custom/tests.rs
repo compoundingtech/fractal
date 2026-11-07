@@ -9,6 +9,30 @@ pub use crate::store::custom::tests_shared_delivery::{DECIDER, FLEET, RAW_KINDS,
 pub use crate::store::custom::tests_shared_delivery::{request, signed_pair, signed_sync, tree_claim, tree_document, tree_status};
 use super::*;
 
+#[test]
+fn decision_inputs_reject_unregistered_person_answer() {
+    let store = Store::open_memory("example").unwrap();
+    tree_claim(&store, TREE, "answered", DECIDER, json!({
+        "question":"ship", "answer":"yes"
+    })).unwrap();
+    assert!(store.decision_inputs(TREE).unwrap_err().to_string().contains("registration is unavailable"));
+}
+
+#[test]
+fn decision_inputs_require_recipient_authority_in_immutable_registration() {
+    let store = Store::open_memory("example").unwrap();
+    let mut manifest = decision_tree();
+    manifest.claims.get_mut("custom.decision.tree.v1.answered").unwrap().authority = Authority::Owner;
+    store.register_custom_kind(&RegistrationRequest {
+        manifest, actor: SEAT.into(),
+    }).unwrap();
+    tree_claim(&store, TREE, "opened", SEAT, json!({
+        "seat":SEAT, "recipient":DECIDER
+    })).unwrap();
+    assert!(store.decision_inputs(TREE).unwrap_err().to_string()
+        .contains("only from the addressed recipient"));
+}
+
 fn audit_custom_dirty(store: &Store) {
     store.connection.write().execute_batch(
         /* sqlite-large-value: allow-for-now lv-h4094ac3a489b owner=fractal_store::store::custom::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE custom_dirty_audit(subject TEXT);

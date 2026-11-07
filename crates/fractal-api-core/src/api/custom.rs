@@ -161,6 +161,27 @@ pub async fn basis(
     ))
 }
 
+#[derive(Deserialize)]
+pub struct DecisionInputsQuery {
+    subject: String,
+}
+
+pub async fn decision_inputs(
+    State(state): State<AppState>,
+    Query(query): Query<DecisionInputsQuery>,
+) -> Result<Json<crate::store::custom::DecisionInputs>, ApiError> {
+    fractal_schema::registry().validate_subject(&query.subject)
+        .map_err(|error| client_v0::validation(error.message))?;
+    let result = blocking_store(move || state.store.decision_inputs(&query.subject)).await
+        .map_err(|error| ApiError {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "invalid-custom-claim".into(),
+            message: error.message,
+            details: Box::default(),
+        })?;
+    Ok(Json(result))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

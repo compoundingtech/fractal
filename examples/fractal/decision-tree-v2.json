@@ -256,7 +256,7 @@
           "max_bytes": 2048
         },
         "written_ms": {
-          "value_type": "integer",
+          "value_type": "object",
           "required": true
         },
         "actors": {

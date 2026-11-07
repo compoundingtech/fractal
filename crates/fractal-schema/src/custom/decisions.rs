@@ -18,6 +18,23 @@ impl Claim {
             .any(|prefix| self.kind.strip_prefix(prefix) == Some(kind))
     }
 }
+
+/// Unknown source time is evidence only, never an ordering value.
+fn provenance_time(provenance: &Claim, claims: &[Claim]) -> Result<Option<i64>, &'static str> {
+    let time = provenance.fields.get("written_ms").and_then(Value::as_object)
+        .ok_or("written_ms must be a tagged object")?;
+    if time.len() != 1 { return Err("written_ms must contain exactly one tag"); }
+    if let Some(known) = time.get("known") {
+        return known.as_i64().map(Some).ok_or("known written_ms must be an integer");
+    }
+    if time.get("unknown").and_then(Value::as_str).is_some_and(|reason| !reason.trim().is_empty()) {
+        if claims.iter().any(|target| Some(target.id.as_str()) == provenance.text("target") && target.is("damaged")) {
+            return Ok(None);
+        }
+        return Err("unknown written_ms requires a damaged target");
+    }
+    Err("unknown written_ms requires a nonempty reason")
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status { Pending, Answered, Withdrawn, Superseded, Moot }
@@ -65,6 +82,14 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
     let scope = |c: &'a Claim| provenance.get(c.id.as_str())
         .and_then(|p| p.text("source_scope")).unwrap_or(subject);
     let mut defects = Vec::new();
+    let mut source_times = BTreeMap::new();
+    for p in provenance.values() {
+        match provenance_time(p, claims) {
+            Ok(Some(time)) => { source_times.insert(p.id.as_str(), time); }
+            Ok(None) => {}
+            Err(reason) => defects.push(format!("invalid provenance time: {}: {reason}", p.id)),
+        }
+    }
     let mut keys = BTreeSet::new();
     for request in &requests {
         if let Some(q) = request.fields.get("q").and_then(Value::as_i64)
@@ -76,8 +101,11 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
         .filter(|c| c.is(kind) && c.text("request") == Some(&request.id))
         .max_by_key(|c| c.order);
     let mut answers = BTreeMap::new();
+    let mut assumptions = BTreeMap::new();
     for request in &requests {
-        let candidates: Vec<_> = claims.iter().filter(|c| (c.is("answered") || c.is("recorded"))
+        for assumption in [false, true] {
+        let candidates: Vec<_> = claims.iter().filter(|c|
+            (if assumption { c.is("assumed") } else { c.is("answered") || c.is("recorded") })
             && c.text("request") == Some(&request.id)).collect();
         let mut successors = BTreeMap::new();
         for answer in &candidates {
@@ -99,24 +127,31 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
                 }
             }
         }
+        // Explicit supersession outranks timestamp and lexical tie-breaks.
+        let heads: Vec<_> = candidates.iter().copied()
+            .filter(|candidate| !successors.contains_key(candidate.id.as_str())).collect();
         // First select the imported head by original chronology, then merge it with
         // native writes by claim order. This is a total order even for mixed histories.
-        let imported = candidates.iter().copied().filter(|a| provenance.contains_key(a.id.as_str()))
+        let imported = heads.iter().copied().filter(|a| provenance.get(a.id.as_str())
+            .is_some_and(|p| source_times.contains_key(p.id.as_str())))
             .max_by_key(|a| {
                 let p = provenance[a.id.as_str()];
-                (p.fields.get("written_ms").and_then(Value::as_i64).unwrap_or_default(),
+                (source_times[p.id.as_str()],
                     p.text("legacy_id").unwrap_or_default(), p.text("source_scope").unwrap_or_default(), a.order)
             });
-        let native = candidates.iter().copied().filter(|a| !provenance.contains_key(a.id.as_str()))
+        let native = heads.iter().copied().filter(|a| !provenance.contains_key(a.id.as_str()))
             .max_by_key(|a| a.order);
         let chosen = imported.into_iter().chain(native).max_by_key(|a| a.order);
-        answers.insert(request.id.as_str(), chosen);
+        if assumption { assumptions.insert(request.id.as_str(), chosen); }
+        else { answers.insert(request.id.as_str(), chosen); }
+        }
     }
     // Resolve guard dependencies recursively: a guard reads only an active request's
     // effective answer or assumption. Cycles are defects, never silently active.
     struct Guards<'a> {
         requests: &'a [&'a Claim],
         answers: &'a BTreeMap<&'a str, Option<&'a Claim>>,
+        assumptions: &'a BTreeMap<&'a str, Option<&'a Claim>>,
         claims: &'a [Claim],
         scopes: BTreeMap<&'a str, &'a str>,
         active: BTreeMap<&'a str, bool>,
@@ -144,8 +179,8 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
                     };
                     if !self.evaluate(dependency) { return false; }
                     if self.claims.iter().any(|c| c.is("withdrawn") && c.text("request") == Some(&dependency.id)) { return false; }
-                    let answer = self.answers[dependency.id.as_str()].or_else(|| self.claims.iter()
-                        .filter(|c| c.is("assumed") && c.text("request") == Some(&dependency.id)).max_by_key(|c| c.order));
+                    let answer = self.answers[dependency.id.as_str()]
+                        .or(self.assumptions[dependency.id.as_str()]);
                     let Some(answer) = answer else { return false; };
                     if let Some(option) = guard.get("option") {
                         return answer.fields.get("selection").and_then(Value::as_array)
@@ -163,13 +198,13 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
             result
         }
     }
-    let mut guards = Guards { requests: &requests, answers: &answers, claims,
+    let mut guards = Guards { requests: &requests, answers: &answers, assumptions: &assumptions, claims,
         scopes: requests.iter().map(|r| (r.id.as_str(), scope(r))).collect(),
         active: BTreeMap::new(), visiting: BTreeSet::new(), defects: Vec::new() };
     for request in &requests { guards.evaluate(request); }
     let mut output: Vec<_> = requests.iter().map(|request| {
         let answer = answers[request.id.as_str()];
-        let assumed = latest(request, "assumed").is_some();
+        let assumed = assumptions[request.id.as_str()].is_some();
         let status = if !guards.active[request.id.as_str()] { Status::Moot }
             else if latest(request, "withdrawn").is_some() { Status::Withdrawn }
             else if requests.iter().any(|child| child.text("parent") == Some(&request.id) && guards.active[child.id.as_str()]) { Status::Superseded }
@@ -179,7 +214,8 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
         Request { request: &request.id, source_scope: scope(request), q: request.fields.get("q").and_then(Value::as_i64),
             approval_gate: status == Status::Answered && answer.is_some_and(|a| approval_gate(a, claims)),
             status, assumed, open, answer: answer.map(|a| a.id.as_str()),
-            needs_ask: open && ask_links.is_empty(), ask_links }
+            needs_ask: open && ask_links.is_empty()
+                && !subject.starts_with("custom/decision/tree/v2/legacy/"), ask_links }
     }).collect();
     defects.extend(guards.defects);
     if !defects.is_empty() {

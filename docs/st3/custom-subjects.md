@@ -223,7 +223,7 @@ is not an alias for v2; no v1 claim is rewritten or silently migrated.
 
 | Added kind | Authority | Required fields | Optional fields |
 | --- | --- | --- | --- |
-| `provenance` | owner | `target` (claim reference), `raw` (hash-pinned document), `source_host`, `source_layout`, `source_paths` (array), `legacy_id`, `source_scope`, `written_ms` (integer), `actors` (array) | none |
+| `provenance` | owner | `target` (claim reference), `raw` (hash-pinned document), `source_host`, `source_layout`, `source_paths` (array), `legacy_id`, `source_scope`, `written_ms` (tagged object), `actors` (array) | none |
 | `withdrawn` | owner/requester | `request` (claim reference), `reason` | `duplicate_of` (claim reference) |
 | `recorded` | owner | `request` (claim reference), `recorder` (agent or person reference), `responder` (original string), `quote` (verbatim string) | `selection` (array), `supersedes` (claim reference) |
 | `ask_linked` | owner | `request` (claim reference), `ask` (native ask's `step-run` subject reference), `activation` (string) | none |
@@ -252,6 +252,12 @@ are evidence, not authority, native claim order, or permission to rewrite a sour
 schema bounds arrays but does not validate their members. As with v1 claim references,
 existence checks alone do not establish the target kind or same-tree membership.
 
+`written_ms` is exactly `{"known": <integer milliseconds>}` or
+`{"unknown": "<nonempty reason>"}`. Unknown time is valid only when `target` names a
+same-tree `damaged` claim, never a request or response. The manifest admits an object;
+the fold rejects malformed tags and unknown times on non-damaged targets as defects.
+Unknown time is never converted to zero or used for chronological ordering.
+
 `ask_linked` records a relationship to an existing native work ask and its activation. It does
 not open, complete, cancel, approve, or delegate that ask. A decision answer, capture,
 assumption, promotion, or withdrawal never bypasses native work authorization.
@@ -262,10 +268,21 @@ assumption, promotion, or withdrawal never bypasses native work authorization.
 fractal subject decisions custom/decision/tree/v2/<seat>
 ```
 
-This is a read-only domain fold of the subject's raw claims, not the latest-slot source row
-and not an instruction to append `status`. It does not write claims, documents, schema
+This is a read-only domain fold of the subject's effective history, not the latest-slot source
+row and not an instruction to append `status`. The reader uses the existing canonical custom
+ordering and repaired-record exclusion used by the basis fence; local store indexes are only
+arrival cursors, never interpretation precedence. It does not write claims, documents, schema
 registrations, or native asks. The generic source row retains its last-fact summaries and
 status-driven attention contract; it is not a substitute for folding all requests.
+
+`GET /v1/custom/decision-inputs?subject=<URL-encoded-tree>` returns
+`{claims, basis}` in one reader transaction. `claims` contains full claim records, including
+verbatim provenance `body.fields`, in canonical effective-history order; repaired originals
+are excluded. `basis` is the existing subject/kinds/revision token for those inputs. No
+client-side pagination or before/after token race is needed for this snapshot read.
+The reader requires a ready matching registration, matching registration pins, a valid
+creation and source, and exact addressed-recipient answer authority. Invalid, conflicting,
+or unregistered histories are rejected rather than classified as approval evidence.
 
 The fold reports duplicate scoped request keys, malformed or cyclic guards, recorder mismatches,
 and dangling, cyclic or forked answer supersession as defects. Provenance supplies a request's
@@ -299,15 +316,23 @@ assumption is not a response. Only an unimported `answered` written by a `person
 counts as a person-authority approval gate, and only while the effective status is `answered`;
 provenance-marked imported answers and recorded captures remain historical responses, not native approval.
 
-Imported response heads are selected by `(written_ms, legacy_id, source_scope)`. The imported
-head is then merged with the newest native response using native claim order, which gives a
-total order for mixed imported and native history. Native-only history uses native claim
-order. Imported chronology is never inferred from array order, local storage indexes, or `q`.
+Explicit supersession removes predecessors from effective-head eligibility before chronology
+is compared. Imported response and assumption heads use the same
+`(written_ms.known, legacy_id, source_scope)` order, with canonical claim order as the final
+tie-break. Unknown damaged times do not participate. The imported head is then merged with
+the newest native head using canonical claim order, giving a total order for mixed history.
+Native-only history uses canonical claim order. Imported chronology is never inferred from
+array order, local storage indexes, or `q`.
 
 Supersession forks are reported as defects; a defective fold is not approval evidence.
 A withdrawal removes that request from the active pending set without fabricating an answer;
 its reason and duplicate relationship remain historical facts. `needs_ask` means the request
-is open and has no `ask_linked` facts; `ask_links` preserves the link fields without assuming
-that a linked ask is still active or authorized. The fold does not distinguish blockers from
+is open, has no `ask_linked` facts, and is not in a legacy-unproven tree.
+Subjects under `custom/decision/tree/v2/legacy/<encoded spelling>` preserve unproven legacy
+ownership: their `opened.seat` is the import actor, not proof of a native seat mapping.
+Their requests can remain open, but `needs_ask` is always false; they never propose ask
+creation. Normal trees require their subject suffix to match the creation actor's seat.
+`ask_links` preserves link fields without assuming that a linked ask is still active or
+authorized. The fold does not distinguish blockers from
 refinements for this open-request accounting. Decision state is derived from effective
 requests and guards, never trusted from a last-written `status` or an unrelated native ask.
