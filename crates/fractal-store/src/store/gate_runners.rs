@@ -38,11 +38,12 @@ macro_rules! stop {
     };
 }
 
-/// A stop observed on `subject`.
+/// A stop observed on `subject`. The triggers name no index: a trigger that names a dropped one
+/// fails every claim write at preparation, and the planner finds the subject and kind index alone.
 macro_rules! stopped {
     ($subject:literal) => {
         concat!(
-            "EXISTS (SELECT 1 FROM claims stopped INDEXED BY claims_subject_kind_index WHERE stopped.subject=", $subject,
+            "EXISTS (SELECT 1 FROM claims stopped WHERE stopped.subject=", $subject,
             " AND ", stop!("stopped"), ")"
         )
     };
@@ -90,7 +91,7 @@ const SCHEMA: &str = concat!(
         DELETE FROM local_gate_runners WHERE claim_id=OLD.id;
         INSERT OR IGNORE INTO local_gate_runners
         SELECT request.id, request.subject, request.origin, ", owner!("request"), "
-        FROM claims request INDEXED BY claims_subject_kind_index
+        FROM claims request
         WHERE ", stop!("OLD"), " AND request.subject=OLD.subject AND ", mechanical!("request"), "
             AND NOT ", stopped!("OLD.subject"), /* sqlite-large-value: allow-for-now lv-h7b6d9491384e owner=fractal_store::store::gate_runners TODO=prepare-body-and-predecessor-values */ ";
     END;
@@ -101,7 +102,7 @@ const SCHEMA: &str = concat!(
         DELETE FROM local_gate_runners WHERE subject=NEW.subject AND ", stopped!("NEW.subject"), /* sqlite-large-value: allow-for-now lv-hb85f5f8cc048 owner=fractal_store::store::gate_runners TODO=bound-or-reference-values-and-reclamation */ ";
         INSERT OR IGNORE INTO local_gate_runners
         SELECT request.id, request.subject, request.origin, ", owner!("request"), "
-        FROM claims request INDEXED BY claims_subject_kind_index
+        FROM claims request
         WHERE request.subject IN (OLD.subject, NEW.subject) AND ", mechanical!("request"), "
             AND NOT ", stopped!("request.subject"), ";
     END;"
