@@ -29,25 +29,57 @@ test('native wire payload preserves every operation, identity and both fences', 
 });
 test('delivery allowlist never turns ambiguous failures into safe refusal', () => {
   const r = request();
-  for (const status of ['accepted', 'completed']) assert.deepEqual(sidebarWriteResult(r, receipt('action/2', status)), { type: 'Ack', identity: r.identity });
-  assert.equal(sidebarWriteResult(r, receipt('action/2', 'rejected')).reason, 'Conflict');
-  for (const [code, reason] of [['stale-fence', 'StaleFence'], ['forbidden', 'Unauthorized'], ['arrangement-owner-forbidden', 'Unauthorized'], ['membership-owner-forbidden', 'Unauthorized'], ['arrangement-folder-deleted', 'DestinationMissing'], ['arrangement-retired', 'DestinationMissing'], ['not-found', 'DestinationMissing'], ['invalid-membership-operations', 'InvalidPlan']]) assert.equal(sidebarWriteResult(r, { error: failure(code) }).reason, reason);
-  for (const result of [receipt('action/other'), receipt('action/2', 'future'), { error: new Error('timeout') }, { error: failure('internal') }, { error: failure('idempotency-conflict') }, { error: failure('stale-fence', 'unknown') }]) assert.equal(sidebarWriteResult(r, result).type, 'Unknown');
-  assert.equal(sidebarWriteResult(r, { error: failure('idempotency-conflict', 'none') }).reason, 'Conflict');
-  assert.equal(sidebarWriteResult(r, { error: failure('internal', 'none') }).reason, 'InvalidPlan');
+  for (const delivery of ['First', 'Replay']) for (const status of ['accepted', 'completed']) assert.deepEqual(sidebarWriteResult(r, delivery, receipt('action/2', status)), { type: 'Ack', identity: r.identity });
+  assert.equal(sidebarWriteResult(r, 'First', receipt('action/2', 'rejected')).reason, 'Conflict');
+  for (const [code, reason] of [['stale-fence', 'StaleFence'], ['forbidden', 'Unauthorized'], ['arrangement-owner-forbidden', 'Unauthorized'], ['membership-owner-forbidden', 'Unauthorized'], ['arrangement-folder-deleted', 'DestinationMissing'], ['arrangement-retired', 'DestinationMissing'], ['not-found', 'DestinationMissing'], ['invalid-membership-operations', 'InvalidPlan']]) assert.equal(sidebarWriteResult(r, 'First', { error: failure(code) }).reason, reason);
+  for (const result of [receipt('action/other'), receipt('action/2', 'future'), { error: new Error('timeout') }, { error: failure('internal') }, { error: failure('idempotency-conflict') }, { error: failure('stale-fence', 'unknown') }]) assert.equal(sidebarWriteResult(r, 'First', result).type, 'Unknown');
+  assert.equal(sidebarWriteResult(r, 'First', { error: failure('idempotency-conflict', 'none') }).reason, 'Conflict');
+  assert.equal(sidebarWriteResult(r, 'First', { error: failure('internal', 'none') }).reason, 'InvalidPlan');
+  for (const code of ['forbidden', 'stale-fence', 'invalid-membership-operations', 'internal', 'idempotency-conflict']) for (const applied of [undefined, 'none', 'unknown']) assert.deepEqual(sidebarWriteResult(r, 'Replay', { error: failure(code, applied) }), { type: 'Unknown', identity: r.identity });
 });
 test('real journal dispatch replays production idempotency and refreshes compound fences', async () => {
   const calls = [], client = { submitAction: async (wire, options) => { calls.push(structuredClone(wire)); assert.ok(options.signal); return receipt(wire.id); } };
-  const env = setup(null, async (effect, s, signal) => { if (effect === 'Send') await sendSidebarWrite(client, s.request, 'actor/test', signal); });
+  const env = setup(null, async (effect, s, signal) => { if (effect.type === 'Send') await sendSidebarWrite(client, s.request, effect.delivery, 'actor/test', signal); });
   const s = state(); await env.host.dispatch(s, { ...plan, plan: { folders: [{ op: 'folder.rename', id: 'folder/test', name: 'Test' }], memberships: members } });
   await env.host.dispatch(s, { type: 'Unknown', identity: identity(1) });
-  const restarted = setup(env.raw(), async (effect, current, signal) => { if (effect === 'Send') await sendSidebarWrite(client, current.request, 'actor/test', signal); });
+  const restarted = setup(env.raw(), async (effect, current, signal) => { if (effect.type === 'Send') await sendSidebarWrite(client, current.request, effect.delivery, 'actor/test', signal); });
   const restored = await restarted.host.restore(); await restarted.host.resume(restored);
   assert.deepEqual(calls[1], calls[0]);
   await restarted.host.dispatch(restored.state, { type: 'Observed', identity: identity(1) });
   await restarted.host.dispatch(restored.state, { type: 'Fresh', base: base(2), operations: members });
   assert.equal(calls[2].id, 'action/2'); assert.equal(calls[2].fence.snapshot_id, 'snapshot/2'); assert.deepEqual(calls[2].fence.subject_revisions, { 'arrangement/test': 'revision/2' });
-  let invoked = false; const refusal = await sendSidebarWrite({ submitAction: async () => { invoked = true; } }, request(), 'actor/other', new AbortController().signal); assert.equal(invoked, false); assert.equal(refusal.reason, 'Unauthorized');
+  let invoked = false; const refusal = await sendSidebarWrite({ submitAction: async () => { invoked = true; } }, request(), 'First', 'actor/other', new AbortController().signal); assert.equal(invoked, false); assert.equal(refusal.reason, 'Unauthorized');
+});
+test('replay refusals preserve compound progress and never resend automatically', async () => {
+  for (const restored of [false, true]) {
+    const responses = [], deliveries = [], requests = [];
+    const run = async (effect, current, signal) => {
+      if (effect.type !== 'Send') return;
+      deliveries.push(effect.delivery); requests.push(structuredClone(current.request));
+      responses.push(await sendSidebarWrite({ submitAction: async () => ({ error: failure('forbidden', 'none') }) }, current.request, effect.delivery, 'actor/test', signal));
+    };
+    let env = setup(null, run), s = state();
+    await env.host.dispatch(s, { ...plan, plan: { folders: [{ op: 'folder.rename', id: 'folder/test', name: 'Test' }], memberships: members } });
+    assert.equal(deliveries[0], 'First'); assert.equal(responses.pop().type, 'Refused');
+    // The first response was lost; the caller can only record uncertain delivery.
+    await env.host.dispatch(s, { type: 'Unknown', identity: identity(1) });
+    const exact = structuredClone(s.request);
+    assert.equal(requests.length, 1);
+    assert.equal('next_delivery' in JSON.parse(env.raw()).state, false);
+    if (restored) {
+      await env.host.close(); env = setup(env.raw(), run);
+      const recovery = await env.host.restore(); s = recovery.state; await env.host.resume(recovery);
+    } else await env.host.dispatch(s, { type: 'Replay' });
+    assert.equal(deliveries.at(-1), 'Replay'); assert.deepEqual(requests.at(-1), exact);
+    const unresolved = responses.pop(); assert.deepEqual(unresolved, { type: 'Unknown', identity: exact.identity });
+    await env.host.dispatch(s, unresolved);
+    assert.equal(s.status, 'UnknownDelivery'); assert.equal(s.refusal, null); assert.deepEqual(s.request, exact);
+    assert.equal(requests.length, 2); assert.deepEqual(s.dependent, identity(2));
+    await env.host.dispatch(s, { type: 'Observed', identity: identity(1) });
+    assert.equal(s.folder_completed, true);
+    await env.host.dispatch(s, { type: 'Fresh', base: base(2), operations: members });
+    assert.equal(deliveries.at(-1), 'First'); assert.deepEqual(s.request.identity, identity(2));
+  }
 });
 test('connection close cancels in-flight transport and bars late storage send', async () => {
   const entered = deferred(), blocked = deferred(); let sends = 0, signal;
