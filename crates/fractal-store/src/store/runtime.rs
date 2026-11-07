@@ -455,7 +455,7 @@ impl Runtime for FractalRuntime {
         append_claim_with_commit_context(store, input, None, None, None, None,
             ClaimCommitContext {
                 feature_barrier_peers: self.feature_barrier_peers.get()
-                    .map(Vec::as_slice).unwrap_or_default(),
+                    .map(Vec::as_slice),
                 ..Default::default()
             })
     }

@@ -448,7 +448,7 @@ pub fn prepare(
     tx: &Transaction<'_>,
     input: &ClaimInput,
     origin: &str,
-    peers: &[String],
+    peers: Option<&[String]>,
 ) -> Result<Option<BTreeMap<String, Value>>, FractalError> {
     if input.subject.starts_with(schema::REGISTRY_PREFIX) || input.kind == schema::REGISTERED {
         return Err(FractalError::new(
@@ -499,6 +499,8 @@ pub fn prepare(
         {
             return Err(fail("decision import requires no earlier claim on the subject"));
         }
+        let peers = peers.ok_or_else(|| FractalError::new("member-version-unproven",
+            "decision import is blocked: configured peer context is unset"))?;
         let blockers = super::marks_switch::feature_blockers(
             tx, origin, peers, DECISION_IMPORT_OPENED_FEATURE,
         ).map_err(internal)?;

@@ -226,6 +226,7 @@ fn import_tree_manifest() -> Manifest {
 
 fn import_tree_store() -> Store {
     let store = Store::open_memory("example").unwrap();
+    store.fractal.feature_barrier_peers.set(Vec::new()).unwrap();
     let manifest = import_tree_manifest();
     store.register_custom_kind(&RegistrationRequest { manifest, actor: SEAT.into() }).unwrap();
     store
@@ -301,10 +302,9 @@ fn decision_import_is_opened_only_and_requires_an_empty_subject() {
     // Local admission checks all raw history, not merely existing opened claims.
     let store = Store::open_memory("unregistered").unwrap();
     import_tree_claim(&store, IMPORT_TREE, "unregistered", SEAT, json!({})).unwrap();
-    // Register the real manifest after the earlier unregistered raw claim.
-    store.register_custom_kind(&RegistrationRequest {
-        manifest: import_tree_manifest(), actor: SEAT.into(),
-    }).unwrap();
+    // Registration arrives from another member; local registration rightly refuses
+    // a populated untyped prefix, but replication must retain historical raw inputs.
+    legacy_sync(&import_tree_store(), &store);
     assert!(import_tree_claim(&store, IMPORT_TREE, "opened", IMPORT_ACTOR,
         import_opening_fields()).unwrap_err().to_string().contains("no earlier claim"));
 }
@@ -325,6 +325,8 @@ fn decision_import_does_not_change_legacy_unproven_or_native_openings() {
 #[test]
 fn decision_import_replication_and_reader_use_stateless_checks() {
     let (source, replica) = signed_pair();
+    source.fractal.feature_barrier_peers.set(Vec::new()).unwrap();
+    replica.fractal.feature_barrier_peers.set(Vec::new()).unwrap();
     source.register_custom_kind(&RegistrationRequest {
         manifest: import_tree_manifest(), actor: SEAT.into(),
     }).unwrap();
@@ -378,12 +380,27 @@ fn decision_reader_without_import_exception_refuses_foreign_creation_actor() {
 
 #[test]
 fn decision_import_barrier_includes_unheard_configured_peers() {
-    let store = import_tree_store();
+    let store = Store::open_memory("example").unwrap();
+    store.register_custom_kind(&RegistrationRequest {
+        manifest: import_tree_manifest(), actor: SEAT.into(),
+    }).unwrap();
     store.fractal.feature_barrier_peers.set(vec!["unheard".into()]).unwrap();
     let error = import_tree_claim(&store, IMPORT_TREE, "opened", IMPORT_ACTOR,
         import_opening_fields()).unwrap_err();
     assert_eq!(error.code, "member-version-unproven");
     assert!(error.to_string().contains("unheard: exchanges with this member"));
+}
+
+#[test]
+fn decision_import_barrier_refuses_unset_peer_context() {
+    let store = Store::open_memory("example").unwrap();
+    store.register_custom_kind(&RegistrationRequest {
+        manifest: import_tree_manifest(), actor: SEAT.into(),
+    }).unwrap();
+    let error = import_tree_claim(&store, IMPORT_TREE, "opened", IMPORT_ACTOR,
+        import_opening_fields()).unwrap_err();
+    assert_eq!(error.code, "member-version-unproven");
+    assert!(error.to_string().contains("configured peer context is unset"));
 }
 
 fn audit_custom_dirty(store: &Store) {

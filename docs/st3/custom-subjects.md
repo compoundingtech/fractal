@@ -237,8 +237,13 @@ Every daemon advertises `decision-tree-import-opened=1` in `daemon.started`. Loc
 admission reuses the strict fleet feature barrier in the append transaction: current members,
 unfenced external writers, and configured peers must each advertise the feature in their own
 newest start. Non-empty blockers produce typed `member-version-unproven` with all blockers
-listed. Replication and reader recognition remain stateless and do not apply the local barrier.
+listed. The configured-peer context is set once at daemon startup; an unset context is also
+blocked, not interpreted as an empty fleet. Replication and reader recognition remain
+stateless and do not apply the local barrier.
 Upgrade every fleet member before importer writes; the importer must preflight that rollout.
+The barrier is reversible, but retained history is not: once import-opened claims exist, no
+member may run a release without their reader. An old joiner must be refused or upgraded
+before joining; a later missing advertisement stops new imports, not the need to read old ones.
 The previous immutable opened schema rejects `import` as an unknown field. An old binary
 given the new manifest may admit the generic object field; this is not a binary capability
 fence. Its pre-exception decision reader still refuses actor/seat mismatch, so such a tree

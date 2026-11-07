@@ -22550,7 +22550,7 @@ pub struct ClaimCommitContext<'a> {
     /// Only rename_identity supplies naming CAS, owner and fleet registry admission.
     pub identity_writer: bool,
     pub admission: Option<&'a ClaimAdmission<'a>>,
-    pub feature_barrier_peers: &'a [String],
+    pub feature_barrier_peers: Option<&'a [String]>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
     /// Write the claim as a build from before its kind became a local observation did: a
