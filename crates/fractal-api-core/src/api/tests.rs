@@ -90,14 +90,52 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[test]
-fn masked_child_cannot_inherit_harness_authority() {
-    let mut child = std::process::Command::new("sleep").arg("10")
-        .env("ST_AGENT", "").env_remove("FRACTAL_AGENT").spawn().unwrap();
-    let ancestry = harness_ancestor(child.id());
-    child.kill().unwrap();
-    child.wait().unwrap();
-    assert_eq!(ancestry, HarnessAncestry::Person);
+async fn assert_masked_identity_refused(method: &str, path: &str, person: bool, body: Value) {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (primary, legacy) in [
+        (Some(""), None),
+        (None, Some("")),
+        (Some(""), Some("agent/fixture/worker")),
+        (Some("agent/fixture/worker"), Some("")),
+        (Some("person/example"), None),
+        (Some("agent/"), None),
+        (Some("agent/fixture/worker"), Some("agent/fixture/other")),
+    ] {
+        let mut command = std::process::Command::new("sleep");
+        command.arg("10").env_remove("ST_AGENT").env_remove("FRACTAL_AGENT");
+        if let Some(value) = primary { command.env("ST_AGENT", value); }
+        if let Some(value) = legacy { command.env("FRACTAL_AGENT", value); }
+        let mut child = command.spawn().unwrap();
+        let ancestry = harness_ancestor(child.id());
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(ancestry, HarnessAncestry::Unavailable);
+        let mut request = Request::builder().method(method).uri(path);
+        if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
+        let mut request = request.body(Body::from(body.to_string())).unwrap();
+        request.extensions_mut().insert(ancestry);
+        let error = guard_bound_request(request, None, &state.store).await.unwrap_err();
+        assert_eq!(error.code, "foreign-agent-actor", "{path}: {primary:?} {legacy:?}");
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_backup_export() {
+    assert_masked_identity_refused("GET", "/v1/backup", false, json!({})).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_person_session() {
+    assert_masked_identity_refused("GET", "/v1/client/session", true, json!({})).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_foreign_actor() {
+    assert_masked_identity_refused("POST", "/v1/fleet/transports", false, json!({"actor": "agent/other"})).await;
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]

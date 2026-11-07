@@ -96,7 +96,8 @@ PID reuse window. A surviving socket and reused PID are not a permanently pinned
 Local harness attribution on macOS walks ancestry using `proc_pidinfo` and reads
 `KERN_PROCARGS2` environment entries with nearest-process masking. Each process birth
 is checked before and after inspection; unreadable, exited or changed processes fail
-closed. Successful inspection with no harness is a person, not an inspection failure.
+closed. Successful inspection without any identity variable is a person, not an inspection failure.
+On Linux and macOS, present but empty, conflicting or invalid identity values are unverifiable.
 Failed inspection denies backup/proof exports, internal routes, `LOCAL_PERSON_HEADER`
 sessions and actor/requester body impersonation; it does not deny every public request.
 The same macOS PID-reuse residual risk applies to this ancestry inspection.

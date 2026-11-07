@@ -25,8 +25,9 @@ evidence, not an installed-build or runtime test receipt.
   and macOS harness requests to their agent. Invite creation and revocation require
   `concrete_person`. macOS uses `LOCAL_PEERPID`, `proc_pidinfo` ancestry and
   `KERN_PROCARGS2` environment masking, validating process birth before and after inspection.
-  Successful inspection without a harness is a person; failed inspection is not. Failure
-  denies backup/proof exports, internal routes, `LOCAL_PERSON_HEADER` sessions and
+  Successful inspection without any identity variable is a person; failed inspection is not.
+  On Linux and macOS, present but empty, conflicting or invalid identity values are unverifiable.
+  Failure denies backup/proof exports, internal routes, `LOCAL_PERSON_HEADER` sessions and
   actor/requester body impersonation, not every public request. macOS has no pidfd:
   before/after birth-time checks narrow but cannot eliminate the PID reuse window.
   This cooperative attribution does not authenticate a scratch launcher owner.

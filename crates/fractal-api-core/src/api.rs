@@ -7192,28 +7192,45 @@ impl HarnessAncestry {
     fn agent(&self) -> Option<&str> {
         match self { Self::Bound(agent) => Some(agent), _ => None }
     }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn of_environment(lookup: &impl Fn(&str) -> Option<String>) -> Self {
+        let primary = lookup("ST_AGENT");
+        let legacy = lookup("FRACTAL_AGENT");
+        if primary.is_none() && legacy.is_none() {
+            return Self::Person;
+        }
+        if primary.as_deref().is_some_and(str::is_empty)
+            || legacy.as_deref().is_some_and(str::is_empty)
+        {
+            return Self::Unavailable;
+        }
+        fractal_drivers::contracts::env_with("ST_AGENT", lookup)
+            .filter(|value| value.starts_with("agent/") && fractal_schema::registry().validate_subject(value).is_ok())
+            .map_or(Self::Unavailable, Self::Bound)
+    }
 }
 
 #[cfg(target_os = "linux")]
 fn harness_ancestor(pid: u32) -> HarnessAncestry {
-    linux_harness_ancestor(pid).map_or(HarnessAncestry::Person, HarnessAncestry::Bound)
+    linux_harness_ancestor(pid).unwrap_or(HarnessAncestry::Unavailable)
 }
 
 #[cfg(target_os = "linux")]
-fn linux_harness_ancestor(mut pid: u32) -> Option<String> {
+fn linux_harness_ancestor(mut pid: u32) -> Option<HarnessAncestry> {
     use std::collections::BTreeSet;
     let mut seen = BTreeSet::new();
-    while pid > 1 && pid != std::process::id() && seen.insert(pid) {
+    while pid > 1 && pid != std::process::id() {
+        if !seen.insert(pid) { return None; }
         let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
         // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
         let lookup = |name: &str| environment.split(|byte| *byte == 0).find_map(|entry| {
             let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
             (key == name).then(|| value.to_owned())
         });
-        // A masked/conflicting child identity must not inherit an ancestor's authority.
-        if lookup("ST_AGENT").is_some() || lookup("FRACTAL_AGENT").is_some() {
-            return fractal_drivers::contracts::env_with("ST_AGENT", &lookup)
-                .filter(|value| value.starts_with("agent/"));
+        match HarnessAncestry::of_environment(&lookup) {
+            HarnessAncestry::Person => {}
+            ancestry => return Some(ancestry),
         }
         // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
         let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -7225,7 +7242,7 @@ fn linux_harness_ancestor(mut pid: u32) -> Option<String> {
             .parse()
             .ok()?;
     }
-    None
+    Some(HarnessAncestry::Person)
 }
 
 #[cfg(target_os = "macos")]
@@ -7246,12 +7263,9 @@ fn harness_ancestor(mut pid: u32) -> HarnessAncestry {
             let (key, value) = entry.split_once('=')?;
             (key == name).then(|| value.to_owned())
         });
-        // A masked/conflicting child identity cannot inherit ancestor authority.
-        if lookup("ST_AGENT").is_some() || lookup("FRACTAL_AGENT").is_some() {
-            binding = fractal_drivers::contracts::env_with("ST_AGENT", &lookup)
-                .filter(|value| value.starts_with("agent/"))
-                .map_or(HarnessAncestry::Person, HarnessAncestry::Bound);
-            break;
+        match HarnessAncestry::of_environment(&lookup) {
+            HarnessAncestry::Person => {}
+            ancestry => { binding = ancestry; break; }
         }
         pid = parent;
     }
