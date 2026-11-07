@@ -4175,13 +4175,30 @@ pub fn managed_session_id(owner: &str, identity: &str) -> String {
 
 pub type ManagedSessionOwner = (String, Option<String>, Option<String>);
 
+#[cfg(test)]
+thread_local! {
+    static MANAGED_OWNER_AFTER_PIN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn managed_owner_after_pin() {
+    MANAGED_OWNER_AFTER_PIN.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().take() { hook(); }
+    });
+}
+
 pub fn managed_session_owner_at(
     store: &Store,
     snapshot_index: u64,
     session_id: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
-    crate::performance::task("conversation/owner", || {
-        let owners = store.conversation_owners_at(snapshot_index)?;
+    // Pin identity/repair state and bypass the shared logical-cut owner cache.
+    crate::performance::task("conversation/owner", || store.read_snapshot(|_| {
+        #[cfg(test)]
+        managed_owner_after_pin();
+        let connection = store.readers.get();
+        let owners = crate::store::conversation_reads::owners_from_connection(&connection, snapshot_index)?;
         for owner in owners.values() {
             if !store.generic_status_subject_visible_at(&owner.subject, snapshot_index)? {
                 continue;
@@ -4194,7 +4211,7 @@ pub fn managed_session_owner_at(
             }
         }
         Ok(None)
-    })
+    }))
 }
 
 pub fn managed_session_owner_for_subject_at(
@@ -4203,7 +4220,9 @@ pub fn managed_session_owner_for_subject_at(
     session_id: &str,
     owner: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
-    crate::performance::task("conversation/owner", || {
+    crate::performance::task("conversation/owner", || store.read_snapshot(|_| {
+        #[cfg(test)]
+        managed_owner_after_pin();
         if !store.generic_status_subject_visible_at(owner, snapshot_index)? {
             return Ok(None);
         }
@@ -4218,7 +4237,7 @@ pub fn managed_session_owner_for_subject_at(
             return Ok(None);
         }
         Ok(Some((owner.subject, owner.incarnation, owner.origin)))
-    })
+    }))
 }
 
 
