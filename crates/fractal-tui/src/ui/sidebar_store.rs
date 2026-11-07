@@ -6,7 +6,7 @@ use std::{collections::VecDeque, fs, io::{self, Write}, os::unix::fs::OpenOption
 
 /// Dedicated live-loop inputs, not resource-window updates. Tokens reject obsolete reads.
 pub enum LiveEvent {
-    Membership(fractal_sidebar::paging::Event),
+    Membership(Box<fractal_sidebar::paging::Event>),
     Edit { scope: Scope, event: Box<Event> },
 }
 #[derive(Debug)]
