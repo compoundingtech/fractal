@@ -248,4 +248,3 @@ fn an_offline_export_refuses_a_copy_with_queued_mail_and_names_it() {
     drop(graph);
     crate::backup::create_from_database(&database, root.path(), &archive).unwrap();
 }
-
