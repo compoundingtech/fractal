@@ -868,6 +868,43 @@ module.save(Path(sys.argv[2]), {"trusted_head": "untrusted", "padding": "x" * 10
         self.assertEqual(self.saved_state()["installed_version"], "17664")
         self.assertEqual(self.device_commands("install"), [])
 
+    def reconciled_failed_launch(self, *, source_changed):
+        self.configure(launch_exit=1)
+        self.reconcile()
+        self.assertTrue(self.saved_state()["pending"]["installed"])
+        self.assertNotIn("install_attempt", self.saved_state())
+        self.configure(apps=[{"bundleIdentifier": BUNDLE_ID, "bundleVersion": "99"}])
+        self.reconcile("--reconcile-installed")
+        data = self.saved_state()
+        self.assertEqual(data["installed_version"], "99")
+        self.assertFalse(data["pending"]["installed"])
+        self.assertNotIn("installed", data)
+        self.assertNotIn("installed_key", data)
+        if source_changed:
+            self.change_js("after-external-install")
+        installs = len(self.device_commands("install"))
+        launches = len(self.device_commands("launch"))
+        self.configure(launch_exit=0, build_exit=65)
+        self.reconcile()
+        data = self.saved_state()
+        self.assertEqual(data["installed_version"], "99")
+        self.assertNotIn("installed", data)
+        self.assertNotIn("installed_key", data)
+        self.assertEqual(len(self.device_commands("install")), installs)
+        self.assertEqual(len(self.device_commands("launch")), launches)
+        self.configure(build_exit=0)
+        self.reconcile()
+        self.assertGreater(int(self.saved_state()["installed_version"]), 99)
+        self.assertEqual(len(self.device_commands("install")), installs + 1)
+        self.assertEqual(len(self.device_commands("launch")), launches + 1)
+        self.assert_installed(self.git("rev-parse", "HEAD"))
+
+    def test_reconcile_installed_invalidates_failed_launch_claim(self):
+        self.reconciled_failed_launch(source_changed=False)
+
+    def test_reconcile_installed_invalidates_superseded_failed_launch_claim(self):
+        self.reconciled_failed_launch(source_changed=True)
+
     def test_interrupted_install_reads_back_success_without_reinstalling(self):
         self.configure(launch_exit=1)
         self.reconcile()

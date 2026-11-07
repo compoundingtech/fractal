@@ -333,6 +333,9 @@ Query failure, malformed JSON, duplicate daily entries, invalid versions, or an
 absent daily app defer delivery without assuming success or mutating the phone.
 A readback contradicting the cached installed version invalidates the
 cached installed-content identity, while retaining the monotonic version floor.
+A contradictory readback also clears a pending artifact's installed claim,
+including an install whose launch failed. Finalizing any artifact never lowers
+the version floor, and a superseded installed claim cannot restore stale identity.
 Ordinary ticks query the device only with caller deploy approval, never under
 `--build-only`.
 

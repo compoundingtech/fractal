@@ -403,6 +403,12 @@ class Delivery:
             self.data.pop("installed", None)
             self.data.pop("installed_key", None)
         self.data["installed_version"] = str(max(int(known_version or 0), int(version)))
+        current = self.data.get("pending")
+        if (current and current["installed"]
+                and int(current["build_version"]) != int(version)):
+            # A successful install followed by a failed launch is only a claim
+            # about that version, not about a later external installation.
+            current["installed"] = False
         self.persist()
         return version
 
@@ -586,7 +592,8 @@ class Delivery:
     def mark_installed(self, artifact):
         self.data["installed"] = artifact["commit"]
         self.data["installed_key"] = artifact["key"]
-        self.data["installed_version"] = artifact["build_version"]
+        self.data["installed_version"] = str(max(int(self.data.get("installed_version") or 0),
+                                                int(artifact["build_version"])))
 
     def downgrades(self, artifact):
         installed = self.data.get("installed_version")
