@@ -87,7 +87,36 @@ BEGIN
 END;
 ",
     )?;
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h57332bf5c3ee owner=fractal_store::store::stream_mirror TODO=prepare-body-and-predecessor-values */ "
+-- A mirrored send, and its close, queue the item's client selector header as a graph claim on
+-- the subject does (client_messages.rs); the fold builds it from the mirror row. Each says the
+-- stream headers are not whole until this build's fold has run (STREAM_WHOLE_MARKER there).
+CREATE TRIGGER IF NOT EXISTS local_stream_sent_client_selector AFTER INSERT ON local_stream_sent
+WHEN NOT EXISTS(SELECT 1 FROM claims WHERE subject=NEW.subject AND kind='message.sent')
+BEGIN
+    INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
+    VALUES(NEW.subject,-1,1,1)
+    ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|1,created_index=created_index+1;
+    DELETE FROM meta WHERE key='client_message_selectors_v1_stream_headers_whole';
+END;
+CREATE TRIGGER IF NOT EXISTS local_stream_lifecycle_client_selector AFTER INSERT ON local_stream_lifecycle
+WHEN NEW.kind='message.closed'
+BEGIN
+    INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
+    VALUES(NEW.subject,-1,1,1)
+    ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|1,created_index=created_index+1;
+    DELETE FROM meta WHERE key='client_message_selectors_v1_stream_headers_whole';
+END;
+",
+    )?;
     Ok(())
+}
+
+/// The shard store index the mirror has passed: every stream item at or below it is in
+/// `local_stream_sent`, read in the caller's snapshot of the graph.
+pub fn sent_through(connection: &Connection) -> Result<u64> {
+    Ok(u64::try_from(cursor(connection, SENT_THROUGH)?)?)
 }
 
 /// Serializes [`mirror`], so two catch-ups never page over the same rows at once.

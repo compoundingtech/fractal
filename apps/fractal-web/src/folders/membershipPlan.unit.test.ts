@@ -3,7 +3,9 @@ import type { Arrangement, OrderedMembership } from '@fractal/client'
 import { Schema } from 'effect'
 import vectors from '../../../../fixtures/clients/sidebar/behavior-v2.json'
 import { loadSidebarBehavior } from '../../../../scripts/sidebar-behavior-fixtures.mjs'
-import { planMembershipMove, spreadMembershipKeys, type MembershipIntent } from './sidebarAdapter.ts'
+import { planMembershipMove, spreadMembershipKeys, membershipWriteRequest, type MembershipIntent } from './sidebarAdapter.ts'
+import { MembershipEditor } from './edit.ts'
+import { SidebarJournal } from './sidebarJournal.ts'
 
 loadSidebarBehavior(vectors)
 // Keep the production SDK-schema loading boundary lazy in this runner too.
@@ -18,7 +20,17 @@ for (const vector of vectors.cases) it(`v2 planner ${vector.name}`, () => {
   for (const [eventIndex, event] of vector.events.entries()) {
     for (const [index, move] of event.moves.entries()) {
       const intent = { node: node(move.node), parent: 'id' in move.parent ? move.parent.id! : null, before: move.before === null ? null : node(move.before) }
-      expect(planMembershipMove(base, vector.initial.memberships.map(row => ({ ...row, id: `${row.container}/${row.member}` })), intent)).toEqual(vector.checkpoints[eventIndex]!.moves[index])
+      const plan = planMembershipMove(base, vector.initial.memberships.map(row => ({ ...row, id: `${row.container}/${row.member}` })), intent)
+      expect(plan).toEqual(vector.checkpoints[eventIndex]!.moves[index])
+      if (plan._tag !== 'PlannedV2') continue
+      const scope = { owner: base.owner, container: base.id, endpoint: 'endpoint/test', host: 'host/test', projection: '1' }
+      const editor = new MembershipEditor(new SidebarJournal(scope, { getItem: () => null, setItem: () => {}, removeItem: () => {} }), intent)
+      const identity = { actor: base.owner, action_id: 'action/test', idempotency_key: 'key/test' }
+      editor.reduce({ _tag: 'Plan', base: { scope, ready: true, revision: base.revision, snapshot: { id: 'snapshot/test', host_id: scope.host, store_index: 1, projection_version: '1', created_at: 'created', expires_at: 'expires' } }, ...plan.edit, folder: { ...identity, action_id: 'action/folder', idempotency_key: 'key/folder' }, membership: identity })
+      editor.execute('PersistPending')
+      const sent = editor.execute('Send')
+      if (sent._tag !== 'Applied' || !sent.request) throw new Error('request not journaled')
+      expect(membershipWriteRequest(sent.request).parameters.operations).toEqual(plan.edit.folders.length ? plan.edit.folders : plan.edit.memberships)
     }
   }
 })

@@ -2,10 +2,10 @@
 //! Hosts supply authoritative resolved maps; this crate performs no I/O.
 
 pub mod cache;
-pub mod edits;
-pub mod keys;
 #[cfg(feature = "client")]
 pub mod client;
+pub mod edits;
+pub mod keys;
 pub mod model;
 mod overlay;
 pub mod paging;
