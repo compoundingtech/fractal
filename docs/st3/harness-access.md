@@ -196,6 +196,8 @@ charged attempt named (the same kind, route, plugin error and project server, wh
 restarted without charging it, on a long backoff of 5 minutes that doubles to at most 30. After 3 such
 restarts in a row for one cause, an operational fault names the seat and the cause, so it is seen; it
 clears when the channel attaches.
+An explicit restart of the seat starts a new budget. The incarnation it replaces is not charged to
+that budget while the restart is in flight; if the restart fails and leaves it running, it is.
 
 A Claude seat in auto mode also gets Read rules in its settings, merged with any authored settings. Auto
 mode's classifier treats a read in another repository as scope escalation and asks a person, which stalls

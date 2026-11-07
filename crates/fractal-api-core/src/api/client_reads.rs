@@ -375,6 +375,7 @@ async fn client_work_history(
                 native_only: query.native_only,
                 items_digest: "sql-page".into(),
                 before_index: None,
+                before_stream_index: None,
                 after_key: None,
                 expires_at_unix_ms,
             })
@@ -1078,15 +1079,15 @@ pub(super) async fn client_messages_sql_page_with_envelope(
     } else {
         None
     };
-    let (limit, expires_at, through, after, offset, now, expected_epoch) = if let Some(cut) = &cut {
+    let (limit, expires_at, through, stream_through, after, offset, now, expected_epoch) = if let Some(cut) = &cut {
         (
-            cut.cursor.limit, cut.cursor.expires_at_unix_ms, cut.cursor.before_index,
+            cut.cursor.limit, cut.cursor.expires_at_unix_ms, cut.cursor.before_index, cut.cursor.before_stream_index,
             cut.cursor.after_key.clone(), cut.cursor.offset, cut.request_time, Some(cut.cut_epoch),
         )
     } else {
         (
             query.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS).clamp(1, CLIENT_MAX_PAGE_ITEMS),
-            request_time.saturating_add(CLIENT_PAGE_TTL_MS), None, None, 0, request_time, None,
+            request_time.saturating_add(CLIENT_PAGE_TTL_MS), None, None, None, 0, request_time, None,
         )
     };
     let reader = state.clone();
@@ -1103,8 +1104,8 @@ pub(super) async fn client_messages_sql_page_with_envelope(
             }
             let through = through.unwrap_or(reader.store.client_messages_page_cut(index)?);
             let snapshot = if continuing { snapshot } else { client_snapshot_at(&reader, through) };
-            let mut rows = reader.store.client_messages_page(
-                person.as_deref(), actor.as_deref(), history, through, after.as_ref(), limit,
+            let (mut rows, stream_through) = reader.store.client_messages_page_within(
+                person.as_deref(), actor.as_deref(), history, (through, stream_through), after.as_ref(), limit,
             )?;
             let selected_more = rows.len() > limit;
             rows.truncate(limit);
@@ -1120,7 +1121,7 @@ pub(super) async fn client_messages_sql_page_with_envelope(
                 let resource = client_message_resource(&reader.store, message, &metadata, current, now)?;
                 Ok((key, resource))
             }).collect::<anyhow::Result<Vec<_>>>()?;
-            Ok((cut_epoch, Some((snapshot, through, selected_more, resources, views))))
+            Ok((cut_epoch, Some((snapshot, through, stream_through, selected_more, resources, views))))
         })
     }).await?;
     // Retire every affected receipt for this store, not just the cursor that
@@ -1131,7 +1132,7 @@ pub(super) async fn client_messages_sql_page_with_envelope(
             !cut.store.ptr_eq(&store) || cut.cut_epoch >= cut_epoch
         });
     }
-    let Some((snapshot, through, selected_more, mut resources, views)) = read else {
+    let Some((snapshot, through, stream_through, selected_more, mut resources, views)) = read else {
         return Err(client_page_expired("the message page cut was invalidated; restart pagination"));
     };
     // Mail to a seat on another host that keeps its receipts reads that host's answer. A page of
@@ -1194,7 +1195,7 @@ pub(super) async fn client_messages_sql_page_with_envelope(
                 owner_run: query.owner_run.clone(), status: query.status.clone(),
                 owner: query.owner.clone(), state: query.state.clone(), native_only: query.native_only,
                 items_digest: receipt.clone(), before_index: Some(through),
-                after_key, expires_at_unix_ms: expires_at,
+                before_stream_index: Some(stream_through), after_key, expires_at_unix_ms: expires_at,
             })
         } else { None };
         page.page.has_more = has_more;
@@ -1558,6 +1559,7 @@ pub async fn client_history(
                 native_only: query.native_only,
                 items_digest: String::new(),
                 before_index: Some(next),
+                before_stream_index: None,
                 after_key: None,
                 expires_at_unix_ms,
             })
