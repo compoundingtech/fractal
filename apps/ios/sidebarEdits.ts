@@ -19,7 +19,7 @@ export const validateSidebarMove = (tree: Tree, intent: Intent): MoveRefusal | u
   const destination = parent._tag === 'Folder' ? tree.nodes[nodeKey(parent)] : undefined;
   if (parent._tag === 'Folder' && !destination) return { _tag: 'ParentMissing', parent, cause: tree.deletedFolders.includes(parent.id) ? 'FolderDeleted' : 'Unknown' };
   if (node._tag === 'Folder') {
-    const path = [{ node, source: current.source }];
+    const path: { node: NodeRef; source: 'person' | 'fallback' }[] = [{ node, source: current.source }];
     let cursor = destination;
     while (cursor) {
       path.push({ node: cursor.node, source: cursor.source });
