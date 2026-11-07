@@ -87,6 +87,16 @@ export const systemRecordItem = (block: TimelineBlock, ctx: RecordContext): Conv
   }
 }
 
+/**
+ * Whether an entry's shared body is this record rather than prose beside it. Fractal writes a record's
+ * bounded copy as `[omp <kind>]`, and text blocks carry no prose of their own to separate from it.
+ */
+export const bodyRepeatsRecord = (block: TimelineBlock, text: string): boolean => {
+  const kind = block.view?.type === 'omp_event' ? block.view.kind : undefined
+  const prompt = recordValue(recordValue(block.payload)?.raw)?.systemPrompt
+  return (kind !== undefined && text.startsWith(`[omp ${kind}]`)) || (typeof prompt === 'string' && prompt !== '' && text.includes(prompt))
+}
+
 /** Hidden from the reading lane by default; `Show all system events` brings the row back with its details. */
 export const isHiddenSystemRecord = (item: ConversationItem): boolean =>
   item._tag === 'Event' && item.notice?._tag === 'SystemRecord'
