@@ -53,8 +53,8 @@ Source abbreviations are repository-relative:
 These criteria derive from gist §§1–4, its deterministic-sync prerequisites,
 October 1's actor/on-behalf distinction, and FPL's legacy-history ruling.
 
-**Pre-M2 rollout gate:** if the #5102 author demonstrates that R05–R06 cannot be met
-without a protocol change, the concrete case MUST go to FPL **before M2 rollout**.
+**Pre-M2 gate:** if the #5102 author demonstrates that R05–R06 cannot be met
+without a protocol change, the concrete case MUST go to FPL **before M2 starts**.
 The gate's verification evidence is the author's concrete case and FPL's recorded
 resolution; the availability ruling alone does not authorize a protocol change.
 
