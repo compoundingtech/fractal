@@ -70,7 +70,7 @@ export function AgentSidebar({ groups, activeId, onSelect, onCollapse, collapsed
       </nav>
     </>}
     <div {...stylex.props(styles.footer)}>
-      <button type="button" aria-label="Settings" title="Settings" {...stylex.props(styles.ghostLg)}>⚙</button>
+      <button type="button" aria-label="Settings" title="Settings" {...stylex.props(styles.ghostLg)}><Icon name="gear" /></button>
       <button type="button" aria-label="Reviews" title="Reviews" {...stylex.props(styles.ghostLg)}>⇄</button>
       <button type="button" aria-label="Usage" title="Usage" {...stylex.props(styles.ghostLg)}>◷</button>
     </div>

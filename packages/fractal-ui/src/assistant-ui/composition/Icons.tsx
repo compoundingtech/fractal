@@ -15,7 +15,7 @@ const PATHS: Record<IconName, React.ReactNode> = {
   info: <><circle cx="8" cy="8" r="6" /><path d="M8 7v4" /><circle cx="8" cy="4.5" r=".5" fill="currentColor" /></>,
   plus: <path d="M8 3v10M3 8h10" />,
   pencil: <path d="M11.5 2.5 13.5 4.5 5 13H3v-2z" />,
-  gear: <><circle cx="8" cy="8" r="2.25" /><path d="M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.6 3.6l1.06 1.06M11.34 11.34l1.06 1.06M12.4 3.6l-1.06 1.06M4.66 11.34 3.6 12.4" /></>,
+  gear: <><circle cx="8" cy="8" r="2" /><path d="M6.39 3.21 6.35 1.3h3.3l-.04 1.91 1.73 1 1.64-.99 1.65 2.85L12.95 7v2l1.68.93-1.65 2.85-1.64-.99-1.73 1 .04 1.91h-3.3l.04-1.91-1.73-1-1.64.99-1.65-2.85L3.05 9V7L1.37 6.07l1.65-2.85 1.64.99z" /></>,
   swap: <path d="M4 5h8l-2.5-2.5M12 11H4l2.5 2.5" />,
   clock: <><circle cx="8" cy="8" r="5.5" /><path d="M8 5v3l2 1.5" /></>,
   'chevron-right': <path d="M6 3.5 10.5 8 6 12.5" />,
