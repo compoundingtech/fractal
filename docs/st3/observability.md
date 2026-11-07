@@ -587,6 +587,7 @@ The metric's `cause` attribute uses the same registry:
 | `timer_gate_poll` |
 | `timer_llm_gate` |
 | `file_watch` |
+| `launch_identity` |
 | `reconciler` |
 | `recorder_receipts` |
 | `startup` |
@@ -612,8 +613,8 @@ notifications to request another outer wake.
 | Instrument | Type | Unit | Complete attribute set |
 | --- | --- | --- | --- |
 | `st.reconcile.pass.duration` | Histogram | `s` | `task=pass` or `task=deadline` |
-| `st.reconcile.wakes` | Counter | `{wake}` | `cause` from the 17-value wake registry |
-| `st.reconcile.passes_per_wake` | Histogram | `{pass}` | `cause` from the 17-value wake registry |
+| `st.reconcile.wakes` | Counter | `{wake}` | `cause` from the 18-value wake registry |
+| `st.reconcile.passes_per_wake` | Histogram | `{pass}` | `cause` from the 18-value wake registry |
 | `st.fifo.depth` | Observable u64 gauge | `{item}` | `queue=writer`, `conversation`, or `terminal_emulation` |
 | `st.fifo.oldest_age` | Observable f64 gauge | `s` | `queue=writer`, `conversation`, or `terminal_emulation` |
 
