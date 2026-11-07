@@ -143,6 +143,7 @@ export type Agent = ResourceHeader & {
   silent_since?: (Timestamp | null);
   since?: (Timestamp | null);
   state: AgentState;
+  stopping?: (AgentStopping | null);
   subagents?: Array<AgentSubagent>;
   suspension?: (AgentSuspension | null);
   todo?: (AgentTodo | null);
@@ -324,6 +325,45 @@ export type AgentQueueRun = {
 
 export type AgentReachability = ("local" | "remote" | "unreachable" | "unknown" | "reachable" | "indeterminate" | string);
 
+export type AgentRelatedRun = {
+  completed_at: number | null;
+  current_step: (RelatedRunWait | null);
+  deadline_at: number | null;
+  eta: (null | {
+  as_of: number;
+  basis: {
+  method: "per-step" | "critical-path";
+  samples: number;
+};
+  remaining_high_ms: number;
+  remaining_low_ms: number;
+});
+  folded: boolean;
+  id: string;
+  late: boolean;
+  mission_id: string;
+  progress: {
+  done: number;
+  total: number;
+};
+  status: string;
+  status_chip: "running" | "waiting" | "waiting-on-you" | "stalled" | "completed" | "failed" | "cancelled";
+  urgency_rank: number;
+  waiting_on_you: boolean;
+  waits_on: Array<RelatedRunWait>;
+};
+
+export type AgentRelatedRuns = {
+  agent_id: string;
+  as_of: number;
+  kind: "agent-related-runs";
+  missions_cut: number;
+  rows: Array<AgentRelatedRun>;
+  total_rows: number;
+  truncated: boolean;
+  work_cut: number;
+};
+
 export type AgentRelationship = {
   agent_id: Id;
   reason?: string | null;
@@ -366,6 +406,10 @@ export type AgentState = (
 export type AgentStopParameters = {
   agent: Id;
   reason?: string;
+};
+
+export type AgentStopping = {
+  held: string | null;
 };
 
 export type AgentSubagent = {
@@ -1760,7 +1804,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
@@ -3114,6 +3158,21 @@ export type PushRegistrationStatus = ({
   environment: PushEnvironment;
   registered: true;
 });
+
+export type RelatedRunWait = {
+  detail?: string;
+  kind: string;
+  lease_expires_at_unix_ms?: number;
+  path: string;
+  seat_state?: string;
+  since_unix_ms?: number;
+  state: string;
+  step: string;
+  title?: string;
+  until_unix_ms?: number;
+  wake_attempts?: number;
+  who?: string;
+};
 
 export type ReplicatedNotice = {
   complete: boolean;

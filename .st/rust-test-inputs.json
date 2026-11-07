@@ -57,7 +57,6 @@
     "docs/st3/client-v0/schemas/operations.json",
     "docs/st3/client-v0/schemas/quota-source-v1.schema.json",
     "examples/fractal/custom-review.json",
-    "fixtures/clients/stream-timeline-pairs-v1.json",
     "scripts/ci-test-paths.rs"
    ]
   },
@@ -113,10 +112,6 @@
     "clients/typescript/fractal-declarations/fixtures/capacity-principal.kdl",
     "clients/typescript/fractal-declarations/fixtures/daily-review.kdl",
     "clients/typescript/fractal-declarations/index.ts",
-    "crates/fractal-client/src/contract.rs",
-    "crates/fractal-client/src/generated.rs",
-    "crates/fractal-client/src/lib.rs",
-    "crates/fractal-client/src/notice_descriptors.generated.rs",
     "crates/fractal/tests/fixtures/validate-revisions.kdl",
     "docs/st3/client-v0/schemas/client-v0.schema.json",
     "docs/st3/client-v0/schemas/operations.json",
@@ -168,11 +163,9 @@
   },
   "fractal-drivers": {
    "extra": [
-    "AGENTS.md",
     "claude-channel/.claude-plugin/marketplace.json",
     "claude-channel/plugins/st2-channel/.claude-plugin/plugin.json",
     "claude-channel/plugins/st2-channel/.mcp.json",
-    "crates/pty-launch-environment.rs",
     "plugins/claude/.claude-plugin/marketplace.json",
     "plugins/claude/st-channel/.claude-plugin/plugin.json",
     "plugins/claude/st-channel/.mcp.json",
@@ -233,7 +226,6 @@
    "extra": [
     ".config",
     ".github/workflows/fleet.yml",
-    ".fractal/evidence-policy.json",
     ".st/evidence-policy.json",
     "crates/fractal-daemon/hooks/claude-observe.sh",
     "crates/fractal-daemon/hooks/claude-statusline.sh",
@@ -272,7 +264,6 @@
   },
   "fractal-reconcile": {
    "extra": [
-    ".st/lane-bursts.json",
     "crates/fractal-daemon/tests/fixtures/harness-access-previous-build.json",
     "scripts/ci-test-paths.rs",
     "slo"
@@ -328,6 +319,14 @@
     "scripts/ci-test-paths.rs"
    ]
   },
+  "fractal-sidebar": {
+   "extra": [
+    "fixtures/clients/sidebar/behavior-v1.json",
+    "fixtures/clients/sidebar/behavior-v2.json",
+    "fixtures/clients/sidebar/behavior.schema.json",
+    "fixtures/clients/sidebar/tui-v1.snapshot"
+   ]
+  },
   "fractal-socket-discovery": {
    "extra": []
   },
@@ -373,7 +372,6 @@
     "docs/st3/client-v0/fixtures/capabilities.json",
     "docs/st3/client-v0/fixtures/terminal-screen.json",
     "fixtures/clients",
-    "fixtures/scenarios/fleet-mid-refactor",
     "fixtures/scenarios/fleet-mid-refactor/attention.json",
     "fixtures/scenarios/fleet-mid-refactor/conversation.json",
     "fixtures/scenarios/fleet-mid-refactor/details.json",
@@ -388,8 +386,6 @@
    "extra": [
     "clients/typescript/fractal-views/tests/fixtures/prompt-forms.json",
     "fixtures/clients/documents-v1.json",
-    "fixtures/clients/sidebar/behavior-v1.json",
-    "fixtures/clients/sidebar/behavior.schema.json",
     "fixtures/clients/words.json",
     "fixtures/scenarios",
     "scripts/ci-test-paths.rs"

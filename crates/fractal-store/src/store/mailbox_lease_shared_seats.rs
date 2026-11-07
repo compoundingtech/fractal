@@ -16,4 +16,7 @@ thread_local! {
     /// Runs once, after a promotion's reader pre-check found something that may promote and
     /// before the writer is borrowed, so a test can change the lease in that gap.
     pub static AFTER_PROMOTION_PRECHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    /// Runs once, after a bind's read check found that the admission must write and before the
+    /// writer is borrowed, so a test can change the mailbox in that gap.
+    pub static AFTER_BIND_READ_CHECK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }

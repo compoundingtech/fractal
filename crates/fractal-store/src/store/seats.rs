@@ -42,51 +42,7 @@ impl Store {
     /// selected declaration is not a stop. A stop that replaced another stop is followed back
     /// to the declaration they ended; a merge of several is ambiguous and also gives `None`.
     pub fn declaration_ended_by_stop(&self, subject: &str) -> Result<Option<EndedDeclaration>> {
-        let connection = self.readers.get();
-        let Some((stop, writer)) = connection
-            .query_row(
-                "SELECT desired.subject, desired.kind, desired.body, desired.member,
-                        desired.owner_run, desired.owner_generation, desired.owner_step,
-                        desired.claim_id, claims.actor
-                 FROM desired LEFT JOIN claims ON claims.id = desired.claim_id
-                 WHERE desired.subject = ?1 AND desired.kind = 'stop'",
-                [subject],
-                |row| {
-                    Ok((
-                        (desired_from_row(row)?, row.get::<_, String>(7)?),
-                        row.get::<_, Option<String>>(8)?,
-                    ))
-                },
-            )
-            .optional()?
-        else {
-            return Ok(None);
-        };
-        let (stop, token) = stop;
-        let mut claim = claim_by_id_tx(&connection, &token)?;
-        // A seat is stopped and started a few times at most; the bound only guards a cycle.
-        for _ in 0..64 {
-            let Some(current) = claim else {
-                return Ok(None);
-            };
-            let desired: DesiredSubject = serde_json::from_value(current.body)?;
-            if desired.kind == "agent" {
-                return Ok(Some(EndedDeclaration {
-                    stop,
-                    token,
-                    writer,
-                    declaration: desired,
-                }));
-            }
-            let [predecessor] = current.predecessors.as_slice() else {
-                return Ok(None);
-            };
-            if desired.kind != "stop" {
-                return Ok(None);
-            }
-            claim = claim_by_id_tx(&connection, predecessor)?;
-        }
-        Ok(None)
+        declaration_ended_by_stop_tx(&self.readers.get(), subject)
     }
 
     /// Suspension ancestry selected at a client snapshot; stopped declarations have none.
@@ -356,3 +312,50 @@ pub struct EndedDeclaration {
     pub declaration: DesiredSubject,
 }
 
+/// `Store::declaration_ended_by_stop` on `connection`, so a writer transaction reads its own state.
+pub fn declaration_ended_by_stop_tx(connection: &Connection, subject: &str) -> Result<Option<EndedDeclaration>> {
+    let Some((stop, writer)) = connection
+        .query_row(
+            "SELECT desired.subject, desired.kind, desired.body, desired.member,
+                    desired.owner_run, desired.owner_generation, desired.owner_step,
+                    desired.claim_id, claims.actor
+             FROM desired LEFT JOIN claims ON claims.id = desired.claim_id
+             WHERE desired.subject = ?1 AND desired.kind = 'stop'",
+            [subject],
+            |row| {
+                Ok((
+                    (desired_from_row(row)?, row.get::<_, String>(7)?),
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            },
+        )
+        .optional()?
+    else {
+        return Ok(None);
+    };
+    let (stop, token) = stop;
+    let mut claim = claim_by_id_tx(connection, &token)?;
+    // A seat is stopped and started a few times at most; the bound only guards a cycle.
+    for _ in 0..64 {
+        let Some(current) = claim else {
+            return Ok(None);
+        };
+        let desired: DesiredSubject = serde_json::from_value(current.body)?;
+        if desired.kind == "agent" {
+            return Ok(Some(EndedDeclaration {
+                stop,
+                token,
+                writer,
+                declaration: desired,
+            }));
+        }
+        let [predecessor] = current.predecessors.as_slice() else {
+            return Ok(None);
+        };
+        if desired.kind != "stop" {
+            return Ok(None);
+        }
+        claim = claim_by_id_tx(connection, predecessor)?;
+    }
+    Ok(None)
+}

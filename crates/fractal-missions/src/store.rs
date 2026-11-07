@@ -144,6 +144,7 @@ pub mod operations;
 pub mod person_work;
 pub mod reconcile_work_context;
 pub mod resource_preparation;
+pub mod stop_intake;
 pub mod usage_period;
 pub mod work_list;
 pub mod work_summaries_ivm;
