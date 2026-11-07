@@ -162,10 +162,11 @@ mod stdio_tests {
             }
             // A valid following frame must not be processed after overflow.
             frame.extend_from_slice(&ping_frame(64));
-            let mut transport = rmcp::transport::async_rw::AsyncRwTransport::<RoleServer, _, _>::new(
-                FrameLimitedRead::new(frame.as_slice()),
-                tokio::io::sink(),
-            );
+            let mut transport =
+                rmcp::transport::async_rw::AsyncRwTransport::<RoleServer, _, _>::new(
+                    FrameLimitedRead::new(frame.as_slice()),
+                    tokio::io::sink(),
+                );
             assert!(transport.receive().await.is_none());
             assert!(transport.receive().await.is_none());
         }
