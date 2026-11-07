@@ -199,7 +199,8 @@ verify the installed build independently of pairing or proof-only UI.
 The embedded `EXPO_PUBLIC_FRACTAL_BUILD` revision (legacy `EXPO_PUBLIC_ST3_BUILD`)
 also appears in connected-client diagnostics.
 
-Prerequisites are Python 3, Git, Node 24, pnpm 12.17.0, CocoaPods, Xcode, and `gate-slot`
+Prerequisites are Python 3, Git, Node 24, pnpm 12.17.0, CocoaPods, Xcode, Rust
+with the `aarch64-apple-ios` and `aarch64-apple-ios-sim` targets, and `gate-slot`
 in the scheduler's PATH. The build takes a heavy admission slot, runs under
 `taskpolicy -c utility` and `nice -n 19`, and caps Xcode parallelism at four jobs.
 Utility QoS yields to interactive work without restricting a native build to
@@ -220,11 +221,21 @@ including partial compilation from unsuccessful attempts. The frozen workspace
 install reruns only when a package manifest, root lock/workspace configuration,
 or Node/pnpm path changes, or `node_modules` is missing. Native generation and CocoaPods rerun only when
 the package locks/manifests, evaluated app configuration, config plugins,
-native modules, assets, or immutable toolchain paths change, or their generated
-workspace/lock is missing. JS-only changes reuse the native cache.
+native modules, compiled Fabric framework, assets, or immutable toolchain paths
+change, or their generated workspace/lock is missing. JS-only changes reuse the
+native cache when the framework content is unchanged.
+The worker runs `sh modules/fractal-fabric/build.sh` from `apps/ios` before
+CocoaPods, reusing the module's documented Rust XCFramework builder inside the
+same gated worker. Its sorted relative file names and file contents determine
+the framework SHA-256; timestamps and absolute paths do not. Missing or empty
+framework output fails closed before linking. The hash participates in the
+build and native-generation identities and is recorded as
+`fabric_framework_hash` in `success.json`. A changed framework invalidates reuse.
 The worker uses `pnpm exec expo config` and clean `pnpm exec expo prebuild`,
-then `pnpm run export:ios`, all with `APP_VARIANT=daily` and the daily fabric
-settings pinned before invoking Xcode.
+then `pnpm run export:ios`, all with `APP_VARIANT=daily` and the daily Fabric
+settings pinned before invoking Xcode. Before publishing the signed snapshot,
+it requires defined Rust bridge symbols in the app executable: the real module
+and disabled stub share the same Swift class name, so that name alone is not proof.
 Metro inlines `EXPO_PUBLIC_*` values into each transformed module, so the build runs
 with a delivery-scoped `TMPDIR` under `build-cache/tmp` and resets that
 transform cache whenever the inlined values change; a successful build also
@@ -248,11 +259,13 @@ from the last successful fetch, updated on every fetch, including reverts and
 app-irrelevant commits. Its content key hashes the Git trees of `apps/ios` and
 its local-package closure together with the inputs outside the revision: the
 Xcode directory, Node/pnpm/CocoaPods paths, inherited `EXPO_PUBLIC_*` values,
-and the pinned native environment. Builds always run with the daily Release
-values `APP_VARIANT=daily`, `FRACTAL_FABRIC=0` and `FRACTAL_FABRIC_PROOF=0` (read by `FractalFabric.podspec`),
-and `FRACTAL_FABRIC_OFFLINE_DEBUG=0` (read by `metro.config.js`), with all three legacy `ST3_` counterparts also pinned to `0`, so an inherited
-value never reaches prebuild, CocoaPods, Metro, or Xcode; the pins are also part
-of the native-generation cache key. A signed artifact is installed only if its
+the compiled Fabric framework hash, and the pinned native environment. Builds
+always run with `APP_VARIANT=daily`, `FRACTAL_FABRIC=1`,
+`FRACTAL_FABRIC_PROOF=0` (read by `FractalFabric.podspec`), and
+`FRACTAL_FABRIC_OFFLINE_DEBUG=0` (read by `metro.config.js`), with the legacy
+`ST3_` counterparts pinned to the same respective values. Inherited settings
+never override these pins in prebuild, CocoaPods, Metro, or Xcode; the pins are
+also part of the native-generation cache key. A signed artifact is installed only if its
 key equals the observed head's key under the current inputs. A build runs only
 when no retained artifact or installed app has that key; a revert to retained
 content reuses its artifact if that does not lower the installed version.
@@ -409,7 +422,7 @@ registered/environment summary. Revocation or expiry also removes the registrati
 
 ## Fabric, an opt-in carrier
 
-The app reaches its member over its saved gateway (Tailscale, the local network or HTTPS) unless the person turns on **Fabric** under Fleet › carrier. Fabric needs a build that links the native bridge: build with `FRACTAL_FABRIC=1 pnpm run pods` after building the Rust framework (see [the module's README](modules/fractal-fabric/README.md)). A build without it is the ordinary app and shows no carrier setting.
+The app reaches its member over its saved gateway (Tailscale, the local network or HTTPS) unless the person turns on **Fabric** under Fleet › carrier. Daily delivery builds link the real native bridge without enabling proof or offline Debug behavior; linking it does not turn on the carrier. For manual builds, run `sh modules/fractal-fabric/build.sh` from `apps/ios`, then `FRACTAL_FABRIC=1 pnpm run pods` (see [the module's README](modules/fractal-fabric/README.md)). A build without the bridge shows no carrier setting.
 
 With Fabric on, each foreground opens a fresh native listener on the loopback address the bridge returns (the only loopback address the app accepts; it is never saved), the client talks to it, and the background stops it. The paired bearer and the enrolled signing key are the same ones the saved gateway uses, so a device already paired to the member needs only the setting and a grant, not a new pairing. A new pairing made while the bridge is open goes over fabric. The member exposes its paired-only client socket as one fabric service and grants this phone's node ID (shown in Fleet › carrier) that one service, inbound-only, on fabric 0.2.41 or later, so the member never dials or probes the phone. After `st devices fabric enable` on the member, a pairing made with `st devices pair NAME --fabric-gateway` does this (the person chooses per pairing; without the flag nothing is granted): a member that offers `fabric-gateway-grant` receives the phone's node ID with the pairing and grants it, `st devices revoke` removes the grant, and a grant that failed is shown after pairing ([Fractal grants paired phones](../../docs/st3/ios-fabric-protocol.md#fractal-grants-paired-phones)). A member without it is granted by hand: `fabric add PHONE_NODE_ID NAME --inbound-only --allow SERVICE`.
 
