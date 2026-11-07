@@ -7526,6 +7526,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     spawn_response_expiry(store.clone());
     // After the shard opened, or failed to: a member without one drains to the graph.
     spawn_message_outbox(store.clone());
+    fractal_store::store::messages_shard::set_configured_peers(&store, state.configured_peers.clone());
     spawn_stream_mirror(store.clone(), event_notify.clone(), config.state_dir.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("observations.trim", trim_local_observations(
         store.clone(),

@@ -20977,6 +20977,7 @@ pub mod tests {
     mod final_cancel_missing_assignee;
     mod gate_on_demand;
     mod github_watch_selection;
+    mod stream_dirty_marking;
     mod standing_observer_stop;
     mod helper_launcher;
     mod bounded_loop_reads;

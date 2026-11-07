@@ -497,6 +497,23 @@ pub fn inbox_hosts(graph: &super::Store, configured_peers: &[String]) -> anyhow:
     hosts_advertising(graph, configured_peers, "messages_stream_inbox")
 }
 
+/// The peers this daemon's configuration names, which [`inbox_hosts`] counts beside the fleet's
+/// members for a sender that has no configuration at hand ([`routing_inbox_hosts`]). The daemon
+/// sets them at start; empty, only fleet members count.
+#[derive(Default)]
+pub struct ConfiguredPeers(std::sync::RwLock<Vec<String>>);
+
+/// Remember the peers the daemon's configuration names, for [`routing_inbox_hosts`].
+pub fn set_configured_peers(graph: &super::Store, peers: Vec<String>) {
+    *graph.extension::<ConfiguredPeers>().0.write().unwrap_or_else(std::sync::PoisonError::into_inner) = peers;
+}
+
+/// [`inbox_hosts`] with the peers the daemon was configured with.
+pub fn routing_inbox_hosts(graph: &super::Store) -> anyhow::Result<BTreeSet<String>> {
+    let peers = graph.extension::<ConfiguredPeers>().0.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    inbox_hosts(graph, &peers)
+}
+
 /// The hosts whose current start sets `features.<feature>` to 1.
 fn hosts_advertising(
     graph: &super::Store,

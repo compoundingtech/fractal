@@ -42,7 +42,7 @@ pub fn legacy_reason(store: &Store, input: &ClaimInput) -> Result<Option<&'stati
     let Some(host) = recipient_host(store, to)? else {
         return Ok(Some("no-host"));
     };
-    if host == store.graph.origin || messages_shard::inbox_hosts(store, &[])?.contains(&host) {
+    if host == store.graph.origin || messages_shard::routing_inbox_hosts(store)?.contains(&host) {
         Ok(None)
     } else {
         Ok(Some("host-without-inbox"))
