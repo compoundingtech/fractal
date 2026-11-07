@@ -2,7 +2,7 @@
 //! never enter claims. Git's normal index, branch and working tree are never changed.
 use crate::SeatsStore;
 use crate::{
-    model::{MemberSpec, St3Error},
+    model::{MemberSpec, FractalError},
     store::Store,
     suspension::Suspension,
 };
@@ -37,11 +37,11 @@ pub struct Manifest {
 }
 
 fn refusal(code: &'static str, message: impl Into<String>) -> anyhow::Error {
-    St3Error::new(code, message).into()
+    FractalError::new(code, message).into()
 }
 pub fn code(error: &anyhow::Error) -> &str {
     error
-        .downcast_ref::<St3Error>()
+        .downcast_ref::<FractalError>()
         .map_or("snapshot-unavailable", |e| e.code)
 }
 pub fn directory(state: &Path, operation: &str) -> PathBuf {

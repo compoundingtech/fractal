@@ -619,7 +619,7 @@ impl Store {
     }
 
     /// Replay the graph from the claims alone, in one batch.
-    pub fn fixture_replay_graph(&self) -> std::result::Result<std::result::Result<(), St3Error>, String> {
+    pub fn fixture_replay_graph(&self) -> std::result::Result<std::result::Result<(), FractalError>, String> {
         self.connection.batched(replay_graph_from_nothing_tx)
     }
 

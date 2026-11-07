@@ -21,6 +21,7 @@ sha2 = "0.10"
 smallclaims = { path = "../smallclaims" }
 fractal-runtime = { path = "../fractal-runtime" }
 fractal-client = { path = "../fractal-client" }
+fractal-socket-discovery = { path = "../fractal-socket-discovery" }
 fractal-terminal-direct = { path = "../fractal-terminal-direct" }
 fractal-schema = { path = "../fractal-schema" }
 fractal-drivers = { path = "../fractal-drivers" }

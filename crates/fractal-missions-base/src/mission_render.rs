@@ -3,7 +3,7 @@ use kdl::{KdlDocument, KdlNode};
 use crate::declaration_render::{annotations, common_body, protection};
 use crate::gate_render::{block, duration, node, property, text};
 use crate::loop_render::{comment, dependencies, has_legacy_loop_shapes, render_loop_node};
-use crate::model::{CompletionSpec, MissionInputKind, MissionSpec, MissionState, ResourceReferenceKind, RevisionCutover, St3Error, StepSpec, UsedMissionSpec};
+use crate::model::{CompletionSpec, MissionInputKind, MissionSpec, MissionState, ResourceReferenceKind, RevisionCutover, FractalError, StepSpec, UsedMissionSpec};
 
 pub struct MissionDeclarationText {
     pub text: String,
@@ -11,14 +11,14 @@ pub struct MissionDeclarationText {
     pub legacy: bool,
 }
 
-pub fn render_mission_kdl(mission: &MissionSpec) -> Result<MissionDeclarationText, St3Error> {
+pub fn render_mission_kdl(mission: &MissionSpec) -> Result<MissionDeclarationText, FractalError> {
     let mut document = KdlDocument::new();
     document.nodes_mut().extend([node("version", [2_i128.into()]), mission_node(mission)?]);
     document.autoformat();
     Ok(MissionDeclarationText { text: document.to_string(), legacy: has_legacy_loop_shapes(mission) })
 }
 
-fn mission_node(mission: &MissionSpec) -> Result<KdlNode, St3Error> {
+fn mission_node(mission: &MissionSpec) -> Result<KdlNode, FractalError> {
     let mut root = text("mission", &mission.id);
     property(&mut root, "state", match mission.state { MissionState::Draft => "draft", MissionState::Ready => "ready", MissionState::Retired => "retired" });
     protection(&mut root, mission.revisions_human_only, mission.revision_reviewer.as_deref(), mission.timeout_ms);
@@ -33,7 +33,7 @@ fn mission_node(mission: &MissionSpec) -> Result<KdlNode, St3Error> {
     Ok(block(root, mission_body(mission, None)?))
 }
 
-fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<Vec<KdlNode>, St3Error> {
+fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<Vec<KdlNode>, FractalError> {
     // Exhaustive destructuring makes a new MissionSpec field a renderer coverage decision.
     let MissionSpec { id: _, subject: _, state: _, revision: _, system, resources, inputs,
         max_active_runs, timeout_ms: _, report_to: _, stalled_after_ms: _, report_stalls: _,
@@ -42,7 +42,7 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
         declared_priority, declared_lane, declared_budgets,
         constraints, agent_constraints: _, baselines, products, gates, steps, display_order } = mission;
     let goals = if parent.is_some() { goals.get(1..).ok_or_else(||
-        St3Error::new("unrenderable-mission", "embedded loop mission lacks its injected goal"))? } else { goals.as_slice() };
+        FractalError::new("unrenderable-mission", "embedded loop mission lacks its injected goal"))? } else { goals.as_slice() };
     let mut children = common_body(goals, constraints, work_selector.as_ref(), baselines, products, gates)?;
     if let Some(priority) = declared_priority { children.push(text("declared-priority", priority.as_str())); }
     if let Some(lane) = declared_lane { children.push(text("declared-lane", lane.as_str())); }
@@ -93,10 +93,10 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
         children.push(block(node("completion", []), body));
     }
     if display_order.len() != steps.len() || display_order.iter().collect::<std::collections::BTreeSet<_>>().len() != steps.len() {
-        return Err(St3Error::new("unrenderable-mission", "display order does not enumerate every step exactly once"));
+        return Err(FractalError::new("unrenderable-mission", "display order does not enumerate every step exactly once"));
     }
     for id in display_order {
-        let step = steps.get(id).ok_or_else(|| St3Error::new("unrenderable-mission", "display order names an absent step"))?;
+        let step = steps.get(id).ok_or_else(|| FractalError::new("unrenderable-mission", "display order names an absent step"))?;
         let rendered = if let Some(spec) = &step.loop_spec {
             render_loop_node(spec, &step.dependencies, &|branch| mission_body(branch, Some(mission)))?
         } else { step_node(step)? };
@@ -119,7 +119,7 @@ fn mission_body(mission: &MissionSpec, parent: Option<&MissionSpec>) -> Result<V
     Ok(children)
 }
 
-fn step_node(step: &StepSpec) -> Result<KdlNode, St3Error> {
+fn step_node(step: &StepSpec) -> Result<KdlNode, FractalError> {
     let StepSpec { id, path: _, fresh_context, keep_open, queue: _, queue_position: _, title,
         goals, constraints, agent_constraints, timeout_ms, capacity, retry, finally: _,
         work_selector, revision_owners, revisions_human_only, revision_reviewer, dependencies: after,

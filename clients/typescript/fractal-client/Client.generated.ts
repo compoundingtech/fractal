@@ -3,7 +3,7 @@
 // Clients that omit that token retain the legacy message-list shape and paging contract.
 import { API_VERSION } from './Models.generated.ts';
 import type {
-    DeviceCommand, DeviceCommandRequest, DeviceResult,
+    AgentRelatedRuns, DeviceCommand, DeviceCommandRequest, DeviceResult,
     PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
@@ -335,11 +335,11 @@ export class FractalClient {
             method, headers, ...(body === undefined ? {} : { body: raw ? (body as BodyInit) : JSON.stringify(body) }),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
-        // Old routers can return an empty 404 for this collection; do not parse it as JSON
-        // or try a history endpoint. This route has no missing-item 404 meaning.
-        if (response.status === 404 && path.split('?')[0] === '/v1/client/schedules') {
+        // These projections have no missing-item 404, including an old router's empty response.
+        const relatedRuns = path.startsWith('/v1/client/agent-related-runs/');
+        if (response.status === 404 && (relatedRuns || path.split('?')[0] === '/v1/client/schedules')) {
             throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
-                request_id: '', code: 'unsupported-capability', message: 'This server does not support schedules.list; upgrade the server',
+                request_id: '', code: 'unsupported-capability', message: `This server does not support ${relatedRuns ? 'agent-related-runs.get' : 'schedules.list'}; upgrade the server`,
                 retryable: false, details: {} }, 404);
         }
         let payload: unknown;
@@ -719,6 +719,7 @@ export class FractalClient {
     async agentDeclarationGet(id: string, revision?: string, showEnvValues = false, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AgentDeclaration>> { return this.get(`/v1/client/agent-declarations/${encodeURIComponent(routedId(id))}` + query({ revision, show_env_values: showEnvValues }), undefined, requestOptions); }
     async statusHistoryGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<StatusHistory>> { return this.get(`/v1/client/status-history/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async agentQueueGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AgentQueue>> { return this.get(`/v1/client/agent-queues/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
+    async agentRelatedRunsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AgentRelatedRuns>> { return this.get(`/v1/client/agent-related-runs/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async harnessInventoryGet(id: string, options: HarnessInventoryQuery, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessInventory>> { return this.get(`/v1/client/harness-inventory/${encodeURIComponent(routedId(id))}` + query({ ...options, limit: options.limit ?? undefined, cursor: options.cursor ?? undefined }), undefined, requestOptions); }
     async runtimesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/runtimes' + query(options), undefined, requestOptions); }
     async runtimesGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/runtimes/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }

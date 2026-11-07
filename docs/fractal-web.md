@@ -145,18 +145,18 @@ Authorization and capability refusals retain their distinct explanations.
 ## Local daemon web app
 
 The daemon serves the web app by default at `http://127.0.0.1:7410`.
-Disable it with `st up --web-listen off`. `--web-dist /path/to/dist/web`
+Disable it with `fractal up --web-listen off`. `--web-dist /path/to/dist/web`
 overrides the default installed assets at `../share/fractal-web` relative to the
 daemon executable: an installation with `bin/fractal` uses `share/fractal-web/`.
 The assets stay separate from the daemon binary so a UI change does not require
 recompiling or relinking Rust.
 
 Missing assets or a missing configured concrete `person` degrade web availability
-without taking down the daemon's API listeners. `st doctor` reports the web
+without taking down the daemon's API listeners. `fractal doctor` reports the web
 finding and the configuration or installation to repair. An occupied listener port
 is still a startup error; use another loopback port or `--web-listen off`.
 
-Run `st web [--state-dir DIR]` or `st web [--state-dir DIR]` to open the app.
+Run `fractal web [--state-dir DIR]` or `fractal web [--state-dir DIR]` to open the app.
 The launcher reads the daemon's owner-only `web-launch-url`. The daemon consumes
 the launch token once, issues a 12-hour HttpOnly SameSite=Strict cookie, redirects
 to `/`, and atomically rotates the launch token. Up to 32 sessions survive until
@@ -193,7 +193,7 @@ carry an allowed `Tailscale-User-Login`, which `tailscale serve` attaches for ta
 browser `Origin` must be exactly the published origin, and upgrades and unsafe methods must
 carry one. An Origin-less read is refused when the browser's `Sec-Fetch-Site` says another site sent it. Never publish it with Funnel, which carries no tailnet identity. Anything else that
 can reach the loopback port could claim a login, so run it only on a host where every local
-user is already trusted with that person's st.
+user is already trusted with that person's Fractal.
 
 ```sh
 pnpm --dir apps/fractal-web build            # writes dist/web, including build-identity.json
@@ -211,7 +211,7 @@ its port when non-default.
 
 The settings:
 
-- `WF_ST_GATEWAY` names st's paired client gateway socket, never the privileged `fractal.sock`.
+- `WF_ST_GATEWAY` names Fractal's paired client gateway socket, never the privileged `fractal.sock`.
 - `WF_ST_AUTHORIZATION_FILE` holds the paired device's bearer. The composer needs a full-control pairing.
   The host refuses to start unless the file belongs to its user and nobody else can read it.
 - `WF_DIST` defaults to `dist/web`.
@@ -532,13 +532,13 @@ Both commands skip all live activity when the one-minute `/proc/loadavg` value i
 ## Fractal web alert strip live proof
 
 `node apps/fractal-web/scripts/alerts-live-proof.mjs [run|up|down]` proves the conversation
-alert strip against a real daemon without touching your own st. `up` makes a throwaway instance
+alert strip against a real daemon without touching your own Fractal. `up` makes a throwaway instance
 (`webproof`, under its own HOME in `/var/tmp/st-webproof`) with person/avery, a program seat
 agent/example/atlas and a paired full-control device whose bearer it keeps in a mode-0600 file.
 `run` has atlas ask avery a yes-or-no question and a decision, answers both from the strip in
 headless Chromium, checks with Fractal that each step finished with that answer, and prints the
 timings against the 2000 ms `alert_landed` budget. `down` uninstalls the instance. The script's
-header lists what it needs (systemd user units, `st3`, `pty`, a Playwright module and Chromium).
+header lists what it needs (systemd user units, `fractal`, `pty`, a Playwright module and Chromium).
 
 ## Sidebar migration
 

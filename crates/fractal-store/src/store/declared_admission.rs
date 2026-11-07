@@ -1,8 +1,8 @@
 //! Publication compatibility only: declarations do not enforce admission or resource limits.
 use super::*;
 
-fn refused(reason: impl Into<String>) -> St3Error {
-    St3Error::new("declared-admission-feature-barrier", reason)
+fn refused(reason: impl Into<String>) -> FractalError {
+    FractalError::new("declared-admission-feature-barrier", reason)
 }
 
 fn declares_fields(value: &Value) -> bool {
@@ -102,7 +102,7 @@ pub(super) fn validate_publication(
     connection: &Connection,
     origin: &str,
     intent: &NormalizedIntent,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let declared = intent.subjects.values().any(|desired| {
         (desired.kind == "agent" && declares_children(&desired.desired))
             || desired.member.as_ref().is_some_and(|member| {
@@ -124,7 +124,7 @@ pub(super) fn validate_claim(
     origin: &str,
     kind: &str,
     body: &Value,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let fields = body.get("fields").unwrap_or(body);
     let payload = fields.get("body").unwrap_or(fields);
     let declared = match kind {
@@ -143,7 +143,7 @@ pub(super) fn validate_claim(
 }
 
 // Until the fleet-evidence gate lands, no local writer may persist these declarations.
-fn validate_fleet(_connection: &Connection, _origin: &str) -> Result<(), St3Error> {
+fn validate_fleet(_connection: &Connection, _origin: &str) -> Result<(), FractalError> {
     Err(refused(
         "declared admission publication is disabled until the fleet feature gate lands; upgrade all members or fence legacy peers first",
     ))

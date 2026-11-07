@@ -5,9 +5,14 @@ use tower::ServiceExt;
 
 fn disconnected_adapter() -> Adapter {
     Adapter {
-        client: reqwest::Client::builder().unix_socket("/nonexistent/st-chatgpt-tests/st3-client.sock").build().unwrap(),
+        client: reqwest::Client::builder().unix_socket("/nonexistent/fractal-chatgpt-tests/fractal-client.sock").build().unwrap(),
         bearer: "test-only-not-a-daemon-credential".into(),
     }
+}
+
+#[test]
+fn server_identity_uses_fractal_chatgpt() {
+    assert_eq!(disconnected_adapter().get_info().server_info.name, "fractal-chatgpt");
 }
 
 #[test]
@@ -511,7 +516,7 @@ async fn dispatch_telemetry_is_correlated_and_content_free() {
         .with_writer(logs.clone()).finish();
     let _capture = tracing::subscriber::set_default(subscriber);
     let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("st3-client.sock");
+    let socket = dir.path().join("fractal-client.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let id = "request/12345678-1234-1234-1234-123456789abc";
     let body = json!({"request_id":id,"value":{"content":"RESPONSE_CONTENT_SENTINEL"}}).to_string();
@@ -537,6 +542,8 @@ async fn dispatch_telemetry_is_correlated_and_content_free() {
     assert_eq!(call(&adapter, "fractal_alert_get", &json!({})).await.unwrap_err()["code"], "invalid-arguments");
     let text = logs.text();
     assert_eq!(text.matches("ChatGPT tool call finished").count(), 4, "{text}");
+    assert_eq!(text.matches("fractal_chatgpt::call").count(), 4, "{text}");
+    assert!(!text.contains("st_chatgpt::call"), "{text}");
     for field in ["tool=\"fractal_alerts_list\"", "outcome=\"success\"", "code=\"ok\"",
         "outcome=\"error\"", "code=\"daemon-denied\"", "code=\"invalid-arguments\"",
         "tool=\"unknown\"", "duration_ms=", id, &format!("response_bytes={expected_bytes}")] {
@@ -554,7 +561,7 @@ async fn dispatch_telemetry_records_decode_transport_and_cancelled_outcomes() {
         .with_writer(logs.clone()).finish();
     let _capture = tracing::subscriber::set_default(subscriber);
     let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("st3-client.sock");
+    let socket = dir.path().join("fractal-client.sock");
     let listener = tokio::net::UnixListener::bind(&socket).unwrap();
     let entered = std::sync::Arc::new(tokio::sync::Notify::new());
     let notify = entered.clone();

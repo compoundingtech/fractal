@@ -55,7 +55,7 @@ pub fn inputs(
     facts: &Value,
     subscriptions: &[(String, SubscriptionSpec)],
     mirrored: Option<&crate::model::MirroredPrior>,
-) -> Result<Inputs, St3Error> {
+) -> Result<Inputs, FractalError> {
     fractal_store::store::completion_state::flush(transaction).map_err(internal)?;
     read_inputs(transaction, Observation {
         observer, desired_revision, attempt, resource, facts, subscriptions, mirrored,
@@ -66,7 +66,7 @@ pub fn inputs(
 pub fn read_inputs(
     transaction: &Connection,
     observation: Observation<'_>,
-) -> Result<Inputs, St3Error> {
+) -> Result<Inputs, FractalError> {
     let Observation { observer, desired_revision, attempt, resource, facts, subscriptions, mirrored } = observation;
     let mut active_subscriptions = Vec::new();
     for (subject, expected) in subscriptions {
@@ -107,7 +107,7 @@ pub fn read_inputs(
     let baseline = previous.is_none();
     let previous_object = previous.as_ref().and_then(Value::as_object);
     let current_object = facts.as_object().ok_or_else(|| {
-        St3Error::new(
+        FractalError::new(
             "invalid-resource-observation",
             "resource observation facts must be an object",
         )

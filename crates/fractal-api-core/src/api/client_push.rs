@@ -13,7 +13,7 @@ pub fn subscribe() -> tokio::sync::broadcast::Receiver<String> {
 }
 
 fn invalid(message: &'static str) -> ApiError {
-    ApiError::bad(St3Error::new("validation-failed", message))
+    ApiError::bad(FractalError::new("validation-failed", message))
 }
 
 fn unavailable() -> ApiError {

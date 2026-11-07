@@ -1,6 +1,6 @@
 use super::*;
 
-fn publish(store: &Store, source: &str) -> Result<ApplyResponse, St3Error> {
+fn publish(store: &Store, source: &str) -> Result<ApplyResponse, FractalError> {
     let intent = crate::graph::parse_intent(source, &store.origin)?;
     let planned = store.mission(
         &intent,
