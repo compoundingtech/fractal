@@ -3,6 +3,7 @@ import type { MembershipScope } from './sidebarMemberships';
 export const SIDEBAR_JOURNAL_VERSION = 1;
 export type JournalStatus = 'Intent' | 'AwaitingPersistence' | 'Sending' | 'UnknownDelivery' | 'AwaitingObservation' | 'AwaitingCompletionPersistence' | 'AwaitingFreshBase' | 'Observed' | 'Refused' | 'PartiallyApplied';
 export type JournalEffect = 'PersistPending' | 'Send' | 'ReadBase' | 'PersistCompletion' | 'PersistRemoval' | 'Replan';
+export type JournalPersistence = 'Pending' | 'Completion' | 'Removal';
 export type JournalState = { scope: MembershipScope; status: JournalStatus; request: { fence: { scope: MembershipScope } } | null };
 export type JournalStorage = { getItem(key: string): Promise<string | null>; setItem(key: string, value: string): Promise<void>; removeItem(key: string): Promise<void> };
 export type JournalRestoreError = { type: 'Version'; version: unknown } | { type: 'InvalidRecord' } | { type: 'ScopeMismatch' };
@@ -15,7 +16,7 @@ export type JournalReducer<TState extends JournalState, TEvent> = {
   decode(value: unknown): TState | undefined;
   reduce(state: TState, event: TEvent): JournalEffect[];
   persisted(state: TState, completion: boolean): TEvent;
-  storageFailed(): TEvent;
+  storageFailed(state: TState, phase: JournalPersistence): TEvent;
 };
 const sameScope = (a: MembershipScope, b: MembershipScope): boolean => a.owner === b.owner && a.container === b.container && a.endpoint === b.endpoint && a.host === b.host && a.projection === b.projection;
 const recover = (state: JournalState): JournalEffect[] => {
@@ -68,6 +69,7 @@ export class SidebarJournal<TState extends JournalState, TEvent> {
       if (!sameScope(state.scope, this.scope) || state.request && !sameScope(state.request.fence.scope, this.scope)) throw new Error('Sidebar journal scope mismatch');
       if (effect === 'Send' || effect === 'ReadBase' || effect === 'Replan') { await this.run(effect, state); continue; }
       let ack: TEvent;
+      const failure = this.reducer.storageFailed(state, effect === 'PersistCompletion' ? 'Completion' : effect === 'PersistRemoval' ? 'Removal' : 'Pending');
       try {
         if (effect === 'PersistRemoval') { await this.storage.removeItem(this.key); continue; }
         // Capture bytes AND acknowledgement before yielding to the storage operation.
@@ -76,7 +78,7 @@ export class SidebarJournal<TState extends JournalState, TEvent> {
         await this.storage.setItem(this.key, raw);
       } catch (error) {
         // Do not recursively retry persistence effects from StorageFailed or send past this barrier.
-        this.reducer.reduce(state, this.reducer.storageFailed());
+        this.reducer.reduce(state, failure);
         throw error;
       }
       await this.execute(state, this.reducer.reduce(state, ack));
