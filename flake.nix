@@ -15,7 +15,7 @@
     # Shared CI generators and the `otelite` collector used by release-integration.
     # Keep the build toolchain aligned with the source member in megarepo.kdl.
     effect-utils.url =
-      "github:overengineeringstudio/effect-utils/f77b58a42db4b0067f036d1484494f8ae07042c8";
+      "github:overengineeringstudio/effect-utils/277dc6d9f7b226da58e526398ee450d877b6a4a1";
   };
 
   outputs =
