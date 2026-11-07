@@ -492,7 +492,7 @@ impl ApiError {
             | "lane-approval-denied"
             | "person-rename-forbidden"
             | "glass-owner-forbidden" => StatusCode::FORBIDDEN,
-            "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
+            "identity-unknown" | "lane-not-found" | "not-found" | "thread-unavailable" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
@@ -11332,6 +11332,7 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
             items.retain(|event| {
                 !fractal_schema::notice::is_reserved_subject(&event.subject)
                     && !fractal_schema::notice::is_reserved_kind(&event.kind)
+                    && !fractal_schema::threads::is_reserved_record(&event.subject, &event.kind)
             });
             // Stream items have no run owner, so an owner-filtered page has none of them.
             let stream = match messages_after {
@@ -11348,6 +11349,7 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     .filter(|event| {
                         !fractal_schema::notice::is_reserved_subject(&event.subject)
                             && !fractal_schema::notice::is_reserved_kind(&event.kind)
+                            && !fractal_schema::threads::is_reserved_record(&event.subject, &event.kind)
                     })
                     .cloned()
                     .collect()
