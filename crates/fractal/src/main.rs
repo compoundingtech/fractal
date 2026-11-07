@@ -7053,6 +7053,28 @@ fn daemon_admitted_open_refuses_directory_swap_or_removal_before_any_database_wr
     }
 }
 
+/// Search once for batches an older writer left behind the sealing frontier, in the graph and
+/// its messages shard, and seal what it finds. Exchanges seal only after the frontier and never
+/// wait for this walk of every batch; a skipped batch is offered from the next exchange on.
+async fn recover_sealing_frontier(store: &Arc<Store>) {
+    let recovering = store.clone();
+    let recovered = store.connection.write_workers().spawn_blocking(move || {
+        fractal_daemon::task_cpu::profiled_blocking("replication.sealing_recovery", || {
+            recovering.seal_local_batches()?;
+            if let Some(shard) = fractal_store::store::messages_shard::shard(&recovering) {
+                shard.seal_local_batches()?;
+            }
+            anyhow::Ok(())
+        })
+    })
+    .await;
+    match recovered {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => stderr_message("fractal", format_args!("sealing frontier recovery failed: {error:#}")),
+        Err(error) => stderr_message("fractal", format_args!("sealing frontier recovery stopped: {error}")),
+    }
+}
+
 /// Audit the operation projection on a blocking thread. The audit reads in pages of at most
 /// 128 rows, each in its own short read snapshot, so it never holds one snapshot for its whole
 /// run and never delays a WAL restart for long. The store keeps the result for doctor.
@@ -7361,7 +7383,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
                     // says nothing about routing: `messages_stream_inbox` will (4c-2a-3).
-                    "messages_stream_mirror": u8::from(messages_shard.is_ok())}),
+                    "messages_stream_mirror": u8::from(messages_shard.is_ok()),
+                    // Lists its stream mail in client message pages (GET /v1/client/messages)
+                    // and its other mail lists. Informational too.
+                    "messages_stream_selectors": u8::from(messages_shard.is_ok())}),
             ),
             ("status".into(), Value::String("running".into())),
             ("pid".into(), Value::from(std::process::id())),
@@ -7495,7 +7520,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     spawn_response_expiry(store.clone());
     // After the shard opened, or failed to: a member without one drains to the graph.
     spawn_message_outbox(store.clone());
-    spawn_stream_mirror(store.clone());
+    spawn_stream_mirror(store.clone(), event_notify.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("observations.trim", trim_local_observations(
         store.clone(),
         config.observations.clone(),
@@ -7549,9 +7574,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }));
     // Doctor reports the envelopes admitted before this node knew better from this count, made
     // at startup and then every period, and again when doctor finds membership moved since.
-    // The first count waits 30 s, so it does not run beside the startup operation audit, unless
-    // doctor asks for it sooner. Counts doctor asks for come at most once a minute, however
-    // often doctor runs while fleet rows replicate.
+    // The first count waits 30 s, unless doctor asks for it sooner. Counts doctor asks for come
+    // at most once a minute, however often doctor runs while fleet rows replicate.
     {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("fleet.admission_residue", async move {
@@ -7572,17 +7596,18 @@ async fn run_up(args: UpArgs) -> Result<()> {
             }
         }));
     }
-    // The first diagnostic report and delayed repair share one operation audit. After it the
-    // daemon audits again every period, and after any repair, so doctor reports a recent audit
-    // instead of reading every operation itself. No request waits for an audit.
-    if let Some(audit) = fractal_daemon::api::start_operation_report(&state) {
+    // The first diagnostic report reads the last audit and never makes one. After the reconnect
+    // window the daemon searches once for batches older writers left unsealed, then audits the
+    // operation projection, one after the other, and audits again every period and after any
+    // repair, so doctor reports a recent audit instead of reading every operation itself. No
+    // request waits for either.
+    fractal_daemon::api::start_operation_report(&state);
+    {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("operations.repair_drift", async move {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            let mut audit = match audit.await {
-                Ok(audit) => audit,
-                Err(error) => Err(anyhow::anyhow!("the startup audit stopped: {error}")),
-            };
+            tokio::time::sleep(fractal_daemon::store::STARTUP_MAINTENANCE_DELAY).await;
+            recover_sealing_frontier(&store).await;
+            let mut audit = audit_operations(&store).await;
             loop {
                 if repair_operation_drift(&store, audit).await {
                     // Audit once more at once, so doctor reports what the repair left; anything
@@ -20925,7 +20950,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
 /// start, which catches up on what a crash left unmirrored, then after each shard commit. A
 /// member whose shard did not open has nothing to mirror. A failed pass is logged and retried
 /// after a pause; the cursors keep what it already mirrored.
-fn spawn_stream_mirror(store: Arc<Store>) {
+fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>) {
     const RETRY: Duration = Duration::from_secs(30);
     let Some(shard) = fractal_store::store::messages_shard::shard(&store) else {
         return;
@@ -20946,7 +20971,14 @@ fn spawn_stream_mirror(store: Arc<Store>) {
             })
             .await;
             let failed = match mirrored {
-                Ok(Ok(_)) => false,
+                // The shard's own wake (stream_admitted) can reach a waiter before this commit, so
+                // a reader it woke may have missed the item's selectors: wake waiters again.
+                Ok(Ok(added)) => {
+                    if added > 0 {
+                        event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
+                    }
+                    false
+                }
                 Ok(Err(error)) => {
                     stderr_message("fractal", format_args!("mirroring the messages stream failed: {error:#}"));
                     true

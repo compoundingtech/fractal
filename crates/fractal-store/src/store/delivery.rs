@@ -65,21 +65,20 @@ impl Store {
         }
         drop(statement);
         let mut states = BTreeMap::<(&str, &str), (u64, u128)>::new();
-        for (subject, (created_index, accepted)) in candidates {
-            let message = self.message_view_cached(&connection, &subject, created_index)?;
+        let mut count = |message: &MessageView, accepted: u128| {
             if message.to != recipient || matches!(message.status.as_str(), "read" | "closed") {
-                continue;
+                return;
             }
-            let state = if include_held && crate::silent::waits_for_turn(&message) {
+            let state = if include_held && crate::silent::waits_for_turn(message) {
                 "held"
             } else {
                 match message.status.as_str() {
                     "sent" | "staged" => "pending",
                     "delivered" => "delivered",
-                    _ => continue,
+                    _ => return,
                 }
             };
-            smallclaims::touched::note_read(|| subject.clone());
+            smallclaims::touched::note_read(|| message.subject.clone());
             let band = if now.saturating_sub(accepted) >= MAILBOX_STALE_AFTER_MS {
                 "stale"
             } else {
@@ -92,6 +91,22 @@ impl Store {
                     *oldest = (*oldest).min(accepted);
                 })
                 .or_insert((1, accepted));
+        };
+        for (subject, (created_index, accepted)) in &candidates {
+            count(&self.message_view_cached(&connection, subject, *created_index)?, *accepted);
+        }
+        // The stream items to this mailbox, unread and not closed here, at the mirror's sent time.
+        for message in super::messages_shard::mailbox_reads::delivery_items(self, &recipient)? {
+            if candidates.contains_key(&message.subject) {
+                continue;
+            }
+            let accepted: Option<i64> = connection
+                .prepare_cached("SELECT sent_ms FROM local_stream_sent WHERE subject=?1")?
+                .query_row(/* sqlite-large-value: allow-for-now lv-hb7c02123e5e8 owner=fractal_store::store::delivery TODO=trace-statement-and-value-representation */ [&message.subject], |row| row.get(0))
+                .optional()?;
+            if let Some(accepted) = accepted {
+                count(&message, u128::try_from(accepted.max(0))?);
+            }
         }
         Ok(states
             .into_iter()
@@ -154,8 +169,10 @@ impl Store {
         let mut after = None;
         let mut all = Vec::new();
         loop {
+            // A delivery listing stays graph-only (mailbox_reads.rs delivers stream mail); every
+            // other listing pages on into the stream items after the graph's.
             let (items, next) = self.messages_page_from(
-                recipient, include_closed, after, through, 200, delivery, false, offerable,
+                recipient, include_closed, after, through, 200, delivery, !delivery, offerable,
             )?;
             all.extend(items);
             match next {
