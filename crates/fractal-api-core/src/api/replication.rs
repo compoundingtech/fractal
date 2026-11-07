@@ -388,22 +388,22 @@ pub async fn replication_receive(
             .map_err(|error| FractalError::new("internal", error.to_string()))?;
         let changed = store_index != before_index
             || (projected && (admission.changed || repairs != 0 || was_deferred));
-        // One read answers both whether every new claim is quiet and which kind names the wake;
-        // only a change that projected can wake the reconciler, so no other receive asks it.
-        let (any_new, waking_kind) = if changed && projected {
+        // One read answers both whether every new claim is quiet and which kind names the wake. It
+        // is asked only where the quiet answer can matter: a clean receive whose change projected.
+        // Any other receive that wakes the reconciler is counted without a kind.
+        let clean = projection_was_healthy
+            && projected
+            && repairs == 0
+            && admission.unknown == 0
+            && admission.invalid == 0;
+        let (any_new, waking_kind) = if changed && clean {
             store
                 .claims_since_waking_kind(before_index)
                 .map_err(|error| FractalError::new("internal", error.to_string()))?
         } else {
             (false, None)
         };
-        let quiet_only = projection_was_healthy
-            && projected
-            && repairs == 0
-            && admission.unknown == 0
-            && admission.invalid == 0
-            && any_new
-            && waking_kind.is_none();
+        let quiet_only = clean && any_new && waking_kind.is_none();
         // A deferred projection left the graph as it was, so the reconciler has nothing new.
         let reconcile_changed = changed && !quiet_only && projected;
         Ok((
