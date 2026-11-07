@@ -407,12 +407,13 @@ Mission-level and step-level declarations (built), bursts and admission are step
 
 ## Inactive host-envelope declaration
 
-`host_envelope_file` in `config.toml` selects a JSON host envelope. Without the key,
-Fractal reads `host-envelope.json` under its product config directory when that file
-exists. A missing explicit file, malformed declaration, unknown schema version, or
-host differing from the configured `node` refuses validation with a typed error.
-This is **read and validate only**: it does not
-change lane admission, create cgroups, activate limits, or replace external admission.
+`host_envelope_file` in `config.toml` selects a JSON host envelope for the explicit
+`Config::read_host_envelope` reader. Without the key, that reader checks
+`host-envelope.json` under Fractal's product config directory when it exists.
+A missing explicit file, malformed declaration, unknown schema version, or host
+differing from the configured `node` returns a typed error to that reader's caller.
+Daemon startup and `Config::validate` do not read or validate the inactive file.
+This changes no lane admission, cgroups, limits, or external admission.
 
 The typed contract lives in `fractal_runtime::host_envelope`; the checked-in
 [JSON Schema](../../fixtures/host-envelope.schema.json) describes version 1.

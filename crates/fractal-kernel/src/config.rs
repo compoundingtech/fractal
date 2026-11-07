@@ -932,7 +932,6 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
-        self.read_host_envelope()?;
         if let Some(directory) = &self.store_dir {
             anyhow::ensure!(directory.is_absolute(), "store_dir must be an absolute directory path");
             anyhow::ensure!(
@@ -1291,7 +1290,9 @@ mod tests {
                 if node == "fixture-other" && host == "fixture-capped"
         )));
         std::fs::write(&path, br#"{"schema_version":99}"#).unwrap();
-        let error = decoded.validate().unwrap_err();
+        // An inactive declaration is inspected only by the explicit reader, never startup validation.
+        decoded.validate().unwrap();
+        let error = decoded.read_host_envelope().unwrap_err();
         assert!(error.chain().any(|cause| matches!(
             cause.downcast_ref::<fractal_runtime::host_envelope::Error>(),
             Some(fractal_runtime::host_envelope::Error::UnsupportedVersion(99))
