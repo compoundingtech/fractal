@@ -74,6 +74,7 @@ import { gatewaySessionTraceLayer } from './stSessionTrace.ts'
 import { sessionTrace, type SessionTraceProvider } from './sessionTrace.ts'
 import { gatewayNativeDetails } from './nativeDetailsSource.ts'
 import { gatewayObjectives } from './objectivesSource.ts'
+import { forgetSessionPerson, rememberSessionPerson } from '../state/cells/drafts.ts'
 
 /** Open/silent subscriptions have no SDK idle deadline. Bound only the first roster snapshot;
  * transport failures trigger the published fallback immediately instead of waiting this long. */
@@ -163,6 +164,8 @@ export const liveSource = ({
         response.status === 403) {
         const body: unknown = await response.clone().json().catch(() => undefined)
         if (readAuthorization({ status: response.status, response: body }) === 'unauthorized') {
+          // A revoked browser keeps none of its person's drafts, here or in other windows.
+          if (!credentialExpired) forgetSessionPerson(registry.get(person))
           credentialExpired = true
           readRejection = 'Browser credential expired or revoked'
           registry.set(readRefusal, readRejection)
@@ -175,6 +178,7 @@ export const liveSource = ({
     traceContext: options.traceContext,
   })
   const deniedReaders = new Set<(message: string) => void>()
+  const person = Atom.make<string | undefined>(undefined).pipe(Atom.keepAlive)
   let readRejection: string | undefined
   let credentialExpired = false
   let connectionAttempt = 1
@@ -1205,6 +1209,8 @@ export const liveSource = ({
         Effect.gen(function* () {
           const fractal = yield* Fractal
           const discovered = yield* fractal.capabilities
+          const owner = /^(person\/[^/\s]+)(?:\/session\/[^/\s]+)?$/.exec(discovered.session_actor)?.[1]
+          if (owner !== undefined) { registry.set(person, owner); rememberSessionPerson(owner) }
           const allowed = new Set(
             discovered.capabilities
               .filter((capability) => capability.state === 'granted')
@@ -1247,6 +1253,7 @@ export const liveSource = ({
       objectives,
       label: 'gateway',
       gateway: new URL(baseUrl).host,
+      person,
       now: wallClock,
       grants,
       contentSearch: gatewayContentSearch(client),

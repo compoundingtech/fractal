@@ -3,6 +3,8 @@ import { markStart, measureEnd } from './perfMarks.ts'
 import { useAtomValue } from '@effect/atom-react'
 import { systemEventsPreference } from './conversationPreferences.ts'
 import { EmbraceComposer } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx'
+import { ComposerDraftSync } from '../../../../packages/fractal-ui/src/assistant-ui/ComposerDraftSync.tsx'
+import { useComposerDraftPort } from './composerDraftPort.ts'
 import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
@@ -232,6 +234,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   }
   // Recorded semantic evidence stands in for the kit summary line; the kit keeps raw input/output and Open beside it.
   const renderSemanticDetail = React.useCallback((item: ToolCallItem, call: WorkLogCall) => recordedToolDetail(item, call, () => onOpenTool(call)), [onOpenTool])
+  const draftPort = useComposerDraftPort(agentRef)
   return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: running, ...(onCancel === undefined ? {} : { onCancel }) }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
@@ -269,6 +272,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       markStart('keystroke_paint')
       measureEnd('keystroke_paint')
     }} style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: `calc(${geometryVars.controlLg} + ${geometryVars.controlMd} + 3 * ${spaceVars.md} + 2 * ${geometryVars.hairline} + ${spaceVars.lg})`, paddingBottom: spaceVars.lg }}>
+      {draftPort === undefined ? null : <ComposerDraftSync port={draftPort} />}
       <EmbraceComposer variant="C1" readingColumn conversationLabel={agentName} disabledReason={state._tag === 'Unavailable' && state.classification === 'not-found' ? 'Conversation not found' : binding.disabledReason} {...(binding.imageAttachments === undefined ? {} : { imageAttachments: binding.imageAttachments })} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
     </div>}
   </EmbraceRuntimeProvider>
