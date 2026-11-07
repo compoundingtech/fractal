@@ -143,6 +143,7 @@ export type Agent = ResourceHeader & {
   silent_since?: (Timestamp | null);
   since?: (Timestamp | null);
   state: AgentState;
+  stopping?: (AgentStopping | null);
   subagents?: Array<AgentSubagent>;
   suspension?: (AgentSuspension | null);
   todo?: (AgentTodo | null);
@@ -405,6 +406,10 @@ export type AgentState = (
 export type AgentStopParameters = {
   agent: Id;
   reason?: string;
+};
+
+export type AgentStopping = {
+  held: string | null;
 };
 
 export type AgentSubagent = {

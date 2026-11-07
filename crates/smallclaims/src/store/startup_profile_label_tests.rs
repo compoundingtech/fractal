@@ -1,6 +1,7 @@
-//! The first replication snapshot of a process walks every envelope identity and every batch.
-//! Whoever asks first, those walks are named in the profile: as their own operations when the
-//! caller has none, and as spans of the caller's operation otherwise.
+//! The first replication snapshot of a process walks every envelope identity, and the first full
+//! sealing pass walks every batch. Whoever asks first, those walks are named in the profile: as
+//! their own operations when the caller has none, and as spans of the caller's operation
+//! otherwise. An exchange's snapshot does not walk the batches; the daemon's deferred pass does.
 use super::runtime::Plain;
 use super::*;
 use serde_json::Value;
@@ -69,6 +70,7 @@ fn first_replication_snapshot_names_its_full_walks_in_the_profile() {
     // No operation on this thread: each walk is an operation of its own.
     let unowned = store_with_claims("alder");
     unowned.replication_snapshot().unwrap();
+    unowned.seal_local_batches().unwrap();
     let records = slow_records();
     for label in [FULL, SEALING] {
         assert!(
@@ -93,6 +95,22 @@ fn first_replication_snapshot_names_its_full_walks_in_the_profile() {
         .find(|record| record["label"] == caller)
         .expect("the caller's operation was not recorded");
     assert_eq!(span_count(record, FULL), 1);
-    assert_eq!(span_count(record, SEALING), 1);
+    assert_eq!(span_count(record, SEALING), 0, "an export waited for the batch walk");
     assert!(added.iter().all(|record| record["label"] != FULL && record["label"] != SEALING));
+
+    // The daemon's deferred pass names its batch walk as a span of its own operation.
+    let before = slow_records().len();
+    let pass = "replication.sealing_recovery";
+    let op = crate::profile::Op::start(pass, None).unwrap();
+    {
+        let _entered = op.enter();
+        owned.seal_local_batches().unwrap();
+    }
+    op.finish();
+    let added = slow_records().split_off(before);
+    let record = added
+        .iter()
+        .find(|record| record["label"] == pass)
+        .expect("the deferred pass was not recorded");
+    assert_eq!(span_count(record, SEALING), 1);
 }

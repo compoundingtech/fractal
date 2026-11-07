@@ -1,4 +1,6 @@
 //! Canonical base-62 position keys for local insertions into arrangement registers.
+mod capacity;
+pub use capacity::spread;
 const DIGITS: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 fn integer_length(key: &str) -> usize {
     let head = key.as_bytes()[0];
@@ -72,7 +74,7 @@ fn midpoint(a: &str, b: Option<&str>) -> String {
     }
     prefix
 }
-pub(super) fn between(a: Option<&str>, b: Option<&str>) -> Result<String, String> {
+pub fn between(a: Option<&str>, b: Option<&str>) -> Result<String, String> {
     if a.zip(b).is_some_and(|(a, b)| a >= b) {
         return Err("These rows share a position key; reorder their group first.".into());
     }
@@ -109,7 +111,7 @@ pub(super) fn between(a: Option<&str>, b: Option<&str>) -> Result<String, String
     Ok(key)
 }
 /// Colliding concurrent position registers require an atomic rekey of that partition.
-pub(super) fn insertion(
+pub fn insertion(
     keys: &[&str],
     index: usize,
 ) -> Result<(String, Vec<(usize, String)>), String> {

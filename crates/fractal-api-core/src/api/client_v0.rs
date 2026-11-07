@@ -818,6 +818,15 @@ pub fn authenticate(
         return Err(forbidden("the client credential is unknown or expired"));
     };
     let mut session = paired_client_session(state, paired, transport, custom_forms)?;
+    // Transfer artifacts contain complete batches/state, not recipient-authorized views.
+    // Never redact their wire contents; refuse generic paired access to the whole artifact.
+    if request.uri().path() == "/v1/backup"
+        || matches!(request.uri().path(),
+            "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
+        || request.uri().path().starts_with(super::INTERNAL_ROUTE_PREFIX)
+    {
+        return Err(super::custom::notices_unavailable());
+    }
     session.conversation_blocks = conversation_blocks;
     session.conversation_delivery_links = conversation_delivery_links;
     session.conversation_message_participants = conversation_message_participants;
@@ -1131,14 +1140,14 @@ pub fn runtime_resources_for_owner(
     // index is not necessarily the causally current runtime observation.
     // Exact owner reads reduce just that subject at this snapshot.
     let status = if let Some(owner) = owner {
-        state.store.status_for_subject_names_at(
+        state.store.status_for_subject_names_for_generic_reads_at(
             BTreeSet::from([owner.to_owned()]),
             snapshot.store_index,
             history,
             crate::store::ClaimsReduction::Runtime,
         )?
     } else {
-        state.store.status_for_claim_kind_at(
+        state.store.status_for_claim_kind_for_generic_reads_at(
             "runtime.observed",
             Some(snapshot.store_index),
             history,
@@ -1431,7 +1440,7 @@ fn machine_resources_and_hosts(
         .collect::<BTreeSet<_>>();
     host_ids.extend(configured_hosts.iter().cloned());
     host_ids.extend(host_runtime_ids.keys().cloned());
-    let status = state.store.status_for_subject_prefix_at(
+    let status = state.store.status_for_subject_prefix_for_generic_reads_at(
         "host/",
         Some(snapshot.store_index),
         history,
@@ -1642,11 +1651,10 @@ pub fn operation_reports() -> std::sync::MutexGuard<'static, BTreeMap<usize, Ope
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Start the first diagnostic report off the request path and hand its operation audit to the
-/// startup repair. Only this first report shares its audit; refreshes inspect current state.
-pub fn start_operation_report(
-    state: &AppState,
-) -> Option<tokio::sync::oneshot::Receiver<anyhow::Result<Vec<String>>>> {
+/// Start the first diagnostic report off the request path. It reads the last operation audit
+/// rather than making one: the daemon's first audit waits until the reconnect window has passed.
+/// Return whether this call started it.
+pub fn start_operation_report(state: &AppState) -> bool {
     let key = Arc::as_ptr(&state.store) as usize;
     let mut reports = operation_reports();
     if reports.get(&key).is_some_and(|report| {
@@ -1655,7 +1663,7 @@ pub fn start_operation_report(
             .upgrade()
             .is_some_and(|store| Arc::ptr_eq(&store, &state.store))
     }) {
-        return None;
+        return false;
     }
     reports.insert(
         key,
@@ -1667,29 +1675,15 @@ pub fn start_operation_report(
         },
     );
     drop(reports);
-    let (audit_sender, audit_receiver) = tokio::sync::oneshot::channel();
     let state = state.clone();
-    std::thread::spawn(move || refresh_operation_report(&state, key, Some(audit_sender)));
-    Some(audit_receiver)
+    std::thread::spawn(move || refresh_operation_report(&state, key));
+    true
 }
 
-pub fn refresh_operation_report(
-    state: &AppState,
-    key: usize,
-    startup_audit: Option<tokio::sync::oneshot::Sender<anyhow::Result<Vec<String>>>>,
-) {
-    let report = if let Some(sender) = startup_audit {
-        // The store keeps this audit's result, which the report's operation check reads.
-        let drift = crate::profile::task("operations.audit", || state.store.operation_projection_drift());
-        let report = crate::profile::task("operations.doctor_report", || doctor_report(state));
-        // The repair owns these findings, including any scan error. It re-derives just the
-        // drifted rows from current claims, never reuses expected values from this snapshot.
-        let _ = sender.send(drift);
-        report
-    } else {
-        crate::profile::task("operations.doctor_report", || doctor_report(state))
-    };
-    let checks = report.ok().map(|report| Arc::new(report.0.checks));
+pub fn refresh_operation_report(state: &AppState, key: usize) {
+    let checks = crate::profile::task("operations.doctor_report", || doctor_report(state))
+        .ok()
+        .map(|report| Arc::new(report.0.checks));
     let mut reports = operation_reports();
     let Some(report) = reports.get_mut(&key) else {
         return;
@@ -4149,7 +4143,7 @@ pub async fn events(
         }
     };
     let has_more = query.after.is_some() && records.len() > limit;
-    let records = records.into_iter().take(limit).collect::<Vec<_>>();
+    let mut records = records.into_iter().take(limit).collect::<Vec<_>>();
     let mut resume = records
         .last()
         .map(|(record, local)| EventCursor {
@@ -4165,6 +4159,11 @@ pub async fn events(
             local: None,
         };
     }
+    // Advance through hidden records without exposing their subjects, kinds or payloads.
+    records.retain(|(record, _)| {
+        !fractal_schema::notice::is_reserved_subject(&record.subject)
+            && !fractal_schema::notice::is_reserved_kind(&record.kind)
+    });
     // The projection enrichment reads the store (mission attribution, snapshot ids), so it
     // takes one admitted query scope; the wait above held no reader.
     let items = super::read_deadline::query(&state.store, "/v1/client/events", || {

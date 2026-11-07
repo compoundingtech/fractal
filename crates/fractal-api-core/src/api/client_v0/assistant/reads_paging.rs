@@ -189,7 +189,7 @@ fn read_page(
                 offset: offset.saturating_add(count), limit,
                 history: false, person: None, actor: None, owner_run: None,
                 status: None, owner: None, state: None, native_only: false,
-                items_digest: marker.clone(), before_index: None,
+                items_digest: marker.clone(), before_index: None, before_stream_index: None,
                 after_key: count.checked_sub(1).and_then(|last| delivered_keys.get(last)).cloned(),
                 expires_at_unix_ms: expires,
             })?)
