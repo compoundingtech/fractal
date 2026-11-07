@@ -7383,7 +7383,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
                     // says nothing about routing: `messages_stream_inbox` will (4c-2a-3).
-                    "messages_stream_mirror": u8::from(messages_shard.is_ok())}),
+                    "messages_stream_mirror": u8::from(messages_shard.is_ok()),
+                    // Lists its stream mail in client message pages (GET /v1/client/messages)
+                    // and its other mail lists. Informational too.
+                    "messages_stream_selectors": u8::from(messages_shard.is_ok())}),
             ),
             ("status".into(), Value::String("running".into())),
             ("pid".into(), Value::from(std::process::id())),
@@ -7517,7 +7520,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     spawn_response_expiry(store.clone());
     // After the shard opened, or failed to: a member without one drains to the graph.
     spawn_message_outbox(store.clone());
-    spawn_stream_mirror(store.clone());
+    spawn_stream_mirror(store.clone(), event_notify.clone());
     tokio::spawn(fractal_daemon::task_cpu::account("observations.trim", trim_local_observations(
         store.clone(),
         config.observations.clone(),
@@ -20947,7 +20950,7 @@ fn spawn_publication_evidence(store: Arc<Store>) {
 /// start, which catches up on what a crash left unmirrored, then after each shard commit. A
 /// member whose shard did not open has nothing to mirror. A failed pass is logged and retried
 /// after a pause; the cursors keep what it already mirrored.
-fn spawn_stream_mirror(store: Arc<Store>) {
+fn spawn_stream_mirror(store: Arc<Store>, event_notify: watch::Sender<u64>) {
     const RETRY: Duration = Duration::from_secs(30);
     let Some(shard) = fractal_store::store::messages_shard::shard(&store) else {
         return;
@@ -20968,7 +20971,14 @@ fn spawn_stream_mirror(store: Arc<Store>) {
             })
             .await;
             let failed = match mirrored {
-                Ok(Ok(_)) => false,
+                // The shard's own wake (stream_admitted) can reach a waiter before this commit, so
+                // a reader it woke may have missed the item's selectors: wake waiters again.
+                Ok(Ok(added)) => {
+                    if added > 0 {
+                        event_notify.send_modify(|generation| *generation = generation.saturating_add(1));
+                    }
+                    false
+                }
                 Ok(Err(error)) => {
                     stderr_message("fractal", format_args!("mirroring the messages stream failed: {error:#}"));
                     true
