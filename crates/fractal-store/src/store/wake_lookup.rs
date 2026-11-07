@@ -124,10 +124,9 @@ pub fn advance(store: &Store) -> Result<bool> {
              WHERE kind='message.sent' AND store_index>?1 AND store_index<=?2
              ORDER BY store_index LIMIT ?3",
         )?;
-        let rows = statement.query_map(params![cursor, ceiling, BACKFILL_PAGE], |row| {
+        statement.query_map(params![cursor, ceiling, BACKFILL_PAGE], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
-        })?.collect::<rusqlite::Result<Vec<_>>>()?;
-        rows
+        })?.collect::<rusqlite::Result<Vec<_>>>()?
     };
     let done = (page.len() as i64) < BACKFILL_PAGE;
     let through = if done { ceiling } else { page.last().expect("a full page").0 };

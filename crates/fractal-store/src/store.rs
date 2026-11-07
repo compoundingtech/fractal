@@ -20126,6 +20126,8 @@ enum WakeHistory {
 
 /// Seek the step's wake tags before fetching message bodies. During the one-time copy only
 /// the unindexed historical tail uses the recipient index; its rowid bounds precede body reads.
+/// DISTINCT keeps one row per message; CROSS JOIN fixes candidates as the driving side. An IN
+/// subquery lets SQLite choose the kind index and walk every message claim before testing ids.
 pub(super) fn work_wake_history_query(complete: bool) -> String {
     let tail = if complete { "" } else {
         "UNION SELECT pending.id FROM claims pending INDEXED BY claims_message_to_order_index
@@ -20159,12 +20161,13 @@ pub(super) fn work_wake_history_query(complete: bool) -> String {
                 OR EXISTS(SELECT 1 FROM local_message_staged staged
                        WHERE staged.message=claims.subject
                          AND staged.recorded_at_unix_ms<=CAST(?1 AS INTEGER))
-         FROM claims
-         WHERE claims.id IN (
-             SELECT claim_id FROM local_work_wake_tags
+         FROM (
+             SELECT DISTINCT claim_id FROM local_work_wake_tags
              WHERE recipient IN (?3, ?4) AND tag>=?2 AND tag<?5
-             {tail})
-           AND claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
+             {tail}
+         ) AS wake_candidates
+         CROSS JOIN claims ON claims.id=wake_candidates.claim_id
+         WHERE claims.kind='message.sent' AND claims.accepted_at_unix_ms<=?1
            AND (instr(claims.body, 'st3-work:' || ?2)>0 OR instr(claims.body, 'fractal-work:' || ?2)>0)
            AND json_extract(claims.body, '$.fields.to') IN (?3, ?4)
          ORDER BY CANONICAL_ASC(claims)"
