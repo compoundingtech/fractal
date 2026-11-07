@@ -8778,8 +8778,8 @@ async fn previous_release_beside_members_that_route_mail_by_the_recipients_host(
         }
     }
     // b's seat sees both its messages, whichever store each is in.
-    let page: Value = b.client().get(&format!("/v1/messages?to={b_seat}&limit=50")).await.unwrap();
-    let listed = page["items"].as_array().unwrap().iter().map(|item| item["subject"].as_str().unwrap().to_owned()).collect::<BTreeSet<_>>();
+    let page: Value = b.client().get(&format!("/v1/messages?to={b_seat}")).await.unwrap();
+    let listed = page.as_array().unwrap().iter().map(|item| item["subject"].as_str().unwrap().to_owned()).collect::<BTreeSet<_>>();
     assert!(listed.contains(&to_b_subject) && listed.contains(&from_o_subject), "{page}");
     if release_inbox {
         wait_until("the release lists the stream mail routed to its seat", 60, || async {
