@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Web in-progress states share one LiveRing, expanded work-log rows share one vertical rhythm and a live work log can be collapsed from its Working header, agent to-dos open focus first with abandoned work counted apart, and the conversation header shows only load progress and failures",
+  "replay": {
+    "status": "none",
+    "detail": "Web UI only; no replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rules changes."
+  },
+  "compatibility": {
+    "status": "none",
+    "detail": "Web and fractal-ui rendering only; no runtime, wire or stored format changes. fractal-ui IconName gains 'more' (additive)."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores the previous loading indicators, work-log layout, to-do list and header sync status."
+  }
+}
