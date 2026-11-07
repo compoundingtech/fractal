@@ -9,6 +9,7 @@ export type WorkspaceView =
   | { readonly _tag: 'Terminal'; readonly ref: TerminalRef }
   | { readonly _tag: 'Missions'; readonly mission?: string }
   | { readonly _tag: 'Usage' }
+  | { readonly _tag: 'Alert'; readonly id: string }
   | { readonly _tag: 'Document'; readonly ref: `doc/${string}` }
   | { readonly _tag: 'ViewUnavailable'; readonly ref: string; readonly reason: string }
 
@@ -18,6 +19,17 @@ export const isTerminalRef = (ref: string): ref is TerminalRef => ref.startsWith
 /** The Missions screen's tab, opened from the sidebar. */
 export const MISSIONS_REF = 'missions'
 const isDocumentRef = (ref: string): ref is `doc/${string}` => ref.startsWith('doc/')
+
+/**
+ * An alert's details view is reached by its URL alone (`?open=alert/<id>:detail`): a passing view over a list that
+ * empties as it is worked through, so it never accumulates in the workspace's tabs.
+ */
+const ALERT_PREFIX = 'alert/'
+export const isAlertRef = (ref: string): boolean => ref.startsWith(ALERT_PREFIX)
+export const alertPaneId = (id: string): string => `${ALERT_PREFIX}${id}:detail`
+/** The alert a selected pane id shows, if it shows one. */
+export const alertIdOfPane = (pane: string): string | undefined =>
+  isAlertRef(pane) && pane.endsWith(':detail') ? pane.slice(ALERT_PREFIX.length, -':detail'.length) : undefined
 
 export const workspaceView = (pane: { readonly ref: string } | undefined): WorkspaceView =>
   pane === undefined
@@ -77,8 +89,10 @@ export const retainPane = ({ panes, ref, name, limit }: {
 export const workspaceHref = (ref: string, pane: string, search: string): string => {
   const path = `/w/${ref.split('/').map(encodeURIComponent).join('/')}?open=${encodeURIComponent(pane)}`
   if (import.meta.env.DEV) {
-    const scenario = new URLSearchParams(search).get('scenario')
-    if (scenario !== null) return `${path}&scenario=${encodeURIComponent(scenario)}`
+    const params = new URLSearchParams(search)
+    const scenario = params.get('scenario')
+    const attention = params.get('attention')
+    if (scenario !== null) return `${path}&scenario=${encodeURIComponent(scenario)}${attention === null ? '' : `&attention=${encodeURIComponent(attention)}`}`
   }
   return path
 }

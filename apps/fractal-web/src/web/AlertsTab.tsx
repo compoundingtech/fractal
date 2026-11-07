@@ -3,67 +3,51 @@ import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
 
-import { promptAnswers } from '../../../../clients/typescript/fractal-views/homeView.ts'
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { colorVars as c, geometryVars as g, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
-import { AgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
-import type { AlertAction, AlertActionResult } from '../conversation/alerts/alert-action-port.ts'
-import type { PromptAnswerResult } from '../conversation/alerts/prompt-answer-port.ts'
-import { useAttention, useAttentionDecode, useDataSource, useNow } from '../data/react.tsx'
+import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
+import { useAttentionDecode, useNow } from '../data/react.tsx'
 import { decodedRoster, type Feed, type RosterDecode } from '../data/source.ts'
 import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
 import { DecodeNotice } from './LiveRoster.tsx'
 
 // The sidebar's Alerts tab: every open alert across conversations in Fractal's tier order, one SR-2 row
-// each, answered in place. It reads the attention collection the conversation strips read, so the tab
-// marker, this list and each conversation agree. It offers only actions the source serves.
-
-type Act = (alert: Native.Attention, action: AlertAction) => Promise<AlertActionResult>
-type Answer = (alert: Native.Attention, answer: string, sent: string) => Promise<PromptAnswerResult>
+// each, opened in the main area. It reads the attention collection the conversation cards read, so the tab
+// marker, this list and each conversation agree.
 
 const GLYPH_WORDS: Record<AlertsTabRow['glyph'], string> = { '?': 'asks a question', '◆': 'needs you', '!': 'fault' }
 
-/** The Alerts tab over the active source: its attention feed, clock, and answer ports when it serves them. */
-export const AlertsTab = ({ onOpen }: { readonly onOpen: (ref: string) => void }): React.ReactNode => {
-  const { alertActions: actions, prompts } = useDataSource()
-  return (
-    <AlertsList
-      feed={useAttention()}
-      decode={useAttentionDecode()}
-      now={useNow()}
-      onOpen={onOpen}
-      onAct={actions === undefined ? undefined : (alert, action) => actions.act({ alert, action })}
-      onAnswer={prompts === undefined ? undefined : (alert, _answer, sent) => {
-        const prompt = promptAnswers(alert)
-        return prompt === null
-          ? Promise.resolve({ _tag: 'Refused', detail: 'This prompt is answered in the seat\'s terminal.' })
-          : prompts.respond({ alert: { id: alert.id, revision: alert.revision, source_id: alert.source_id, target_id: prompt.target_id, episode: prompt.episode }, answer: sent })
-      }}
-    />
-  )
-}
+/** The Alerts tab over the active source: its attention feed, without answers on their way, and its clock. */
+export const AlertsTab = ({ onOpen, selected, onSelect }: {
+  readonly onOpen: (ref: string) => void
+  readonly selected?: string
+  readonly onSelect?: (id: string) => void
+}): React.ReactNode => (
+  <AlertsList feed={useVisibleAttention()} decode={useAttentionDecode()} now={useNow()} onOpen={onOpen} {...(selected === undefined ? {} : { selected })} {...(onSelect === undefined ? {} : { onSelect })} />
+)
 
 /**
  * The list itself, from a feed: waiting, unavailable, stale and empty each say so; unknown is never shown as none.
- * It is its own bounded scroll region, so it fills a `minHeight: 0` column and every row and expanded answer stays reachable.
+ * It is its own bounded scroll region, so it fills a `minHeight: 0` column and every row stays reachable.
  */
-export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, onAct, onAnswer }: {
+export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected, onSelect }: {
   readonly feed: Feed<readonly Native.Attention[]>
   readonly decode?: RosterDecode
   readonly now: number
   /** Opens an agent conversation or a mission by ref. */
   readonly onOpen: (ref: string) => void
-  readonly onAct?: Act
-  readonly onAnswer?: Answer
+  /** The alert the main area shows. */
+  readonly selected?: string
+  /** Opens an alert's details in the main area. */
+  readonly onSelect?: (id: string) => void
 }): React.ReactNode => {
   const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now) : []), [feed, now])
   const shownIds = React.useMemo(() => new Set(feed._tag === 'Observed' ? feed.value.map((row) => row.id) : []), [feed])
-  const [expanded, setExpanded] = React.useState<string>()
   const region = React.useRef<HTMLDivElement>(null)
   const message = React.useRef<HTMLParagraphElement>(null)
   // The row that last held focus: its own controls, its answer, or its menu. It stays recorded when focus falls to
-  // the page because a control inside the row unmounted (a sent answer's confirmation), and is forgotten once the
+  // the page because a control inside the row unmounted (a row that left the feed), and is forgotten once the
   // person moves focus or points anywhere else, so a later feed update never takes focus back from other content.
   const focused = React.useRef<string | undefined>(undefined)
   const shown = React.useRef<readonly string[]>([])
@@ -80,7 +64,6 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, onAct, o
     const before = shown.current
     const ids = rows.map((row) => row.id)
     shown.current = ids
-    if (expanded !== undefined && !ids.includes(expanded)) setExpanded(undefined)
     const lost = focused.current
     if (lost === undefined || ids.includes(lost)) return
     focused.current = undefined
@@ -89,9 +72,9 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, onAct, o
     const at = before.indexOf(lost)
     const next = [...before.slice(at + 1), ...before.slice(0, Math.max(at, 0)).reverse()].find((id) => ids.includes(id)) ?? ids[0]
     const row = next === undefined ? undefined : [...(region.current?.querySelectorAll<HTMLElement>('[data-alert-id]') ?? [])].find((each) => each.dataset.alertId === next)
-    const target = row === undefined ? message.current : row.querySelector<HTMLElement>('button[aria-expanded]')
+    const target = row === undefined ? message.current : row.querySelector<HTMLElement>('button[data-alert-open]')
     target?.focus()
-  }, [rows, expanded])
+  }, [rows])
   return (
     <div
       ref={region}
@@ -125,12 +108,10 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, onAct, o
                   <AlertRow
                     key={row.id}
                     row={row}
-                    expanded={expanded === row.id}
-                    onExpand={(open) => setExpanded(open ? row.id : undefined)}
+                    selected={selected === row.id}
+                    onSelect={() => onSelect?.(row.id)}
                     onFocusWithin={() => { focused.current = row.id }}
                     onOpen={onOpen}
-                    onAct={onAct}
-                    onAnswer={onAnswer}
                   />
                 ))}
               </ul>
@@ -141,45 +122,29 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, onAct, o
   )
 }
 
-const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAnswer }: {
+const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen }: {
   readonly row: AlertsTabRow
-  readonly expanded: boolean
-  readonly onExpand: (open: boolean) => void
+  readonly selected: boolean
+  readonly onSelect: () => void
   /** Focus arrived in this row, including its menu, which React bubbles here from the popover. */
   readonly onFocusWithin: () => void
   readonly onOpen: (ref: string) => void
-  readonly onAct: Act | undefined
-  readonly onAnswer: Answer | undefined
 }): React.ReactNode => {
   const touch = React.useContext(NarrowLayoutContext)
   const [menu, setMenu] = React.useState(false)
-  const trigger = React.useRef<HTMLButtonElement>(null)
-  const panel = React.useRef<HTMLDivElement>(null)
-  const panelId = React.useId()
-  // Opening moves focus to the first answer (else the answer region), so Enter, then Enter again, reaches the alert's own confirmation.
-  React.useEffect(() => {
-    if (expanded) (panel.current?.querySelector<HTMLElement>('textarea:not([disabled]), button:not([disabled]), a[href]') ?? panel.current)?.focus()
-  }, [expanded])
   return (
     <li
       data-alert-id={row.id}
       data-alert-glyph={row.glyph}
       onContextMenu={(event) => { event.preventDefault(); setMenu(true) }}
       onFocus={onFocusWithin}
-      onKeyDown={(event) => {
-        if (event.key !== 'Escape' || !expanded || event.defaultPrevented) return
-        event.preventDefault()
-        onExpand(false)
-        trigger.current?.focus()
-      }}
     >
-      <div {...stylex.props(styles.row)}>
+      <div {...stylex.props(styles.row, selected && styles.rowSelected)}>
         <Aria.Button
-          ref={trigger}
-          aria-expanded={expanded}
-          aria-controls={expanded ? panelId : undefined}
+          data-alert-open=""
+          aria-current={selected ? 'true' : undefined}
           aria-label={`${row.title}, ${row.age}${row.line2 === '' ? '' : `, ${row.line2}`}, ${GLYPH_WORDS[row.glyph]}`}
-          onPress={() => onExpand(!expanded)}
+          onPress={onSelect}
           onKeyDown={(event) => {
             if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) setMenu(true)
             else event.continuePropagation()
@@ -199,7 +164,7 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
             <Aria.Menu
               aria-label={`Actions for ${row.title}`}
               autoFocus="first"
-              onAction={(key) => (key === 'answer' ? onExpand(true) : onOpen(String(key)))}
+              onAction={(key) => (key === 'answer' ? onSelect() : onOpen(String(key)))}
               {...stylex.props(styles.menu)}
             >
               <Aria.MenuItem id="answer" {...stylex.props(styles.item)}>Answer</Aria.MenuItem>
@@ -209,11 +174,6 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
           </Aria.Popover>
         </Aria.MenuTrigger>
       </div>
-      {expanded ? (
-        <div ref={panel} id={panelId} role="region" tabIndex={-1} aria-label={`Answer ${row.title}`} {...stylex.props(styles.panel)}>
-          <AgentAlerts alerts={[row.item]} onAct={onAct} onAnswer={onAnswer} />
-        </div>
-      ) : null}
     </li>
   )
 }
@@ -224,19 +184,19 @@ const styles = stylex.create({
   scroll: { flex: '1 1 0', minWidth: 0, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' },
   list: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column' },
   row: { display: 'flex', alignItems: 'stretch', borderRadius: 4, ':hover': { backgroundColor: c.rowHover } },
+  rowSelected: { backgroundColor: c.rowActive, ':hover': { backgroundColor: c.rowActive } },
   main: { flexGrow: 1, minWidth: 0, minHeight: g.sidebarRow, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 2, paddingBlock: s.xs, paddingInline: s.row, borderWidth: 0, borderRadius: 4, backgroundColor: 'transparent', color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, textAlign: 'start', cursor: 'pointer', ...focus },
   line: { display: 'flex', alignItems: 'baseline', gap: s.sm, minWidth: 0 },
   glyph: { flexShrink: 0, width: g.iconSm, textAlign: 'center', color: c.attention, fontWeight: 600, '::before': { content: 'attr(data-alert-row-glyph)' } },
   question: { color: c.primary },
   fault: { color: c.danger },
   title: { flexGrow: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  metric: { flexShrink: 0, color: c.fgMuted, fontSize: t.metaSize, fontVariantNumeric: 'tabular-nums' },
-  meta: { paddingInlineStart: `calc(${g.iconSm} + ${s.sm})`, color: c.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  more: { flexShrink: 0, width: 24, borderWidth: 0, borderRadius: 4, backgroundColor: 'transparent', color: c.fgMuted, cursor: 'pointer', ':hover': { color: c.fg }, ...focus },
+  metric: { flexShrink: 0, color: c.fgSoft, fontSize: t.metaSize, fontVariantNumeric: 'tabular-nums' },
+  meta: { paddingInlineStart: `calc(${g.iconSm} + ${s.sm})`, color: c.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  more: { flexShrink: 0, width: 24, borderWidth: 0, borderRadius: 4, backgroundColor: 'transparent', color: c.fgSoft, cursor: 'pointer', ':hover': { color: c.fg }, ...focus },
   touch: { minHeight: g.touchTarget, minWidth: g.touchTarget },
   popover: { backgroundColor: c.raised, color: c.fg, border: `1px solid ${c.border}`, borderRadius: 6, fontFamily: t.fontSans, fontSize: t.metaSize, zIndex: 100 },
   menu: { outline: 'none', padding: s.xs, minWidth: 160 },
   item: { paddingBlock: s.xs, paddingInline: s.md, borderRadius: 4, cursor: 'pointer', outline: 'none', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { backgroundColor: c.rowHover } },
-  panel: { paddingInline: s.row, paddingBlockEnd: s.md, outline: 'none' },
-  empty: { margin: 0, padding: s.md, color: c.fgMuted, fontSize: t.metaSize, outline: 'none', ...focus },
+  empty: { margin: 0, padding: s.md, color: c.fgSoft, fontSize: t.metaSize, outline: 'none', ...focus },
 })
