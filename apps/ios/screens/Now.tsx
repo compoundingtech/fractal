@@ -13,6 +13,7 @@ import { missionTitle } from '../missionsView';
 import { useStore } from '../store';
 import { randomName } from '../launcher';
 import { AlertBody, RequestAnswers, RequestQuestion, StructuredRequestView } from './Alerts';
+import { AskThread, ThreadGroup } from './Threads';
 import { theme } from '../theme';
 import { Button, GroupedHeader, GroupedRow, Markdown, Note, SystemScreen as Screen, T } from '../ui';
 import type { RootScreen } from '../navigation';
@@ -90,6 +91,7 @@ export function NowScreen() {
       ListEmptyComponent={<Empty text={alertsEmptyText({ loadError: loadErrors.attention, status, hasSynced, sync })} />}
       ListFooterComponent={<View>
         {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `fractal now` lists them all.</Note> : null}
+        <ThreadGroup title="Recently closed threads" context={{ recently_closed: true }} openThread={id => navigation.navigate('Thread', { id })} />
       </View>}
       style={{ flex: 1 }}
     />
@@ -110,6 +112,10 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   const agentId = [item.requester_id, item.source_id].find(id => id?.startsWith('agent/'));
   const agent = agentId ? data.agents.find(candidate => candidate.id === agentId) : undefined;
   const mission = item.mission_id ? data.missions.find(candidate => candidate.id === item.mission_id) : undefined;
+  const requester = item.requester_id;
+  const askOrigin = isRequest(item.attention_kind) && item.source_id.startsWith('step-run/') && item.source_id.length > 'step-run/'.length
+    && requester?.startsWith('agent/') && requester.length > 'agent/'.length && item.episode
+    ? { agentId: requester, ask: item.source_id, episode: item.episode } : undefined;
   const other = item.actions.filter(action => action !== 'work.done' && action !== 'message.read' && action !== 'prompt.respond');
   // Closed elsewhere, so nothing here can be answered; it stays until the person clears it.
   if (item.closedElsewhere && !item.update) {
@@ -120,6 +126,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         <T bold selectable>{row.title}</T>
         {item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
         <T dim>This was closed. It stays under Recently closed until you clear it.</T>
+        {askOrigin ? <AskThread origin={askOrigin} initialTitle={item.title} allowStart={false} onOpen={id => navigation.navigate('Thread', { id })} /> : null}
         <Button label="clear from Now" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
         <T dim selectable>{item.id}</T>
       </ScrollView>
@@ -152,7 +159,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
     return <Screen>
       <Banners />
       {/* Automatic insets keep the end of a long request clear of the floating tab bar. */}
-      <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}>
+      <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}>
         <T><T bold color={theme[row.color]}>{row.glyph} request</T><T dim>  {item.priority} · waited {row.age}</T></T>
         <T bold selectable>{row.title}</T>
         <T><T dim>asks  </T><T bold color={theme.person}>{from}</T></T>
@@ -163,6 +170,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         </>}
         {blockedLine(item) ? <T dim selectable>{blockedLine(item)}</T> : <T dim>Answer it, or Nothing to do if there is nothing for you to do. Either way the step it waits on continues.</T>}
         {mission ? <Button label={`mission ${missionTitle(mission)}`} onPress={() => navigation.navigate('Mission', { id: mission.id })} /> : item.mission_id ? <T dim>mission {item.mission_id}</T> : null}
+        {askOrigin ? <AskThread origin={askOrigin} initialTitle={item.title} onOpen={id => navigation.navigate('Thread', { id })} /> : null}
         {agentId ? <Button label={`chat with ${from}`} onPress={() => navigation.navigate('Conversation', { target: agentId, title: from })} /> : null}
         <T dim selectable>{item.id}</T>
       </ScrollView>

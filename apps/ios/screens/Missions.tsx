@@ -1,3 +1,4 @@
+import { ThreadGroup } from './Threads';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Pressable, ScrollView, SectionList, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
@@ -136,6 +137,7 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
           onPress={() => navigation.navigate('Attention', { id: row.item.id })}
         />)}
       </> : null}
+      <ThreadGroup context={{ mission_id: mission.id }} openThread={id => navigation.navigate('Thread', { id })} />
       <SectionHeader title="steps" count={steps.length} />
       {steps.map(({ shown, step }) => {
         const style = stepStyle(shown?.word);

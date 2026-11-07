@@ -402,3 +402,47 @@ test('a collections socket that never opens is given up on and tried again', asy
   assert.equal(closed, true);
   feed.close();
 });
+
+test('thread windows share the paired socket, apply exact order, and follow again after reconnect', async () => {
+  const { client, sockets } = fakeClient();
+  const { handlers } = watch();
+  const foreground = new ForegroundGate('active');
+  const feed = new Feed(client, handlers, foreground, () => 'action/test', [5]);
+  const rows = [], events = [], issues = [];
+  const context = { origin_ask: 'step-run/one', origin_ask_episode: 'episode/one' };
+  const summary = feed.followThreadSummaries(context, { onWindow: window => rows.push(window.items), onIssue: (...issue) => issues.push(issue) });
+  const timeline = feed.followThreadTimeline('thread/one', { onWindow: window => events.push(window.items), onIssue: (...issue) => issues.push(issue) });
+  try {
+    await settle();
+    const socket = sockets[0];
+    const list = socket.sent.find(command => command.collection === 'threads');
+    const history = socket.sent.find(command => command.collection === 'thread-timeline');
+    assert.deepEqual(list.thread_context, context);
+    assert.equal(history.subject, 'thread/one');
+    assert.equal(sockets.length, 1);
+    const thread = { id: 'thread/one', title: 'Review', unread: true, message_count: 1, state: 'open' };
+    const event = { id: 'message/first', kind: 'message', content: 'One', thread_quote_id: null };
+    socket.frame({ kind: 'snapshot', collection: 'threads', id: list.id, snapshot: snapshot(1), items: [thread], order: [thread.id], has_more: false });
+    socket.frame({ kind: 'snapshot', collection: 'thread-timeline', id: history.id, snapshot: snapshot(1), items: [event], order: [event.id], has_more: false });
+    const changed = { ...thread, unread: false, message_count: 2 };
+    socket.frame({ kind: 'changes', collection: 'threads', id: list.id, snapshot: snapshot(2), upserts: [changed], removes: [], order: [thread.id], has_more: false });
+    assert.deepEqual(rows, [[thread], [changed]]);
+    assert.deepEqual(events, [[event]]);
+
+    feed.reconnect();
+    await settle();
+    assert.equal(sockets.length, 2);
+    assert.equal(socket.closed, true);
+    assert.ok(sockets[1].sent.some(command => command.id === list.id));
+    assert.ok(sockets[1].sent.some(command => command.id === history.id));
+    socket.frame({ kind: 'snapshot', collection: 'threads', id: list.id, snapshot: snapshot(3), items: [thread], order: [thread.id], has_more: false });
+    assert.equal(rows.length, 2, 'a late frame from the old socket cannot restore its state');
+    sockets[1].frame({ kind: 'error', id: list.id, code: 'forbidden', message: 'grant expired', retryable: false });
+    assert.deepEqual(issues, [['not allowed: grant expired', true]]);
+    summary.close();
+    timeline.close();
+    assert.deepEqual(sockets[1].sent.slice(-2), [{ kind: 'unsubscribe', id: list.id }, { kind: 'unsubscribe', id: history.id }]);
+  } finally {
+    feed.close();
+  }
+});

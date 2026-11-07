@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Show Fractal threads in native iOS agent and thread views",
+  "summary": "Start, read and reply to threads in native iOS Inbox, mission, agent and dedicated views",
   "replay": {
     "status": "none",
     "detail": "No runtime replay change."
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "The iOS UI shows thread controls only when the selected member advertises threads-v1 and grants the corresponding scopes. This change does not activate the capability."
+    "detail": "Thread messages use the paired device key, and live thread windows reuse the selected member’s collections socket. The iOS UI requires threads-v1 from that member and checks each action grant. Activation remains gated on daemon rollout."
   },
   "downtime": {
     "status": "none",
