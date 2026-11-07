@@ -2310,7 +2310,7 @@
             "under": { "type": "array", "items": { "$ref": "#/$defs/AgentRelationship" } },
             "delivery": { "oneOf": [{ "$ref": "#/$defs/AgentDelivery" }, { "type": "null" }], "description": "Whether the process that carries this local seat's messages is live and runs this daemon's st binary. Present for local native seats that are running or waiting, including human-blocked harnesses; a stale path makes a running agent `waiting`." },
             "subagents": { "type": "array", "items": { "$ref": "#/$defs/AgentSubagent" }, "description": "The subagents this seat's harness runs now, oldest first: recorded, not ended, with a lease that runs past this read. Omitted when the agent's driver does not report subagents, or by an older daemon. Claude, Codex, and OMP report subagents; Pi and OpenCode do not. Absence means not reported; an empty list means no running subagents." },
-            "handoff": {"oneOf": [{"$ref": "#/$defs/AgentHandoff"}, {"type": "null"}], "description": "Placement handoff phase; the destination waits for former hosts to acknowledge their stopped runtimes."},
+            "handoff": {"oneOf": [{"$ref": "#/$defs/AgentHandoff"}, {"type": "null"}], "description": "Placement handoff phase; the destination waits for former hosts to acknowledge their stopped runtimes."}, "stopping": {"oneOf": [{"$ref": "#/$defs/AgentStopping"}, {"type": "null"}], "description": "The seat's declaration is a stop but its process still runs. An older daemon omits the field."},
             "rollout": { "type": ["object", "null"], "description": "Durable owned-seat cutover, incarnation and native-session fences, phase, deadline and blockers. Omitted by older daemons." },
             "workspace": { "type": ["string", "null"], "description": "The declared workspace on the owning host." },
             "lifecycle": { "$ref": "#/$defs/AgentLifecycle", "description": "The selected agent declaration's optional KDL `lifecycle` child. Declared intent, not observed activity, runtime state, restart policy, or inferred ownership; omitted rather than null when undeclared. Absence means undeclared; a future string decodes as Unknown without discarding the row." },
@@ -2392,6 +2392,7 @@
         "transport": { "type": ["string", "null"] }
       }
     },
+    "AgentStopping": {"type": "object", "additionalProperties": false, "required": ["held"], "properties": {"held": {"type": ["string", "null"], "description": "Why the stop waits: mail the seat had not read, or work it held in another run, when the stop was declared. Null while the stop has not been deferred."}}},
     "AgentHandoff": {"type": "object", "additionalProperties": false, "required": ["phase", "destination", "sources", "pending_sources", "desired_token"], "properties": {"phase": {"type": "string", "enum": ["stopping-source", "waiting-for-destination", "starting", "running"]}, "destination": {"type": "string"}, "sources": {"type": "array", "items": {"type": "string"}}, "pending_sources": {"type": "array", "items": {"type": "string"}}, "overridden_sources": {"type": "array", "items": {"type": "string"}}, "desired_token": {"type": "string"}}},
     "AgentSuspension": {
       "type": "object",

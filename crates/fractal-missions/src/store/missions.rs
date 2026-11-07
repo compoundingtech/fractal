@@ -6,7 +6,10 @@ use fractal_store::store::identities::resolve_reference_conn;
 
 mod run_review;
 #[doc(hidden)]
-pub use run_review::{validate_run_reviewer, validate_run_reviewer_assignment};
+pub use run_review::{
+    ReviewOwnerSnapshot, review_owner_snapshot, validate_run_reviewer,
+    validate_run_reviewer_assignment,
+};
 
 /// The batches one resource observation seals its claims in. A claim whose retention class
 /// keeps only the latest state (`current`, `otel`) does not share a batch with a claim of another
@@ -1693,8 +1696,12 @@ pub trait MissionsStore {
     /// Remaining duration from bounded, incrementally projected completed-run samples.
     fn mission_run_eta(&self, run: &str, at_unix_ms: u128) -> Result<Option<Value>>;
     fn active_mission_runs_for_origin(&self, origin: &str) -> Result<Vec<MissionRunView>>;
-    /// Live work that `seat` holds or is assigned in a run outside the root of `owner_run`.
-    fn seat_work_in_other_runs(&self, seat: &str, owner_run: &str) -> Result<Vec<String>>;
+    /// Live work that `seat` holds or is assigned in a run outside the root of `owner_run`. With
+    /// `before`, only work in runs this host recorded before that store index (`stop_intake`).
+    fn seat_work_in_other_runs(&self, seat: &str, owner_run: &str, before: Option<u64>) -> Result<Vec<String>>;
+    /// The run that declared `seat`'s stop, if any, and the stop claim's local store index, when
+    /// its declaration is a stop (`stop_intake::stop_cut`).
+    fn seat_stop_cut(&self, seat: &str) -> Result<Option<(Option<String>, u64)>>;
     /// All-pending current generations first, newest first within each group. This puts first
     /// readiness before older runs' gate writes. Every active run remains in the finite snapshot;
     /// arrivals during a pass wait for the next pass and cannot displace its remaining work.
@@ -4843,30 +4850,17 @@ impl MissionsStore for Store {
             .collect()
     }
 
-    fn seat_work_in_other_runs(&self, seat: &str, owner_run: &str) -> Result<Vec<String>> {
+    fn seat_work_in_other_runs(&self, seat: &str, owner_run: &str, before: Option<u64>) -> Result<Vec<String>> {
         // Any step or run can come to hold or release this seat's work.
         smallclaims::touched::note_read(|| format!("actor:{seat}"));
         smallclaims::touched::note_read(|| "kind:step-run.state".to_owned());
         smallclaims::touched::note_read(|| "kind:mission-run.state".to_owned());
-        let owner = owner_run.strip_prefix("mission-run/").unwrap_or(owner_run);
-        let connection = self.readers.get();
-        let mut statement = connection.prepare(
-            "SELECT step_runs.subject
-             FROM step_runs JOIN mission_runs ON mission_runs.id=step_runs.run_id
-             WHERE (step_runs.assignee=?1 OR step_runs.lease_owner=?1)
-               AND step_runs.status IN ('ready','claimed','working','verifying')
-               AND step_runs.generation_id=mission_runs.current_generation_id
-               AND mission_runs.status IN ('running','standing','blocked')
-               AND mission_runs.phase NOT LIKE 'cleanup-%'
-               AND mission_runs.phase<>'terminal'
-               AND mission_runs.root_run_id<>COALESCE(
-                     (SELECT root_run_id FROM mission_runs WHERE id=?2), ?2)
-             ORDER BY step_runs.subject LIMIT 3",
-        )?;
-        let subjects = statement
-            .query_map(params![seat, owner], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(subjects)
+        super::stop_intake::held_work(&self.readers.get(), seat, owner_run, before, None)
+    }
+
+    fn seat_stop_cut(&self, seat: &str) -> Result<Option<(Option<String>, u64)>> {
+        smallclaims::touched::note_read(|| seat.to_owned());
+        super::stop_intake::stop_cut(&self.readers.get(), seat)
     }
 
     fn active_mission_run_ids_for_origin(&self, origin: &str) -> Result<Vec<String>> {
@@ -5931,6 +5925,7 @@ impl MissionsStore for Store {
                 }
                 if action == "claim" {
                     fractal_store::store::refresh_intake::admit_claim_tx(transaction, &actor)?;
+                    super::stop_intake::admit_claim(transaction, &actor, &subject)?;
                 }
                 let current = transaction
                     .query_row(
