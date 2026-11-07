@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
-import { resourceRow, readSidebarResources, subjectToFile } from './sidebarResources.ts';
-import { sidebarGroups, rememberResources } from './sidebarView.ts';
+import { resourceRow, readSidebarResources, subjectToFile, terminalResourceRow } from './sidebarResources.ts';
+import { sidebarGroups, rememberResources, sidebarResourceMatches } from './sidebarView.ts';
 const observation = (id, kind, facts = {}) => ({ id, kind, facts, observed_at: '2026-10-11T00:00:00Z', opened_by: null, opened_by_run: null });
 const pull = observation('resource/github/acme/garden/issue/9', 'vcs.pull-request', { title: 'Build garden', number: 9 });
 const repo = observation('resource/github/acme/garden', 'vcs.repository', { url: 'https://github.com/acme/garden' });
@@ -45,3 +45,14 @@ const specific = await readSidebarResources(async (filters, options) => {
 assert.deepEqual(specific.rows, [exact]); assert.equal(specific.truncated, false);
 const descendant = await readSidebarResources(async (filters) => ({ value: { items: filters.subject_prefix ? [observation(exact.id + '/child', 'custom.acme.note')] : [], page: { has_more: false } } }), exact.id);
 assert.deepEqual(descendant.rows, [], 'a prefix descendant never masquerades as the requested subject');
+
+const terminal = terminalResourceRow({ id: 'runtime/physical-1', owner_id: 'pty/person/avery/a2186f3b-1234-7000-8000-000000000001', terminal_id: 'terminal/pty/person/avery/a2186f3b-1234-7000-8000-000000000001' });
+assert.equal(terminal.title, 'a2186f3b');
+assert.equal(terminal.target, 'terminal/pty/person/avery/a2186f3b-1234-7000-8000-000000000001');
+const terminals = rememberResources(new Map(), [terminal]);
+for (const query of ['a2186f3b', 'PERSON/AVERY', terminal.searchText, 'physical-1']) {
+  assert.equal(sidebarGroups([], terminals, {}, query).groups[0].resources[0].id, terminal.id);
+  assert.equal(sidebarResourceMatches(terminal, query), true, 'the folder picker uses the same owner-ID search as the browser');
+}
+assert.equal(sidebarGroups([], terminals, {}, 'not-this-terminal').groups[0].resources.length, 0);
+assert.equal(terminalResourceRow({ id: 'runtime/2', owner_id: 'agent/example/worker', terminal_id: 'terminal/2' }).title, 'worker');

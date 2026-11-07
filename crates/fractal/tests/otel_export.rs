@@ -1146,7 +1146,6 @@ fn daemon_write_exports_independent_reconcile_pass_and_metrics() {
         "timer_gate_poll",
         "timer_llm_gate",
         "file_watch",
-        "launch_identity",
         "reconciler",
         "recorder_receipts",
         "startup",

@@ -340,6 +340,8 @@ export interface DataSource {
   /** Rows the SDK could not decode for the missions feed; absent sources decode every row. */
   readonly missionsDecode?: Atom.Atom<RosterDecode>
   readonly attention: Atom.Atom<Feed<readonly Attention[]>>
+  /** Rows the SDK could not decode for the attention feed; absent sources decode every row. */
+  readonly attentionDecode?: Atom.Atom<RosterDecode>
   readonly proposed?: Readonly<Record<string, ProposedMissionFields>>
   readonly events: Atom.Atom<Feed<readonly GatewayEvent[]>>
   /** Keyed by agent ref; retained data follows keep folding while invisible until evicted. */

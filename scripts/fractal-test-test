@@ -908,7 +908,13 @@ class LaneBurstTest(unittest.TestCase):
     def fractal(self, body):
         """A fake fractal: records its arguments, runs BODY (which prints the holder's answers), then holds until stdin closes."""
         path = Path(self.tmp.name) / 'fractal'
-        path.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> {self.calls}\n{body}\ncat > /dev/null\necho released >> {self.released}\n')
+        released = shlex.quote(str(self.released))
+        pending = shlex.quote(str(self.released.with_suffix('.pending')))
+        # Existence announces a complete release history, including repeat asks.
+        # Build it beside the marker, then publish it with one atomic rename.
+        path.write_text(f'#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> {self.calls}\n{body}\ncat > /dev/null\n'
+                        f'{{ if [ -e {released} ]; then cat {released}; fi; echo released; }} > {pending}\n'
+                        f'mv {pending} {released}\n')
         path.chmod(0o755)
         return {'ST3_BIN': str(path), 'ST_AGENT': 'agent/crew/builder'}
 

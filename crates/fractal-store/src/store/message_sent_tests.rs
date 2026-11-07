@@ -7,7 +7,7 @@ fn sent(subject: &str, key: Option<&str>, content: &str) -> ClaimInput {
         kind: "message.sent".into(),
         actor: Some("agent/birch".into()),
         fields: serde_json::from_value(json!({
-            "from": "agent/birch", "to": "agent/cedar", "content": content, "status": "sent"
+            "from": "agent/birch", "to": "agent/alder.cedar", "content": content, "status": "sent"
         }))
         .unwrap(),
         evidence: Vec::new(),
@@ -20,6 +20,9 @@ fn sent(subject: &str, key: Option<&str>, content: &str) -> ClaimInput {
 fn graph_with_shard(root: &Path) -> Arc<Store> {
     let graph = Arc::new(Store::open(&root.join("claims.sqlite3"), "alder").unwrap());
     messages_shard::open(&graph, root).unwrap();
+    // The recipient is a seat on this member, so mail to it routes to the stream.
+    let seat = crate::graph::parse_internal_intent("version 2\nagent \"cedar\" { host \"alder\"; command \"true\"; }", "alder").unwrap();
+    crate::store::card_fold_tests_shared_missions::declare(&graph, &seat, "outbox-recipient");
     graph
 }
 
