@@ -150,7 +150,9 @@ marker in pages, with no subject, id, actor, origin, kind, timestamp or body dig
 This includes declarations, grants and pending device/assistant pairings: even
 the deterministic pairing subject can be a verifier and is not disclosed.
 Nonallowlisted by-id requests return the same not-found response as nonexistent
-ids, with no existence oracle. Withheld rows retain page positions without gaps.
+ids. Service by-id admission first reads only the kind through the id index;
+hidden and absent rows return before loading or parsing a body, avoiding a
+body-size/JSON-parse existence oracle. Withheld rows retain page positions without gaps.
 The new client claim/work aliases admit only services; device, assistant and
 browser clients gain no new routes. Existing native routes retain non-service
 semantics. No declaration, assistant, action, upgrade, HEAD or unknown route is admitted.

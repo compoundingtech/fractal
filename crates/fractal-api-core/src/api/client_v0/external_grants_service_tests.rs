@@ -98,8 +98,9 @@ async fn service_r29_claim_parity_paging_bounds_redaction_and_credential_secrecy
         }
         let (status, value) = call(&app,"GET",&format!("/v1/client/claims/by-id/{}",grant.id),Value::Null,false).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{value}");
-        let (missing_status, _) = call(&app,"GET","/v1/client/claims/by-id/nonexistent",Value::Null,false).await;
+        let (missing_status, missing) = call(&app,"GET","/v1/client/claims/by-id/nonexistent",Value::Null,false).await;
         assert_eq!(status, missing_status);
+        assert_eq!(value.to_string().replace(&grant.id,"nonexistent"),missing.to_string());
         assert!(!value.to_string().contains(&credential_digest(TOKEN)));
         assert!(!value.to_string().contains(TOKEN));
         assert!(!value.to_string().contains("\"credential\":"));
@@ -107,6 +108,9 @@ async fn service_r29_claim_parity_paging_bounds_redaction_and_credential_secrecy
             let (status, raw) = call(&app,"GET",&format!("/v1/claims/by-id/{}",grant.id),Value::Null,false).await;
             assert_eq!(status, StatusCode::NOT_FOUND);
             assert_eq!(raw, value);
+            let (absent_status, absent) = call(&app,"GET","/v1/claims/by-id/nonexistent",Value::Null,false).await;
+            assert_eq!(status,absent_status);
+            assert_eq!(raw.to_string().replace(&grant.id,"nonexistent"),absent.to_string());
         }
     }
 }

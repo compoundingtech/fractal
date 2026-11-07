@@ -5,6 +5,7 @@ use crate::PersonWorkStore;
 use crate::EvidenceStore;
 use super::*;
 use super::client_v0::{ClientSession, require_scope};
+use rusqlite::OptionalExtension as _;
 
 pub(super) fn generic_claim_visible(claim: &ClaimRecord) -> bool {
     !fractal_schema::notice::is_reserved_subject(&claim.subject)
@@ -289,21 +290,32 @@ pub async fn get_claim(
     AxumPath(id): AxumPath<String>,
     session: Option<Extension<ClientSession>>,
 ) -> Result<Json<Value>, ApiError> {
+    let service = session.as_ref().is_some_and(|session|
+        client_v0::external_grants::is_service(&session.0));
     if let Some(session) = &session
         && client_v0::external_grants::is_service(&session.0) {
         require_scope(&session.0, "read.claims")?;
     }
     let store = state.store.clone();
     let id_for_read = id.clone();
-    blocking_store(move || store.claim_by_id(&id_for_read))
+    blocking_store(move || {
+        if service {
+            // The id index resolves only kind. Hidden and absent rows take the
+            // same path without loading or parsing any potentially large body.
+            let kind: Option<String> = store.readers.get()
+                .query_row("SELECT kind FROM claims WHERE id=?1", [&id_for_read],
+                    |row| row.get(0))
+                .optional()?;
+            if !kind.as_deref().is_some_and(|kind| service_claim_fields(kind).is_some()) {
+                return Ok(None);
+            }
+        }
+        store.claim_by_id(&id_for_read)
+    })
         .await?
         .filter(|claim| !claim.subject.starts_with("glass/"))
         .filter(generic_claim_visible)
-        .filter(|claim| !session.as_ref().is_some_and(|session|
-            client_v0::external_grants::is_service(&session.0))
-            || service_claim_fields(&claim.kind).is_some())
-        .map(|claim| Json(if session.as_ref().is_some_and(|session|
-            client_v0::external_grants::is_service(&session.0)) {
+        .map(|claim| Json(if service {
             service_claim(&claim)
         } else { json!(claim) }))
         .ok_or_else(|| ApiError::not_found(format!("claim `{id}` does not exist")))
