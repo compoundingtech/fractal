@@ -46,7 +46,7 @@ const Card = ({ layout, density }: { readonly layout: DecisionMoreLayout; readon
 
 type Args = { readonly scheme: Scheme; readonly width: number; readonly layout: DecisionMoreLayout; readonly density: 'docked' | 'full' }
 const Frame = ({ scheme, width, layout, density }: Args) => <main data-scheme={scheme} {...stylex.props(styles.root, darkTheme, scheme === 'light' && lightTheme)}>
-  <div style={{ width, maxWidth: '100%' }} {...stylex.props(styles.lane)}><Card layout={layout} density={density} /></div>
+  <div style={{ width, maxWidth: '100%' }} {...stylex.props(styles.lane, density === 'docked' && styles.laneDocked)}><Card layout={layout} density={density} /></div>
 </main>
 
 const meta = {
@@ -92,5 +92,6 @@ export const CFull: Story = { name: 'C · Digest, full density', args: { layout:
 
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', display: 'flex', justifyContent: 'center', alignItems: 'flex-start', padding: s.section, backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans },
-  lane: { display: 'flex', flexDirection: 'column', minWidth: 0, maxHeight: g.transcriptFrameHeight },
+  lane: { display: 'flex', flexDirection: 'column', minWidth: 0 },
+  laneDocked: { maxHeight: g.transcriptFrameHeight },
 })
