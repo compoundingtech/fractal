@@ -3,11 +3,22 @@
 
 name: Fractal tag release
 
+run-name: ${{ github.event_name == 'workflow_dispatch' && inputs.sha != '' && format('Fractal candidate {0} {1}', inputs.sha, inputs.request_id) || format('Fractal tag release {0}', github.ref_name) }}
+
 on:
   push:
     branches: [main]
-    tags: ["**", "!edge", "!embed-*", "!evidence/**"]
-  workflow_dispatch: null
+    tags: ['**', '!edge', '!embed-*', '!evidence/**']
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Exact first-parent main source SHA for an isolated candidate build
+        required: false
+        type: string
+      request_id:
+        description: Caller correlation ID for this candidate build
+        required: false
+        type: string
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths:
@@ -45,10 +56,52 @@ permissions:
   actions: read
 
 concurrency:
-  group: "fractal-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}"
+  group: "fractal-release-${{ github.event_name == 'pull_request' && github.ref || (github.event_name == 'workflow_dispatch' && inputs.sha != '' && format('candidate-{0}', inputs.sha)) || (github.event_name == 'push' && github.ref == 'refs/heads/main' && 'main') || github.run_id }}"
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  validate-source:
+    name: Validate the requested release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the trusted dispatch ref, never the unvalidated candidate
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require main dispatch and a full first-parent main SHA
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          REQUESTED_SHA: ${{ inputs.sha }}
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$DISPATCH_REF" != refs/heads/main ]]; then
+            echo "::error::Release builds must be dispatched from main."
+            exit 1
+          fi
+          if [[ -n "$REQUESTED_SHA" ]]; then
+            if [[ ! "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::The candidate source must be a full lowercase 40-character SHA."
+              exit 1
+            fi
+            # Read the whole stream: pipefail must not mistake an early reader exit for invalid history.
+            if ! git rev-list --first-parent refs/remotes/origin/main | grep -Fx -- "$REQUESTED_SHA"; then
+              echo "::error::The candidate source must belong to origin/main first-parent history."
+              exit 1
+            fi
+          fi
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Validates dispatch inputs using trusted inline shell and main history; never executes candidate source.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   pick-runner:
     name: pick-runner
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name != 'pull_request') }}
@@ -357,7 +410,8 @@ jobs:
           CACHE_REASON: Only reads organization runner metadata; checks out and builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   installer:
-    name: "installer (${{ matrix.runner }})"
+    name: 'installer (${{ matrix.runner }})'
+    needs: validate-source
     strategy:
       fail-fast: false
       matrix:
@@ -368,6 +422,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - name: Test release names, install entry points and isolated app transactions
         run: |
           scripts/install-test
@@ -377,6 +432,7 @@ jobs:
           python3 scripts/release-fractal-edge-test
           python3 scripts/release-publish-embed-test
           python3 scripts/release-fractal-manifest-test
+          python3 scripts/release-fractal-publish-test
           python3 scripts/compat-baseline-release-test
 
       - name: Test the daily release failure path
@@ -385,20 +441,22 @@ jobs:
         if: always()
         shell: bash
         env:
-          CACHE_REASON: Runs isolated installer fixtures without downloads or compilation.
+          CACHE_REASON: Runs isolated installer and publication-gate fixtures without downloads or compilation.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   embed:
     name: release-web-embed
+    needs: validate-source
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
       - uses: actions/cache@v4
         with:
-          path: "${{ runner.temp }}/pnpm-store"
+          path: '${{ runner.temp }}/pnpm-store'
           key: "web-embed-pnpm-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml', 'pnpm-source-inputs.json') }}"
         id: cache-1
       - # v3.24.1
@@ -419,14 +477,14 @@ jobs:
           summarize: true
       - name: Materialize megarepo members
         env:
-          MEGAREPO_STORE: "${{ runner.temp }}/megarepo"
+          MEGAREPO_STORE: '${{ runner.temp }}/megarepo'
         run: |
           python3 scripts/prepare-pnpm-source-inputs.py apply
           printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
       - name: Build the offline embed and capture four posters
         env:
-          pnpm_config_store_dir: "${{ runner.temp }}/pnpm-store"
-        run: "nix develop .#web --command node scripts/release-fractal-embed.mjs dist"
+          pnpm_config_store_dir: '${{ runner.temp }}/pnpm-store'
+        run: 'nix develop .#web --command node scripts/release-fractal-embed.mjs dist'
       - uses: actions/upload-artifact@v4
         with:
           name: release-web-embed
@@ -455,6 +513,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
       - uses: actions/download-artifact@v4
         with:
           name: release-web-embed
@@ -468,27 +527,28 @@ jobs:
           CACHE_REASON: Publishes the verified immutable web archive; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   build:
-    needs: [pick-runner]
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request')) }}
-    name: "release-build (${{ matrix.target }})"
+    needs: [pick-runner, validate-source]
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled() && needs['validate-source'].result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.deleted == false) || github.event_name == 'pull_request')) }}
+    name: 'release-build (${{ matrix.target }})'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - runner: "namespace-profile-linux-x86-64;job.priority=2;github.run-id=${{ github.run_id }}"
+          - runner: 'namespace-profile-linux-x86-64;job.priority=2;github.run-id=${{ github.run_id }}'
             target: x86_64-unknown-linux-gnu
           - runner: macos-15
             target: aarch64-apple-darwin
     runs-on: ${{ matrix.target == 'x86_64-unknown-linux-gnu' && github.event_name != 'pull_request' && (needs['pick-runner'].outputs.ci1 && fromJSON(needs['pick-runner'].outputs.ci1)[0] || 'ci1-priority') || matrix.runner }}
     timeout-minutes: 90
     env:
-      MACOSX_DEPLOYMENT_TARGET: "15.0"
-      CI_NATIVE_SNAPSHOT: "1"
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+      CI_NATIVE_SNAPSHOT: '1'
       RELEASE_TAG: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067
         with:
           toolchain: 1.97.0
@@ -504,7 +564,7 @@ jobs:
       - if: env.CI_BUILD_SNAPSHOT_HIT != '1'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
-          key: "release-${{ matrix.target }}"
+          key: 'release-${{ matrix.target }}'
           cache-on-failure: true
         id: cache-4
       - name: Restore the pinned Zig compiler
@@ -512,7 +572,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.CI_ZIG_CACHE_DIR }}
-          key: "zig-tool-v1-${{ runner.os }}-${{ runner.arch }}-0.15.2"
+          key: 'zig-tool-v1-${{ runner.os }}-${{ runner.arch }}-0.15.2'
         id: cache-5
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
@@ -567,7 +627,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.build-snapshot-save.outputs.name }}
-          path: "${{ runner.temp }}/ci-build-snapshot/build.tar.zst"
+          path: '${{ runner.temp }}/ci-build-snapshot/build.tar.zst'
           compression-level: 0
           retention-days: 3
           if-no-files-found: error
@@ -583,14 +643,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.build-snapshot-save.outputs.name }}
-          path: "${{ runner.temp }}/ci-build-snapshot/build.tar.zst"
+          path: '${{ runner.temp }}/ci-build-snapshot/build.tar.zst'
           compression-level: 0
           retention-days: 3
           if-no-files-found: error
           overwrite: true
       - uses: actions/upload-artifact@v4
         with:
-          name: "release-${{ matrix.target }}"
+          name: 'release-${{ matrix.target }}'
           path: dist/*
           if-no-files-found: error
           retention-days: 7
@@ -608,6 +668,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
       - uses: actions/download-artifact@v4
         with:
           pattern: release-*
@@ -615,7 +676,7 @@ jobs:
           path: dist
       - name: Verify both targets and record exact sources
         env:
-          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_SHA: ${{ inputs.sha || github.sha }}
         run: |
           set -euo pipefail
           cd dist
@@ -623,6 +684,8 @@ jobs:
           sha256sum --check SHA256SUMS
           python3 ../scripts/release-fractal-manifest.py "$SOURCE_SHA"
           cp ../docs/st3/binary-releases.md RELEASE-NOTES.md
+          # Markdown backticks are literal, not command substitution.
+          # shellcheck disable=SC2016
           printf '\nExact source: `%s`. See RELEASE.json for the PTY revision and targets.\n' "$SOURCE_SHA" >> RELEASE-NOTES.md
 
       - uses: actions/upload-artifact@v4
@@ -635,7 +698,7 @@ jobs:
         if: always()
         shell: bash
         env:
-          CACHE_REASON: Downloads verified build artifacts; builds nothing.
+          CACHE_REASON: Downloads verified build artifacts; tag runs stop at verified artifacts without drafting or publishing releases; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   publishEdge:
@@ -653,11 +716,12 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       SOURCE_SHA: ${{ github.sha }}
-      RUN_URL: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+      RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.sha || github.sha }}
           fetch-depth: 1
       - name: Fetch the whole history without evidence tags
         env:
@@ -696,98 +760,4 @@ jobs:
         shell: bash
         env:
           CACHE_REASON: Moves the rolling edge pre-release to a verified main commit; builds nothing.
-        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-  publish:
-    name: release-publish
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.event.deleted == false) }}
-    needs: assemble
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      TAG: ${{ github.ref_name }}
-      SOURCE_SHA: ${{ github.sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 1
-      - name: Fetch the whole history without evidence tags
-        env:
-          FETCH_TOKEN: ${{ github.token }}
-        run: |
-          if [ -z "$(git config --local --get-regexp '^http\..*\.extraheader$' || true)" ]; then
-            export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
-            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$FETCH_TOKEN" | base64 | tr -d '\n')"
-            export GIT_CONFIG_VALUE_0
-          fi
-          head=$(git rev-parse HEAD)
-          shallow=$(git rev-parse --git-path shallow)
-          errors=$(mktemp)
-          fetch() {
-            status=0
-            git fetch --quiet --refetch --no-tags origin '+refs/heads/*:refs/remotes/origin/*' '+refs/tags/*:refs/tags/*' '^refs/tags/evidence/*' "$head" 2> "$errors" || status=$?
-            cat "$errors" >&2
-            return "$status"
-          }
-          transport() { grep -Eq 'HTTP (408|429|5[0-9][0-9])|RPC failed|remote end hung up|early EOF|Connection (timed out|reset)|Operation timed out' "$errors"; }
-          [ ! -f "$shallow" ] || mv "$shallow" "$shallow.full-fetch"
-          if ! fetch && ! { transport && echo 'full history fetch: transport failure; trying once more' >&2 && fetch; }; then
-            [ ! -f "$shallow.full-fetch" ] || mv "$shallow.full-fetch" "$shallow"
-            exit 1
-          fi
-          rm -f "$shallow.full-fetch"
-          git fsck --connectivity-only --no-dangling --no-progress
-      - uses: actions/download-artifact@v4
-        with:
-          name: fractal-release
-          path: dist
-      - name: Publish the verified tag artifacts
-        run: |
-          set -euo pipefail
-          git fetch origin "refs/tags/$TAG"
-          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$SOURCE_SHA"
-          python3 scripts/compat-baseline-release check --source "$SOURCE_SHA" --require-latest
-          python3 scripts/release_notes.py --source "$SOURCE_SHA" --tag "$TAG" --output dist/RELEASE-NOTES.md --manifest dist/UPGRADE-IMPACT.json
-          cd dist
-          sha256sum --check SHA256SUMS
-          python3 ../scripts/release-fractal-manifest.py "$SOURCE_SHA"
-          # Refuse to replace any existing release or its assets. A partial draft stays private
-          # for inspection; delete that draft before retrying, never move the tag.
-          gh release create "$TAG" --verify-tag --draft --title "Fractal $TAG" \
-            --notes-file RELEASE-NOTES.md ./*.tar.gz ./*.sha256 SHA256SUMS RELEASE.json UPGRADE-IMPACT.json
-          gh release edit "$TAG" --draft=false
-
-      - name: Report job cache coverage
-        if: always()
-        shell: bash
-        env:
-          CACHE_REASON: Publishes verified assembled artifacts; builds nothing.
-        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
-  advance:
-    name: advance-compatibility-baselines
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') && github.event.deleted == false) }}
-    needs: publish
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    permissions:
-      contents: write
-      actions: write
-      pull-requests: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      GH_REPO: ${{ github.repository }}
-      TAG: ${{ github.ref_name }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Propose compatibility baselines after publication
-        run: python3 scripts/compat-baseline-release advance "$TAG"
-      - name: Report job cache coverage
-        if: always()
-        shell: bash
-        env:
-          CACHE_REASON: Verifies published archives and proposes the baseline maintenance PR; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
