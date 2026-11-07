@@ -1,4 +1,5 @@
-import type { Arrangement, OrderedMembership } from '@fractal/client'
+import { ClientError, type ActionOf, type Arrangement, type OrderedMembership } from '@fractal/client'
+import type { MembershipEditEvent } from './edit.ts'
 import type { SidebarJournalRequest, SidebarJournalState } from './sidebarJournal.ts'
 import { generateKeyBetween, generateNKeysBetween } from 'fractional-indexing'
 import { drawnParents, insertAt, isLive, liveAncestor, positionKey, project, wouldCycle, type FolderDoc, type Insertion, type Projection, type ProjectedFolder } from './core.mts'
@@ -348,4 +349,33 @@ export const planMembershipMove = (arrangement: Arrangement, memberships: readon
   }
   if (new TextEncoder().encode(JSON.stringify(folders.length ? folders : members)).length > 1024 * 1024) return refuse('TooManyBytes')
   return { _tag: 'PlannedV2', edit: { folders, memberships: members } }
+}
+
+/** Send only requests returned by MembershipEditor.execute('Send'). Actor stays transport-owned. */
+export const membershipWriteRequest = (request: SidebarJournalRequest): ActionOf<'arrangement.edit'> | ActionOf<'arrangement.membership.edit'> => {
+  const { fence, identity, operations } = request
+  const common = { api_version: 'st3.client.v0' as const, id: identity.action_id, idempotency_key: identity.idempotency_key,
+    fence: { snapshot_id: fence.snapshot.id, subject_revisions: { [fence.scope.container]: fence.revision } } }
+  const parameters = { subject: fence.scope.container, owner: fence.scope.owner }
+  return 'Folders' in operations
+    ? { ...common, type: 'arrangement.edit', parameters: { ...parameters, operations: [...operations.Folders] } }
+    : { ...common, type: 'arrangement.membership.edit', parameters: { ...parameters, operations: [...operations.Memberships] } }
+}
+export const membershipWriteResult = (request: SidebarJournalRequest, result: unknown): MembershipEditEvent => {
+  const identity = request.identity
+  if (typeof result === 'object' && result !== null && 'action_id' in result && result.action_id === identity.action_id && 'status' in result) {
+    if (result.status === 'accepted' || result.status === 'completed') return { _tag: 'Ack', identity }
+    if (result.status === 'rejected') return { _tag: 'Refused', identity, refusal: 'Conflict' }
+  }
+  if (result instanceof ClientError) {
+    const { code, details } = result.response
+    if (details?.applied === 'unknown') return { _tag: 'Unknown', identity }
+    const refusal = code === 'stale-fence' ? 'StaleFence'
+      : ['forbidden', 'arrangement-owner-forbidden', 'membership-owner-forbidden'].includes(code) ? 'Unauthorized'
+      : ['arrangement-folder-deleted', 'arrangement-retired', 'not-found'].includes(code) ? 'DestinationMissing'
+      : code === 'invalid-membership-operations' ? 'InvalidPlan'
+      : details?.applied === 'none' ? code === 'idempotency-conflict' ? 'Conflict' : 'InvalidPlan' : undefined
+    if (refusal) return { _tag: 'Refused', identity, refusal }
+  }
+  return { _tag: 'Unknown', identity }
 }

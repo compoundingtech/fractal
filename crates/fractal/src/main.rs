@@ -7053,6 +7053,28 @@ fn daemon_admitted_open_refuses_directory_swap_or_removal_before_any_database_wr
     }
 }
 
+/// Search once for batches an older writer left behind the sealing frontier, in the graph and
+/// its messages shard, and seal what it finds. Exchanges seal only after the frontier and never
+/// wait for this walk of every batch; a skipped batch is offered from the next exchange on.
+async fn recover_sealing_frontier(store: &Arc<Store>) {
+    let recovering = store.clone();
+    let recovered = store.connection.write_workers().spawn_blocking(move || {
+        fractal_daemon::task_cpu::profiled_blocking("replication.sealing_recovery", || {
+            recovering.seal_local_batches()?;
+            if let Some(shard) = fractal_store::store::messages_shard::shard(&recovering) {
+                shard.seal_local_batches()?;
+            }
+            anyhow::Ok(())
+        })
+    })
+    .await;
+    match recovered {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => stderr_message("fractal", format_args!("sealing frontier recovery failed: {error:#}")),
+        Err(error) => stderr_message("fractal", format_args!("sealing frontier recovery stopped: {error}")),
+    }
+}
+
 /// Audit the operation projection on a blocking thread. The audit reads in pages of at most
 /// 128 rows, each in its own short read snapshot, so it never holds one snapshot for its whole
 /// run and never delays a WAL restart for long. The store keeps the result for doctor.
@@ -7549,9 +7571,8 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }));
     // Doctor reports the envelopes admitted before this node knew better from this count, made
     // at startup and then every period, and again when doctor finds membership moved since.
-    // The first count waits 30 s, so it does not run beside the startup operation audit, unless
-    // doctor asks for it sooner. Counts doctor asks for come at most once a minute, however
-    // often doctor runs while fleet rows replicate.
+    // The first count waits 30 s, unless doctor asks for it sooner. Counts doctor asks for come
+    // at most once a minute, however often doctor runs while fleet rows replicate.
     {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("fleet.admission_residue", async move {
@@ -7572,17 +7593,18 @@ async fn run_up(args: UpArgs) -> Result<()> {
             }
         }));
     }
-    // The first diagnostic report and delayed repair share one operation audit. After it the
-    // daemon audits again every period, and after any repair, so doctor reports a recent audit
-    // instead of reading every operation itself. No request waits for an audit.
-    if let Some(audit) = fractal_daemon::api::start_operation_report(&state) {
+    // The first diagnostic report reads the last audit and never makes one. After the reconnect
+    // window the daemon searches once for batches older writers left unsealed, then audits the
+    // operation projection, one after the other, and audits again every period and after any
+    // repair, so doctor reports a recent audit instead of reading every operation itself. No
+    // request waits for either.
+    fractal_daemon::api::start_operation_report(&state);
+    {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("operations.repair_drift", async move {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            let mut audit = match audit.await {
-                Ok(audit) => audit,
-                Err(error) => Err(anyhow::anyhow!("the startup audit stopped: {error}")),
-            };
+            tokio::time::sleep(fractal_daemon::store::STARTUP_MAINTENANCE_DELAY).await;
+            recover_sealing_frontier(&store).await;
+            let mut audit = audit_operations(&store).await;
             loop {
                 if repair_operation_drift(&store, audit).await {
                     // Audit once more at once, so doctor reports what the repair left; anything
@@ -7738,10 +7760,38 @@ async fn run_up(args: UpArgs) -> Result<()> {
         _ = terminate.recv() => stderr_message("fractal", format_args!("forced stop before assistant read receipts committed")),
         _ = interrupt.recv() => stderr_message("fractal", format_args!("forced stop before assistant read receipts committed")),
     }
+    // Leave the replication inventory for the next start, which extends it instead of reading
+    // every envelope while its peers reconnect. A second stop signal skips it.
+    let saving = store.clone();
+    tokio::select! {
+        saved = tokio::task::spawn_blocking(move || save_replication_inventories(&saving)) => if let Err(error) = saved {
+            stderr_message("fractal", format_args!("saving the replication inventory stopped: {error}"));
+        },
+        _ = terminate.recv() => stderr_message("fractal", format_args!("forced stop before the replication inventory was saved")),
+        _ = interrupt.recv() => stderr_message("fractal", format_args!("forced stop before the replication inventory was saved")),
+    }
     telemetry.shutdown();
     match stopped {
         Ok(signal) => end_by_signal(signal),
         Err(served) => served.map(|_| ()),
+    }
+}
+
+/// Save the graph's replication inventory and its messages shard's, each when nothing but
+/// appends changed it since this start; a store that cannot is read in full by the next start.
+fn save_replication_inventories(store: &Arc<Store>) {
+    let said = |name: &str, saved: anyhow::Result<smallclaims::store::saved_inventory::InventorySave>| match saved {
+        Ok(smallclaims::store::saved_inventory::InventorySave::Saved) => {
+            stderr_message("fractal", format_args!("saved the {name}'s replication inventory for the next start"));
+        }
+        Ok(smallclaims::store::saved_inventory::InventorySave::Skipped(reason)) => {
+            stderr_message("fractal", format_args!("the {name}'s replication inventory was not saved, so the next start reads it from the store: {reason}"));
+        }
+        Err(error) => stderr_message("fractal", format_args!("saving the {name}'s replication inventory failed: {error:#}")),
+    };
+    said("graph", store.save_replication_inventory());
+    if let Some(shard) = fractal_store::store::messages_shard::shard(store) {
+        said("messages shard", shard.save_replication_inventory());
     }
 }
 

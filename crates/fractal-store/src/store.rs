@@ -99,6 +99,7 @@ pub mod publication;
 pub mod publication_facts;
 pub mod seat_status;
 pub mod stop_deferral;
+pub mod stopping_seat;
 pub mod card_fold;
 #[cfg(test)]
 pub mod card_fold_tests;
@@ -2266,6 +2267,12 @@ pub struct Store {
 /// How often the daemon audits the operation projection against the claim log and counts the
 /// fleet admission residue. Doctor calls a result older than two periods stale.
 pub const OPERATION_AUDIT_PERIOD: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// How long after it starts the daemon defers whole-store maintenance reads: its first
+/// operation audit and the sealing frontier's recovery search. Every client and peer reconnects
+/// in the first minute after a restart, and those reads (66 s of SQL and a 14 s batch walk on a
+/// busy host's store) made each of their requests wait on the same disk.
+pub const STARTUP_MAINTENANCE_DELAY: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// One finished background audit: when it finished, how long it took and what it found.
 #[derive(Clone, Debug)]
