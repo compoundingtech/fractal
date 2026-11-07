@@ -7,6 +7,12 @@ import { fakeClient } from './fakeFeed.mjs';
 import { sidebarGroups, rememberResources } from './sidebarView.ts';
 import { placeResource, moveFolder, validateSidebarMove } from './sidebarEdits.ts';
 import { buildTree } from './sidebarPlanning.ts';
+import { hostname, arch, platform } from 'node:os';
+import { SidebarMemberships } from './sidebarMemberships.ts';
+import { readSidebarMemberships, sidebarMembershipFrame, sidebarMembershipFailure } from './feed.ts';
+import { planSidebarV2 } from './sidebarEdits.ts';
+import { createWriteState, writeReducer } from './sidebarWriteState.ts';
+import { sidebarWriteRequest } from './sidebarDispatch.ts';
 
 const fixtures = loadSidebarBehavior();
 const nested = 'nested-and-dormant-non-agent-placements';
@@ -104,3 +110,144 @@ for (const fixture of fixtures.cases) test(`native sidebar behavior: ${fixture.n
 test('all documented native differences were exercised', () => {
   assert.deepEqual([...used].sort(), Object.keys(divergences).sort());
 });
+
+// Opt in: SIDEBAR_IOS_PERF=1 nix develop .#web --command pnpm --dir apps/ios test
+// Node measurements are pre-activation CPU evidence, not native release/frame evidence.
+const scaleScope = { owner: 'person/test', container: 'arrangement/scale', endpoint: 'local', host: snapshot.host_id, projection: snapshot.projection_version };
+const subject = subject => ({ _tag: 'Subject', subject });
+const folder = id => ({ _tag: 'Folder', id });
+const scaleFixture = (count, depth = 1) => {
+  const arrangement = { id: scaleScope.container, owner: scaleScope.owner, revision: 'claim/scale',
+    body: { version: 2, name: { value: 'Sidebar', revision: 'claim/scale' }, folders: {} }, resolved: { parents: {} } };
+  for (let i = 0; i < depth; i++) {
+    const id = `00000000-0000-7000-8000-${String(i).padStart(12, '0')}`, parent = i ? Object.keys(arrangement.body.folders).at(-1) : null;
+    arrangement.body.folders[id] = { name: { value: `Folder ${i}`, revision: 'claim/folder' }, position: { value: { parent, key: 'a0' }, revision: 'claim/folder' } };
+    arrangement.resolved.parents[id] = parent;
+  }
+  const destination = Object.keys(arrangement.body.folders).at(-1);
+  const memberships = Array.from({ length: count }, (_, i) => ({ id: `membership/${i}`, member: `agent/scale/${String(i).padStart(4, '0')}`, container: arrangement.id, revision: 'claim/member', position: { bucket: null, key: 'a0' } }));
+  const catalog = memberships.map(row => row.member), resources = resourcesFor(catalog);
+  const intent = { node: subject(catalog[0]), parent: folder(destination), before: null };
+  const v1 = { ...arrangement, body: { ...arrangement.body, version: 1, placements: Object.fromEntries(memberships.map(row => [row.member, { value: { folder: row.position.bucket, key: row.position.key }, revision: row.revision }])) }, resolved: { ...arrangement.resolved, folders: Object.fromEntries(catalog.map(id => [id, null])) } };
+  return { arrangement, memberships, catalog, resources, intent, v1 };
+};
+const cutFor = count => ({ epoch: 'scale-epoch', changed_index: 1, live_count: count });
+const scaleRead = async (memberships, onPage = () => {}) => {
+  const state = new SidebarMemberships(), cut = cutFor(memberships.length);
+  let effects = state.reduce({ type: 'Refresh', scope: scaleScope, generation: 1 }), requests = 0, active = 0;
+  while (effects.length && effects[0].type !== 'PersistBase') {
+    assert.equal(effects.length, 1);
+    const effect = effects[0];
+    const event = await readSidebarMemberships(effect, async () => {}, async (_token, cursor) => {
+      assert.equal(++active, 1, 'one page in flight');
+      const offset = cursor ? Number(cursor) : 0, end = Math.min(offset + 128, memberships.length);
+      // Model unrelated daemon writes: global snapshot advances, collection cut does not.
+      const page = { frontier: cut, snapshot: { ...snapshot, id: `snapshot/scale/${requests}`, store_index: ++requests }, members: memberships.slice(offset, end), has_more: end < memberships.length, ...(end < memberships.length ? { next: String(end) } : {}) };
+      onPage(state, effect.token, page); active--;
+      return page;
+    });
+    effects = state.reduce(event);
+    if (state.status === 'Paging') assert.equal(state.complete, undefined);
+  }
+  assert.equal(state.status, 'Ready'); assert.equal(state.stale, false);
+  assert.deepEqual(state.complete.members, memberships);
+  assert.equal(requests, Math.max(1, Math.ceil(memberships.length / 128)));
+  return state;
+};
+
+for (const count of [1001, 4096]) test(`native real feed/projection/planning at ${count} tied live members`, async () => {
+  const f = scaleFixture(count);
+  const state = await scaleRead(f.memberships, (state, token, page) => {
+    const event = sidebarMembershipFrame(token, 'scale', { kind: 'changes', id: 'scale', collection: 'ordered-memberships', membership: { container: scaleScope.container, changed_index: 1, live_count: count }, snapshot: page.snapshot, upserts: [], removes: [], order: [], has_more: false }, 'scale-epoch');
+    assert.deepEqual(state.reduce(event), []);
+  });
+  const tree = buildTree(f.arrangement, state.complete.members, f.catalog);
+  assert.equal(Object.keys(tree.nodes).length, count + 1);
+  assert.deepEqual(tree.roots.filter(node => node._tag === 'Subject').map(node => node.subject), f.catalog);
+  const edit = planSidebarV2(f.arrangement, state.complete.members, f.intent);
+  assert.equal(edit.memberships.length, 1);
+  const write = createWriteState(scaleScope, f.intent);
+  assert.deepEqual(writeReducer.reduce(write, { type: 'Plan', base: { scope: scaleScope, snapshot, revision: f.arrangement.revision, ready: true }, plan: edit, folder: { actor: 'actor/scale', action_id: 'action/folder', idempotency_key: 'key/folder' }, membership: { actor: 'actor/scale', action_id: 'action/member', idempotency_key: 'key/member' } }), ['PersistPending']);
+  assert.equal(write.status, 'AwaitingPersistence', 'pending state exists before any send');
+  assert.deepEqual(sidebarWriteRequest(write.request).parameters.operations, edit.memberships);
+  const view = sidebarGroups([f.v1], f.resources);
+  assert.equal(view.unfiledCount, count);
+  assert.equal(view.groups.flatMap(group => group.resources).length, count);
+});
+
+test('native admitted 1,024-folder chain projects and plans without recursive traversal', () => {
+  const f = scaleFixture(1001, 1024), tree = buildTree(f.arrangement, f.memberships);
+  assert.equal(Object.keys(tree.nodes).length, 2025);
+  let node = tree.roots.find(node => node._tag === 'Folder'), depth = 0;
+  while (node) { depth++; node = tree.nodes[`folder:${node.id}`].children.find(node => node._tag === 'Folder'); }
+  assert.equal(depth, 1024);
+  assert.equal(planSidebarV2(f.arrangement, f.memberships, f.intent).memberships.length, 1);
+});
+
+test('atomic 1,025-operation rekey and >1 MiB operations never reach dispatch', () => {
+  const f = scaleFixture(2049), destination = f.intent.parent.id;
+  for (const row of f.memberships.slice(0, 2048)) row.position.bucket = destination;
+  const intent = { node: subject(f.catalog[2048]), parent: folder(destination), before: subject(f.catalog[1024]) };
+  let dispatches = 0;
+  const dispatchIfPlanned = result => { if (!('error' in result)) { dispatches++; return sidebarWriteRequest(result); } return result.error; };
+  const before = structuredClone(f.memberships);
+  assert.deepEqual(dispatchIfPlanned(planSidebarV2(f.arrangement, f.memberships, intent)), { _tag: 'TooManyOperations', count: 1025 });
+  assert.deepEqual(f.memberships, before, 'no partial rekey or truncation');
+  const huge = scaleFixture(1), id = 'agent/' + 'x'.repeat(1048576);
+  huge.memberships[0].member = id; huge.intent.node = subject(id);
+  const refused = dispatchIfPlanned(planSidebarV2(huge.arrangement, huge.memberships, huge.intent));
+  assert.equal(refused._tag, 'TooManyBytes'); assert.ok(refused.bytes > 1048576);
+  assert.equal(dispatches, 0);
+});
+
+test('scale refresh faults retain stale complete rows and isolate obsolete attempts', async () => {
+  const f = scaleFixture(4096), original = await scaleRead(f.memberships), base = original.complete;
+  for (const fault of ['disconnect', 'unauthorized', 'expired', 'repeated', 'edited']) {
+    const state = new SidebarMemberships(base);
+    const token = state.reduce({ type: 'Refresh', scope: scaleScope, generation: 2 })[0].token;
+    const page = { frontier: cutFor(4096), snapshot, members: f.memberships.slice(0, 128), has_more: true, next: 'cursor' };
+    state.reduce({ type: 'Page', token, page });
+    assert.equal(state.status, 'Paging'); assert.equal(state.complete, base); assert.equal(state.stale, true);
+    if (fault === 'repeated') state.reduce({ type: 'Page', token, page: { ...page, members: f.memberships.slice(128, 256) } });
+    else if (fault === 'edited') state.reduce({ type: 'Metadata', token, frontier: { ...cutFor(4096), changed_index: 2 } });
+    else state.reduce(sidebarMembershipFailure(token, fault === 'disconnect' ? {} : { status: fault === 'expired' ? 409 : 403, response: { code: fault === 'expired' ? 'membership-collection-changed' : 'forbidden' } }));
+    assert.equal(state.status, ({ disconnect: 'Disconnected', unauthorized: 'Refused', expired: 'Paging', repeated: 'Refused', edited: 'Paging' })[fault]);
+    assert.equal(state.complete, base); assert.equal(state.stale, true);
+    if (fault === 'expired' || fault === 'edited') assert.deepEqual(state.reduce({ type: 'Page', token, page }), []);
+  }
+  const empty = await scaleRead([]);
+  assert.equal(empty.status, 'Ready'); assert.equal(empty.complete.members.length, 0);
+  assert.notEqual(new SidebarMemberships().status, empty.status);
+});
+
+const p95 = values => values.sort((a, b) => a - b)[Math.ceil(values.length * .95) - 1];
+test('opt-in native CPU latency and equivalent v1 baseline', { skip: process.env.SIDEBAR_IOS_PERF !== '1' && 'Set SIDEBAR_IOS_PERF=1; timing gates are not default CI assertions' }, async t => {
+  const results = [];
+  for (const count of [1001, 4096]) {
+    const f = scaleFixture(count), times = { v2: [], v1: [], v1View: [], inMemoryInitialLoad: [] };
+    for (let i = 0; i < 120; i++) {
+      let started = performance.now();
+      const tree = buildTree(f.arrangement, f.memberships, f.catalog);
+      const edit = planSidebarV2(f.arrangement, f.memberships, f.intent);
+      const v2 = performance.now() - started;
+      assert.equal(tree.roots.length, count + 1); assert.equal(edit.memberships.length, 1);
+      started = performance.now();
+      buildTree(f.v1, undefined, f.catalog); placeResource(f.v1, f.catalog[0], f.intent.parent.id);
+      const v1 = performance.now() - started;
+      started = performance.now(); sidebarGroups([f.v1], f.resources, {}, 'agent');
+      const view = performance.now() - started;
+      if (i >= 20) { times.v2.push(v2); times.v1.push(v1); times.v1View.push(view); }
+    }
+    for (let i = 0; i < 20; i++) { const started = performance.now(); await scaleRead(f.memberships); times.inMemoryInitialLoad.push(performance.now() - started); }
+    results.push({ count, p95_ms: Object.fromEntries(Object.entries(times).map(([key, values]) => [key, p95(values)])) });
+  }
+  console.log(JSON.stringify({ runner: { host: hostname(), platform: platform(), arch: arch(), node: process.version }, samples: 100, warmup: 20, results, limitations: 'Node CPU only; v1View is not native render. In-memory load is not local-socket load. PR25 native release and D evidence remain required.' }));
+  for (const { count, p95_ms } of results) await t.test(`${count} planning <=4ms and <=2x v1`, () => {
+    assert.ok(p95_ms.v2 <= 4, `v2 p95 ${p95_ms.v2}ms >4ms`);
+    assert.ok(p95_ms.v2 <= 2 * p95_ms.v1, `v2/v1 ${p95_ms.v2 / p95_ms.v1} >2`);
+  });
+});
+
+test('D: local-socket full initial load p95 <=1s and sustained unrelated daemon writes', { skip: '#4739 D not delivered: real collection-scoped paging daemon required; in-memory page/cut invariance above is not socket evidence' }, () => {});
+test('D: real server rejects 4,097th live-member edit', { skip: '#4739 real daemon admission fixture required; do not substitute client-side refusal for the server limit' }, () => {});
+test('PR25: native release render p95 <=8ms, next-frame pending overlay, <=2x v1', { skip: 'v2 view/frame host is unwired before PR25; Node sidebarGroups is v1 only, not native frame/render evidence' }, () => {});
