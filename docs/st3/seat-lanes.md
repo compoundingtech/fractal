@@ -404,3 +404,37 @@ lane. The tests:
   relaunch of a live declaration keeps it.
 
 Mission-level and step-level declarations (built), bursts and admission are step 2.
+
+## Inactive host-envelope declaration
+
+`host_envelope_file` in `config.toml` selects a JSON host envelope. Without the key,
+Fractal reads `host-envelope.json` under its product config directory when that file
+exists. A missing explicit file, malformed declaration, or unknown schema version
+refuses configuration validation. This is **read and validate only**: it does not
+change lane admission, create cgroups, activate limits, or replace external admission.
+
+The typed contract lives in `fractal_runtime::host_envelope`; the checked-in
+[JSON Schema](../../fixtures/host-envelope.schema.json) describes version 1.
+Regenerate with `cargo run -p fractal-runtime --example host_envelope_schema`.
+Every resource is either `{"coverage":"enforced","value":...}` or
+`{"coverage":"not-enforced","reason":"..."}`. These are declared coverage,
+not proof of installed limits. Reasons must be nonempty. All fields are required
+except a slice's optional `io`; absent IO makes no coverage claim.
+`darwin-advisory` requires all present resources to be `not-enforced`.
+
+Host fields are `schema_version`, `host`, `platform`, `mem_available_floor`,
+`slice_psi` (memory and CPU), and `slices`. PSI values name `window` (`avg10`,
+`avg60`, `avg300`), `percent`, and `target_slice`, referring to a declared
+user-manager slice unit. Each slice names `memory.max`, `memory.high`, `cpu`,
+optional `io`, `swap.max`, and `tasks.max` (nested objects, not dotted JSON keys).
+CPU values contain exactly one of `max: {quota_micros, period_micros}` or
+`weight`; IO values contain a `weight`. Weights are 1..10000; max quota, period,
+and task counts are positive integers. Memory and swap values use the shared
+binary SIZE parser: byte counts or whole numbers ending in K, M, G, T, fitting
+u64 bytes; `"0"` expresses zero swap. JSON Schema checks structural constraints;
+the Rust reader additionally checks SIZE overflow, slice uniqueness and PSI references.
+
+All example thresholds and capacities in the generic-host fixtures are test data,
+not production defaults. Host values require an operator decision; activation
+requires separate host acceptance and rollout approval. This contract defines no
+IO start rule, and remote-only work is not charged local envelope capacity by it.
