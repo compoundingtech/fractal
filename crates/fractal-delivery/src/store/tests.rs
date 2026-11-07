@@ -299,7 +299,7 @@ fn the_waking_kind_reads_only_the_claims_past_the_cursor() {
     let store = Store::open_memory("node").unwrap();
     let connection = store.readers.get();
     let plan = connection
-        .prepare(&format!("EXPLAIN QUERY PLAN {}", crate::store::delivery::WAKING_KIND))
+        .prepare(format!("EXPLAIN QUERY PLAN {}", crate::store::delivery::WAKING_KIND).as_str())
         .unwrap()
         .query_map([0], |row| row.get::<_, String>(3))
         .unwrap()

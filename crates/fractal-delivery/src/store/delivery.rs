@@ -1183,7 +1183,7 @@ impl DeliveryStore for Store {
     fn claims_since_waking_kind(&self, after_index: u64) -> Result<(bool, Option<String>)> {
         let connection = self.readers.get();
         Ok(connection.query_row(
-            WAKING_KIND,
+            /* sqlite-large-value: allow-for-now lv-hf61d9a97c9cc owner=fractal_delivery::store::delivery TODO=trace-statement-and-value-representation */ WAKING_KIND,
             [after_index],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?)
