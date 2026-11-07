@@ -5,7 +5,7 @@ import { folderAttentionCount } from './sidebarAttention.ts'
 
 export const FolderAttentionSignal = ({ folder, refs }: { readonly folder: SidebarFolder | SidebarGroup; readonly refs: ReadonlySet<string> }) => {
   const count = folderAttentionCount(folder.children, refs)
-  return count === 0 ? null : <span data-folder-attention={count} aria-label={`${count} ${count === 1 ? 'agent needs' : 'agents need'} your attention`} {...stylex.props(styles.signal)}>{count} need you</span>
+  return count === 0 ? null : <span data-folder-attention={count} aria-label={`${count} ${count === 1 ? 'agent needs' : 'agents need'} your attention`} {...stylex.props(styles.signal)}>{count} {count === 1 ? 'needs' : 'need'} you</span>
 }
 
 const styles = stylex.create({
