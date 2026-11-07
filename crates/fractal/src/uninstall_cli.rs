@@ -6,6 +6,40 @@ fn directory_is_empty(path: &Path) -> bool {
     fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
 }
 
+fn uninstall_socket_paths(socket: &Path) -> Result<Vec<PathBuf>> {
+    use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _};
+    let mut paths = vec![socket.to_path_buf(), fractal_daemon::api::unix_reservation_path(socket)];
+    let legacy = fractal_daemon::api::legacy_socket_paths(socket);
+    let [alias, reservation] = legacy.as_slice() else { return Ok(paths); };
+    match fs::symlink_metadata(alias) {
+        Ok(metadata) => {
+            let ours = metadata.uid() == unsafe { libc::geteuid() }
+                && ((metadata.file_type().is_symlink()
+                    && fs::read_link(alias)? == Path::new(socket.file_name().unwrap()))
+                    || (metadata.file_type().is_socket()
+                        && fractal_daemon::config::socket_binding_path(socket).as_ref() == alias.as_path()));
+            if !ours {
+                return Ok(paths);
+            }
+            paths.push(alias.clone());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    // A stopped daemon may already have removed its alias. Its empty, owned
+    // reservation remains ours; preserve other users' entries and file contents.
+    match fs::symlink_metadata(reservation) {
+        Ok(metadata) if metadata.file_type().is_file()
+            && metadata.uid() == unsafe { libc::geteuid() } && metadata.len() == 0 => {
+                paths.push(reservation.clone());
+            }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(paths)
+}
+
 fn remove_uninstall_path(path: &Path, binary_aliases: &[&Path]) -> std::io::Result<()> {
     if binary_aliases.contains(&path) && !fractal::may_remove(path) {
         return Ok(());
@@ -92,16 +126,14 @@ pub(super) async fn run_uninstall(
         config.state_dir.clone(),
         config_dir,
         data_dir,
-        config.socket.clone(),
-        config.client_gateway_socket.clone(),
     ];
+    paths.extend(uninstall_socket_paths(&config.socket)?);
+    paths.extend(uninstall_socket_paths(&config.client_gateway_socket)?);
     if config.store_dir.is_some() {
         let directory = fractal_daemon::config::store_dir(&config);
         paths.extend(fractal_daemon::config::STORE_DATABASE_FILES.map(|name| directory.join(name)));
     }
     paths.extend(fractal_daemon::startup::paths(&config.socket));
-    paths.push(fractal_daemon::api::unix_reservation_path(&config.socket));
-    paths.push(fractal_daemon::api::unix_reservation_path(&config.client_gateway_socket));
     if st2_only_hooks {
         paths.push(st2_state);
     }
@@ -258,6 +290,59 @@ pub(super) async fn run_uninstall(
 #[cfg(test)]
 mod instance_uninstall_tests {
     use super::*;
+
+    #[test]
+    fn uninstall_removes_stale_socket_aliases_and_their_own_reservations() {
+        use std::os::unix::{fs::symlink, net::UnixListener};
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        fs::create_dir(&state).unwrap();
+        let mut expected = Vec::new();
+        let mut removals = Vec::new();
+        for (primary, legacy) in [("fractal.sock", "st3.sock"), ("fractal-client.sock", "st3-client.sock")] {
+            let socket = root.path().join(primary);
+            drop(UnixListener::bind(&socket).unwrap());
+            let alias = root.path().join(legacy);
+            symlink(primary, &alias).unwrap();
+            let primary_lock = root.path().join(format!("{primary}.reservation.lock"));
+            let alias_lock = root.path().join(format!("{legacy}.reservation.lock"));
+            fs::write(&primary_lock, b"").unwrap();
+            fs::write(&alias_lock, b"").unwrap();
+            removals.extend(uninstall_socket_paths(&socket).unwrap());
+            expected.extend([socket, alias, primary_lock, alias_lock]);
+        }
+        let custom = root.path().join("custom.sock");
+        fs::write(&custom, "keep").unwrap();
+        assert!(fractal_daemon::api::legacy_socket_paths(&custom).is_empty());
+        remove_uninstall_paths(&removals, &[], &state, std::time::Instant::now()).unwrap();
+        for path in expected {
+            assert!(fs::symlink_metadata(&path).is_err(), "uninstall left {}", path.display());
+        }
+        assert_eq!(fs::read_to_string(custom).unwrap(), "keep");
+    }
+
+    #[test]
+    fn uninstall_preserves_foreign_entries_at_legacy_socket_names() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("fractal.sock");
+        let alias = root.path().join("st3.sock");
+        let reservation = root.path().join("st3.sock.reservation.lock");
+        fs::write(&alias, "keep").unwrap();
+        fs::write(&reservation, b"").unwrap();
+        let paths = uninstall_socket_paths(&socket).unwrap();
+        assert!(!paths.contains(&alias));
+        assert!(!paths.contains(&reservation));
+        fs::remove_file(&alias).unwrap();
+        symlink("other.sock", &alias).unwrap();
+        assert!(!uninstall_socket_paths(&socket).unwrap().contains(&alias));
+        fs::remove_file(&alias).unwrap();
+        symlink("fractal.sock", &alias).unwrap();
+        fs::write(&reservation, "keep").unwrap();
+        let paths = uninstall_socket_paths(&socket).unwrap();
+        assert!(paths.contains(&alias));
+        assert!(!paths.contains(&reservation));
+    }
 
     #[test]
     fn uninstall_preserves_state_while_inherited_lock_is_held() -> Result<()> {

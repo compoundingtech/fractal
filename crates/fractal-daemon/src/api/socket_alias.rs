@@ -44,12 +44,27 @@ fn check_alias_parent(parent: &Path, expected: (u64, u64)) -> Result<()> {
     Ok(())
 }
 
+fn socket_names(socket: &Path) -> Option<(&'static str, &'static str)> {
+    match socket.file_name().and_then(|name| name.to_str()) {
+        Some("fractal.sock") => Some(("fractal.sock", "st3.sock")),
+        Some("fractal-client.sock") => Some(("fractal-client.sock", "st3-client.sock")),
+        _ => None,
+    }
+}
+
+/// Compatibility entries published beside a default socket, inspected by uninstall
+/// after its daemon has stopped. The alias's lock keeps its own name even when
+/// the alias resolves to the primary socket.
+pub fn legacy_socket_paths(socket: &Path) -> Vec<PathBuf> {
+    let Some((_, legacy)) = socket_names(socket) else { return Vec::new(); };
+    let alias = socket.with_file_name(legacy);
+    let mut reservation = alias.as_os_str().to_owned();
+    reservation.push(".reservation.lock");
+    vec![alias, PathBuf::from(reservation)]
+}
+
 async fn reserve_alias(socket: &Path, existing: Option<&SocketAlias>, bound_socket: &Path) -> Result<Option<SocketAlias>> {
-    let (primary, legacy) = match socket.file_name().and_then(|name| name.to_str()) {
-        Some("fractal.sock") => ("fractal.sock", "st3.sock"),
-        Some("fractal-client.sock") => ("fractal-client.sock", "st3-client.sock"),
-        _ => return Ok(None),
-    };
+    let Some((primary, legacy)) = socket_names(socket) else { return Ok(None); };
     let parent = socket.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)?;
     let canonical_parent = fs::canonicalize(parent)?;

@@ -934,11 +934,21 @@ async fn placement_handoff_source_offline_retires_the_returning_real_daemon_runt
     cross_host_seat_move(SeatMove::SourceOffline).await;
 }
 
+// Unlike a cold restart, a communication pause leaves the source's seat alive.
+#[tokio::test(flavor = "multi_thread")]
+async fn placement_handoff_source_offline_retires_the_resumed_real_daemon_runtime() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    cross_host_seat_move(SeatMove::SourcePaused).await;
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum SeatMove {
     Stopped,
     Running,
     SourceOffline,
+    SourcePaused,
 }
 
 async fn cross_host_seat_move(mode: SeatMove) {
@@ -946,6 +956,7 @@ async fn cross_host_seat_move(mode: SeatMove) {
     let root = tempfile::tempdir().unwrap();
     let mut a = anchor(root.path(), "amber").await;
     let b = joined(root.path(), &a, "cobalt", &[]).await;
+    let source_offline = matches!(mode, SeatMove::SourceOffline | SeatMove::SourcePaused);
     let pty = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
         .map(|directory| directory.join("pty"))
         .find(|path| path.is_file())
@@ -989,8 +1000,12 @@ agent "move/worker" {
         })
         .await;
     }
-    if mode == SeatMove::SourceOffline {
-        a.stop();
+    if source_offline {
+        if mode == SeatMove::SourcePaused {
+            a.signal("STOP");
+        } else {
+            a.stop();
+        }
         b.st_ok(&[
             "agents",
             "start",
@@ -1021,7 +1036,7 @@ agent "move/worker" {
         "cobalt's running observation reaches both replicas",
         30,
         || async {
-            let replicas = if mode == SeatMove::SourceOffline {
+            let replicas = if source_offline {
                 vec![&b]
             } else {
                 vec![&a, &b]
@@ -1041,7 +1056,7 @@ agent "move/worker" {
         },
     )
     .await;
-    if mode == SeatMove::SourceOffline {
+    if source_offline {
         let proof = b
             .claims()
             .await
@@ -1056,7 +1071,11 @@ agent "move/worker" {
             peek.contains("moved-seat-ready"),
             "destination is reachable while source is offline: {peek}"
         );
-        a.start().await;
+        if mode == SeatMove::SourcePaused {
+            a.signal("CONT");
+        } else {
+            a.start().await;
+        }
         wait_until(
             "returning source retires its old incarnation",
             30,
@@ -3032,6 +3051,14 @@ async fn uninstall_leaves_nothing_behind() {
     )
     .await;
 
+    // The fixture executable owns these login shells in its test HOME. Preserve
+    // only the files already present, so later product residue still fails below.
+    let fixture_shells = fs::read_dir(b.root.join("home/.cache/fractal-fixture"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path().strip_prefix(&b.root).unwrap().to_path_buf())
+        .collect::<BTreeSet<_>>();
+    assert!(!fixture_shells.is_empty());
+
     // The dry run lists and removes nothing.
     let listed = b.st_ok(&["uninstall", "--dry-run", "--keep-binaries", "--no-service"]);
     assert!(listed.contains(&b.state_dir().display().to_string()));
@@ -3075,6 +3102,8 @@ async fn uninstall_leaves_nothing_behind() {
                 "home/.bash_profile",
                 "home/.zprofile",
                 "home/.zshrc",
+                "home/.cache",
+                "home/.cache/fractal-fixture",
                 "config",
                 "config/fish",
                 "config/fish/config.fish",
@@ -3088,6 +3117,7 @@ async fn uninstall_leaves_nothing_behind() {
             ]
             .iter()
             .any(|kept| relative == Path::new(kept))
+            || fixture_shells.contains(&relative)
             || relative.to_string_lossy().ends_with(".log");
         if !expected {
             remaining.push(relative);
@@ -4883,9 +4913,20 @@ async fn a_removed_members_writes_relayed_by_an_uninformed_member_are_refused() 
         !a.notes().await.contains("custom/fleet-test/r-after"),
         "a admitted a removed member's write relayed through c"
     );
-    // c admitted it before it knew; doctor says so.
-    let doctor = c.st(&["--json", "doctor"]);
-    let report = String::from_utf8_lossy(&doctor.stdout);
+    // c admitted it before it knew. Doctor requests a background recount after
+    // membership changes; wait for that result rather than its initial pending report.
+    let mut report = String::new();
+    wait_until("c's doctor reports the removed writer's admitted envelopes", 60, || {
+        let doctor = c.st(&["--json", "doctor"]);
+        report = String::from_utf8(doctor.stdout).unwrap();
+        let checks: Value = serde_json::from_str(&report).unwrap();
+        let counted = checks["checks"].as_array().unwrap().iter().any(|check| {
+            check["name"] == "fleet-admission"
+                && check["message"].as_str().unwrap().contains("beyond high water")
+        });
+        async move { counted }
+    })
+    .await;
     assert!(
         report.contains("beyond high water"),
         "c's doctor does not report what it admitted from r: {report}"

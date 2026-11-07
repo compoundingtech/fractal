@@ -10117,6 +10117,22 @@ impl<R: RuntimeControl> Reconciler<R> {
         // Reuse the observation needed for record-once deduplication. Unmarked agents
         // need no extra actual-state query or harness fold on this hot path.
         let previous = self.store.latest_observation(&subject.subject, "runtime.observed")?;
+        if observation.status == "vanished" && observation.incarnation_id.is_none() {
+            // A dead PTY's registry row can lose its PID before the daemon returns.
+            // Keep the last identity of this local runtime in its end evidence, even
+            // when a destination's running observation is newer than our own.
+            let local = if previous.as_ref().is_some_and(|claim| claim.origin == self.host) {
+                previous.clone()
+            } else {
+                crate::placement::latest_by_origin(&self.store, &subject.subject, u64::MAX)?
+                    .remove(&self.host)
+            };
+            if let Some(local) = local.filter(|claim| {
+                crate::placement::field(claim, "runtime_id") == Some(member.runtime_id.as_str())
+            }) && let Some(incarnation) = crate::placement::field(&local, "incarnation_id") {
+                fields.insert("incarnation_id".into(), Value::String(incarnation.into()));
+            }
+        }
         // An exec incarnation that has ended cannot run again; a restart is a new incarnation. The
         // `st3 driver exec` wrapper reports its child's exit before it exits itself, so its own
         // process can still look live here for a moment. Recording that would put `running` over
@@ -20950,6 +20966,7 @@ pub mod tests {
     mod step_lane_tests;
     mod lane_burst_tests;
     mod ownership_guard_tests;
+    mod retirement_identity;
     mod pull_request_run_tests;
     mod ready_idle_wake;
     mod ref_watch_tests;
