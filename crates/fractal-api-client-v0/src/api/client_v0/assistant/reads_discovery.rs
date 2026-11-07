@@ -86,7 +86,7 @@ fn value(
             snapshot:snapshot.clone(), collection:collection.into(), offset:0, limit,
             history:false, person:None, actor:None, owner_run:None, status:None, owner:None,
             state:None, native_only:false, items_digest:"assistant-source-keyset-v1".into(),
-            before_index:None, after_key:after.map(|id| (0,id.to_owned())), expires_at_unix_ms:expires,
+            before_index:None, before_stream_index:None, after_key:after.map(|id| (0,id.to_owned())), expires_at_unix_ms:expires,
         })?;
         Some(conversation_reads::bind_cursor(&payload, &format!("{collection}:"))?)
     } else { None };
