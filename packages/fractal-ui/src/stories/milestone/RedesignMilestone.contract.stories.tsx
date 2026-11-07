@@ -44,7 +44,7 @@ export const Stale: Story = {
   args: { state: 'stale' },
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Play requires an exact 18-second last-seen pnpm command and known working/idle last-turn timestamps; roster slices do not hydrate last-turn summaries.' } },
   play: async ({ canvasElement }) => {
-    const tail = await waitFor(() => { const element = canvasElement.querySelector<HTMLElement>('[data-last-seen]'); expect(element).not.toBeNull(); return element! })
+    const tail = await waitFor(() => { const element = canvasElement.querySelector<HTMLElement>('[data-last-seen]'); if (element === null) throw new Error('Missing last-seen status'); return element })
     // The live region reads only its sentence: the glyph beside it (and its hidden description) is decorative.
     await expect(tail.querySelector('[role="img"]')?.closest('[aria-hidden="true"]')).not.toBeNull()
     const announced = tail.cloneNode(true) as HTMLElement
@@ -74,7 +74,7 @@ function manualReload() {
   let settle: (() => void) | undefined
   return {
     reload: () => new Promise<void>(resolve => { settle = resolve }),
-    settle: () => { expect(settle).toBeDefined(); settle!(); settle = undefined },
+    settle: () => { if (settle === undefined) throw new Error('No pending reload to settle'); settle(); settle = undefined },
   }
 }
 const rosterReload = manualReload()

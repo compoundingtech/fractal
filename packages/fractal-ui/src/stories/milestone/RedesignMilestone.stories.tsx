@@ -18,6 +18,11 @@ const meta = {
 export default meta
 type Story = StoryObj<Args>
 
+const required = <T,>(value: T | null | undefined, label: string): T => {
+  if (value === null || value === undefined) throw new Error(`Missing ${label}`)
+  return value
+}
+
 const world = (id: string) => ({ scenario: { _tag: 'slices', slices: ['roster', 'conversation', 'sync'], world: id } })
 
 const light = (story: Story): Story => ({ ...story, args: { ...story.args, scheme: 'light' } })
@@ -40,11 +45,11 @@ export const Navigation: Story = {
   args: { state: 'navigation' },
   parameters: world('fleet-mid-refactor'),
   play: async ({ canvasElement }) => {
-    const title = canvasElement.querySelector<HTMLElement>('[data-scenario-navigation-title]')!.dataset.scenarioNavigationTitle!
-    const paletteGlyph = await waitFor(() => { const svg = within(canvasElement).getAllByRole('menuitem').find(item => item.textContent?.includes(title))?.querySelector('svg'); expect(svg).not.toBeNull(); expect(svg).toBeDefined(); return svg! })
+    const title = required(canvasElement.querySelector<HTMLElement>('[data-scenario-navigation-title]')?.dataset.scenarioNavigationTitle, 'scenario navigation title')
+    const paletteGlyph = await waitFor(() => required(within(canvasElement).getAllByRole('menuitem').find(item => item.textContent?.includes(title))?.querySelector('svg'), 'palette status glyph'))
     const sidebarRow = [...canvasElement.querySelectorAll<HTMLElement>('[data-milestone-row]')].find(row => row.textContent?.includes(title))
     if (sidebarRow === undefined) return
-    await expect(getComputedStyle(paletteGlyph).color).toBe(getComputedStyle(sidebarRow.querySelector('[data-row-column="status"] svg')!).color)
+    await expect(getComputedStyle(paletteGlyph).color).toBe(getComputedStyle(required(sidebarRow.querySelector('[data-row-column="status"] svg'), 'sidebar status glyph')).color)
   },
 }
 export const NavigationLight = light(Navigation)
@@ -67,11 +72,11 @@ export const HideChanges: Story = {
     await expect(await canvas.findByRole('tablist', { name: 'Open conversations' })).toBeVisible()
     const docked = () => canvas.queryByRole('separator', { name: 'Resize changes' })
     // The selected world may carry live or failed work rather than an authored known duration.
-    const work = await waitFor(() => { const button = canvasElement.querySelector<HTMLElement>('[data-testid="work-log"] > button'); expect(button).not.toBeNull(); return button! })
+    const work = await waitFor(() => required(canvasElement.querySelector<HTMLElement>('[data-testid="work-log"] > button'), 'work log disclosure'))
     if (work.getAttribute('aria-expanded') === 'false') await userEvent.click(work)
     await expect(work).toHaveAttribute('aria-expanded', 'true')
-    await userEvent.click(await waitFor(() => { const row = canvasElement.querySelector<HTMLElement>('[data-tool-status] > button'); expect(row).not.toBeNull(); return row! }))
-    await userEvent.click((await canvas.findAllByRole('button', { name: 'Show raw input/output' }))[0]!)
+    await userEvent.click(await waitFor(() => required(canvasElement.querySelector<HTMLElement>('[data-tool-status] > button'), 'tool disclosure')))
+    await userEvent.click(required((await canvas.findAllByRole('button', { name: 'Show raw input/output' }))[0], 'raw input/output disclosure'))
     await userEvent.click(await canvas.findByRole('button', { name: /^Open .+ tool detail$/ }))
     if (narrow) await waitFor(() => expect(changesTab()).toHaveAttribute('aria-selected', 'true'))
     else await waitFor(() => expect(docked()).not.toBeNull())
@@ -94,8 +99,8 @@ export const NavigationKeyboard: Story = {
     const canvas = within(canvasElement)
     const page = within(canvasElement.ownerDocument.body)
     const active = () => canvasElement.ownerDocument.activeElement
-    const title = canvasElement.querySelector<HTMLElement>('[data-scenario-navigation-title]')!.dataset.scenarioNavigationTitle!
-    const primaryTitle = canvasElement.querySelector<HTMLElement>('[data-scenario-primary-title]')!.dataset.scenarioPrimaryTitle!
+    const title = required(canvasElement.querySelector<HTMLElement>('[data-scenario-navigation-title]')?.dataset.scenarioNavigationTitle, 'scenario navigation title')
+    const primaryTitle = required(canvasElement.querySelector<HTMLElement>('[data-scenario-primary-title]')?.dataset.scenarioPrimaryTitle, 'scenario primary title')
     await waitFor(() => expect(canvas.getByRole('main', { name: 'Workspace' })).toBeVisible())
     await userEvent.click(canvas.getByRole('main', { name: 'Workspace' }), { skipHover: true })
     await userEvent.keyboard(chord('k'))

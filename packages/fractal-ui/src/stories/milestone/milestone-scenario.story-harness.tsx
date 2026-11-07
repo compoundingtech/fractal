@@ -28,7 +28,7 @@ export const milestoneRoster = (slice: WireSlice<'roster'>, query: string): Mile
       ref: agent.id, id: agent.id, title: agent.name, status, statusLabel: statuses[status].label,
       host: agent.host_id == null ? 'Unknown host' : hosts.get(agent.host_id) ?? agent.host_id,
       freshness: 'live', usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' }, children: [],
-      missionContext: current === undefined ? { _tag: 'None' } : { _tag: 'Mission', id: current.mission_id, slug: current.mission_id.split('/').at(-1)!, progress: { _tag: 'Unknown' }, step: { _tag: 'Step', name: current.title || current.path }, queued: [] },
+      missionContext: current === undefined ? { _tag: 'None' } : { _tag: 'Mission', id: current.mission_id, slug: current.mission_id.split('/').at(-1) ?? current.mission_id, progress: { _tag: 'Unknown' }, step: { _tag: 'Step', name: current.title || current.path }, queued: [] },
     }
   })
   return { folders: rows.length === 0 ? [] : [{ id: 'scenario-agents', label: 'Agents', rows }], inboxCount: 0, query }
