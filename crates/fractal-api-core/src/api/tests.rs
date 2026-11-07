@@ -10148,6 +10148,9 @@ async fn assert_agent_roster_survives_other_mode_publications(history: bool) {
         State(state.clone()), Extension(new_client_snapshot(&state)),
         Query(ClientListQuery { history, ..ClientListQuery::default() }),
     ).await.unwrap();
+    assert!(before.items[0]["delivery"]["reason"].as_str().unwrap()
+        .contains("daemon started 5s ago"),
+        "blocking assessments must retain the fixture's frozen uptime");
     let mut first_other_cut = None;
     for marker in 1..=12 {
         advance(marker);
@@ -13468,6 +13471,17 @@ async fn a_summary_status_read_answers_a_seats_incarnation_without_its_claims() 
     let (status, owned) = get_request(app.clone(), &format!("/v1/status?subject={seat}&summary=true&owner_run=mission-run/example-other")).await;
     assert_eq!(status, StatusCode::OK, "{owned}");
     assert_eq!(owned["subjects"], json!([]), "{owned}");
+    // A seat carrying a reserved notice fact is refused, as the full read refuses it.
+    owner.store.connection.write().execute_batch(&format!(
+        /* sqlite-large-value: allow-for-now lv-h18ab046ede43 owner=fractal_api_core::api::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES ('summary-notice','node',9000,'fixture','1700000000000');
+         INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+         VALUES ('summary-notice-claim','summary-notice','{seat}','attention.notice','node','{{\"fields\":{{}}}}','[]','1700000000000');"
+    )).unwrap();
+    for path in [format!("/v1/status?subject={seat}"), format!("/v1/status?subject={seat}&summary=true")] {
+        let (status, refused) = get_request(app.clone(), &path).await;
+        assert_ne!(status, StatusCode::OK, "{path}: {refused}");
+        assert!(refused.to_string().contains("notices-unavailable"), "{path}: {refused}");
+    }
 }
 
 #[tokio::test]
