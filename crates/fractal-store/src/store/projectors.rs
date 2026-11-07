@@ -58,6 +58,7 @@ pub const OPEN: &[Hook] = &[
     Hook { name: "arrangements", run: arrangements::open },
     Hook { name: "limits", run: limits::open_limits },
     Hook { name: "run-eta", run: run_eta::open },
+    Hook { name: "gate-runners", run: gate_runners::open },
 ];
 
 /// Projects a locally appended claim, in this order, for the kinds each entry takes.
@@ -169,6 +170,7 @@ pub const REBUILD: &[Hook] = &[
     Hook { name: "directive-notes", run: directive_notes::rebuild },
     Hook { name: "arrangements", run: arrangements::rebuild },
     Hook { name: "run-eta", run: run_eta::rebuild },
+    Hook { name: "gate-runners", run: gate_runners::rebuild },
     Hook { name: "ordered-membership", run: ordered_membership::rebuild },
 ];
 

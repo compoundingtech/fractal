@@ -222,3 +222,30 @@ fn a_backup_drains_the_outbox_to_the_shard_first() {
     assert_eq!(shard_items(&graph, &message.subject), 1);
     assert!(rows(&graph).is_empty());
 }
+
+#[test]
+fn an_offline_export_refuses_a_copy_with_queued_mail_and_names_it() {
+    let root = tempfile::tempdir().unwrap();
+    let database = root.path().join("claims.sqlite3");
+    let graph = graph_with_shard(root.path());
+    let first = sent("message/outbox-copy-first", "agent/birch");
+    let second = sent("message/outbox-copy-second", "agent/birch");
+    enqueue(&graph, &first);
+    enqueue(&graph, &second);
+    drop(graph);
+    // The copy has its shards directory beside it, so the exporter opens its shard; it still
+    // refuses, rather than drain the member's mail into the copy as the copy's writer.
+    let archive = root.path().join("copy.jsonl");
+    let error = crate::backup::create_from_database(&database, root.path(), &archive).unwrap_err();
+    let error = format!("{error:#}");
+    assert!(error.contains("holds 2 message(s)"), "{error}");
+    assert!(error.contains("message/outbox-copy-first, message/outbox-copy-second"), "{error}");
+    assert!(!archive.exists());
+    let graph = graph_with_shard(root.path());
+    assert_eq!(shard_items(&graph, &first.subject), 0);
+    assert_eq!(rows(&graph).len(), 2);
+    // Once the member's daemon has written them, a copy exports.
+    message_outbox::drain(&graph).unwrap();
+    drop(graph);
+    crate::backup::create_from_database(&database, root.path(), &archive).unwrap();
+}

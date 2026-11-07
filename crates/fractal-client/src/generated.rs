@@ -1161,10 +1161,33 @@ pub struct AgentWorkspace {
     pub desired_token: String,
     pub declaration_token: String,
 }
+/// Declared admission — declared, not enforced.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DeclaredBudgets {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_max: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_max: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+}
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct DeclaredAdmission {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budgets: Option<DeclaredBudgets>,
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentDeclaration {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accountable: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_admission: Option<DeclaredAdmission>,
     pub id: String,
     pub revision: String,
     pub tree: Value,
@@ -1483,6 +1506,8 @@ pub struct Mission {
     pub title: String,
     pub state: String,
     pub mission_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_admission: Option<DeclaredAdmission>,
     /// st's own plumbing or a standing observer; false from older daemons.
     #[serde(default)]
     pub system: bool,
@@ -1754,6 +1779,8 @@ pub struct Agent {
     pub state: String,
     pub reachability: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_admission: Option<DeclaredAdmission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mail_custody: Option<AgentMailCustody>,
     #[serde(default)]
     pub runtime_ids: Vec<String>,
@@ -1843,6 +1870,9 @@ pub struct Agent {
     /// Placement handoff phase and the sources still holding its fence.
     #[serde(default)]
     pub handoff: Option<AgentHandoff>,
+    /// The seat's declaration is a stop but its process still runs. An older daemon omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopping: Option<AgentStopping>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rollout: Option<Value>,
     /// The resources the seat's current declaration names. An older daemon omits them.
@@ -1858,6 +1888,12 @@ pub enum AgentLifecycle {
     Bounded,
     #[serde(other)]
     Unknown,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AgentStopping {
+    /// Why the stop waits: mail it had not read, or work it held in another run, when the stop
+    /// was declared. `None` while the stop has not been deferred.
+    pub held: Option<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct AgentHandoff {
@@ -2040,6 +2076,52 @@ pub struct StatusTransition {
     pub state: Option<String>,
     pub observed_at: String,
     pub reset: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AgentRelatedRuns {
+    pub kind: String,
+    pub agent_id: String,
+    pub as_of: u64,
+    pub work_cut: u64,
+    pub missions_cut: u64,
+    pub total_rows: u64,
+    pub truncated: bool,
+    pub rows: Vec<AgentRelatedRun>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct AgentRelatedRun {
+    pub id: String,
+    pub mission_id: String,
+    pub status: String,
+    pub status_chip: String,
+    pub progress: Value,
+    pub eta: Option<Value>,
+    pub waiting_on_you: bool,
+    pub late: bool,
+    pub deadline_at: Option<u64>,
+    pub current_step: Option<RelatedRunWait>,
+    pub waits_on: Vec<RelatedRunWait>,
+    pub urgency_rank: u64,
+    pub folded: bool,
+    pub completed_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct RelatedRunWait {
+    pub step: String,
+    pub path: String,
+    pub title: Option<String>,
+    pub state: String,
+    pub kind: String,
+    pub who: Option<String>,
+    pub seat_state: Option<String>,
+    pub detail: Option<String>,
+    pub since_unix_ms: Option<u64>,
+    pub lease_expires_at_unix_ms: Option<u64>,
+    pub until_unix_ms: Option<u64>,
+    pub wake_attempts: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

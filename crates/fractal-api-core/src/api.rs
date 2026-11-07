@@ -17,6 +17,7 @@ use crate::SeatStatusStore;
 use crate::SeatsStore;
 use crate::SeatsStoreCore;
 use crate::SubagentsStore;
+use crate::StopDeferralStore;
 use crate::EvidenceStore;
 use crate::OwnedSetsStore;
 use crate::PublicationFactsStore;
@@ -83,13 +84,14 @@ use crate::model::{
     ReplicationRepairRequest, ReplicationStatus, ReviewRequest, RevisionApprovalRequest,
     RevisionCancelRequest, RevisionCutover, RevisionProposalView, RevisionSubmissionView,
     RunGenerationView, SessionControlResponse, SessionInputMode, SessionInputRequest,
-    SessionLogChunk, SessionScreen, SessionSignalRequest, St3Error, StatusResponse, StepRunView,
+    SessionLogChunk, SessionScreen, SessionSignalRequest, FractalError, StatusResponse, StepRunView,
     WorkRequest, WorkRetryRequest, WorkWakeRequest,
 };
 use crate::model::{PersonAskRequest, PersonRenameReport, PersonRenameRequest, PersonStepResponse};
 #[cfg(test)]
 use crate::model::IntentInput;
 use crate::store::Store;
+use crate::store::local_commits;
 
 pub mod wire_names;
 pub mod seat_freshness;
@@ -362,6 +364,10 @@ pub struct ClientPageCursor {
     pub items_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_index: Option<u64>,
+    /// The stream items the first page could see: the shard index the stream mirror had passed
+    /// (fractal-store stream_mirror.rs), as `before_index` is for graph messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before_stream_index: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_key: Option<(u128, String)>,
     pub expires_at_unix_ms: u128,
@@ -444,6 +450,8 @@ pub fn signal_visible_change(state: &AppState) {
 
 #[cfg(test)]
 mod storage_contention_response_tests;
+#[cfg(test)]
+mod replication_wake_tests;
 
 #[derive(Debug)]
 pub struct ApiError {
@@ -454,7 +462,7 @@ pub struct ApiError {
 }
 
 impl ApiError {
-    pub fn bad(error: St3Error) -> Self {
+    pub fn bad(error: FractalError) -> Self {
         let status = match error.code {
             "recipient-retired"
             | "identity-cycle"
@@ -514,15 +522,15 @@ impl ApiError {
             return error;
         }
         if smallclaims::read_budget::check().is_err() {
-            return Self::bad(St3Error::new("read-deadline", "the read exceeded its deadline or was cancelled"));
+            return Self::bad(FractalError::new("read-deadline", "the read exceeded its deadline or was cancelled"));
         }
-        let store_error = typed.downcast_ref::<St3Error>().or_else(|| {
+        let store_error = typed.downcast_ref::<FractalError>().or_else(|| {
             typed
                 .downcast_ref::<anyhow::Error>()
-                .and_then(|error| error.downcast_ref::<St3Error>())
+                .and_then(|error| error.downcast_ref::<FractalError>())
         });
         if let Some(error) = store_error {
-            return Self::bad(St3Error {
+            return Self::bad(FractalError {
                 code: error.code,
                 message: error.message.clone(),
                 details: error.details.clone(),
@@ -1024,6 +1032,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(replication::test_shard_items).post(replication::test_shard_append),
         )
         // The worker-only peers route refuses a test caller; this reads the same answer.
+        .route("/v1/internal/test/messages-shard/copy", post(replication::test_shard_copy))
         .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers))
         // Nothing records a message mark until consumers switch (4b-2); tests record one here.
         .route("/v1/internal/test/message-marks", post(test_record_message_mark));
@@ -1937,6 +1946,9 @@ pub fn client_error_retryable(status: StatusCode, code: Option<&str>) -> bool {
         | "invalid-membership-member" | "invalid-membership-bucket"
         | "invalid-membership-key" | "invalid-membership-operations"
         | "membership-edit-too-large"
+        | "invalid-membership-cursor" | "membership-collection-changed"
+        | "membership-frontier-reset" | "unsupported-membership-paging-contract"
+        | "membership-frontier-inconsistent"
     )) { return false; }
     matches!(
         code,
@@ -2013,6 +2025,11 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "invalid-membership-key"
         | "invalid-membership-operations"
         | "membership-edit-too-large"
+        | "invalid-membership-cursor"
+        | "membership-collection-changed"
+        | "membership-frontier-reset"
+        | "unsupported-membership-paging-contract"
+        | "membership-frontier-inconsistent"
         | "stale-fence"
         | "timeline-history-incomplete"
         | "projection-detail-too-large"
@@ -2379,6 +2396,7 @@ fn client_page_read_projected(
                 native_only: query.native_only,
                 items_digest: items_digest.clone(),
                 before_index: None,
+                before_stream_index: None,
                 after_key: None,
                 expires_at_unix_ms,
             })?)
@@ -3123,7 +3141,7 @@ fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> 
             })?
             .collect::<Result<BTreeSet<_>, _>>()?;
         if !history {
-            subjects = store.current_view_candidates(&connection, subjects, index, true)?;
+            subjects = store.current_view_candidates_for_generic_reads(&connection, subjects, index, true)?;
         }
         let names = subjects.iter().cloned().collect::<Vec<_>>();
         let desired = store
@@ -3595,7 +3613,7 @@ pub fn client_agent_resources_uncached(
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
     pinned_unless_enclosed(store, || {
-        let status = store.status_for_subject_prefix_at(
+        let status = store.status_for_subject_prefix_for_generic_reads_at(
             "agent/",
             Some(snapshot_index),
             history,
@@ -3612,7 +3630,7 @@ fn client_agent_resources_selected(
     changed: Option<(&BTreeSet<String>, &[Value])>,
 ) -> anyhow::Result<Vec<Value>> {
     pinned_unless_enclosed(store, || {
-        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
+        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_for_generic_reads_at(
             changed.map(|(subjects, _)| subjects), snapshot_index, history,
         ))?;
         client_agent_resources_from_status(store, history, snapshot_index, changed, status)
@@ -3721,7 +3739,7 @@ fn client_agent_cards_presented(
     )?;
     let mailbox_faults = match store.mailbox_faults_for(&agent_subjects, snapshot_index) {
         Ok(faults) => Some(faults),
-        Err(error) if error.downcast_ref::<St3Error>().is_some_and(|error| error.code == "read-deadline") => None,
+        Err(error) if error.downcast_ref::<FractalError>().is_some_and(|error| error.code == "read-deadline") => None,
         Err(error) => return Err(error),
     };
     store.record_agent_roster_fault_read(history, &agent_subjects, mailbox_faults.is_none(), selected);
@@ -3940,6 +3958,20 @@ fn client_agent_cards_presented(
             let state = if terminal_subjects.contains(&subject.subject) {
                 "retired"
             } else { state };
+            // A stop is declared but the process still runs: it ends once the mail and other
+            // runs' work it held at the stop are gone (#4500). Say why it is still running.
+            let stopping = (subject.kind.as_deref() == Some("stop")
+                && matches!(observed, Some("running" | "ready" | "working" | "idle")))
+            .then(|| -> anyhow::Result<Value> {
+                let incarnation = fields.and_then(|fields| fields.get("incarnation_id")).and_then(Value::as_str);
+                let held = store.latest_stop_deferral(&subject.subject)?.filter(|diagnostic| {
+                    diagnostic.body["fields"]["code"] == "stop-deferred"
+                        && diagnostic.body["evidence"][0].as_str() == subject.desired_token.as_deref()
+                        && diagnostic.body["fields"]["incarnation_id"].as_str() == incarnation
+                }).and_then(|diagnostic| diagnostic.body["fields"]["reason"].as_str().map(str::to_owned));
+                Ok(json!({"held": held}))
+            })
+            .transpose()?;
             let runtime_id = fields
                 .and_then(|fields| fields.get("runtime_id"))
                 .and_then(Value::as_str);
@@ -4055,6 +4087,7 @@ fn client_agent_cards_presented(
                 "operational": subject.projection,
                 "suspension": suspension.as_ref().map(client_suspension),
                 "handoff": handoff,
+                "stopping": stopping,
                 "rollout": if card_reads.may_have_rollout(&subject.subject) {
                     crate::rollout::status(store, &subject.subject)?
                 } else {
@@ -4152,6 +4185,9 @@ pub fn managed_session_owner_at(
     crate::performance::task("conversation/owner", || {
         let owners = store.conversation_owners_at(snapshot_index)?;
         for owner in owners.values() {
+            if !store.generic_status_subject_visible_at(&owner.subject, snapshot_index)? {
+                continue;
+            }
             let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
                 continue;
             };
@@ -4170,6 +4206,9 @@ pub fn managed_session_owner_for_subject_at(
     owner: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
     crate::performance::task("conversation/owner", || {
+        if !store.generic_status_subject_visible_at(owner, snapshot_index)? {
+            return Ok(None);
+        }
         let owner = store.conversation_owner_at(owner, snapshot_index)?;
         let Some(owner) = owner else {
             return Ok(None);
@@ -4310,7 +4349,7 @@ fn managed_session_resources(
     at: &str,
     snapshot_index: u64,
 ) -> anyhow::Result<(Vec<Value>, BTreeSet<String>)> {
-    let status = store.status_for_subject_prefix_at(
+    let status = store.status_for_subject_prefix_for_generic_reads_at(
         "agent/",
         Some(snapshot_index),
         history,
@@ -4852,10 +4891,14 @@ pub async fn relay_client_message_items(
             let Some(message) = store.message(&id)? else {
                 continue;
             };
-            let sent_at = store
-                .latest_claim(&id, Some("message.sent"))?
-                .map(|claim| claim.accepted_at_unix_ms)
-                .unwrap_or_default();
+            let sent_at = if crate::store::messages_shard::mailbox_reads::is_stream_item(&message) {
+                stream_sent_at(&store, &id)?
+            } else {
+                store
+                    .latest_claim(&id, Some("message.sent"))?
+                    .map(|claim| claim.accepted_at_unix_ms)
+                    .unwrap_or_default()
+            };
             views.push((message, sent_at));
         }
         Ok(views)
@@ -4866,6 +4909,14 @@ pub async fn relay_client_message_items(
         items.retain(|item| !item.get("id").and_then(Value::as_str).is_some_and(|id| closed.contains(id)));
     }
     Ok(())
+}
+
+/// A stream item's sent time, as its client metadata reads it.
+fn stream_sent_at(store: &Store, subject: &str) -> anyhow::Result<u128> {
+    Ok(store
+        .stream_message_metadata(subject)?
+        .and_then(|metadata| metadata["sent_at"].as_str().and_then(|at| at.parse().ok()))
+        .unwrap_or_default())
 }
 
 pub fn client_message_resources(
@@ -4899,32 +4950,43 @@ fn client_message_resources_at(
         if peer.is_some_and(|peer| message.from != peer && message.to != peer) {
             continue;
         }
-        let claims = store.claims_for(&message.subject, None)?;
-        let first = claims.first();
-        let last = claims.last();
-        let sent_at = first
-            .map(|claim| claim.accepted_at_unix_ms)
-            .unwrap_or_default();
-        let mut updated_at = last
-            .map(|claim| claim.accepted_at_unix_ms)
-            .unwrap_or(sent_at);
-        let mut revision = last.map(|claim| claim.id.clone()).unwrap_or_else(|| "message/unknown".into());
-        // A seat this member hosts moves its message by a local mark, which no claim records.
-        if let Some((receipt, at)) = crate::store::message_marks::latest(&store.readers.get(), &message.subject)?
-            && at >= updated_at
-        {
-            (revision, updated_at) = (receipt, at);
-        }
-        let session_id = first
-            .and_then(|claim| {
-                claim
-                    .body
-                    .get("fields")
-                    .unwrap_or(&claim.body)
-                    .get("session_id")
-            })
-            .cloned()
-            .unwrap_or(Value::Null);
+        let (sent_at, updated_at, revision, session_id) = if crate::store::messages_shard::mailbox_reads::is_stream_item(&message) {
+            // A stream item has no graph claims: the mirror and the shard carry what they would.
+            let Some(metadata) = store.stream_message_metadata(&message.subject)? else {
+                continue;
+            };
+            let at = |field: &str| metadata[field].as_str().unwrap_or("0").parse::<u128>();
+            (at("sent_at")?, at("updated_at")?, metadata["revision"].as_str().unwrap_or("message/unknown").to_owned(),
+             metadata["session_id"].clone())
+        } else {
+            let claims = store.claims_for(&message.subject, None)?;
+            let first = claims.first();
+            let last = claims.last();
+            let sent_at = first
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or_default();
+            let mut updated_at = last
+                .map(|claim| claim.accepted_at_unix_ms)
+                .unwrap_or(sent_at);
+            let mut revision = last.map(|claim| claim.id.clone()).unwrap_or_else(|| "message/unknown".into());
+            // A seat this member hosts moves its message by a local mark, which no claim records.
+            if let Some((receipt, at)) = crate::store::message_marks::latest(&store.readers.get(), &message.subject)?
+                && at >= updated_at
+            {
+                (revision, updated_at) = (receipt, at);
+            }
+            let session_id = first
+                .and_then(|claim| {
+                    claim
+                        .body
+                        .get("fields")
+                        .unwrap_or(&claim.body)
+                        .get("session_id")
+                })
+                .cloned()
+                .unwrap_or(Value::Null);
+            (sent_at, updated_at, revision, session_id)
+        };
         let mut reasons = Vec::new();
         if message.status == "closed"
             || crate::store::relayed_closes::closed(&store.readers.get(), &message.subject)?
@@ -5839,6 +5901,7 @@ fn published_work_cursor(
         native_only: query.native_only,
         items_digest,
         before_index: None,
+        before_stream_index: None,
         after_key: None,
         expires_at_unix_ms,
     }
@@ -5894,7 +5957,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
     for chunk in subjects.chunks(AGENT_ROSTER_WARM_CHUNK) {
         let names = chunk.iter().cloned().collect::<BTreeSet<_>>();
         store.read_snapshot(|index| crate::otel::roster_phase("status_fold", || {
-            store.agent_card_status_at(Some(&names), index, false).map(drop)
+            store.agent_card_status_for_generic_reads_at(Some(&names), index, false).map(drop)
         }))?;
     }
     Ok(())
@@ -6489,7 +6552,11 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    #[cfg(any(test, feature = "test-support"))]
+    let uptime = crate::delivery_presence::uptime_pin::capture();
     crate::api::read_deadline::spawn_blocking(move || {
+        #[cfg(any(test, feature = "test-support"))]
+        let _uptime = uptime.enter();
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
@@ -6503,7 +6570,7 @@ where
 pub async fn blocking_action<T, F>(operation: F) -> Result<T, ApiError>
 where
     T: Send + 'static,
-    F: FnOnce() -> Result<T, St3Error> + Send + 'static,
+    F: FnOnce() -> Result<T, FractalError> + Send + 'static,
 {
     let profile = crate::profile::current();
     let cpu_kind = crate::performance::current();
@@ -6591,11 +6658,9 @@ pub async fn serve_unix(socket: &Path, app: Router) -> anyhow::Result<()> {
 
 /// Make the daemon's first diagnostic report, which the operations collection lists, off the
 /// request path. Until it is made, the collection says so instead of making a read wait for it.
-/// A newly started report returns its operation audit for the delayed startup repair to consume;
-/// later doctor calls and diagnostic refreshes always audit the current store themselves.
-pub fn start_operation_report(
-    state: &AppState,
-) -> Option<tokio::sync::oneshot::Receiver<anyhow::Result<Vec<String>>>> {
+/// The report reads the last operation audit; the daemon makes its first audit only after the
+/// reconnect window. Return whether this call started the report.
+pub fn start_operation_report(state: &AppState) -> bool {
     client_v0::start_operation_report(state)
 }
 
@@ -6609,12 +6674,21 @@ pub fn start_native_session_discovery(state: &AppState) {
 /// The shortest pause between two roster refreshes. A refresh also pauses as long as it took,
 /// so refreshing never takes more than about half a core however often readers ask. Reads
 /// never wait for it: this bounds how stale a served roster can be, about a second plus a fold.
-/// A read waiting for a fresh roster cuts it short to the refresh's own length.
+/// A read waiting for a fresh roster cuts it short to [`AGENT_ROSTER_FRESH_PAUSE`], and a claim
+/// this node commits that a card reads to [`AGENT_ROSTER_LOCAL_PAUSE`].
 const AGENT_ROSTER_REFRESH_PAUSE: Duration = Duration::from_secs(1);
 
-/// The shortest pause a read waiting for a fresh roster can cut the refresher's pause to, so
-/// that a very cheap fold cannot turn fresh reads into many refreshes a second.
+/// The shortest pause a read waiting for a fresh roster can cut the refresher's pause to, so that
+/// a very cheap fold cannot turn fresh reads into many refreshes a second.
 const AGENT_ROSTER_FRESH_PAUSE: Duration = Duration::from_millis(100);
+
+/// The shortest pause a claim this node commits can cut the refresher's pause to, and at least
+/// twice the refresh's own length, though never past the full pause. A host whose seats write a
+/// stream of claims the roster reads cuts nearly every pause, so this sets its folding rate: a
+/// fold about every 400 ms plus the fold, and a third of a core for a fold of up to half a
+/// second, rather than one back to back with the last. A longer fold keeps the full pause, and
+/// its half-core bound, as a pause no local claim cuts.
+const AGENT_ROSTER_LOCAL_PAUSE: Duration = Duration::from_millis(400);
 
 /// How long a legacy fresh or named-cut read waits for publication: long enough
 /// for the refresher to finish a fold, pause as long, and fold again.
@@ -6632,11 +6706,16 @@ pub fn start_agent_roster(state: &AppState) {
     };
     let store = state.store.clone();
     tokio::spawn(crate::task_cpu::account("published_list.agents", async move {
+        // Whether a commit holds a claim this node wrote about a subject a card reads is read off
+        // the writer, once for every refresher that pauses on it.
+        let mut local = agent_roster_local_commits(&store);
         #[cfg(feature = "test-support")]
         hold_first_agent_roster().await;
         let mut head = true;
         loop {
             let started = tokio::time::Instant::now();
+            // Every claim at or before this index is in the fold below or an earlier one.
+            let folded_through = store.index().unwrap_or(u64::MAX);
             let first = std::mem::take(&mut head);
             let refreshed = refresh_agent_roster_admitted(Arc::clone(&store), first).await;
             match refreshed {
@@ -6647,15 +6726,7 @@ pub fn start_agent_roster(state: &AppState) {
             if first {
                 continue;
             }
-            // Pause as long as the refresh took, so refreshing stays under about half a core
-            // however often readers ask, and at least the minimum pause unless a reader waits
-            // for a fresh roster: that read then waits for one fold, not the rest of the pause.
-            let pause = started.elapsed().max(AGENT_ROSTER_FRESH_PAUSE);
-            tokio::time::sleep(pause).await;
-            tokio::select! {
-                () = tokio::time::sleep(AGENT_ROSTER_REFRESH_PAUSE.saturating_sub(pause)) => {}
-                () = store.fresh_agent_roster_wanted() => {}
-            }
+            agent_roster_pause(&store, &mut local, started.elapsed(), folded_through).await;
             // Presented rows contain time-sensitive evidence. Keep one demand-gated owner,
             // paced by the existing refresh pause, never a timer per subscriber.
             if store.agent_roster_refresh_failed() {
@@ -6664,6 +6735,47 @@ pub fn start_agent_roster(state: &AppState) {
             wait_for_agent_roster_demand(&store, &wake).await;
         }
     }));
+}
+
+/// Why the refresher's pause between two refreshes ended.
+type AgentRosterPauseEnd = local_commits::PauseEnd;
+
+/// The roster's hold on the store's local-commit scanner: a claim this node wrote cuts the
+/// refresher's pause only when a card reads it (`local_agent_card_input_after`, the subjects the
+/// roster's incremental fold reads).
+fn agent_roster_local_commits(store: &Arc<Store>) -> local_commits::LocalCommits {
+    let reader = Arc::clone(store);
+    store.local_commits(AGENT_ROSTER_LOCAL_CHECK, Arc::new(move |after, through| reader.local_agent_card_input_after(after, through)))
+}
+
+/// The name the roster's check has on the scanner.
+const AGENT_ROSTER_LOCAL_CHECK: &str = "agents";
+
+/// Pause as long as the refresh took (`folded`), so refreshing stays under about half a core
+/// however often readers ask, and at least the minimum pause; then the rest of the full pause,
+/// unless a reader waits for a fresh roster, or this node commits a claim a card reads after
+/// `through`, an index the refresh has surely folded (a claim the refresh folded after it costs
+/// one more fold at the local pause, never a missed one). A fresh read then waits for one fold;
+/// a local claim ends the pause once it has lasted [`AGENT_ROSTER_LOCAL_PAUSE`] and twice the
+/// fold, so a person waiting to see their own write is not left waiting up to a second for the
+/// next timed fold, while a stream of local writes folds no more than about twice a second and
+/// a fold of up to half a second takes at most a third of a core. The cut never lengthens the
+/// pause: a longer fold's local floor is the full pause. Commits that hold only claims other
+/// nodes wrote, or only local claims no card reads, keep the full pause, so a busy replication
+/// stream or a node's other writes do not fold the roster any more often. See
+/// [`local_commits::pause_after_fold`].
+async fn agent_roster_pause(
+    store: &Arc<Store>,
+    local: &mut local_commits::LocalCommits,
+    folded: Duration,
+    through: u64,
+) -> AgentRosterPauseEnd {
+    let pace = local_commits::Pace {
+        floor: AGENT_ROSTER_FRESH_PAUSE,
+        local: AGENT_ROSTER_LOCAL_PAUSE,
+        full: AGENT_ROSTER_REFRESH_PAUSE,
+    };
+    local_commits::pause_after_fold(Some(local), store.fresh_agent_roster_wanted(), pace, folded, through).await
 }
 
 /// An isolated startup test reads a serving daemon whose refresher runs but has published no
@@ -6708,7 +6820,7 @@ async fn refresh_agent_roster_admitted(
         let submitted = crate::otel::export_enabled().then(Instant::now);
         match tokio::task::spawn_blocking(move || crate::otel::roster_collect_warm(|| {
             roster_worker(true, submitted, None, || {
-                let result = crate::task_cpu::performance_blocking("startup.warmup", || warm_agent_roster(&reader));
+                let result = crate::task_cpu::profiled_blocking("startup.warmup", || warm_agent_roster(&reader));
                 (result, crate::otel::take_roster_attributes())
             })
         })).await {
@@ -7362,10 +7474,16 @@ pub async fn guard_bound_request(
     let Some(bound_agent) = bound_agent else {
         return Ok(request);
     };
+    if request.uri().path() == "/v1/backup"
+        || matches!(request.uri().path(),
+            "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
+    {
+        return Err(custom::notices_unavailable());
+    }
     // Internal routes serve this node's own processes: its replication worker and its operator's
     // CLI. A seat's harness reads fleet views through their public routes instead.
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}`, and internal routes refuse seat callers"),
         )));
@@ -7385,14 +7503,14 @@ pub async fn guard_bound_request(
         .and_then(|value| value.to_str().ok())
         && !is_bound_actor(store, person, &bound_identity)?
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}` and cannot act as `{person}`"),
         )));
     }
     let path = request.uri().path();
     if path == "/v1/repair/apply" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             "bound harnesses must use the attributed repair apply route",
         )));
@@ -7400,7 +7518,7 @@ pub async fn guard_bound_request(
     // A forwarded client read carries a person's authority between fleet members. Only the
     // replication worker, which runs in no harness, hands one over.
     if path.starts_with(crate::peer::CLIENT_READ_FORWARD_PATH) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}` and cannot forward a person's client read"),
         )));
@@ -7455,7 +7573,7 @@ pub async fn guard_bound_request(
         if parts.uri.path() == "/v1/repair/apply-attributed"
             && value.get("actor").and_then(Value::as_str).is_none_or(str::is_empty)
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "foreign-agent-actor",
                 format!("this harness is `{bound_agent}`; repair apply requires its explicit actor"),
             )));
@@ -7464,7 +7582,7 @@ pub async fn guard_bound_request(
             if let Some(actor) = value.get(key).and_then(Value::as_str)
                 && !is_bound_actor(store, actor, &bound_identity)?
             {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "foreign-agent-actor",
                     format!("this harness is `{bound_agent}` and cannot act as `{actor}`"),
                 )));
@@ -8017,8 +8135,10 @@ pub fn relayed_held_mail(
             .get()
             .prepare_cached(
                 "SELECT held.subject, held.sent_ms FROM coordination_sends held
-                 JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
-                 WHERE held.held=1 AND held.sent_ms < ?1 AND json_extract(sent.body,'$.fields.to')=?2
+                 LEFT JOIN claims sent ON sent.subject=held.subject AND sent.kind='message.sent'
+                 LEFT JOIN local_stream_sent stream ON stream.subject=held.subject
+                 WHERE held.held=1 AND held.sent_ms < ?1
+                   AND COALESCE(json_extract(sent.body,'$.fields.to'), json_extract(stream.fields,'$.to'))=?2
                  LIMIT ?3",
             )?
             .query_map(
@@ -8668,7 +8788,8 @@ pub fn doctor_report(state: &AppState) -> Result<Json<DoctorReport>, ApiError> {
 }
 
 /// What the daemon's last operation audit found. Doctor never audits inline: a full audit reads
-/// every operation, about 14 s on a 56 GB store. The daemon audits at startup and then every
+/// every operation, about 14 s on a 56 GB store. The daemon audits
+/// [`crate::store::STARTUP_MAINTENANCE_DELAY`] after it starts and then every
 /// [`crate::store::OPERATION_AUDIT_PERIOD`]; a result older than two periods is stale.
 pub(crate) fn operation_projection_check(
     audit: Option<crate::store::OperationAuditRecord>,
@@ -8682,7 +8803,8 @@ pub(crate) fn operation_projection_check(
     };
     let Some(audit) = audit else {
         return check("warn", format!(
-            "no operation audit has finished since the daemon started; it audits at startup and then every {} min",
+            "no operation audit has finished since the daemon started; it audits {} min after it starts and then every {} min",
+            crate::store::STARTUP_MAINTENANCE_DELAY.as_secs() / 60,
             period.as_secs() / 60
         ));
     };
@@ -9590,11 +9712,11 @@ mod checkpoint_plan_tests;
 
 // Admission is already committed here. A contended projection is pending work, not a
 // failed peer delivery; the contention generation schedules the daemon's bounded retry.
-fn admitted_projection_result(result: anyhow::Result<Option<bool>>) -> Result<Option<bool>, St3Error> {
+fn admitted_projection_result(result: anyhow::Result<Option<bool>>) -> Result<Option<bool>, FractalError> {
     match result {
         Ok(projected) => Ok(projected),
-        Err(error) if error.downcast_ref::<St3Error>().is_some_and(|error| error.is_sqlite_contention()) => Ok(None),
-        Err(error) => Err(St3Error::new("internal", error.to_string())),
+        Err(error) if error.downcast_ref::<FractalError>().is_some_and(|error| error.is_sqlite_contention()) => Ok(None),
+        Err(error) => Err(FractalError::new("internal", error.to_string())),
     }
 }
 
@@ -9708,7 +9830,7 @@ fn concrete_person(person: &str) -> Result<(), ApiError> {
     if person.starts_with("person/") && person.matches('/').count() == 1 && person.len() > 7 {
         Ok(())
     } else {
-        Err(ApiError::bad(St3Error::new(
+        Err(ApiError::bad(FractalError::new(
             "person-required",
             "fleet operations need a concrete person/NAME",
         )))
@@ -9757,7 +9879,7 @@ async fn refuse_while_leaving(
         // closes the connection under it, and the client then reports a broken pipe instead
         // of this refusal.
         let _ = axum::body::to_bytes(request.into_body(), 1 << 20).await;
-        return ApiError::bad(St3Error::new(
+        return ApiError::bad(FractalError::new(
             "fleet-leaving",
             "this node is leaving its fleet and accepts no new writes; `st fleet leave --cancel` stops the leave",
         ))
@@ -9793,9 +9915,9 @@ fn mission_only_subjects(intent: &crate::model::NormalizedIntent) -> bool {
 fn launch_candidate_mission<'a>(
     intent: &'a crate::model::NormalizedIntent,
     expected: &str,
-) -> Result<&'a crate::model::MissionSpec, St3Error> {
+) -> Result<&'a crate::model::MissionSpec, FractalError> {
     let Some(mission) = intent.missions.get(expected) else {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "wrong-launch-mission",
             format!(
                 "a candidate must contain ready mission `{expected}` and no immediate desired state"
@@ -9805,7 +9927,7 @@ fn launch_candidate_mission<'a>(
     let published_closure = crate::mission::mission_closure_ids(mission);
     let published = intent.missions.keys().cloned().collect::<BTreeSet<_>>();
     if !mission_only_subjects(intent) || published != published_closure {
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "wrong-launch-mission",
             format!(
                 "a candidate must contain ready mission `{expected}`, its implicit mission graphs, and no immediate desired state"
@@ -9936,7 +10058,7 @@ struct PublicationRefusals {
 
 impl PublicationRefusals {
     /// The error that refuses the publication, if anything does.
-    fn error(self) -> Option<St3Error> {
+    fn error(self) -> Option<FractalError> {
         let (code, refusals) = if !self.references.is_empty() {
             ("unresolved-reference", self.references)
         } else if !self.renders.is_empty() {
@@ -9944,7 +10066,7 @@ impl PublicationRefusals {
         } else {
             return None;
         };
-        Some(St3Error::new(code, refusals.join("; ")).with_detail("refusals", json!(refusals)))
+        Some(FractalError::new(code, refusals.join("; ")).with_detail("refusals", json!(refusals)))
     }
 
     /// Lists the refusals as the preview's blockers, where each replaces a warning of the same
@@ -9979,7 +10101,7 @@ async fn publication_refusals(
         let renders = if publication.iter().any(|subject| subject.member.is_some()) {
             let current = store
                 .desired_subjects()
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
             crate::render::publication_refusals(&store, &publication, &current, &node)
         } else {
             Vec::new()
@@ -10026,7 +10148,7 @@ fn suspension_target(
         .map_err(ApiError::bad)?
         .is_some_and(|o| o.holds_seat())
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "rollout-in-progress",
             "the seat has a rollout; inspect it or retry with st agents rollout",
         )));
@@ -10040,13 +10162,13 @@ fn suspension_target(
         .into_iter()
         .find(|item| item.subject == subject)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-agent",
                 format!("no seat `{subject}`"),
             ))
         })?;
     if !current.conflicts.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "suspend-conflict",
             "resolve the seat's conflicting declarations first",
         )));
@@ -10060,7 +10182,7 @@ fn suspension_target(
         .and_then(|desired| desired.member)
         .filter(|member| member.lifecycle == crate::model::MemberLifecycle::Service)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "suspend-not-declared",
                 "only a declared, started seat can be suspended or resumed",
             ))
@@ -10071,7 +10193,7 @@ fn suspension_target(
         member = incumbent;
     }
     let token = current.desired_token.clone().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "suspend-not-declared",
             "the seat has no selected declaration",
         ))
@@ -10138,7 +10260,7 @@ pub fn request_suspend(
         .map_err(ApiError::internal)?
         .is_some_and(|s| s["mode"] == "manual" && s["phase"] == "pending")
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "rollout-in-progress",
             "the seat has a rollout; inspect it or retry with st agents rollout",
         )));
@@ -10149,7 +10271,7 @@ pub fn request_suspend(
         && suspension.holds_seat()
     {
         return Err(ApiError::bad(
-            St3Error::new(
+            FractalError::new(
                 "already-suspended",
                 format!("the seat is already {}", suspension.phase),
             )
@@ -10165,7 +10287,7 @@ pub fn request_suspend(
         .and_then(|fields| fields.get("incarnation_id"))
         .and_then(Value::as_str)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "suspend-not-running",
                 "only a running seat can be suspended",
             ))
@@ -10173,7 +10295,7 @@ pub fn request_suspend(
     check_suspension_fence(fence.as_ref(), Some(incarnation), &token)?;
     if let Some(selector) = crate::native_resume::authored_session_selection(&member) {
         return Err(ApiError::bad(
-            St3Error::new(
+            FractalError::new(
                 "suspend-authored-session-selection",
                 format!("the seat declares its own session selection ({selector}); native resume would refuse it, so suspend leaves the seat running"),
             )
@@ -10184,7 +10306,7 @@ pub fn request_suspend(
         .map_err(ApiError::internal)?;
     if !blocking.is_empty() {
         return Err(ApiError::bad(
-            St3Error::new(
+            FractalError::new(
                 "suspend-blocked",
                 format!("the seat is not quiet: {}", blocking.join(", ")),
             )
@@ -10240,14 +10362,14 @@ pub fn request_resume(
         .map_err(ApiError::internal)?
         .filter(|suspension| suspension.phase == "suspended")
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new("not-suspended", "the seat is not suspended"))
+            ApiError::bad(FractalError::new("not-suspended", "the seat is not suspended"))
         })?;
     let suspend = suspension.suspend_operation_id.clone().ok_or_else(|| {
         ApiError::internal(anyhow::anyhow!("a suspension without its suspend request"))
     })?;
     let host = request.host.unwrap_or_else(|| member.host.clone());
     if host.is_empty() || host.contains('/') {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-host",
             "resume needs a host name",
         )));
@@ -10256,7 +10378,7 @@ pub fn request_resume(
         crate::rollout::pending_manual_launch(&state.store, &subject).map_err(ApiError::internal)?
     {
         if host != old.host {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "rollout-in-progress",
                 "resume on the current host before applying the pending manual rollout",
             )));
@@ -10281,13 +10403,13 @@ pub fn request_resume(
                 crate::fleet::MemberState::Current(_)
             )
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "unknown-host",
                 "the resume target is not a current fleet member",
             )));
         }
         if !matches!(suspension.harness.as_deref(), Some("pi" | "omp")) {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "snapshot-harness-unsupported",
                 "cross-host resume currently supports pi and omp portable transcripts",
             )));
@@ -10324,7 +10446,7 @@ async fn apply_with_authority(
     bound: Option<&str>,
 ) -> Result<Json<ApplyResponse>, ApiError> {
     let actor = request.actor.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-publication-actor",
             "publication needs an explicit actor",
         ))
@@ -10333,13 +10455,13 @@ async fn apply_with_authority(
     if !intent.direct_message_registrations.is_empty()
         && bound.is_some_and(|bound| normalized_agent_actor(actor).as_deref() != Some(bound))
     {
-        return Err(ApiError::bad(St3Error::new("foreign-agent-actor",
+        return Err(ApiError::bad(FractalError::new("foreign-agent-actor",
             "a bound harness registers a message subscription only as itself")));
     }
     for declaration in intent.mission_runs.values() {
         if let Some(creation) = &declaration.creation {
             if creation.requester == "person/requester" {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "placeholder-run-requester",
                     "a mission run needs a concrete requester, not `person/requester`",
                 )));
@@ -10347,7 +10469,7 @@ async fn apply_with_authority(
             if let Some(agent) = normalized_agent_actor(actor)
                 && creation.requester != agent
             {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "run-requester-actor-mismatch",
                     format!(
                         "`{actor}` cannot create a run for requester `{}`",
@@ -10404,7 +10526,7 @@ async fn get_delivery_hold(
 ) -> Result<Json<crate::delivery_hold::HoldView>, ApiError> {
     fractal_schema::registry()
         .validate_subject(&query.subject)
-        .map_err(|error| ApiError::bad(St3Error::new(error.code, error.message)))?;
+        .map_err(|error| ApiError::bad(FractalError::new(error.code, error.message)))?;
     let store = state.store.clone();
     blocking_store(move || {
         crate::delivery_hold::view(&store, &query.subject, client_now_ms() as u64)
@@ -10426,13 +10548,13 @@ async fn post_delivery_hold(
         {
             let subjects = store
                 .desired_subjects_named(std::slice::from_ref(&input.subject))
-                .map_err(|error| St3Error::new("internal", error.to_string()))?;
+                .map_err(|error| FractalError::new("internal", error.to_string()))?;
             let driver = subjects
                 .first()
                 .and_then(|subject| subject.member.as_ref())
                 .and_then(|member| member.driver.as_deref());
             if !matches!(driver, Some("codex" | "opencode")) {
-                return Err(St3Error::new(
+                return Err(FractalError::new(
                     "unsupported-delivery-hold",
                     "delivery holds currently require a declared Codex or OpenCode seat",
                 ));
@@ -10583,7 +10705,7 @@ pub const SIGNED_LONG_MESSAGE_FIELDS: &[&str] = &[
 pub const DEVICE_SIGNATURE_WINDOW_MS: u128 = 15 * 60 * 1_000;
 
 fn device_signature_error(code: &'static str, message: impl Into<String>) -> ApiError {
-    ApiError::bad(St3Error::new(code, message.into()))
+    ApiError::bad(FractalError::new(code, message.into()))
 }
 
 /// Check a device's signature on the message this daemon is about to write, before writing it.
@@ -10713,7 +10835,7 @@ pub fn accept_message_receipt_with_upload_owner(
     let requested_recipient = normalize_message_party(&request.to);
     let (recipient, recipient_identity) = receipt_recipient(&state.store, &requested_recipient)?;
     if request.from.starts_with("external/") && upload_owner.is_none() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "adapter-route-refused",
             "external sender imports require the enrolled adapter endpoint",
         )));
@@ -10721,7 +10843,7 @@ pub fn accept_message_receipt_with_upload_owner(
     crate::model::refuse_person_recipient(&normalize_message_party(&request.to))
         .map_err(ApiError::bad)?;
     if request.content.trim().is_empty() && request.attachments.is_empty() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "empty-message",
             "a message needs nonempty content",
         )));
@@ -10729,7 +10851,7 @@ pub fn accept_message_receipt_with_upload_owner(
     let long_body = request.content.len() > message_body::INLINE_MAX_BYTES
         && !request.content.starts_with("doc/");
     if long_body && request.content.len() > message_body::MAX_BYTES {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "message-too-large",
             format!(
                 "a message cannot be longer than {} KiB; this one is {} KiB. Shorten it or send it as several messages.",
@@ -10740,13 +10862,13 @@ pub fn accept_message_receipt_with_upload_owner(
     }
     if request.content.starts_with("doc/") {
         let (name, hash) = request.content.rsplit_once('@').ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "unpinned-document-reference",
                 "a message document reference needs `doc/NAME@HASH`",
             ))
         })?;
         if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "invalid-document-reference",
                 "a message document reference has an invalid hash",
             )));
@@ -10757,7 +10879,7 @@ pub fn accept_message_receipt_with_upload_owner(
             .map_err(ApiError::internal)?
             .is_none()
         {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "missing-document",
                 format!("message document `{}` is not stored", request.content),
             )));
@@ -10777,7 +10899,7 @@ pub fn accept_message_receipt_with_upload_owner(
             .iter()
             .any(|tag| crate::silent::reserved_event_tag(tag))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "reserved-message-tag",
             "daemon event tags cannot be asserted by conversation senders",
         )));
@@ -10788,7 +10910,7 @@ pub fn accept_message_receipt_with_upload_owner(
             .iter()
             .any(|tag| crate::silent::is_remaining_tag(tag))
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "reserved-message-tag",
             "remaining-count tags are delivery metadata",
         )));
@@ -10832,7 +10954,7 @@ pub fn accept_message_receipt_with_upload_owner(
                 == crate::silent::stored_tags(&from, &stored)
         };
         if !same_tags {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "idempotency-mismatch",
                 "the idempotency key already identifies different message tags",
             )));
@@ -10917,7 +11039,7 @@ pub fn accept_message_receipt_with_upload_owner(
             let mut names = signature.signed_fields.clone();
             names.sort();
             if names == SIGNED_MESSAGE_FIELDS {
-                return Err(ApiError::bad(St3Error::new(
+                return Err(ApiError::bad(FractalError::new(
                     "long-message-signature-unsupported",
                     format!(
                         "this device signs messages in a form that cannot cover one over {} KiB; update it, or send a shorter message",
@@ -10981,12 +11103,21 @@ pub fn accept_message_receipt_with_upload_owner(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let mut work_wake = is_work_wake(&tags);
+    // A repeat can replay a stream item an earlier send of this key wrote to the messages shard:
+    // it lists past the graph's indexes, and the send that wrote it settled its parent.
+    let (created_index, stream_item) = if appended {
+        (record.store_index, false)
+    } else {
+        crate::store::message_sent::listed_index(&state.store, &record).map_err(ApiError::internal)?
+    };
     if let Some(reference) = request.in_reply_to.as_deref() {
         // Settling the parent writes its lifecycle claims too.
         work_wake |= parent
             .as_ref()
             .is_none_or(|message| is_work_wake(&message.tags));
-        settle_answered_message(&state.store, reference, &from, &to, &subject, &record.id)?;
+        if !stream_item {
+            settle_answered_message(&state.store, reference, &from, &to, &subject, &record.id)?;
+        }
     }
     signal_message_changed(state, "message.sent", work_wake);
     let kind = if tags.iter().any(|tag| crate::silent::is_silent_tag(tag))
@@ -11014,7 +11145,7 @@ pub fn accept_message_receipt_with_upload_owner(
             title: request.title,
             in_reply_to: request.in_reply_to,
             tags,
-            created_index: record.store_index,
+            created_index,
             status_from: None,
             attachments,
             body_ref: body.as_ref().map(|body| message_body::reference(&body.sha256)),
@@ -11166,7 +11297,7 @@ struct EventPage {
 async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPage, ApiError> {
     let limit = query.limit.unwrap_or(200);
     if !(1..=200).contains(&limit) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "invalid-event-limit",
             "event page limit must be 1 through 200",
         )));
@@ -11197,8 +11328,13 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     ])),
                 }));
             }
-            let (items, next_after, has_more) =
+            let (mut items, next_after, has_more) =
                 store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
+            // Events retain their bounded last-inspected cursor contract, even when hidden.
+            items.retain(|event| {
+                !fractal_schema::notice::is_reserved_subject(&event.subject)
+                    && !fractal_schema::notice::is_reserved_kind(&event.kind)
+            });
             // Stream items have no run owner, so an owner-filtered page has none of them.
             let stream = match messages_after {
                 Some(messages_after) if owner.is_none() => {
@@ -11211,6 +11347,10 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     .items
                     .iter()
                     .filter(|event| subject.as_deref().is_none_or(|subject| event.subject == subject))
+                    .filter(|event| {
+                        !fractal_schema::notice::is_reserved_subject(&event.subject)
+                            && !fractal_schema::notice::is_reserved_kind(&event.kind)
+                    })
                     .cloned()
                     .collect()
             });
@@ -11298,7 +11438,7 @@ async fn quick_agent(
         .cached_idempotency_response::<crate::model::ApplyResponse>(&request.idempotency_key)
         .map_err(ApiError::internal)?;
     if selected_token != request.expected_subject && historical_apply.is_none() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-subject",
             format!("the desired state for `{agent_subject}` changed"),
         )));
@@ -11378,7 +11518,7 @@ fn scope_eval_desired_subjects(
     intent: &mut crate::model::NormalizedIntent,
     current: &[crate::model::DesiredSubject],
     owner_run: &str,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let selected = current
         .iter()
         .map(|subject| (subject.subject.as_str(), subject))
@@ -11395,7 +11535,7 @@ fn scope_eval_desired_subjects(
             shared.push(subject.clone());
             continue;
         }
-        return Err(St3Error::new(
+        return Err(FractalError::new(
             "eval-desired-conflict",
             format!(
                 "eval declaration `{subject}` conflicts with the selected desired state; use a run-owned declaration or an isolated daemon"
@@ -11413,13 +11553,13 @@ pub async fn start_mission_run_action(
     Json(request): Json<MissionRunRequest>,
 ) -> Result<Json<MissionRunView>, ApiError> {
     let requester = request.requester.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-run-requester",
             "a mission run needs an explicit requester",
         ))
     })?;
     if requester == "person/requester" {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "placeholder-run-requester",
             "a mission run needs a concrete requester, not `person/requester`",
         )));
@@ -11585,7 +11725,7 @@ fn person_or_agent_actor(actor: &str, code: &'static str) -> Result<String, ApiE
         return Ok(actor.to_owned());
     }
     normalized_agent_actor(actor).ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             code,
             format!("`{actor}` is neither a person nor an agent"),
         ))
@@ -11641,13 +11781,13 @@ async fn work_action_response_viewing(
         .as_deref()
         .and_then(normalized_agent_actor)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-work-actor",
                 "a work action needs an exact agent actor",
             ))
         })?;
     let incarnation = request.incarnation.as_deref().ok_or_else(|| {
-        ApiError::bad(St3Error::new(
+        ApiError::bad(FractalError::new(
             "missing-work-incarnation",
             "a work action must be fenced to one exact live agent incarnation",
         ))
@@ -11674,7 +11814,7 @@ async fn work_action_response_viewing(
                 } else {
                     store.enrich_work_wake(&mut response, None)
                 };
-                filled.map_err(|error| St3Error::new("store-read-failed", format!("{error:#}")))?;
+                filled.map_err(|error| FractalError::new("store-read-failed", format!("{error:#}")))?;
                 Ok(response)
             })
             .await?;
@@ -11688,7 +11828,7 @@ async fn work_action_response_viewing(
         .work_incarnation_live(&actor, incarnation)
         .map_err(ApiError::internal)?
     {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "inactive-work-incarnation",
             format!("`{incarnation}` is not the current live incarnation of `{actor}`"),
         )));
@@ -11739,7 +11879,7 @@ pub fn live_session(
     let selected = state.store.runtime_authority(subject).map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no live session")))?;
     if !matches!(selected.reachability.as_str(), "reachable" | "local") {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "runtime-authority-indeterminate",
             format!("subject `{subject}` has indeterminate runtime authority"),
         )));
@@ -11750,7 +11890,7 @@ pub fn live_session(
         ))
     })?;
     if origin != state.store.origin() {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "runtime-not-local",
             format!(
                 "subject `{subject}` is owned by `{}` and cannot be controlled through `{}`",
@@ -11778,7 +11918,7 @@ pub fn live_session(
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::not_found(format!("subject `{subject}` has no incarnation")))?;
     if expected_incarnation.is_some_and(|expected| incarnation_id != expected) {
-        return Err(ApiError::bad(St3Error::new(
+        return Err(ApiError::bad(FractalError::new(
             "stale-incarnation",
             format!("subject `{subject}` changed incarnation"),
         )));
@@ -11829,7 +11969,7 @@ pub async fn input_session_as(
         SessionInputMode::Raw => base64::engine::general_purpose::STANDARD
             .decode(&request.value)
             .map_err(|error| {
-                ApiError::bad(St3Error::new(
+                ApiError::bad(FractalError::new(
                     "invalid-session-input",
                     format!("raw terminal input is not valid base64: {error}"),
                 ))
@@ -11938,7 +12078,7 @@ pub async fn signal_session_as(
         "user-1" => libc::SIGUSR1,
         "user-2" => libc::SIGUSR2,
         other => {
-            return Err(ApiError::bad(St3Error::new(
+            return Err(ApiError::bad(FractalError::new(
                 "invalid-session-signal",
                 format!("session signal `{other}` is not registered"),
             )));
@@ -12094,7 +12234,7 @@ fn finish_session_control(
         } else {
             "control-action-failed"
         };
-        return Err(ApiError::bad(St3Error::new(code, reason)));
+        return Err(ApiError::bad(FractalError::new(code, reason)));
     }
     Ok(Json(SessionControlResponse {
         subject: subject.into(),
@@ -12135,7 +12275,7 @@ async fn host_agent_workspace(
     if host_id == client_host_id(&state.node) {
         let workspace =
             crate::config::default_agent_workspace(&query.identity).map_err(|error| {
-                ApiError::bad(St3Error::new("validation-failed", error.to_string()))
+                ApiError::bad(FractalError::new("validation-failed", error.to_string()))
             })?;
         return Ok(Json(json!({ "host_id": host_id, "workspace": workspace })));
     }
@@ -12144,7 +12284,7 @@ async fn host_agent_workspace(
         .and_then(|value| value.to_str().ok())
         .filter(|person| person.starts_with("person/") && person.matches('/').count() == 1)
         .ok_or_else(|| {
-            ApiError::bad(St3Error::new(
+            ApiError::bad(FractalError::new(
                 "missing-person",
                 format!("asking {host_id} for a workspace needs a concrete person"),
             ))

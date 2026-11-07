@@ -236,12 +236,12 @@ Write authority is separate from read consent and must be named explicitly at pa
 | `write.assistant.messages` | Send a plain-text message to any existing agent, never a person |
 | `write.assistant.custom-reply` | Submit a supported custom reply |
 
-For example, add `--scope write.assistant.answers` to `st devices --as person/operator pair --assistant assistant/chatgpt`, alongside the desired read scopes, expiry, and disclosure-consent arguments. Existing read-only grants do not acquire this authority: update their policy explicitly. `read.assistant.attention` only permits reading attention, not answering it. Answers change authoritative owner work and may release waiting work, so treating a read scope or disclosure consent as write authorization would silently escalate existing grants.
+For example, add `--scope write.assistant.answers` to `fractal devices --as person/operator pair --assistant assistant/chatgpt`, alongside the desired read scopes, expiry, and disclosure-consent arguments. Existing read-only grants do not acquire this authority: update their policy explicitly. `read.assistant.attention` only permits reading attention, not answering it. Answers change authoritative owner work and may release waiting work, so treating a read scope or disclosure consent as write authorization would silently escalate existing grants.
 
 With `write.assistant.answers`, supported `work.done` proposals execute immediately without creating another owner approval ask. The existing fenced, idempotent action path still binds the alert ID, episode, selected answer/option, fence, and idempotency key. Dispatch and the authoritative answer transaction retain assistant grant/policy provenance and recheck current authority; the assistant does not become a person principal.
 The writer transaction restricts this authority to a supported structured `work.person-asked` request assigned to the grant's owner, with a named answer. Authored person review steps are not alert asks and remain completable only through ordinary owner authority, not this assistant scope.
 
-The resulting `work.person-done` claim uses the grant's `assistant/chatgpt` or `assistant/mcp` principal as its actor. Work projections expose the same principal as `person_answers[].respondent`, alongside optional server-owned `sender_class`, `assistant_grant_id`, `assistant_owner`, and `assistant_session_actor`. Owner and session context do not replace the respondent and do not set `acted_for`: that field remains reserved for an agent recording a person's prior instruction with delegation proof. `st work show` displays the assistant respondent and the separate grant, owner, and session actor context.
+The resulting `work.person-done` claim uses the grant's `assistant/chatgpt` or `assistant/mcp` principal as its actor. Work projections expose the same principal as `person_answers[].respondent`, alongside optional server-owned `sender_class`, `assistant_grant_id`, `assistant_owner`, and `assistant_session_actor`. Owner and session context do not replace the respondent and do not set `acted_for`: that field remains reserved for an agent recording a person's prior instruction with delegation proof. `fractal work show` displays the assistant respondent and the separate grant, owner, and session actor context.
 
 `write.assistant.messages` is intentionally broad across declared existing agents, as decided in Q21 / [#3250](https://github.com/compoundingtech/fractal/issues/3250). The API and message-acceptance transaction do not require exact membership in `recipient_allowlist`, even when it is empty. That field remains stored policy metadata, not an enforced recipient restriction. Non-agent and person recipients remain refused, and the recipient must exist. Grant expiry, revocation, policy revision, explicit scope, fenced dispatch, idempotency, and external-assistant sender attribution remain enforced. A ChatGPT confirmation card is advisory, not a second daemon approval or downstream owning-person authorization.
 
@@ -354,7 +354,7 @@ data, and these reads confer no write authority or deployment/activation permiss
 For `approval-once` grants, every read is denied until the configured owning person pins trust for the exact grant at its authoritative origin. Explicitly sealed `caller-bound-allow` grants instead use their consent, scopes, expiry, and caller binding without a separate read-trust or policy call:
 
 ```sh
-st devices --as person/operator grant read-trust GRANT --issuer person/operator \
+fractal devices --as person/operator grant read-trust GRANT --issuer person/operator \
   --key-id <key-id> --attestor-public-key <base64url-ed25519> --shim-public-key <base64url-ed25519> \
   [--default-response-bytes N] [--max-response-bytes N]
 ```
@@ -365,9 +365,9 @@ This calls `POST /v1/client/assistant/grants/{id}/read-trust` with `AssistantRea
 
 Every assistant read leaves two audit claims: `custom.client.assistant.v1.read-used` and `custom.client.assistant.v1.read-outcome`. Their kinds and body fields are unchanged. What differs between the two read modes is when the claims are written.
 
-`approval-once` reads write their receipts synchronously, as before. The read-used claim consumes the proof's nonce before st reads any source data, and the outcome claim is written before the response is sent. If either write fails, the read fails.
+`approval-once` reads write their receipts synchronously, as before. The read-used claim consumes the proof's nonce before Fractal reads any source data, and the outcome claim is written before the response is sent. If either write fails, the read fails.
 
-For `caller-bound-allow` reads, the response does not wait for the receipts to be committed. st still checks the grant, scope, expiry, revocation, and policy revision before it builds the projection, and again just before it returns the response; a failed check denies the read as before. After that final check, once the response is serialized, st puts the receipts on a bounded in-memory queue and returns the response. When the queue is full, the next read waits for space; it never skips its receipt. A single writer commits everything waiting in the queue in one transaction (group commit). It starts as soon as receipts are waiting, with no timer or flush interval, so a receipt may be committed before or after the response reaches the caller; neither order is guaranteed. A graceful daemon shutdown writes every queued receipt before the store closes.
+For `caller-bound-allow` reads, the response does not wait for the receipts to be committed. Fractal still checks the grant, scope, expiry, revocation, and policy revision before it builds the projection, and again just before it returns the response; a failed check denies the read as before. After that final check, once the response is serialized, Fractal puts the receipts on a bounded in-memory queue and returns the response. When the queue is full, the next read waits for space; it never skips its receipt. A single writer commits everything waiting in the queue in one transaction (group commit). It starts as soon as receipts are waiting, with no timer or flush interval, so a receipt may be committed before or after the response reaches the caller; neither order is guaranteed. A graceful daemon shutdown writes every queued receipt before the store closes.
 
 If a read's existing deadline or cancellation ends its wait for receipt capacity, it discloses no response bytes and writes neither a receipt nor a synchronous denial audit for that abandoned admission; other deadline errors keep their existing audit behavior.
 
@@ -425,7 +425,7 @@ Public HTTPS hostname                         fractal daemon
         |
         +-- browser: pairing code + requested scopes
                          |
-Owning person -- trusted CLI/stui --> typed client API approve/deny
+Owning person -- trusted CLI/Fractal TUI --> typed client API approve/deny
 ```
 
 The adapter is the OAuth resource server. `/mcp` remains on the OpenAI tunnel;
@@ -543,7 +543,7 @@ change its approved principal, scopes or resource.
 ### Surface-independent owner approval
 
 The daemon represents authorization as a pending request, independent of the
-browser, CLI or stui. Its review data binds request ID, owning person, OAuth
+browser, CLI or Fractal TUI. Its review data binds request ID, owning person, OAuth
 client identity, assistant principal, redirect URI, resource, requested scopes
 and expiry. The trusted surface displays that data before consent.
 
