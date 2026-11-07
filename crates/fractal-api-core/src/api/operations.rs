@@ -653,6 +653,10 @@ pub struct StatusQuery {
     /// Only the subject's current harness; see `Store::status_harness_only`.
     #[serde(default)]
     harness_only: bool,
+    /// Only the subject's declaration, status and incarnation; see `Store::status_summary_at`.
+    /// A daemon older than this ignores it and answers with the full reduction.
+    #[serde(default)]
+    summary: bool,
 }
 
 pub async fn resource_referrers(
@@ -693,6 +697,8 @@ pub async fn status(
         }).transpose()?;
         let mut response = if let (true, false, Some(subject)) = (query.harness_only, query.history, &subject) {
             store.status_harness_only(subject)
+        } else if let (true, false, Some(subject)) = (query.summary, query.history, &subject) {
+            store.status_summary_at(subject, query.at_index)
         } else if query.history {
             store.status_history(
                 subject.as_deref(),

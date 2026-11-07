@@ -13423,6 +13423,45 @@ async fn native_rename_routes_show_and_send_keep_storage_identity() {
     assert_eq!(sent["recipient_identity"], "agent/example-original/worker");
 }
 
+/// A driver reads a seat's incarnation with `summary=true`: the declaration and the runtime's status
+/// and incarnation as a full read shows them, without the claim list a full read carries.
+#[tokio::test]
+async fn a_summary_status_read_answers_a_seats_incarnation_without_its_claims() {
+    let root = tempfile::tempdir().unwrap();
+    let owner = state(root.path());
+    let seat = "agent/example-summary/worker";
+    let intent = crate::graph::parse_test_intent(
+        "version 2\nagent \"example-summary/worker\" { command \"true\"; workspace \"/tmp\"; restart \"never\"; }\n",
+        owner.store.origin(),
+    ).unwrap();
+    let expected = intent.subjects.keys().map(|subject| {
+        (subject.clone(), owner.store.selected_desired_token(subject).unwrap().into_iter().collect())
+    }).collect();
+    owner.store.apply(&intent, &expected, "summary-declare").unwrap();
+    for index in 0..20 {
+        roster_fixture_append(&owner.store, seat, "runtime.observed", json!({
+            "status":"running", "runtime_id":seat, "host":owner.node,
+            "incarnation_id":format!("summary-incarnation-{index}")
+        }));
+    }
+    // A newer observation without an incarnation leaves the earlier one current.
+    roster_fixture_append(&owner.store, seat, "runtime.observed", json!({"status":"stopped"}));
+    let app = router(owner.clone());
+    let (status, full) = get_request(app.clone(), &format!("/v1/status?subject={seat}")).await;
+    assert_eq!(status, StatusCode::OK, "{full}");
+    let (status, summary) = get_request(app.clone(), &format!("/v1/status?subject={seat}&summary=true")).await;
+    assert_eq!(status, StatusCode::OK, "{summary}");
+    let (full, summary) = (&full["subjects"][0], &summary["subjects"][0]);
+    assert!(!full["claims"].as_array().unwrap().is_empty(), "{full}");
+    assert_eq!(summary["claims"], json!([]), "{summary}");
+    assert_eq!(summary["actual"]["incarnation_id"], "summary-incarnation-19", "{summary}");
+    for field in ["incarnation_id", "status"] {
+        assert_eq!(summary["actual"][field], full["actual"][field], "{field}");
+    }
+    assert_eq!(summary["desired"], full["desired"]);
+    assert_eq!(summary["subject"], seat);
+}
+
 #[tokio::test]
 async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_replication() {
     let root = tempfile::tempdir().unwrap();
