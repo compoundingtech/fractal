@@ -299,6 +299,9 @@ pub async fn get_claim(
         .await?
         .filter(|claim| !claim.subject.starts_with("glass/"))
         .filter(generic_claim_visible)
+        .filter(|claim| !session.as_ref().is_some_and(|session|
+            client_v0::external_grants::is_service(&session.0))
+            || service_claim_fields(&claim.kind).is_some())
         .map(|claim| Json(if session.as_ref().is_some_and(|session|
             client_v0::external_grants::is_service(&session.0)) {
             service_claim(&claim)
@@ -392,24 +395,16 @@ pub async fn client_list_claims(
     list_claims(state, query, Some(session)).await
 }
 
-/// Closed R29 receipt/state schema. No unknown kind or field acquires disclosure rights.
-/// In particular, declarations, challenges and grant verifiers are metadata-only.
+/// Closed R29 receipt/state schema. Unknown rows reveal only a paging position.
 fn service_claim(claim: &ClaimRecord) -> Value {
+    let Some(fields) = service_claim_fields(&claim.kind) else {
+        return json!({"store_index":claim.store_index, "withheld":true});
+    };
     let mut value = json!({
         "id":claim.id, "kind":claim.kind, "subject":claim.subject, "origin":claim.origin,
         "store_index":claim.store_index, "accepted_at_unix_ms":claim.accepted_at_unix_ms,
         "body_digest":client_v0::credential_digest(&claim.body.to_string()),
     });
-    let fields: &[&str] = match claim.kind.as_str() {
-        "gate.result" => &["verdict", "operation", "request", "gate", "baseline", "token_usage", "stage"],
-        "work.claimed" | "work.renewed" | "work.progress" | "work.submitted" | "work.failed"
-            | "work.released" | "work.extended" => &[
-                "attempt", "status", "worker_reported", "claimant", "claim_incarnation",
-                "claim_expires_at_unix_ms", "readiness_epoch", "extend_ms", "clock",
-                "wait_until_unix_ms", "submitted_incarnation",
-            ],
-        _ => return value,
-    };
     value["actor"] = json!(claim.actor);
     let source = claim.body.get("fields").unwrap_or(&claim.body);
     let projected = fields.iter().filter_map(|field| {
@@ -418,6 +413,19 @@ fn service_claim(claim: &ClaimRecord) -> Value {
     }).collect::<serde_json::Map<_, _>>();
     value["body"] = json!({"fields":projected});
     value
+}
+
+fn service_claim_fields(kind: &str) -> Option<&'static [&'static str]> {
+    Some(match kind {
+        "gate.result" => &["verdict", "operation", "request", "baseline", "token_usage", "stage"],
+        "work.claimed" | "work.renewed" | "work.progress" | "work.submitted" | "work.failed"
+            | "work.released" | "work.extended" => &[
+                "attempt", "status", "worker_reported", "claimant", "claim_incarnation",
+                "claim_expires_at_unix_ms", "readiness_epoch", "extend_ms", "clock",
+                "wait_until_unix_ms", "submitted_incarnation",
+            ],
+        _ => return None,
+    })
 }
 
 #[derive(Default, Deserialize)]

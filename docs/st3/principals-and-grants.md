@@ -123,7 +123,12 @@ Service read admission uses a closed GET/scope registry on both the credential
 gateway and bearer-authenticated native router. `read.claims` admits
 `/v1/client/claims` and `/v1/client/claims/by-id/{id}` with the native readers'
 1–500 bounds and numeric `after`/`before` cursors. `read.work` admits exact
-`/v1/client/work-items/{subject}` reads without acknowledging wakes.
+`/v1/client/work-items/{subject}` reads without acknowledging wakes. Service work
+responses are a separate typed DTO: subject, run/generation/step identifiers,
+attempt, status, claimant, claim/submission incarnations, claim expiry, readiness
+epoch, worker-reported flag, creation/update timestamps and typed execution clock
+timestamps/counters only. Goals, constraints, titles, person answers, summaries,
+blocked reasons and other native free-text subviews are excluded on both aliases.
 `read.documents` remains a closed scope and its routes remain registered, but its
 document namespace allowlist is empty: every service list/content/history request
 is refused until a consumer namespace is declared. Native aliases use the same
@@ -133,17 +138,19 @@ Service claim bodies are deny-by-default, not field-name redaction. Only
 `gate.result` and `work.claimed`, `work.renewed`, `work.progress`,
 `work.submitted`, `work.failed`, `work.released`, `work.extended` disclose
 schema-listed scalar receipt/state fields. Gate bodies expose `verdict`,
-`operation`, `request`, `gate`, `baseline`, `token_usage`, `stage`; work bodies
+`operation`, `request`, `baseline`, `token_usage`, `stage`; the literal gate name
+is excluded. Work bodies
 expose `attempt`, `status`, `worker_reported`, `claimant`, `claim_incarnation`,
 `claim_expires_at_unix_ms`, `readiness_epoch`, `extend_ms`, `clock`,
 `wait_until_unix_ms`, `submitted_incarnation`, with the receipt/state claim's actor.
 These support independent gate receipt and work-state validation without arbitrary
 payload, summary, reason or handoff objects.
-Every other kind returns only id, kind, subject, origin, store index, acceptance
-time and a SHA-256 digest of its JSON body. This includes `mission.published`,
-`intent.desired`, grant records and pending device/assistant pairing challenges:
-neither declaration bodies nor another grant's verifiers are disclosed.
-Metadata-only items retain their page positions, so pagination has no gaps.
+Every other kind returns only `store_index` and the fixed `withheld: true`
+marker in pages, with no subject, id, actor, origin, kind, timestamp or body digest.
+This includes declarations, grants and pending device/assistant pairings: even
+the deterministic pairing subject can be a verifier and is not disclosed.
+Nonallowlisted by-id requests return the same not-found response as nonexistent
+ids, with no existence oracle. Withheld rows retain page positions without gaps.
 The new client claim/work aliases admit only services; device, assistant and
 browser clients gain no new routes. Existing native routes retain non-service
 semantics. No declaration, assistant, action, upgrade, HEAD or unknown route is admitted.

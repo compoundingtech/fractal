@@ -1,5 +1,6 @@
 use super::*;
 use axum::body::to_bytes;
+use crate::PersonWorkStore;
 
 const TOKEN: &str = "service-test-private-bearer-never-in-a-claim";
 const ID: &str = "121212121212121212121212";
@@ -66,7 +67,7 @@ async fn service_r29_claim_parity_paging_bounds_redaction_and_credential_secrecy
             actor:Some("person/owner".into()), fields:serde_json::from_value(json!({"number":n,
                 "desired":{"environment":{"TOKEN":"environment-secret"}}, "declaration":"declaration-secret"})).unwrap(),
             evidence:vec![], expected_subject:None, idempotency_key:None,
-        }).unwrap().id);
+        }).unwrap().store_index);
     }
     for gateway in [false, true] {
         let app = if gateway { crate::api::fabric_router(state.clone()) } else { crate::api::router(state.clone()) };
@@ -78,7 +79,11 @@ async fn service_r29_claim_parity_paging_bounds_redaction_and_credential_secrecy
             let serialized = page.to_string();
             assert!(!serialized.contains("environment-secret"));
             assert!(!serialized.contains("declaration-secret"));
-            ids.extend(page["claims"].as_array().unwrap().iter().map(|claim| claim["id"].as_str().unwrap().to_owned()));
+            ids.extend(page["claims"].as_array().unwrap().iter().map(|claim| {
+                assert_eq!(claim.as_object().unwrap().len(), 2);
+                assert_eq!(claim["withheld"], true);
+                claim["store_index"].as_u64().unwrap()
+            }));
             let Some(next) = page["next_cursor"].as_u64() else { break };
             assert!(next > after);
             after = next;
@@ -92,15 +97,15 @@ async fn service_r29_claim_parity_paging_bounds_redaction_and_credential_secrecy
             assert_eq!(call(&app,"GET",&format!("/v1/client/claims?limit={limit}"),Value::Null,false).await.0, StatusCode::OK);
         }
         let (status, value) = call(&app,"GET",&format!("/v1/client/claims/by-id/{}",grant.id),Value::Null,false).await;
-        assert_eq!(status, StatusCode::OK, "{value}");
-        assert!(value.get("body").is_none());
-        assert_eq!(value["body_digest"].as_str().unwrap().len(),64);
+        assert_eq!(status, StatusCode::NOT_FOUND, "{value}");
+        let (missing_status, _) = call(&app,"GET","/v1/client/claims/by-id/nonexistent",Value::Null,false).await;
+        assert_eq!(status, missing_status);
         assert!(!value.to_string().contains(&credential_digest(TOKEN)));
         assert!(!value.to_string().contains(TOKEN));
         assert!(!value.to_string().contains("\"credential\":"));
         if !gateway {
             let (status, raw) = call(&app,"GET",&format!("/v1/claims/by-id/{}",grant.id),Value::Null,false).await;
-            assert_eq!(status, StatusCode::OK);
+            assert_eq!(status, StatusCode::NOT_FOUND);
             assert_eq!(raw, value);
         }
     }
@@ -236,13 +241,54 @@ mission "service-work" state="ready" {
         idempotency_key:"service-run".into(),
     }).unwrap();
     let subject = &run.steps[0].subject;
+    state.store.set_step_state(subject,"ready",None).unwrap();
+    let action = |name: &str, summary: &str| state.store.work_action(subject,name,&crate::model::WorkRequest {
+        wait_ms:None,actor:Some("agent/node.reader".into()),incarnation:Some("service-runtime".into()),
+        summary:Some(summary.into()),reason:None,evidence:vec![],idempotency_key:format!("service-{name}"),
+    }).unwrap();
+    action("claim","claim");
+    action("progress","worker-progress-secret-sentinel");
+    let progress = state.store.step_run(subject).unwrap().unwrap();
+    assert_eq!(progress.progress_summary.as_deref(),Some("worker-progress-secret-sentinel"));
+    for app in [crate::api::router(state.clone()),crate::api::fabric_router(state.clone())] {
+        let (status,view) = call(&app,"GET",&format!("/v1/client/work-items/{subject}"),Value::Null,false).await;
+        assert_eq!(status,StatusCode::OK);
+        assert!(!view.to_string().contains("worker-progress-secret-sentinel"));
+    }
+    let ask = state.store.ask_person(&crate::model::PersonAskRequest {
+        legacy_request:None,person:"person/owner".into(),title:"Private question".into(),
+        reason:"Private reason".into(),actor:"agent/node.reader".into(),step:Some(subject.clone()),
+        new_run:None,incarnation:Some("service-runtime".into()),request:None,
+        deadline_ms:None,default_answer:None,idempotency_key:"service-person-ask".into(),
+    }).unwrap();
+    state.store.finish_person_step(&crate::model::PersonStepResponse {
+        delegation:None,subject:ask.subject,actor:"person/owner".into(),
+        summary:"person-answer-secret-sentinel".into(),evidence:vec![],episode:None,
+        answer:None,idempotency_key:"service-person-answer".into(),
+    },false).unwrap();
+    action("complete","worker-completion-secret-sentinel");
+    let completed = state.store.step_run(subject).unwrap().unwrap();
+    assert_eq!(completed.completion_summary.as_deref(),Some("worker-completion-secret-sentinel"));
+    assert!(serde_json::to_string(&completed.person_answers).unwrap().contains("person-answer-secret-sentinel"));
     let expected = serde_json::to_value(state.store.step_run(subject).unwrap().unwrap()).unwrap();
     let document = state.store.put_document_as("doc/service-parity", b"service document", &None, "service-doc", None).unwrap();
     for gateway in [false, true] {
         let app = if gateway { crate::api::fabric_router(state.clone()) } else { crate::api::router(state.clone()) };
         let (status, work) = call(&app,"GET",&format!("/v1/client/work-items/{subject}"),Value::Null,false).await;
         assert_eq!(status,StatusCode::OK,"{work}");
-        assert_eq!(work,expected);
+        for sentinel in ["worker-progress-secret-sentinel","worker-completion-secret-sentinel","person-answer-secret-sentinel"] {
+            assert!(!work.to_string().contains(sentinel));
+        }
+        for field in ["subject","run","generation","step","attempt","status","claimant",
+            "claim_incarnation","submitted_incarnation","claim_expires_at_unix_ms",
+            "readiness_epoch","worker_reported","created_at_unix_ms","updated_at_unix_ms"] {
+            assert_eq!(work[field],expected[field],"{field}");
+        }
+        assert_eq!(work.as_object().unwrap().len(),15);
+        for field in ["goals","constraints","title","person_answers","progress_summary",
+            "completion_summary","blocked_reason","under"] {
+            assert!(work.get(field).is_none(),"{field}");
+        }
         for path in [
             "/v1/client/documents?prefix=doc/service-parity",
             "/v1/client/documents?history=true",
@@ -267,7 +313,7 @@ async fn service_receipt_bodies_use_only_the_closed_field_schema() {
     let receipt = state.store.append_claim(&ClaimInput {
         subject:"gate-operation/service/work/review".into(),kind:"gate.result".into(),
         actor:Some("person/owner".into()),
-        fields:serde_json::from_value(json!({"verdict":"pass","gate":"review","baseline":true,
+        fields:serde_json::from_value(json!({"verdict":"pass","gate":"gate-name-secret-sentinel","baseline":true,
             "value":{"declarations_kdl":"receipt-secret-sentinel","code_hash":"other-verifier"},
             "reason":"private-free-text"})).unwrap(),
         evidence:vec![],expected_subject:None,idempotency_key:None,
@@ -275,7 +321,8 @@ async fn service_receipt_bodies_use_only_the_closed_field_schema() {
     for app in [crate::api::router(state.clone()),crate::api::fabric_router(state.clone())] {
         let (status,value) = call(&app,"GET",&format!("/v1/client/claims/by-id/{}",receipt.id),Value::Null,false).await;
         assert_eq!(status,StatusCode::OK,"{value}");
-        assert_eq!(value["body"],json!({"fields":{"verdict":"pass","gate":"review","baseline":true}}));
+        assert_eq!(value["body"],json!({"fields":{"verdict":"pass","baseline":true}}));
+        assert!(!value.to_string().contains("gate-name-secret-sentinel"));
         assert!(!value.to_string().contains("receipt-secret-sentinel"));
         assert!(!value.to_string().contains("other-verifier"));
         assert!(!value.to_string().contains("private-free-text"));

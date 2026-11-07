@@ -34,7 +34,7 @@ fn service_fixture(state: &AppState) {
 }
 
 #[tokio::test]
-async fn real_mission_planning_and_pending_pairings_are_metadata_only_or_refused() {
+async fn real_mission_planning_and_pending_pairings_are_withheld_or_refused() {
     let root = tempfile::tempdir().unwrap();
     let mut state = tests_shared::state(root.path());
     state.owning_person = Some(OWNER.into());
@@ -103,20 +103,31 @@ mission "service-planned" state="ready" {
                 assert!(!wire.contains(sentinel));
             }
             for verifier in &verifiers { assert!(!wire.contains(verifier)); }
+            for challenge in &challenges {
+                assert!(!wire.contains(&challenge.subject));
+                assert!(!wire.contains(&challenge.id));
+                assert!(!wire.contains(&credential_digest(&challenge.body.to_string())));
+                let pairing_id = challenge.subject.rsplit('/').next().unwrap();
+                assert!(!wire.contains(pairing_id));
+            }
             assert!(!wire.contains("code_hash") && !wire.contains("credential_hash"));
-            seen.extend(page["claims"].as_array().unwrap().iter().map(|claim|claim["id"].as_str().unwrap().to_owned()));
+            seen.extend(page["claims"].as_array().unwrap().iter().map(|claim| {
+                if claim["withheld"] == true {
+                    assert_eq!(claim,&json!({"store_index":claim["store_index"],"withheld":true}));
+                }
+                claim["store_index"].as_u64().unwrap()
+            }));
             let Some(next) = page["next_cursor"].as_u64() else { break };
             assert!(next > after); after = next;
         }
         for claim in claims.iter().filter(|claim| matches!(claim.kind.as_str(),"mission.published" | "intent.desired"
             | "custom.client.pairing-begun" | external_grants::BEGUN | external_grants::GRANTED)) {
-            assert!(seen.contains(&claim.id));
+            assert!(seen.contains(&claim.store_index));
             for prefix in ["/v1/client/claims/by-id/","/v1/claims/by-id/"] {
                 let (status,value) = request(&app,"GET",&format!("{prefix}{}",claim.id),Some(TOKEN),Value::Null).await;
-                if status == StatusCode::OK {
-                    assert!(value.get("body").is_none(),"{value}");
-                    assert_eq!(value["body_digest"].as_str().unwrap().len(),64);
-                } else { assert_eq!(status,StatusCode::FORBIDDEN); }
+                assert!(matches!(status,StatusCode::NOT_FOUND | StatusCode::FORBIDDEN),"{value}");
+                let (missing_status,_) = request(&app,"GET",&format!("{prefix}nonexistent"),Some(TOKEN),Value::Null).await;
+                assert_eq!(status,missing_status);
             }
         }
         for prefix in ["/v1/client/documents","/v1/documents"] {
@@ -155,6 +166,53 @@ async fn paired_devices_and_browser_sessions_cannot_use_service_claim_routes() {
                     expires_at:u128::from(u64::MAX),
                 }).body(Body::empty()).unwrap();
             assert_eq!(app.clone().oneshot(browser).await.unwrap().status(),StatusCode::FORBIDDEN);
+        }
+    }
+}
+
+#[tokio::test]
+async fn real_predicate_gate_receipt_withholds_gate_name() {
+    use fractal_reconcile::reconcile::{Reconciler, tests::FakeRuntime};
+    use fractal_api_core::{MissionsStore, MissionsStoreCore};
+    let root = tempfile::tempdir().unwrap();
+    let mut state = tests_shared::state(root.path());
+    state.owning_person = Some(OWNER.into());
+    let source = r#"version 2
+mission "service-gate" state="ready" {
+  goal "Protect literal gate names."
+  step "check" {
+    agentless
+    gate "gate-name-secret-sentinel" { exists "doc/service-gate-input" }
+  }
+}
+"#;
+    let intent = crate::graph::parse_test_intent(source,"node").unwrap();
+    let plan = state.store.mission(&intent,crate::model::IntentInput { kdl:source.into(),source_name:None }).unwrap();
+    state.store.apply(&intent,&plan.subject_tokens,"service-gate-publish").unwrap();
+    state.store.put_document_as("doc/service-gate-input",b"present",&None,"service-gate-input",None).unwrap();
+    state.store.create_mission_run(&crate::model::MissionRunRequest {
+        mission:"service-gate".into(),revision:None,workspace:root.path().display().to_string(),
+        requester:Some(OWNER.into()),mode:Some("run".into()),inputs:std::collections::BTreeMap::new(),
+        idempotency_key:"service-gate-run".into(),
+    }).unwrap();
+    let reconciler = Reconciler::new(state.store.clone(),std::sync::Arc::new(FakeRuntime::default()),
+        "node".into(),std::sync::Arc::new(tokio::sync::Notify::new()));
+    reconciler.reconcile_once().unwrap();
+    let receipt = state.store.claims_page(None,None,0,None,false,500).unwrap().claims.into_iter()
+        .find(|claim| claim.kind == "gate.result" && claim.body["fields"]["gate"] == "gate-name-secret-sentinel")
+        .expect("the real reconciler writes the literal gate name");
+    service_fixture(&state);
+    for (gateway,app) in [(false,router(state.clone())),(true,fabric_router(state.clone()))] {
+        for prefix in ["/v1/client/claims/by-id/","/v1/claims/by-id/"] {
+            let (status,value) = request(&app,"GET",&format!("{prefix}{}",receipt.id),Some(TOKEN),Value::Null).await;
+            if gateway && prefix == "/v1/claims/by-id/" {
+                assert_eq!(status,StatusCode::FORBIDDEN);
+            } else {
+                assert_eq!(status,StatusCode::OK,"{value}");
+                assert_eq!(value["body"]["fields"]["verdict"],"pass");
+                assert!(value["body"]["fields"].get("gate").is_none());
+                assert!(!value.to_string().contains("gate-name-secret-sentinel"));
+            }
         }
     }
 }
