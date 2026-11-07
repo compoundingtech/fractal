@@ -203,6 +203,32 @@ export const Stale: Story = { args: { feed: 'stale' }, play: async ({ canvasElem
   await expect(rows(canvasElement)).toHaveLength(4)
 } }
 
+/** Rejected rows do not become urgent badges; their evidence lives inside the tab panel. */
+export const RejectedRows: Story = {
+  render: () => (
+    <main {...stylex.props(styles.canvas, liveLegacyTheme, assistantDarkTheme)}>
+      <aside aria-label="Alerts sidebar" {...stylex.props(styles.sidebar)}>
+        <AlertsList
+          feed={observed({ value: [] })} now={Date.now()} onOpen={() => {}}
+          decode={{ decodeStale: false, undecodable: [
+            { _tag: 'Rejected', id: 'attention/broken', path: 'actions', reason: 'Expected an array' },
+            { _tag: 'Rejected', id: 'attention/other', path: 'title', reason: 'Expected a string' },
+          ] }}
+        />
+      </aside>
+    </main>
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('status')).toHaveTextContent('2 alerts could not be shown · their data does not match the expected format')
+    await expect(canvas.getByText('Nothing needs you. Asks, approvals and harness questions show here.')).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: 'Details' }))
+    const details = canvas.getByRole('list', { name: 'Alerts that could not be shown' })
+    await expect(details).toHaveTextContent('attention/broken')
+    await expect(details).toHaveTextContent('attention/other')
+  },
+}
+
 const styles = stylex.create({
   canvas: { display: 'flex', alignItems: 'flex-start', gap: 16, minHeight: '100vh', boxSizing: 'border-box', padding: 12, backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
   sidebar: { width: g.sidebarDefault, flexShrink: 0, boxSizing: 'border-box', backgroundColor: c.sidebar, border: `1px solid ${c.border}` },

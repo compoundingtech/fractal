@@ -135,3 +135,39 @@ describe('AlertsList, after an answer leaves the feed', () => {
     expect(document.activeElement).toBe(outside)
   })
 })
+
+describe('AlertsList decode notice', () => {
+  it('counts rejected rows above an empty list, discloses IDs and clears on recovery', async () => {
+    const decode = {
+      decodeStale: false,
+      undecodable: [
+        { _tag: 'Rejected' as const, id: 'attention/broken', path: 'actions', reason: 'Expected an array' },
+        { _tag: 'Rejected' as const, id: 'attention/broken', path: 'title', reason: 'Expected a string' },
+        { _tag: 'Rejected' as const, id: 'attention/other', path: 'actions', reason: 'Expected an array' },
+        { _tag: 'Degraded' as const, id: 'attention/kept', path: 'extra', reason: 'Unknown leaf' },
+      ],
+    }
+    await act(async () => root.render(<AlertsList feed={observed({ value: [] })} decode={decode} now={now} onOpen={() => {}} />))
+    const notice = host.querySelector('[data-wf-attention-decode]')!
+    expect(notice.querySelector('[role="status"]')?.textContent).toBe('2 alerts could not be shown · their data does not match the expected format')
+    expect(host.textContent).toContain('Nothing needs you. Asks, approvals and harness questions show here.')
+    const details = notice.querySelector<HTMLButtonElement>('button')!
+    await act(async () => details.click())
+    expect(notice.querySelector('[aria-label="Alerts that could not be shown"]')?.textContent).toContain('attention/broken')
+    expect(notice.textContent).toContain('attention/other')
+    expect(notice.textContent).not.toContain('attention/kept')
+    await show([])
+    expect(host.querySelector('[data-wf-attention-decode]')).toBeNull()
+    expect(host.textContent).toBe('Nothing needs you. Asks, approvals and harness questions show here.')
+  })
+
+  it('keeps valid alerts visible alongside rejected rows', async () => {
+    await act(async () => root.render(<AlertsList
+      feed={observed({ value: [first] })}
+      decode={{ decodeStale: false, undecodable: [{ _tag: 'Rejected', id: 'attention/broken', path: 'actions', reason: 'Expected an array' }] }}
+      now={now} onOpen={() => {}}
+    />))
+    expect(row(first)).not.toBeNull()
+    expect(host.querySelector('[data-wf-attention-decode] [role="status"]')?.textContent).toContain('1 alert could not be shown')
+  })
+})
