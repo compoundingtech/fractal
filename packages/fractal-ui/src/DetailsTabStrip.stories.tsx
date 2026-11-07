@@ -40,7 +40,7 @@ const styles = stylex.create({
 /** Only production components are mounted; the CSF render callback owns host observations. */
 const meta = {
   excludeStories: ['scenarioExemptions'],
-  title: 'Fractal UI/Details Tab Strip',
+  id: 'fractal-ui-details-tab-strip', title: 'Surfaces/Details/Tab strip',
   component: Workbench,
   parameters: {
     scenario: { _tag: 'contract-fixture', reason: 'The fixed eight pane identities and labels pin duplicate resource routing, 159/160px containment thresholds, focus recovery and zero layout shifts; catalog resource counts and labels would change those contracts.' },

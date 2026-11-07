@@ -17,7 +17,7 @@ const day = civilDate('2026-10-12', zone)!
 const hostText = stylex.createTheme(text, { fg: '#123456' })
 const hostSurface = stylex.createTheme(surface, { canvas: '#f1eadb', raised: '#f1eadb' })
 
-function HumanTimeStory({ scheme = 'dark', width = 440, host = false, live = false, browserClock = false, instantTooltips = true }: { scheme?: Scheme; width?: number; host?: boolean; live?: boolean; browserClock?: boolean; instantTooltips?: boolean }) {
+function HumanTimeStory({ scheme = 'dark', host = false, live = false, browserClock = false, instantTooltips = true }: { scheme?: Scheme; host?: boolean; live?: boolean; browserClock?: boolean; instantTooltips?: boolean }) {
   // A fake one-second timer clock keeps the live story deterministic without changing global timers.
   const [timer] = React.useState(() => {
     let value = now
@@ -27,7 +27,7 @@ function HumanTimeStory({ scheme = 'dark', width = 440, host = false, live = fal
   })
   // Strict plays hover without the delay; DefaultHoverDelay keeps the component's default.
   const hoverDelay = instantTooltips ? 0 : undefined
-  return <main data-testid="human-time-story" data-scheme={scheme} {...stylex.props(styles.root, styles.width(width), ...baselineTheme, scheme === 'light' && lightTheme, host && hostText, host && hostSurface)}>
+  return <main data-testid="human-time-story" data-scheme={scheme} {...stylex.props(styles.root, ...baselineTheme, scheme === 'light' && lightTheme, host && hostText, host && hostSurface)}>
     <HumanClockProvider clock={browserClock ? systemClock : live ? timer.clock : fixedClock(now)} zone={zone}>
       <h1>Human time</h1>
       <dl {...stylex.props(styles.list)}>
@@ -44,20 +44,17 @@ function HumanTimeStory({ scheme = 'dark', width = 440, host = false, live = fal
 }
 const meta = {
   excludeStories: ['scenarioExemptions'],
-  title: 'Fractal UI/Human time', component: HumanTimeStory, parameters: { scenario: { _tag: 'primitive', reason: "Frozen clock values and explicit tooltip timing isolate human-time formatting and tick behavior." }, layout: 'fullscreen' },
-  args: { scheme: 'dark', width: 440, instantTooltips: true },
-  argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, width: { options: [440, 1440], control: 'select' }, instantTooltips: { control: 'boolean' } },
+  id: 'fractal-ui-human-time', title: 'Components/Human time', component: HumanTimeStory, parameters: { scenario: { _tag: 'primitive', reason: "Frozen clock values and explicit tooltip timing isolate human-time formatting and tick behavior." }, layout: 'fullscreen' },
+  args: { scheme: 'dark', instantTooltips: true },
+  argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, instantTooltips: { control: 'boolean' } },
 } satisfies Meta<typeof HumanTimeStory>
 export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
   'AllStates:primitive',
-  'Dark1440:primitive',
   'DefaultHoverDelay:primitive',
   'HostTheme:primitive',
-  'Light1440:primitive',
-  'Light440:primitive',
   'LiveTick:primitive',
   'SystemTick:primitive',
 ]
@@ -106,9 +103,6 @@ const assertStates: NonNullable<Story['play']> = async ({ canvasElement }) => {
   await tooltipFor(canvas.getByTestId('relative'), exact)
 }
 export const AllStates: Story = { play: assertStates }
-export const Light440: Story = { args: { scheme: 'light', width: 440 }, play: assertStates }
-export const Dark1440: Story = { args: { scheme: 'dark', width: 1440 }, play: assertStates }
-export const Light1440: Story = { args: { scheme: 'light', width: 1440 }, play: assertStates }
 export const HostTheme: Story = { args: { scheme: 'light', host: true }, play: assertStates }
 export const LiveTick: Story = { args: { live: true }, play: async context => {
   await assertStates(context)
@@ -147,7 +141,6 @@ export const DefaultHoverDelay: Story = { args: { instantTooltips: false }, play
 } }
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', padding: s.xl, backgroundColor: surface.canvas, color: text.fg, fontFamily: t.fontSans },
-  width: (width: number) => ({ width, maxWidth: '100%' }),
   list: { display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: s.md },
   colors: { backgroundColor: text.fg, color: surface.raised },
 })

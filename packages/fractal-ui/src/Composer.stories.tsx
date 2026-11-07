@@ -120,7 +120,7 @@ function SingleComposer(args: ComposerArgs) {
 
 const meta = {
   excludeStories: ['scenarioExemptions'],
-  title: 'Fractal UI/Composer',
+  id: 'fractal-ui-composer', title: 'Surfaces/Composer/Composer',
   component: SingleComposer,
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'editable composer and outbox state are host-owned local contracts that no world slice models' }, layout: 'fullscreen', docs: { description: { component: 'Decided composer C2 · R3 · M2 · K1 over assistant-ui native composer state and React Aria TokenField. Native queue, structured mention/command serialization, image attachments, durable local drafts and explicit local fixture send outcomes; no network transport is claimed.' } } },
   args: { scheme: 'dark', state: 'idle', ...decided, effort: 'supported' },
@@ -139,7 +139,6 @@ export default meta
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
   'AllStates:contract-fixture',
-  'AllStatesLight:contract-fixture',
   'DurableDraft:contract-fixture',
   'EffortAllStates:contract-fixture',
   'EffortSupported:contract-fixture',
@@ -147,30 +146,23 @@ export const scenarioExemptions: readonly string[] = [
   'EffortUnsupported:contract-fixture',
   'FailedSendRestored:contract-fixture',
   'FooterWidthBudgetMedium:contract-fixture',
-  'FooterWidthBudgetMediumLight:contract-fixture',
   'FooterWidthBudgetNarrow:contract-fixture',
-  'FooterWidthBudgetNarrowLight:contract-fixture',
   'FooterWidthBudgetWide:contract-fixture',
-  'FooterWidthBudgetWideLight:contract-fixture',
   'Geometry:contract-fixture',
   'Idle:contract-fixture',
-  'IdleLight:contract-fixture',
   'ImageAttached:contract-fixture',
   'ImeComposition:contract-fixture',
   'KitLabelResize:contract-fixture',
   'LayoutShapes:contract-fixture',
   'MentionPopup:contract-fixture',
-  'MentionPopupLight:contract-fixture',
   'OfflineDraft:contract-fixture',
   'PlainImageAttachments:contract-fixture',
-  'PlainImageAttachmentsLight:contract-fixture',
   'PlainTextAdapter:contract-fixture',
   'QueuedTwice:contract-fixture',
   'Running:contract-fixture',
   'ShiftEnterNewline:contract-fixture',
   'SlashCommands:contract-fixture',
   'TargetTooltips:contract-fixture',
-  'TargetTooltipsLight:contract-fixture',
   'TypingMultiLine:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
@@ -228,7 +220,6 @@ export const Idle: Story = { tags: ['critical'],
     await expect(within(receiptLog(canvasElement)).getByText(/Accepted · Review agent for the composer migration · claude-opus-4/)).toBeVisible()
   },
 }
-export const IdleLight: Story = { ...Idle, args: { scheme: 'light' } }
 export const TypingMultiLine: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   args: { state: 'typing multi-line' },
@@ -307,7 +298,6 @@ export const AllStates: Story = {
   beforeEach: clearDrafts,
   render: args => <Surface scheme={args.scheme}><div {...stylex.props(styles.gallery)}>{composerStates.map(state => <ComposerFrame key={state} policy={decided} state={state} effort={args.effort} frameId={`all.${state}`} />)}</div></Surface>,
 }
-export const AllStatesLight: Story = { ...AllStates, args: { scheme: 'light' } }
 
 /** Readout and picker tooltips: keyboard focus reaches the full value once, without native titles. */
 export const TargetTooltips: Story = { tags: ['critical'],
@@ -344,7 +334,6 @@ export const TargetTooltips: Story = { tags: ['critical'],
     }
   },
 }
-export const TargetTooltipsLight: Story = { ...TargetTooltips, args: { scheme: 'light', state: 'running' } }
 
 /** Suggestion popup geometry: 4px above the form, sticky group headers, 28px rows, first result active on open. */
 export const MentionPopup: Story = { tags: ['critical'],
@@ -389,7 +378,6 @@ export const MentionPopup: Story = { tags: ['critical'],
     await expect(field.textContent).toContain(firstLabel)
   },
 }
-export const MentionPopupLight: Story = { ...MentionPopup, args: { scheme: 'light', mentions: 'M3' } }
 export const SlashCommands: Story = { tags: ['critical'],
   beforeEach: clearDrafts,
   play: async ({ canvasElement }) => {
@@ -573,11 +561,8 @@ const footerWidthBudget = (composerWidth: 320 | 360 | 451): Story => ({
   },
 })
 export const FooterWidthBudgetNarrow: Story = { ...footerWidthBudget(320), tags: ['critical', 'both-widths'] }
-export const FooterWidthBudgetNarrowLight: Story = { ...FooterWidthBudgetNarrow, tags: ['critical', '!both-widths'], args: { scheme: 'light', state: 'running', effort: 'supported' } }
 export const FooterWidthBudgetMedium: Story = { ...footerWidthBudget(360), tags: ['critical', 'both-widths'] }
-export const FooterWidthBudgetMediumLight: Story = { ...FooterWidthBudgetMedium, tags: ['critical', '!both-widths'], args: { scheme: 'light', state: 'running', effort: 'supported' } }
 export const FooterWidthBudgetWide: Story = { ...footerWidthBudget(451), tags: ['critical', 'both-widths'] }
-export const FooterWidthBudgetWideLight: Story = { ...FooterWidthBudgetWide, tags: ['critical', '!both-widths'], args: { scheme: 'light', state: 'running', effort: 'supported' } }
 
 /** C1/C3 use a pill only when the actual lane leaves enough editor space; draft wrapping and C3 focus use a slab (the pending shape pick). */
 export const LayoutShapes: Story = { tags: ['critical', 'both-widths'],
@@ -748,7 +733,6 @@ export const PlainImageAttachments: Story = { tags: ['critical'],
     await waitFor(() => expect(within(receiptLog(canvasElement)).getByText('Attachments:')).toBeVisible())
   },
 }
-export const PlainImageAttachmentsLight: Story = { ...PlainImageAttachments, args: { scheme: 'light' } }
 
 /** Plain text adapter used by workbench thread panes: session-scoped draft, queue while running, explicit stop. */
 function PlainAdapter({ scheme }: { readonly scheme: Scheme }) {

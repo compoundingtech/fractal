@@ -38,7 +38,7 @@ const styles = stylex.create({
 
 const meta = {
   excludeStories: ['scenarioExemptions'],
-  title: 'Fractal UI/Details Recovery',
+  id: 'fractal-ui-details-recovery', title: 'Surfaces/Details/Recovery',
   component: Workbench,
   parameters: { layout: 'fullscreen', docs: { description: { component: 'Mounted production Details recovery. Host controls change decoded observations, content variants and actual pane widths. Plays retain the inherited pending geometry, header, keyboard and accessibility batteries; schemes are args and viewports are owned by the canonical browser matrix.' } } },
   args: { resources: workbenchResources, layout, workspaceId: 'details-recovery', scheme: 'dark', mountedWidth: 320, variantIndex: defaultVariant, initialState: 'busy', describePane: () => ({ title: 'Details' }) },

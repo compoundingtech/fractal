@@ -80,7 +80,7 @@ const styles = stylex.create({
 })
 
 const meta = { excludeStories: ['scenarioExemptions'],
-  title: 'wf/Sidebar/Roster decode',
+  id: 'wf-sidebar-roster-decode', title: 'Surfaces/Sidebar/Roster decode',
   component: Roster,
   parameters: { layout: 'fullscreen' },
   argTypes: { scheme: { control: 'radio', options: ['light', 'dark'] } },
