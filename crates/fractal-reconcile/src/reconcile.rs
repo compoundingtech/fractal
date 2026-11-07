@@ -11228,13 +11228,32 @@ impl<R: RuntimeControl> Reconciler<R> {
                                 .map(|agent| format!("`{agent}`"))
                                 .collect::<Vec<_>>()
                                 .join(", ");
-                            changed |= self.store.set_step_state(
-                                &view.subject,
-                                "blocked",
-                                Some(&format!(
-                                    "no eligible agent is present in the desired graph: {eligible}"
-                                )),
-                            )?;
+                            // A cancelled run does not wait for a seat that is known to be gone:
+                            // every named agent is stopped or retired, which both select a stop.
+                            // A seat this host has not seen yet may still replicate, so its step
+                            // keeps waiting.
+                            let mut agents = view.assigned_to.iter().chain(view.available_to.iter()).peekable();
+                            let mut gone = agents.peek().is_some();
+                            for agent in agents {
+                                gone &= self.store.selected_desired_kind(agent)?.as_deref() == Some("stop");
+                            }
+                            let (status, reason) = if run.phase == "final-cancelled" && gone {
+                                (
+                                    "cancelled",
+                                    format!(
+                                        "the mission run was cancelled and every eligible agent is stopped or retired: {eligible}"
+                                    ),
+                                )
+                            } else {
+                                (
+                                    "blocked",
+                                    format!(
+                                        "no eligible agent is present in the desired graph: {eligible}"
+                                    ),
+                                )
+                            };
+                            changed |=
+                                self.store.set_step_state(&view.subject, status, Some(&reason))?;
                             return Ok(changed);
                         }
                         // A step that raises its seat's lane is delivered only once the raised lane
@@ -20922,6 +20941,7 @@ pub mod tests {
     pub(crate) mod slo_breach_tests;
     mod slo_breach_flow_tests;
     mod final_cancel_gate_exit;
+    mod final_cancel_missing_assignee;
     mod gate_on_demand;
     mod github_watch_selection;
     mod standing_observer_stop;
