@@ -87,7 +87,9 @@ pub fn write_request(request: &crate::edits::Request) -> Result<fractal_client::
 
 /// Receipts acknowledge delivery, never authoritative observation. A lost, malformed or
 /// mismatched response cannot prove non-delivery; replay retains the original request.
-pub fn write_result(request: &crate::edits::Request, result: Result<Envelope<fractal_client::ActionResult>, fractal_client::ClientError>) -> crate::edits::Event {
+/// Pass the provenance from `Effect::Send` unchanged; replay errors reject only this
+/// attempt, not an earlier uncertain delivery. Hosts never infer it from HTTP errors.
+pub fn write_result(request: &crate::edits::Request, delivery: crate::edits::Delivery, result: Result<Envelope<fractal_client::ActionResult>, fractal_client::ClientError>) -> crate::edits::Event {
     use fractal_client::{ActionStatus, ClientError, ErrorCode};
     use crate::edits::{Event, Refusal};
     let id = request.identity.clone();
@@ -97,6 +99,7 @@ pub fn write_result(request: &crate::edits::Request, result: Result<Envelope<fra
             ActionStatus::Rejected => Event::Refused(id, Refusal::Conflict),
             ActionStatus::Unknown => Event::Unknown(id),
         },
+        Err(_) if delivery == crate::edits::Delivery::Replay => Event::Unknown(id),
         Err(error) if error.applied() == Some("unknown") => Event::Unknown(id),
         // These arrangement-specific validation/precondition codes precede the write:
         // api/client_v0/arrangements.rs:44-48,89-106; store/arrangements.rs:328-339,363-369.
@@ -258,37 +261,50 @@ mod write_tests {
     fn acknowledgements_refusals_and_ambiguous_delivery_are_distinct() {
         let state = staged(false); let request = state.request().unwrap();
         for status in ["accepted", "completed"] {
-            assert!(matches!(write_result(request, Ok(receipt("action/2", status))), crate::edits::Event::Ack(i) if i == id(2)));
+            for delivery in [Delivery::First, Delivery::Replay] {
+                assert!(matches!(write_result(request, delivery, Ok(receipt("action/2", status))), crate::edits::Event::Ack(i) if i == id(2)));
+            }
         }
         for (code, reason) in [(ErrorCode::StaleFence, Refusal::StaleFence), (ErrorCode::Forbidden, Refusal::Unauthorized),
             (ErrorCode::ArrangementOwnerForbidden, Refusal::Unauthorized), (ErrorCode::MembershipOwnerForbidden, Refusal::Unauthorized),
             (ErrorCode::ArrangementFolderDeleted, Refusal::DestinationMissing), (ErrorCode::ArrangementRetired, Refusal::DestinationMissing),
             (ErrorCode::NotFound, Refusal::DestinationMissing), (ErrorCode::InvalidMembershipOperations, Refusal::InvalidPlan)] {
-            assert!(matches!(write_result(request, Err(failure(code, None))), crate::edits::Event::Refused(i, r) if i == id(2) && r == reason));
+            assert!(matches!(write_result(request, Delivery::First, Err(failure(code.clone(), None))), crate::edits::Event::Refused(i, r) if i == id(2) && r == reason));
+            for applied in [None, Some("none")] {
+                assert!(matches!(write_result(request, Delivery::Replay, Err(failure(code.clone(), applied))), crate::edits::Event::Unknown(i) if i == id(2)));
+            }
         }
-        assert!(matches!(write_result(request, Err(failure(ErrorCode::IdempotencyConflict, Some("none")))), crate::edits::Event::Refused(_, Refusal::Conflict)));
-        assert!(matches!(write_result(request, Err(failure(ErrorCode::Internal, Some("none")))), crate::edits::Event::Refused(_, Refusal::InvalidPlan)));
-        assert!(matches!(write_result(request, Ok(receipt("action/2", "rejected"))), crate::edits::Event::Refused(_, Refusal::Conflict)));
+        assert!(matches!(write_result(request, Delivery::First, Err(failure(ErrorCode::IdempotencyConflict, Some("none")))), crate::edits::Event::Refused(_, Refusal::Conflict)));
+        assert!(matches!(write_result(request, Delivery::First, Err(failure(ErrorCode::Internal, Some("none")))), crate::edits::Event::Refused(_, Refusal::InvalidPlan)));
+        assert!(matches!(write_result(request, Delivery::First, Ok(receipt("action/2", "rejected"))), crate::edits::Event::Refused(_, Refusal::Conflict)));
         for result in [Err(ClientError::Transport("timeout".into())), Err(ClientError::Protocol("truncated".into())),
             Err(failure(ErrorCode::StaleFence, Some("unknown"))), Err(failure(ErrorCode::Internal, None)),
             Err(failure(ErrorCode::Unknown, None)), Err(failure(ErrorCode::IdempotencyConflict, None)),
             Ok(receipt("action/other", "completed")), Ok(receipt("action/2", "future"))] {
-            assert!(matches!(write_result(request, result), crate::edits::Event::Unknown(i) if i == id(2)));
+            assert!(matches!(write_result(request, Delivery::First, result), crate::edits::Event::Unknown(i) if i == id(2)));
         }
     }
     #[test]
     fn restore_replays_exact_payload_and_compound_step_refreshes_both_fences() {
         let mut state = staged(true); let first = wire(&state);
-        assert_eq!(state.reduce(crate::edits::Event::Persisted(id(1))), vec![Effect::Send]);
+        assert_eq!(state.reduce(crate::edits::Event::Persisted(id(1))), vec![Effect::Send(Delivery::First)]);
         // HTTP 500/internal after the layout commit cannot prove non-application.
-        state.reduce(write_result(state.request().unwrap(), Err(failure(ErrorCode::Internal, None))));
+        state.reduce(write_result(state.request().unwrap(), Delivery::First, Err(failure(ErrorCode::Internal, None))));
         assert_eq!(state.status, Status::UnknownDelivery);
         assert!(state.reduce(crate::edits::Event::Retry).is_empty());
         let (mut state, effects) = Edits::restore(&state.journal().unwrap(), &base(1).scope).unwrap();
         assert_eq!(effects, vec![Effect::PersistPending]); assert_eq!(wire(&state), first);
-        assert_eq!(state.reduce(crate::edits::Event::Persisted(id(1))), vec![Effect::Send]);
+        let sends = state.reduce(crate::edits::Event::Persisted(id(1)));
+        let [Effect::Send(delivery)] = sends.as_slice() else { panic!("expected replay") };
+        assert_eq!(*delivery, Delivery::Replay);
         assert_eq!(wire(&state), first);
-        state.reduce(write_result(state.request().unwrap(), Ok(receipt("action/1", "completed"))));
+        assert_eq!(state.reduce(write_result(state.request().unwrap(), *delivery, Err(failure(ErrorCode::Forbidden, None)))), vec![Effect::PersistPending]);
+        assert_eq!(state.status, Status::UnknownDelivery); assert_eq!(wire(&state), first);
+        // No automatic send: persistence acknowledgements cannot replay UnknownDelivery.
+        assert!(state.reduce(crate::edits::Event::Persisted(id(1))).is_empty());
+        assert!(state.reduce(crate::edits::Event::Retry).is_empty());
+        assert_eq!(state.reduce(crate::edits::Event::Replay), vec![Effect::Send(Delivery::Replay)]);
+        state.reduce(write_result(state.request().unwrap(), Delivery::Replay, Ok(receipt("action/1", "completed"))));
         assert_eq!(state.status, Status::AwaitingObservation);
         assert!(state.reduce(crate::edits::Event::Fresh(base(2), Ok(members()))).is_empty());
         state.reduce(crate::edits::Event::Observed(id(1)));
@@ -298,7 +314,7 @@ mod write_tests {
         let second = wire(&state); assert_eq!(second["type"], "arrangement.membership.edit");
         assert_eq!(second["id"], "action/2"); assert_eq!(second["fence"]["snapshot_id"], "snapshot/2");
         assert_eq!(second["fence"]["subject_revisions"], json!({(CONTAINER):"revision/2"}));
-        assert_eq!(state.reduce(crate::edits::Event::Persisted(id(2))), vec![Effect::Send]);
+        assert_eq!(state.reduce(crate::edits::Event::Persisted(id(2))), vec![Effect::Send(Delivery::First)]);
         let (restored, _) = Edits::restore(&state.journal().unwrap(), &base(1).scope).unwrap();
         assert_eq!(wire(&restored), second);
     }
