@@ -412,33 +412,43 @@ fn validate_declaration_source(source: &str, owner: &str) -> Result<(), FractalE
     walk(&document)
 }
 
+/// Persisted declaration locations, including envelopes that may coexist with empty decoys.
+pub fn claim_payload_candidates(body: &Value) -> impl Iterator<Item = &Value> {
+    [
+        Some(body),
+        body.get("fields"),
+        body.get("body"),
+        body.get("fields").and_then(|fields| fields.get("body")),
+    ]
+    .into_iter()
+    .flatten()
+}
+
 /// Validate new claim input before typed decoding can discard nulls or unknown keys.
 pub fn validate_claim(kind: &str, subject: &str, body: &Value) -> Result<(), FractalError> {
-    let payload = body
-        .get("fields")
-        .and_then(|f| f.get("body"))
-        .unwrap_or(body);
-    match kind {
-        "intent.desired" => {
-            let scope = Scope(
-                payload
-                    .get("kind")
-                    .and_then(Value::as_str)
-                    .unwrap_or("agent"),
-                subject,
-            );
-            let canonical = (payload.get("kind").and_then(Value::as_str) == Some("agent"))
-                .then(|| scope.desired(payload.get("desired").unwrap_or(&Value::Null)))
-                .transpose()?;
-            if let Some(member) = payload.get("member").filter(|v| !v.is_null()) {
-                let typed = scope.fields(member)?;
-                if let Some(canonical) = &canonical {
-                    scope.consistent(&typed, canonical)?;
+    for payload in claim_payload_candidates(body) {
+        match kind {
+            "intent.desired" => {
+                let scope = Scope(
+                    payload
+                        .get("kind")
+                        .and_then(Value::as_str)
+                        .unwrap_or("agent"),
+                    subject,
+                );
+                let canonical = (payload.get("kind").and_then(Value::as_str) == Some("agent"))
+                    .then(|| scope.desired(payload.get("desired").unwrap_or(&Value::Null)))
+                    .transpose()?;
+                if let Some(member) = payload.get("member").filter(|v| !v.is_null()) {
+                    let typed = scope.fields(member)?;
+                    if let Some(canonical) = &canonical {
+                        scope.consistent(&typed, canonical)?;
+                    }
                 }
             }
+            "mission.published" => validate_mission_json(subject, payload)?,
+            _ => {}
         }
-        "mission.published" => validate_mission_json(subject, payload)?,
-        _ => {}
     }
     Ok(())
 }
@@ -913,6 +923,33 @@ mod consistency_tests {
             json!({"kind": "agent", "member": {}, "desired": {"children": [{"name": "declared-budgets"}]}}),
         ] {
             validate_claim("intent.desired", "agent/test", &body).unwrap();
+        }
+    }
+
+    #[test]
+    fn every_persisted_candidate_is_validated_despite_empty_decoys() {
+        for priority in ["normal", "urgent"] {
+            for (kind, payload) in [
+                ("intent.desired", json!({"kind": "agent", "desired": {"children": [
+                    {"name": "declared-priority", "arguments": [priority]}
+                ]}})),
+                ("intent.desired", json!({"kind": "resource", "member": {"declared_priority": priority}})),
+                ("mission.published", json!({"declared_priority": priority})),
+            ] {
+                for body in [
+                    payload.clone(),
+                    json!({"fields": payload, "body": {}}),
+                    json!({"body": payload, "fields": {}}),
+                    json!({"fields": {"body": payload}, "body": {}}),
+                ] {
+                    let result = validate_claim(kind, "subject/test", &body);
+                    if priority == "normal" {
+                        result.unwrap();
+                    } else {
+                        assert_eq!(result.unwrap_err().code, "invalid-declared-admission");
+                    }
+                }
+            }
         }
     }
 }

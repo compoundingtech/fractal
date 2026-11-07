@@ -88,21 +88,37 @@ fn declared_admission_publication_and_direct_claims_fail_closed_without_evidence
     }
 }
 
-fn assert_direct_claim_decoys_refused(subject: &str, kind: &str, payload: &Value) {
-    if kind == "intent.desired" {
-        assert_eq!(payload["kind"], "agent");
-    }
+fn decoy_bodies(payload: &Value) -> [Value; 5] {
     let mut empty_body = payload.clone();
     empty_body["body"] = json!({});
     let mut empty_fields = payload.clone();
     empty_fields["fields"] = json!({});
-    for body in [
+    [
         empty_body.clone(),
         empty_fields,
         json!({"fields": {"body": payload}, "body": {}}),
         json!({"body": payload, "fields": {}}),
         json!({"fields": empty_body}),
-    ] {
+    ]
+}
+
+fn assert_direct_claim_decoys_refused(subject: &str, kind: &str, payload: &Value) {
+    for body in decoy_bodies(payload) {
+        // Valid metadata must reach the barrier through the real raw writer.
+        let mut connection = Connection::open_in_memory().unwrap();
+        let transaction = connection.transaction().unwrap();
+        let error = append_claim_tx(
+            &transaction, "alder", subject, kind, Some("person/avery"), &body, &[], None,
+        ).unwrap_err();
+        let refusal = error.downcast_ref::<FractalError>().unwrap_or_else(|| {
+            panic!("expected the declared-admission barrier for {kind} {body}, got {error}")
+        });
+        assert_eq!(refusal.code, "declared-admission-feature-barrier", "{subject} {kind} {body}");
+    }
+}
+
+fn assert_barrier_decoys_refused(subject: &str, kind: &str, payload: &Value) {
+    for body in decoy_bodies(payload) {
         // Exercise envelope detection directly: typed validation can independently reject
         // member/canonical drift, and the evidence gate requires an initialized store.
         let store = Store::open_memory("alder").unwrap();
@@ -162,8 +178,8 @@ fn desired_claim_decoys_cannot_hide_member_or_desired_children() {
         member_only["desired"] = plain["desired"].clone();
         let mut children_only = desired;
         children_only["member"] = plain["member"].clone();
-        assert_direct_claim_decoys_refused("agent/alder.new", "intent.desired", &member_only);
-        assert_direct_claim_decoys_refused("agent/alder.new", "intent.desired", &children_only);
+        assert_barrier_decoys_refused("agent/alder.new", "intent.desired", &member_only);
+        assert_barrier_decoys_refused("agent/alder.new", "intent.desired", &children_only);
     }
 }
 
