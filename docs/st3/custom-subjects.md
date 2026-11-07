@@ -282,10 +282,15 @@ status-driven attention contract; it is not a substitute for folding all request
 verbatim provenance `body.fields`, in canonical effective-history order; repaired originals
 are excluded. `basis` is the existing subject/kinds/revision token for those inputs. No
 client-side pagination or before/after token race is needed for this snapshot read.
-Before materializing history, the same snapshot counts effective claims and sums stored body
-bytes. More than 10,000 claims or 32 MiB (33,554,432 bytes) of bodies is refused with
-`decision-inputs-too-large`; history is never silently truncated. The decision reader defines
-`DECISION_INPUTS_MAX_CLAIMS` and `DECISION_INPUTS_MAX_BODY_BYTES` together.
+Before materializing history, the same snapshot streams indexed subject rows, stopping as soon
+as the effective count exceeds 10,000 claims or stored body bytes exceed 32 MiB (33,554,432
+bytes). Repaired rows contribute neither count nor bytes, but a separate work budget refuses
+after 20,000 scanned rows including repaired history, even if effective history is small.
+Refusal is `decision-inputs-too-large`; history is never silently truncated. There is no
+whole-history count/sum aggregate before refusal. The decision reader defines
+`DECISION_INPUTS_MAX_CLAIMS`, `DECISION_INPUTS_MAX_BODY_BYTES`, and
+`DECISION_INPUTS_MAX_SCANNED_CLAIMS` together. SQLite VM-step regressions cover count,
+byte, and repaired-only oversized histories without work growing with their refused tail.
 Within those bounds, work and response size scale with the selected tree's history, not a
 constant latest-state page. The route-cost inventory records that explicit bounded contract.
 The reader requires a ready matching registration, matching registration pins, a valid
@@ -311,12 +316,18 @@ The original v1 guard shape `{ "decision": "<request-claim-id>", "option": "<opt
 is also supported, resolving the request directly rather than through a scoped `q`.
 
 Each guard resolves `q` only within its `source_scope`, defaulting to the requesting question's
-own scope. A guard is active when its option strings intersect the referenced question's
-effective selection; it does not search every imported tree for a matching number. A missing
-effective answer or a withdrawn dependency leaves the guard inactive. Malformed guards are defects rather than guessed
-cross-tree links. Inactive guarded requests are `moot`. A parent-linked reframe suppresses its
+own scope only when `source_scope` is omitted. A supplied `source_scope` or direct `decision`
+must be a string; malformed values never fall back to another identity. Every guard's structure
+is validated before dependency resolution, including guards after an inactive predicate.
+A guard is active when its option strings intersect the referenced question's effective
+selection; it does not search every imported tree for a matching number. A missing effective
+answer or a withdrawn dependency leaves the guard inactive. Malformed guards are defects
+rather than guessed cross-tree links. Inactive guarded requests are `moot`. A parent-linked reframe suppresses its
 parent only while the child's guards are active; an inactive branch cannot erase a pending
 parent. An active child still suppresses its parent when the child itself has been withdrawn.
+Guard evaluation uses an explicit traversal stack rather than recursive calls, so deep
+dependency chains cannot exhaust the Rust call stack. Supersession traversal indexes claim
+IDs and memoizes completed predecessor paths instead of rescanning the chain for every answer.
 
 The fold reports `pending`, `answered`, `withdrawn`, `superseded`, or `moot` for each request.
 An assumption sets an independent `assumed` flag but leaves the question pending: an owner

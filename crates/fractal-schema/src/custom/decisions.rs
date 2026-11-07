@@ -107,6 +107,8 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
         let candidates: Vec<_> = claims.iter().filter(|c|
             (if assumption { c.is("assumed") } else { c.is("answered") || c.is("recorded") })
             && c.text("request") == Some(&request.id)).collect();
+        let candidates_by_id: BTreeMap<_, _> = candidates.iter()
+            .map(|answer| (answer.id.as_str(), *answer)).collect();
         let mut successors = BTreeMap::new();
         for answer in &candidates {
             if answer.is("recorded") && answer.text("recorder") != answer.actor.as_deref() {
@@ -116,16 +118,24 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
                 if successors.insert(previous, &answer.id).is_some() {
                     defects.push(format!("answer supersession fork: {previous}"));
                 }
-                if !candidates.iter().any(|c| c.id == previous) {
+                if !candidates_by_id.contains_key(previous) {
                     defects.push(format!("missing answer predecessor: {previous}"));
                 }
-                let mut seen = BTreeSet::new();
-                let mut cursor = Some(answer.id.as_str());
-                while let Some(id) = cursor {
-                    if !seen.insert(id) { defects.push(format!("answer supersession cycle: {id}")); break; }
-                    cursor = candidates.iter().find(|c| c.id == id).and_then(|c| c.text("supersedes"));
-                }
             }
+        }
+        // Memoize completed paths: each predecessor edge is traversed only once.
+        let mut completed = BTreeSet::new();
+        for answer in &candidates {
+            let mut seen = BTreeSet::new();
+            let mut cursor = Some(answer.id.as_str());
+            while let Some(id) = cursor {
+                if completed.contains(id) { break; }
+                if !seen.insert(id) {
+                    defects.push(format!("answer supersession cycle: {id}")); break;
+                }
+                cursor = candidates_by_id.get(id).and_then(|c| c.text("supersedes"));
+            }
+            completed.extend(seen);
         }
         // Explicit supersession outranks timestamp and lexical tie-breaks.
         let heads: Vec<_> = candidates.iter().copied()
@@ -146,8 +156,29 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
         else { answers.insert(request.id.as_str(), chosen); }
         }
     }
-    // Resolve guard dependencies recursively: a guard reads only an active request's
-    // effective answer or assumption. Cycles are defects, never silently active.
+    // Validate every guard before resolving any dependencies, even when an earlier
+    // predicate is false. Malformed evidence must never become approval eligible.
+    let mut invalid_guards = BTreeSet::new();
+    for request in &requests {
+        let Some(value) = request.fields.get("applies_when") else { continue; };
+        let valid = value.as_array().is_some_and(|guards| guards.iter().all(|guard| {
+            guard.is_object()
+                && guard.get("q").is_none_or(|v| v.as_i64().is_some())
+                && guard.get("source_scope").is_none_or(Value::is_string)
+                && guard.get("decision").is_none_or(Value::is_string)
+                && (guard.get("decision").is_some() || guard.get("q").is_some())
+                && guard.get("option").is_none_or(Value::is_string)
+                && guard.get("selection").is_none_or(|v| v.as_array()
+                    .is_some_and(|values| values.iter().all(Value::is_string)))
+                && (guard.get("option").is_some() || guard.get("selection").is_some())
+        }));
+        if !valid {
+            defects.push(format!("invalid guards: {}", request.id));
+            invalid_guards.insert(request.id.as_str());
+        }
+    }
+    // Explicit DFS frames avoid consuming the call stack on adversarial chains.
+    // A guard reads only an active request's effective answer or assumption.
     struct Guards<'a> {
         requests: &'a [&'a Claim],
         answers: &'a BTreeMap<&'a str, Option<&'a Claim>>,
@@ -155,52 +186,77 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
         claims: &'a [Claim],
         scopes: BTreeMap<&'a str, &'a str>,
         active: BTreeMap<&'a str, bool>,
-        visiting: BTreeSet<&'a str>,
+        invalid: BTreeSet<&'a str>,
         defects: Vec<String>,
     }
     impl Guards<'_> {
-        fn evaluate(&mut self, request: &Claim) -> bool {
-            if let Some(active) = self.active.get(request.id.as_str()) { return *active; }
-            let Some(request) = self.requests.iter().copied().find(|r| r.id == request.id) else { return false; };
-            if !self.visiting.insert(&request.id) {
-                self.defects.push(format!("guard cycle: {}", request.id)); return false;
-            }
-            let result = match request.fields.get("applies_when") {
-                None => true,
-                Some(Value::Array(guards)) => guards.iter().all(|guard| {
+        fn evaluate(&mut self, request: &Claim) {
+            if self.active.contains_key(request.id.as_str()) { return; }
+            let Some(request) = self.requests.iter().copied().find(|r| r.id == request.id) else { return; };
+            let mut visiting = BTreeSet::from([request.id.as_str()]);
+            let mut stack = vec![(request, 0)];
+            while let Some(&(request, index)) = stack.last() {
+                let guards = request.fields.get("applies_when").and_then(Value::as_array);
+                let guard = guards.and_then(|guards| guards.get(index));
+                let result = if self.invalid.contains(request.id.as_str()) {
+                    false
+                } else if let Some(guard) = guard {
                     let q = guard.get("q").and_then(Value::as_i64);
-                    let scope = guard.get("source_scope").and_then(Value::as_str).unwrap_or(self.scopes[request.id.as_str()]);
+                    let scope = guard.get("source_scope").and_then(Value::as_str)
+                        .unwrap_or(self.scopes[request.id.as_str()]);
                     let decision = guard.get("decision").and_then(Value::as_str);
                     let dependency = self.requests.iter().copied().find(|r|
                         decision == Some(r.id.as_str()) || (decision.is_none() && q.is_some()
                         && r.fields.get("q").and_then(Value::as_i64) == q && self.scopes[r.id.as_str()] == scope));
-                    let Some(dependency) = dependency else {
-                        self.defects.push(format!("missing guard dependency: {}", request.id)); return false;
-                    };
-                    if !self.evaluate(dependency) { return false; }
-                    if self.claims.iter().any(|c| c.is("withdrawn") && c.text("request") == Some(&dependency.id)) { return false; }
-                    let answer = self.answers[dependency.id.as_str()]
-                        .or(self.assumptions[dependency.id.as_str()]);
-                    let Some(answer) = answer else { return false; };
-                    if let Some(option) = guard.get("option") {
-                        return answer.fields.get("selection").and_then(Value::as_array)
-                            .is_some_and(|actual| actual.contains(option));
+                    if let Some(dependency) = dependency {
+                        if let Some(active) = self.active.get(dependency.id.as_str()) {
+                            let answer = self.answers[dependency.id.as_str()]
+                                .or(self.assumptions[dependency.id.as_str()]);
+                            let withdrawn = *active && self.claims.iter().any(|c| c.is("withdrawn")
+                                && c.text("request") == Some(&dependency.id));
+                            if *active && !withdrawn && guard.get("option").is_none()
+                                && answer.is_some_and(|answer|
+                                    !answer.fields.get("selection").is_some_and(Value::is_array)) {
+                                self.defects.push(format!("invalid guard selection: {}", request.id));
+                            }
+                            let matches = *active && !withdrawn
+                                && answer.and_then(|answer| answer.fields.get("selection"))
+                                    .and_then(Value::as_array).is_some_and(|actual| {
+                                        if let Some(option) = guard.get("option") {
+                                            actual.contains(option)
+                                        } else {
+                                            guard["selection"].as_array().is_some_and(|expected|
+                                                expected.iter().any(|v| actual.contains(v)))
+                                        }
+                                    });
+                            if matches {
+                                stack.last_mut().expect("current guard frame").1 += 1;
+                                continue;
+                            }
+                            false
+                        } else if visiting.insert(dependency.id.as_str()) {
+                            stack.push((dependency, 0));
+                            continue;
+                        } else {
+                            self.defects.push(format!("guard cycle: {}", dependency.id));
+                            false
+                        }
+                    } else {
+                        self.defects.push(format!("missing guard dependency: {}", request.id));
+                        false
                     }
-                    match (guard.get("selection").and_then(Value::as_array), answer.fields.get("selection").and_then(Value::as_array)) {
-                        (Some(expected), Some(actual)) => expected.iter().any(|v| actual.contains(v)),
-                        _ => { self.defects.push(format!("invalid guard selection: {}", request.id)); false }
-                    }
-                }),
-                Some(_) => { self.defects.push(format!("invalid guards: {}", request.id)); false }
-            };
-            self.visiting.remove(request.id.as_str());
-            self.active.insert(&request.id, result);
-            result
+                } else {
+                    true
+                };
+                self.active.insert(request.id.as_str(), result);
+                visiting.remove(request.id.as_str());
+                stack.pop();
+            }
         }
     }
     let mut guards = Guards { requests: &requests, answers: &answers, assumptions: &assumptions, claims,
         scopes: requests.iter().map(|r| (r.id.as_str(), scope(r))).collect(),
-        active: BTreeMap::new(), visiting: BTreeSet::new(), defects: Vec::new() };
+        active: BTreeMap::new(), invalid: invalid_guards, defects: Vec::new() };
     for request in &requests { guards.evaluate(request); }
     let mut output: Vec<_> = requests.iter().map(|request| {
         let answer = answers[request.id.as_str()];

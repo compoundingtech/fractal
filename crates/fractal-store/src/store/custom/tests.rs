@@ -117,6 +117,99 @@ fn decision_inputs_limits_count_all_claims_and_sum_utf8_body_bytes() {
     assert_eq!(store.decision_inputs_with_limits(TREE, 2, total).unwrap().claims.len(), 2);
 }
 
+fn decision_preflight_work_fixture(count: u64, repaired: bool) -> Connection {
+    let connection = Connection::open_in_memory().unwrap();
+    // Only the preflight's authoritative tables/indexes are needed. Avoid projection
+    // maintenance so the measured work is the production preflight, not fixture setup.
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-h749cf1015bd0 owner=fractal_store::store::custom::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE batches(id TEXT PRIMARY KEY);
+         CREATE TABLE claims(id TEXT PRIMARY KEY,batch_id TEXT,subject TEXT,body TEXT);
+         CREATE INDEX claims_subject ON claims(subject);
+         CREATE TABLE replica_records(claim_id TEXT,state TEXT);
+         CREATE INDEX replica_records_claim ON replica_records(claim_id);
+         CREATE INDEX replica_records_repaired_claim ON replica_records(claim_id) WHERE state='repaired';
+         INSERT INTO batches VALUES('batch');",
+    ).unwrap();
+    {
+        let tx = connection.unchecked_transaction().unwrap();
+        let mut insert = tx.prepare(
+            /* sqlite-large-value: allow-for-now lv-h9d4209b9ce0c owner=fractal_store::store::custom::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims VALUES(?1,'batch',?2,'{\"fields\":{\"detail\":\"✓\"}}')",
+        ).unwrap();
+        let mut repair = tx.prepare(
+            /* sqlite-large-value: allow-for-now lv-h7b32036bdf19 owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records VALUES(?1,'repaired')",
+        ).unwrap();
+        for index in 0..count {
+            insert.execute(/* sqlite-large-value: allow-for-now lv-h51660fd08a1f owner=fractal_store::store::custom::tests TODO=trace-statement-and-value-representation */ params![index.to_string(), TREE]).unwrap();
+            if repaired {
+                repair.execute(/* sqlite-large-value: allow-for-now lv-h09f141e001e0 owner=fractal_store::store::custom::tests TODO=trace-statement-and-value-representation */ [index.to_string()]).unwrap();
+            }
+        }
+        drop(insert);
+        drop(repair);
+        tx.commit().unwrap();
+    }
+    connection
+}
+
+fn decision_preflight_refusal_steps(
+    connection: &Connection,
+    max_claims: u64,
+    max_body_bytes: u64,
+) -> usize {
+    use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+    let steps = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&steps);
+    connection.progress_handler(1, Some(move || {
+        counter.fetch_add(1, Ordering::Relaxed);
+        false
+    }));
+    let result = decision_inputs_preflight(connection, TREE, max_claims, max_body_bytes);
+    connection.progress_handler(0, None::<fn() -> bool>);
+    assert_eq!(
+        result.unwrap_err().downcast_ref::<FractalError>().unwrap().code,
+        "decision-inputs-too-large",
+    );
+    steps.load(Ordering::Relaxed)
+}
+
+#[test]
+fn decision_inputs_claim_preflight_stops_sqlite_before_oversized_tail() {
+    let costs = [256, 8192].map(|count| {
+        let connection = decision_preflight_work_fixture(count, false);
+        decision_preflight_refusal_steps(&connection, 1, u64::MAX)
+    });
+    assert!(costs[0] < 1000, "claim cap must stop after two rows: {costs:?}");
+    assert!(costs[1] <= costs[0] + 100, "tail must not add SQLite work: {costs:?}");
+}
+
+#[test]
+fn decision_inputs_byte_preflight_stops_sqlite_before_oversized_tail() {
+    let costs = [256, 8192].map(|count| {
+        let connection = decision_preflight_work_fixture(count, false);
+        // Disable the effective count cap: only the running byte cap can stop this read.
+        decision_preflight_refusal_steps(&connection, u64::MAX, 1)
+    });
+    assert!(costs[0] < 1000, "byte cap must stop after one row: {costs:?}");
+    assert!(costs[1] <= costs[0] + 100, "tail must not add SQLite work: {costs:?}");
+}
+
+#[test]
+fn decision_inputs_preflight_bounds_repaired_history_work() {
+    let small = decision_preflight_work_fixture(2, true);
+    decision_inputs_preflight(&small, TREE, 0, 0).unwrap();
+    let costs = [
+        DECISION_INPUTS_MAX_SCANNED_CLAIMS + 1,
+        4 * DECISION_INPUTS_MAX_SCANNED_CLAIMS,
+    ].map(|count| {
+        let connection = decision_preflight_work_fixture(count, true);
+        decision_preflight_refusal_steps(&connection, 0, 0)
+    });
+    assert!(
+        costs[1] <= costs[0] + 100,
+        "repaired-only history must stop at the scanned-row budget: {costs:?}",
+    );
+}
+
 fn audit_custom_dirty(store: &Store) {
     store.connection.write().execute_batch(
         /* sqlite-large-value: allow-for-now lv-h4094ac3a489b owner=fractal_store::store::custom::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE custom_dirty_audit(subject TEXT);

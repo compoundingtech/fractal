@@ -140,7 +140,7 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
         "GET /v1/custom/decision-inputs",
-        "returns and validates complete canonical effective decision-tree history with its atomic basis, refusing above 10,000 claims or 32 MiB of stored bodies before materialization; within those caps work and response size intentionally grow with that tree's history, not a constant latest-state page; action_coverage::decision_reads_converge_across_opposite_arrival_orders, decision_reader_excludes_repaired_originals, and decision_reader_rejects_unregistered_or_unauthorized_approval exercise the real endpoint",
+        "returns and validates complete canonical effective decision-tree history with its atomic basis; streaming preflight stops above 10,000 effective claims, 32 MiB of stored bodies, or 20,000 scanned rows including repaired history; custom::tests::decision_inputs_claim_preflight_stops_sqlite_before_oversized_tail, decision_inputs_byte_preflight_stops_sqlite_before_oversized_tail, and decision_inputs_preflight_bounds_repaired_history_work bound refusal SQLite VM steps as tails grow; admitted work and response size intentionally grow with that tree's history, not a constant latest-state page; action_coverage::decision_reads_converge_across_opposite_arrival_orders, decision_reader_excludes_repaired_originals, and decision_reader_rejects_unregistered_or_unauthorized_approval exercise the real endpoint contract",
     ),
     (
         "POST /v1/fleet/admission-override",

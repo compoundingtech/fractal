@@ -203,3 +203,128 @@ fn duplicate_target_cannot_hide_invalid_provenance_time() {
         assert!(!folded.requests[0].approval_gate);
     }
 }
+
+#[test]
+fn nonstring_guard_scope_and_decision_are_defects_not_fallbacks() {
+    for field in ["source_scope", "decision"] {
+        for value in [Value::Null, json!(42), json!(false), json!([]), json!({})] {
+            let mut guard = json!({"q":1,"selection":["yes"]});
+            guard[field] = value;
+            let claims = vec![request("r1", 1),
+                claim("a1", "answered", 3, json!({"request":"r1","selection":["yes"]})),
+                claim("r2", "requested", 2, json!({"q":2,"applies_when":[guard]})),
+                claim("a2", "answered", 4, json!({"request":"r2","selection":["yes"]}))];
+            let folded = result(&claims);
+            assert!(folded.defects.iter().any(|d| d == "invalid guards: r2"), "{field}");
+            assert_eq!(folded.requests[1].status, Status::Moot, "{field}");
+            assert!(folded.requests.iter().all(|r| !r.approval_gate), "{field}");
+        }
+    }
+}
+
+#[test]
+fn malformed_guards_are_validated_before_short_circuit_or_dependency_resolution() {
+    let malformed = [
+        Value::Null,
+        json!({"q":1,"selection":"yes"}),
+        json!({"q":1,"selection":[42]}),
+        json!({"q":1}),
+        json!({"q":"1","selection":["yes"]}),
+        json!({"selection":["yes"]}),
+        json!({"decision":"r1","option":false}),
+        json!({"decision":"r1","option":"yes","selection":false}),
+    ];
+    for guard in malformed {
+        for first in [
+            json!({"q":1,"selection":["no"]}),
+            json!({"q":999,"selection":["yes"]}),
+        ] {
+            let claims = vec![request("r1", 1),
+                claim("a1", "answered", 3, json!({"request":"r1","selection":["yes"]})),
+                claim("r2", "requested", 2,
+                    json!({"q":2,"applies_when":[first,guard.clone()]}))];
+            let folded = result(&claims);
+            assert!(folded.defects.iter().any(|d| d == "invalid guards: r2"), "{guard}");
+            assert_eq!(folded.requests[1].status, Status::Moot);
+            assert!(folded.requests.iter().all(|r| !r.approval_gate));
+        }
+    }
+    // Even the first guard's malformed selection is detected with no answer to read.
+    let claims = vec![request("r1", 1), claim("r2", "requested", 2,
+        json!({"q":2,"applies_when":[{"q":1,"selection":false}]}))];
+    assert!(result(&claims).defects.iter().any(|d| d == "invalid guards: r2"));
+}
+
+#[test]
+fn deep_guard_dependency_chain_uses_no_recursive_call_stack() {
+    const DEPTH: usize = 4096;
+    let mut claims = Vec::new();
+    // Forward dependencies force one deep traversal rather than cached shallow reads.
+    for index in 0..DEPTH {
+        let id = format!("r{index}");
+        let fields = if index + 1 == DEPTH {
+            json!({"q":index})
+        } else {
+            json!({"q":index,"applies_when":[{"decision":format!("r{}", index + 1),"selection":["yes"]}]})
+        };
+        claims.push(claim(&id, "requested", index as u64, fields));
+        claims.push(claim(&format!("a{index}"), "answered", (DEPTH + index) as u64,
+            json!({"request":id,"selection":["yes"]})));
+    }
+    let folded = result(&claims);
+    assert!(folded.defects.is_empty(), "{:?}", folded.defects);
+    assert_eq!(folded.requests.len(), DEPTH);
+    assert!(folded.requests.iter().all(|r| r.status == Status::Answered && r.approval_gate));
+}
+
+#[test]
+fn guard_cycles_remain_moot_and_never_approve() {
+    let claims = vec![
+        claim("r1", "requested", 1, json!({"q":1,"applies_when":[{"q":2,"selection":["yes"]}]})),
+        claim("r2", "requested", 2, json!({"q":2,"applies_when":[{"q":1,"selection":["yes"]}]})),
+        claim("a1", "answered", 3, json!({"request":"r1","selection":["yes"]})),
+        claim("a2", "answered", 4, json!({"request":"r2","selection":["yes"]})),
+    ];
+    let folded = result(&claims);
+    assert!(folded.defects.iter().any(|d| d.contains("guard cycle")));
+    assert!(folded.requests.iter().all(|r| r.status == Status::Moot && !r.approval_gate));
+}
+
+#[test]
+fn long_supersession_chains_select_the_head_for_answers_and_assumptions() {
+    const LENGTH: usize = 8192;
+    for kind in ["answered", "assumed"] {
+        let mut claims = vec![request("r", 1)];
+        // The oldest candidate is visited first; without memoization every later
+        // candidate repeats the entire growing predecessor walk.
+        for index in 0..LENGTH {
+            let mut fields = json!({"request":"r","selection":["yes"]});
+            if index > 0 { fields["supersedes"] = json!(format!("a{}", index - 1)); }
+            claims.push(claim(&format!("a{index}"), kind, index as u64 + 2, fields));
+        }
+        let folded = result(&claims);
+        assert!(folded.defects.is_empty(), "{:?}", folded.defects);
+        if kind == "answered" {
+            let head = format!("a{}", LENGTH - 1);
+            assert_eq!(folded.requests[0].answer, Some(head.as_str()));
+            assert!(folded.requests[0].approval_gate);
+        } else {
+            assert!(folded.requests[0].assumed);
+            assert!(folded.requests[0].open);
+        }
+    }
+}
+
+#[test]
+fn indexed_supersession_retains_cycle_fork_and_missing_predecessor_defects() {
+    let claims = vec![request("r", 1),
+        claim("a1", "answered", 2, json!({"request":"r","supersedes":"a2"})),
+        claim("a2", "answered", 3, json!({"request":"r","supersedes":"a1"})),
+        claim("fork", "answered", 4, json!({"request":"r","supersedes":"a1"})),
+        claim("missing", "answered", 5, json!({"request":"r","supersedes":"absent"}))];
+    let folded = result(&claims);
+    for defect in ["cycle", "fork", "missing answer predecessor"] {
+        assert!(folded.defects.iter().any(|d| d.contains(defect)), "{defect}");
+    }
+    assert!(!folded.requests[0].approval_gate);
+}

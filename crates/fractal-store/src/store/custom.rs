@@ -6,6 +6,9 @@ use fractal_schema::custom::{self as schema, Authority, Basis, Expr, Manifest, P
 /// Whole-history admission limits: decision snapshots are refused, never truncated.
 pub const DECISION_INPUTS_MAX_CLAIMS: u64 = 10_000;
 pub const DECISION_INPUTS_MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
+/// Work budget includes repaired rows, which do not consume the effective history limits.
+/// Excessive repaired history is refused with the same typed error, never silently skipped.
+const DECISION_INPUTS_MAX_SCANNED_CLAIMS: u64 = 2 * DECISION_INPUTS_MAX_CLAIMS;
 
 // Explicit UPSERTs in triggers keep an outer admission UPSERT from overriding IGNORE.
 const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h30131c291680 owner=fractal_store::store::custom TODO=chunk-or-reference-variable-columns */ r#"
@@ -133,6 +136,51 @@ pub fn claims(connection: &Connection, subject: &str) -> Result<Vec<ClaimRecord>
          AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
          ORDER BY CANONICAL_ASC(claims)"))?
         .query_map([subject],claim_from_row)?.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+fn decision_inputs_preflight(
+    connection: &Connection,
+    subject: &str,
+    max_claims: u64,
+    max_body_bytes: u64,
+) -> Result<()> {
+    // No aggregate or sort: SQLite yields each subject row before visiting the next.
+    // Keep repaired rows in the cursor so even a repaired-only history has bounded work.
+    // CASE avoids measuring excluded bodies. Canonical ordering is applied only after
+    // admission, by claims(), in the caller's same read transaction.
+    let mut statement = connection.prepare(
+        "SELECT CASE WHEN NOT EXISTS(
+             SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired'
+         ) THEN length(CAST(claims.body AS BLOB)) END
+         FROM claims CROSS JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.subject=?1 LIMIT ?2",
+    )?;
+    let mut rows = statement.query(params![subject, DECISION_INPUTS_MAX_SCANNED_CLAIMS + 1])?;
+    let mut scanned = 0;
+    let mut claim_count = 0;
+    let mut body_bytes = 0_u64;
+    while let Some(row) = rows.next()? {
+        scanned += 1;
+        let bytes: Option<u64> = row.get(0)?;
+        if let Some(bytes) = bytes {
+            claim_count += 1;
+            body_bytes = body_bytes.saturating_add(bytes);
+        }
+        if scanned > DECISION_INPUTS_MAX_SCANNED_CLAIMS
+            || claim_count > max_claims || body_bytes > max_body_bytes
+        {
+            return Err(FractalError::new(
+                "decision-inputs-too-large",
+                format!(
+                    "decision history exceeds its admission budget after scanning {scanned} claims \
+                     ({claim_count} effective claims and {body_bytes} body bytes so far); \
+                     limits are {max_claims} effective claims, {max_body_bytes} body bytes, \
+                     and {DECISION_INPUTS_MAX_SCANNED_CLAIMS} scanned claims including repaired history"
+                ),
+            ).into());
+        }
+    }
+    Ok(())
 }
 pub fn registration(
     connection: &Connection,
@@ -952,24 +1000,7 @@ impl Store {
             "decision source authority is not ready");
         let source_body = source(&snapshot, subject)?
             .ok_or_else(|| anyhow::anyhow!("decision source is unavailable"))?;
-        // Match claims()'s effective canonical history, including repaired exclusion.
-        // Count in the same read transaction before allocating or parsing claim bodies.
-        let (claim_count, body_bytes): (u64, u64) = snapshot.query_row(
-            "SELECT count(*),coalesce(sum(length(CAST(claims.body AS BLOB))),0)
-             FROM claims JOIN batches ON batches.id=claims.batch_id WHERE claims.subject=?1
-             AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')",
-            [subject],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        if claim_count > max_claims || body_bytes > max_body_bytes {
-            return Err(FractalError::new(
-                "decision-inputs-too-large",
-                format!(
-                    "decision history has {claim_count} claims and {body_bytes} body bytes; \
-                     limits are {max_claims} claims and {max_body_bytes} body bytes"
-                ),
-            ).into());
-        }
+        decision_inputs_preflight(&snapshot, subject, max_claims, max_body_bytes)?;
         let history = claims(&snapshot, subject)?;
         anyhow::ensure!(
             history.iter().all(|claim| fields(claim).get("_registration") == Some(&json!(hash))),
