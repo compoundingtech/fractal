@@ -2685,6 +2685,12 @@ fn normalize_subject(value: &str, kind: &str) -> String {
 }
 
 fn normalize_assignee(value: &str, default_host: &str) -> String {
+    // Declaration shorthand is host-relative, including the historical `agent/worker` spelling.
+    // Qualify it before accepting an already-prefixed actor as canonical.
+    let identity = value.strip_prefix("agent/").unwrap_or(value);
+    if !identity.contains('.') && !identity.contains("${") && !identity.contains('/') {
+        return format!("agent/{default_host}.{identity}");
+    }
     if let Some(canonical) = fractal_schema::canonical_agent_actor(value) {
         return canonical.into_owned();
     }
@@ -2693,7 +2699,6 @@ fn normalize_assignee(value: &str, default_host: &str) -> String {
     if value.starts_with("person/") {
         return value.to_owned();
     }
-    let identity = value.strip_prefix("agent/").unwrap_or(value);
     if identity.contains('.') || identity.contains("${") {
         format!("agent/{identity}")
     } else if identity.contains('/') {
@@ -3142,8 +3147,27 @@ mod tests {
             ("person/reviewer", "person/reviewer"),
             ("daemon/scheduler", "daemon/scheduler"),
             ("worker", "agent/host.worker"),
+            ("agent/worker", "agent/host.worker"),
         ] {
             assert_eq!(super::normalize_assignee(input, "host"), expected);
+        }
+    }
+
+    #[test]
+    fn declaration_assignees_qualify_host_relative_agent_names() {
+        let source = r#"mission "relative" state="ready" {
+          goal "Resolve host-relative declaration assignees.";
+          step "prefixed" { assigned-to "agent/worker"; }
+          step "bare" { assigned-to "worker"; }
+        }"#;
+        let missions = super::parse_missions(&source.parse().unwrap(), "host").unwrap();
+        for step in ["prefixed", "bare"] {
+            assert_eq!(
+                missions["relative"].steps[step].work_selector,
+                Some(super::WorkSelector::Assigned {
+                    agent: "agent/host.worker".into(),
+                })
+            );
         }
     }
 

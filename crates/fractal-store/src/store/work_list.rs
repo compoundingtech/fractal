@@ -248,10 +248,10 @@ pub fn viewer_seat(viewer: &str) -> String {
 /// Whether `viewer` sees `view` in its own work list, as the direct read's actor filter does.
 fn visible_to(view: &StepRunView, viewer: &str) -> bool {
     !view.agentless
-        && (view.assigned_to.as_deref() == Some(viewer)
-            || view.claimant.as_deref() == Some(viewer)
+        && (super::work_actor_matches(view.assigned_to.as_deref(), viewer)
+            || super::work_actor_matches(view.claimant.as_deref(), viewer)
             || (matches!(view.status.as_str(), "ready" | "blocked")
-                && view.available_to.iter().any(|seat| seat == viewer)))
+                && view.available_to.iter().any(|seat| super::work_actor_matches(Some(seat), viewer))))
 }
 
 /// How the work list ranks a step's state: ready work first, ended work last.
@@ -380,7 +380,19 @@ impl WorkRows {
         let queue = self.seat_orders.get(&viewer_seat(viewer)).map_or(&[][..], |order| order.as_slice());
         let steps = shown
             .iter()
-            .map(|(_, view)| crate::seat_queue::SeatStep::from(&***view))
+            .map(|(_, view)| {
+                let mut step = crate::seat_queue::SeatStep::from(&***view);
+                if super::work_actor_matches(step.assignee, viewer) {
+                    step.assignee = Some(viewer);
+                }
+                if super::work_actor_matches(step.claimant, viewer) {
+                    step.claimant = Some(viewer);
+                }
+                if super::work_actor_matches(step.carried_claimant, viewer) {
+                    step.carried_claimant = Some(viewer);
+                }
+                step
+            })
             .collect::<Vec<_>>();
         let ready = crate::seat_queue::select(viewer, &steps, queue)
             .ready

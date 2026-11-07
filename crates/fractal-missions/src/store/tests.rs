@@ -6413,7 +6413,8 @@ fn an_active_nested_lease_can_publish_its_parent_mission_output() {
 }
 
 #[test]
-fn nested_work_renews_the_same_workers_ancestor_lease() {
+fn nested_work_renews_the_same_workers_legacy_ancestor_lease() {
+    let holder = "node/worker";
     let store = Store::open_memory("node").unwrap();
     let source = r#"version 2
 
@@ -6422,7 +6423,7 @@ agent "worker" { workspace "/tmp"; command "true" }
 mission "nested-work" state="ready" {
   goal "Complete nested work."
   step "outer" {
-    assigned-to "agent/node.worker"
+    assigned-to "agent/node/worker"
     mission "work" {
       goal "Complete the child work."
       step "first" { }
@@ -6464,7 +6465,7 @@ mission "nested-work" state="ready" {
         .unwrap();
     let request = |key: &str| WorkRequest {
         wait_ms: None,
-        actor: Some("agent/node.worker".into()),
+        actor: Some("agent/node/worker".into()),
         incarnation: Some("current".into()),
         summary: None,
         reason: None,
@@ -6489,8 +6490,8 @@ mission "nested-work" state="ready" {
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h96d7cb75d46b owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0' WHERE subject=?1",
-            [&parent.subject],
+            /* sqlite-large-value: allow-for-now lv-h96d7cb75d46b owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0', lease_owner=?2 WHERE subject=?1",
+            params![parent.subject, holder],
         )
         .unwrap();
 
@@ -6500,7 +6501,7 @@ mission "nested-work" state="ready" {
 
     let parent = store.step_run(&parent.subject).unwrap().unwrap();
     assert_eq!(parent.status, "working");
-    assert_eq!(parent.claimant.as_deref(), Some("agent/node.worker"));
+    assert_eq!(parent.claimant.as_deref(), Some(holder));
     assert_eq!(parent.claim_incarnation.as_deref(), Some("current"));
     assert!(parent.claim_expires_at_unix_ms.unwrap() > now_ms());
 }
@@ -9556,6 +9557,44 @@ fn a_revision_keeps_the_claim_on_a_carried_step() {
         .unwrap();
     assert_eq!(submitted.subject, carried.subject);
     assert_eq!(submitted.status, "verifying");
+}
+
+#[test]
+fn carried_claim_successor_matches_legacy_and_canonical_holders() {
+    for actor in ["node/worker", "agent/node/worker"] {
+        for holder in ["node/worker", "agent/node/worker"] {
+            let store = Store::open_memory("node").unwrap();
+            publish_carry(&store, CARRY_SOURCE, "alias-carry-one");
+            let run = store.create_mission_run(&MissionRunRequest {
+                mission: "carry".into(), revision: None, workspace: "/tmp".into(),
+                requester: Some("person/requester".into()), mode: Some("run".into()),
+                inputs: BTreeMap::new(), idempotency_key: "alias-carry-run".into(),
+            }).unwrap();
+            let old = &run.steps.iter().find(|step| step.step == "work").unwrap().subject;
+            store.set_step_state(old, "ready", None).unwrap();
+            store.work_action(old, "claim", &carry_request("one", "alias-carry-claim")).unwrap();
+            let revised = publish_carry(
+                &store,
+                &CARRY_SOURCE.replace("Use the first goal.", "Use the second goal."),
+                "alias-carry-two",
+            );
+            let adopted = store.adopt_mission_revision(
+                &run.id, &revised, "person/requester", "revise other work", "alias-carry-revision",
+            ).unwrap();
+            let carried = &adopted.steps.iter().find(|step| step.step == "work").unwrap().subject;
+            assert_ne!(carried, old);
+            store.connection.write().execute(
+                "UPDATE step_runs SET assignee='agent/node/worker', lease_owner=?2 WHERE subject=?1",
+                params![carried, holder],
+            ).unwrap();
+            let mut renew = carry_request("one", "alias-carry-renew");
+            renew.actor = Some(actor.into());
+            let renewed = store.work_action(old, "renew", &renew).unwrap();
+            assert_eq!(&renewed.subject, carried);
+            assert_eq!(renewed.claimant.as_deref(), Some("agent/node/worker"));
+            assert!(renewed.claim_expires_at_unix_ms.unwrap() > now_ms());
+        }
+    }
 }
 
 #[test]
