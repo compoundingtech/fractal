@@ -1579,6 +1579,20 @@ pub const UNREPAIRED_CLAIM: &str = "NOT EXISTS (
     SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id
 )";
 
+/// The claims a subject's actual state folds. The full fold and the newest-first field read
+/// both filter with it, so a summary read answers each field as the full reduction does.
+pub(crate) static ACTUAL_FOLD_CLAIM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!("{ACTUAL_STATE_CLAIM} AND claims.kind NOT LIKE 'harness.%' AND {UNREPAIRED_CLAIM}")
+});
+
+#[cfg(test)]
+thread_local! {
+    /// A filter the field read uses in place of `ACTUAL_FOLD_CLAIM`, without its index, so a
+    /// test can show that its equivalence check fails when the two filters differ.
+    pub(crate) static ACTUAL_FIELDS_FILTER_FOR_TEST: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 // Both discovery and index installation share the actual fold's open-ended kind predicate.
 // Custom actual-state kinds can also supply a runtime id; a fixed kind allowlist is incomplete.
 pub const RUNTIME_ID_FIELD: &str = "json_extract(body, CASE WHEN json_type(body, '$.fields') IS NULL
@@ -11843,14 +11857,13 @@ pub fn latest_actual_at(
     // Only the integer identity and canonical keys enter SQLite's sorter. Keep its cursor
     // open while fetching each body on this same connection: even an unpinned caller then
     // reads both statements from one SQLite read cut, without retaining history bodies.
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hb4ae5bcd8a91 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h217040c2fa3a owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
         "SELECT claims.store_index
          FROM claims INDEXED BY claims_subject_kind_index
          JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
-           AND claims.kind NOT LIKE 'harness.%'
-           AND claims.store_index<=?2 AND {UNREPAIRED_CLAIM}
-         ORDER BY {CANONICAL_ORDER}"
+         WHERE claims.subject=?1 AND {} AND claims.store_index<=?2
+         ORDER BY {CANONICAL_ORDER}",
+        &*ACTUAL_FOLD_CLAIM
     ))?;
     let mut rows = statement.query(params![subject, at_index])?;
     let mut bodies = connection
@@ -11888,14 +11901,20 @@ fn latest_actual_fields_at(
     fields: &[&str],
 ) -> Result<Option<Value>> {
     debug_assert!(fields.len() < usize::BITS as usize);
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h5911198f6cf3 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &format!(
+    let fields_sql = format!(
         "SELECT claims.store_index FROM claims INDEXED BY claims_actual_accepted_index
          JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.subject=?1 AND {ACTUAL_STATE_CLAIM}
-           AND claims.kind NOT LIKE 'harness.%'
-           AND +claims.store_index<=?2 AND {UNREPAIRED_CLAIM}
+         WHERE claims.subject=?1 AND {} AND +claims.store_index<=?2
+         ORDER BY {CANONICAL_ORDER_DESC}",
+        &*ACTUAL_FOLD_CLAIM
+    );
+    #[cfg(test)]
+    let fields_sql = ACTUAL_FIELDS_FILTER_FOR_TEST.with(|filter| filter.borrow().as_ref().map(|filter| format!(
+        "SELECT claims.store_index FROM claims JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.subject=?1 AND {filter} AND claims.store_index<=?2
          ORDER BY {CANONICAL_ORDER_DESC}"
-    ))?;
+    ))).unwrap_or(fields_sql);
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc44243b75520 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &fields_sql)?;
     let mut rows = statement.query(params![subject, at_index.unwrap_or(i64::MAX as u64)])?;
     let mut bodies = connection.prepare_cached("SELECT kind, body FROM claims WHERE store_index=?1")?;
     let mut actual = serde_json::Map::new();
