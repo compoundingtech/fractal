@@ -1032,6 +1032,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
             get(replication::test_shard_items).post(replication::test_shard_append),
         )
         // The worker-only peers route refuses a test caller; this reads the same answer.
+        .route("/v1/internal/test/messages-shard/copy", post(replication::test_shard_copy))
         .route("/v1/internal/test/messages-shard/peers", get(replication::test_shard_peers))
         // Nothing records a message mark until consumers switch (4b-2); tests record one here.
         .route("/v1/internal/test/message-marks", post(test_record_message_mark));
@@ -3140,7 +3141,7 @@ fn client_agent_page_refs_uncached(store: &Store, history: bool, index: u64) -> 
             })?
             .collect::<Result<BTreeSet<_>, _>>()?;
         if !history {
-            subjects = store.current_view_candidates(&connection, subjects, index, true)?;
+            subjects = store.current_view_candidates_for_generic_reads(&connection, subjects, index, true)?;
         }
         let names = subjects.iter().cloned().collect::<Vec<_>>();
         let desired = store
@@ -3612,7 +3613,7 @@ pub fn client_agent_resources_uncached(
     snapshot_index: u64,
 ) -> anyhow::Result<Vec<Value>> {
     pinned_unless_enclosed(store, || {
-        let status = store.status_for_subject_prefix_at(
+        let status = store.status_for_subject_prefix_for_generic_reads_at(
             "agent/",
             Some(snapshot_index),
             history,
@@ -3629,7 +3630,7 @@ fn client_agent_resources_selected(
     changed: Option<(&BTreeSet<String>, &[Value])>,
 ) -> anyhow::Result<Vec<Value>> {
     pinned_unless_enclosed(store, || {
-        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_at(
+        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_for_generic_reads_at(
             changed.map(|(subjects, _)| subjects), snapshot_index, history,
         ))?;
         client_agent_resources_from_status(store, history, snapshot_index, changed, status)
@@ -4184,6 +4185,9 @@ pub fn managed_session_owner_at(
     crate::performance::task("conversation/owner", || {
         let owners = store.conversation_owners_at(snapshot_index)?;
         for owner in owners.values() {
+            if !store.generic_status_subject_visible_at(&owner.subject, snapshot_index)? {
+                continue;
+            }
             let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
                 continue;
             };
@@ -4202,6 +4206,9 @@ pub fn managed_session_owner_for_subject_at(
     owner: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
     crate::performance::task("conversation/owner", || {
+        if !store.generic_status_subject_visible_at(owner, snapshot_index)? {
+            return Ok(None);
+        }
         let owner = store.conversation_owner_at(owner, snapshot_index)?;
         let Some(owner) = owner else {
             return Ok(None);
@@ -4342,7 +4349,7 @@ fn managed_session_resources(
     at: &str,
     snapshot_index: u64,
 ) -> anyhow::Result<(Vec<Value>, BTreeSet<String>)> {
-    let status = store.status_for_subject_prefix_at(
+    let status = store.status_for_subject_prefix_for_generic_reads_at(
         "agent/",
         Some(snapshot_index),
         history,
@@ -5950,7 +5957,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
     for chunk in subjects.chunks(AGENT_ROSTER_WARM_CHUNK) {
         let names = chunk.iter().cloned().collect::<BTreeSet<_>>();
         store.read_snapshot(|index| crate::otel::roster_phase("status_fold", || {
-            store.agent_card_status_at(Some(&names), index, false).map(drop)
+            store.agent_card_status_for_generic_reads_at(Some(&names), index, false).map(drop)
         }))?;
     }
     Ok(())
@@ -6545,7 +6552,11 @@ where
     let cpu_kind = crate::performance::current();
     let trace = crate::otel::export_enabled().then(tracing::Span::current);
     let writer_wait = smallclaims::sqlite::telemetry::current_request();
+    #[cfg(any(test, feature = "test-support"))]
+    let uptime = crate::delivery_presence::uptime_pin::capture();
     crate::api::read_deadline::spawn_blocking(move || {
+        #[cfg(any(test, feature = "test-support"))]
+        let _uptime = uptime.enter();
         let _trace = trace.as_ref().map(tracing::Span::enter);
         let _writer_scope = smallclaims::sqlite::telemetry::enter_request(writer_wait);
         let _entered = crate::profile::enter(profile.as_ref());
@@ -7463,6 +7474,12 @@ pub async fn guard_bound_request(
     let Some(bound_agent) = bound_agent else {
         return Ok(request);
     };
+    if request.uri().path() == "/v1/backup"
+        || matches!(request.uri().path(),
+            "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
+    {
+        return Err(custom::notices_unavailable());
+    }
     // Internal routes serve this node's own processes: its replication worker and its operator's
     // CLI. A seat's harness reads fleet views through their public routes instead.
     if request.uri().path().starts_with(INTERNAL_ROUTE_PREFIX) {
@@ -11086,12 +11103,21 @@ pub fn accept_message_receipt_with_upload_owner(
         .map(str::to_owned)
         .collect::<Vec<_>>();
     let mut work_wake = is_work_wake(&tags);
+    // A repeat can replay a stream item an earlier send of this key wrote to the messages shard:
+    // it lists past the graph's indexes, and the send that wrote it settled its parent.
+    let (created_index, stream_item) = if appended {
+        (record.store_index, false)
+    } else {
+        crate::store::message_sent::listed_index(&state.store, &record).map_err(ApiError::internal)?
+    };
     if let Some(reference) = request.in_reply_to.as_deref() {
         // Settling the parent writes its lifecycle claims too.
         work_wake |= parent
             .as_ref()
             .is_none_or(|message| is_work_wake(&message.tags));
-        settle_answered_message(&state.store, reference, &from, &to, &subject, &record.id)?;
+        if !stream_item {
+            settle_answered_message(&state.store, reference, &from, &to, &subject, &record.id)?;
+        }
     }
     signal_message_changed(state, "message.sent", work_wake);
     let kind = if tags.iter().any(|tag| crate::silent::is_silent_tag(tag))
@@ -11119,7 +11145,7 @@ pub fn accept_message_receipt_with_upload_owner(
             title: request.title,
             in_reply_to: request.in_reply_to,
             tags,
-            created_index: record.store_index,
+            created_index,
             status_from: None,
             attachments,
             body_ref: body.as_ref().map(|body| message_body::reference(&body.sha256)),
@@ -11302,8 +11328,13 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     ])),
                 }));
             }
-            let (items, next_after, has_more) =
+            let (mut items, next_after, has_more) =
                 store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
+            // Events retain their bounded last-inspected cursor contract, even when hidden.
+            items.retain(|event| {
+                !fractal_schema::notice::is_reserved_subject(&event.subject)
+                    && !fractal_schema::notice::is_reserved_kind(&event.kind)
+            });
             // Stream items have no run owner, so an owner-filtered page has none of them.
             let stream = match messages_after {
                 Some(messages_after) if owner.is_none() => {
@@ -11316,6 +11347,10 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     .items
                     .iter()
                     .filter(|event| subject.as_deref().is_none_or(|subject| event.subject == subject))
+                    .filter(|event| {
+                        !fractal_schema::notice::is_reserved_subject(&event.subject)
+                            && !fractal_schema::notice::is_reserved_kind(&event.kind)
+                    })
                     .cloned()
                     .collect()
             });
