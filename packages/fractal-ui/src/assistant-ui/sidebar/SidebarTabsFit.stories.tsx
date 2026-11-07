@@ -23,9 +23,15 @@ const BadgeSizes = () => {
   const [selected, setSelected] = React.useState('one')
   return <main {...stylex.props(styles.host, styles.sidebar)}><SidebarTabs tabs={sizes} selectedId={selected} onSelectionChange={setSelected}><p>Panel</p></SidebarTabs></main>
 }
-const Surface = ({ width }: { readonly width: 'sidebar' | 'tight' }) => {
+/** The live sidebar at a 1280px window: a 240px sidebar with a few agents, alerts and a stalled mission. */
+const live: readonly SidebarTab[] = [
+  { id: 'agents', label: 'Agents', icon: 'person', count: 4 },
+  { id: 'alerts', label: 'Alerts', icon: 'bell', needsYouCount: 2 },
+  { id: 'missions', label: 'Missions', icon: 'checklist', status: { glyph: '!', label: '1 stalled or failed' } },
+]
+const Surface = ({ width }: { readonly width: 'sidebar' | 'tight' | 'window1280' }) => {
   const [selected, setSelected] = React.useState('agents')
-  return <main {...stylex.props(styles.host, width === 'sidebar' ? styles.sidebar : styles.tight)}><SidebarTabs tabs={tabs} selectedId={selected} onSelectionChange={setSelected}><p>Panel</p></SidebarTabs></main>
+  return <main {...stylex.props(styles.host, width === 'sidebar' ? styles.sidebar : width === 'window1280' ? styles.window1280 : styles.tight)}><SidebarTabs tabs={width === 'window1280' ? live : tabs} selectedId={selected} onSelectionChange={setSelected}><p>Panel</p></SidebarTabs></main>
 }
 const painted = (tablist: HTMLElement) => within(tablist).getAllByRole('tab').map(tab => {
   const pill = tab.querySelector('[data-sidebar-tab-marker]')
@@ -45,7 +51,7 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
-export const scenarioExemptions: readonly string[] = ['At256:primitive', 'BadgeShapes:primitive', 'CountsDropped:primitive']
+export const scenarioExemptions: readonly string[] = ['At256:primitive', 'BadgeShapes:primitive', 'CountsBeforeIcons:primitive', 'CountsDropped:primitive']
 
 export const At256: Story = { tags: ['critical'], name: 'Three tabs · counts fit 256px', args: { width: 'sidebar' }, play: async ({ canvasElement }) => {
   const tablist = within(canvasElement).getByRole('tablist', { name: 'Sidebar' })
@@ -71,16 +77,25 @@ export const BadgeShapes: Story = { tags: ['critical'], name: 'Badges · 1, 12 a
   // The exact count stays spoken past the painted cap.
   await expect(within(tablist).getAllByRole('tab')[2]).toHaveAttribute('aria-label', 'Many, 1234')
 } }
-export const CountsDropped: Story = { tags: ['critical'], name: 'Three tabs · counts drop first', args: { width: 'tight' }, play: async ({ canvasElement }) => {
+export const CountsDropped: Story = { tags: ['critical'], name: 'Three tabs · counts drop when even the iconless row overflows', args: { width: 'tight' }, play: async ({ canvasElement }) => {
   const tablist = within(canvasElement).getByRole('tablist', { name: 'Sidebar' })
   await waitFor(() => expect(canvasElement.querySelector('[data-sidebar-tabs]')).toHaveAttribute('data-sidebar-tab-counts', 'dropped'))
   await expect(painted(tablist)).toEqual(['Agents·', 'Alerts·', 'Missions'])
   await expect(within(tablist).getAllByRole('tab').map(tab => tab.getAttribute('aria-label'))).toEqual(names)
   await assertWhole(tablist)
 } }
+// Numbers carry information and tab icons only repeat the label, so icons give way first and counts drop only when even
+// the iconless row cannot hold them.
+export const CountsBeforeIcons: Story = { tags: ['critical'], name: 'Three tabs · icons give way before counts at 240px', args: { width: 'window1280' }, play: async ({ canvasElement }) => {
+  const tablist = within(canvasElement).getByRole('tablist', { name: 'Sidebar' })
+  await waitFor(() => expect(canvasElement.querySelector('[data-sidebar-tabs]')).toHaveAttribute('data-sidebar-tab-counts', 'shown'))
+  await expect(painted(tablist)).toEqual(['Agents·4', 'Alerts·2', 'Missions·'])
+  await assertWhole(tablist)
+} }
 
 const styles = stylex.create({
   host: { backgroundColor: surface.canvas, color: ink.fg, display: 'flex', flexDirection: 'column', height: '120px' },
   sidebar: { width: '256px' },
-  tight: { width: '210px' },
+  tight: { width: '180px' },
+  window1280: { width: '240px' },
 })
