@@ -275,6 +275,154 @@ fn custom_ordinary_claim_append_and_seal_never_enqueue_dirty_subjects() {
     assert_eq!(count, 0, "flush clearing the queue must not hide transient inserts");
 }
 
+fn externally_mark_custom_dirty(store: &Store, path: &std::path::Path, subject: &str) {
+    assert!(!transaction_work::custom_pending(&store.connection.write()));
+    let external = Connection::open(path).unwrap();
+    configure_projection_writer(&external).unwrap();
+    // A non-Store writer has the durable projection functions, but none of the
+    // connection-local custom work notifiers installed by custom::create_schema.
+    let notifiers: i64 = external.query_row(
+        "SELECT count(*) FROM sqlite_temp_master WHERE type='trigger' AND name GLOB 'custom_work_*'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(notifiers, 0);
+    assert_eq!(external.execute(
+        /* sqlite-large-value: allow-for-now lv-hade739ecf70b owner=fractal_store::store::custom::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_custom_dirty(subject) VALUES(?1)", [subject],
+    ).unwrap(), 1);
+    assert!(external.is_autocommit());
+    drop(external);
+
+    let connection = store.connection.write();
+    assert!(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject=?1)",
+        [subject], |row| row.get::<_, bool>(0),
+    ).unwrap(), "the external marker must be committed and visible to the Store writer");
+    assert!(!transaction_work::custom_pending(&connection),
+        "another connection's durable marker must not set this writer's hint");
+}
+
+#[test]
+fn custom_claim_append_refreshes_after_external_dirty_marker_conflict() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let store = Store::open(&path, "example").unwrap();
+    registration(&store);
+    let subject = "custom/garden/review/v1/external-dirty-append";
+    let requested = request(&store, subject);
+    let before = store.custom_subject(subject).unwrap().unwrap();
+    assert_eq!(before["state"], "ready");
+    assert!(before["fields"]["selection"].is_null());
+    assert_eq!(store.attention_items(Some("person/lichen")).unwrap().len(), 1);
+    externally_mark_custom_dirty(&store, &path, subject);
+
+    store.append_claim(&ClaimInput {
+        subject: subject.into(),
+        kind: "custom.garden.review.v1.answered".into(),
+        actor: Some("person/lichen".into()),
+        fields: serde_json::from_value(json!({
+            "request": requested.id, "selection": "keep"
+        })).unwrap(),
+        ..empty_input()
+    }).unwrap();
+
+    let after = store.custom_subject(subject).unwrap().unwrap();
+    assert_eq!(after["state"], "ready");
+    assert_eq!(after["fields"]["selection"], "keep");
+    assert_ne!(after["revision"], before["revision"]);
+    assert!(store.attention_items(Some("person/lichen")).unwrap().is_empty());
+    assert!(!store.connection.write().query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject=?1)",
+        [subject], |row| row.get::<_, bool>(0),
+    ).unwrap());
+}
+
+#[test]
+fn custom_replicated_repair_refreshes_after_external_dirty_marker_conflict() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let source = Store::open_memory("alder").unwrap();
+    let store = Store::open(&path, "birch").unwrap();
+    // Use the signed_pair admission pattern with a file-backed receiver so an
+    // independent SQLite writer can leave a durable dirty marker there.
+    let keys = (0..2)
+        .map(|_| Arc::new(crate::fleet::MemberKey::generate().unwrap().0))
+        .collect::<Vec<_>>();
+    for (index, member) in [&source, &store].into_iter().enumerate() {
+        member.bind_fleet(FLEET).unwrap();
+        member.pin_fleet_anchor(keys[0].public()).unwrap();
+        member.set_member_key(Some(keys[index].clone())).unwrap();
+        let mut fields = json!({
+            "fleet_id": FLEET, "member_key": keys[index].public(),
+            "via": if index == 0 { "anchor" } else { "invite" }, "mode": "listening"
+        });
+        if index != 0 {
+            fields["sponsor"] = json!("host/alder");
+        }
+        source.append_claim(&ClaimInput {
+            subject: format!("host/{}", member.origin()),
+            kind: "fleet.member-admitted".into(),
+            fields: serde_json::from_value(fields).unwrap(),
+            ..empty_input()
+        }).unwrap();
+    }
+    registration(&source);
+    let subject = "custom/garden/review/v1/external-dirty-repair";
+    let requested = request(&source, subject);
+    let answered = source.append_claim(&ClaimInput {
+        subject: subject.into(),
+        kind: "custom.garden.review.v1.answered".into(),
+        actor: Some("person/lichen".into()),
+        fields: serde_json::from_value(json!({
+            "request": requested.id, "selection": "keep"
+        })).unwrap(),
+        ..empty_input()
+    }).unwrap();
+    signed_sync(&source, &store);
+    let before = store.custom_subject(subject).unwrap().unwrap();
+    assert_eq!(before["state"], "ready");
+    assert_eq!(before["fields"]["selection"], "keep");
+    assert!(store.attention_items(Some("person/lichen")).unwrap().is_empty());
+    externally_mark_custom_dirty(&store, &path, subject);
+
+    // Isolate the canonical repair projection from receiving new claims: an
+    // unrelated INSERT could set the hint and hide a lost conflicting dirty mark.
+    // Validate the raw seam against the actually replicated record and the same
+    // repaired-filtered canonical history consumed by the custom projection.
+    store.connection.batched(|tx| -> Result<()> {
+        assert!(!transaction_work::custom_pending(tx));
+        assert_eq!(tx.query_row(
+            "SELECT count(*) FROM replica_records WHERE claim_id=?1",
+            [&answered.id], |row| row.get::<_, i64>(0),
+        )?, 1);
+        assert_eq!(tx.query_row(
+            "SELECT kind_hint FROM replica_records WHERE claim_id=?1",
+            [&answered.id], |row| row.get::<_, Option<String>>(0),
+        )?.as_deref(), Some("custom.garden.review.v1.answered"),
+            "a NULL hint would exercise the generic notifier instead of custom-kind repair");
+        assert!(claims(tx, subject)?.iter().any(|claim| claim.id == answered.id));
+        assert_eq!(tx.execute(
+            /* sqlite-large-value: allow-for-now lv-h72c162193663 owner=fractal_store::store::custom::tests TODO=chunk-or-reference-exact-wire-values */ "UPDATE replica_records SET state='repaired' WHERE claim_id=?1 AND state<>'repaired'",
+            [&answered.id],
+        )?, 1);
+        let canonical = claims(tx, subject)?;
+        assert_eq!(canonical.len(), 1);
+        assert_eq!(canonical[0].id, requested.id);
+        assert!(!canonical.iter().any(|claim| claim.id == answered.id));
+        flush(tx)
+    }).unwrap().unwrap();
+
+    let after = store.custom_subject(subject).unwrap().unwrap();
+    assert_eq!(after["state"], "ready");
+    assert!(after["fields"]["selection"].is_null());
+    assert_ne!(after["revision"], before["revision"]);
+    let attention = store.attention_items(Some("person/lichen")).unwrap();
+    assert_eq!(attention.len(), 1);
+    assert!(!store.connection.write().query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject=?1)",
+        [subject], |row| row.get::<_, bool>(0),
+    ).unwrap());
+}
+
 #[test]
 fn custom_non_custom_dependency_canonical_change_refreshes_consumer() {
     let store = Store::open_memory("example").unwrap();
