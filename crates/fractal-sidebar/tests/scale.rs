@@ -240,3 +240,34 @@ fn cache_rechecks_live_folder_resolution_at_the_same_revision() {
     assert_eq!(cache.project(&key, &changed, &members, &[]), Err(ProjectionError::InvalidResolution));
     assert_eq!(cache.project(&key, &a, &members, &[]), Ok(&build_v2(&a, &members).unwrap()), "same-revision recovery rebuilds");
 }
+#[test]
+fn cache_rechecks_v1_placement_resolution_at_the_same_revision() {
+    use fractal_sidebar::cache::ProjectionCache;
+    let (mut a, members) = fixture(3, 2); let key = revisions(&a);
+    let catalog: Vec<_> = members.iter().map(|m| m.member.clone()).collect();
+    let mut body = serde_json::to_value(&a.body).unwrap(); body["version"] = json!(1);
+    body["placements"] = json!(members.iter().map(|m| (m.member.clone(), json!({"value":{"folder":m.position.bucket,"key":m.position.key},"revision":"r"}))).collect::<std::collections::BTreeMap<_, _>>());
+    a.body = serde_json::from_value(body).unwrap();
+    a.resolved.as_mut().unwrap().folders = members.iter().map(|m| (m.member.clone(), m.position.bucket.clone())).collect();
+    let mut cache = ProjectionCache::default();
+    let expected = cache.project(&key, &a, &[], &catalog).unwrap().clone();
+    for missing in &catalog {
+        cache.project(&key, &a, &[], &catalog).unwrap();
+        let mut partial = a.clone();
+        partial.resolved.as_mut().unwrap().folders.remove(missing);
+        *partial.resolved.as_mut().unwrap().parents.values_mut().next().unwrap() = Some("unknown".into());
+        assert_eq!(cache.project(&key, &partial, &[], &catalog), Err(ProjectionError::NotReady));
+        assert_eq!(build(&partial, &catalog), Err(ProjectionError::NotReady), "full projection owns precedence");
+        let mut invalid = a.clone();
+        *invalid.resolved.as_mut().unwrap().parents.values_mut().next().unwrap() = Some("unknown".into());
+        assert_eq!(cache.project(&key, &invalid, &[], &catalog), Err(ProjectionError::InvalidResolution), "partial resolution cleared the entry");
+    }
+    cache.project(&key, &a, &[], &catalog).unwrap();
+    let mut changed = a.clone();
+    changed.resolved.as_mut().unwrap().folders.insert(catalog[0].clone(), None);
+    let moved = build(&changed, &catalog).unwrap(); assert_ne!(moved, expected);
+    assert_eq!(cache.project(&key, &changed, &[], &catalog), Ok(&moved), "changed destination rebuilds");
+    changed.resolved.as_mut().unwrap().folders.insert(catalog[0].clone(), Some("unknown".into()));
+    assert_eq!(cache.project(&key, &changed, &[], &catalog), Err(ProjectionError::InvalidResolution));
+    assert_eq!(cache.project(&key, &a, &[], &catalog), Ok(&expected), "same-revision recovery rebuilds");
+}
