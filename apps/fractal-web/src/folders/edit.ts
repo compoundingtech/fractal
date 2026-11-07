@@ -1,4 +1,4 @@
-import { SidebarJournal, type SidebarJournalState, type SidebarJournalRequest, type SidebarJournalEffect, type SidebarJournalResult } from './sidebarJournal.ts'
+import { SidebarJournal, type SidebarJournalState, type SidebarJournalRequest, type SidebarJournalEffect, type SidebarJournalResult, type SidebarPersistenceFailure } from './sidebarJournal.ts'
 import type { ActionOf, Arrangement, ArrangementOperation, ErrorEnvelope } from '@fractal/client'
 import { ErrorCode, decodeUnknownSync } from '@fractal/client/schema/read'
 import type { ActionResult } from '@fractal/client/schema'
@@ -429,7 +429,8 @@ export type MembershipEditEvent =
   | { readonly _tag: 'Fresh'; readonly base: MembershipBase; readonly memberships: Extract<MembershipOperations, { Memberships: unknown }>['Memberships']; readonly refusal?: MembershipRefusal }
   | { readonly _tag: 'Persisted' | 'CompletionPersisted' | 'Ack' | 'Unknown' | 'Observed'; readonly identity: MembershipIdentity }
   | { readonly _tag: 'Refused'; readonly identity: MembershipIdentity; readonly refusal: MembershipRefusal }
-  | { readonly _tag: 'Replay' | 'Retry' | 'StorageFailed' }
+  | SidebarPersistenceFailure
+  | { readonly _tag: 'Replay' | 'Retry' }
 const sameMembershipIdentity = (a: MembershipIdentity, b: MembershipIdentity): boolean => a.actor === b.actor && a.action_id === b.action_id && a.idempotency_key === b.idempotency_key
 /** Unwired Rust edits.rs port. Host serializes events and executes every journal effect. */
 export class MembershipEditor {
@@ -457,7 +458,7 @@ export class MembershipEditor {
   execute(effect: SidebarJournalEffect): SidebarJournalResult & { readonly effects?: readonly SidebarJournalEffect[] } {
     const result = this.journal.run(effect, this.state)
     if (result._tag === 'Applied' && result.event) return { ...result, effects: this.reduce(result.event) }
-    if (result._tag === 'StorageFailed') return { ...result, effects: this.reduce({ _tag: 'StorageFailed' }) }
+    if (result._tag === 'StorageFailed' && result.event) return { ...result, effects: this.reduce(result.event) }
     return result
   }
   reduce(event: MembershipEditEvent): SidebarJournalEffect[] {
@@ -486,7 +487,7 @@ export class MembershipEditor {
     if (event._tag === 'Retry' && ['Refused', 'PartiallyApplied'].includes(state.status)) {
       this.state = { ...state, status: 'Intent', refusal: null, dependent: null }; return ['ReadBase', 'Replan']
     }
-    if (event._tag === 'StorageFailed' && ['AwaitingPersistence', 'AwaitingCompletionPersistence'].includes(state.status)) return this.#refuse('Storage')
+    if (event._tag === 'StorageFailed' && (state.status === 'AwaitingPersistence' && event.phase === 'Pending' || state.status === 'AwaitingCompletionPersistence' && event.phase === 'Completion')) return this.#refuse('Storage')
     if (event._tag === 'Replay' && state.status === 'UnknownDelivery' || event._tag === 'Persisted' && state.status === 'AwaitingPersistence') {
       this.state = { ...state, status: 'Sending' }; return ['Send']
     }
