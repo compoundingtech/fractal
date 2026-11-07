@@ -23,6 +23,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         if let Some(burst) = self.seat_admission.status.burst_granted(agent) {
             wanted = Capacity { cores: wanted.cores.max(burst.cores), memory: wanted.memory.max(burst.memory) };
         }
+        // So does a raise this daemon found at start, until its holder's renewal restores the burst
+        // or its lease after the start ends (find_raised_lanes).
+        if let Some(found) = self.seat_admission.status.state().lane_found.get(agent).copied() {
+            wanted = Capacity { cores: wanted.cores.max(found.cores), memory: wanted.memory.max(found.memory) };
+        }
         let status = &self.seat_admission.status;
         // A daemon that restarted has no record of what it set, and a raise lasts as long as the
         // slice: it reads the slice, so a lane a step left raised comes down and counts until then.

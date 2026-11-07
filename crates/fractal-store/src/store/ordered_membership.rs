@@ -6,6 +6,34 @@ use fractal_schema::ordered_membership::{self as schema, Operation, Position};
 
 pub const MAX_LIVE_MEMBERS: usize = 4096;
 const VERSION_KEY: &str = "ordered_membership_heads_v1";
+const GENERATION_KEY: &str = "local_ordered_membership_generation";
+
+/// One bounded read cut; generation is local maintenance identity, not replicated authority.
+#[derive(Debug)]
+pub struct MembershipPage {
+    pub store_index: u64,
+    pub generation: u64,
+    pub state: schema::State,
+    pub items: Vec<Value>,
+}
+
+fn generation_at(connection: &Connection) -> Result<u64> {
+    Ok(connection.query_row(
+        "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key=?1),0)",
+        [GENERATION_KEY], |row| row.get(0),
+    )?)
+}
+
+fn advance_generation(transaction: &Transaction<'_>) -> Result<()> {
+    let next = generation_at(transaction)?.checked_add(1)
+        .and_then(|next| i64::try_from(next).ok())
+        .ok_or_else(|| anyhow::anyhow!("ordered membership generation exhausted"))?;
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h3b5ec217e92b owner=fractal_store::store::ordered_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![GENERATION_KEY, next],
+    )?;
+    Ok(())
+}
 pub const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h5471ad779977 owner=fractal_store::store::ordered_membership TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS ordered_membership_heads (
     container TEXT NOT NULL, member TEXT NOT NULL, position TEXT,
@@ -198,6 +226,10 @@ pub(super) fn container_changed(transaction: &Transaction<'_>, container: &str, 
             drop(statement);
             for member in &members { refresh_pair(transaction, container, member, index, &view)?; }
         }
+    } else if arrangements::migrated(transaction, container)? {
+        // Migration retains a container lifecycle dependency even with zero pairs.
+        // Keep it current on name/folder edits and retirement, exactly as replay does.
+        remember_lifecycle(transaction, container)?;
     }
     if arrangements::version(transaction, container)? == 2 {
         transaction.execute(
@@ -256,6 +288,7 @@ pub fn flush(transaction: &Transaction<'_>) -> Result<()> {
 /// A repair can remove the final count row. Keep its invalidation watermark locally,
 /// independent of rebuildable shared rows and their surviving claims' arrival indexes.
 pub fn repair_frontier(transaction: &Transaction<'_>, subject: &str) -> Result<()> {
+    advance_generation(transaction)?;
     let index = current_index(transaction)?;
     transaction.execute(
         /* sqlite-large-value: allow-for-now lv-he69938b2fc65 owner=fractal_store::store::ordered_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('local_ordered_membership_repair_index',?1)
@@ -287,6 +320,56 @@ pub fn member_repaired(transaction: &Transaction<'_>, subject: &str) -> Result<(
     )?;
     flush(transaction)?;
     repair_frontier(transaction, subject)
+}
+
+/// Historical placement claims keep their original canonical key, revision and real actor.
+/// This boundary translates values only; it never creates a replacement authority claim.
+fn legacy_head(transaction: &Transaction<'_>, container: &str, member: &str,
+    placement: &Value, (revision, winner): (&str, &[u8]), index: u64, view: &ContainerView) -> Result<()> {
+    let position = canonical_serialized_json_text(&Position {
+        bucket: placement["folder"].as_str().map(str::to_owned),
+        key: placement["key"].as_str().context("historical placement key")?.to_owned(),
+    })?;
+    let changed = transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-h0c9f4b3ffede owner=fractal_store::store::ordered_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO ordered_membership_heads(container,member,position,revision,winner) VALUES(?1,?2,?3,?4,?5)
+         ON CONFLICT(container,member) DO UPDATE SET position=excluded.position,revision=excluded.revision,winner=excluded.winner
+         WHERE excluded.winner>ordered_membership_heads.winner", params![container,member,position,revision,winner],
+    )?;
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-hc31f627d3a1e owner=fractal_store::store::ordered_membership TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO declared_resource_edges(owner,relation,name,target)
+        VALUES(?1,'ordered-membership',?2,?2)", params![container,member])?;
+    if changed != 0 { refresh_pair(transaction, container, member, index, view)?; }
+    Ok(())
+}
+
+pub(super) fn backfill_legacy(transaction: &Transaction<'_>, container: &str, index: u64) -> Result<()> {
+    let view = container_view(transaction, container)?;
+    let mut statement = transaction.prepare_cached(
+        "SELECT substr(register,11),value,revision,winner FROM arrangement_registers
+         WHERE subject=?1 AND register LIKE 'placement/%' ORDER BY register")?;
+    let rows = statement.query_map([container], |row| Ok((row.get::<_,String>(0)?,
+        row.get::<_,String>(1)?, row.get::<_,String>(2)?, row.get::<_,Vec<u8>>(3)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(statement);
+    for (member, value, revision, winner) in rows {
+        legacy_head(transaction, container, &member, &serde_json::from_str(&value)?,
+            (&revision, &winner), index, &view)?;
+    }
+    Ok(())
+}
+
+pub(super) fn project_legacy_claim(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
+    if !arrangements::migrated(transaction, &claim.subject)? { return Ok(()); }
+    let fields = schema_fields_for_body(&claim.kind, &claim.body)?;
+    let operations = fractal_schema::arrangements::operations(&claim.subject, &fields).map_err(anyhow::Error::new)?;
+    let winner = canonical::sortable_key(&canonical::claim_key(transaction, &claim.id)?);
+    let view = container_view(transaction, &claim.subject)?;
+    for operation in operations {
+        if let fractal_schema::arrangements::Operation::SubjectPlace { subject, folder, key } = operation {
+            legacy_head(transaction, &claim.subject, &subject, &json!({"folder":folder,"key":key}),
+                (&claim.id, &winner), claim.store_index, &view)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()> {
@@ -332,13 +415,13 @@ pub fn project(transaction: &Transaction<'_>, claim: &ClaimRecord) -> Result<()>
     Ok(())
 }
 
-pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), St3Error> {
+pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), FractalError> {
     if input.kind != "ordered-membership.edited" { return Ok(()); }
     // Selected declaration changes earlier in this writer batch must affect admission too.
     flush(transaction).map_err(internal)?;
-    let operations = schema::operations(&input.subject, &input.fields).map_err(|error| St3Error::new(error.code,error.message))?;
+    let operations = schema::operations(&input.subject, &input.fields).map_err(|error| FractalError::new(error.code,error.message))?;
     if !container_live(transaction, &input.subject).map_err(internal)? {
-        return Err(St3Error::new("invalid-arrangement-operations", "ordered memberships require a live version-2 arrangement; existing version-1 placements require explicit migration"));
+        return Err(FractalError::new("invalid-arrangement-operations", "ordered memberships require a live version-2 arrangement; existing version-1 placements require explicit migration"));
     }
     let initial_count: i64 = transaction.query_row(
         "SELECT COALESCE((SELECT live_count FROM ordered_membership_counts WHERE container=?1),0)", [&input.subject], |row| row.get(0),
@@ -356,7 +439,7 @@ pub fn prepare(transaction: &Transaction<'_>, input: &ClaimInput) -> Result<(), 
         count += i64::from(next) - i64::from(previous);
     }
     if count > MAX_LIVE_MEMBERS as i64 && count > initial_count {
-        return Err(St3Error::new("arrangement-limit", "ordered membership admission exceeds 4096 live entries; hidden lifetime pairs do not count"));
+        return Err(FractalError::new("arrangement-limit", "ordered membership admission exceeds 4096 live entries; hidden lifetime pairs do not count"));
     }
     Ok(())
 }
@@ -368,6 +451,7 @@ pub fn open(transaction: &Transaction<'_>) -> Result<()> {
 }
 
 pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
+    advance_generation(transaction)?;
     // Replay restores canonical rows but can replace lifecycle fanout indexes with
     // older claim indexes. Preserve the host's pre-rebuild frontier independently
     // of those rows; this local invalidation metadata is not shared authority.
@@ -380,7 +464,8 @@ pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
         DELETE FROM ordered_membership_counts; DELETE FROM ordered_membership_lifecycle;
         DELETE FROM local_ordered_membership_pending; DELETE FROM declared_resource_edges WHERE relation='ordered-membership';")?;
     let mut statement = transaction.prepare("SELECT a.subject,a.changed_index FROM arrangements a
-        JOIN arrangement_registers r ON r.subject=a.subject WHERE r.register='version' AND r.value='2'")?;
+        WHERE EXISTS(SELECT 1 FROM arrangement_registers r WHERE r.subject=a.subject
+            AND ((r.register='version' AND r.value='2') OR r.register='membership-authority'))")?;
     let containers = statement.query_map([], |row| Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
@@ -390,10 +475,13 @@ pub fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
         }
     }
     let mut statement = transaction.prepare("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims
-        WHERE kind='ordered-membership.edited' AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id) AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')")?;
+        WHERE kind IN ('ordered-membership.edited','arrangement.edited') AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id) AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')")?;
     let claims = statement.query_map([],claim_from_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
     drop(statement);
-    for claim in claims { project(transaction, &claim)?; }
+    for claim in claims {
+        if claim.kind == "arrangement.edited" { project_legacy_claim(transaction, &claim)?; }
+        else { project(transaction, &claim)?; }
+    }
     flush(transaction)?;
     Ok(())
 }
@@ -443,9 +531,9 @@ fn state_at(connection: &Connection, container: &str) -> Result<schema::State> {
 pub fn items_at(connection: &Connection, container: &str, through: u64, after: Option<(&str,&str,&str)>, limit: usize) -> Result<Vec<Value>> {
     anyhow::ensure!(limit <= 1001, "ordered membership pages are bounded to 1000 entries plus one lookahead");
     let created: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM arrangements WHERE subject=?1 AND created=1)", [container], |row| row.get(0))?;
-    if !created { return Err(anyhow::Error::new(St3Error::new("not-found", "ordered membership container is unknown"))); }
+    if !created { return Err(anyhow::Error::new(FractalError::new("not-found", "ordered membership container is unknown"))); }
     if arrangements::version(connection, container)? != 2 {
-        return Err(anyhow::Error::new(St3Error::new("invalid-arrangement-operations", "ordered membership reads require version 2; version-1 placements are not an empty membership collection")));
+        return Err(anyhow::Error::new(FractalError::new("invalid-arrangement-operations", "ordered membership reads require version 2; version-1 placements are not an empty membership collection")));
     }
     anyhow::ensure!(state_at(connection, container)?.changed_index <= through,
         "ordered membership snapshot frontier is stale");
@@ -469,10 +557,21 @@ pub fn items_at(connection: &Connection, container: &str, through: u64, after: O
 }
 
 impl Store {
-    pub fn edit_ordered_memberships(&self, input: &ClaimInput, expected: &BTreeMap<String,String>) -> Result<ClaimRecord,St3Error> {
-        if input.kind != "ordered-membership.edited" { return Err(St3Error::new("invalid-arrangement-operations", "membership edits require ordered-membership.edited")); }
+    pub fn edit_ordered_memberships(&self, input: &ClaimInput, expected: &BTreeMap<String,String>) -> Result<ClaimRecord,FractalError> {
+        if input.kind != "ordered-membership.edited" { return Err(FractalError::new("invalid-arrangement-operations", "membership edits require ordered-membership.edited")); }
         if let Some(actor) = &input.actor { self.graph.ensure_principal_key(actor)?; }
         append_claim_with_subject_fences(&self.graph,input,None,None,Some(expected),None).map(|(claim,_)| claim)
+    }
+    /// Metadata and keyset rows share a short transaction, including when nested in an API read.
+    /// No transaction or result is retained for a subsequent request.
+    pub fn ordered_membership_page(&self, container: &str, after: Option<(&str,&str,&str)>, limit: usize) -> Result<MembershipPage> {
+        self.read_snapshot(|store_index| {
+            let connection = self.readers.get();
+            let generation = generation_at(&connection)?;
+            let state = state_at(&connection, container)?;
+            let items = items_at(&connection, container, store_index, after, limit)?;
+            Ok(MembershipPage { store_index, generation, state, items })
+        })
     }
     pub fn ordered_memberships(&self, container: &str, through: u64, after: Option<(&str,&str,&str)>, limit: usize) -> Result<Vec<Value>> {
         self.read_snapshot(|_| items_at(&self.readers.get(),container,through,after,limit))

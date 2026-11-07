@@ -241,6 +241,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -470,6 +473,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -677,6 +683,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -845,6 +854,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -1015,6 +1027,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -1114,6 +1129,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -1178,6 +1196,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -1345,6 +1366,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -2559,6 +2583,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -2582,6 +2609,10 @@ jobs:
         run: |
           python3 scripts/prepare-pnpm-source-inputs.py apply
           printf 'MEGAREPO_STORE=%s\n' "$MEGAREPO_STORE" >> "$GITHUB_ENV"
+        if: needs.proof-evidence-gate-genie-freshness.outputs.skip != 'true' && needs.proof-evidence-gate-genie-freshness.outputs.refuse != 'true'
+      - name: Validate public sidebar fixtures and scrubber self-tests
+        shell: bash
+        run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
         if: needs.proof-evidence-gate-genie-freshness.outputs.skip != 'true' && needs.proof-evidence-gate-genie-freshness.outputs.refuse != 'true'
       - name: Check license coverage, runner selection and generated files
         shell: bash
@@ -2732,6 +2763,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -2869,6 +2903,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -3114,6 +3151,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -3234,6 +3274,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -3398,6 +3441,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -3584,6 +3630,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -3628,6 +3677,9 @@ jobs:
       - name: Install matching rendered hooks
         shell: bash
         run: nix develop -c bash scripts/ci-install-built-hooks
+      - name: Validate public sidebar fixtures and scrubber self-tests
+        shell: bash
+        run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
       - name: Prove shards form the complete selected inventory
@@ -3829,6 +3881,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -3873,6 +3928,9 @@ jobs:
       - name: Install matching rendered hooks
         shell: bash
         run: nix develop -c bash scripts/ci-install-built-hooks
+      - name: Validate public sidebar fixtures and scrubber self-tests
+        shell: bash
+        run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
       - name: Make room for the JUnit report
@@ -4071,6 +4129,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -4115,6 +4176,9 @@ jobs:
       - name: Install matching rendered hooks
         shell: bash
         run: nix develop -c bash scripts/ci-install-built-hooks
+      - name: Validate public sidebar fixtures and scrubber self-tests
+        shell: bash
+        run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
       - name: Make room for the JUnit report
@@ -4313,6 +4377,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -4357,6 +4424,9 @@ jobs:
       - name: Install matching rendered hooks
         shell: bash
         run: nix develop -c bash scripts/ci-install-built-hooks
+      - name: Validate public sidebar fixtures and scrubber self-tests
+        shell: bash
+        run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
       - name: Make room for the JUnit report
@@ -4570,6 +4640,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -4585,6 +4658,9 @@ jobs:
       - name: Use the cached Nix outputs
         if: env.CI_LOCAL_CACHES != '1'
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
+      - name: Validate public sidebar fixtures and scrubber self-tests
+        shell: bash
+        run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
       - name: Run the Clippy warning ratchet and generated-client check
@@ -4799,6 +4875,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}
@@ -4814,6 +4893,9 @@ jobs:
       - name: Use the cached Nix outputs
         if: env.CI_LOCAL_CACHES != '1'
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
+      - name: Validate public sidebar fixtures and scrubber self-tests
+        shell: bash
+        run: "nix develop '.#genie' -c bash -euc 'node --test scripts/check-sidebar-fixtures.test.mjs; node scripts/check-sidebar-fixtures.mjs'"
       - name: Summarize tested revision
         run: "printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' \"$(git rev-parse HEAD)\" \"$(nproc)\" \"$(free -h | awk '/^Mem:/ {print $2 \" memory\"}')\" >> \"$GITHUB_STEP_SUMMARY\""
       - name: Run fleet compatibility against the pinned older st3
@@ -5347,7 +5429,7 @@ jobs:
           import sys
           import tempfile
 
-          # Directory patterns end in `/**`; `*` stays within one path component.
+          # `**/` includes zero or more directories; `*` stays within one path component.
           PATTERNS = (
               "apps/fractal-web/**",
               "packages/fractal-ui/**",
@@ -5408,17 +5490,12 @@ jobs:
           # scripts/ci-fractal-web-kit-graph fails the kit lane when the built Storybook bundles a file outside these.
           KIT_PATTERNS = (
               "packages/fractal-ui/**",
+              # Every app story belongs to kit, including stories added in new source folders.
+              "apps/fractal-web/src/**/*.stories.tsx",
               # Changelog stories render the app's changelog view and seen state.
               "apps/fractal-web/src/changelog/**",
               "apps/fractal-web/src/embed/**",
-              "apps/fractal-web/src/web/ColdOpen.stories.tsx",
               "apps/fractal-web/src/web/coldOpen.fixtures.ts",
-              # The image composer integration story exercises the app's live imageUploadAdapter in kit Storybook.
-              "apps/fractal-web/src/web/ComposerImages.stories.tsx",
-              # NativeTranscript exercises the real ConversationPane over synthetic native wire records.
-              "apps/fractal-web/src/web/NativeTranscript.stories.tsx",
-              # The transcript image integration story exercises the app's production transcript image cache in kit Storybook.
-              "apps/fractal-web/src/web/TranscriptImages.stories.tsx",
               "apps/fractal-web/src/web/transcriptImages.ts",
               # NarrowLayout.stories renders the real LiveAgentWorkspace; these are its bundled workspace packages and entries.
               "apps/fractal-web/.changelog/**",
@@ -5447,6 +5524,7 @@ jobs:
               "apps/fractal-web/src/conversation/vocabulary.ts",
               "apps/fractal-web/src/data/arrangements.ts",
               "apps/fractal-web/src/data/asking.ts",
+              "apps/fractal-web/src/data/attachmentSchema.ts",
               "apps/fractal-web/src/data/attention.ts",
               "apps/fractal-web/src/data/contextOccupancy.ts",
               "apps/fractal-web/src/data/fixtureSource.ts",
@@ -5471,6 +5549,7 @@ jobs:
               "apps/fractal-web/src/extensions/public.ts",
               "apps/fractal-web/src/fixtures/projections.ts",
               "apps/fractal-web/src/fixtures/world.ts",
+              "apps/fractal-web/src/folders/arrangementSchema.ts",
               "apps/fractal-web/src/folders/client.ts",
               "apps/fractal-web/src/folders/core.mts",
               "apps/fractal-web/src/folders/edit.ts",
@@ -5519,6 +5598,7 @@ jobs:
               "apps/fractal-web/src/terminal/rawTerminalInput.ts",
               "apps/fractal-web/src/terminal/rawTerminalState.ts",
               "apps/fractal-web/src/terminal/terminalMetrics.stylex.ts",
+              "apps/fractal-web/src/terminal/terminalSchema.ts",
               "apps/fractal-web/src/terminal/terminalTyping.ts",
               "apps/fractal-web/src/terminal/assets/JetBrainsMonoNerdFontMono-Regular.ttf",
               "apps/fractal-web/src/terminal/assets/JetBrainsMono-Regular.woff2",
@@ -5565,19 +5645,15 @@ jobs:
               "apps/fractal-web/src/web/LiveAgentWorkspace.tsx",
               "apps/fractal-web/src/web/useTabMetadata.ts",
               "apps/fractal-web/src/web/liveSidebarTree.ts",
-              "apps/fractal-web/src/web/NarrowLayout.stories.tsx",
               "apps/fractal-web/src/web/NativeTurnFooter.tsx",
               "apps/fractal-web/src/web/perfMarks.ts",
-              "apps/fractal-web/src/web/ResponsiveAgentSidebar.stories.tsx",
               "apps/fractal-web/src/web/ResponsiveAgentSidebar.tsx",
               "apps/fractal-web/src/web/PhoneAgentDrawer.tsx",
               "apps/fractal-web/src/web/PhoneWorkspaceTabs.tsx",
               "apps/fractal-web/src/web/semanticTool.tsx",
               "apps/fractal-web/src/web/sidebarAttention.ts",
-              "apps/fractal-web/src/web/SidebarChrome.stories.tsx",
               "apps/fractal-web/src/web/SidebarChromeFooter.tsx",
               "apps/fractal-web/src/web/SidebarEmptyState.tsx",
-              "apps/fractal-web/src/web/SidebarTreeBinding.stories.tsx",
               "apps/fractal-web/src/web/sidebarRow.ts",
               "apps/fractal-web/src/web/subagentThreadFocus.ts",
               "apps/fractal-web/src/web/TypedToolPreview.tsx",
@@ -5612,11 +5688,8 @@ jobs:
               "apps/fractal-web/src/data/attention.ts",
               "apps/fractal-web/src/data/projections.ts",
               "apps/fractal-web/src/data/source.ts",
-              "apps/fractal-web/src/web/LiveRoster.stories.tsx",
               "apps/fractal-web/src/web/LiveRoster.tsx",
               # The production module suites mount the real LiveAgentWorkspace and ConversationPane over app story states.
-              "apps/fractal-web/src/web/LiveAgentWorkspace.stories.tsx",
-              "apps/fractal-web/src/web/ConversationPane.stories.tsx",
               "apps/fractal-web/src/fixtures/AppStoryHarness.tsx",
               "apps/fractal-web/src/fixtures/appStoryAssertions.ts",
               "apps/fractal-web/src/fixtures/appStoryStates.ts",
@@ -5627,8 +5700,8 @@ jobs:
 
 
           def pattern_regex(pattern):
-              parts = re.split(r"(\*\*|\*)", pattern)
-              body = "".join(".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part) for part in parts)
+              parts = re.split(r"(\*\*/|\*\*|\*)", pattern)
+              body = "".join("(?:.*/)?" if part == "**/" else ".*" if part == "**" else "[^/]*" if part == "*" else re.escape(part) for part in parts)
               # DOTALL: Git paths may legally contain newlines, and `**` must still cover them.
               return re.compile(body + r"\Z", re.DOTALL)
 
@@ -5763,6 +5836,9 @@ jobs:
           extra-conf: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
             extra-substituters = https://overeng-effect-utils.cachix.org
             extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
             access-tokens = github.com=${{ github.token }}

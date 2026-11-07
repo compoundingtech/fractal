@@ -1,6 +1,6 @@
 # Demos: a scripted fractal in the terminal interface
 
-`st demo play FILE` plays a demo of fractal in the terminal interface. A demo is one file: what the
+`fractal demo play FILE` plays a demo of fractal in the terminal interface. A demo is one file: what the
 fleet holds when it starts (agents, missions and runs, conversations, messages, documents) and a
 list of beats. Each beat does one visible thing, such as an agent's message arriving, a pane
 opening, a mission step moving or an alert appearing. It fires after a delay or when you press
@@ -10,7 +10,7 @@ The agents are scripted, not harnesses. A demo uses no model tokens and plays th
 every time.
 
 ```sh
-st --instance demo demo play examples/demos/release-day.kdl
+fractal --instance demo demo play examples/demos/release-day.kdl
 ```
 
 A demo always plays in an [instance](instances.md), so your own fleet is never touched. Each
@@ -28,7 +28,7 @@ The mark stays, so every later play erases the instance without asking: keep a m
 for demos only.
 
 ```sh
-st --instance demo demo play --reset examples/demos/release-day.kdl
+fractal --instance demo demo play --reset examples/demos/release-day.kdl
 ```
 
 Two examples are in [`examples/demos`](../../examples/demos):
@@ -38,11 +38,11 @@ Two examples are in [`examples/demos`](../../examples/demos):
 - `an-alert-needs-an-answer.kdl`: an agent raises an alert that only the person can answer, and
   the person types a reply.
 
-`st demo check FILE` reads a demo without playing it and lists its beats with their lines.
+`fractal demo check FILE` reads a demo without playing it and lists its beats with their lines.
 
 Run it from your own terminal. Inside a managed agent, fractal binds every command to that agent, and
 the demo cannot act as its own agents and person. The demo's agents start through your login
-shell, like any agent, so that shell must find `pty` on its `PATH`; `st --instance demo doctor`
+shell, like any agent, so that shell must find `pty` on its `PATH`; `fractal --instance demo doctor`
 names anything missing.
 
 ## While it plays
@@ -85,7 +85,7 @@ beats {
 ```
 
 The `seed` holds `agent`, `mission` and `person` declarations, written as for
-[`st apply`](https://github.com/compoundingtech/fractal/blob/main/docs/site/reference/configuration.md), plus actions that run before the interface opens. An agent's
+[`fractal apply`](https://github.com/compoundingtech/fractal/blob/main/docs/site/reference/configuration.md), plus actions that run before the interface opens. An agent's
 name has a slash (`copperwren/builder` is `agent/copperwren/builder`). fractal gives each agent a
 process that does nothing, in place of a harness, and a folder in the instance's work root.
 
@@ -109,11 +109,11 @@ Agents' text is Markdown, as in a real conversation.
 
 ## Actions
 
-Each action is the `st` command a real agent would run, run as the agent it names.
+Each action is the `fractal` command a real agent would run, run as the agent it names.
 
 | Action | What it shows | Written as |
 | --- | --- | --- |
-| `open` | An agent, mission, mission run, machine or document in a tab, or a split with `split="right"` or `"below"`. This is [`st ui open`](onboarding-guide.md); `by="agent/…"` names the agent shown as opening it. A document opens as `doc/NAME`, the version the demo stored. | `open "agent/NAME" split="right" by="agent/OTHER"` |
+| `open` | An agent, mission, mission run, machine or document in a tab, or a split with `split="right"` or `"below"`. This is [`fractal ui open`](onboarding-guide.md); `by="agent/…"` names the agent shown as opening it. A document opens as `doc/NAME`, the version the demo stored. | `open "agent/NAME" split="right" by="agent/OTHER"` |
 | `focus` | The same as `open`. For a pane that is already open, it moves the focus there. | `focus "agent/NAME"` |
 | `say` | The agent's message in its conversation. A beat streams it in at `speed` words a second (default `9/s`). In the seed, `ago="20m"` dates it in the past. | `say "agent/NAME" "text"` |
 | `tool` | A tool call in the agent's conversation that finishes after `takes` (default 1.5s), with `input`, `output` and `failed=#true`. | `tool "agent/NAME" "Bash" input="make test" output="ok"` |

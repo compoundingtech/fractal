@@ -22,15 +22,15 @@ fn writer_seek(table: &str, column: &str) -> String {
     format!("SELECT {column} FROM {table} WHERE {column}>?1 ORDER BY {column} LIMIT 1")
 }
 
-fn refused(reason: impl Into<String>) -> St3Error {
-    St3Error::new("schedule-standby-unavailable", reason)
+fn refused(reason: impl Into<String>) -> FractalError {
+    FractalError::new("schedule-standby-unavailable", reason)
 }
 
 pub(super) fn validate_publication(
     connection: &Connection,
     origin: &str,
     intent: &NormalizedIntent,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     for desired in intent.subjects.values().filter(|desired| desired.kind == "schedule") {
         let Some(spec) = crate::graph::schedule_spec(&desired.desired, origin) else { continue };
         let Some(standby) = spec.standby.as_ref() else { continue };
@@ -45,7 +45,7 @@ pub(super) fn validate_publication(
     Ok(())
 }
 
-fn adoption_epoch(connection: &Connection, origin: &str, spec: &crate::model::ScheduleSpec) -> Result<String, St3Error> {
+fn adoption_epoch(connection: &Connection, origin: &str, spec: &crate::model::ScheduleSpec) -> Result<String, FractalError> {
     let Some(standby) = spec.standby.as_ref() else { return Err(refused("standby is not declared")) };
     let membership = fleet_membership_tx(connection).map_err(internal)?;
     if membership.anchor().is_none()
@@ -99,7 +99,7 @@ fn adoption_epoch(connection: &Connection, origin: &str, spec: &crate::model::Sc
 }
 
 impl Store {
-    pub fn schedule_standby_adoption_epoch(&self, spec: &crate::model::ScheduleSpec) -> Result<String, St3Error> {
+    pub fn schedule_standby_adoption_epoch(&self, spec: &crate::model::ScheduleSpec) -> Result<String, FractalError> {
         adoption_epoch(&self.readers.get(), &self.origin, spec)
     }
 

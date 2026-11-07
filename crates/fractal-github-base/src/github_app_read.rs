@@ -536,6 +536,52 @@ pub(crate) mod tests {
         }).await;
         crate::github_http::send(client.get(format!("{}/repos/unconfigured/repo/issues", server.base)), &pat).await.unwrap();
     }
+
+    #[tokio::test]
+    async fn response_observer_counts_app_replays_and_pat_redirect_hops_once() {
+        let root = tempfile::tempdir().unwrap();
+        let owner = "retry-redirect-accounting";
+        install(root.path(), owner, "gh-ci", "fixture-app",
+            chrono::Utc::now() + chrono::Duration::minutes(60));
+        let auth = select(Some(root.path()), owner, "gh-ci", &GithubAuth::test("fixture-pat"));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let recorded = calls.clone();
+        let fixture = server_with_headers(move |headers, authorization, path, _| {
+            recorded.lock().push((authorization.to_owned(), path.to_owned()));
+            let mut response_headers = reqwest::header::HeaderMap::new();
+            let status = if authorization == "Bearer fixture-app" {
+                assert!(headers.contains_key("if-none-match"));
+                StatusCode::UNAUTHORIZED
+            } else {
+                assert_eq!(authorization, "Bearer fixture-pat");
+                assert!(!headers.contains_key("if-none-match"));
+                if path.starts_with("/repos/") {
+                    response_headers.insert("location", "/repositories/42/pulls".parse().unwrap());
+                    StatusCode::MOVED_PERMANENTLY
+                } else {
+                    StatusCode::NOT_MODIFIED
+                }
+            };
+            (status, response_headers, json!({}))
+        }).await;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let response = crate::github_http::spend_as("fixture/retry-redirect-accounting".into(),
+            crate::github_http::send_read(client.get(
+                format!("{}/repos/{owner}/repo/pulls", fixture.base))
+                .header("if-none-match", "\"fixture-app-etag\""), &auth)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert!(!crate::github_http::read_response_cacheable(&response));
+        let report = crate::resource::github_usage_report();
+        let usage = report.spenders.iter()
+            .find(|usage| usage.spender == "fixture/retry-redirect-accounting").unwrap();
+        assert_eq!((usage.sent, usage.refused, usage.not_modified), (4, 2, 1));
+        assert_eq!(usage.counted_last_hour, 3);
+        let calls = calls.lock();
+        assert_eq!(calls.iter().map(|(auth, _)| auth.as_str()).collect::<Vec<_>>(),
+            ["Bearer fixture-app", "Bearer fixture-app", "Bearer fixture-pat", "Bearer fixture-pat"]);
+        assert_eq!(calls[3].1, "/repositories/42/pulls");
+    }
 }
 
 #[cfg(test)]

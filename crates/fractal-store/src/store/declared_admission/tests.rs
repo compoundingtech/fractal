@@ -5,7 +5,7 @@ use crate::store::directive_notes::tests_shared_delivery::{FLEET, claim, enable,
 const ERROR: &str = "declared-admission-feature-barrier";
 const PLAIN: &str = "version 2\nagent \"plain\" { workspace \"/tmp\"; command \"true\"; }\n";
 
-fn publish(store: &Store, source: &str, key: &str) -> Result<ApplyResponse, St3Error> {
+fn publish(store: &Store, source: &str, key: &str) -> Result<ApplyResponse, FractalError> {
     let intent = crate::graph::parse_intent(source, &store.origin)?;
     let planned = store.mission(
         &intent,

@@ -1,8 +1,8 @@
 //! Publication compatibility only: declarations do not enforce admission or resource limits.
 use super::*;
 
-fn refused(reason: impl Into<String>) -> St3Error {
-    St3Error::new("declared-admission-feature-barrier", reason)
+fn refused(reason: impl Into<String>) -> FractalError {
+    FractalError::new("declared-admission-feature-barrier", reason)
 }
 
 fn declares_fields(value: &Value) -> bool {
@@ -102,7 +102,7 @@ pub(super) fn validate_publication(
     connection: &Connection,
     origin: &str,
     intent: &NormalizedIntent,
-) -> Result<(), St3Error> {
+) -> Result<(), FractalError> {
     let declared = intent.subjects.values().any(|desired| {
         (desired.kind == "agent" && declares_children(&desired.desired))
             || desired.member.as_ref().is_some_and(|member| {
@@ -124,18 +124,30 @@ pub(super) fn validate_claim(
     origin: &str,
     kind: &str,
     body: &Value,
-) -> Result<(), St3Error> {
-    let fields = body.get("fields").unwrap_or(body);
-    let payload = fields.get("body").unwrap_or(fields);
-    let declared = match kind {
+) -> Result<(), FractalError> {
+    // The writer persists the whole body, and desired/mission projection decodes that
+    // body even when schema_fields_for_body selects an explicit `fields` object.
+    // Mission capacity validation also reads `fields.body`. Inspect a conservative
+    // superset of these locations, retaining the existing `body` envelope checks;
+    // an empty decoy must never hide declarations in another persisted location.
+    let declared = [
+        Some(body),
+        body.get("fields"),
+        body.get("body"),
+        body.get("fields").and_then(|fields| fields.get("body")),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|payload| match kind {
         "intent.desired" => {
-            payload.get("member").is_some_and(declares_fields)
-                || (payload.get("kind").and_then(Value::as_str) == Some("agent")
-                    && payload.get("desired").is_some_and(declares_children))
+            declares_fields(payload)
+                || declares_children(payload)
+                || payload.get("member").is_some_and(declares_fields)
+                || payload.get("desired").is_some_and(declares_children)
         }
         "mission.published" => declares_mission_json(payload),
         _ => false,
-    };
+    });
     if declared {
         validate_fleet(connection, origin)?;
     }
@@ -143,7 +155,7 @@ pub(super) fn validate_claim(
 }
 
 /// The directive-notes barrier's signed membership policy, with no local-member exemption.
-fn validate_fleet(connection: &Connection, origin: &str) -> Result<(), St3Error> {
+fn validate_fleet(connection: &Connection, origin: &str) -> Result<(), FractalError> {
     let pending: bool = connection.query_row(/* sqlite-large-value: allow-for-now lv-h281752a36224 owner=fractal_store::store::declared_admission TODO=trace-statement-and-value-representation */ &format!(
         "SELECT EXISTS(SELECT 1 FROM claims c JOIN batches b ON b.id=c.batch_id
          LEFT JOIN replica_envelopes e ON e.batch_id=b.id

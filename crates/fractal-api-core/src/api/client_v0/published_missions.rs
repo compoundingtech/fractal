@@ -133,7 +133,7 @@ pub fn page(
             snapshot: snapshot.clone(), collection: "missions".into(), offset: end, limit,
             history: false, person: query.person.clone(), actor: query.actor.clone(),
             owner_run: query.owner_run.clone(), status: query.status.clone(), owner: None, state: None,
-            native_only: query.native_only, items_digest: digest, before_index: None,
+            native_only: query.native_only, items_digest: digest, before_index: None, before_stream_index: None,
             after_key: None, expires_at_unix_ms: expires,
         })?)
     } else { None };

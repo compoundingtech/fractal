@@ -1,6 +1,6 @@
 use super::*;
 
-fn publish(store: &Store, source: &str) -> Result<ApplyResponse, St3Error> {
+fn publish(store: &Store, source: &str) -> Result<ApplyResponse, FractalError> {
     let intent = crate::graph::parse_intent(source, &store.origin)?;
     let planned = store.mission(
         &intent,
@@ -85,6 +85,82 @@ fn declared_admission_publication_and_direct_claims_fail_closed_without_evidence
                 "direct claim must not write"
             );
         }
+    }
+}
+
+fn assert_direct_claim_decoys_refused(subject: &str, kind: &str, payload: &Value) {
+    let mut empty_body = payload.clone();
+    empty_body["body"] = json!({});
+    let mut empty_fields = payload.clone();
+    empty_fields["fields"] = json!({});
+    for body in [
+        empty_body.clone(),
+        empty_fields,
+        json!({"fields": {"body": payload}, "body": {}}),
+        json!({"body": payload, "fields": {}}),
+        json!({"fields": empty_body}),
+    ] {
+        // Exercise envelope detection directly: typed validation can independently reject
+        // member/canonical drift, and the evidence gate requires an initialized store.
+        let store = Store::open_memory("alder").unwrap();
+        let before = store.index().unwrap();
+        let refusal = validate_claim(&store.readers.get(), "alder", kind, &body).unwrap_err();
+        assert_eq!(
+            refusal.code, "declared-admission-feature-barrier",
+            "{subject} {kind} {body}"
+        );
+        assert_eq!(store.index().unwrap(), before, "decoy refusal must not write");
+    }
+}
+
+#[test]
+fn direct_declaration_claim_decoy_envelopes_fail_closed() {
+    for child in [
+        "declared-priority \"normal\"",
+        "declared-lane \"check\"",
+        "declared-budgets {}",
+    ] {
+        let source = format!(
+            "version 2\nagent \"new\" {{ command \"true\"; {child}; }}\n\
+             mission \"new\" state=\"ready\" {{ goal \"Work.\"; {child}; }}\n"
+        );
+        let intent = crate::graph::parse_intent(&source, "alder").unwrap();
+        let mut desired = serde_json::to_value(&intent.subjects["agent/alder.new"]).unwrap();
+        let mut mission = serde_json::to_value(&intent.missions["new"]).unwrap();
+        if child == "declared-budgets {}" {
+            desired["member"]["declared_budgets"] = json!({});
+            mission["declared_budgets"] = json!({});
+        }
+        assert_direct_claim_decoys_refused("agent/alder.new", "intent.desired", &desired);
+        assert_direct_claim_decoys_refused("mission/new", "mission.published", &mission);
+    }
+}
+
+#[test]
+fn desired_claim_decoys_cannot_hide_member_or_desired_children() {
+    let plain = crate::graph::parse_intent(
+        "version 2\nagent \"new\" { command \"true\"; }\n",
+        "alder",
+    )
+    .unwrap();
+    let plain = serde_json::to_value(&plain.subjects["agent/alder.new"]).unwrap();
+    for child in [
+        "declared-priority \"normal\"",
+        "declared-lane \"check\"",
+        "declared-budgets {}",
+    ] {
+        let source = format!("version 2\nagent \"new\" {{ command \"true\"; {child}; }}\n");
+        let intent = crate::graph::parse_intent(&source, "alder").unwrap();
+        let mut desired = serde_json::to_value(&intent.subjects["agent/alder.new"]).unwrap();
+        if child == "declared-budgets {}" {
+            desired["member"]["declared_budgets"] = json!({});
+        }
+        let mut member_only = desired.clone();
+        member_only["desired"] = plain["desired"].clone();
+        let mut children_only = desired;
+        children_only["member"] = plain["member"].clone();
+        assert_direct_claim_decoys_refused("agent/alder.new", "intent.desired", &member_only);
+        assert_direct_claim_decoys_refused("agent/alder.new", "intent.desired", &children_only);
     }
 }
 

@@ -542,30 +542,6 @@ pub fn path(agent_dir: &Path) -> PathBuf {
     agent_dir.join("driver-diagnostic")
 }
 
-/// Whether this declaration has a native driver that publishes this record at all.
-pub fn expected_for(spec: &crate::AgentSpec) -> bool {
-    matches!(
-        spec.driver.as_ref(),
-        Some(
-            crate::Driver::OpenCode(_)
-                | crate::Driver::Claude(_)
-                | crate::Driver::Codex(_)
-                | crate::Driver::Omp(_)
-        )
-    )
-}
-
-/// Whether a missing record is itself a fault for this declaration.
-///
-/// Only a driver that publishes a boundary result on EVERY launch can be missing one: OpenCode's
-/// version gate publishes or clears before the provider spawns, so absence there means the native
-/// driver never ran. Claude, Codex, and omp publish this record only when the provider's own typed
-/// turn result names a rejected credential, so absence is their healthy steady state and advising
-/// on it would put a warning under every seat in the fleet.
-pub fn absence_is_a_fault(spec: &crate::AgentSpec) -> bool {
-    matches!(spec.driver.as_ref(), Some(crate::Driver::OpenCode(_)))
-}
-
 pub fn read(path: &Path) -> Observed {
     let raw = match fs::read(path) {
         Ok(raw) => raw,
@@ -702,14 +678,6 @@ impl Publisher {
             attempt,
         };
         self.failures[index] = Some(record);
-        crate::metrics::record_driver_diagnostic(
-            self.driver,
-            stage,
-            reason,
-            source,
-            self.support,
-            false,
-        );
         emit(
             self.driver,
             stage,
@@ -738,14 +706,6 @@ impl Publisher {
         let Some(cleared) = cleared else {
             return;
         };
-        crate::metrics::record_driver_diagnostic(
-            self.driver,
-            stage,
-            cleared.reason,
-            cleared.source,
-            cleared.support,
-            true,
-        );
         emit(
             self.driver,
             stage,
@@ -851,20 +811,6 @@ fn emit(
     outcome: &'static str,
     producer_version: Option<&str>,
 ) {
-    let span = crate::telemetry::tracer_export_enabled().then(|| {
-        tracing::info_span!(
-            "st.driver.diagnostic",
-            "span.label" = stage.as_str(),
-            "st.driver.name" = driver.as_str(),
-            "st.driver.stage" = stage.as_str(),
-            "st.driver.reason" = reason.as_str(),
-            "st.driver.source" = source.as_str(),
-            "st.driver.support" = support.as_str(),
-            "st.outcome" = outcome,
-            "st.driver.producer_version" = producer_version,
-        )
-    });
-    let _guard = span.as_ref().map(tracing::Span::enter);
     tracing::info!(
         driver = driver.as_str(),
         stage = stage.as_str(),
