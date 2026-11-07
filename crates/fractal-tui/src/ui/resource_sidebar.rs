@@ -1072,6 +1072,9 @@ mod tests {
         assert_eq!(rows.iter().filter(|row| matches!(row, Row::Resource(_))).count(), 1);
         assert!(rows.iter().any(|row| matches!(row, Row::Resource(row) if row.title.trim() == "Renamed worker")));
         sidebar.preview_v2 = false;
+        // Mode selection preserves the host's search; compare membership visibility unfiltered.
+        assert_eq!(sidebar.filter, "renamed");
+        sidebar.filter.clear();
         assert!(sidebar.rows().iter().any(|row| matches!(row, Row::Resource(row) if row.id == "agent/retired")));
     }
 
