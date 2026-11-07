@@ -800,7 +800,7 @@ means false; a failed work read invalidates the refresh rather than guessing.
 `idle` plus `has_work=true` is idle-with-work, not another state.
 
 Attention is the count of open actionable attention items, not agents. Count
-each source/person/episode item once, using the existing attention snapshot;
+each source, person and episode item once, using the existing attention snapshot;
 closed/expired items do not count. Its kind set includes current attention
 sources beyond the five in the original draft. Custom/unrecognized kinds use
 `unattributed`. `unread-message` is reserved: the current attention snapshot
@@ -813,7 +813,7 @@ Shard by the owning host of the source member/run/launch; message attention
 belongs to its source conversation owner. For fleet-global sources select the
 fleet's authoritative source origin, not every replica that reads the item.
 An implementation must establish that unique origin before exporting those
-items; no person/message/source identifiers become labels.
+items; no person, message or source identifiers become labels.
 On every successful snapshot, `st.attention.open` emits all ten closed kinds,
 including explicit zeros. A missing attention-kind series means exporter
 failure, not zero open items; use the last-success gauge to detect a stale
