@@ -1,5 +1,5 @@
 // The sidebar's bottom Usage section: one worst-quota line when collapsed, worst-first rows with meters when open.
-import { useAtomValue } from '@effect/atom-react'
+import { useAtom, useAtomValue } from '@effect/atom-react'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
@@ -10,6 +10,7 @@ import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assista
 import { ResizableSplit } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Shell.tsx'
 import { colorVars as c, geometryNumbers, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource, useNow } from '../data/react.tsx'
+import { usageSection } from '../state/cells/lists.ts'
 import { quotaStateAtom } from './state.ts'
 import { usageSectionView, type UsageLevel, type UsageRowView, type UsageSectionView } from './usageSectionView.ts'
 
@@ -108,21 +109,47 @@ const Body = ({ view, onOpenUsage }: { readonly view: UsageSectionView; readonly
   }
 }
 
-export const UsageSection = ({ view, onOpenUsage, storageKey = 'wf.sidebar.usageSection' }: {
+const clampHeight = (value: number): number => Number.isFinite(value) && value >= MIN_HEIGHT && value <= MAX_HEIGHT ? value : DEFAULT_HEIGHT
+
+/** Where the section keeps its open state and committed height. The app passes a shared cell. */
+export interface UsageSectionMemory {
+  readonly open: boolean
+  readonly height: number
+  readonly onChange: (next: { readonly open: boolean; readonly height: number }) => void
+}
+
+/** Uncontrolled memory under one localStorage key, for stories and isolated hosts. */
+const useStoredMemory = (storageKey: string): UsageSectionMemory => {
+  const [state, setState] = React.useState(() => ({ open: stored(`${storageKey}.open`) === 'true', height: storedHeight(`${storageKey}.height`) }))
+  return { ...state, onChange: (next) => {
+    setState(next)
+    remember(`${storageKey}.open`, String(next.open))
+    remember(`${storageKey}.height`, String(next.height))
+  } }
+}
+
+export const UsageSection = ({ view, onOpenUsage, storageKey = 'wf.sidebar.usageSection', memory }: {
   readonly view: UsageSectionView
   readonly onOpenUsage: () => void
   readonly storageKey?: string
+  /** Controlled open state and height; without it the section remembers under `storageKey`. */
+  readonly memory?: UsageSectionMemory
 }): React.ReactNode => {
   const narrow = React.useContext(NarrowLayoutContext)
-  const [open, setOpen] = React.useState(() => stored(`${storageKey}.open`) === 'true')
-  const [height, setHeight] = React.useState(() => storedHeight(`${storageKey}.height`))
-  const toggle = (next: boolean) => { setOpen(next); remember(`${storageKey}.open`, String(next)) }
+  const fallback = useStoredMemory(storageKey)
+  const remembered = memory ?? fallback
+  const open = remembered.open
+  // Dragging previews locally every frame; only a commit reaches the memory.
+  const [dragHeight, setDragHeight] = React.useState<number | undefined>(undefined)
+  const height = dragHeight ?? clampHeight(remembered.height)
+  const toggle = (next: boolean) => { remembered.onChange({ open: next, height: clampHeight(remembered.height) }) }
+  const commitHeight = (value: number) => { setDragHeight(undefined); remembered.onChange({ open, height: clampHeight(value) }) }
   const wordsId = React.useId()
   return (
     <Aria.Disclosure isExpanded={open} onExpandedChange={toggle} data-usage-section="" {...stylex.props(styles.section)}>
       {open && !narrow
         ? <ResizableSplit id="usage-section" label="Resize Usage section" orientation="horizontal" reverse collapsed={false} value={height} min={MIN_HEIGHT} max={MAX_HEIGHT}
-          onChange={setHeight} onCommit={value => { setHeight(value); remember(`${storageKey}.height`, String(value)) }} onToggle={() => toggle(false)} onReset={() => { setHeight(DEFAULT_HEIGHT); remember(`${storageKey}.height`, String(DEFAULT_HEIGHT)) }} />
+          onChange={setDragHeight} onCommit={commitHeight} onToggle={() => toggle(false)} onReset={() => commitHeight(DEFAULT_HEIGHT)} />
         : null}
       <div {...stylex.props(styles.header)}>
         <span id={wordsId} hidden>{summaryWords(view)}</span>
@@ -149,7 +176,8 @@ export const LiveUsageSection = ({ onOpenUsage }: { readonly onOpenUsage: () => 
   // A slow read doesn't overturn a daemon's answer that it has no source, which only a real answer changes.
   const settled = React.useRef<UsageSectionView>(view)
   if (view._tag !== 'loading' && !(view._tag === 'failed' && settled.current._tag === 'not-configured')) settled.current = view
-  return <UsageSection view={settled.current} onOpenUsage={onOpenUsage} />
+  const [remembered, setRemembered] = useAtom(usageSection)
+  return <UsageSection view={settled.current} onOpenUsage={onOpenUsage} memory={{ ...remembered, onChange: setRemembered }} />
 }
 
 const levels: Readonly<Record<UsageLevel, stylex.StyleXStyles>> = stylex.create({

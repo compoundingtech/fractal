@@ -1,49 +1,16 @@
-import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 
-import { persistedAtom } from '../../state/persistence.ts'
+import { defaultSidebarFilters, sidebarCollapsed, sidebarFilters, sidebarTab } from '../../state/cells/lists.ts'
 
-/** Persisted sidebar search, visibility, status and ordering settings; Show filters live in the query. */
-export const SidebarFilters = Schema.Struct({
-  query: Schema.String,
-  hideEnded: Schema.Boolean,
-  hideRetired: Schema.Boolean,
-  statuses: Schema.Array(Schema.String),
-  sort: Schema.Literals(['manual', 'status', 'activity', 'name', 'host']),
-})
-export type SidebarFilters = typeof SidebarFilters.Type
+export { SidebarFilters, SidebarTab } from '../../state/cells/lists.ts'
+import type { SidebarTab } from '../../state/cells/lists.ts'
 /** Unfiltered manual-order sidebar settings for a new gateway. */
-export const defaultFilters: SidebarFilters = {
-  query: '',
-  hideEnded: false,
-  hideRetired: false,
-  statuses: [],
-  sort: 'manual',
-}
-const filters = Atom.family((gateway: string) =>
-  persistedAtom({
-    key: `${gateway}:sidebar.filters`,
-    schema: SidebarFilters,
-    defaultValue: defaultFilters,
-  }),
-)
-export const SidebarTab = Schema.Literals(['agents', 'alerts', 'missions', 'fleet'])
-export type SidebarTab = typeof SidebarTab.Type
-const tab = Atom.family((gateway: string) => persistedAtom({
-  key: `${gateway}:sidebar.tab`, schema: SidebarTab, defaultValue: 'agents',
-}))
-const collapsed = Atom.family((gateway: string) =>
-  persistedAtom({
-    key: `${gateway}:sidebar.collapsedFolders`,
-    schema: Schema.Array(Schema.String),
-    defaultValue: [],
-  }),
-)
-/** Gateway-scoped persisted sidebar filters and collapsed-folder state. */
+export const defaultFilters = defaultSidebarFilters
+/** Gateway-scoped persisted sidebar filters, collapsed folders (and expanded agents) and tab. */
 export const sidebarState = (gateway: string) => ({
-  filters: filters(gateway),
-  collapsed: collapsed(gateway),
-  tab: tab(gateway),
+  filters: sidebarFilters(gateway),
+  collapsed: sidebarCollapsed(gateway),
+  tab: sidebarTab(gateway),
 })
 /** Cache the subscribed atoms themselves: a weak-cached wrapper could be collected between renders. */
 const fixtureFilters = Atom.family((_gateway: string) =>
