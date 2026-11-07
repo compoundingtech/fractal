@@ -257,6 +257,52 @@ describe('native closed transcript boundary', () => {
       const custom = project(entry([block('unknown', { source_type: 'custom', payload: { raw: { customType: 'future-custom' } } })]))
       expect(custom).toMatchObject([{ _tag: 'Unsupported', recordKind: 'future-custom' }])
     })
+    describe.each([
+      ['record first', (record: unknown, text: unknown) => [record, text]],
+      ['text first', (record: unknown, text: unknown) => [text, record]],
+    ])('beside visible text, %s', (_, order) => {
+      const mixed = (record: unknown, fields: object = {}, text = 'Visible words') => {
+        const blocks = [block('source_record', { visibility: 'internal', payload: { raw: session } }), ...order(record, block('text', { source_type: 'content', payload: { body_ref: true } }))]
+        return project(entry(blocks, { body: { text, media_type: 'text/plain', blocks }, ...fields }))
+      }
+      it.each([[false, ['Text']], [true, ['Event', 'Text']]])('keeps the prose with system events %s', (shown, tags) => {
+        const visible = lane(mixed(status('model_usage', usage)), shown)
+        expect(visible.map(item => item._tag)).toEqual(tags)
+        expect(visible.at(-1)).toMatchObject({ _tag: 'Text', text: 'Visible words' })
+      })
+      it('gives the record its own stable row', () => {
+        expect(mixed(status('model_usage', usage)).map(item => item.id)).toEqual(['timeline-entry/raw/1#block/status', 'timeline-entry/raw/1'])
+      })
+      it.each([false, true])('never carries the session prompt beside the prose, system events %s', shown => {
+        const items = mixed(status('session_init', session))
+        expect(items.map(item => item._tag)).toEqual(['Event', 'Text'])
+        expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+        expect(JSON.stringify(lane(items, shown))).not.toMatch(/SENTINEL/)
+      })
+      it.each([
+        ['its bounded copy', `[omp session_init]\n${JSON.stringify(session)}`],
+        ['the prompt itself', 'Before SYSTEM_PROMPT_SENTINEL after'],
+      ])('does not read the body as prose when it is %s', (__, text) => {
+        const items = mixed(status('session_init', session), {}, text)
+        expect(items.map(item => item._tag)).toEqual(['Event'])
+        expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+      })
+      it('keeps a quiet rule row visible beside the prose', () => {
+        expect(lane(mixed(status('ttsr_injection', { injectedRules: ['no-force-push'] })), false).map(item => 'text' in item ? item.text : item._tag))
+          .toEqual(['Rule applied: no-force-push', 'Visible words'])
+      })
+    })
+    it('keeps a hidden body hidden beside a record, without the record inside its disclosure', () => {
+      const blocks = [status('session_init', session), block('text', { visibility: 'internal' })]
+      const items = project(entry(blocks, { body: { text: 'Internal words', media_type: 'text/plain', blocks } }))
+      expect(items.map(item => item._tag)).toEqual(['Event', 'UnknownEvent'])
+      expect(JSON.stringify(items)).not.toMatch(/SENTINEL/)
+      expect(lane(items, false)).toEqual([])
+    })
+    it('gives each of several records a row', () => {
+      expect(project(entry([status('model_usage', usage), { ...status('session_init', session), id: 'block/init' }])).map(item => item.id))
+        .toEqual(['timeline-entry/raw/1#block/init', 'timeline-entry/raw/1'])
+    })
     it('keeps a visible custom message that shares a record name as prose', () => {
       const blocks = [block('text', { source_type: 'content', view: { type: 'omp_event', kind: 'model_usage', content: 'Visible words' } })]
       expect(project(entry(blocks, { body: { text: 'Visible words', media_type: 'text/plain', blocks } }))).toMatchObject([{ _tag: 'Text', text: 'Visible words' }])
