@@ -749,14 +749,17 @@ pub fn run(context: Context) -> Result<()> {
                     body_requested.clear();
                     changed = true;
                 }
-                feed::Update::ThreadSupport(granted) => {
-                    ui.threads.enable(granted);
-                    if granted { ui.threads.model(&model); }
+                feed::Update::ThreadSupport { available, mark_read, exact_summary } => {
+                    ui.threads.enable(available);
+                    ui.threads.set_read_enabled(mark_read, exact_summary);
+                    if available { ui.threads.model(&model); }
                     changed = true;
                 }
                 feed::Update::ThreadWindow { interest, snapshot, replace, rows, removes, order, has_more } => {
                     if !ui.threads.interests(&ui.main_pane()).contains(&interest) { continue; }
-                    if let feed::ThreadInterest::Timeline(id) = &interest {
+                    if let feed::ThreadInterest::Timeline(id) = &interest
+                        && !thread_interests.contains(&feed::ThreadInterest::Summary(id.clone()))
+                    {
                         thread_refresh.insert(id.clone());
                     }
                     ui.threads.window(interest, snapshot, replace, rows, removes, order, has_more);
@@ -1472,7 +1475,9 @@ pub fn run(context: Context) -> Result<()> {
         if wanted_threads != thread_interests {
             for interest in &wanted_threads {
                 if let feed::ThreadInterest::Timeline(id) = interest
-                    && !thread_interests.contains(interest) {
+                    && !thread_interests.contains(interest)
+                    && !wanted_threads.contains(&feed::ThreadInterest::Summary(id.clone()))
+                {
                     thread_refresh.insert(id.clone());
                 }
             }
@@ -2176,7 +2181,7 @@ pub fn run(context: Context) -> Result<()> {
             .collect();
         for id in visible
             .into_iter()
-            .filter(|id| incoming.contains(id.as_str()) || ui.threads.incoming_visible(id, &person))
+            .filter(|id| incoming.contains(id.as_str()))
         {
             read_receipts.displayed(id, Instant::now());
         }

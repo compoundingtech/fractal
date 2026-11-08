@@ -182,7 +182,7 @@ pub enum Update {
     /// are out of date and must not be shown as current.
     WindowStopped(Window),
     Terminal { generation: u64, update: TerminalUpdate },
-    ThreadSupport(bool),
+    ThreadSupport { available: bool, mark_read: bool, exact_summary: bool },
     ThreadWindow {
         interest: ThreadInterest,
         snapshot: Snapshot,
@@ -595,7 +595,15 @@ async fn connected(
     // The summary exists only where st grants it; an older member has no such collection.
     let summary = supports("summary");
     let threads_granted = supports("threads-v1") && supports("collections");
-    if updates.send(Update::ThreadSupport(threads_granted)).is_err() { return Ended::Closed; }
+    let thread_read_granted = threads_granted && capabilities.value.capabilities.iter().any(|capability| {
+        capability.id == "thread.read" && capability.state == CapabilityState::Granted
+    });
+    let exact_summary = threads_granted && supports("thread-summary-feed");
+    let attention_thread_hints = threads_granted && supports("collection.attention.thread-hints");
+    if updates.send(Update::ThreadSupport { available: threads_granted, mark_read: thread_read_granted, exact_summary }).is_err() { return Ended::Closed; }
+    if !exact_summary {
+        threads.retain(|window| !matches!(window.interest, ThreadInterest::Summary(_)));
+    }
     if threads_granted {
         for window in threads.iter() {
             if let Err(error) = window.subscribe(stream).await { return Ended::Dropped(error.human()); }
@@ -628,7 +636,11 @@ async fn connected(
         let result = if window == Window::Agents && revisioned_agents {
             stream.subscribe_agents_publication(window.id()).await
         } else {
-            stream.subscribe(window.id(), window.id(), window.limit(), None, None).await
+            if window == Window::Attention && attention_thread_hints {
+                stream.subscribe_attention(window.id(), window.limit(), true).await
+            } else {
+                stream.subscribe(window.id(), window.id(), window.limit(), None, None).await
+            }
         };
         if let Err(error) = result {
             return Ended::Dropped(error.to_string());
@@ -953,7 +965,10 @@ async fn connected(
                     }
                 }
                 Some(Command::Threads(targets)) => {
-                    let targets = targets.into_iter().take(MAX_THREADS).collect::<Vec<_>>();
+                    let targets = targets.into_iter()
+                        .filter(|interest| exact_summary || !matches!(interest, ThreadInterest::Summary(_)))
+                        .take(MAX_THREADS)
+                        .collect::<Vec<_>>();
                     let mut kept = Vec::new();
                     for window in std::mem::take(threads) {
                         if targets.contains(&window.interest) {
@@ -1056,6 +1071,9 @@ async fn connected(
                             agents_publication = None;
                             stream.subscribe_agents_publication(window.id()).await
                         },
+                        Window::Attention if attention_thread_hints => {
+                            stream.subscribe_attention(window.id(), window.limit(), true).await
+                        }
                         _ => stream.subscribe(window.id(), window.id(), window.limit(), None, None).await,
                     };
                     if let Err(error) = result {

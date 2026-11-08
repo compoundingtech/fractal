@@ -58,7 +58,7 @@ impl Ui {
             Hit::Usage => "show/hide Usage".into(),
             Hit::Connection => "connection details".into(),
             Hit::Row(_) => "select row".into(),
-            Hit::Message | Hit::Subject | Hit::InlineImage(_) => String::new(),
+            Hit::Message | Hit::Subject | Hit::InlineImage(_) | Hit::ThreadBody { .. } => String::new(),
             Hit::Resize => "drag resize; double-click equalize".into(),
             Hit::SidebarResize => "drag resize sidebar; double-click reset".into(),
             Hit::Key(_) | Hit::Enter | Hit::Escape | Hit::Menu(_) => label,

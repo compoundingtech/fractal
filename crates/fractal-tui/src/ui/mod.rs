@@ -142,6 +142,14 @@ impl FramePane {
     }
 }
 
+struct ThreadBodyRow {
+    host: String,
+    thread: String,
+    message: String,
+    rect: Rect,
+    layer: usize,
+}
+
 #[derive(Default)]
 struct FrameInfo {
     area: Rect,
@@ -169,10 +177,23 @@ struct FrameInfo {
     /// Glasses: where Home was drawn over the glass, while it is open.
     home: Option<Rect>,
     read_messages: HashSet<String>,
+    thread_body: Vec<ThreadBodyRow>,
     /// The first palette row drawn.
     palette_top: usize,
     /// Glasses: where the right-click menu was drawn, while it is open.
     menu: Option<Rect>,
+}
+
+impl FrameInfo {
+    fn visible_thread_messages(&self, host: &str, thread: &str) -> HashSet<String> {
+        self.thread_body.iter().filter_map(|row| {
+            if row.host != host || row.thread != thread { return None; }
+            let visible = (row.rect.x..row.rect.right()).any(|x| !self.covers.iter().skip(row.layer).any(|(cover, _)| {
+                contains(*cover, x, row.rect.y)
+            }));
+            visible.then(|| row.message.clone())
+        }).collect()
+    }
 }
 
 /// The palette remains reachable from a focused terminal. Other space shortcuts
@@ -1737,6 +1758,7 @@ impl Ui {
         match tab {
             0 => {
                 let mut list = screens::home_list(&self.world, &self.snoozed, &self.closed);
+                self.threads.mark_inbox_unread(&mut list);
                 self.threads.recently_closed(&mut list);
                 list
             },
@@ -3107,7 +3129,15 @@ impl Ui {
                     width: target.width.min(area.width.saturating_sub(target.column)),
                     height: 1,
                 };
-                if !matches!(target.hit, Hit::InlineImage(_)) { self.hit(rect, target.hit.clone()); }
+                match &target.hit {
+                    Hit::InlineImage(_) => {}
+                    Hit::ThreadBody { host, thread, message } => {
+                        self.frame.borrow_mut().thread_body.push(ThreadBodyRow {
+                            host: host.clone(), thread: thread.clone(), message: message.clone(), rect, layer,
+                        });
+                    }
+                    hit => self.hit(rect, hit.clone()),
+                }
             }
             if let Hit::InlineImage(key) = &target.hit
                 && target.line < top + height
@@ -6396,7 +6426,7 @@ impl Ui {
             self.prompt_keys = None;
         }
         match hit {
-            Hit::Message | Hit::Subject | Hit::Resize | Hit::SidebarResize => {}
+            Hit::Message | Hit::Subject | Hit::ThreadBody { .. } | Hit::Resize | Hit::SidebarResize => {}
             Hit::GlassMenu => self.open_palette(Some(4), glass::Open::Here),
             Hit::PaletteSection(section) => self.open_palette(Some(section), glass::Open::Here),
             Hit::Home => self.open_home(),
@@ -6405,6 +6435,13 @@ impl Ui {
             // the browser opens too.
             Hit::Link(url) if documents::openable(&url).is_some() => self.open_document(&url),
             Hit::Document(tap) => self.document_tap(tap),
+            Hit::Thread(host, thread::Tap::MarkVisibleRead(id)) => {
+                if self.confirmation_open() { return; }
+                let visible = self.frame.borrow().visible_thread_messages(&host, &id);
+                if !self.threads.mark_visible_read(&host, id, &visible) {
+                    self.flash("No visible replies to mark read");
+                }
+            }
             Hit::Thread(host, tap) => {
                 if let Some(id) = self.threads.tap(&host, tap, &mut self.conversation_state.drafts) {
                     let pane = Pane::Thread(id.clone());
@@ -7104,6 +7141,32 @@ mod tests {
         assert_eq!(ui.effects, vec![Effect::RetryConversation { target: target.clone() }]);
         assert!(!ui.stalled.contains_key(&target));
         assert_eq!(ui.conversation_state.drafts[&target], "saved draft");
+    }
+
+    #[test]
+    fn thread_read_ignores_another_mount_and_covered_body_text() {
+        let row = |host: &str, thread: &str, message: &str, y| ThreadBodyRow {
+            host: host.into(),
+            thread: thread.into(),
+            message: message.into(),
+            rect: Rect::new(4, y, 8, 1),
+            layer: 1,
+        };
+        let frame = FrameInfo {
+            covers: vec![(Rect::new(0, 0, 20, 4), 0), (Rect::new(4, 2, 8, 1), 0)],
+            thread_body: vec![
+                row("home:ask", "thread/one", "message/visible", 1),
+                row("home:ask", "thread/one", "message/covered", 2),
+                row("home:ask", "thread/two", "message/sibling", 1),
+                row("chat:agent", "thread/one", "message/other-mount", 1),
+                row("home:ask", "thread/one", "message/visible", 3),
+            ],
+            ..FrameInfo::default()
+        };
+        assert_eq!(
+            frame.visible_thread_messages("home:ask", "thread/one"),
+            HashSet::from(["message/visible".to_owned()]),
+        );
     }
 
     #[test]

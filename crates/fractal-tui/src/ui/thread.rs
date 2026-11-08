@@ -20,6 +20,7 @@ pub enum Tap {
     Close(String),
     Reopen(String),
     OpenTab(String),
+    MarkVisibleRead(String),
 }
 
 pub type Doc = fractal_conversation_ui::doc::Doc<Tap>;
@@ -67,6 +68,7 @@ pub struct State<'a> {
     pub hovered_message: Option<&'a str>,
     pub has_earlier: bool,
     pub loading_earlier: bool,
+    pub can_mark_read: bool,
 }
 
 /// Adapt a real daemon window to the native component. Older metadata-only daemons omit the
@@ -363,6 +365,14 @@ pub fn panel(
             "Open in tab",
             Tap::OpenTab(summary.id.to_owned()),
             theme::SAPPHIRE,
+        ));
+    }
+    if summary.unread && state.can_mark_read {
+        actions.push((
+            "V",
+            "Mark visible replies read",
+            Tap::MarkVisibleRead(summary.id.to_owned()),
+            theme::OVERLAY1,
         ));
     }
     doc.button_rows(&actions, width);

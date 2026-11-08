@@ -106,6 +106,8 @@ pub enum Hit {
     /// A document page's or the documents list's own button: back, try again, more.
     Document(super::documents::Tap),
     Thread(String, super::thread::Tap),
+    /// Rendered body text, tracked for an explicit thread read action.
+    ThreadBody { host: String, thread: String, message: String },
 }
 
 pub type Target = SharedTarget<Hit>;

@@ -437,3 +437,46 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     assert!(refused.iter().any(|line| line == "Ask access expired"));
     assert!(!refused.iter().any(|line| line.contains("Worker test")));
 }
+
+#[test]
+fn mark_visible_read_fences_the_observed_incoming_messages() {
+    let mut threads = Threads::default();
+    threads.enable(true);
+    let id = "thread/worker";
+    let observed = snapshot();
+    threads.put_summary(Envelope {
+        api_version: fractal_client::API_VERSION.into(),
+        request_id: "request/test".into(),
+        snapshot: observed.clone(),
+        value: summary(),
+    });
+    let message = |id: &str, actor: &str| {
+        serde_json::from_value::<ThreadTimelineEvent>(serde_json::json!({
+            "id": id, "actor_id": actor, "accepted_at_unix_ms": 1_000,
+            "kind": "message", "content": id, "thread_quote_id": null
+        })).unwrap()
+    };
+    threads.histories.insert(id.into(), History {
+        head: vec![
+            message("message/offscreen", "agent/atlas"),
+            message("message/own", "person/operator"),
+            message("message/shown", "agent/atlas"),
+        ],
+        earlier: vec![message("message/older", "agent/atlas")],
+        ..History::default()
+    });
+    let visible = ["message/own", "message/shown", "message/older", "message/other-thread"]
+        .into_iter().map(str::to_owned).collect();
+    assert!(!threads.mark_visible_read("home:ask", id.into(), &visible));
+    threads.set_read_enabled(true, false);
+    assert!(!threads.mark_visible_read("home:ask", id.into(), &HashSet::new()));
+    assert!(threads.mark_visible_read("home:ask", id.into(), &visible));
+    assert!(!threads.mark_visible_read("home:ask", id.into(), &visible));
+    let [write]: [Write; 1] = threads.writes().try_into().ok().expect("one explicit write");
+    let Mutation::MarkRead(parameters) = write.mutation else { panic!("expected thread.read") };
+    assert_eq!(parameters.target_id, id);
+    assert_eq!(parameters.through_message_id.as_deref(), Some("message/shown"));
+    assert_eq!(parameters.seen_message_ids, ["message/shown", "message/older"]);
+    assert_eq!(write.fence.snapshot_id, observed.id);
+    assert!(write.fence.subject_revisions.is_empty());
+}

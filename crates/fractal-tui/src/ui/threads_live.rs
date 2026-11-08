@@ -1,11 +1,11 @@
 //! Thread mounts share the authenticated feed and native editor. The UI keeps disclosure and
 //! drafts local. Accepted metadata, message history and unread state come from the member.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use fractal_client::{
-    Client, ClientError, Envelope, Fence, Snapshot, ThreadCollectionRows, ThreadRenameParameters,
+    Client, ClientError, Envelope, Fence, Snapshot, ThreadCollectionRows, ThreadReadParameters, ThreadRenameParameters,
     ThreadReplyParameters, ThreadStartParameters, ThreadState, ThreadSummary,
     ThreadTargetParameters, ThreadTimelineChange, ThreadTimelineEvent,
 };
@@ -58,6 +58,7 @@ enum Mutation {
     Start(ThreadStartParameters),
     Reply(ThreadReplyParameters),
     Rename(ThreadRenameParameters),
+    MarkRead(ThreadReadParameters),
     Close,
     Reopen,
 }
@@ -109,10 +110,15 @@ impl Write {
                     .thread_rename(&action, key, fence, value.clone())
                     .await
             }
+            Mutation::MarkRead(value) => client.thread_read(&action, key, fence, value.clone()).await,
             Mutation::Close => client.thread_close(&action, key, fence, target()).await,
             Mutation::Reopen => client.thread_reopen(&action, key, fence, target()).await,
         };
         let result = match result {
+            Ok(result) if matches!(&self.mutation, Mutation::MarkRead(request)
+                if result.value.affected_ids.iter().any(|id| !request.seen_message_ids.contains(id))) => {
+                Err(ClientError::Protocol("Thread read acknowledged a message outside the visible selection".into()))
+            }
             Ok(result) if result.value.status == fractal_client::ActionStatus::Completed => {
                 Ok(client.thread_get(&self.id).await.ok())
             }
@@ -198,7 +204,10 @@ impl Earlier {
 #[derive(Default)]
 pub(super) struct Threads {
     available: bool,
+    read_enabled: bool,
+    exact_summary: bool,
     asks: BTreeMap<String, Ask>,
+    unread_asks: BTreeSet<String>,
     sessions: BTreeMap<String, String>,
     lists: BTreeMap<ThreadInterest, Vec<String>>,
     summaries: BTreeMap<String, Envelope<ThreadSummary>>,
@@ -219,7 +228,10 @@ impl Threads {
     pub(super) fn enable(&mut self, available: bool) {
         self.available = available;
         if !available {
+            self.read_enabled = false;
+            self.exact_summary = false;
             self.lists.clear();
+            self.unread_asks.clear();
             self.start_slot = None;
             self.summaries.clear();
             self.histories.clear();
@@ -232,6 +244,11 @@ impl Threads {
                 draft.pending = false;
             }
         }
+    }
+
+    pub(super) fn set_read_enabled(&mut self, enabled: bool, exact_summary: bool) {
+        self.read_enabled = self.available && enabled;
+        self.exact_summary = self.available && exact_summary;
     }
 
     pub(super) fn available(&self) -> bool {
@@ -276,6 +293,7 @@ impl Threads {
             }
             KeyCode::Char('Z' | 'z') => thread::Tap::Reopen(id.clone()),
             KeyCode::Char('N' | 'n') => thread::Tap::Rename(id.clone()),
+            KeyCode::Char('V' | 'v') if self.can_mark_read(id) => thread::Tap::MarkVisibleRead(id.clone()),
             KeyCode::Char('P' | 'p') if !matches!(pane, Pane::Thread(_)) => {
                 thread::Tap::OpenTab(id.clone())
             }
@@ -307,10 +325,14 @@ impl Threads {
                 ),
         );
         self.asks.clear();
+        self.unread_asks.clear();
         let Some(snapshot) = &model.now.snapshot else {
             return;
         };
         for item in model.attention() {
+            if item.thread_unread == Some(true) {
+                self.unread_asks.insert(item.header.id.clone());
+            }
             if item.episode.is_empty() || !item.source_id.starts_with("step-run/") {
                 continue;
             }
@@ -362,10 +384,16 @@ impl Threads {
             out.push(ThreadInterest::RecentlyClosed);
         }
         if let Pane::Thread(id) = pane {
+            if self.exact_summary {
+                out.push(ThreadInterest::Summary(id.clone()));
+            }
             out.push(ThreadInterest::Timeline(id.clone()));
         } else if let Pane::Home(Some(id)) = pane
             && id.starts_with("thread/")
         {
+            if self.exact_summary {
+                out.push(ThreadInterest::Summary(id.clone()));
+            }
             if !self.folded_inbox_details.contains(&pane.key()) {
                 out.push(ThreadInterest::Timeline(id.clone()));
             }
@@ -513,9 +541,15 @@ impl Threads {
 
     pub(super) fn failure(&mut self, interest: ThreadInterest, message: String, permanent: bool) {
         if permanent {
-            if let ThreadInterest::Timeline(id) = &interest {
-                self.histories.remove(id);
-                self.summaries.remove(id);
+            match &interest {
+                ThreadInterest::Timeline(id) => {
+                    self.histories.remove(id);
+                    self.summaries.remove(id);
+                }
+                ThreadInterest::Summary(id) => {
+                    self.summaries.remove(id);
+                }
+                _ => {}
             }
             self.lists.remove(&interest);
             if self.start_slot.as_ref().is_some_and(|(ask, _)| ask == &interest) {
@@ -525,15 +559,14 @@ impl Threads {
         self.failures.insert(interest, message);
     }
 
-    pub(super) fn incoming_visible(&self, id: &str, person: &str) -> bool {
-        self.histories
-            .values()
-            .flat_map(History::rows)
-            .any(|event| {
-                event.id == id
-                    && event.actor_id != person
-                    && matches!(&event.change, ThreadTimelineChange::Message { .. })
-            })
+    pub(super) fn mark_inbox_unread(&self, list: &mut super::screens::Listing) {
+        for item in &mut list.items {
+            if let super::screens::Item::Row { index, second, .. } = item
+                && list.ids.get(*index).is_some_and(|id| self.unread_asks.contains(id))
+            {
+                second.push(Span::styled(" · unread thread replies", theme::fg(theme::SAPPHIRE)));
+            }
+        }
     }
 
     pub(super) fn recently_closed(&self, list: &mut super::screens::Listing) {
@@ -563,6 +596,7 @@ impl Threads {
                     .message_count
                     .map(|count| Span::styled(format!("{count}"), theme::dim()))
                     .into_iter()
+                    .chain((row.unread == Some(true)).then(|| Span::styled(" · unread", theme::dim())))
                     .collect(),
                 second: Vec::new(),
                 children: Vec::new(),
@@ -742,6 +776,7 @@ impl Threads {
                 hovered_message: self.hover.as_deref(),
                 has_earlier: source.is_some_and(History::more),
                 loading_earlier: source.is_some_and(|history| history.loading),
+                can_mark_read: self.can_mark_read(id),
             },
             &world.person,
             |actor| {
@@ -765,7 +800,7 @@ impl Threads {
                     hit: Hit::Thread(host.into(), thread::Tap::MessageHeader(message.clone())),
                 });
             }
-            doc.append(shell_doc(rendered, host), 0);
+            doc.append(shell_doc(rendered, host, id), 0);
             if draft.is_some_and(|draft| draft.pending) {
                 doc.line(Line::from(Span::styled("Sending…", theme::dim())));
             }
@@ -895,7 +930,7 @@ impl Threads {
                     });
                 }
             }
-            thread::Tap::MessageHeader(_) => {}
+            thread::Tap::MessageHeader(_) | thread::Tap::MarkVisibleRead(_) => {}
         }
         None
     }
@@ -1148,6 +1183,41 @@ impl Threads {
         self.writes.push(write);
     }
 
+    fn can_mark_read(&self, id: &str) -> bool {
+        self.read_enabled && !self.pending_actions.contains_key(id)
+            && self.summary(id).is_some_and(|summary| summary.unread == Some(true))
+    }
+
+    pub(super) fn mark_visible_read(&mut self, host: &str, id: String, visible: &HashSet<String>) -> bool {
+        if !self.can_mark_read(&id) {
+            return false;
+        }
+        let Some(observed) = self.summaries.get(&id) else { return false };
+        let seen_message_ids: Vec<_> = self.histories.get(&id).into_iter().flat_map(History::rows)
+            .filter(|event| visible.contains(&event.id)
+                && event.actor_id == observed.value.agent_id
+                && matches!(&event.change, ThreadTimelineChange::Message { .. }))
+            .take(50)
+            .map(|event| event.id.clone())
+            .collect();
+        let Some(anchor) = seen_message_ids.first().cloned() else { return false };
+        let write = Write {
+            key: uuid::Uuid::now_v7().to_string(),
+            id: id.clone(),
+            host: host.into(),
+            input: None,
+            fence: Fence { snapshot_id: observed.snapshot.id.clone(), ..Fence::default() },
+            mutation: Mutation::MarkRead(ThreadReadParameters {
+                target_id: id.clone(),
+                through_message_id: Some(anchor),
+                seen_message_ids,
+            }),
+        };
+        self.pending_actions.insert(id, write.clone());
+        self.writes.push(write);
+        true
+    }
+
     fn lifecycle(&mut self, host: &str, id: String, mutation: Mutation) {
         if self.pending_actions.contains_key(&id) {
             return;
@@ -1254,22 +1324,25 @@ fn metadata_fence(observed: &Envelope<ThreadSummary>) -> Fence {
     }
 }
 
-fn shell_doc(doc: thread::Doc, host: &str) -> Doc {
-    Doc {
-        lines: doc.lines,
-        messages: doc.messages,
-        entries: doc.entries,
-        targets: doc
-            .targets
-            .into_iter()
-            .map(|target| super::doc::Target {
-                line: target.line,
-                column: target.column,
-                width: target.width,
-                hit: Hit::Thread(host.into(), target.hit),
-            })
-            .collect(),
+fn shell_doc(doc: thread::Doc, host: &str, thread: &str) -> Doc {
+    let mut targets: Vec<_> = doc.targets.into_iter().map(|target| super::doc::Target {
+        line: target.line,
+        column: target.column,
+        width: target.width,
+        hit: Hit::Thread(host.into(), target.hit),
+    }).collect();
+    for (message, body) in doc.messages {
+        for line in body {
+            let width = doc.lines[line].width() as u16;
+            if width > 0 {
+                targets.push(super::doc::Target {
+                    line, column: 0, width,
+                    hit: Hit::ThreadBody { host: host.into(), thread: thread.into(), message: message.clone() },
+                });
+            }
+        }
     }
+    Doc { lines: doc.lines, messages: Vec::new(), entries: doc.entries, targets }
 }
 
 #[cfg(test)]

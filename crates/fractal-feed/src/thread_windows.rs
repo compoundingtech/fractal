@@ -9,6 +9,7 @@ pub enum ThreadInterest {
     Mission(String),
     RecentlyClosed,
     Timeline(String),
+    Summary(String),
 }
 
 pub(super) struct ThreadSubscription {
@@ -30,6 +31,9 @@ impl ThreadSubscription {
             ThreadInterest::Ask { id, episode } => ThreadListScope::Ask { id, episode },
             ThreadInterest::Mission(id) => ThreadListScope::Mission(id),
             ThreadInterest::RecentlyClosed => ThreadListScope::RecentlyClosed,
+            ThreadInterest::Summary(id) => {
+                return stream.subscribe_thread_summary(&self.id, id).await;
+            }
             ThreadInterest::Timeline(id) => {
                 return stream.subscribe_thread_timeline(&self.id, id, 50).await;
             }
