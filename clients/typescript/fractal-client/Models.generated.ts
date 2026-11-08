@@ -1854,6 +1854,7 @@ export type ErrorCode = (
   | "idempotency-conflict"
   | "legacy-action-receipt-untrusted"
   | "issuer-required"
+  | "pairing-origin-required"
   | "suspend-authored-session-selection"
   | "stale-fence"
   | "cursor-gap"
