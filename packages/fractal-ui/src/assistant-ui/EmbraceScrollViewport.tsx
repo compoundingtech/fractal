@@ -270,7 +270,9 @@ class ViewportController {
     if (element === null) return
     const viewport = element.getBoundingClientRect()
     const top = viewport.top
-    const hit = element.ownerDocument.elementFromPoint(viewport.left + viewport.width / 2, top + geometryNumbers.scrollEndTolerance)?.closest<HTMLElement>(anchorSelector)
+    // Hit-testing is a shortcut; a document without it (jsdom, some embedders) takes the row scan below.
+    const page = element.ownerDocument
+    const hit = typeof page.elementFromPoint === 'function' ? page.elementFromPoint(viewport.left + viewport.width / 2, top + geometryNumbers.scrollEndTolerance)?.closest<HTMLElement>(anchorSelector) : undefined
     if (hit !== undefined && hit !== null && element.contains(hit) && !isAnchorContainer(hit)) {
       this.remember(hit, hit.getBoundingClientRect().top - top)
       return
