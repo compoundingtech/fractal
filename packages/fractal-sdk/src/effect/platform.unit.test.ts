@@ -36,7 +36,7 @@ describe('host-independent SDK', () => {
       return socket
     }
     const layer = FractalLive({
-      baseUrl: 'http://gateway.test', maxFollows: 2,
+      baseUrl: 'http://gateway.test', maxFollows: 3,
       credential: () => 'paired-test-credential', client: 'sdk-node-test', socket: factory,
       fetch: async (_input, init) => {
         httpAuthorization.push(new Headers(init?.headers).get('authorization'))
@@ -60,20 +60,32 @@ describe('host-independent SDK', () => {
             if (event._tag === 'Observed') identities.push(...event.value.items.map((item) => item.identity))
           }),
         )))
+        const history: string[] = []
+        const third = yield* Effect.forkChild(sdk.followThreadTimeline({ _tag: 'ThreadTimeline', thread: 'thread/test', limit: 40 })
+          .pipe(Stream.runForEach(event => Effect.sync(() => {
+            if (event._tag === 'Observed') history.push(...event.value.items.map(item => item.id))
+          }))))
         yield* settle
         expect(socketCount).toBe(1)
         expect(socketAuthorization).toBe('Bearer paired-test-credential')
         expect(httpAuthorization).toContain('Bearer paired-test-credential')
-        expect(commands.filter((command) => command.kind === 'subscribe').map((command) => command.collection)).toEqual(['agents', 'missions'])
+        expect(commands.filter((command) => command.kind === 'subscribe').map((command) => command.collection)).toEqual(['agents', 'missions', 'thread-timeline'])
         expect(followKey(descriptor.spec)).not.toBe(followKey({ ...descriptor.spec, descriptor: 'another-decoder' }))
         const subscription = commands.find((command) => command.collection === 'missions')!
         socket.onmessage?.({ data: JSON.stringify({
           kind: 'snapshot', id: subscription.id, collection: 'missions', has_more: false,
           items: [{ id: 'mission/test', revision: '1' }], order: ['mission/test'], snapshot,
         }) })
+        const thread = commands.find(command => command.collection === 'thread-timeline')!
+        socket.onmessage?.({ data: JSON.stringify({
+          kind: 'snapshot', id: thread.id, collection: 'thread-timeline', has_more: false,
+          items: [{ kind: 'message', id: 'message/test', actor_id: 'agent/test', accepted_at_unix_ms: 5, content: 'Done', thread_quote_id: null }],
+          order: ['message/test'], snapshot,
+        }) })
         // Ingest and Effect publication complete on separate scheduler turns.
         yield* Effect.promise(async () => {
           await expect.poll(() => identities, { timeout: 2_000 }).toEqual(['mission/test'])
+          await expect.poll(() => history, { timeout: 2_000 }).toEqual(['message/test'])
         })
         yield* Fiber.interrupt(first)
         yield* settle
@@ -81,6 +93,9 @@ describe('host-independent SDK', () => {
         yield* Fiber.interrupt(second)
         yield* settle
         expect(commands.filter((command) => command.kind === 'unsubscribe')).toHaveLength(2)
+        yield* Fiber.interrupt(third)
+        yield* settle
+        expect(commands.filter((command) => command.kind === 'unsubscribe')).toHaveLength(3)
       }).pipe(Effect.provide(layer), Effect.scoped)
       expect(closes).toBeGreaterThan(0)
     })

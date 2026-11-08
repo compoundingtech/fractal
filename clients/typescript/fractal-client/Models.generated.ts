@@ -22,6 +22,11 @@ export type ActionCommon = {
   "harness.answer"
   | "arrangement.edit"
   | "arrangement.membership.edit"
+  | "thread.rename"
+  | "thread.start"
+  | "thread.reply"
+  | "thread.close"
+  | "thread.reopen"
   | "custom.reply"
   | "private-notes.write"
   | "prompt.respond"
@@ -88,6 +93,7 @@ export type ActionResult = {
   harness_answer?: HarnessAnswerResult;
   kind: "action-result";
   membership_revision?: Revision;
+  metadata_revision?: Revision;
   operation_id: Id;
   private_notes?: PrivateNotesFence;
   snapshot_id: Id;
@@ -1228,7 +1234,7 @@ export type Capabilities = {
   schemas: Array<string>;
   sender_class?: AssistantSenderClass;
   session_actor: Id;
-  transport: "unix" | "fabric-loopback";
+  transport: "unix" | "fabric-loopback" | "local-web";
 };
 
 export type Capability = {
@@ -1339,7 +1345,21 @@ export type ClientDiagnosticsBatch = {
   version: 1;
 };
 
-export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; agent?: never; capability?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
+export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; agent?: never; capability?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
+  collection: "thread-timeline";
+  id: string;
+  kind: "subscribe";
+  limit?: number;
+  subject: string;
+  trace?: SubscribeTraceContext;
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; status?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
+  collection: "threads";
+  id: string;
+  kind: "subscribe";
+  limit?: number;
+  thread_context: ThreadCollectionContext;
+  trace?: SubscribeTraceContext;
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
   actor?: string | null;
   collection: "commands";
   id: string;
@@ -1347,7 +1367,7 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   limit?: number;
   status?: string | null;
   trace?: SubscribeTraceContext;
-} & { agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
+} & { agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; subject?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
   actor?: null;
   collection: "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
   id: string;
@@ -1358,7 +1378,7 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   status?: null;
   trace?: SubscribeTraceContext;
   until_ms?: number;
-} & { agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; subject?: never; terminal?: never; }) | ({
+} & { agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; subject?: never; terminal?: never; thread_context?: never; }) | ({
   actor?: string | null;
   collection: "missions" | "attention" | "work" | "glasses" | "summary";
   id: string;
@@ -1367,7 +1387,7 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   person?: string | null;
   status?: string | null;
   trace?: SubscribeTraceContext;
-} & { agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
+} & { agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; subject?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
   actor?: string | null;
   agent?: (AgentId | null);
   collection: "agents";
@@ -1377,7 +1397,7 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   person?: string | null;
   status?: string | null;
   trace?: SubscribeTraceContext;
-} & { agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
+} & { agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; subject?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
   collection: "arrangements";
   id: string;
   kind: "subscribe";
@@ -1385,14 +1405,14 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   person: ArrangementPerson;
   subject?: ArrangementId;
   trace?: SubscribeTraceContext;
-} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; until_ms?: never; }) | ({
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
   collection: "ordered-memberships";
   id: string;
   kind: "subscribe";
   limit?: number;
   person: ArrangementPerson;
   subject: ArrangementId;
-} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; trace?: never; until_ms?: never; }) | ({
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; thread_context?: never; trace?: never; until_ms?: never; }) | ({
   capability: string;
   collection: "terminal";
   id: string;
@@ -1400,18 +1420,52 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   kind: "subscribe";
   terminal: Id;
   trace?: SubscribeTraceContext;
-} & { actor?: never; agent?: never; agents_publication_version?: never; conversation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; until_ms?: never; }) | ({
+} & { actor?: never; agent?: never; agents_publication_version?: never; conversation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; thread_context?: never; until_ms?: never; }) | ({
   collection: "conversation";
   conversation: Id;
   id: string;
   kind: "subscribe";
   trace?: SubscribeTraceContext;
-} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
   id: string;
   kind: "unsubscribe";
-} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; collection?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; trace?: never; until_ms?: never; }));
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; collection?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; thread_context?: never; trace?: never; until_ms?: never; }));
 
 export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; code?: never; header?: never; membership?: never; message?: never; older_cursor?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; upserts?: never; value?: never; }) | (AgentsChanges & { chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; membership?: never; message?: never; older_cursor?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; value?: never; }) | ({
+  collection: "thread-timeline";
+  has_more: boolean;
+  id: string;
+  kind: "changes";
+  order: Array<Id>;
+  removes: Array<Id>;
+  snapshot: Snapshot;
+  upserts: Array<ThreadTimelineEvent>;
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; membership?: never; message?: never; older_cursor?: never; publication?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; value?: never; }) | ({
+  collection: "thread-timeline";
+  has_more: boolean;
+  id: string;
+  items: Array<ThreadTimelineEvent>;
+  kind: "snapshot";
+  order: Array<Id>;
+  snapshot: Snapshot;
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; membership?: never; message?: never; older_cursor?: never; publication?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; upserts?: never; value?: never; }) | ({
+  collection: "threads";
+  has_more: boolean;
+  id: string;
+  kind: "changes";
+  order: Array<Id>;
+  removes: Array<Id>;
+  snapshot: Snapshot;
+  upserts: Array<ThreadSummary>;
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; membership?: never; message?: never; older_cursor?: never; publication?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; value?: never; }) | ({
+  collection: "threads";
+  has_more: boolean;
+  id: string;
+  items: Array<ThreadSummary>;
+  kind: "snapshot";
+  order: Array<Id>;
+  snapshot: Snapshot;
+} & { base_revision?: never; chunk_count?: never; chunk_index?: never; code?: never; header?: never; membership?: never; message?: never; older_cursor?: never; publication?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; upserts?: never; value?: never; }) | ({
   collection: ResourceCollectionName;
   has_more: boolean;
   id: string;
@@ -1497,6 +1551,8 @@ export type CollectionName =
   | "commands"
   | "sessions"
   | "terminals"
+  | "threads"
+  | "thread-timeline"
 ;
 
 export type ConnectedClient = ResourceHeader & {
@@ -3735,6 +3791,118 @@ export type TerminalScreen = {
   truncated: boolean;
 };
 
+export type ThreadClosedEvent = {
+  accepted_at_unix_ms: number;
+  actor_id: Id;
+  id: Id;
+  kind: "thread.closed";
+};
+
+export type ThreadCollectionContext = ({
+  agent_id: AgentId;
+} | {
+  origin_ask: Id;
+  origin_ask_episode: Revision;
+} | {
+  mission_id: Id;
+} | {
+  recently_closed: true;
+});
+
+export type ThreadListQuery = ({
+  agent_id: Id;
+  cursor?: string;
+  limit?: number;
+} | {
+  cursor?: string;
+  limit?: number;
+  origin_ask: Id;
+  origin_ask_episode: Revision;
+} | {
+  cursor?: string;
+  limit?: number;
+  mission_id: Id;
+} | {
+  cursor?: string;
+  limit?: number;
+  recently_closed: true;
+});
+
+export type ThreadMessageEvent = {
+  accepted_at_unix_ms: number;
+  actor_id: Id;
+  content: string;
+  id: Id;
+  kind: "message";
+  thread_quote_id: (Id | null);
+};
+
+export type ThreadRenameParameters = {
+  target_id: Id;
+  title: string;
+  title_revision: Revision;
+};
+
+export type ThreadRenamedEvent = {
+  accepted_at_unix_ms: number;
+  actor_id: Id;
+  id: Id;
+  kind: "thread.renamed";
+  previous_title: string;
+  title: string;
+};
+
+export type ThreadReopenedEvent = {
+  accepted_at_unix_ms: number;
+  actor_id: Id;
+  id: Id;
+  kind: "thread.reopened";
+};
+
+export type ThreadReplyParameters = {
+  content: string;
+  signature?: DeviceSignature;
+  target_id: Id;
+  thread_quote_id?: Id;
+};
+
+export type ThreadStartParameters = {
+  agent_id: Id;
+  content: string;
+  origin_ask: Id;
+  origin_ask_episode: Revision;
+  signature?: DeviceSignature;
+  target_id: Id;
+  title: string;
+};
+
+export type ThreadSummary = {
+  agent_id: Id;
+  id: Id;
+  message_count?: number;
+  revision: Revision;
+  state: "open" | "closed";
+  title: string;
+  title_revision: Revision;
+  unread?: boolean;
+};
+
+export type ThreadSummaryPage = {
+  items: Array<ThreadSummary>;
+  next_cursor: (string | null);
+};
+
+export type ThreadTargetParameters = {
+  target_id: Id;
+};
+
+export type ThreadTimelineEvent = (ThreadRenamedEvent | ThreadClosedEvent | ThreadReopenedEvent | ThreadMessageEvent);
+
+export type ThreadTimelinePage = {
+  items: Array<ThreadTimelineEvent>;
+  next_cursor: (string | null);
+};
+
 export type TimelineAskAnswer = {
   custom?: string;
   note?: string;
@@ -4607,6 +4775,11 @@ export type ActionRequest =
   rows: number;
   terminal_id: Id;
 }; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'terminal_sequence'>> }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.close'; parameters: ThreadTargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.rename'; parameters: ThreadRenameParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.reopen'; parameters: ThreadTargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.reply'; parameters: ThreadReplyParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.start'; parameters: ThreadStartParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.ask'; parameters: PersonAskParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.cancel-ask'; parameters: PersonStepParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'work.claim'; parameters: TargetParameters; fence: Fence & Required<Pick<Fence, 'mission_generation' | 'step_definition' | 'attempt' | 'readiness_epoch'>> }) |

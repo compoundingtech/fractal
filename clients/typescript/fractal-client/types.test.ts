@@ -171,6 +171,16 @@ const onFrame: CollectionStreamOptions['onFrame'] = frame => {
         const key: string | undefined = first?.position.key;
         const changedIndex: number | undefined = sidebar?.membership.changed_index;
         void [member, key, changedIndex];
+    } else if (frame.collection === 'threads') {
+        const summary = applyWindow(undefined, frame)?.items[0];
+        const messageCount: number | undefined = summary?.message_count;
+        void messageCount;
+    } else if (frame.collection === 'thread-timeline') {
+        const event = applyWindow(undefined, frame)?.items[0];
+        if (event?.kind === 'message') {
+            const quoted: string | null | undefined = event.thread_quote_id;
+            void quoted;
+        }
     } else {
         agentsWindow = applyWindow(agentsWindow, frame);
         const kind: string | undefined = agentsWindow?.items[0]?.kind;
