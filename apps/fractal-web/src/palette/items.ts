@@ -59,7 +59,8 @@ const row = (fields: Omit<PaletteRow, 'action'>, entry: PaletteEntry): PaletteRo
 const open = (ref: string, extra: Omit<PaletteEntry, 'action' | 'key'> = {}): PaletteEntry => ({ action: { _tag: 'Open', ref }, key: ref, ...extra })
 
 export interface PaletteWorld {
-  readonly alerts: readonly { readonly ref: string; readonly title: string; readonly kind: string; readonly status?: EntityStatus | undefined }[]
+  /** `pane`: the TUI pane key, when it is not `home:<ref>`. */
+  readonly alerts: readonly { readonly ref: string; readonly title: string; readonly kind: string; readonly status?: EntityStatus | undefined; readonly pane?: string | undefined }[]
   readonly agents: readonly {
     readonly ref: string
     readonly name: string
@@ -71,7 +72,8 @@ export interface PaletteWorld {
   readonly missions: readonly { readonly ref: string; readonly title: string; readonly word: string; readonly status?: EntityStatus | undefined }[]
   readonly machines: readonly { readonly id: string; readonly connected: boolean }[]
   /** Pull requests, issues, runs and documents this gateway observed. */
-  readonly resources: readonly { readonly ref: string; readonly title: string; readonly kind: string; readonly status?: EntityStatus | undefined }[]
+  /** `pane`: the TUI pane key, when it is not `resource:<ref>` (a document is `document:<ref>`). */
+  readonly resources: readonly { readonly ref: string; readonly title: string; readonly kind: string; readonly status?: EntityStatus | undefined; readonly pane?: string | undefined }[]
 }
 
 export const emptyWorld: PaletteWorld = { alerts: [], agents: [], missions: [], machines: [], resources: [] }
@@ -85,7 +87,7 @@ export const worldItems = (world: PaletteWorld, query = ''): readonly PaletteRow
     row({ id: 'list:home', section: 'alerts', label: 'Inbox', detail: 'alerts and updates', search: 'inbox home' }, open('list:home', { icon: 'bell' })),
     row({ id: 'usage:', section: 'alerts', label: 'Usage', detail: 'spend by agent, mission, step, model, account or host', search: 'usage spend tokens cost' }, open('usage:', { icon: 'gauge' })),
     ...world.alerts.map(alert => {
-      const ref = `home:${alert.ref}`
+      const ref = alert.pane ?? `home:${alert.ref}`
       return row({ id: ref, section: 'alerts', label: alert.title, detail: alert.kind, search: `${alert.title} ${ref}` },
         open(ref, { icon: 'alert', entity: { kind: 'resource', id: alert.ref, title: alert.title, ...withStatus(alert.status) } }))
     }),
@@ -109,7 +111,7 @@ export const worldItems = (world: PaletteWorld, query = ''): readonly PaletteRow
       return row({ id: ref, section: 'fleet', label: machine.id, detail: machine.connected ? 'reachable' : 'unreachable', search: `${machine.id} ${ref}` }, open(ref, { icon: 'globe' }))
     }),
     ...world.resources.map(resource => {
-      const ref = `resource:${resource.ref}`
+      const ref = resource.pane ?? `resource:${resource.ref}`
       return row({ id: ref, section: 'resources', label: resource.title, detail: resource.kind, search: `${resource.title} ${resource.kind} ${resource.ref}` },
         open(ref, { icon: resource.kind === 'pull request' ? 'pull-request' : 'folder', entity: { kind: 'resource', id: resource.ref, title: resource.title, ...withStatus(resource.status) } }))
     }),
