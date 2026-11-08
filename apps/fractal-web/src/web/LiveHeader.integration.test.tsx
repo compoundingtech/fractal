@@ -207,7 +207,7 @@ describe('live header parity', () => {
   }
   const viewKdl = async () => {
     await click('More actions')
-    await act(async () => within(document.body).getByRole('menuitem', { name: 'View KDL' }).dispatchEvent(new MouseEvent('click', { bubbles: true })))
+    await act(async () => within(document.body).getByRole('menuitem', { name: 'View KDL, read its whole declaration' }).dispatchEvent(new MouseEvent('click', { bubbles: true })))
   }
   it('opens the agent canonical KDL from the overflow menu as a new tab, and focuses that tab the next time', async () => {
     await viewKdl()
