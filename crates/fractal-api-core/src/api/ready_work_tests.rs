@@ -354,7 +354,7 @@ fn ready_work_store_count_excludes_blockers_independently() {
 }
 
 fn grant_claim(state: &AppState, subject: &str, kind: &str, fields: Value) {
-    state.store.append_claim(&ClaimInput {
+    state.store.append_client_operation_claim(&ClaimInput {
         subject: subject.into(), kind: kind.into(), actor: Some("person/operator".into()),
         fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
         expected_subject: None, idempotency_key: None,

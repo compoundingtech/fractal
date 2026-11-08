@@ -706,9 +706,9 @@ mod tests {
                 "custom.client.terminal-attached", "custom.client.terminal-consumed",
                 "custom.client.terminal-detached"] {
                 operations.push(source.append_client_operation_claim(&ClaimInput {
-                    subject:format!("custom/client/archive-{kind}"),kind:kind.into(),
-                    actor:Some("person/archive".into()),fields:serde_json::from_value(json!({
-                        "person_id":"person/archive","expires_at_unix_ms":u64::MAX,
+                    subject:format!("custom/client/archive-{}", kind.rsplit('.').next().unwrap()),kind:kind.into(),
+                    actor:Some("person/example".into()),fields:serde_json::from_value(json!({
+                        "person_id":"person/example","expires_at_unix_ms":u64::MAX,
                     })).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None,
                 }).unwrap());
             }
