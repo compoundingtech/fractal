@@ -59,18 +59,20 @@ impl WritePrincipal {
                 changed = true;
             }
         }
-        if path == "/v1/messages" {
-            if let Some(from) = value.get("from") { self.check(store, from)?; }
+        if path == "/v1/messages"
+            && let Some(from) = value.get("from")
+        {
+            self.check(store, from)?;
         }
-        if path == "/v1/claims" {
-            if value.get("kind").and_then(Value::as_str) == Some("message.sent") {
-                if let Some(from) = value.pointer("/fields/from") { self.check(store, from)?; }
-                if let Some(fields) = value.get_mut("fields").and_then(Value::as_object_mut)
-                    && fields.get("from").is_none_or(Value::is_null)
-                {
-                    fields.insert("from".into(), Value::String(self.actor.clone()));
-                    changed = true;
-                }
+        if path == "/v1/claims"
+            && value.get("kind").and_then(Value::as_str) == Some("message.sent")
+        {
+            if let Some(from) = value.pointer("/fields/from") { self.check(store, from)?; }
+            if let Some(fields) = value.get_mut("fields").and_then(Value::as_object_mut)
+                && fields.get("from").is_none_or(Value::is_null)
+            {
+                fields.insert("from".into(), Value::String(self.actor.clone()));
+                changed = true;
             }
         }
         let missing_key = if path == "/v1/launches" {

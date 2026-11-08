@@ -12543,7 +12543,7 @@ async fn writer_binding_request(
 }
 
 fn writer_binding_pairing(state: &AppState, credential: &str, scopes: &[&str]) {
-    state.store.append_claim(&ClaimInput {
+    state.store.append_client_operation_claim(&ClaimInput {
         subject: "custom/client/writer-binding".into(),
         kind: "custom.client.pairing-completed".into(),
         actor: Some("person/example".into()),
@@ -12897,7 +12897,7 @@ async fn writer_binding_native_receipts_and_tracking_retain_seat_attribution() {
         }));
         for (kind, subject, fields) in [
             ("custom.agent.initial-message", format!("custom/agent/initial-{transport}"),
-                json!({"agent":"agent/native","incarnation":"one","from":"person/original"})),
+                json!({"agent":"agent/native","incarnation":"one","from":"person/example"})),
             ("custom.agent.first-native-launch", format!("custom/agent/seed-{transport}"),
                 json!({"agent":"agent/native","incarnation":"one","outcome":"fresh"})),
             ("subagent.appeared", "agent/native".into(),
@@ -12910,7 +12910,7 @@ async fn writer_binding_native_receipts_and_tracking_retain_seat_attribution() {
             assert_eq!(status, StatusCode::OK, "{transport}/{kind}: {receipt}");
             assert_eq!(receipt["actor"], "agent/native");
             if kind == "custom.agent.initial-message" {
-                assert_eq!(receipt["body"]["fields"]["from"], "person/original");
+                assert_eq!(receipt["body"]["fields"]["from"], "person/example");
             }
         }
         let (status, receipt) = writer_binding_request(app, "/v1/claims", None, None,
