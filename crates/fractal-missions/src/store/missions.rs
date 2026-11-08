@@ -6155,21 +6155,15 @@ impl MissionsStore for Store {
                 let lease_valid = current
                     .claim_expires_at_unix_ms
                     .is_some_and(|expiry| expiry > now);
-                // Expansion keeps main's literal ownership fence for renewal writes:
-                // replay reapplies operational extensions only to the exact stored owner.
-                let owns_lease = if action == "renew" {
-                    current.claimant.as_deref() == Some(actor.as_str())
-                } else {
-                    work_actor_matches(current.claimant.as_deref(), &actor)
-                };
-                if lease_valid && !owns_lease {
+                // Expansion preserves main's literal ownership admission for every mutation.
+                if lease_valid && current.claimant.as_deref() != Some(actor.as_str()) {
                     return Err(FractalError::new(
                         "work-already-claimed",
                         format!("step run `{subject}` has an active lease"),
                     ));
                 }
                 if action != "claim"
-                    && (!lease_valid || !owns_lease)
+                    && (!lease_valid || current.claimant.as_deref() != Some(actor.as_str()))
                 {
                     return Err(FractalError::new(
                         "work-not-claimed",
@@ -6177,7 +6171,7 @@ impl MissionsStore for Store {
                     ));
                 }
                 if lease_valid
-                    && owns_lease
+                    && current.claimant.as_deref() == Some(actor.as_str())
                     && current.claim_incarnation.as_deref() != Some(requested_incarnation)
                 {
                     return Err(FractalError::new(
