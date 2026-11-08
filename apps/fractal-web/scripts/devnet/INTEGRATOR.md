@@ -489,6 +489,31 @@ commit identity; the reserved-domain default identifies local integration commit
 Identity keys in `config.worktree` are refused even when worktree config is
 enabled: their higher precedence must not override the launcher's common identity.
 
+Preparation disables automatic GC and maintenance in the disposable clone
+(`gc.auto=0`, `maintenance.auto=false`). Once per day, under the tick lock,
+the integrator first prunes loose unreachable objects older than two weeks,
+then runs `git repack -d --geometric=2` and `git rerere gc` with 60-day resolved
+and 7-day unresolved retention. Pruning first prevents packing expired loose
+garbage. Geometric repacking consolidates loose objects
+and small packs without routinely rewriting the large base pack; a sufficiently
+large accumulated increment can eventually include it. The attempt timestamp
+is stored in `live/<clone-name>-git-maintenance.json`. Failures are recorded in
+the tick's `maintenanceErrors` and do not fail integration or retry until the
+next daily attempt. Expiry settings are command-local, not additional accepted
+repository config keys.
+Every 30 days (including the first maintenance attempt), after pruning and
+before geometric repacking, `git gc --cruft --prune=2.weeks.ago` collects packed
+unreachable objects. This deliberately permits a monthly full base-pack rewrite;
+recent unreachable objects survive in cruft packs until old enough to expire.
+Its separate `live/<clone-name>-git-full-gc.json` attempt stamp also bounds
+failed full collections to monthly, with the same nonfatal tick diagnostics.
+
+Before aborting an abandoned merge, `git rerere clear` removes its unresolved
+preimages while retaining recorded resolutions. Otherwise repeated conflicts
+allocate new numbered preimages on each tick even when their contents match.
+This bounds abandoned-cache growth, not the writes needed to record a conflict
+the next time it is attempted.
+
 The clone's entire `.git` directory is read-only inside bubblewrap. Linked
 snapshots additionally bind their `.git` pointer read-only; the clone mount covers
 the actual worktree gitdir and common config, hooks and attributes. Output staging

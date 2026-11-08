@@ -341,6 +341,7 @@ order from the same admitted claims.
 | `local_usage_responses` | Local | Counted provider response IDs and times; deduplicates replay across harness incarnations. |
 | `local_usage_spend` | Local | Cumulative token and cost buckets; retained across observation-log trimming. |
 | `local_work_lease_renewals` | Local | Local lease extensions, re-applied after canonical replay. Durable replicated lease anchors remain shared. |
+| `local_work_wake_tags`, `local_work_wake_backfill` | Local derived state | Trigger-maintained recipient/work-tag/claim-id candidates and the persistent ceiling, cursor and completion of a bounded historical copy. Tag family prefixes are removed and attempt/epoch numbers are canonicalized to preserve wake parsing semantics. Rebuildable from claims; never replicated or included in shared projection digests. |
 | `message_index` | Shared projection | Shared message membership/closed fact. created_index is a local cache cursor. Subject order/onset/lifecycle must come from canonical message claims, never this cursor. |
 | `meta` | Local | Local schema/version/writer/cache/frontier bookkeeping; individual fleet-binding metadata copies do not turn the table into a shared projection. |
 | `mission_definitions` | Shared projection | Shared selected mission revision/state/claim. |

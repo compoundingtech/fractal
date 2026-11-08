@@ -625,7 +625,7 @@
           pname = "fractal-chatgpt";
           inherit version cargoDeps;
           src = self;
-          cargoBuildFlags = [ "-p" "fractal-chatgpt" "--bin" "fractal-chatgpt" ];
+          cargoBuildFlags = [ "-p" "fractal-chatgpt" "--bin" "fractal-chatgpt" "--bin" "fractal-mcp" ];
           # .cargo/config.toml links Linux targets with mold.
           nativeBuildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
           # The shared daemon check runs the adapter's Rust tests.
@@ -634,12 +634,17 @@
           postInstall = ''ln -s fractal-chatgpt "$out/bin/st-chatgpt"'';
           # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias
           meta = {
-            description = "Standalone Fractal ChatGPT MCP adapter";
+            description = "Standalone Fractal ChatGPT and local stdio MCP adapters";
             homepage = "https://github.com/compoundingtech/fractal";
             license = pkgs.lib.licenses.mit;
             mainProgram = "fractal-chatgpt";
           };
         };
+
+        # Both entrypoints share one crate and build; only nix run's default differs.
+        fractalMcp = fractalChatgpt.overrideAttrs (old: {
+          meta = old.meta // { mainProgram = "fractal-mcp"; };
+        });
 
         fractalFabricAdapter = pkgs.rustPlatform.buildRustPackage {
           pname = "fractal-fabric-adapter";
@@ -861,12 +866,22 @@
         # LIVE-MIGRATION END arn:lmig:smalltalk:2026-11-01-fractal-chatgpt-alias
         packages.fractal-fabric-adapter = fractalFabricAdapter;
         packages.st-fabric-adapter = fractalFabricAdapter;
+        packages.fractal-mcp = fractalMcp;
         # Isolated bootstrap/live proofs use the exact pairing API revision.
         packages.fabric-pairing = fabric.packages.${system}.default;
         packages.st3-migrate = st3;
         packages.small-talk = st3;
         # All four components come out of one build; the install paths are unchanged.
         packages.default = st3;
+        # A null attribute name omits this output entirely on non-Darwin systems.
+        packages.${if pkgs.stdenv.hostPlatform.isDarwin then "ios-rust-toolchain" else null} =
+          fenix.packages.${system}.combine [
+            fenix.packages.${system}.stable.cargo
+            fenix.packages.${system}.stable.rustc
+            fenix.packages.${system}.stable.rust-std
+            fenix.packages.${system}.targets.aarch64-apple-ios.stable.rust-std
+            fenix.packages.${system}.targets.aarch64-apple-ios-sim.stable.rust-std
+          ];
 
         # `nix flake check` is the whole CI: it builds the package — which runs
         # the hermetic portion of the in-tree `cargo test` suite via doCheck —
@@ -989,6 +1004,10 @@
               SH
               chmod +x "$out/activate"
             '';
+            rollbackPackage = pkgs.runCommand "st3-with-pty" { } ''
+              mkdir -p "$out/bin"
+              cp ${preReceiptPackage}/bin/fractal "$out/bin/st3"
+            '';
           in
           assert pkgs.lib.hasInfix ''person = "person/ada"'' rendered.xdg.configFile."st3/config.toml".text;
           assert pkgs.lib.hasInfix "/tmp/fractal-test.sock" args;
@@ -1009,10 +1028,10 @@
           # service.rs passes the shared runtime gateway explicitly, even with --state-dir.
           # Assert the rendered command: %%t would be a literal path, not a systemd specifier.
           assert (if pkgs.stdenv.hostPlatform.isLinux then
-            pkgs.lib.hasInfix ''"--client-gateway-socket" "%t/st3-client.sock"'' args
-            && !(pkgs.lib.hasInfix "%%t/st3-client.sock" args)
+            pkgs.lib.hasInfix ''"--client-gateway-socket" "%t/fractal-client.sock"'' args
+            && !(pkgs.lib.hasInfix "%%t/fractal-client.sock" args)
           else
-            pkgs.lib.hasInfix "--client-gateway-socket ${rendered.services.smalltalk.stateDir}/run/st3-client.sock" args);
+            pkgs.lib.hasInfix "--client-gateway-socket ${rendered.services.smalltalk.stateDir}/run/fractal-client.sock" args);
           assert (if pkgs.stdenv.hostPlatform.isLinux then
             pkgs.lib.hasPrefix ''"${stableExecutable}" '' args
           else
@@ -1087,6 +1106,150 @@
               test ! -e "$binDir/st3" && test ! -L "$binDir/st3"
               test ! -e "$receipt" && test ! -L "$receipt"
               test "$(find "$binDir" -name '.fractal.*' | wc -l)" -eq 0
+            done
+            # Recorded pre-Fractal rollback state, never leftover byte equality.
+            for layout in st-alias st-absent no-state other-package malformed-json traversal slash-name wrong-st3 foreign-alias foreign-symlink; do
+              rm -rf state
+              mkdir -p "$binDir" "$PWD/state/binary-installer"
+              cp ${rollbackPackage}/bin/st3 "$binDir/st3"
+              printf 'leftover candidate\n' > "$target"
+              if [ "$layout" != st-absent ]; then ln -s st3 "$binDir/st"; fi
+              package=${rollbackPackage}
+              if [ "$layout" = other-package ]; then package=${preReceiptPackage}; fi
+              if [ "$layout" = traversal ]; then package="$package/../$(basename "$package")"; fi
+              if [ "$layout" = slash-name ]; then package="$package/child"; fi
+              ${pkgs.jq}/bin/jq -n --arg package "$package" \
+                '{installer:"historical-installer",package:$package,narHash:"historical-hash"}' \
+                > "$PWD/state/binary-installer/current.json"
+              case "$layout" in
+                no-state) rm "$PWD/state/binary-installer/current.json" ;;
+                malformed-json) printf '{broken' > "$PWD/state/binary-installer/current.json" ;;
+                wrong-st3) chmod u+w "$binDir/st3"; printf foreign > "$binDir/st3" ;;
+                foreign-alias) ln -sfn elsewhere "$binDir/st" ;;
+                foreign-symlink) mv "$target" "$binDir/elsewhere"; ln -s elsewhere "$target" ;;
+              esac
+              case "$layout" in
+                st-alias|st-absent)
+                  ${pkgs.runtimeShell} activate
+                  cmp "$source" "$target"
+                  test "$(readlink "$binDir/st")" = fractal
+                  test "$(readlink "$binDir/st3")" = fractal
+                  assertReceipt
+                  set -- "$binDir"/fractal.replaced-*
+                  test "$#" = 1
+                  cmp "$1" <(printf 'leftover candidate\n')
+                  # An old generation restores st3 and st, leaving receipt,
+                  # canonical payload and preserved siblings untouched.
+                  for cycle in 1 2; do
+                    rm "$binDir/st3"
+                    cp ${rollbackPackage}/bin/st3 "$binDir/st3"
+                    ln -sfn st3 "$binDir/st"
+                    ${pkgs.runtimeShell} activate
+                    assertReceipt
+                    cmp "$1" <(printf 'leftover candidate\n')
+                  done
+                  echo "PASS: rollback adoption $layout and repeated roll-forward"
+                  ;;
+                *)
+                  if ${pkgs.runtimeShell} activate 2>refusal; then
+                    echo "unexpected rollback adoption: $layout" >&2; exit 1
+                  fi
+                  ${pkgs.gnugrep}/bin/grep -q 'Home Manager: refusing to replace foreign fractal command:' refusal
+                  test ! -e "$receipt"
+                  test -z "$(find "$binDir" -name 'fractal.replaced-*' -print)"
+                  echo "PASS: rollback adoption refuses $layout"
+                  ;;
+              esac
+            done
+            # Inject swaps immediately before rename in a copy of the emitted
+            # activation, not via a production environment-variable hook.
+            substitute activate race-activate \
+              --replace-fail '${pkgs.coreutils}/bin/mv -f "$target" "$replaced"' \
+                'raceSwap; ${pkgs.coreutils}/bin/mv -f "$target" "$replaced"' \
+              --replace-fail 'if [[ "$(rollbackSnapshot "$replaced")" != "$rollbackProof" ]]' \
+                'raceAfterMove; if [[ "$(rollbackSnapshot "$replaced")" != "$rollbackProof" ]]'
+            raceSwap() {
+              case "$RACE_LAYOUT" in
+                candidate)
+                  mv "$target" "$binDir/checked-candidate"
+                  printf 'racing foreign candidate\n' > "$target"
+                  ;;
+                st3-inode)
+                  cp "$binDir/st3" "$binDir/.racing-st3"
+                  mv -Tf "$binDir/.racing-st3" "$binDir/st3"
+                  ;;
+                st3-content)
+                  chmod u+w "$binDir/st3"
+                  printf 'racing st3 bytes\n' > "$binDir/st3"
+                  chmod a-w "$binDir/st3"
+                  ;;
+                st-link)
+                  ln -s st3 "$binDir/.racing-st"
+                  mv -Tf "$binDir/.racing-st" "$binDir/st"
+                  ;;
+                failed-rename)
+                  mv "$target" "$binDir/checked-candidate"
+                  mkdir "$target"
+                  printf 'foreign directory entry\n' > "$target/binary"
+                  ;;
+              esac
+            }
+            raceAfterMove() {
+              if [ "$RACE_LAYOUT" = concurrent-target ]; then
+                printf 'concurrent command\n' > "$target"
+                ln -sfn elsewhere "$binDir/st"
+              fi
+            }
+            export -f raceSwap raceAfterMove
+            for RACE_LAYOUT in candidate st3-inode st3-content st-link failed-rename concurrent-target; do
+              export RACE_LAYOUT
+              rm -rf state
+              mkdir -p "$binDir" "$PWD/state/binary-installer"
+              cp ${rollbackPackage}/bin/st3 "$binDir/st3"
+              ln -s st3 "$binDir/st"
+              printf 'leftover candidate\n' > "$target"
+              ${pkgs.jq}/bin/jq -n --arg package ${rollbackPackage} \
+                '{installer:"historical-installer",package:$package,narHash:"historical-hash"}' \
+                > "$PWD/state/binary-installer/current.json"
+              # The injected function runs in the activation subprocess.
+              export binDir target
+              if ${pkgs.runtimeShell} race-activate 2>refusal; then
+                echo "unexpected race adoption: $RACE_LAYOUT" >&2; exit 1
+              fi
+              ${pkgs.gnugrep}/bin/grep -q 'Home Manager: refusing to replace foreign fractal command:' refusal
+              if [ "$RACE_LAYOUT" = failed-rename ]; then
+                test -d "$target"
+                cmp "$target/binary" <(printf 'foreign directory entry\n')
+                cmp "$binDir/checked-candidate" <(printf 'leftover candidate\n')
+              elif [ "$RACE_LAYOUT" = concurrent-target ]; then
+                cmp "$target" <(printf 'concurrent command\n')
+                set -- "$binDir"/fractal.replaced-*
+                test "$#" = 1
+                cmp "$1" <(printf 'leftover candidate\n')
+                ${pkgs.gnugrep}/bin/grep -F "preserved candidate at $1; leaving concurrent command at $target untouched." refusal
+              elif [ "$RACE_LAYOUT" = candidate ]; then
+                cmp "$target" <(printf 'racing foreign candidate\n')
+                cmp "$binDir/checked-candidate" <(printf 'leftover candidate\n')
+              else
+                cmp "$target" <(printf 'leftover candidate\n')
+              fi
+              test ! -e "$receipt"
+              case "$RACE_LAYOUT" in
+                failed-rename)
+                  # A failed rename may retain the empty reserved aside path,
+                  # but must never trigger restoration into the foreign directory.
+                  set -- "$binDir"/fractal.replaced-*
+                  test "$#" = 1 && test -f "$1" && test ! -s "$1"
+                  echo 'PASS: rollback adoption refuses failed rename without restoring over foreign entry'
+                  ;;
+                concurrent-target)
+                  echo 'PASS: rollback adoption preserves both paths and refuses concurrent target publication'
+                  ;;
+                *)
+                  test -z "$(find "$binDir" -name 'fractal.replaced-*' -print)"
+                  echo "PASS: rollback adoption restores and refuses $RACE_LAYOUT race"
+                  ;;
+              esac
             done
             # A managed physical layout supports mixed exact reverse aliases.
             rm -rf state

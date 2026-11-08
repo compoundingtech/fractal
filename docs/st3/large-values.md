@@ -36,15 +36,26 @@ These markers record transitional debt. They neither grant permanent permission
 nor transfer source ownership. The source module owns the TODO until its normal
 maintainer changes the representation through review. A changed statement,
 function, owner, TODO or dependency set requires an explicit inventory review;
-removing a site requires removing its exception. There is no “accept all” or
-regeneration command in the check. The first inventory deliberately keeps
+removing a site requires removing its exception. Formatting does not accept new
+exceptions or refresh source metadata. The first inventory deliberately keeps
 conservative candidates instead of silently treating an ambiguous call as safe.
 
 The inventory uses one complete entry per physical line (including nested column
-metadata), with site records ordered by `(path, id)` and manual flows by
-`(path, function)`. Declarations follow deterministic source-path/statement order,
-with table, added-column and index groups within each template. Keep this layout
-when reviewing changes so unrelated additions can merge as independent records.
+metadata), with site records ordered lexicographically by stable `id`. Hash order
+distributes independent additions rather than concentrating them at the front or
+within one producer's path. Manual flows retain `(path, function)` order.
+Declarations follow deterministic source-path/statement order, with table,
+added-column and index groups within each template. Independent insertions into
+different gaps merge cleanly; insertions into the same gap can still conflict.
+The guard rejects non-canonical order or formatting. After reviewing edits, run:
+
+```sh
+python3 scripts/check-sqlite-large-values --format
+```
+
+This command only sorts and formats existing JSON records. It preserves
+`reviewed_base` as review provenance, rather than updating it to the current
+commit on every regeneration. No CI or merge-queue step rewrites the inventory.
 
 Use the read-only maintenance helper after a source edit:
 
@@ -125,7 +136,7 @@ Neither exception adds a production writer or size/cost guarantee.
 
 ### Cold runtime reduction inventory (PR #1706)
 
-The `fractal_store::store` maintainer owns `lv-h5911198f6cf3` and `lv-ha1002d83b7ac`:
+The `fractal_store::store` maintainer owns `lv-hc44243b75520` and `lv-ha1002d83b7ac`:
 the first selects existing integer claim identities in descending canonical order, and the
 second hydrates one existing kind/body at a time until consumed fields resolve. Claim bodies
 and canonical subject/time keys remain inline; a decoded-row bound is not a byte-size bound.
@@ -475,3 +486,52 @@ current publication rejects for-each syntax. The UPDATE binds body, mission-ID
 and revision TEXT values; no production writer changes. The maintainer must
 preserve this historical regression through referenced storage/reclamation work.
 Inline storage here proves neither encoded size nor execution-cost bounds.
+
+## Incremental observed credit heads
+
+`fractal_store::store::usage_credits` owns `lv-he501efb4d29a`,
+`lv-ha6f6e9f76f2b`, `lv-h974bed02ce8f`, `lv-hfa1f0cadbda8`,
+`lv-hf26ee56ee42a`, `lv-h8e8ca6ee8350`, `lv-hb2a7b858df59`,
+`lv-h032c204ec84f` and `lv-h6308405566ae`.
+The projection retains one inline credit JSON object and claim ID per
+provider/account/credit ID/writer. Heads compare absorbing state precedence
+(`redeemed` > `forfeited` > `available`/`unknown`), then exact seconds/nanoseconds
+and claim ID within a state class. SQL extracts the rank from retained JSON.
+The pending table contains newly admitted claim IDs, drained in their append or
+replication transaction independently of historical completeness.
+Append and replication leave an absent projection absent: authoritative claims
+arriving before initialization are included in the worker's initial target.
+
+Historical catch-up persists a singleton numeric claim-store-index cursor and
+target. Open only installs/resumes metadata for an already-present projection;
+an absent projection with empty writer configuration is left absent. Configuring
+writers or directly reading credits starts a background worker, never a synchronous
+historical fold. Each writer transaction visits at most 64 claim rows and commits
+its cursor with the absorbing upserts, releasing the writer between batches.
+No history-sized pending insertion or index build is required. Interrupted workers
+resume from the committed cursor. Queue ownership follows the resource-backfill
+lifecycle: dropping the store prevents another batch from retaining its writer.
+Read snapshots expose `catching_up`, `through_index` and `target_index` atomically
+with the heads; incremental writes never promote partial historical heads to complete.
+Legacy timestamp-only heads are repaired by the same bounded refold. Explicit
+rebuild removes obsolete heads and resets the durable cursor.
+
+There is no numeric retention limit for durable usage observations. Provider,
+account, credit ID, actor and claim ID TEXT keys and credit JSON remain
+variable-size values. Bounded claim batches prove neither a per-claim byte bound
+nor a bound on the number of retained heads. The owner must preserve exact
+ordering, resumability and writer-selectable evidence when moving these columns
+and queue reclamation to bounded/reference storage.
+
+The module's fixture-only reset/update sites are inventoried under
+`fractal_store::store::usage_credits::tests`. Regressions cover legacy recovery,
+pending catch-up, both delivery orders, replication, rebuild, configuration
+changes, interruption/reopen at several persisted cursors versus a full fold,
+and an incrementally appended claim while a historical worker is paused after
+commit. Preserve these scenarios when the representation changes.
+
+`fractal_store::store::limits` owns revised `lv-hc361226a445f` and
+`lv-he63d64cf72c5`. Quota reclamation now binds the writer subject as well as
+provider/account/reference/window, so an excluded writer cannot delete another
+writer's evidence. Existing inline keys remain; the owner must preserve this
+per-writer reclamation boundary in the eventual bounded representation.

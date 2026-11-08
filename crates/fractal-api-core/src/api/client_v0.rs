@@ -53,6 +53,7 @@ pub mod published_missions;
 pub mod collection_ivm;
 pub mod summary;
 pub mod assistant;
+pub mod external_grants;
 pub mod related_runs;
 
 pub const LOCAL_PERSON_HEADER: &str = "x-st3-person";
@@ -680,6 +681,13 @@ pub fn forbidden(message: impl Into<String>) -> ApiError {
     }
 }
 
+fn credential_rejected(message: &str) -> ApiError {
+    ApiError {
+        details: Box::new(serde_json::Map::from_iter([("reason".into(), json!("credential-rejected"))])),
+        ..forbidden(message)
+    }
+}
+
 pub fn fabric_boundary_forbidden() -> ApiError {
     forbidden("the client gateway exposes only the authenticated client-v0 boundary")
 }
@@ -815,7 +823,7 @@ pub fn authenticate(
             == Some(digest.as_str())
     });
     let Some(paired) = paired else {
-        return Err(forbidden("the client credential is unknown or expired"));
+        return Err(credential_rejected("the client credential is unknown or expired"));
     };
     let mut session = paired_client_session(state, paired, transport, custom_forms)?;
     // Transfer artifacts contain complete batches/state, not recipient-authorized views.
@@ -867,7 +875,7 @@ pub fn paired_client_session(
     let expires_at = paired.body.pointer("/fields/expires_at_unix_ms")
         .and_then(Value::as_u64).map(u128::from).unwrap_or_default();
     if revoked || expires_at <= client_now_ms() {
-        return Err(forbidden("the client credential was revoked or expired"));
+        return Err(credential_rejected("the client credential was revoked or expired"));
     }
     let actor = paired.body.pointer("/fields/session_actor").and_then(Value::as_str)
         .ok_or_else(|| ApiError::internal("a paired client has no derived actor"))?;
@@ -1060,7 +1068,7 @@ pub fn mission_list_cards_with(
         let generations=newest.iter().map(|r| (r["id"].as_str().unwrap().to_owned(),r["generation_id"].clone()))
             .collect::<serde_json::Map<_,_>>();
         let historical = matches!(state,"completed"|"failed"|"cancelled"|"retired");
-        Ok(json!({"id":id,"kind":"mission","revision":revision,"updated_at":client_timestamp(updated),
+        let mut value = json!({"id":id,"kind":"mission","revision":revision,"updated_at":client_timestamp(updated),
             "title":id.trim_start_matches("mission/"),"state":state,"mission_revision":revision,
             "system":crate::mission::is_system(id, definition.map(|d| &d.mission)),
             "runs":newest.iter().rev().map(|r| r["id"].clone()).collect::<Vec<_>>(),
@@ -1069,7 +1077,17 @@ pub fn mission_list_cards_with(
             "run_generations":generations,"must_act":must_act,
             "resources":crate::api::client_declared_resources(
                 definition.map_or(&[][..], |d| d.mission.resources.as_slice()), &resource_uris),
-            "operational":{"layer":if historical {"history"} else {"current"},"actionable":!historical,"reasons":[]}}))
+            "operational":{"layer":if historical {"history"} else {"current"},"actionable":!historical,"reasons":[]}});
+        if let Some(admission) = definition.and_then(|definition| {
+            crate::model::DeclaredAdmission::from_declaration(
+                definition.mission.declared_priority.as_ref(),
+                definition.mission.declared_lane.as_ref(),
+                definition.mission.declared_budgets.as_ref(),
+            )
+        }) {
+            value["declared_admission"] = serde_json::to_value(admission)?;
+        }
+        Ok(value)
     }).collect()
 }
 
@@ -3276,13 +3294,41 @@ pub fn timeline_value(
     id: &str,
     query: &ClientListQuery,
 ) -> Result<Json<Value>, ApiError> {
+    timeline_value_with_subject(state, snapshot, session, id, query, None)
+}
+
+/// Inventory subjects are hints only: resolve on this page sequence's pinned snapshot.
+pub fn timeline_value_for_subject(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    id: &str,
+    query: &ClientListQuery,
+    owner_subject: &str,
+) -> Result<Json<Value>, ApiError> {
+    timeline_value_with_subject(state, snapshot, session, id, query, Some(owner_subject))
+}
+
+fn timeline_value_with_subject(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    id: &str,
+    query: &ClientListQuery,
+    owner_subject: Option<&str>,
+) -> Result<Json<Value>, ApiError> {
     require_scope(session, "read.projections")?;
     let session_id = client_detail_id("session", id);
+    let managed_owner = || match owner_subject {
+        Some(subject) => super::managed_session_owner_for_timeline_at(
+            &state.store, snapshot.store_index, &session_id, subject,
+        ),
+        None => super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id),
+    }.map_err(ApiError::internal);
     if let Some(cursor) = query.cursor.as_deref() {
         let _span = crate::profile::span("timeline/cached-page");
         if cursor.starts_with(NATIVE_PAGE_CURSOR_PREFIX) {
-            let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
-                .map_err(ApiError::internal)?;
+            let managed = managed_owner()?;
             let source = conversation_blocks::source(state, &session_id, managed.as_ref())
                 .map_err(|_| client_page_expired("the page snapshot is no longer available; restart pagination"))?;
             return native_slice_page_at_generation(
@@ -3319,9 +3365,8 @@ pub fn timeline_value(
         }
         return Ok(Json(page_value));
     }
+    let managed = managed_owner()?;
     crate::performance::task("conversation/first-page", || {
-        let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
-            .map_err(ApiError::internal)?;
         timeline_first_page(state, snapshot, session, session_id, query, None, managed.as_ref())
     })
 }

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Expose declared admission data in agent and mission reads with explicit declared-not-enforced CLI output",
+  "replay": {
+    "status": "none",
+    "detail": "Read projections only; no claim history rewrite or replay rule change. Declaration validation is supplied by the preceding declared-admission stack changes; all-member publication admission is supplied by the companion publication-gate change."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Agent cards, agent declaration reads and mission list/detail reads expose optional declared_admission priority, lane and budgets. Empty groups are omitted and future priority/lane strings are preserved. Declared-admission refusals retain stable error codes and report applied=none. No database layout or claim-kind change."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Deferred declaration sources are parsed once before admission-child detection, so escaped or quoted KDL node names cannot skip semantic validation; malformed deferred KDL is refused rather than skipped by a literal-text shortcut. These values do not change scheduling, admission, process priority or resource limits. No checkpoint rule change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Health and daemon.started features advertise declared_admission=1 while retaining existing feature flags and messages-store read progress. The inherited fail-closed barrier still refuses every new publication or direct declaration claim containing declared admission, including empty budgets. Only the companion publication-gate change consumes advertisements to enable writes. Existing declarations without these fields keep their previous read shape."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal binary restart; no storage migration."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Authoring is parsed and validated but remains refused until the companion publication gate lands; then upgrade every active member before publishing declared admission values. Human agent and mission output labels the values declared, not enforced; no resource enforcement is enabled by this change."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "This read layer adds no persisted state or backfill, and the inherited fail-closed barrier prevents new populated metadata writes. Reverting this slice alone requires no declaration cleanup; rolling back a later complete stack that enabled publication still requires removing metadata with upgraded readers first."
+  }
+}

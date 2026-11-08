@@ -34,6 +34,8 @@ pub enum Hit {
     Voice,
     /// Start a plain shell in a new tab.
     NewTerminal,
+    /// Show or hide the sidebar, exactly as Ctrl+S.
+    SidebarToggle,
     /// A row of the Ctrl+S sidebar's list: select it and open it.
     SidebarRow(usize),
     ResourceRow(usize),
