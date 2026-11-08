@@ -6,6 +6,25 @@ const GRANT: &str = "custom/client/pairing-order";
 const PERSON: &str = "person/avery";
 
 fn replicate(from: &AppState, to: &AppState) {
+    if from.store.member_key.read().unwrap().is_none() {
+        let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let peer = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        for state in [from, to] {
+            state.store.bind_fleet("pairing-fleet").unwrap();
+            state.store.pin_fleet_anchor(anchor.public()).unwrap();
+        }
+        from.store.set_member_key(Some(anchor.clone())).unwrap();
+        to.store.set_member_key(Some(peer.clone())).unwrap();
+        from.store.admit_fleet_anchor("pairing-fleet", anchor.public(), "listening").unwrap();
+        from.store.append_claim(&ClaimInput {
+            subject:format!("host/{}", to.store.origin()),kind:"fleet.member-admitted".into(),actor:None,
+            fields:serde_json::from_value(json!({
+                "member_key":peer.public(),"via":"member","sponsor":from.store.origin(),
+                "writer_floor":0,"mode":"listening",
+            })).unwrap(),
+            evidence:vec![],expected_subject:None,idempotency_key:None,
+        }).unwrap();
+    }
     let exchange = from
         .store
         .export_replication_exchange("pairing-fleet", &to.store.replication_inventory().unwrap())
@@ -27,6 +46,7 @@ fn complete(state: &AppState, expires_at: u64) -> ClaimRecord {
             actor: Some(PERSON.into()),
             fields: serde_json::from_value(json!({
                 "session_actor": "person/avery/session/phone", "person_id": PERSON,
+                "device_id":"device/ordered-phone",
                 "credential_hash": "test-not-a-secret", "expires_at_unix_ms": expires_at,
                 "scopes": ["read.projections"],
             }))
@@ -59,6 +79,47 @@ fn newest_by_arrival(state: &AppState, kind: &str) -> ClaimRecord {
 
 fn later() -> u64 {
     client_now_ms() as u64 + 600_000
+}
+
+#[tokio::test]
+async fn pairing_lifecycle_selection_uses_admitted_completions_before_ordering() {
+    let (left_root, right_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let left = super::tests::test_state_named(left_root.path(), "pairing-left");
+    let right = super::tests::test_state_named(right_root.path(), "pairing-right");
+    let completed = complete(&left, later());
+    let session = paired_client_session(&left, &completed, "fabric-loopback", false).unwrap();
+    for kind in ["custom.client.pairing-completed", "custom.client.pairing-revoked"] {
+        right.store.append_claim(&ClaimInput {
+            subject:GRANT.into(), kind:kind.into(), actor:Some(PERSON.into()),
+            fields:serde_json::from_value(completed.body["fields"].clone()).unwrap(),
+            evidence:vec![],expected_subject:None,idempotency_key:None,
+        }).unwrap();
+    }
+    replicate(&right, &left);
+    assert!(revalidate_session(&left, &session).is_ok());
+    let snapshot = new_client_snapshot(&left);
+    let devices = device_resources(&left, &snapshot, PERSON).unwrap();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0]["revision"], completed.id);
+    assert_eq!(devices[0]["state"], "active");
+    // Expiry does not prevent the issuing operation from withdrawing an admitted grant.
+    let expired = complete(&left, 1);
+    right.store.append_claim(&ClaimInput {
+        subject:GRANT.into(),kind:"custom.client.pairing-completed".into(),actor:Some(PERSON.into()),
+        fields:serde_json::from_value(json!({
+            "device_id":"device/ordered-phone","person_id":PERSON,
+            "session_actor":"person/avery/session/retained","expires_at_unix_ms":u64::MAX,
+        })).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    replicate(&right, &left);
+    let local = ClientSession::local(Some(PERSON)).unwrap();
+    dispatch_action(&left, &new_client_snapshot(&left), &local, &ActionRequest {
+        api_version:CLIENT_API_VERSION.into(),id:"action/revoke-ordered".into(),
+        action_type:"pairing.revoke".into(),idempotency_key:"revoke-ordered".into(),
+        fence:Fence::default(),parameters:json!({"target_id":"device/ordered-phone"}),
+    }).await.unwrap();
+    assert!(left.store.pairing_completion_is_revoked(&expired).unwrap());
 }
 
 #[test]

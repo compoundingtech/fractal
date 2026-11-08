@@ -942,16 +942,25 @@ pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<C
     if session.transport == "unix" && acting_party(session) {
         return Ok(session.clone());
     }
-    // With a grant, the canonical newest completion, so every member checks the same one.
+    // Admission precedes canonical selection; retained records cannot displace a valid grant.
+    let now = client_now_ms();
     let paired = match session.pairing_grant.as_deref() {
-        Some(subject) => state.store
-            .newest_claim_for_subject_kind(subject, "custom.client.pairing-completed")
+        Some(subject) => state.store.newest_admitted_pairing_completion(subject, now)
             .map_err(ApiError::internal)?,
-        None => state.store
-            .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
-            .map_err(ApiError::internal)?
-            .claims.into_iter()
-            .find(|claim| claim.body.pointer("/fields/session_actor").and_then(Value::as_str) == Some(session.actor.as_str())),
+        None => {
+            let claims = state.store.claims_for_kind_at(
+                "custom.client.pairing-completed", None, true, 10_000,
+            ).map_err(ApiError::internal)?.claims;
+            let mut selected = None;
+            for claim in claims {
+                if claim.body.pointer("/fields/session_actor").and_then(Value::as_str) == Some(session.actor.as_str())
+                    && state.store.pairing_completion_is_admitted(&claim, now).map_err(ApiError::internal)? {
+                    selected = Some(claim);
+                    break;
+                }
+            }
+            selected
+        }
     }.ok_or_else(|| forbidden("the client session grant is absent"))?;
     let mut current = paired_client_session(state, &paired, session.transport, session.custom_forms)?;
     current.conversation_blocks = session.conversation_blocks;
@@ -1833,6 +1842,14 @@ pub fn device_resources(
     for claim in &claims {
         let fields = claim.body.get("fields").unwrap_or(&claim.body);
         if claim.kind == "custom.client.pairing-begun"
+            && !state.store.client_operation_is_trusted(claim).map_err(ApiError::internal)? {
+            continue;
+        }
+        if claim.kind == "custom.client.pairing-completed"
+            && !state.store.pairing_completion_is_admitted(claim, client_now_ms()).map_err(ApiError::internal)? {
+            continue;
+        }
+        if claim.kind == "custom.client.pairing-begun"
             && let Some(name) = fields.get("device_name").and_then(Value::as_str)
         {
             names.insert(claim.subject.clone(), name.to_owned());
@@ -1847,7 +1864,8 @@ pub fn device_resources(
                 paired.insert(device_id.to_owned(), (claim, None));
             }
             "custom.client.pairing-revoked" => {
-                if let Some(entry) = paired.get_mut(device_id) {
+                if let Some(entry) = paired.get_mut(device_id)
+                    && state.store.pairing_revocation_is_trusted(claim, entry.0).map_err(ApiError::internal)? {
                     entry.1 = Some(claim);
                 }
             }

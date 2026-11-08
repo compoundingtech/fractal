@@ -2293,23 +2293,28 @@ a new pairing unless an operator configures a temporary migration allowance for 
 existing completion record. `pairing_legacy_allowances` defaults to an empty list. Each entry
 contains `completion_id`, `record_hash`, and `until_unix_ms`. The hash is
 `fractal_store::pairing::record_hash(origin, actor, fields)` over the retained completion.
-Startup refuses entries whose hash does not match an existing completion. An allowance
-never extends recorded scopes or expiry, bypasses revocation, or lasts beyond
+Startup refuses entries whose hash does not match an existing completion or whose writer
+is not exactly the recorded person.
+An allowance never extends recorded scopes or expiry, bypasses revocation, or lasts beyond
 2026-11-15T23:00:00Z, regardless of its configured deadline. The allowance is member-local
 and must be configured explicitly on each member where the existing credential is used.
 An allowance entry must come from an audited record: it admits exactly the recorded
 contents, not independently verified provenance. Held terminal streams use the earlier of
 the credential expiry and allowance deadline and recheck admission at continuation.
-Revocation requires its own matching operation receipt from the completion's issuing
-member. Other revocation records are counted in an operator warning, without credential data.
+Revocation of a receipted credential requires a matching operation receipt from its issuing
+member. For an allowance-backed credential, any revocation from that issuer applies,
+including one received after startup. Other revocation records are counted in an operator
+warning, without credential data.
 
 Terminal attachment lifecycle records likewise require the dedicated terminal operations:
 `custom.client.terminal*` kinds and `custom/client/terminal-*` subjects are reserved.
 Attachments and their consumption/detachment records require the same native receipt.
 Unreceipted attachments require a new attach operation; they cannot provide stream authority.
 The receipt kind is registered system-only and cannot be submitted through ordinary claims;
-older schemas reject it as an unknown native kind. Replication uses authenticated member
-admission, preserving the receipt's issuing origin.
+older schemas reject it as an unknown native kind. A receipt requires member-local operation
+proof or an envelope signed by a keyed fleet member for its issuing origin. Unsigned receipt
+envelopes are refused by both replication and backup admission. Lifecycle selection ignores
+unadmitted records before choosing the current completion or terminal transition.
 
 Unknown, expired, or revoked paired-device credentials return HTTP 403, `code: forbidden`,
 `retryable: false`, and `details.reason: credential-rejected`. Pair the device again to restore
