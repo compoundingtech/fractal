@@ -25,7 +25,8 @@ import { useMarkRead, useUnreadMarks } from './readPosition.ts'
 import { useWorkspaceResources, useWorkspaceRoute, useWorkspaceState, useWorkspaceStore, type WorkspaceNavigation } from '../workspace/useWorkspace.ts'
 import { useWorkspaceKeys } from '../workspace/useWorkspaceKeys.ts'
 import { WorkspaceBody } from '../workspace/WorkspaceBody.tsx'
-import { WorkspaceEmpty, WorkspaceStrip } from '../workspace/WorkspaceStrip.tsx'
+import { WorkspaceEmpty, WorkspaceStrip, openable } from '../workspace/WorkspaceStrip.tsx'
+import { ConversationOverflowMenu, type OverflowSection } from './AgentActions.tsx'
 import { PaneSlot, PaneSlots, WorkspaceSplits, attributeValue, leadPane } from '../workspace/WorkspaceSplits.tsx'
 import { SpaceSwitcher, nextSpace } from '../workspace/SpaceSwitcher.tsx'
 import { PaneSwitcher } from '../workspace/PaneSwitcher.tsx'
@@ -797,7 +798,12 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
       focusShownFace.current = true
       store.dispatch({ _tag: 'SetView', tab: shownTab.id, view: { terminal: !terminalShown } })
     }
-    const nativeActions = paneAgent === '' ? undefined : <ConversationHeaderActions key={paneAgent} agentRef={paneAgent} onViewDeclaration={() => openRef(`declaration/${paneAgent}`)} />
+    // A phone folds "Open a tab" and the pane's other tabs into its one More actions, so every bar target stays 44px.
+    const phoneSections: readonly OverflowSection[] | undefined = narrow ? [
+      { title: 'Open a tab', items: openable.map(item => ({ id: item.id, label: item.label, onAction: () => openRef(item.ref) })) },
+      ...(pane.tabs.length > 1 ? [{ title: 'Open tabs', items: pane.tabs.map(tab => ({ id: tab.id, label: titleOfTab(tab.id) ?? tab.ref, current: tab.id === pane.active, onAction: () => go({ _tag: 'Activate', tab: tab.id }) })) }] : []),
+    ] : undefined
+    const nativeActions = paneAgent === '' ? undefined : <ConversationHeaderActions key={paneAgent} agentRef={paneAgent} onViewDeclaration={() => openRef(`declaration/${paneAgent}`)} sections={phoneSections} />
     const watch = terminalShown && shownTab !== undefined ? <TerminalAttachWatch key={paneAgent} agentRef={paneAgent} onMissing={reason => onMissingTerminal(paneAgent, shownTab.id, reason)} /> : null
     // A zoomed split says so, and the badge is the way back.
     const zoomBadge = space.local.zoomed === pane.id ? <Aria.Button aria-label="Unzoom split" onPress={() => go({ _tag: 'ToggleZoom' })} data-testid="zoom-badge" {...stylex.props(styles.zoomBadge)}>Zoomed <kbd {...stylex.props(styles.zoomKey)}>{navigator.platform.includes('Mac') ? '⌥O' : 'Alt+O'}</kbd></Aria.Button> : null
@@ -818,8 +824,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
           ? <>
             {zoomBadge}{watch}
             {(terminal.ref !== undefined || terminal.disabledReason !== undefined || terminalShown) ? <PhoneTerminalToggle pressed={terminalShown} onPress={toggleTerminal} {...(disabledReason === undefined ? {} : { disabledReason })} /> : undefined}
-            <div data-testid="native-action-slot" ref={slots.header(pane.id)} {...stylex.props(styles.barSlot)}>{nativeActions}</div>
-            <ChromeControl icon="search" label="Search" edge="trail" popup="dialog" expanded={paletteOpen} onPress={openPalette} />
+            <div data-testid="native-action-slot" ref={slots.header(pane.id)} {...stylex.props(styles.barSlot)}>{nativeActions ?? (phoneSections === undefined ? null : <ConversationOverflowMenu sections={phoneSections} />)}</div>
+            {/* Only the bar's last control overhangs its gutter. */}
+            <ChromeControl icon="search" label="Search" {...(focused && kindAside !== undefined ? {} : { edge: 'trail' as const })} popup="dialog" expanded={paletteOpen} onPress={openPalette} />
             {focused && kindAside !== undefined ? <ChromeControl icon="panel" label="Agent details" edge="trail" popup="dialog" expanded={narrowDetailsOpen} active={narrowDetailsOpen} onPress={() => setSheetOpen(!narrowDetailsOpen)} /> : null}
           </>
           : <>{zoomBadge}{watch}<PaneThreadActions nativeActions={nativeActions} actionPortalRef={slots.header(pane.id)} terminalAvailable={terminal.ref !== undefined || terminalShown} {...(disabledReason === undefined ? {} : { terminalDisabledReason: disabledReason })} terminalOpen={terminalShown} onToggleTerminal={toggleTerminal} /></>}>
