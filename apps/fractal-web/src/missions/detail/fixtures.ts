@@ -135,7 +135,7 @@ export const syncSecurityWork: Work = decodeUnknownSync(Work)({
   id: syncStep('security'), kind: 'work', revision: 'w3', updated_at: iso(at(25)), mission_id: syncMissionRef, mission_run_id: syncRunRef,
   generation_id: `run-generation/${generation}`, definition_id: 'definition/sync-v2', path: 'security', state: 'blocked', title: 'Security review of the token scope change',
   attempt: 1, readiness_epoch: 1, blockers: [], goals: [], constraints: [],
-  person_answers: [{ ask: 'ask/sec-1', answered_at_unix_ms: at(14, 30), respondent: 'person/operator', status: 'completed', summary: 'Hold the canary until the index fix lands, then rerun the load test.', answer: { type: 'feedback', outcome: 'feedback', text: 'Hold the canary until the index fix lands.' } }],
+  person_answers: [{ ask: 'ask/sec-1', answered_at_unix_ms: at(14, 30), respondent: 'person/operator', status: 'completed', summary: 'Hold the canary until the index fix lands, then rerun the load test.', answer: { choices: [], words: 'Hold the canary until the index fix lands.' } }],
 } as unknown as WorkEncoded)
 
 /**
