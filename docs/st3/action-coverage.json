@@ -2356,6 +2356,18 @@
       "verification": "real CLI over private Unix socket; registered reads and fenced person replies across restart"
     },
     {
+      "command": "st subject decisions",
+      "description": "Fold an atomic, authority-validated canonical effective decision.tree snapshot without writes.",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::decision_tree_manifest_cards_fences_retries_damage_and_restarts",
+        "crates/fractal/tests/action_coverage.rs::decision_reads_converge_across_opposite_arrival_orders",
+        "crates/fractal/tests/action_coverage.rs::decision_reader_rejects_unregistered_or_unauthorized_approval",
+        "crates/fractal/tests/action_coverage.rs::registered_v2_denies_agent_answers_but_accepts_nonapproving_owner_recordings",
+        "crates/fractal/tests/action_coverage.rs::decision_reader_excludes_repaired_originals"
+      ],
+      "verification": "real CLI and GET /v1/custom/decision-inputs over private Unix sockets; opposite replication arrival orders converge, invalid recipient/registration/source authority is rejected, owner recordings never approve, and repaired originals remain historical but do not influence the effective basis or fold"
+    },
+    {
       "command": "st subject history",
       "description": "Show bounded immutable history for one subject",
       "tests": [
