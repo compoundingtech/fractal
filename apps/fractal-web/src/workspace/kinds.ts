@@ -1,8 +1,9 @@
-import type * as React from 'react'
+import * as React from 'react'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { makeKindRegistry, type KindPolicy } from './registry.ts'
 import type { Subject, SubjectKind } from './subject.ts'
+import { githubContributions, GithubTab } from '../plugins/github/index.ts'
 import { AgentSurface, AlertSurface, DeclarationSurface, DocumentSurface, InboxSurface, MissionsSurface, ResourceSurface, UnsupportedSurface, UsageSurface } from './surfaces.tsx'
 
 /** What a kind renders and how it hides. Its data requirements live beside it in `registry.ts`. */
@@ -55,7 +56,14 @@ const views: Readonly<Record<SubjectKind, KindSurface>> = {
   Unsupported: { Surface: UnsupportedSurface, hidden: 'activity', scrollMemory: false },
 }
 
+/** A GitHub item's tab: the plugin reads and renders it; this only hands over the ref and `open`. */
+const githubSurface: KindSurface = {
+  Surface: ({ subject, onOpen }: SurfaceProps) => subject._tag === 'Resource' ? React.createElement(GithubTab, { subjectRef: subject.ref, onOpen }) : null,
+  hidden: 'activity',
+  scrollMemory: true,
+}
+
 /** Contributed kinds join here; the core never imports a plugin's internals. */
-export const workspaceKinds = makeKindRegistry<KindSurface>({ views })
+export const workspaceKinds = makeKindRegistry<KindSurface>({ views, contributions: githubContributions(() => githubSurface) })
 
 export const policyOf = (subject: Subject): KindPolicy => workspaceKinds.kindOf(subject).policy
