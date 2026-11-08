@@ -3,25 +3,41 @@ use super::*;
 use crate::{AttentionListStore, PersonWorkStore};
 use crate::api::published_lists::tests_shared_client_v0_tests::publish;
 use crate::api::tests_shared_client_v0_tests::{get_request, state};
-use crate::model::{MissionRunRequest, PersonAskRequest, WorkHandoffRequest, WorkRequest};
+use crate::model::{MissionRunRequest, PersonAskRequest, PersonStepResponse, WorkHandoffRequest, WorkRequest};
 
 const ASH: &str = "agent/garden/ash";
 const BIRCH: &str = "agent/garden/birch";
 const PATH: &str = "/v1/client/ready-work?cohort=agent/garden/ash";
 
-// Current-thread API tests resume the handler on their own thread. Key the one-shot seam
-// by store as well, so another router on that thread cannot consume this invalidation.
-thread_local! {
-    static FORGET_AFTER_COUNT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+// Router ingress runs handlers on a worker thread. Store-keyed one-shots must
+// follow the handler across threads without invalidating another test's store.
+static FORGET_AFTER_COUNT: std::sync::Mutex<BTreeSet<usize>> = std::sync::Mutex::new(BTreeSet::new());
+
+struct ForgetAfterCount(usize);
+
+impl ForgetAfterCount {
+    fn arm(state: &AppState) -> Self {
+        let key = Arc::as_ptr(&state.store) as usize;
+        assert!(FORGET_AFTER_COUNT.lock().unwrap().insert(key));
+        Self(key)
+    }
+
+    fn assert_consumed(&self) {
+        let consumed = !FORGET_AFTER_COUNT.lock().unwrap().contains(&self.0);
+        assert!(consumed, "the post-count seam was reached");
+    }
+}
+
+impl Drop for ForgetAfterCount {
+    fn drop(&mut self) {
+        FORGET_AFTER_COUNT.lock().unwrap().remove(&self.0);
+    }
 }
 
 pub(super) fn after_count(state: &AppState) {
-    FORGET_AFTER_COUNT.with(|hook| {
-        if hook.get() == Some(Arc::as_ptr(&state.store) as usize) {
-            hook.set(None);
-            state.store.published_work_list().forget();
-        }
-    });
+    if FORGET_AFTER_COUNT.lock().unwrap().remove(&(Arc::as_ptr(&state.store) as usize)) {
+        state.store.published_work_list().forget();
+    }
 }
 
 fn fixture() -> (tempfile::TempDir, AppState, String) {
@@ -151,9 +167,13 @@ async fn ready_work_refuses_graph_head_and_frontier_staleness_independently() {
 async fn ready_work_refuses_generation_invalidated_after_count() {
     let (_root, state, _) = fixture();
     publish_work(&state);
-    FORGET_AFTER_COUNT.with(|hook| hook.set(Some(Arc::as_ptr(&state.store) as usize)));
-    refused(&state, PATH, StatusCode::SERVICE_UNAVAILABLE, "work-list-not-ready").await;
-    FORGET_AFTER_COUNT.with(|hook| assert!(hook.get().is_none(), "the post-count seam was reached"));
+    let hook = ForgetAfterCount::arm(&state);
+    let (status, error) = get_request(router(state.clone()), PATH).await;
+    hook.assert_consumed();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{error}");
+    assert_eq!(error["code"], "internal", "{error}");
+    assert_eq!(error["retryable"], true, "{error}");
+    assert_eq!(error["details"]["reason"], "work-list-not-ready", "{error}");
 }
 
 #[cfg(test)]
@@ -279,7 +299,7 @@ async fn ready_work_counts_an_acknowledged_handoff_as_ready() {
 }
 
 #[tokio::test]
-async fn ready_work_person_blocker_isolated_from_status_and_claimant() {
+async fn ready_work_person_ask_blocks_until_answered() {
     let (_root, state, step) = fixture();
     ready_count(&state, PATH, 1).await;
     claim(&state, &step);
@@ -290,23 +310,47 @@ async fn ready_work_person_blocker_isolated_from_status_and_claimant() {
         new_run: None, incarnation: Some("ash-1".into()), request: None,
         idempotency_key: "ready-demand-isolated-person-blocker".into(),
     }).unwrap();
-    // Restore ready and clear the lease through the typed state path, leaving the
-    // open person ask as the sole exclusion instead of testing waiting-person.
-    state.store.set_step_state(&step, "ready", None).unwrap();
-    ready_count(&state, PATH, 0).await;
+    state.store.published_work_list().forget();
+    publish_work(&state);
     let publication = state.store.published_work().unwrap();
     let view = &publication.rows.rows[&step].view;
+    assert_eq!(view.status, "waiting-person");
+    assert_eq!(view.blocked_reason.as_deref(), Some(ask.subject.as_str()));
+    assert!(view.blockers.contains(&ask.subject));
+    let (status, value) = get_request(router(state.clone()), PATH).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["ready_count"], 0, "{value}");
+    state.store.finish_person_step(&PersonStepResponse {
+        delegation: None, subject: ask.subject, actor: "person/operator".into(),
+        summary: "Plant on Friday.".into(), evidence: vec![], episode: None,
+        idempotency_key: "ready-demand-answer".into(), answer: None,
+    }, false).unwrap();
+    ready_count(&state, PATH, 1).await;
+    otherwise_ready(&state.store.published_work().unwrap().rows.rows[&step].view);
+}
+
+#[test]
+fn ready_work_store_count_excludes_blockers_independently() {
+    let (_root, state, step) = fixture();
+    publish_work(&state);
+    let publication = state.store.published_work().unwrap();
+    let mut view = publication.rows.rows[&step].view.clone();
+    otherwise_ready(&view);
+    let cohort = [ASH.to_owned()];
+    let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+    let count = |view: &crate::model::StepRunView| {
+        state.store.ready_work_cohort_count([view], &cohort, at).unwrap()
+    };
+    assert_eq!(count(&view), Some(1));
+    // Deliberately seed the view predicate, not an incoherent native ask lifecycle.
+    view.blockers.push("person-ask/isolated-blocker".into());
     assert_eq!(view.status, "ready");
     assert!(view.claimant.is_none());
     assert!(view.blocked_reason.is_none());
     assert!(view.not_before_unix_ms.is_none());
-    assert!(!view.agentless);
-    assert_eq!(view.assigned_to.as_deref(), Some(ASH));
-    assert!(!view.blockers.is_empty());
-    // Resolve only the blocking ask; the owner is already ready and unclaimed.
-    state.store.set_step_state(&ask.subject, "completed", None).unwrap();
-    ready_count(&state, PATH, 1).await;
-    otherwise_ready(&state.store.published_work().unwrap().rows.rows[&step].view);
+    assert_eq!(count(&view), Some(0));
+    view.blockers.clear();
+    assert_eq!(count(&view), Some(1));
 }
 
 fn grant_claim(state: &AppState, subject: &str, kind: &str, fields: Value) {
