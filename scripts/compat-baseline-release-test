@@ -147,20 +147,27 @@ class Policy(unittest.TestCase):
         self.assertIsNone(json.loads(updates[baseline.BASELINES[0]])['exception_reason'])
 
     def test_generated_publication_tokens_do_not_gain_maintenance_writes(self):
-        for filename, publisher in [('release-fractal.yml', 'publish'), ('release-daily.yml', 'release')]:
+        workflows = {}
+        for filename in ('release-fractal.yml', 'release-daily.yml'):
             workflow = (ROOT / '.github/workflows' / filename).read_text()
-            jobs = dict(re.findall(r'(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)',
-                                   workflow.split('\njobs:\n', 1)[1]))
-            publish = jobs[publisher]
-            advance = jobs['advance']
-            self.assertIn('contents: write', publish)
-            self.assertNotIn('actions: write', publish)
-            self.assertNotIn('pull-requests: write', publish)
-            self.assertNotIn('compat-baseline-release advance', publish)
-            for permission in ('contents: write', 'actions: write', 'pull-requests: write'):
-                self.assertIn(permission, advance)
-            self.assertIn(f'needs: {publisher}', advance)
-            self.assertIn('compat-baseline-release advance', advance)
+            workflows[filename] = dict(re.findall(
+                r'(?ms)^  ([\w-]+):\n(.*?)(?=^  [\w-]+:\n|\Z)', workflow.split('\njobs:\n', 1)[1]))
+        for filename, publishers in (
+                ('release-fractal.yml', ('publishEmbed', 'publishEdge')),
+                ('release-daily.yml', ('release', 'publish'))):
+            for publisher in publishers:
+                with self.subTest(workflow=filename, publisher=publisher):
+                    publish = workflows[filename][publisher]
+                    self.assertIn('contents: write', publish)
+                    self.assertNotIn('actions: write', publish)
+                    self.assertNotIn('pull-requests: write', publish)
+                    self.assertNotIn('compat-baseline-release advance', publish)
+        self.assertNotIn('advance', workflows['release-fractal.yml'])
+        advance = workflows['release-daily.yml']['advance']
+        for permission in ('contents: write', 'actions: write', 'pull-requests: write'):
+            self.assertIn(permission, advance)
+        self.assertIn('needs: publish', advance)
+        self.assertIn('compat-baseline-release advance', advance)
 
 
 class Archives(unittest.TestCase):

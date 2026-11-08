@@ -15,8 +15,10 @@ export const extensionBuild = ({ entry, privateBuild, changelogDeployment, chang
   let changelog
   let manifest
   let identityId
+  let machineVersion
   const compile = async (identityCode) => {
-    const { machineVersion } = await evaluateBuildIdentityModule(identityCode)
+    const identity = await evaluateBuildIdentityModule(identityCode)
+    machineVersion = identity.machineVersion
     manifest = changelog.compile({ machineVersion })
   }
   return {
@@ -34,6 +36,7 @@ export const extensionBuild = ({ entry, privateBuild, changelogDeployment, chang
       manifest = undefined
       changelog = undefined
       identityId = undefined
+      machineVersion = undefined
       if (!building) return
       changelog = await prepareChangelogBuild({
         privateBuild,
@@ -54,6 +57,17 @@ export const extensionBuild = ({ entry, privateBuild, changelogDeployment, chang
     },
     async transform(code, id) {
       if (changelog !== undefined && id === identityId) await compile(code)
+    },
+    // Early sockets open before any module executes: embed the exact bundle identity in HTML.
+    transformIndexHtml: {
+      order: 'post',
+      async handler(html, context) {
+        if (!html.includes('"__FRACTAL_WEB_CLIENT__"')) return html
+        const version = context.server === undefined ? machineVersion
+          : (await context.server.ssrLoadModule('virtual:build-identity')).buildIdentity.machineVersion
+        if (typeof version !== 'string') throw new Error('Early client requires the canonical build identity')
+        return html.replaceAll('"__FRACTAL_WEB_CLIENT__"', JSON.stringify(`fractal-web ${version}`).replaceAll('<', '\\u003c'))
+      },
     },
     async load(id) {
       if (changelog === undefined) return

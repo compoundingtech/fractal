@@ -150,10 +150,13 @@ async fn ready_work_refuses_generation_invalidated_after_count() {
     FORGET_AFTER_COUNT.with(|hook| assert!(hook.get().is_none(), "the post-count seam was reached"));
 }
 
+#[cfg(test)]
 #[tokio::test]
-async fn ready_work_excludes_claimants_person_blockers_future_work_and_pending_handoffs() {
-    for exclusion in ["claimant", "blockers", "not-before", "handoff"] {
+async fn ready_work_excludes_claimants_future_work_and_pending_handoffs() {
+    for exclusion in ["claimant", "not-before", "handoff"] {
         let (_root, state, step) = fixture();
+        ready_count(&state, &format!("{PATH},{BIRCH}"), 1).await;
+        state.store.published_work_list().forget();
         match exclusion {
             "not-before" => {
                 // Seed a future-ready projection without advancing wall time. A cold real
@@ -165,15 +168,7 @@ async fn ready_work_excludes_claimants_person_blockers_future_work_and_pending_h
             }
             _ => claim(&state, &step),
         }
-        if exclusion == "blockers" {
-            state.store.ask_person(&PersonAskRequest {
-                deadline_ms: None, default_answer: None, legacy_request: None,
-                person: "person/operator".into(), title: "Choose a planting date".into(),
-                reason: "The owner must choose.".into(), actor: ASH.into(), step: Some(step.clone()),
-                new_run: None, incarnation: Some("ash-1".into()), request: None,
-                idempotency_key: "ready-demand-person-blocker".into(),
-            }).unwrap();
-        } else if exclusion == "handoff" {
+        if exclusion == "handoff" {
             state.store.handoff_work(&step, &WorkHandoffRequest {
                 actor: ASH.into(), incarnation: Some("ash-1".into()), to: BIRCH.into(),
                 note: "Please take over.".into(), evidence: Vec::new(),
@@ -185,7 +180,6 @@ async fn ready_work_excludes_claimants_person_blockers_future_work_and_pending_h
         let view = &publication.rows.rows[&step].view;
         match exclusion {
             "claimant" => assert_eq!(view.claimant.as_deref(), Some(ASH)),
-            "blockers" => assert!(!view.blockers.is_empty()),
             "not-before" => {
                 assert_eq!(view.status, "ready");
                 assert!(view.not_before_unix_ms.unwrap() > publication.rows.time_unix_ms);
@@ -201,6 +195,112 @@ async fn ready_work_excludes_claimants_person_blockers_future_work_and_pending_h
         assert_eq!(status, StatusCode::OK, "{exclusion}: {value}");
         assert_eq!(value["ready_count"], 0, "{exclusion}: {value}");
     }
+}
+
+async fn ready_count(state: &AppState, path: &str, expected: usize) {
+    state.store.published_work_list().forget();
+    publish_work(state);
+    let (status, value) = get_request(router(state.clone()), path).await;
+    assert_eq!(status, StatusCode::OK, "{value}");
+    assert_eq!(value["ready_count"], expected, "{value}");
+}
+
+fn otherwise_ready(view: &crate::model::StepRunView) {
+    assert_eq!(view.status, "ready");
+    assert!(view.claimant.is_none());
+    assert!(view.blocked_reason.is_none());
+    assert!(view.blockers.is_empty());
+    assert!(view.not_before_unix_ms.is_none());
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn ready_work_excludes_only_the_agentless_flag_on_an_otherwise_ready_row() {
+    let (_root, state, step) = fixture();
+    ready_count(&state, PATH, 1).await;
+    // Isolate the flag without also removing the cohort assignment or changing status.
+    state.store.connection.lock().unwrap().execute(
+        "UPDATE step_runs SET agentless=1 WHERE subject=?1", [&step],
+    ).unwrap();
+    ready_count(&state, PATH, 0).await;
+    let publication = state.store.published_work().unwrap();
+    let view = &publication.rows.rows[&step].view;
+    otherwise_ready(view);
+    assert!(view.agentless);
+    assert_eq!(view.assigned_to.as_deref(), Some(ASH));
+}
+
+#[tokio::test]
+async fn ready_work_excludes_non_member_of_a_valid_cohort() {
+    let (_root, state, step) = fixture();
+    ready_count(&state, PATH, 1).await;
+    ready_count(&state, "/v1/client/ready-work?cohort=agent/garden/birch", 0).await;
+    let publication = state.store.published_work().unwrap();
+    let view = &publication.rows.rows[&step].view;
+    otherwise_ready(view);
+    assert!(!view.agentless);
+    assert_eq!(view.assigned_to.as_deref(), Some(ASH));
+    // Changing only cohort membership restores the same row to the answer.
+    ready_count(&state, PATH, 1).await;
+}
+
+#[tokio::test]
+async fn ready_work_counts_an_acknowledged_handoff_as_ready() {
+    let (_root, state, step) = fixture();
+    let path = format!("{PATH},{BIRCH}");
+    ready_count(&state, &path, 1).await;
+    claim(&state, &step);
+    state.store.handoff_work(&step, &WorkHandoffRequest {
+        actor: ASH.into(), incarnation: Some("ash-1".into()), to: BIRCH.into(),
+        note: "Please take over.".into(), evidence: Vec::new(),
+        idempotency_key: "ready-demand-acknowledged-handoff".into(),
+    }).unwrap();
+    ready_count(&state, &path, 0).await;
+    let publication = state.store.published_work().unwrap();
+    let view = &publication.rows.rows[&step].view;
+    otherwise_ready(view);
+    assert!(!view.agentless);
+    assert_eq!(view.assigned_to.as_deref(), Some(BIRCH));
+    let messages = state.store.messages(Some(BIRCH), true).unwrap();
+    let note = messages.iter().find(|message| {
+        message.tags.contains(&format!("st3-work-handoff:{step}"))
+    }).expect("the real handoff publishes its acknowledgment note");
+    state.store.acknowledge_work(&step, &crate::model::WorkAcknowledgeRequest {
+        actor: BIRCH.into(), message: note.subject.clone(),
+    }).unwrap();
+    ready_count(&state, &path, 1).await;
+    otherwise_ready(&state.store.published_work().unwrap().rows.rows[&step].view);
+}
+
+#[tokio::test]
+async fn ready_work_person_blocker_isolated_from_status_and_claimant() {
+    let (_root, state, step) = fixture();
+    ready_count(&state, PATH, 1).await;
+    claim(&state, &step);
+    let ask = state.store.ask_person(&PersonAskRequest {
+        deadline_ms: None, default_answer: None, legacy_request: None,
+        person: "person/operator".into(), title: "Choose a planting date".into(),
+        reason: "The owner must choose.".into(), actor: ASH.into(), step: Some(step.clone()),
+        new_run: None, incarnation: Some("ash-1".into()), request: None,
+        idempotency_key: "ready-demand-isolated-person-blocker".into(),
+    }).unwrap();
+    // Restore ready and clear the lease through the typed state path, leaving the
+    // open person ask as the sole exclusion instead of testing waiting-person.
+    state.store.set_step_state(&step, "ready", None).unwrap();
+    ready_count(&state, PATH, 0).await;
+    let publication = state.store.published_work().unwrap();
+    let view = &publication.rows.rows[&step].view;
+    assert_eq!(view.status, "ready");
+    assert!(view.claimant.is_none());
+    assert!(view.blocked_reason.is_none());
+    assert!(view.not_before_unix_ms.is_none());
+    assert!(!view.agentless);
+    assert_eq!(view.assigned_to.as_deref(), Some(ASH));
+    assert!(!view.blockers.is_empty());
+    // Resolve only the blocking ask; the owner is already ready and unclaimed.
+    state.store.set_step_state(&ask.subject, "completed", None).unwrap();
+    ready_count(&state, PATH, 1).await;
+    otherwise_ready(&state.store.published_work().unwrap().rows.rows[&step].view);
 }
 
 fn grant_claim(state: &AppState, subject: &str, kind: &str, fields: Value) {
