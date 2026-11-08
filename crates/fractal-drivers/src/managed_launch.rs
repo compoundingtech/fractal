@@ -130,25 +130,31 @@ fn resolve_for_persona(
 }
 
 /// Apply the managed launch environment only to a provider child.
-pub fn apply_provider_environment(command: &mut std::process::Command) {
+pub fn apply_provider_environment(command: &mut std::process::Command) -> std::io::Result<()> {
     if let Some(environment) = PROVIDER_ENVIRONMENT.get() {
+        apply_agent_identity(command, &environment.subject, &|name| std::env::var_os(name))?;
         apply_path(command, Some(&environment.path));
-        apply_agent_identity(command, &environment.subject, &|name| std::env::var_os(name));
     }
+    Ok(())
 }
 
 fn apply_agent_identity(
     command: &mut std::process::Command,
     subject: &str,
     inherited: &impl Fn(&str) -> Option<std::ffi::OsString>,
-) {
+) -> std::io::Result<()> {
     for name in ["ST_AGENT", "FRACTAL_AGENT"] {
-        let present = command.get_envs().find(|(key, _)| *key == std::ffi::OsStr::new(name))
-            .map(|(_, value)| value.is_some()).unwrap_or_else(|| inherited(name).is_some());
-        if !present {
-            command.env(name, subject);
+        let value = command.get_envs().find(|(key, _)| *key == std::ffi::OsStr::new(name))
+            .map(|(_, value)| value.map(std::ffi::OsStr::to_owned))
+            .unwrap_or_else(|| inherited(name));
+        if let Some(value) = value
+            && value != std::ffi::OsStr::new(subject) {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
+                format!("managed provider {name}={value:?} does not match fenced subject {subject}; refusing launch")));
         }
     }
+    command.env("ST_AGENT", subject).env("FRACTAL_AGENT", subject);
+    Ok(())
 }
 
 fn apply_path(command: &mut std::process::Command, path: Option<&std::ffi::OsStr>) {
@@ -157,10 +163,10 @@ fn apply_path(command: &mut std::process::Command, path: Option<&std::ffi::OsStr
     }
 }
 
-pub fn provider_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+pub fn provider_command(program: impl AsRef<std::ffi::OsStr>) -> std::io::Result<std::process::Command> {
     let mut command = std::process::Command::new(program);
-    apply_provider_environment(&mut command);
-    command
+    apply_provider_environment(&mut command)?;
+    Ok(command)
 }
 
 fn prefixed_path(bin: &Path, inherited: Option<&std::ffi::OsStr>) -> Result<std::ffi::OsString> {
@@ -387,19 +393,33 @@ mod tests {
     }
 
     #[test]
-    fn provider_identity_fills_missing_aliases_and_preserves_existing_authority() {
-        let mut missing = std::process::Command::new("omp");
-        apply_agent_identity(&mut missing, "agent/worker", &|_| None);
-        let values = missing.get_envs().collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(values[std::ffi::OsStr::new("ST_AGENT")], Some(std::ffi::OsStr::new("agent/worker")));
-        assert_eq!(values[std::ffi::OsStr::new("FRACTAL_AGENT")], Some(std::ffi::OsStr::new("agent/worker")));
-        let mut existing = std::process::Command::new("omp");
-        existing.env("ST_AGENT", "agent/explicit");
-        apply_agent_identity(&mut existing, "agent/worker", &|name| {
-            (name == "FRACTAL_AGENT").then(|| "agent/inherited".into())
-        });
-        let values = existing.get_envs().collect::<std::collections::BTreeMap<_, _>>();
-        assert_eq!(values[std::ffi::OsStr::new("ST_AGENT")], Some(std::ffi::OsStr::new("agent/explicit")));
-        assert!(!values.contains_key(std::ffi::OsStr::new("FRACTAL_AGENT")));
+    fn provider_identity_refuses_mismatches_and_sets_matching_aliases() {
+        let subject = "agent/worker";
+        for (st, fractal) in [
+            (Some("agent/wrong"), None),
+            (None, Some("agent/wrong")),
+            (Some("agent/wrong"), Some("agent/wrong")),
+            (Some(subject), Some("agent/other")),
+            (Some(""), None),
+        ] {
+            let mut command = std::process::Command::new("omp");
+            let error = apply_agent_identity(&mut command, subject, &|name| {
+                match name { "ST_AGENT" => st, "FRACTAL_AGENT" => fractal, _ => None }
+                    .map(std::ffi::OsString::from)
+            }).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("does not match fenced subject"));
+        }
+        for inherited in [None, Some(subject)] {
+            let mut command = std::process::Command::new("omp");
+            apply_agent_identity(&mut command, subject, &|_| inherited.map(Into::into)).unwrap();
+            let values = command.get_envs().collect::<std::collections::BTreeMap<_, _>>();
+            for name in ["ST_AGENT", "FRACTAL_AGENT"] {
+                assert_eq!(values[std::ffi::OsStr::new(name)], Some(std::ffi::OsStr::new(subject)));
+            }
+        }
+        let mut overridden = std::process::Command::new("omp");
+        overridden.env("ST_AGENT", "agent/wrong");
+        assert!(apply_agent_identity(&mut overridden, subject, &|_| Some(subject.into())).is_err());
     }
 }

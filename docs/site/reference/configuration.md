@@ -121,9 +121,10 @@ directly. The Agent Spec's `persona` selects the persona; `AGENT_PERSONA` is nex
 and `generalist` is the last fallback. A declared persona that disagrees with
 `AGENT_PERSONA` refuses launch. The selected `harnessBin` is prepended to the
 provider child's PATH, so provider subprocesses also resolve managed wrappers;
-the driver's own PATH is unchanged. The provider child also receives `ST_AGENT`
-and `FRACTAL_AGENT` from the fenced driver subject when those variables are absent;
-existing identity values remain unchanged. The profile publisher selects the
+the driver's own PATH is unchanged. Before spawning a managed provider child,
+any present `ST_AGENT` or `FRACTAL_AGENT` must equal the fenced driver subject;
+empty or mismatched values refuse launch. Both child aliases are then set to
+that subject. The profile publisher selects the
 directory; Fractal does not duplicate persona-to-path rules. A missing persona entry,
 `harnessBin`, or executable wrapper refuses launch, naming the missing key/path.
 There is no fallback to a raw provider or to a different persona.
