@@ -52,7 +52,7 @@ let
     ++ lib.optionals (cfg.socket != null) [ "--socket" cfg.socket ]
     ++ lib.optionals (cfg.clientGatewaySocket != null) [ "--client-gateway-socket" cfg.clientGatewaySocket ]
     ++ [ "--web-listen" (if cfg.webListen == null then "off" else cfg.webListen) ]
-    ++ lib.optionals (!externallyManaged) [ "--web-dist" "${effectivePackage}/share/fractal-web" ]
+    ++ lib.optionals (!externallyManaged) [ "--web-dist" "${cfg.package}/share/fractal-web" ]
     ++ lib.optionals (cfg.clientGatewaySocket == null && pkgs.stdenv.hostPlatform.isDarwin)
       [ "--client-gateway-socket" "${cfg.stateDir}/run/fractal-client.sock" ]
     ++ (if externallyManaged then

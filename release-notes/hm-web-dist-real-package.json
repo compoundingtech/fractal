@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Serve Home Manager browser assets from the original package",
+  "replay": {"status": "none", "detail": "No replay or projection changes."},
+  "schema": {"status": "none", "detail": "No persistent schema changes."},
+  "rules": {"status": "none", "detail": "Static asset canonical-path containment remains enforced."},
+  "compatibility": {"status": "none", "detail": "Home Manager uses the original package web root rather than the PTY wrapper's per-file symlinks, avoiding rejected static assets when a PTY package is configured."},
+  "downtime": {"status": "none", "detail": "No additional downtime beyond normal Home Manager daemon service activation."},
+  "manual": {"status": "none", "detail": "No configuration changes are required; normal Home Manager activation applies the corrected web root."},
+  "recovery": {"status": "none", "detail": "Normal Home Manager generation rollback remains available."}
+}
