@@ -306,6 +306,7 @@ order from the same admitted claims.
 | `local_coordination_backfill` | Local cache | Writer-maintained count and held metadata, bounded historical cursor/ceiling/progress. No new conversation payload; excluded from shared projection digests. |
 | `local_custom_dirty` | Local | Custom projection subjects requiring maintenance in the current transaction. |
 | `local_directive_note_dirty` | Local | Person directive-note subjects whose published read needs refresh. |
+| `local_desired_write_witness` | Local | Single-row desired-page invalidation generation, maintained by desired-row write triggers, like `local_client_message_cut_epoch`. Never replicated, included in shared digests or exported in claim backups. Restore initializes a fresh witness and rebuilds selected rows from admitted claims; its new writer identity invalidates every pre-restore desired cursor even if the generation resets or collides. |
 | `local_directive_note_pending` | Local | Person directive-note projection work queue. |
 | `local_event_payloads` | Temporary local | Present only while duplicate local event payloads drain in bounded migration transactions. |
 | `local_git_change_latest` | Local | Current workspace Git observations on this node. |
