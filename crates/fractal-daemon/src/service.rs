@@ -1703,6 +1703,7 @@ mod tests {
         let config = Config { node: "node-a".into(),
         quota_source: None,
         usage_limits: None,
+        host_envelope_file: None,
         access_mode: None,
         claude_primary_ownership: None,
         claude_primary_ownership_observe: None,
