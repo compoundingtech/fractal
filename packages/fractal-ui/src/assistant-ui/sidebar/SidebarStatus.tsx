@@ -46,12 +46,13 @@ const paths: Record<AgentStatus, React.ReactNode> = {
 }
 /**
  * The row-system state marks, in a 16 box. Filled is active and hollow is at rest; every other state differs by shape or
- * stroke weight, so nothing here depends on color. Waiting is the heavier hollow ring beside idle's thin one.
+ * stroke weight, so nothing here depends on color. Idle is the plain hollow ring; Waiting adds clock hands to it.
  */
 const marks: Record<AgentStatus, React.ReactNode> = {
   working: <circle cx="8" cy="8" r="4.75" fill="currentColor" stroke="none" />,
   idle: <circle cx="8" cy="8" r="4.75" strokeWidth="1.25" />,
-  waiting: <circle cx="8" cy="8" r="4.5" strokeWidth="2" />,
+  // Waiting on something other than you: idle's hollow ring with clock hands, so the two never share a shape.
+  waiting: <><circle cx="8" cy="8" r="4.75" strokeWidth="1.25" /><path data-mark-detail="clock" d="M8 5.6V8l1.6 1.1" strokeWidth="1.25" /></>,
   pending: <circle cx="8" cy="8" r="4.75" strokeDasharray=".01 2.98" />,
   stale: <><circle cx="8" cy="8" r="4.75" strokeDasharray="1.8 2.2" /><circle cx="8" cy="8" r="2" fill="currentColor" stroke="none" /></>,
   offline: <><circle cx="8" cy="8" r="4.75" /><path d="M4.75 4.75l6.5 6.5" /></>,
