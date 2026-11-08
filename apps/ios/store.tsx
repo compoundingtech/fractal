@@ -891,7 +891,7 @@ function useAppStore(proof?: FabricProfile) {
         } else setOwnProfiles(held => new Map(held).set(renewal.profileKey, next));
         setRenewals(held => held.filter(item => item.profileKey !== renewal.profileKey));
         push.resume();
-      } catch { setRenewalIssue('Renewal was not saved. Your previous pairing was kept. Reopen the app to refresh the request, then try again.'); }
+      } catch { setRenewalIssue('Renewal was not saved. Your previous profile was kept. Reopen the app to refresh; if no request remains, ask the operator to stage a new replacement.'); }
       finally { push.releaseIssuer(renewal.profileKey); renewalWorking.current = false; setRenewalBusy(false); }
     },
     async pair(id: string, code: string, fingerprint: string, unpinned = false): Promise<boolean> {

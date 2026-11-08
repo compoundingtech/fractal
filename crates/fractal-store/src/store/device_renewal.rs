@@ -50,12 +50,22 @@ impl Store {
             && replacement.fields.get("scopes") == fields.get("scopes")
             && replacement.fields.get("delegated_scopes") == fields.get("scopes"),
             "the replacement does not match the approved renewal");
+        let grant_expiry = fields["grant_expires_at_unix_ms"].as_u64().context("approved grant expiry missing")?;
+        anyhow::ensure!(u128::from(grant_expiry) > now && u128::from(grant_expiry) <= now + 30 * 24 * 60 * 60 * 1000
+            && replacement.fields.get("expires_at_unix_ms") == Some(&fields["grant_expires_at_unix_ms"]),
+            "the replacement expiry does not match the approved renewal");
         let previous: Vec<String> = serde_json::from_value(historical["scopes"].clone())?;
         let scopes: Vec<String> = serde_json::from_value(fields["scopes"].clone())?;
         anyhow::ensure!(!scopes.is_empty() && scopes.iter().all(|scope| previous.contains(scope)), "renewal scopes exceed the source grant");
+        anyhow::ensure!(crate::pairing::latest_completion(&tx, &source.subject, Some(self.origin()), now)?
+            .is_some_and(|current| current.id == source.id), "the renewal source is no longer the current admitted completion");
         let completed = append_claim_tx(&tx, self.origin(), &replacement.subject, &replacement.kind,
             replacement.actor.as_deref(), &json!({"fields":replacement.fields}), &replacement.evidence, None)?;
         append_operation_receipt_tx(&tx, &completed)?;
+        let retired = append_claim_tx(&tx, self.origin(), &source.subject, "custom.client.pairing-revoked",
+            Some(person), &json!({"fields":{"person_id":person,"device_id":device,"completion_id":source.id}}),
+            std::slice::from_ref(&source.id), Some(&completed.batch_id))?;
+        append_operation_receipt_tx(&tx, &retired)?;
         let receipt = append_claim_tx(&tx, self.origin(), &consumed.subject, &consumed.kind,
             consumed.actor.as_deref(), &json!({"fields":consumed.fields}), std::slice::from_ref(&stage.id), Some(&completed.batch_id))?;
         append_operation_receipt_tx(&tx, &receipt)?;
@@ -76,15 +86,16 @@ mod tests {
     }
     fn fixture_with_expiry(stage_expiry: u64, challenge_expiry: u64) -> (Store, ClaimRecord, ClaimRecord, ClaimRecord, ClaimInput, ClaimInput) {
         let store=Store::open_memory("member").unwrap();
+        let grant_expiry = smallclaims::store::now_ms() + 29 * 24 * 60 * 60 * 1000;
         let source=store.append_client_operation_claim(&input("custom/client/pairing-history","custom.client.pairing-completed",
             json!({"person_id":"person/example","device_id":"device/old","device_public_key":"old-key","scopes":["read.projections"],"expires_at_unix_ms":1}))).unwrap();
         let stage=store.append_client_operation_claim(&input("custom/client/pairing-renewal-stage","custom.client.pairing-renewal-staged",
-            json!({"person_id":"person/example","renewal_id":"renewal/test","source_grant_id":source.id,"old_public_key":"old-key","scopes":["read.projections"],"expires_at_unix_ms":stage_expiry}))).unwrap();
+            json!({"person_id":"person/example","renewal_id":"renewal/test","source_grant_id":source.id,"old_public_key":"old-key","scopes":["read.projections"],"expires_at_unix_ms":stage_expiry,"grant_expires_at_unix_ms":grant_expiry}))).unwrap();
         let challenge=store.append_client_operation_claim(&input("custom/client/pairing-renewal-challenge","custom.client.pairing-renewal-challenge",
             json!({"person_id":"person/example","renewal_id":"renewal/test","expires_at_unix_ms":challenge_expiry}))).unwrap();
         let consumed=input(&stage.subject,"custom.client.pairing-renewal-consumed",json!({"person_id":"person/example","renewal_id":"renewal/test"}));
         let replacement=input("custom/client/pairing-replacement","custom.client.pairing-completed",
-            json!({"person_id":"person/example","device_public_key":"candidate-key","scopes":["read.projections"],"delegated_scopes":["read.projections"]}));
+            json!({"person_id":"person/example","device_public_key":"candidate-key","scopes":["read.projections"],"delegated_scopes":["read.projections"],"expires_at_unix_ms":grant_expiry}));
         (store,stage,source,challenge,consumed,replacement)
     }
     fn withdraw(store: &Store, source: &ClaimRecord) {
@@ -100,9 +111,16 @@ mod tests {
         let (store,stage,source,challenge,consumed,replacement)=fixture();
         let result=store.commit_device_renewal(&stage,&source,&challenge,&consumed,&replacement).unwrap();
         assert!(store.client_operation_is_trusted(&result).unwrap());
+        assert_eq!(result.body["fields"]["expires_at_unix_ms"], stage.body["fields"]["grant_expires_at_unix_ms"]);
         let receipt=store.claims_for_subject_kind_at(&stage.subject,"custom.client.pairing-renewal-consumed",None,true,1).unwrap().claims.remove(0);
         assert!(store.client_operation_is_trusted(&receipt).unwrap());
         assert_eq!(receipt.batch_id,result.batch_id);
+        assert!(store.commit_device_renewal(&stage,&source,&challenge,&consumed,&replacement).is_err());
+    }
+    #[test]
+    fn device_renewal_refuses_a_changed_replacement_expiry() {
+        let (store,stage,source,challenge,consumed,mut replacement)=fixture();
+        replacement.fields.insert("expires_at_unix_ms".into(), json!(smallclaims::store::now_ms() + 30 * 24 * 60 * 60 * 1000));
         assert!(store.commit_device_renewal(&stage,&source,&challenge,&consumed,&replacement).is_err());
     }
     #[test]

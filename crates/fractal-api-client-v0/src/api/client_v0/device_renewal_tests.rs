@@ -3,6 +3,9 @@ use smallclaims::fleet::MemberKey;
 
 const PERSON: &str = "person/avery";
 fn fixture() -> (tempfile::TempDir, AppState, MemberKey, ClaimRecord) {
+    fixture_with_source_expiry(1)
+}
+fn fixture_with_source_expiry(expiry: u128) -> (tempfile::TempDir, AppState, MemberKey, ClaimRecord) {
     let root = tempfile::tempdir().unwrap();
     let state = super::super::tests::test_state_named(root.path(), "renewal-member");
     state.store.set_node_key(Arc::new(MemberKey::generate().unwrap().0)).unwrap();
@@ -10,7 +13,7 @@ fn fixture() -> (tempfile::TempDir, AppState, MemberKey, ClaimRecord) {
     let old = MemberKey::generate().unwrap().0;
     let source = state.store.append_client_operation_claim(&ClaimInput {
         subject: "custom/client/pairing-historical-phone".into(), kind: "custom.client.pairing-completed".into(), actor: Some(PERSON.into()),
-        fields: serde_json::from_value(json!({"device_id":"device/historical-phone","person_id":PERSON,"device_public_key":old.public(),"credential_hash":credential_digest("old-bearer"),"session_actor":"person/avery/session/phone","scopes":["read.projections"],"expires_at_unix_ms":1})).unwrap(),
+        fields: serde_json::from_value(json!({"device_id":"device/historical-phone","person_id":PERSON,"device_public_key":old.public(),"credential_hash":credential_digest("old-bearer"),"session_actor":"person/avery/session/phone","scopes":["read.projections"],"expires_at_unix_ms":expiry})).unwrap(),
         evidence: vec![],expected_subject:None,idempotency_key:None,
     }).unwrap();
     (root,state,old,source)
@@ -40,7 +43,7 @@ async fn poll(state: &AppState, key: &MemberKey) -> Result<Json<Value>, ApiError
     pending(State(state.clone()),Json(serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"device_public_key":key.public(),"timestamp_unix_ms":timestamp,"signature":key.sign(bytes.as_bytes())})).unwrap())).await
 }
 fn approval(offer: &Value, old: &MemberKey, candidate: &MemberKey) -> Complete {
-    let bytes = format!("fractal-device-renewal-v1\n{}",json!([offer["renewal_id"],offer["migration_epoch"],offer["issuer_member"],offer["person_id"],offer["requested_by"],offer["scopes"],offer["old_public_key"],offer["nonce"],offer["expires_at_unix_ms"],candidate.public()]));
+    let bytes = format!("fractal-device-renewal-v1\n{}",json!([offer["renewal_id"],offer["migration_epoch"],offer["issuer_member"],offer["person_id"],offer["requested_by"],offer["scopes"],offer["old_public_key"],offer["nonce"],offer["expires_at_unix_ms"],offer["grant_expires_at_unix_ms"],candidate.public()]));
     serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"renewal_id":offer["renewal_id"],"device_public_key":old.public(),"candidate_public_key":candidate.public(),"key_storage":"secure-enclave","nonce":offer["nonce"],"expires_at_unix_ms":offer["expires_at_unix_ms"],"old_signature":old.sign(bytes.as_bytes()),"candidate_signature":candidate.sign(bytes.as_bytes())})).unwrap()
 }
 
@@ -65,6 +68,23 @@ async fn renewal_addresses_existing_key_and_preserves_scopes_once() {
     assert!(complete(State(state.clone()),Extension(session),Json(approval(offer,&old,&candidate))).await.is_err());
     assert!(poll(&state,&old).await.unwrap().0["renewals"].as_array().unwrap().is_empty());
     assert!(paired_client_session(&state,&source,"fabric-loopback",false).is_err());
+}
+
+#[tokio::test]
+async fn renewal_retires_live_source_bearer_and_admits_replacement() {
+    use axum::{body::Body, http::{Request, StatusCode, header::AUTHORIZATION}};
+    let (_root, state, old, source) = fixture_with_source_expiry(client_now_ms() + DAY_MS);
+    let request = |credential: &str| Request::builder().uri("/v1/client/capabilities")
+        .header(AUTHORIZATION, format!("Bearer {credential}")).body(Body::empty()).unwrap();
+    assert!(authenticate(&state, &request("old-bearer"), "fabric-loopback").is_ok());
+    staged(&state, &source).await;
+    let offers = poll(&state, &old).await.unwrap().0;
+    let candidate = MemberKey::generate().unwrap().0;
+    let result = complete(State(state.clone()), Extension(ClientSession::pairing()),
+        Json(approval(&offers["renewals"][0], &old, &candidate))).await.unwrap().0;
+    let refused = authenticate(&state, &request("old-bearer"), "fabric-loopback").unwrap_err();
+    assert!(matches!(refused.status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN));
+    assert!(authenticate(&state, &request(result["credential"].as_str().unwrap()), "fabric-loopback").is_ok());
 }
 
 #[tokio::test]
@@ -131,7 +151,7 @@ async fn renewal_signatures_cover_every_offer_field_and_candidate() {
     let bytes=approval_bytes(&stage,nonce,expiry,candidate.public()).unwrap();
     let signature=old.sign(&bytes);
     assert!(smallclaims::principal::verify_key_signature(old.public(),&bytes,&signature));
-    for name in ["renewal_id","migration_epoch","issuer_member","person_id","requested_by","scopes","old_public_key"] {
+    for name in ["renewal_id","migration_epoch","issuer_member","person_id","requested_by","scopes","old_public_key","grant_expires_at_unix_ms"] {
         let mut changed=stage.clone();
         changed.body["fields"][name]=if name=="scopes" { json!(["control.messages"]) } else { json!("changed") };
         assert!(!smallclaims::principal::verify_key_signature(old.public(),&approval_bytes(&changed,nonce,expiry,candidate.public()).unwrap(),&signature),"{name}");
@@ -143,6 +163,17 @@ async fn renewal_signatures_cover_every_offer_field_and_candidate() {
     ] {
         assert!(!smallclaims::principal::verify_key_signature(old.public(),&bytes,&signature));
     }
+}
+
+#[tokio::test]
+async fn invalid_pending_proofs_do_not_charge_the_device_allowance() {
+    let (_root, state, old, source) = fixture();
+    staged(&state, &source).await;
+    for _ in 0..20 {
+        let request = serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"device_public_key":old.public(),"timestamp_unix_ms":client_now_ms(),"signature":"invalid"})).unwrap();
+        assert!(pending(State(state.clone()), Json(request)).await.is_err());
+    }
+    assert_eq!(poll(&state, &old).await.unwrap().0["renewals"].as_array().unwrap().len(), 1);
 }
 
 #[tokio::test]

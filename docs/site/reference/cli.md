@@ -87,6 +87,10 @@ The approval window defaults to 72 hours. Set `--expires-in-hours HOURS` to choo
 1–168 hours. Staging accepts no scope or candidate-key overrides and is unavailable
 over HTTP or Fabric endpoints. It prints only the renewal ID and expiry; `--json`
 returns the stage receipt, including its audited digest, without a credential.
+Renewal explicitly supports an expired or short-lived source grant. The audited
+stage fixes the replacement expiry at 30 days after staging, never later than
+30 days after approval. Both the signed offer and phone approval bind that exact
+expiry; completion preserves it rather than starting a new lifetime.
 The saved phone profile discovers its renewal when the app starts or returns to
 the foreground. Review the displayed member, person, requester, and scopes there, then tap
 **Approve** to finish with native user presence. No pairing code or QR scan is

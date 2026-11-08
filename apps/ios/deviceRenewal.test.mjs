@@ -28,10 +28,10 @@ const now = 1_800_000_000_000;
 const profile = () => ({ url: 'https://member.example', credential: 'previous-bearer-never-sent-for-renewal', personRootFingerprint: vector.fingerprint,
   signing: { key: 'p256:old-device-key', storage: 'secure-enclave', handle: 'old-handle', person: vector.person, chain: ['old-grant'] }, routing: { carrier: 'tailscale', members: [] } });
 const offer = () => ({ renewal_id: 'renewal/example', migration_epoch: 'example-epoch', issuer_member: 'host/example', person_id: vector.person, requested_by: 'agent/example',
-  scopes: ['control.messages'], old_public_key: 'p256:old-device-key', nonce: 'fresh-nonce', expires_at_unix_ms: now + 300_000,
+  scopes: ['control.messages'], old_public_key: 'p256:old-device-key', nonce: 'fresh-nonce', expires_at_unix_ms: now + 300_000, grant_expires_at_unix_ms: now + 29 * 24 * 60 * 60_000,
   person_root_key_proof: structuredClone(vector.proofs[1]), issuer_signature: 'offer-signature' });
 const session = () => ({ kind: 'paired-session', device_id: 'device/0123456789abcdef01234567', person_id: vector.person,
-  session_actor: `${vector.person}/session/example`, credential: 'new-test-bearer-at-least-thirty-two-characters', expires_at: '2027-01-01T00:00:00Z',
+  session_actor: `${vector.person}/session/example`, credential: 'new-test-bearer-at-least-thirty-two-characters', expires_at: new Date(now + 29 * 24 * 60 * 60_000).toISOString(),
   scopes: ['control.messages'], device_key_chain: [...vector.chain], device_key_proofs: structuredClone(vector.proofs) });
 
 function setup() {
@@ -130,5 +130,6 @@ test('every approval tuple field and the candidate affect the signed bytes', () 
   for (const key of ['renewal_id', 'migration_epoch', 'issuer_member', 'person_id', 'old_public_key', 'nonce']) assert.notEqual(renewalApprovalText({ ...value, [key]: `${value[key]}-changed` }, 'candidate'), text);
   assert.notEqual(renewalApprovalText({ ...value, scopes: ['other'] }, 'candidate'), text);
   assert.notEqual(renewalApprovalText({ ...value, expires_at_unix_ms: value.expires_at_unix_ms + 1 }, 'candidate'), text);
+  assert.notEqual(renewalApprovalText({ ...value, grant_expires_at_unix_ms: value.grant_expires_at_unix_ms + 1 }, 'candidate'), text);
   assert.notEqual(renewalApprovalText(value, 'another-candidate'), text);
 });

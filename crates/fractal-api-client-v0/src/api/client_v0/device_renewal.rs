@@ -115,6 +115,15 @@ fn source(state: &AppState, stage: &ClaimRecord) -> Result<ClaimRecord, ApiError
     not_revoked(state, &claim)?;
     Ok(claim)
 }
+fn pre_auth_budget() -> Result<(), ApiError> {
+    static BUDGET: Mutex<(u128, u32)> = Mutex::new((0, 0));
+    let now = client_now_ms();
+    let mut budget = BUDGET.lock().map_err(|_| ApiError::internal("renewal budget unavailable"))?;
+    if now.saturating_sub(budget.0) >= 60_000 { *budget = (now, 0); }
+    budget.1 += 1;
+    if budget.1 > 4096 { return Err(forbidden("renewal requests are busy; retry later")); }
+    Ok(())
+}
 fn rate_limit(key: &str) -> Result<(), ApiError> {
     static REQUESTS: LazyLock<Mutex<BTreeMap<String, (u128, u32)>>> = LazyLock::new(Default::default);
     let now = client_now_ms();
@@ -171,13 +180,14 @@ pub async fn stage(State(state): State<AppState>, Extension(session): Extension<
             ("issuer_member".into(), json!(state.node)), ("source_grant_id".into(), json!(source.id)),
             ("allow_digest".into(), json!(request.allow_digest)), ("old_public_key".into(), json!(old_key)),
             ("scopes".into(), json!(scopes)), ("expires_at_unix_ms".into(), json!(expires)),
+            ("grant_expires_at_unix_ms".into(), json!(client_now_ms() + 30 * DAY_MS)),
         ]), None, vec![source.id.clone()])?;
     signal_changed(&state);
     Ok(Json(json!({"kind":"device-renewal-staged","renewal_id":renewal_id,"expires_at":client_timestamp(expires),"allow_digest":request.allow_digest})))
 }
 
 fn offer_tuple(stage: &ClaimRecord, nonce: &str, expires: u64) -> Result<Value, ApiError> {
-    Ok(json!([text(stage,"renewal_id")?, text(stage,"migration_epoch")?, text(stage,"issuer_member")?, text(stage,"person_id")?, text(stage,"requested_by")?, field(stage,"scopes"), text(stage,"old_public_key")?, nonce, expires]))
+    Ok(json!([text(stage,"renewal_id")?, text(stage,"migration_epoch")?, text(stage,"issuer_member")?, text(stage,"person_id")?, text(stage,"requested_by")?, field(stage,"scopes"), text(stage,"old_public_key")?, nonce, expires, field(stage,"grant_expires_at_unix_ms")]))
 }
 fn approval_bytes(stage: &ClaimRecord, nonce: &str, expires: u64, candidate: &str) -> Result<Vec<u8>, ApiError> {
     let mut tuple = offer_tuple(stage, nonce, expires)?;
@@ -188,12 +198,13 @@ fn approval_bytes(stage: &ClaimRecord, nonce: &str, expires: u64, candidate: &st
 pub async fn pending(State(state): State<AppState>, Json(request): Json<Pending>) -> Result<Json<Value>, ApiError> {
     version(&request.api_version)?;
     if request.device_public_key.len() > 160 || request.signature.len() > 256 { return Err(validation("invalid renewal proof")); }
-    rate_limit(&request.device_public_key)?;
+    pre_auth_budget()?;
     let now = client_now_ms();
     let proof = format!("fractal-device-renewal-pending-v1\n{}", json!([request.device_public_key, request.timestamp_unix_ms]));
     if now.abs_diff(u128::from(request.timestamp_unix_ms)) > 60_000
         || !smallclaims::principal::verify_key_signature(&request.device_public_key, proof.as_bytes(), &request.signature)
     { return Err(forbidden("the renewal key proof is invalid")); }
+    rate_limit(&request.device_public_key)?;
     let mut renewals = Vec::new();
     for stage in matching_claims(&state, STAGED, "old_public_key", &request.device_public_key)? {
         if !local_record(&state, &stage)? || field(&stage,"old_public_key").as_str() != Some(request.device_public_key.as_str())
@@ -209,7 +220,7 @@ pub async fn pending(State(state): State<AppState>, Json(request): Json<Pending>
         let root = pairing_root_proof(&state, person)?.ok_or_else(|| forbidden("the member cannot prove the renewal root"))?;
         append(&state, format!("custom/client/pairing-renewal-challenge-{nonce}"), CHALLENGE, (person, person),
             BTreeMap::from([("renewal_id".into(), field(&stage,"renewal_id").clone()),("nonce".into(),json!(nonce)),("expires_at_unix_ms".into(),json!(expires))]), None, vec![stage.id.clone()])?;
-        renewals.push(json!({"renewal_id":text(&stage,"renewal_id")?,"migration_epoch":text(&stage,"migration_epoch")?,"issuer_member":text(&stage,"issuer_member")?,"person_id":person,"requested_by":text(&stage,"requested_by")?,"scopes":field(&stage,"scopes"),"old_public_key":request.device_public_key,"nonce":nonce,"expires_at_unix_ms":expires,"person_root_key_proof":root,"issuer_signature":issuer_signature}));
+        renewals.push(json!({"renewal_id":text(&stage,"renewal_id")?,"migration_epoch":text(&stage,"migration_epoch")?,"issuer_member":text(&stage,"issuer_member")?,"person_id":person,"requested_by":text(&stage,"requested_by")?,"scopes":field(&stage,"scopes"),"old_public_key":request.device_public_key,"nonce":nonce,"expires_at_unix_ms":expires,"grant_expires_at_unix_ms":field(&stage,"grant_expires_at_unix_ms"),"person_root_key_proof":root,"issuer_signature":issuer_signature}));
     }
     Ok(Json(json!({"kind":"device-renewals","renewals":renewals})))
 }
@@ -221,7 +232,7 @@ pub async fn complete(State(state): State<AppState>, Extension(_session): Extens
         || request.nonce.len() != 48 || !request.nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
         || request.renewal_id.len() > 80
     { return Err(validation("invalid renewal completion")); }
-    rate_limit(&request.device_public_key)?;
+    pre_auth_budget()?;
     let _serial = RENEWAL_COMPLETIONS.lock().await;
     let id = request.renewal_id.strip_prefix("renewal/").ok_or_else(|| validation("invalid renewal id"))?;
     let subject = format!("custom/client/pairing-renewal-{id}");
@@ -245,6 +256,7 @@ pub async fn complete(State(state): State<AppState>, Extension(_session): Extens
     if !smallclaims::principal::verify_key_signature(&request.device_public_key, &bytes, &request.old_signature)
         || !smallclaims::principal::verify_key_signature(&request.candidate_public_key, &bytes, &request.candidate_signature)
     { return Err(forbidden("the renewal approval does not match its keys and offer")); }
+    rate_limit(&request.device_public_key)?;
     let person = text(&stage,"person_id")?;
     let candidate = &request.candidate_public_key;
     let scopes = field(&stage, "scopes").clone();
@@ -268,7 +280,9 @@ pub async fn complete(State(state): State<AppState>, Extension(_session): Extens
     let device_hash = credential_digest(candidate);
     let device_id = format!("device/{}", &device_hash[..24]);
     let actor = format!("{person}/session/{}", &device_hash[..16]);
-    let expires = now + 30 * DAY_MS;
+    let expires = field(&stage, "grant_expires_at_unix_ms").as_u64().map(u128::from)
+        .filter(|expiry| *expiry > now && *expiry <= now + 30 * DAY_MS)
+        .ok_or_else(|| forbidden("the replacement expiry is unavailable"))?;
     let consumed = ClaimInput {
         subject, kind: CONSUMED.into(), actor: Some(person.into()),
         fields: BTreeMap::from([
