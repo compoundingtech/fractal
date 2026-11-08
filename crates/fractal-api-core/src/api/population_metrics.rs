@@ -365,6 +365,7 @@ async fn wait_for_refresh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SeatsStoreCore as _;
     use serde_json::json;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
