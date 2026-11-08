@@ -1,8 +1,8 @@
 import { useAtomValue } from '@effect/atom-react'
 import * as DateTime from 'effect/DateTime'
+import * as React from 'react'
 import { EntityCard, EntityCardHeader, EntityCardList, EntityCardListItem, EntityCardMeta, EntityCardMetaLine, EntityCardNote, EntityCardSection, EntityStatusMark } from '../../../../packages/fractal-ui/src/assistant-ui/entity/EntityCard.tsx'
 import { useAttention, useDataSource, useNowSnapshot } from '../data/react.tsx'
-import { useMissionRows } from '../missions/useMissionRows.ts'
 import { quotaStateAtom } from '../monitor/state.ts'
 import { usageSectionView } from '../monitor/usageSectionView.ts'
 import type { PresentationWorld } from '../workspace/presentation.ts'
@@ -35,17 +35,11 @@ const InboxCard = () => {
   </EntityCard>
 }
 
-const MissionsCard = () => {
-  const { missions, rows } = useMissionRows()
-  const active = rows.filter(row => row.presentation.settled_at === null && !row.presentation.system)
-  return <EntityCard entity={{ kind: 'view', id: 'missions' }} testId="missions-hover-card">
-    <EntityCardHeader title="Missions" summary={missions._tag !== 'Observed' ? ['Loading'] : [plural(active.length, 'active mission'), `${rows.length} in all`]} />
-    {active.length > 0 && <EntityCardSection label="Active" icon="checklist">
-      <EntityCardList>{active.slice(0, listLimit).map(row => <EntityCardListItem key={row.mission.id} title={row.mission.title} trailing={`${row.presentation.progress.done}/${row.presentation.progress.total}`} detail={row.presentation.word} />)}</EntityCardList>
-      {active.length > listLimit && <EntityCardNote>+{active.length - listLimit} more</EntityCardNote>}
-    </EntityCardSection>}
-  </EntityCard>
-}
+// The missions card orders rows by the contract's JSON word list; it loads on demand, like the missions surfaces.
+const LazyMissionsViewCard = React.lazy(() => import('./MissionsViewCard.tsx').then(module => ({ default: module.MissionsViewCard })))
+const MissionsCard = () => <React.Suspense fallback={<EntityCard entity={{ kind: 'view', id: 'missions' }} testId="missions-hover-card"><EntityCardHeader title="Missions" summary={['Loading']} /></EntityCard>}>
+  <LazyMissionsViewCard />
+</React.Suspense>
 
 const UsageCard = () => {
   const view = usageSectionView({ state: useAtomValue(quotaStateAtom(useDataSource().usage)), now: useNowSnapshot() })
