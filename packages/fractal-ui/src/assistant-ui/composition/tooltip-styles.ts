@@ -8,7 +8,9 @@ import { elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVa
  * string stays a label-sized box inside the viewport rather than a column over the page.
  */
 export const tooltipStyles = stylex.create({
-  tooltip: { zIndex: 50, borderRadius: r.control, backgroundColor: text.fg, paddingInline: s.row, paddingBlock: s.sm, fontSize: t.denseSize, fontFamily: t.fontSans, color: surface.raised, boxShadow: elevation.popover, boxSizing: 'border-box', width: 'max-content', maxWidth: `min(${g.tooltipMax}, calc(100vw - ${s.lg}))`, whiteSpace: 'normal', overflowWrap: 'break-word', textAlign: 'start', maxHeight: `min(${g.tooltipMaxBlock}, calc(100vh - ${s.lg} * 2))`, overflow: 'hidden' },
+  tooltip: { zIndex: 50, borderRadius: r.control, backgroundColor: text.fg, paddingInline: s.row, paddingBlock: s.sm, fontSize: t.denseSize, fontFamily: t.fontSans, color: surface.raised, boxShadow: elevation.popover, boxSizing: 'border-box', width: 'max-content', maxWidth: `min(${g.tooltipMax}, calc(100vw - ${s.lg}))`, whiteSpace: 'normal', overflowWrap: 'break-word', textAlign: 'start', maxHeight: `min(${g.tooltipMaxBlock}, calc(100vh - ${s.lg} * 2))`, overflow: 'hidden',
+    // React Aria sets data-placement only after measuring the trigger; never paint at the origin first.
+    visibility: { default: 'hidden', ':is([data-placement])': 'visible' } },
   /** A label longer than the cap ends in an ellipsis at the last whole line. */
   label: { display: '-webkit-box', WebkitBoxOrient: 'vertical', WebkitLineClamp: 6, overflow: 'hidden' },
 })
