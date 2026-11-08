@@ -8122,12 +8122,16 @@ fn declare_outbox_reader(node: &Node) {
 /// `attempts` times already: what a sender that queues there (4c-3) leaves when its daemon stops
 /// before the drain, or when the member rolls back from it.
 fn leave_in_outbox(node: &Node, subject: &str, from: &str, attempts: i64) {
+    leave_in_outbox_to(node, subject, from, "agent/fleet-reader", attempts);
+}
+
+fn leave_in_outbox_to(node: &Node, subject: &str, from: &str, to: &str, attempts: i64) {
     let claim = ClaimInput {
         subject: subject.into(),
         kind: "message.sent".into(),
         actor: Some(from.into()),
         fields: serde_json::from_value(json!({
-            "from": from, "to": OUTBOX_READER, "content": "through the outbox", "status": "sent"
+            "from": from, "to": to, "content": "through the outbox", "status": "sent"
         }))
         .unwrap(),
         evidence: Vec::new(),
@@ -8250,7 +8254,7 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
     // an older release leaves it queued while continuing to read and send graph mail.
     o.stop();
     let left = "message/0000000000000e01";
-    leave_in_outbox(&o, left, "agent/fleet-sender", 0);
+    leave_in_outbox_to(&o, left, "agent/fleet-sender", OUTBOX_READER, 0);
     if let Some(restored) = previous_release_rollback(&mut o, &old, &recovery).await {
         assert_eq!(listed(&restored).await, before, "recovery changed the old reader's mail");
         assert_eq!(outbox(&o), [left], "the refused downgrade changed the pending outbox");
@@ -8299,7 +8303,6 @@ async fn a_message_left_in_the_outbox_drains_once_when_the_daemon_starts() {
     let root = tempfile::tempdir().unwrap();
     let mut n = Node::new(root.path(), "n");
     n.start().await;
-    declare_outbox_reader(&n);
     let held = "message/0000000000000f01";
     append_stream_item(&n, held).await;
     n.stop();
