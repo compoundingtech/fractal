@@ -13,6 +13,34 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
+#[test]
+fn incomplete_linux_environment_is_unavailable() {
+    for (case, environment, expected) in [
+        ("empty environ", b"".as_slice(), HarnessAncestry::Unavailable),
+        ("truncated environ", b"PATH=/bin".as_slice(), HarnessAncestry::Unavailable),
+        ("complete environment without markers", b"PATH=/bin\0".as_slice(), HarnessAncestry::Person),
+        ("complete environment with marker", b"ST_AGENT=agent/fixture/worker\0".as_slice(),
+            HarnessAncestry::Bound("agent/fixture/worker".into())),
+    ] {
+        assert_eq!(HarnessAncestry::of_linux_environment(environment), expected, "{case}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn empty_process_environment_is_unavailable() {
+    let mut child = std::process::Command::new("sleep").arg("10").env_clear().spawn().unwrap();
+    let pid = child.id();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let identity = local_harness_identity(pid);
+    let ancestry = harness_ancestor(pid, Some(&peer));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(identity, Some(HarnessAncestry::Unavailable), "empty environ local identity");
+    assert_eq!(ancestry, HarnessAncestry::Unavailable, "empty environ ancestry walk");
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn person_uid_boundary_stops_before_unreadable_foreign_ancestors() {
@@ -206,7 +234,7 @@ async fn assert_masked_identity_refused(method: &str, path: &str, person: bool, 
         if let Some(value) = primary { command.env("ST_AGENT", value); }
         if let Some(value) = legacy { command.env("FRACTAL_AGENT", value); }
         let ancestry = inspect_ancestry_fixture(&mut command);
-        assert_eq!(ancestry, HarnessAncestry::Unavailable);
+        assert_eq!(ancestry, HarnessAncestry::Unavailable, "{path}: {primary:?} {legacy:?}");
         let mut request = Request::builder().method(method).uri(path);
         if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
         let mut request = request.body(Body::from(body.to_string())).unwrap();
