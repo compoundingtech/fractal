@@ -17,6 +17,8 @@ let container: HTMLDivElement
 let store: ViewportStore
 beforeEach(() => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  // jsdom has no ResizeObserver; the header's truncation tooltip observes its label, which never resizes here.
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   store = new ViewportStore()
   container = document.createElement('div')
   document.body.appendChild(container)
