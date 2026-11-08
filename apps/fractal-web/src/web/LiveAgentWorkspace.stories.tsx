@@ -135,6 +135,8 @@ export const TranscriptEndClearsComposer: Story = {
 export const TranscriptEndClearsComposerLight: Story = { ...TranscriptEndClearsComposer, args: { state: 'populated', scheme: 'light' } }
 
 const mac = () => /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
+/** A phone width shows the focused pane alone. */
+const collapsed = (canvas: HTMLElement) => canvas.querySelector('[data-workspace][data-collapsed]') !== null
 const press = (init: KeyboardEventInit, target: EventTarget = document.body) =>
   target.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }))
 
@@ -158,6 +160,18 @@ export const Splits: Story = {
     const surface = () => canvasElement.querySelector(`[data-tab-surface="agent:${other.id}"]`)
     await waitFor(() => expect(surface()).not.toBeNull())
     const node = surface()
+    if (collapsed(canvasElement)) {
+      // A phone keeps splits but shows the focused pane alone: Mod+D focuses a new empty pane, Alt+W closes it.
+      press({ key: 'd', code: 'KeyD', metaKey: mac(), ctrlKey: !mac() })
+      await waitFor(() => expect(strips()).toHaveLength(2))
+      expect(shownPanes()).toHaveLength(1)
+      await waitFor(() => expect(canvasElement.querySelector('[data-pane][data-focused] [data-testid="workspace-empty"]')).not.toBeNull())
+      press({ key: 'w', code: 'KeyW', altKey: true })
+      await waitFor(() => expect(strips()).toHaveLength(1))
+      expect(surface()).toBe(node)
+      canvasElement.dataset.proof = 'passed'
+      return
+    }
     moved.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
     await waitFor(() => expect([...document.querySelectorAll('[role="menuitem"]')].some(item => item.textContent === 'Split right')).toBe(true))
     ;[...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(item => item.textContent === 'Split right')!.click()
@@ -222,6 +236,13 @@ export const SplitsDragAndDrop: Story = {
     drop()
     await waitFor(() => expect(strips()).toHaveLength(2))
     expect(surface()).toBe(node)
+    if (collapsed(canvasElement)) {
+      // A phone shows the new pane alone, the dragged tab in it; nothing to drag back onto.
+      expect([...canvasElement.querySelectorAll('[data-pane]')].filter(pane => pane.closest('[hidden]') === null)).toHaveLength(1)
+      await waitFor(() => expect(surface()?.getAttribute('aria-hidden')).toBe('false'))
+      canvasElement.dataset.proof = 'passed'
+      return
+    }
     const home = strips()[0]!.querySelector('[role="tab"]')!.getBoundingClientRect()
     const back = drag(tabs()[1]!, { x: home.right - 4, y: home.top + home.height / 2 })
     back()
@@ -244,6 +265,11 @@ export const SidebarDragToPane: Story = {
     const strips = () => [...canvasElement.querySelectorAll<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"]')]
     const tabs = () => strips().flatMap(strip => [...strip.querySelectorAll<HTMLElement>('[role="tab"]')])
     await waitFor(() => expect(tabs()).toHaveLength(1))
+    // A phone's roster is a touch drawer over the one pane: a press there scrolls, and filing uses the Move button.
+    if (collapsed(canvasElement)) {
+      canvasElement.dataset.proof = 'passed'
+      return
+    }
     const other = fixtureProjections.agents.find(row => row.id !== appStoryAgent(args.state))!
     const row = () => canvasElement.querySelector<HTMLElement>(`[data-sidebar-tree-key="${other.id}"]`)
     await waitFor(() => expect(row()).not.toBeNull())
