@@ -14,7 +14,6 @@ import { credentialExpiredMessage, observed, unavailable, type Feed } from '../d
 import type { ResourcePage } from '../resources/agent/model.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import { rightPanelAtom } from './rightPanel.ts'
-import { inspectorViewPreference } from './conversationPreferences.ts'
 import type { ConversationPage } from '../data/source.ts'
 import { decodeConversationChunk } from '@fractal/sdk/read'
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
@@ -67,7 +66,6 @@ beforeEach(async () => {
   registry = AtomRegistry.make()
   // The dock is one app-wide setting; each test starts it closed.
   registry.set(rightPanelAtom, { open: false, tab: 'details' })
-  registry.set(inspectorViewPreference, 'details')
   registry.set(resources, observed({ value: { items: [resource], nextCursor: null } }))
   host = document.createElement('div')
   document.body.append(host)
