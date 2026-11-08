@@ -81,16 +81,19 @@ impl Store {
             let after = cursor.as_ref().map_or("", |cursor| cursor.after.as_str());
             smallclaims::touched::note_read(|| "kind:intent.desired".to_owned());
             let connection = self.readers.get();
-            let desired_sql = if subjects.is_empty() {
-                "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
-                 FROM desired WHERE ?1='[]' AND (?2 IS NULL OR kind=?2)
-                 AND subject>?3 ORDER BY subject LIMIT ?4"
+            let mut query = if subjects.is_empty() {
+                connection.prepare_cached(
+                    "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
+                     FROM desired WHERE ?1='[]' AND (?2 IS NULL OR kind=?2)
+                     AND subject>?3 ORDER BY subject LIMIT ?4",
+                )?
             } else {
-                "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
-                 FROM desired WHERE subject IN (SELECT value FROM json_each(?1))
-                 AND (?2 IS NULL OR kind=?2) AND subject>?3 ORDER BY subject LIMIT ?4"
+                connection.prepare_cached(
+                    "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
+                     FROM desired WHERE subject IN (SELECT value FROM json_each(?1))
+                     AND (?2 IS NULL OR kind=?2) AND subject>?3 ORDER BY subject LIMIT ?4",
+                )?
             };
-            let mut query = connection.prepare_cached(desired_sql)?;
             let mut desired = query.query_map(
                 params![serde_json::to_string(&subjects)?, request.kind, after, limit + 1], desired_from_row,
             )?.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -102,19 +105,22 @@ impl Store {
                 let mission_names = subjects.iter().filter_map(|subject| subject.strip_prefix("mission/"))
                     .collect::<Vec<_>>();
                 if subjects.is_empty() || !mission_names.is_empty() {
-                    let mission_sql = if subjects.is_empty() {
-                        "SELECT 'mission/' || d.mission_id, 'mission', r.body, NULL, NULL, NULL, NULL
-                         FROM mission_definitions d JOIN mission_revisions r
-                         ON r.mission_id=d.mission_id AND r.revision=d.revision
-                         WHERE ?1 AND ?2='[]' AND d.mission_id>?3 ORDER BY d.mission_id LIMIT ?4"
+                    let mut query = if subjects.is_empty() {
+                        connection.prepare_cached(
+                            "SELECT 'mission/' || d.mission_id, 'mission', r.body, NULL, NULL, NULL, NULL
+                             FROM mission_definitions d JOIN mission_revisions r
+                             ON r.mission_id=d.mission_id AND r.revision=d.revision
+                             WHERE ?1 AND ?2='[]' AND d.mission_id>?3 ORDER BY d.mission_id LIMIT ?4",
+                        )?
                     } else {
-                        "SELECT 'mission/' || d.mission_id, 'mission', r.body, NULL, NULL, NULL, NULL
-                         FROM mission_definitions d JOIN mission_revisions r
-                         ON r.mission_id=d.mission_id AND r.revision=d.revision
-                         WHERE NOT ?1 AND d.mission_id IN (SELECT value FROM json_each(?2))
-                         AND d.mission_id>?3 ORDER BY d.mission_id LIMIT ?4"
+                        connection.prepare_cached(
+                            "SELECT 'mission/' || d.mission_id, 'mission', r.body, NULL, NULL, NULL, NULL
+                             FROM mission_definitions d JOIN mission_revisions r
+                             ON r.mission_id=d.mission_id AND r.revision=d.revision
+                             WHERE NOT ?1 AND d.mission_id IN (SELECT value FROM json_each(?2))
+                             AND d.mission_id>?3 ORDER BY d.mission_id LIMIT ?4",
+                        )?
                     };
-                    let mut query = connection.prepare_cached(mission_sql)?;
                     desired.extend(query.query_map(params![subjects.is_empty(), serde_json::to_string(&mission_names)?,
                         after.strip_prefix("mission/").unwrap_or(""), limit + 1], desired_from_row)?
                         .collect::<rusqlite::Result<Vec<_>>>()?);

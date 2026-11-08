@@ -251,7 +251,9 @@ async fn desired_pages_require_the_same_paired_device_scope_as_single_desired() 
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
     }
-    let app = fabric_router(state);
+    // Native routes authenticate paired Authorization headers too. The fabric gateway
+    // separately forbids all raw routes, regardless of the credential's read scope.
+    let app = router(state);
     let (single_status, single) = paired_desired_request(
         app.clone(), "/v1/desired/agent/page/0000", "desired-no-projections",
     ).await;
