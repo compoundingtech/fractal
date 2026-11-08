@@ -392,7 +392,7 @@ async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut
     let url = format!("http://localhost/v1/client/assistant/{route}");
     let request = if write {
         let parameters = if name == ALERT_ANSWER {
-            json!({"target_id":args["alert_id"],"episode":args["episode"],"summary":args["summary"],"answer":{"id":args["option"]}})
+            json!({"target_id":args["alert_id"],"episode":args["episode"],"summary":args["summary"],"answer":{"choices":[{"id":args["option"]}]}})
         } else {json!({"to":args["to"],"title":args["title"],"content":args["content"]})};
         adapter.client.post(url).json(&json!({"api_version":"st3.client.v0","id":args["action_id"],"type":if name==ALERT_ANSWER {"work.done"} else {"message.send"},"idempotency_key":args["idempotency_key"],"fence":args["fence"],"parameters":parameters}))
     } else {

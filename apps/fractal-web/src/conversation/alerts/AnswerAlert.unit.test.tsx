@@ -88,19 +88,19 @@ describe('alertChoices', () => {
     const ask = item({ request: decision })
     expect(keys(ask)).toEqual(['merge', 'hold', 'change', 'dismiss'])
     expect(choice(ask, 'merge')).toMatchObject({ recommended: true, words: 'none', tone: 'primary' })
-    expect(choice(ask, 'merge').action('ignored')).toEqual({ type: 'work.done', summary: 'Merge', answer: { id: 'merge' } })
+    expect(choice(ask, 'merge').action('ignored')).toEqual({ type: 'work.done', summary: 'Merge', answer: { choices: [{ id: 'merge' }] } })
     expect(choice(ask, 'hold').tone).toBe('danger')
     expect(choice(ask, 'change').words).toBe('required')
     expect(choice(ask, 'change').action('Rename the flag.')).toEqual({
-      type: 'work.done', summary: 'Rename the flag.', answer: { id: 'change', text: 'Rename the flag.' },
+      type: 'work.done', summary: 'Change it — Rename the flag.', answer: { choices: [{ id: 'change' }], words: 'Rename the flag.' },
     })
-    expect(choice(ask, 'dismiss').action('')).toEqual({ type: 'work.done', summary: 'Dismissed without an answer.', answer: { id: 'dismiss' } })
+    expect(choice(ask, 'dismiss').action('')).toEqual({ type: 'work.done', summary: 'Dismissed without an answer.', answer: { choices: [{ id: 'dismiss' }] } })
   })
 
   it('takes words for feedback and a custom choice', () => {
     const feedback = item({ request: { version: 1, type: 'feedback', question: 'What should the banner say?', why_person: 'Your words.' } })
     expect(keys(feedback)).toEqual(['words', 'nothing'])
-    expect(choice(feedback, 'words').action('Welcome back')).toEqual({ type: 'work.done', summary: 'Welcome back', answer: { text: 'Welcome back' } })
+    expect(choice(feedback, 'words').action('Welcome back')).toEqual({ type: 'work.done', summary: 'Welcome back', answer: { choices: [], words: 'Welcome back' } })
     const custom = item({ request: { ...decision, type: 'choice', custom: true, answers: decision.answers.map(({ outcome: _, ...rest }) => rest) } })
     expect(keys(custom)).toEqual(['merge', 'hold', 'change', 'words', 'dismiss'])
   })
@@ -205,10 +205,10 @@ describe('a note on an answer', () => {
     const merge = choices.find((choice) => choice.key === 'merge')!
     const change = choices.find((choice) => choice.key === 'change')!
     expect(merge.notes).toBe(true)
-    expect(merge.action('', '  after the release branch is cut ')).toEqual({ type: 'work.done', summary: 'Merge: after the release branch is cut', answer: { id: 'merge', text: 'after the release branch is cut' } })
-    expect(merge.action('', '   ')).toEqual({ type: 'work.done', summary: 'Merge', answer: { id: 'merge' } })
+    expect(merge.action('', '  after the release branch is cut ')).toEqual({ type: 'work.done', summary: 'Merge: after the release branch is cut', answer: { choices: [{ id: 'merge', note: 'after the release branch is cut' }] } })
+    expect(merge.action('', '   ')).toEqual({ type: 'work.done', summary: 'Merge', answer: { choices: [{ id: 'merge' }] } })
     expect(change.notes).toBe(false)
-    expect(change.action('Split it in two', 'ignored')).toEqual({ type: 'work.done', summary: 'Split it in two', answer: { id: 'change', text: 'Split it in two' } })
+    expect(change.action('Split it in two', 'ignored')).toEqual({ type: 'work.done', summary: 'Change it — Split it in two', answer: { choices: [{ id: 'change' }], words: 'Split it in two' } })
   })
 })
 
@@ -327,11 +327,11 @@ describe('gatewayAlertActions', () => {
     const reviewApprove = vi.fn(async (_request: unknown) => ({ value: { status: 'completed' } }))
     const client = { attentionGet: vi.fn(async () => envelope(open)), workDone, reviewApprove } as unknown as FractalClient
     const port = gatewayAlertActions(client)
-    expect(await port.act({ alert: answered, action: { type: 'work.done', summary: 'Merge', answer: { id: 'merge' } } })).toEqual({ _tag: 'Sent' })
+    expect(await port.act({ alert: answered, action: { type: 'work.done', summary: 'Merge', answer: { choices: [{ id: 'merge' }] } } })).toEqual({ _tag: 'Sent' })
     expect(workDone).toHaveBeenCalledTimes(1)
     expect(workDone.mock.calls[0]![0]).toMatchObject({
       fence: { snapshot_id: 'snapshot/now', subject_revisions: { 'attention/ask': 'r1' } },
-      parameters: { target_id: 'step-run/example/build', episode: 'claim/example', summary: 'Merge', answer: { id: 'merge' } },
+      parameters: { target_id: 'step-run/example/build', episode: 'claim/example', summary: 'Merge', answer: { choices: [{ id: 'merge' }] } },
     })
     expect(await port.act({ alert: answered, action: { type: 'review.approve', reason: '' } })).toEqual({ _tag: 'Sent' })
     expect(reviewApprove.mock.calls[0]![0]).toMatchObject({ parameters: { target_id: 'step-run/example/build' } })

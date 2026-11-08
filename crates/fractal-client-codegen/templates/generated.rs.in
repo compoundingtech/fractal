@@ -3570,6 +3570,10 @@ pub struct StructuredRequest {
     pub answers: Vec<RequestAnswerOption>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub custom: bool,
+    /// `none`, `optional` or `required`: whether the person's words go with an answer. Absent means
+    /// required for feedback and optional for a decision or choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<String>,
     /// Images to look at, read with the blob route and the ask's step as the carrier.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<Attachment>,
@@ -3616,13 +3620,30 @@ pub struct RequestAnswerOption {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<String>,
 }
-/// A named answer `id`, text, or both.
+/// A person's answer in the one answer schema: the answers chosen, each with an optional note, and
+/// the person's own words beside them.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct PersonAnswerInput {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<PersonChoiceInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
+    pub words: Option<String>,
+}
+/// One chosen answer, by its id, with the person's note on it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct PersonChoiceInput {
+    pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
+    pub note: Option<String>,
+}
+/// One chosen answer as recorded: its id, its label, and the person's note on it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct PersonAnswerChoice {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 /// The typed answer a person gave to a structured request.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -3632,12 +3653,13 @@ pub struct PersonAnswer {
     /// `accept`, `decline`, `request_changes`, `selected`, `custom`, `feedback`, `read` or
     /// `dismissed`. A default applied at a deadline reads as the answer it stands for.
     pub outcome: String,
+    /// The answers chosen, each with its label and the person's note: none for words alone, a
+    /// dismissal or a read update.
+    #[serde(default)]
+    pub choices: Vec<PersonAnswerChoice>,
+    /// The person's own words beside their answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
+    pub words: Option<String>,
 }
 /// The answer of a person-step ask that applies at its deadline.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]

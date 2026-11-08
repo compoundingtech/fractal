@@ -142,7 +142,9 @@ export const StructuredRequest = /*#__PURE__*/ (() => Schema.Struct({
   "type": Schema.Literals(["decision","choice","feedback"]),
   "version": Schema.Literal(1),
   /** Why only this person can answer. */
-  "why_person": markdownInlineSchema(Schema.String.check(Schema.isMinCodePoints(1))).annotate({ description: "Why only this person can answer." })
+  "why_person": markdownInlineSchema(Schema.String.check(Schema.isMinCodePoints(1))).annotate({ description: "Why only this person can answer." }),
+  /** Whether the person's words go with an answer. Absent means required for feedback and optional for a decision or choice. */
+  "words": optionalKey(Schema.Literals(["none","optional","required"])).annotate({ description: "Whether the person's words go with an answer. Absent means required for feedback and optional for a decision or choice." })
 }).annotate({ identifier: "StructuredRequest", description: "A typed question with named answers. A decision names one accept, one decline and at most one request_changes answer; a choice names 2 to 5 options; feedback asks for text." }))()
 export type StructuredRequest = typeof StructuredRequest.Type
 export type StructuredRequestEncoded = typeof StructuredRequest.Encoded
@@ -2797,9 +2799,17 @@ export const Usage = /*#__PURE__*/ (() => Schema.Struct({
 export type Usage = typeof Usage.Type
 export type UsageEncoded = typeof Usage.Encoded
 
-export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
-  "id": optionalKey(Schema.String),
+export const PersonAnswerChoice = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Schema.String,
   "label": optionalKey(Schema.String),
+  "note": optionalKey(Schema.String)
+}).annotate({ identifier: "PersonAnswerChoice" }))()
+export type PersonAnswerChoice = typeof PersonAnswerChoice.Type
+export type PersonAnswerChoiceEncoded = typeof PersonAnswerChoice.Encoded
+
+export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
+  /** The answers chosen, each with its label and the person's note; empty for words alone, a dismissal or a read update. */
+  "choices": Schema.Array(PersonAnswerChoice).annotate({ description: "The answers chosen, each with its label and the person's note; empty for words alone, a dismissal or a read update." }),
   "outcome": Schema.Literals([
   "accept",
   "decline",
@@ -2810,8 +2820,9 @@ export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "read",
   "dismissed"
 ]),
-  "text": optionalKey(Schema.String),
-  "type": Schema.Literals(["decision","choice","feedback","update"])
+  "type": Schema.Literals(["decision","choice","feedback","update"]),
+  /** The person's own words beside their answer. */
+  "words": optionalKey(Schema.String).annotate({ description: "The person's own words beside their answer." })
 }).annotate({ identifier: "PersonAnswer" }))()
 export type PersonAnswer = typeof PersonAnswer.Type
 export type PersonAnswerEncoded = typeof PersonAnswer.Encoded

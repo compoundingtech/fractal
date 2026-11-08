@@ -70,22 +70,27 @@ export function spaced(question: string): string {
 
 type Request = { type: string; custom?: boolean; answers?: { id: string; outcome?: string | null }[] };
 
+/** A person's answer in the one answer schema (`docs/st3/person-answers.md`). */
+export type AnswerInput = { choices: { id: string; note?: string }[]; words?: string };
+
 /**
- * The typed answer for a person step, as the Fractal terminal UI sends it: the named answer chosen (with the words
- * when it requests changes), or the person's own words where the request takes them. Words
- * alone on a structured request are refused by Fractal (`answer-required`), which left an answered
- * item on Home (Nathan, 2026-10-03). A string says why words cannot answer it.
+ * The typed answer for a person step, as the Fractal terminal UI sends it, in the one answer schema: the named answer
+ * chosen, with the person's `note` on it and the words when it requests changes, or the person's own words where the
+ * request takes them. Words alone on a structured request are refused by Fractal (`answer-required`), which left an
+ * answered item on Home (Nathan, 2026-10-03). A string says why words cannot answer it.
  */
-export function personAnswer(request: Request | null | undefined, chosen: string | undefined, words: string): { id?: string; text?: string } | undefined | string {
+export function personAnswer(request: Request | null | undefined, chosen: string | undefined, words: string, note?: string): AnswerInput | undefined | string {
   const text = words.trim();
   if (chosen) {
+    const noted = note?.trim();
+    const choice = noted ? { id: chosen, note: noted } : { id: chosen };
     const changes = request?.answers?.some(answer => answer.id === chosen && answer.outcome === 'request_changes');
-    return changes ? { id: chosen, text } : { id: chosen };
+    return changes ? { choices: [choice], words: text } : { choices: [choice] };
   }
   if (!request) return undefined;
-  if (request.type === 'feedback' || (request.type === 'choice' && request.custom)) return { text };
+  if (request.type === 'feedback' || (request.type === 'choice' && request.custom)) return { choices: [], words: text };
   const changes = request.answers?.find(answer => answer.outcome === 'request_changes');
-  return changes ? { id: changes.id, text } : 'This asks you to pick one of its answers.';
+  return changes ? { choices: [{ id: changes.id }], words: text } : 'This asks you to pick one of its answers.';
 }
 
 /**

@@ -426,17 +426,17 @@ fn person_answer(
             })
         });
         return Ok(Some(fractal_client::PersonAnswerInput {
-            id: Some(id),
-            text: changes.then(|| words.trim().to_owned()),
+            choices: vec![fractal_client::PersonChoiceInput { id, note: None }],
+            words: changes.then(|| words.trim().to_owned()),
         }));
     }
     let Some(request) = request else {
         return Ok(None);
     };
-    let text = Some(words.trim().to_owned());
+    let words = Some(words.trim().to_owned());
     match request.entry_type.as_str() {
-        "feedback" => Ok(Some(fractal_client::PersonAnswerInput { id: None, text })),
-        "choice" if request.custom => Ok(Some(fractal_client::PersonAnswerInput { id: None, text })),
+        "feedback" => Ok(Some(fractal_client::PersonAnswerInput { choices: vec![], words })),
+        "choice" if request.custom => Ok(Some(fractal_client::PersonAnswerInput { choices: vec![], words })),
         // A decision takes words as its request for changes, when it offers one.
         _ => match request
             .answers
@@ -444,8 +444,8 @@ fn person_answer(
             .find(|answer| answer.outcome.as_deref() == Some("request_changes"))
         {
             Some(changes) => Ok(Some(fractal_client::PersonAnswerInput {
-                id: Some(changes.id.clone()),
-                text,
+                choices: vec![fractal_client::PersonChoiceInput { id: changes.id.clone(), note: None }],
+                words,
             })),
             None => anyhow::bail!("This asks you to pick one of its answers: a chooses one"),
         },
@@ -1149,21 +1149,21 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(
-            (answer.id, answer.text.as_deref()),
-            (None, Some("found it, works"))
+            (answer.choices.len(), answer.words.as_deref()),
+            (0, Some("found it, works"))
         );
         // A chosen answer goes by its id.
         let chosen = person_answer(Some(&custom), Some("works".into()), "Works")
             .unwrap()
             .unwrap();
-        assert_eq!(chosen.id.as_deref(), Some("works"));
+        assert_eq!(chosen.choices[0].id, "works");
         // Feedback takes words; a free-text ask takes the summary alone.
         let feedback = request("feedback", false, serde_json::json!([]));
         assert!(
             person_answer(Some(&feedback), None, "notes")
                 .unwrap()
                 .unwrap()
-                .text
+                .words
                 .is_some()
         );
         assert!(person_answer(None, None, "notes").unwrap().is_none());
@@ -1180,13 +1180,13 @@ mod tests {
         let chosen = person_answer(Some(&decision), Some("change".into()), "rename it")
             .unwrap()
             .unwrap();
-        assert_eq!(chosen.text.as_deref(), Some("rename it"));
+        assert_eq!(chosen.words.as_deref(), Some("rename it"));
         let changes = person_answer(Some(&decision), None, "rename it")
             .unwrap()
             .unwrap();
         assert_eq!(
-            (changes.id.as_deref(), changes.text.as_deref()),
-            (Some("change"), Some("rename it"))
+            (changes.choices[0].id.as_str(), changes.words.as_deref()),
+            ("change", Some("rename it"))
         );
         assert!(person_answer(Some(&request("choice", false, options)), None, "words").is_err());
     }

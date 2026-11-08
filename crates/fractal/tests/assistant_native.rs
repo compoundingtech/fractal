@@ -171,7 +171,7 @@ impl Harness {
         let item = self.state.store.attention_items(Some(OWNER)).unwrap().into_iter().find(|item| item.subject == target).unwrap();
         ActionRequest::work_done(format!("action/{key}"), format!("native-test-{key}"), self.fence().await,
             PersonStepParameters { target_id: target.into(), summary: "Native test answer".into(), episode: item.episode,
-                answer: Some(PersonAnswerInput { id: Some(answer.into()), ..Default::default() }), ..Default::default() }).unwrap()
+                answer: Some(PersonAnswerInput { choices: vec![fractal_client::PersonChoiceInput { id: answer.into(), note: None }], ..Default::default() }), ..Default::default() }).unwrap()
     }
 
     async fn message(&self, to: &str, key: &str) -> ActionRequest {

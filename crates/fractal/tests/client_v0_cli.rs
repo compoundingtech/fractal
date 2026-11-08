@@ -2255,6 +2255,10 @@ async fn cli_structured_choice_returns_the_selected_option_as_data() {
     .await;
     assert!(!words.status.success());
     assert!(String::from_utf8_lossy(&words.stderr).contains("answer-required"));
+    // The clean cut to the one answer schema: the old flags are gone.
+    let old = run_cli(&socket, &["work", "done", subject, "--as", "person/avery", "--answer", "paged"]).await;
+    assert!(!old.status.success());
+    assert!(String::from_utf8_lossy(&old.stderr).contains("--answer"));
     let done = value(
         &run_cli(
             &socket,
@@ -2264,8 +2268,10 @@ async fn cli_structured_choice_returns_the_selected_option_as_data() {
                 subject,
                 "--as",
                 "person/avery",
-                "--answer",
-                "paged",
+                "--choice",
+                "paged=only past 500 rows",
+                "--words",
+                "warn in the UI too",
             ],
         )
         .await,
@@ -2274,14 +2280,16 @@ async fn cli_structured_choice_returns_the_selected_option_as_data() {
     let shown = value(&run_cli(&socket, &["work", "show", subject]).await);
     let answer = &shown["value"]["person_answers"][0];
     assert_eq!(answer["respondent"], "person/avery");
-    assert_eq!(answer["summary"], "Page it");
+    assert_eq!(answer["summary"], "Page it: only past 500 rows — warn in the UI too");
     assert_eq!(
         answer["answer"],
-        serde_json::json!({"type": "choice", "outcome": "selected", "id": "paged", "label": "Page it"})
+        serde_json::json!({"type": "choice", "outcome": "selected",
+            "choices": [{"id": "paged", "label": "Page it", "note": "only past 500 rows"}],
+            "words": "warn in the UI too"})
     );
     let human = run_cli_human(&socket, &["work", "show", subject]).await;
     assert!(
-        String::from_utf8_lossy(&human.stdout).contains("Person answer: selected paged: Page it")
+        String::from_utf8_lossy(&human.stdout).contains("Person answer: selected paged: Page it: only past 500 rows — warn in the UI too")
     );
     server.abort();
 }
@@ -2381,7 +2389,7 @@ mission "release-report" state="ready" {
     assert_eq!(item["update"]["about"], run.subject);
     assert_eq!(
         item["action_parameters"]["work.done"]["answer"],
-        serde_json::json!({"id": "read"})
+        serde_json::json!({"choices": [{"id": "read"}]})
     );
 
     let attention_id = item["id"].as_str().unwrap();

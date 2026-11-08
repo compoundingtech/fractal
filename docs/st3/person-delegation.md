@@ -42,7 +42,7 @@ fractal work done step-run/example/ask --as agent/example/helper \
 The same proof flags work on `fractal conversations archive` (one message at a time),
 `fractal alerts resolve`, `fractal alerts approve`, and `fractal alerts reject`. Use the original
 `message.sent` claim ID for an archive, the update's `work.person-asked` ID for a closure,
-or the exact `gate.requested` ID for a review. `fractal work done --answer ID --text TEXT` retains
+or the exact `gate.requested` ID for a review. `fractal work done --choice ID[=NOTE] --words TEXT` retains
 structured answer validation. A delegated cancellation is refused.
 
 The daemon's store checks the current policy, operation, assigned person, episode and revision,

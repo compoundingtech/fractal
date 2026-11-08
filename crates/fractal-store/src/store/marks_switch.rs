@@ -32,6 +32,11 @@ pub const FEATURE: &str = "message_view_reads";
 /// advertises it ([`staged_switched_tx`]).
 pub const STAGED_FEATURE: &str = "message_staged_reads";
 
+/// The `daemon.started` feature of a build that reads person answers in the one answer schema
+/// (`person_request::read_answer`). Until every other member advertises it, an answer this member
+/// records also carries the fields an older build reads (`person_request::with_legacy_mirror`).
+pub const ANSWER_SCHEMA_FEATURE: &str = "person_answer_schema";
+
 const WRITER_TABLES: [(&str, &str); 3] = [
     ("replica_envelopes", "writer"), ("batches", "origin"), ("checkpoint_envelopes", "writer"),
 ];
@@ -130,10 +135,25 @@ fn staged_recorded_tx(connection: &Connection) -> Result<bool> {
         == Some("1"))
 }
 
+/// Whether every other member reads the one answer schema, as [`Store::refresh_marks_switch`] last
+/// decided, read in the answer writer's own transaction. Absent means not yet: answers keep the
+/// fields older builds read until the barrier is first decided.
+pub fn answer_schema_switched_tx(connection: &Connection) -> Result<bool> {
+    Ok(connection
+        .query_row("SELECT value FROM meta WHERE key='answer_schema_switched'", [], |row| row.get::<_, String>(0))
+        .optional()?
+        .as_deref()
+        == Some("1"))
+}
+
 /// Record a switch in `meta` when it changed, answering whether it did.
 fn record_switch(store: &Store, key: &str, switched: bool) -> Result<bool> {
     let connection = store.readers.get();
-    let recorded = if key == "marks_switched" { marks_switched_tx(&connection)? } else { staged_recorded_tx(&connection)? };
+    let recorded = match key {
+        "marks_switched" => marks_switched_tx(&connection)?,
+        "answer_schema_switched" => answer_schema_switched_tx(&connection)?,
+        _ => staged_recorded_tx(&connection)?,
+    };
     drop(connection);
     if recorded == switched {
         return Ok(false);
@@ -176,6 +196,11 @@ impl Store {
         let staged = switched && staged_blockers.is_empty();
         if record_switch(self, "staged_switched", staged)? {
             tracing::debug!(staged, ?staged_blockers, "message staging marks switch changed");
+        }
+        // Independent of marks: answers drop the legacy fields once every member reads the schema.
+        let answer_blockers = feature_blockers(&self.readers.get(), &self.origin, peers, ANSWER_SCHEMA_FEATURE)?;
+        if record_switch(self, "answer_schema_switched", answer_blockers.is_empty())? {
+            tracing::debug!(switched = answer_blockers.is_empty(), ?answer_blockers, "person answer schema switch changed");
         }
         Ok((switched, blockers))
     }
@@ -248,6 +273,33 @@ mod tests {
         sync(&peer, &store);
         assert!(!store.refresh_marks_switch(&[]).unwrap().0);
         assert!(!store.marks_switched().unwrap());
+    }
+
+    /// Answers drop the fields an older build reads only once every other member reads the one
+    /// answer schema, decided independently of marks: a member alone at once, beside an older
+    /// member never, and again when that member starts on a build that reads it.
+    #[test]
+    fn answers_keep_the_legacy_fields_until_every_other_member_reads_the_schema() {
+        let alone = Store::open_memory("alder").unwrap();
+        assert!(!answer_schema_switched_tx(&alone.readers.get()).unwrap(), "legacy fields until decided");
+        alone.refresh_marks_switch(&[]).unwrap();
+        assert!(answer_schema_switched_tx(&alone.readers.get()).unwrap());
+
+        let (store, peer) = fleet_of_two();
+        started(&peer, true);
+        sync(&peer, &store);
+        store.refresh_marks_switch(&[]).unwrap();
+        assert!(store.marks_switched().unwrap());
+        assert!(!answer_schema_switched_tx(&store.readers.get()).unwrap(), "birch predates the schema");
+        claim(&peer, "daemon/birch", "daemon.started", None,
+            json!({"status": "running", "features": {FEATURE: 1, ANSWER_SCHEMA_FEATURE: 1}}));
+        sync(&peer, &store);
+        store.refresh_marks_switch(&[]).unwrap();
+        assert!(answer_schema_switched_tx(&store.readers.get()).unwrap());
+        started(&peer, true);
+        sync(&peer, &store);
+        store.refresh_marks_switch(&[]).unwrap();
+        assert!(!answer_schema_switched_tx(&store.readers.get()).unwrap(), "birch went back to an older build");
     }
 
     /// Stagings turn to marks only while marks are on and every other member's own newest start

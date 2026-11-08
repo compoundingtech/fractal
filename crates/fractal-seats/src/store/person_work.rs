@@ -264,9 +264,7 @@ pub mod tests {
                 delegation: None, subject: ask.subject.clone(), actor: input.person.clone(),
                 summary: String::new(), evidence: vec![], episode: Some(item.episode.clone()),
                 idempotency_key: "refresh-answer".into(),
-                answer: Some(crate::person_request::AnswerInput {
-                    id: Some("land".into()), text: None,
-                }),
+                answer: Some(crate::person_request::AnswerInput::choose("land")),
             };
             store.append_claim(&ClaimInput {
                 subject: input.actor.clone(), kind: "runtime.observed".into(), actor: None,
@@ -304,7 +302,7 @@ pub mod tests {
             assert_eq!(resumed.attempt, origin.attempt);
             assert_eq!(resumed.person_answers.len(), 1);
             assert_eq!(resumed.person_answers[0].ask, ask.subject);
-            assert_eq!(resumed.person_answers[0].answer.as_ref().unwrap()["id"], "land");
+            assert_eq!(resumed.person_answers[0].answer.as_ref().unwrap()["choices"][0]["id"], "land");
             drop(store);
             let store = Store::open(&path, &node).unwrap();
             assert_eq!(store.step_run(&origin.subject).unwrap().unwrap().person_answers.len(), 1);
@@ -1004,7 +1002,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             delegation: None, subject: ask.subject.clone(), actor: "person/avery".into(),
             summary: String::new(), evidence: vec![], episode: Some(item.episode),
             idempotency_key: "assistant-projection-answer".into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput::choose("land")),
         };
         store.finish_person_step_authorized(&response, false, Some(&authorization)).unwrap();
         // The answer is stored under the assistant principal, so a retry with the same key must
@@ -1044,7 +1042,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             delegation: None, subject: standalone.subject, actor: "person/avery".into(),
             summary: String::new(), evidence: vec![], episode: Some(item.episode),
             idempotency_key: "standalone-notification-answer".into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput::choose("land")),
         }, false, Some(&authorization)).unwrap();
         let notification = store.messages(Some("agent/alder.asker"), true).unwrap().into_iter()
             .find(|message| message.assistant_grant_id.as_deref() == Some(grant_id)).unwrap();
@@ -1083,7 +1081,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
         let request = item.request.clone().unwrap();
         assert_eq!(request["answers"][2]["id"], "revise-auth");
         assert_eq!(request["subjects"][0]["revision"], "abc123");
-        assert!(item.actions[0].argv.iter().any(|arg| arg == "--answer"));
+        assert!(item.actions[0].argv.iter().any(|arg| arg == "--choice"));
         let mut response = PersonStepResponse {
             delegation: None,
             subject: ask.subject.clone(),
@@ -1108,8 +1106,8 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
         );
         response.summary = String::new();
         response.answer = Some(crate::person_request::AnswerInput {
-            id: Some("revise-auth".into()),
-            text: Some("Pair browsers like the native clients.".into()),
+            choices: vec![crate::person_request::ChoiceInput { id: "revise-auth".into(), note: None }],
+            words: Some("Pair browsers like the native clients.".into()),
         });
         assert_eq!(
             store.finish_person_step(&response, false).unwrap().status,
@@ -1120,15 +1118,15 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             "completed"
         );
         let mut other = response.clone();
-        other.answer.as_mut().unwrap().id = Some("land".into());
-        other.answer.as_mut().unwrap().text = None;
+        other.answer = Some(crate::person_request::AnswerInput::choose("land"));
         assert_eq!(
             store.finish_person_step(&other, false).unwrap_err().code,
             "idempotency-conflict"
         );
         let expected = json!({
-            "type": "decision", "outcome": "request_changes", "id": "revise-auth",
-            "label": "Revise auth and review", "text": "Pair browsers like the native clients."
+            "type": "decision", "outcome": "request_changes",
+            "choices": [{"id": "revise-auth", "label": "Revise auth and review"}],
+            "words": "Pair browsers like the native clients."
         });
         let check = |store: &Store| {
             let resumed = store.step_run(&origin.subject).unwrap().unwrap();
@@ -1140,10 +1138,10 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             assert_eq!(answer.answer.as_ref(), Some(&expected));
             assert_eq!(
                 answer.summary,
-                "Revise auth and review: Pair browsers like the native clients."
+                "Revise auth and review — Pair browsers like the native clients."
             );
             assert!(resumed.constraints.iter().any(|constraint| constraint
-                == "Person response: Revise auth and review: Pair browsers like the native clients."));
+                == "Person response: Revise auth and review — Pair browsers like the native clients."));
             let own = store.step_run(&ask.subject).unwrap().unwrap();
             assert_eq!(own.person_answers.len(), 1);
             assert_eq!(own.person_answers[0].answer.as_ref(), Some(&expected));
@@ -1270,7 +1268,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             "the resolved ask leaves the person's home"
         );
         // The default carries the outcome of the answer it stands for; resolved_by says it timed out.
-        let expected = json!({"type": "decision", "outcome": "decline", "id": "keep-open", "label": "Keep it open"});
+        let expected = json!({"type": "decision", "outcome": "decline", "choices": [{"id": "keep-open", "label": "Keep it open"}]});
         let check = |store: &Store| {
             let resumed = store.step_run(&origin.subject).unwrap().unwrap();
             assert_eq!(resumed.status, "ready");
@@ -1298,7 +1296,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             evidence: vec![],
             episode: Some(item.episode),
             idempotency_key: "gateway-late".into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput::choose("land")),
         };
         assert_eq!(store.finish_person_step(&late, false).unwrap_err().code, "stale-fence");
     }
@@ -1361,7 +1359,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             evidence: vec![],
             episode: Some(episode.clone()),
             idempotency_key: key.into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some(id.into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput::choose(id)),
         };
         // The person answers on the other member before the deadline; the owner, not holding
         // that answer, applies the default at the deadline.
@@ -1386,7 +1384,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             let standing = &resumed.person_answers[0];
             assert_eq!(standing.respondent, "person/avery");
             assert_eq!(standing.resolved_by, None);
-            assert_eq!(standing.answer.as_ref().unwrap()["id"], "land");
+            assert_eq!(standing.answer.as_ref().unwrap()["choices"][0]["id"], "land");
             assert!(standing.answered_at_unix_ms < deadline);
             assert!(resumed.constraints.iter().any(|constraint| constraint.contains("replaces the default")), "{}", store.origin);
         }
@@ -1428,7 +1426,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             evidence: vec![],
             episode: Some(episode),
             idempotency_key: "land-late".into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput::choose("land")),
         };
         assert_eq!(other.finish_person_step(&late, false).unwrap_err().code, "stale-fence");
         assert_eq!(other.step_run(&ask.subject).unwrap().unwrap().status, "ready");
@@ -1555,8 +1553,8 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
                     episode: None,
                     idempotency_key: "gateway-answer".into(),
                     answer: Some(crate::person_request::AnswerInput {
-                        id: Some("revise-auth".into()),
-                        text: Some("Pair browsers like the native clients.".into()),
+                        choices: vec![crate::person_request::ChoiceInput { id: "revise-auth".into(), note: Some("Start with Safari.".into()) }],
+                        words: Some("Pair browsers like the native clients.".into()),
                     }),
                 },
                 false,
@@ -1565,7 +1563,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
         let messages = store.messages(Some("agent/alder.asker"), true).unwrap();
         assert_eq!(messages.len(), 1);
         assert!(messages[0].content.contains(
-            "Answer: Revise auth and review (revise-auth)\nPair browsers like the native clients."
+            "Answer: Revise auth and review (revise-auth)\nNote: Start with Safari.\nPair browsers like the native clients."
         ));
     }
 
@@ -1646,7 +1644,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             .expect("the update outlives its poster");
         assert_eq!(item.request.as_ref().unwrap()["type"], "update");
         assert_eq!(item.actions[0].label, "read");
-        assert_eq!(item.actions[0].argv[6..], ["--answer", "read"]);
+        assert_eq!(item.actions[0].argv[6..], ["--choice", "read"]);
 
         let read = |subject: &str, answer: Option<&str>, text: Option<&str>| {
             store.finish_person_step(
@@ -1660,8 +1658,8 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
                     idempotency_key: format!("read:{subject}:{answer:?}:{text:?}"),
                     answer: (answer.is_some() || text.is_some()).then(|| {
                         crate::person_request::AnswerInput {
-                            id: answer.map(str::to_owned),
-                            text: text.map(str::to_owned),
+                            choices: answer.map(|id| crate::person_request::ChoiceInput { id: id.to_owned(), note: None }).into_iter().collect(),
+                            words: text.map(str::to_owned),
                         }
                     }),
                 },
@@ -1681,7 +1679,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
         assert_eq!(done.person_answers[0].summary, "Read");
         assert_eq!(
             done.person_answers[0].answer,
-            Some(json!({"type": "update", "outcome": "read"}))
+            Some(json!({"type": "update", "outcome": "read", "choices": []}))
         );
         assert!(
             store
@@ -1721,10 +1719,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             evidence: vec![],
             episode: Some(item.episode),
             idempotency_key: "free-text".into(),
-            answer: Some(crate::person_request::AnswerInput {
-                id: Some("friday".into()),
-                text: None,
-            }),
+            answer: Some(crate::person_request::AnswerInput::choose("friday")),
         };
         assert_eq!(
             store.finish_person_step(&response, false).unwrap_err().code,
@@ -1784,7 +1779,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
         assert_eq!(
             own.person_answers[0].answer,
             Some(
-                json!({"type": "feedback", "outcome": "feedback", "text": "Lead with the phone."})
+                json!({"type": "feedback", "outcome": "feedback", "choices": [], "words": "Lead with the phone."})
             )
         );
         // No step waits on a new-run ask, so the answer is pushed to its requester.
