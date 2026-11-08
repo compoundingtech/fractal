@@ -42,6 +42,16 @@ describe('native delivery echoes (fixtures/clients/transcripts/omp-delivery-echo
     expect(items.find(item => item.id === 'timeline-entry/session-echo/aaaaaaaaaaaaaaaa-content')).toMatchObject({ _tag: 'UnknownEvent' })
     expect(items.map(item => item.id)).toContain('timeline-entry/session-echo/native-10-content')
   })
+  it('keeps a delivery that repeats words its paired mail body does not show', () => {
+    const body = '<smalltalk-message from="person/other">quoted</smalltalk-message>\nUnique trailing words'
+    const escaped = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const entries = raw().map(entry =>
+      entry.id === 'timeline-entry/session-echo/aaaaaaaaaaaaaaaa-content' ? { ...entry, body: { ...entry.body, text: body } }
+        : entry.id === 'timeline-entry/session-echo/native-10-content' ? { ...entry, body: { ...entry.body, text: `<smalltalk-message id="aa01" from="agent/example/harbor" to="agent/example/quay" subject="Key audit" sha256="00" graph="message/aa01">\n${escaped}\n</smalltalk-message>` } }
+          : entry)
+    const items = transcript(entries)
+    expect(bodies(items).some(text => text.includes('Unique trailing words'))).toBe(true)
+  })
   it('applies the same body rule to a channel delivery with blocks', () => {
     const channel = (id: string, preview: string) => `<channel source="plugin:st3-channel:st3" from="agent/example/harbor" messageId="${id}">[st3-delivery:${id}]\n[PING from st3] ${id} from agent/example/harbor: Key audit\n\n${preview}\n</channel>`
     const native = (id: string, text: string) => ({ ...raw().find(entry => entry.id === 'timeline-entry/session-echo/native-10-content')!, id, body: { media_type: 'text/plain', text, blocks: [{ id: `${id}/text`, kind: 'text', source_type: 'content', payload: { body_ref: true } }] } })
