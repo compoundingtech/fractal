@@ -1087,7 +1087,7 @@ pub fn mission_list_cards_with(
         let generations=newest.iter().map(|r| (r["id"].as_str().unwrap().to_owned(),r["generation_id"].clone()))
             .collect::<serde_json::Map<_,_>>();
         let historical = matches!(state,"completed"|"failed"|"cancelled"|"retired");
-        Ok(json!({"id":id,"kind":"mission","revision":revision,"updated_at":client_timestamp(updated),
+        let mut value = json!({"id":id,"kind":"mission","revision":revision,"updated_at":client_timestamp(updated),
             "title":id.trim_start_matches("mission/"),"state":state,"mission_revision":revision,
             "system":crate::mission::is_system(id, definition.map(|d| &d.mission)),
             "runs":newest.iter().rev().map(|r| r["id"].clone()).collect::<Vec<_>>(),
@@ -1096,7 +1096,17 @@ pub fn mission_list_cards_with(
             "run_generations":generations,"must_act":must_act,
             "resources":crate::api::client_declared_resources(
                 definition.map_or(&[][..], |d| d.mission.resources.as_slice()), &resource_uris),
-            "operational":{"layer":if historical {"history"} else {"current"},"actionable":!historical,"reasons":[]}}))
+            "operational":{"layer":if historical {"history"} else {"current"},"actionable":!historical,"reasons":[]}});
+        if let Some(admission) = definition.and_then(|definition| {
+            crate::model::DeclaredAdmission::from_declaration(
+                definition.mission.declared_priority.as_ref(),
+                definition.mission.declared_lane.as_ref(),
+                definition.mission.declared_budgets.as_ref(),
+            )
+        }) {
+            value["declared_admission"] = serde_json::to_value(admission)?;
+        }
+        Ok(value)
     }).collect()
 }
 

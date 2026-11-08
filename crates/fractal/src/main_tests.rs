@@ -2463,6 +2463,22 @@ fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
 }
 
 #[test]
+fn declared_admission_human_output_is_explicitly_not_enforced() {
+    let mut agent = stopped_agent(serde_json::Value::Null);
+    assert!(!render_client_agent(&agent, &[], 0).contains("Declared admission"));
+    agent.declared_admission = Some(serde_json::from_value(serde_json::json!({
+        "priority": "normal", "lane": "check",
+        "budgets": {"cpu_seconds": 300, "memory_max": "8G", "disk_max": "20G", "token_budget": 100000}
+    })).unwrap());
+    let rendered = render_client_agent(&agent, &[], 0);
+    assert!(rendered.contains("Declared admission — declared, not enforced.\n"));
+    assert!(rendered.contains("st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.\n"));
+    for field in ["priority: normal", "lane: check", "cpu_seconds: 300", "memory_max: 8G", "disk_max: 20G", "token_budget: 100000"] {
+        assert!(rendered.contains(field), "{rendered}");
+    }
+}
+
+#[test]
 fn a_stopped_agent_says_why_who_and_when_in_show_and_ls() {
     let parked = stopped_agent(serde_json::json!({
         "kind": "parked", "actor": "daemon/runtime", "ended_at": "2026-10-21T04:37:42.469Z",

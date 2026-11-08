@@ -376,14 +376,15 @@ fn validate_mission(mission: &MissionSpec) -> Result<(), FractalError> {
 }
 
 fn validate_declaration_source(source: &str, owner: &str) -> Result<(), FractalError> {
-    if !FIELDS.iter().any(|(name, _)| source.contains(name)) {
-        return Ok(());
-    }
     fn walk(document: &KdlDocument) -> Result<(), FractalError> {
         for node in document.nodes() {
             if let Some(children) = node.children() {
                 let kind = node.name().value();
-                if matches!(kind, "agent" | "mission") {
+                if matches!(kind, "agent" | "mission")
+                    && children.nodes().iter().any(|child| {
+                        FIELDS.iter().any(|(name, _)| child.name().value() == *name)
+                    })
+                {
                     let name = node
                         .entries()
                         .iter()
@@ -867,6 +868,7 @@ mod deferred_claim_tests {
             r#"agent "worker" { declared-priority "urgent"; }"#,
             r#"host "node" { agent "worker" { declared-budgets { cpu-seconds 0; }; }; }"#,
             r#"agent "${ST_MISSION_RUN}/worker" { declared-lane "future"; }"#,
+            r#"agent "worker" { "declared\u{2d}priority" "urgent"; }"#,
         ] {
             for mission in [
                 json!({"declarations_kdl": source}),
@@ -891,7 +893,10 @@ mod deferred_claim_tests {
 
     #[test]
     fn admission_only_deferred_validation_leaves_unrelated_authoring_alone() {
-        validate_declaration_source("not even valid KDL {", "mission/test").unwrap();
+        validate_declaration_source(
+            r#"resource "example" { "declared\u{2d}priority" "unrelated"; }"#,
+            "mission/test",
+        ).unwrap();
         validate_declaration_source(
             r#"agent "worker" { unrelated-existing-field "anything"; declared-priority "normal"; declared-budgets { memory-max "8G"; }; }"#,
             "mission/test",

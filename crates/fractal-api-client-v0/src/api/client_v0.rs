@@ -2794,6 +2794,7 @@ pub async fn agent_declaration(
     let kdl = crate::graph::render_agent_desired_kdl(&tree, &uris).map_err(ApiError::bad)?;
     let accountable = fractal_schema::accountable::from_desired(&tree)
         .map_err(|e| ApiError::bad(FractalError::new(e.code, e.message)))?.map(str::to_owned);
+    let declared_admission = fractal_api_core::api::client_declared_admission(&tree);
     let mut value = json!({
         "id": subject,
         "revision": revision,
@@ -2802,6 +2803,9 @@ pub async fn agent_declaration(
         "revisions": revisions,
     });
     if let Some(person) = accountable { value["accountable"] = json!(person); }
+    if let Some(admission) = declared_admission {
+        value["declared_admission"] = serde_json::to_value(admission).map_err(ApiError::internal)?;
+    }
     Ok(Json(value))
 }
 
@@ -3447,7 +3451,7 @@ fn mission_resources_filtered(
             } else {
                 None
             };
-            Ok::<Option<Value>, anyhow::Error>(Some(json!({
+            let mut value = json!({
                 "id": mission,
                 "kind": "mission",
                 "revision": revision,
@@ -3472,7 +3476,17 @@ fn mission_resources_filtered(
                     "actionable": !historical,
                     "reasons": if historical { vec![state] } else { Vec::<&str>::new() }
                 }
-            })))
+            });
+            if let Some(admission) = definition.and_then(|(definition, _)| {
+                crate::model::DeclaredAdmission::from_declaration(
+                    definition.declared_priority.as_ref(),
+                    definition.declared_lane.as_ref(),
+                    definition.declared_budgets.as_ref(),
+                )
+            }) {
+                value["declared_admission"] = serde_json::to_value(admission)?;
+            }
+            Ok::<Option<Value>, anyhow::Error>(Some(value))
         })
         .collect::<anyhow::Result<Vec<_>>>()?
         .into_iter()

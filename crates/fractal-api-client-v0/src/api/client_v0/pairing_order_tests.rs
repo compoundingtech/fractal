@@ -45,32 +45,41 @@ async fn issuer_operation_withdrawal_accepts_another_local_person() {
 }
 
 pub(super) fn replicate(from: &AppState, to: &AppState) {
+    const FLEET: &str = "549d4b9d-f23c-41e9-9e0b-15f13ab837e6";
     if from.store.member_key.read().unwrap().is_none() {
         let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
         let peer = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
         for state in [from, to] {
-            state.store.bind_fleet("pairing-fleet").unwrap();
+            state.store.bind_fleet(FLEET).unwrap();
             state.store.pin_fleet_anchor(anchor.public()).unwrap();
         }
         from.store.set_member_key(Some(anchor.clone())).unwrap();
         to.store.set_member_key(Some(peer.clone())).unwrap();
-        from.store.admit_fleet_anchor("pairing-fleet", anchor.public(), "listening").unwrap();
-        from.store.append_claim(&ClaimInput {
-            subject:format!("host/{}", to.store.origin()),kind:"fleet.member-admitted".into(),actor:None,
-            fields:serde_json::from_value(json!({
-                "fleet_id":"pairing-fleet",
-                "member_key":peer.public(),"via":"member","sponsor":from.store.origin(),
-                "writer_floor":0,"mode":"listening",
-            })).unwrap(),
-            evidence:vec![],expected_subject:None,idempotency_key:None,
-        }).unwrap();
+        from.store.admit_fleet_anchor(FLEET, anchor.public(), "listening").unwrap();
+        let invitation = from.store.create_fleet_invite(
+            Some(to.store.origin()), std::time::Duration::from_secs(600),
+            &["fabric".into()], "person/alex", false,
+        ).unwrap();
+        let code = smallclaims::fleet::code::JoinCode {
+            fleet_id: FLEET.parse().unwrap(),
+            invite: hex::decode(invitation.invite).unwrap().try_into().unwrap(),
+            token: invitation.token,
+            fingerprint: smallclaims::fleet::code::fingerprint(anchor.public()),
+            expires_at: invitation.expires_at_unix_ms / 1000,
+            name: Some(to.store.origin().into()),
+            migrate: false, endpoints: Vec::new(), pairing: None,
+        };
+        let joiner = smallclaims::fleet::handshake::Joiner::start(
+            &code, &peer, to.store.origin(), "listening", None, "test",
+        ).unwrap();
+        from.store.append_fleet_admission(joiner.request(), false, Some(0), None).unwrap();
     }
     let exchange = from
         .store
-        .export_replication_exchange("pairing-fleet", &to.store.replication_inventory().unwrap())
+        .export_replication_exchange(FLEET, &to.store.replication_inventory().unwrap())
         .unwrap();
     to.store
-        .receive_replication_exchange(from.store.origin(), "pairing-fleet", &exchange)
+        .receive_replication_exchange(from.store.origin(), FLEET, &exchange)
         .unwrap();
     to.store.validate_replication_backlog().unwrap();
     to.store.apply_replication_repairs().unwrap();

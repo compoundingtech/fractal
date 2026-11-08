@@ -55,6 +55,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         "vendor/libghostty-vt-sys/**",
         "scripts/release-fractal*",
         "scripts/release_artifact.py",
+        "scripts/release_draft_recovery.py",
         "scripts/release-fractal-embed.mjs",
         "apps/fractal-web/**",
         "scripts/release_notes*",
@@ -130,7 +131,7 @@ fi`,
         }
       },
       "runs-on": "${{ matrix.runner }}",
-      "timeout-minutes": 5,
+      "timeout-minutes": "${{ matrix.runner == 'macos-15' && 10 || 5 }}",
       "steps": [
         {
           // Exercise the workflow's current publication automation, including tests absent from historical candidates.
