@@ -407,6 +407,85 @@ fn decision_import_replication_and_reader_use_stateless_checks() {
 }
 
 #[test]
+fn disconnected_dual_imports_converge_or_refuse_content_conflicts_on_both_members() {
+    const LEGACY: &str = "custom/decision/tree/v2/legacy/disconnected-original";
+    for different in [false, true] {
+        let (left, right) = signed_pair();
+        for store in [&left, &right] {
+            store.fractal.feature_barrier_peers.set(Vec::new()).unwrap();
+            store.append_claim(&ClaimInput {
+                subject: format!("daemon/{}", store.origin), kind: "daemon.started".into(),
+                fields: serde_json::from_value(json!({"status":"running",
+                    "features":{DECISION_IMPORT_OPENED_FEATURE:1}})).unwrap(),
+                ..empty_input()
+            }).unwrap();
+        }
+        left.register_custom_kind(&RegistrationRequest {
+            manifest: import_tree_manifest(), actor: SEAT.into(),
+        }).unwrap();
+        let legacy = import_tree_claim(&left, LEGACY, "opened", IMPORT_ACTOR,
+            json!({"seat":IMPORT_ACTOR,"recipient":DECIDER})).unwrap();
+        signed_sync(&left, &right);
+        signed_sync(&right, &left);
+
+        // Both members satisfy their local empty-history check while disconnected.
+        let first = import_tree_claim(&left, IMPORT_TREE, "opened", IMPORT_ACTOR,
+            import_opening_fields()).unwrap();
+        let mut second_fields = import_opening_fields();
+        if different { second_fields["legacy_trees"] = json!(["other-host:/different-source"]); }
+        let second = import_tree_claim(&right, IMPORT_TREE, "opened", IMPORT_ACTOR,
+            second_fields).unwrap();
+        assert_ne!(first.id, second.id);
+        for store in [&left, &right] {
+            assert_eq!(store.decision_inputs(IMPORT_TREE).unwrap().claims.len(), 1);
+        }
+        signed_sync(&left, &right);
+        signed_sync(&right, &left);
+        signed_sync(&left, &right);
+
+        let (canonical, duplicate) = if first.id.as_bytes() < second.id.as_bytes() {
+            (&first.id, &second.id)
+        } else { (&second.id, &first.id) };
+        for store in [&left, &right] {
+            let retained = store.decision_inputs(LEGACY).unwrap();
+            assert_eq!(retained.claims.len(), 1);
+            assert_eq!(retained.claims[0].id, legacy.id);
+            let view = store.custom_subject(IMPORT_TREE).unwrap().unwrap();
+            assert_eq!(view["owner"], SEAT);
+            if different {
+                assert_eq!(view["state"], "invalid");
+                let error = store.decision_inputs(IMPORT_TREE).unwrap_err();
+                assert_eq!(error.downcast_ref::<FractalError>().unwrap().code,
+                    "decision-import-opening-conflict");
+                assert!(error.to_string().contains(&first.id));
+                assert!(error.to_string().contains(&second.id));
+                let refused = import_tree_claim(store, IMPORT_TREE, "status", SEAT,
+                    json!({"state":"clear","title":"Resolve","detail":"No resolving primitive"}))
+                    .unwrap_err();
+                assert_eq!(refused.code, "decision-import-opening-conflict");
+            } else {
+                let inputs = store.decision_inputs(IMPORT_TREE).unwrap();
+                assert_eq!(inputs.claims.iter().filter(|claim| claim.kind.ends_with(".opened")).count(), 2,
+                    "immutable raw history retains both witnesses");
+                assert_eq!(view["state"], "ready");
+                assert_eq!(view["canonical_opening"], canonical.as_str());
+                assert_eq!(view["provenance"]["tree"]["claim_id"], canonical.as_str());
+                assert_eq!(view["duplicate_openings"], json!([duplicate]));
+                let refused = import_tree_claim(store, IMPORT_TREE, "status", IMPORT_ACTOR,
+                    json!({"state":"clear","title":"Later importer","detail":"Not the owner"}))
+                    .unwrap_err();
+                assert_eq!(refused.code, "invalid-custom-claim");
+                assert!(refused.to_string().contains("only the opening"));
+            }
+        }
+        if !different {
+            assert_eq!(left.decision_inputs(IMPORT_TREE).unwrap().basis,
+                right.decision_inputs(IMPORT_TREE).unwrap().basis);
+        }
+    }
+}
+
+#[test]
 fn decision_import_field_is_refused_by_the_previous_immutable_schema() {
     let mut old = import_tree_manifest();
     old.claims.get_mut("custom.decision.tree.v2.opened").unwrap().fields.remove("import");

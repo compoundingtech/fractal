@@ -235,9 +235,28 @@ arrival order must not change acceptance. Seat-authored openings must omit `impo
 The exception is for `opened` only. An imported tree's owner is its canonical subject seat,
 not the import writer. One owner derivation is shared by local admission, replicated projection
 and the decision reader, including projected owner/ask requester identity. The canonical seat
-can write later owner facts; the importer cannot write any later claim, including another
-opening. Owner validation and append share the same write transaction, so concurrent native
-and import openings cannot both pass the first-opening check. Recipient authority is unchanged.
+can write later owner facts; local admission refuses any later importer claim, including
+another opening. Owner validation and append share the same write transaction, so concurrent
+native and import openings on one member cannot both pass the first-opening check.
+Recipient authority is unchanged.
+
+Disconnected members can each admit an import before observing the other's claim. When all
+opening fields are equal (including the import ARN, seat, recipient, registration pin and
+ordered `legacy_trees` entries), these imports converge: the lowest claim ID, compared
+bytewise, is the canonical opening. Claim ID, origin/writer and timestamps do not participate
+in content equality; object member ordering is irrelevant. Both immutable raw claims remain.
+The other opening is a recognized duplicate witness, not a later importer-authority grant.
+Inspect the custom-subject projection's `canonical_opening` and sorted `duplicate_openings`
+IDs; its creation-slot provenance identifies the canonical claim only. Decision reads retain
+both raw witnesses in the basis-fenced history. The canonical seat owns the tree; subsequent
+non-opening importer claims remain typed refusals. Legacy-unproven trees are untouched.
+
+Content-different import openings fail closed with `decision-import-opening-conflict`, naming
+the conflicting claim IDs on every member. A normal seat status or later owner claim does not
+resolve this conflict. There is currently no decision-tree resolving-claim primitive or
+documented semantic repair operation for two individually valid, conflicting openings;
+none is introduced here. Stop the conflicting import and retain both claims for a separately
+authorized repair design rather than discarding or silently choosing one source.
 
 Every daemon advertises `decision-tree-import-opened=1` in `daemon.started`. Local import-opened
 admission reuses the strict fleet feature barrier in the append transaction: current members,

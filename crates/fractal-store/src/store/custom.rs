@@ -485,9 +485,7 @@ pub fn prepare(
     }
     f.insert("_registration".into(), json!(hash));
     let history = claims(tx, &input.subject).map_err(internal)?;
-    let creation = history.iter().find(|c| {
-        c.kind == m.creation_kind && fields(c).get("_registration") == Some(&json!(hash))
-    });
+    let creation = select_creation(&input.subject, &m, &hash, &history)?;
     if input.subject.starts_with("custom/attention/source/") && creation.is_some() {
         return Err(fail("notices unavailable: producer input is immutable"));
     }
@@ -552,6 +550,47 @@ fn decision_import_opening(
     );
     Ok(true)
 }
+/// Equal disconnected imports are duplicate witnesses, not a second owner grant.
+fn same_opening(left: &ClaimRecord, right: &ClaimRecord) -> bool {
+    left.kind == right.kind && left.actor == right.actor
+        && left.body.get("fields") == right.body.get("fields")
+}
+
+fn select_creation<'a>(
+    subject: &str,
+    manifest: &Manifest,
+    hash: &str,
+    history: &'a [ClaimRecord],
+) -> Result<Option<&'a ClaimRecord>, FractalError> {
+    let mut openings = history.iter().filter(|claim| claim.kind == manifest.creation_kind
+        && claim.body.pointer("/fields/_registration").and_then(Value::as_str) == Some(hash));
+    let Some(first) = openings.next() else { return Ok(None); };
+    if manifest.creation_kind != "custom.decision.tree.v2.opened" { return Ok(Some(first)); }
+    let imported = |claim: &ClaimRecord| matches!(
+        decision_import_opening(subject, &claim.kind, claim.actor.as_deref(), &fields(claim)),
+        Ok(true));
+    let first_import = imported(first);
+    let mut any_import = first_import;
+    let mut canonical = first;
+    let mut conflict = false;
+    for opening in openings {
+        let is_import = imported(opening);
+        any_import |= is_import;
+        conflict |= !same_opening(first, opening) || !first_import || !is_import;
+        if opening.id.as_bytes() < canonical.id.as_bytes() { canonical = opening; }
+    }
+    if !any_import { return Ok(Some(first)); }
+    if conflict {
+        let mut ids: Vec<_> = history.iter().filter(|claim| claim.kind == manifest.creation_kind
+            && claim.body.pointer("/fields/_registration").and_then(Value::as_str) == Some(hash))
+            .map(|claim| claim.id.as_str()).collect();
+        ids.sort_unstable();
+        return Err(FractalError::new("decision-import-opening-conflict",
+            format!("conflicting decision openings: {}", ids.join(", "))));
+    }
+    Ok(Some(canonical))
+}
+
 
 /// An imported opening records its writer, but grants ownership only to its canonical seat.
 fn claim_owner<'a>(subject: &str, creation: Option<&'a ClaimRecord>) -> Result<Option<&'a str>> {
@@ -571,7 +610,7 @@ fn validate_fact(
     kind: &str,
     actor: Option<&str>,
     f: &BTreeMap<String, Value>,
-    // The flag identifies the original opening by claim ID, never by repeated fields.
+    // True only for the selected opening or a content-equal witness validated by selection.
     creation: Option<(&ClaimRecord, bool)>,
 ) -> Result<()> {
     let (creation, is_creation) = creation
@@ -788,14 +827,18 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
         .filter(|c| fields(c).get("_registration") == Some(&json!(hash)))
         .cloned()
         .collect::<Vec<_>>();
-    let creation = pinned.iter().find(|c| c.kind == m.creation_kind);
+    let (creation, creation_error) = match select_creation(subject, &m, &hash, &pinned) {
+        Ok(creation) => (creation, None),
+        Err(error) => (pinned.iter().filter(|claim| claim.kind == m.creation_kind)
+            .min_by(|left, right| left.id.as_bytes().cmp(right.id.as_bytes())), Some(error)),
+    };
     let reserved = fractal_schema::notice::is_reserved_subject(subject);
     let mut error = if reserved && pinned.len() != history.len() {
         Some("notices unavailable: fact registration pin is missing or mismatched".to_owned())
     } else if subject.starts_with(fractal_schema::notice::SOURCE_PREFIX)
         && pinned.iter().filter(|claim| claim.kind == m.creation_kind).count() != 1 {
         Some("notices unavailable: missing or duplicate source creation".to_owned())
-    } else { None };
+    } else { creation_error.as_ref().map(ToString::to_string) };
     let owner = match claim_owner(subject, creation) {
         Ok(owner) => owner,
         Err(e) => { error = Some(e.to_string()); None }
@@ -803,10 +846,14 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
     let mut valid = Vec::new();
     for c in &pinned {
         match validate_fact(tx, subject, &m, &c.kind, c.actor.as_deref(), &fields(c),
-            creation.map(|opening| (opening, opening.id == c.id))) {
-            Ok(()) => valid.push(c.clone()),
+            creation.map(|opening| (opening, same_opening(opening, c)))) {
+            Ok(()) => {
+                let duplicate = creation.is_some_and(|opening| opening.actor.as_deref() != owner
+                    && opening.id != c.id && same_opening(opening, c));
+                if !duplicate { valid.push(c.clone()); }
+            }
             Err(e) => {
-                error = Some(e.to_string());
+                if creation_error.is_none() { error = Some(e.to_string()); }
             }
         }
     }
@@ -943,6 +990,14 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
     let mut body = json!({"kind":"custom-subject","id":subject,"registered_kind":m.kind,"schema_version":m.version,"registration":hash,"revision":revision,"state":state,"owner":owner,"fields":output,"provenance":slots.iter().map(|(n,c)|(n.clone(),json!({"claim_id":c.id,"actor":c.actor}))).collect::<BTreeMap<_,_>>(),"input_count":pinned.len()});
     if !reply_conflicts.is_empty() {
         body["reply_conflicts"] = json!(reply_conflicts);
+    }
+    if let Some(error) = &creation_error { body["error_code"] = json!(error.code); }
+    if let Some(opening) = creation.filter(|opening| opening.actor.as_deref() != owner) {
+        body["canonical_opening"] = json!(opening.id);
+        let mut duplicates: Vec<_> = pinned.iter().filter(|claim| claim.id != opening.id
+            && same_opening(opening, claim)).map(|claim| claim.id.as_str()).collect();
+        duplicates.sort_unstable();
+        body["duplicate_openings"] = json!(duplicates);
     }
     if let Some(e) = error {
         body["error"] = json!(e);
@@ -1141,18 +1196,22 @@ impl Store {
         ).optional()?;
         let (source_state, source_recipient) = source_status
             .ok_or_else(|| anyhow::anyhow!("decision source is unavailable"))?;
-        // Stale derived status must not prevent its importer from reading fresh raw inputs.
-        anyhow::ensure!(matches!(source_state.as_str(), "ready" | "stale"),
-            "decision source authority is not ready");
         let source_body = source(&snapshot, subject)?
             .ok_or_else(|| anyhow::anyhow!("decision source is unavailable"))?;
+        if source_body["error_code"] == "decision-import-opening-conflict" {
+            return Err(FractalError::new("decision-import-opening-conflict",
+                source_body["error"].as_str().unwrap_or("conflicting decision openings")).into());
+        }
+        // Stale status does not prevent reading fresh raw inputs, but authority conflicts do.
+        anyhow::ensure!(matches!(source_state.as_str(), "ready" | "stale"),
+            "decision source authority is not ready");
         decision_inputs_preflight(&snapshot, subject, max_claims, max_body_bytes)?;
         let history = claims(&snapshot, subject)?;
         anyhow::ensure!(
             history.iter().all(|claim| fields(claim).get("_registration") == Some(&json!(hash))),
             "decision history contains mismatched registration pins"
         );
-        let creation = history.iter().find(|claim| claim.kind == manifest.creation_kind)
+        let creation = select_creation(subject, &manifest, &hash, &history)?
             .ok_or_else(|| anyhow::anyhow!("decision creation is unavailable"))?;
         let creation_fields = fields(creation);
         let seat = creation_fields.get("seat").and_then(Value::as_str)
@@ -1177,7 +1236,7 @@ impl Store {
         );
         for claim in &history {
             validate_fact(&snapshot, subject, &manifest, &claim.kind,
-                claim.actor.as_deref(), &fields(claim), Some((creation, claim.id == creation.id)))?;
+                claim.actor.as_deref(), &fields(claim), Some((creation, same_opening(creation, claim))))?;
         }
         let kinds = schema::decisions::input_kinds(version);
         let revision = basis_revision_from_history(subject, &kinds, &history)?;
