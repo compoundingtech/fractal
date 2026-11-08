@@ -365,6 +365,24 @@ const definedProps = (props: object): object =>
   Object.fromEntries(Object.entries(props).filter(([, value]) => value !== undefined))
 
 /** Accessible editor tab strip with drag, keyboard reorder, and overflow navigation. */
+/**
+ * Scroll only the strip so `item` is fully in view (`nearest` semantics on both axes). Unlike
+ * `scrollIntoView`, it never scrolls the strip's ancestors or the document: this effect also runs on
+ * every resize, while the strip may sit outside a pane's or the window's visible box.
+ */
+const revealInStrip = (strip: HTMLElement, item: Element) => {
+  const box = strip.getBoundingClientRect()
+  const left = box.left + strip.clientLeft
+  const top = box.top + strip.clientTop
+  const right = left + strip.clientWidth
+  const bottom = top + strip.clientHeight
+  const target = item.getBoundingClientRect()
+  if (target.left < left) strip.scrollLeft -= left - target.left
+  else if (target.right > right) strip.scrollLeft += Math.min(target.right - right, target.left - left)
+  if (target.top < top) strip.scrollTop -= top - target.top
+  else if (target.bottom > bottom) strip.scrollTop += Math.min(target.bottom - bottom, target.top - top)
+}
+
 export const EditorTabs = ({
   label,
   groupId,
@@ -396,7 +414,8 @@ export const EditorTabs = ({
     const reveal = () => {
       const nodes = [...strip.querySelectorAll('[data-tab-id]')]
       for (const node of nodes) resized?.observe(node)
-      nodes.find((node) => node.getAttribute('data-tab-id') === activeId)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+      const active = nodes.find((node) => node.getAttribute('data-tab-id') === activeId)
+      if (active !== undefined) revealInStrip(strip, active)
     }
     resized?.observe(strip)
     const added = typeof MutationObserver === 'undefined' ? undefined : new MutationObserver(reveal)
