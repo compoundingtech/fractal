@@ -128,6 +128,24 @@ describe('row-wise resource decoding', () => {
     expect(windows[3]?.decodeStale).toBe(false)
   })
 
+  it('carries a stated collection total and leaves it absent when the server omits it', () => {
+    const tasks: (() => void)[] = []
+    const windows: ProcessedWindow<unknown>[] = []
+    const ingest = makeWindowIngest({
+      decode: (raw) => decodeResourceRow(raw).value,
+      decodeDetailed: decodeResourceRow,
+      publish: (window) => windows.push(window),
+      now: () => 0,
+      schedule: (work) => { tasks.push(work); return () => {} },
+    })
+    ingest.accept({ ...frame([agent] as ResourceWire[]), has_more: true, total: 240 } as never)
+    while (tasks.length > 0) tasks.shift()!()
+    ingest.accept(frame([agent] as ResourceWire[]))
+    while (tasks.length > 0) tasks.shift()!()
+    expect(windows[0]?.total).toBe(240)
+    expect(windows[1]?.total).toBeUndefined()
+  })
+
   it.each([42, undefined, null])('retains diagnostics for an identity %s that cannot join server order', (id) => {
     const tasks: (() => void)[] = []
     const windows: ProcessedWindow<unknown>[] = []

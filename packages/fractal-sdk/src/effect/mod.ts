@@ -209,6 +209,8 @@ export const followKey = (spec: FollowSpec): string => {
 export interface WindowValue<TResource = DecodedResource> {
   readonly items: readonly TResource[]
   readonly hasMore: boolean
+  /** The collection's size before the server's bounds, when it states one (missions); absent means unknown. */
+  readonly total?: number
   readonly snapshot: ProcessedWindow<Resource>['snapshot']
   readonly rawItems: readonly unknown[]
   readonly undecodable: readonly Undecodable[]
