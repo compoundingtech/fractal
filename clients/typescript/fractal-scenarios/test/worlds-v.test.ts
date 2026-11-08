@@ -75,6 +75,9 @@ for (const definition of [fleetMidRefactor, empty, ciFailingFix, firstRunOnboard
       expect(cards.filter(card => card.attention_kind === 'harness-prompt').map(card => [card.requester_id, card.mission_id, card.source_id])).toEqual([[undefined, undefined, world.cast.agents[0]!.session]])
       expect(cards.filter(card => card.attention_kind !== 'harness-prompt').map(card => card.requester_id)).toEqual(world.cast.agents.slice(1).map(member => member.id))
       expect(cards.filter(card => card.mission_id !== undefined).map(card => card.requester_id)).toEqual(world.cast.agents.length > 1 && world.cast.missions[0] ? [world.cast.agents[1]!.id] : [])
+      // The mission card names the step waiting on the answer; no other card claims one.
+      const mission = world.cast.missions[0]
+      expect(cards.filter(card => card.blocked != null).map(card => card.blocked!.step)).toEqual(world.cast.agents.length > 1 && mission ? [(mission.steps.at(-2) ?? mission.steps.at(-1))!.path] : [])
     }
     if (kind === 'roster' && variant === 'sidebar-tabs') for (const machine of variantWorld.slices.roster.state.machines) {
       const local = machine.host_id === world.cast.hosts[0]?.id

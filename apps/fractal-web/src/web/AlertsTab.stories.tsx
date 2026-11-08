@@ -138,6 +138,9 @@ const servedPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
     await expect(context.scrollHeight).toBeLessThanOrEqual(context.clientHeight + 1)
   }
   await expect(holder.querySelector('[data-alert-mission]')).toHaveTextContent('Rename fetchUser to loadUser')
+  // The mission card names the step waiting on the answer: mission › step.
+  await expect(holder.querySelector('[data-alert-step]')?.textContent).toBeTruthy()
+  await expect(rowButton(holder)).toHaveAccessibleName(/, step \S+/)
   await expect(rowButton(holder)).toHaveAccessibleName(/, from Atlas \w+, mission Rename fetchUser to loadUser/)
   await expect(question.querySelector('[data-alert-mission]')).toBeNull()
   await expect(list.textContent).not.toMatch(/[0-9a-f]{16,}/)
