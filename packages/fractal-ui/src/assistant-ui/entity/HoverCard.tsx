@@ -169,7 +169,7 @@ const styles = stylex.create({
   // The sidebar row's card frame, unchanged: raised surface, strong hairline, md radius, popover elevation, 16px gutters.
   frame: {
     backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md,
-    padding: s.lg, boxSizing: 'border-box', width: 'max-content', maxWidth: 'calc(100vw - 32px)', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading,
+    padding: s.lg, boxSizing: 'border-box', width: 'max-content', maxWidth: 'calc(100vw - 32px)', maxHeight: 'calc(100vh - 32px)', overflow: 'hidden', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading,
     boxShadow: elevation.popover, outline: 'none', pointerEvents: 'none', zIndex: 50,
     // RAC supplies placement only after measuring the mounted anchor; never paint at the origin first.
     visibility: { default: 'hidden', ':is([data-placement])': 'visible' },

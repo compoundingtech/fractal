@@ -8,8 +8,9 @@ const inTerminal = (target: EventTarget | null) =>
   target instanceof Element && target.closest('[data-testid="terminal-pane"]') !== null
 
 /**
- * The TUI's tab keys, as far as a browser lets a page have them: `]` and `[`, Ctrl+PageUp/PageDown, Ctrl+^,
- * Alt+1 to Alt+9, Alt+W, Alt+Shift+W, Alt+Shift+T and Ctrl+H. A bare `[`/`]` or Ctrl+H only applies outside text. Modified chords also work from the composer but
+ * The TUI's tab keys the shared primitives' keymap does not bind, as far as a browser lets a page have them:
+ * `]` and `[`, Ctrl+^, Alt+1 to Alt+9, Alt+Shift+W, Ctrl+W and Ctrl+H. Splits, focus, zoom, Alt+W, Alt+Shift+T,
+ * Alt+[ / Alt+] and Ctrl+PageUp/PageDown are the primitives' (`useWorkspaceKeys` from `@fractal/ui/workspace/react`). A bare `[`/`]` or Ctrl+H only applies outside text. Modified chords also work from the composer but
  * never over a terminal, where attached programs must receive their input unchanged.
  * Cmd+T/W and Ctrl+Tab belong to the browser; `event.code` keeps Alt chords working on Mac layouts.
  */
@@ -35,8 +36,6 @@ export const useWorkspaceKeys = ({ dispatch, getState, openInbox }: {
       }
       if (terminal) return
       if (event.ctrlKey && !event.metaKey && !event.altKey) {
-        if (event.key === 'PageDown') return run({ _tag: 'Cycle', by: 1 })
-        if (event.key === 'PageUp') return run({ _tag: 'Cycle', by: -1 })
         if (event.key === '^' || event.key === '6') return run({ _tag: 'ActivatePrevious' })
         if (event.key === 'w' && active !== undefined) return run({ _tag: 'Close', tab: active })
         if (event.key === 'h' && !typing) {
@@ -45,10 +44,7 @@ export const useWorkspaceKeys = ({ dispatch, getState, openInbox }: {
         }
       }
       if (event.altKey && !event.metaKey && !event.ctrlKey) {
-        if (event.code === 'BracketRight') return run({ _tag: 'Cycle', by: 1 })
-        if (event.code === 'BracketLeft') return run({ _tag: 'Cycle', by: -1 })
-        if (event.code === 'KeyW' && active !== undefined) return run(event.shiftKey ? { _tag: 'CloseOthers', tab: active } : { _tag: 'Close', tab: active })
-        if (event.code === 'KeyT' && event.shiftKey) return run({ _tag: 'ReopenClosed' })
+        if (event.code === 'KeyW' && event.shiftKey && active !== undefined) return run({ _tag: 'CloseOthers', tab: active })
         const digit = event.code.match(/^Digit([1-9])$/)?.[1]
         if (digit !== undefined) return run({ _tag: 'ActivateIndex', index: Number(digit) - 1 })
       }

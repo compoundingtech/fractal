@@ -902,4 +902,33 @@ describe('following the live end', () => {
     await appendRow()
     expect(lane().scrollTop).toBe(top)
   })
+
+  it('stops following when assistive tech opens a disclosure with a click alone', async () => {
+    // A real disclosure: activating it renders more of its row. Assistive tech may send only a click: no pointerdown, no keydown.
+    function Disclosure() {
+      const [open, setOpen] = React.useState(false)
+      return <><button aria-expanded={open} onClick={() => setOpen(value => !value)}>Thinking</button>{open && <p data-test-detail>Expanded detail</p>}</>
+    }
+    let appendRows: () => void = () => {}
+    function Host() {
+      const [count, setCount] = React.useState(6)
+      appendRows = () => setCount(value => value + 1)
+      const items = rows.slice(0, count)
+      return <EmbraceScrollViewport items={items} data-testid="transcript-scroll">
+        {items.map((row, index) => <div key={row.id} data-test-tail-row data-item-id={row.id}>{row.id}{index === 4 && <Disclosure />}</div>)}
+      </EmbraceScrollViewport>
+    }
+    await render(<Host />)
+    expect(distance()).toBe(0)
+    const top = lane().scrollTop
+    const disclosure = lane().querySelector<HTMLButtonElement>('[aria-expanded]')!
+    await act(async () => { disclosure.focus() })
+    await act(async () => { disclosure.click() })
+    await flushFrames()
+    expect(disclosure.getAttribute('aria-expanded')).toBe('true')
+    expect(lane().querySelector('[data-test-detail]')).not.toBeNull()
+    await act(async () => appendRows())
+    await flushFrames()
+    expect(lane().scrollTop, 'the lane followed the end instead of holding the opened row').toBe(top)
+  })
 })

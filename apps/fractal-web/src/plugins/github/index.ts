@@ -6,6 +6,7 @@
  */
 import * as React from 'react'
 
+import { DraggableMention } from '../../workspace/DraggableMention.tsx'
 import { claimsKind, parseGithubUrl, parseSubjectRef, refOf, type GithubKind, type GithubRef } from './refs.ts'
 
 export { githubSubjectRef, parseGithubUrl, parseSubjectRef, refOf, type GithubRef } from './refs.ts'
@@ -23,7 +24,8 @@ const LazySurface = React.lazy(() => views().then(module => ({ default: module.G
 export const githubLinkPreview = (href: string, link: React.ReactElement): React.ReactNode | undefined => {
   const target = parseGithubUrl(href)
   if (target === undefined) return undefined
-  return React.createElement(React.Suspense, { fallback: link }, React.createElement(LazyHoverLink, { target, children: link }))
+  // The link drags onto the workspace as the subject's tab.
+  return React.createElement(DraggableMention, { subject: refOf(target) }, React.createElement(React.Suspense, { fallback: link }, React.createElement(LazyHoverLink, { target, children: link })))
 }
 
 /**

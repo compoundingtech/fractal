@@ -19,7 +19,10 @@ export type AlertChoice = {
   /** Whether this answer takes the person's words: never, if they wrote some, or only with them. */
   readonly words: 'none' | 'optional' | 'required'
   readonly tone: 'primary' | 'secondary' | 'danger'
-  readonly action: (words: string) => AlertAction
+  /** `note` is the person's note on this answer, where it takes one (`notes`). */
+  readonly action: (words: string, note?: string) => AlertAction
+  /** Whether a note on this answer is sent with it: a request's named answer carries text beside its id. */
+  readonly notes?: boolean
 }
 
 const done = (summary: string, answer?: { readonly id?: string; readonly text?: string }): AlertAction => ({
@@ -32,6 +35,15 @@ const done = (summary: string, answer?: { readonly id?: string; readonly text?: 
 const typed = (request: NonNullable<Native.Attention['request']>, chosen: string | undefined, words: string) => {
   const answer = personAnswer(request as Parameters<typeof personAnswer>[0], chosen, words)
   return typeof answer === 'object' ? answer : undefined
+}
+
+/**
+ * A named answer with the person's note on it, as `text` beside the answer's `id`: Fractal records text on any named
+ * answer (`PersonRequest::answer`), the way it records the changes a request-changes answer carries.
+ */
+const noted = (answer: { readonly id?: string; readonly text?: string } | undefined, note: string | undefined) => {
+  const text = note?.trim() ?? ''
+  return answer === undefined || answer.id === undefined || text === '' || answer.text !== undefined ? answer : { ...answer, text }
 }
 
 /**
@@ -51,7 +63,13 @@ export const alertChoices = (alert: Native.Attention): readonly AlertChoice[] | 
         // Requesting changes carries the changes, in the person's words.
         words: answer.outcome === 'request_changes' ? 'required' : 'none',
         tone: answer.outcome === 'decline' ? 'danger' : request.recommendation?.answer === answer.id ? 'primary' : 'secondary',
-        action: (words) => done(answer.outcome === 'request_changes' ? words.trim() : answer.label, typed(request, answer.id, words)),
+        notes: answer.outcome !== 'request_changes',
+        action: (words, note) => {
+          const sent = noted(typed(request, answer.id, words), note)
+          // The summary is the line the asker's history shows: a note reads there too, as Fractal words it (`answer_summary`).
+          const summary = answer.outcome === 'request_changes' ? words.trim() : sent?.text === undefined ? answer.label : `${answer.label}: ${sent.text}`
+          return done(summary, sent)
+        },
       }))
       if (request.type === 'feedback' || (request.type === 'choice' && request.custom === true)) {
         choices.push({

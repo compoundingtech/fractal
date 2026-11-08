@@ -153,9 +153,13 @@ export const AnswerAlert = ({
   const selected = chosen ?? parts.options.filter((choice) => choice.recommended === true).map((choice) => choice.key)
   const answer = choices === null ? undefined : effectiveChoice(choices, selected[0], words)
   const from = alertFrom(alert, React.useContext(AlertNames))
+  const notes = store.notes(alert)
+  // A note rides with a named answer as its text; only answers that carry one offer it.
+  const notable = onAct !== undefined && parts.options.some((choice) => choice.notes === true)
   const send = (choice: NonNullable<typeof answer>) => {
     if (onAct === undefined) return
-    store.send(alert, answeredLabel(choice, words), () => onAct(alert, choice.action(words)))
+    const note = choice.notes === true ? notes[choice.key] : undefined
+    store.send(alert, answeredLabel(choice, words), () => onAct(alert, choice.action(words, note)))
     onBegin?.(alert)
   }
   const [armed, arm] = useArmed(alert.id)
@@ -190,10 +194,12 @@ export const AnswerAlert = ({
   const options = parts.options
   const shownSelected = answer !== undefined && options.some((choice) => choice.key === answer.key) ? [answer.key] : []
   const movedToWords = words.trim() !== '' && selected.length > 0 && answer?.key !== selected[0]
+  // A note rides only with its own answer: once words take the answer's place, the note stays in the draft, unsent.
+  const droppedNote = movedToWords && (notes[selected[0]!] ?? '').trim() !== '' ? options.find((choice) => choice.key === selected[0])?.label : undefined
   const stuck = words.trim() !== '' && answer !== undefined && answer.words === 'none'
   const status = failure !== undefined ? { tone: 'error' as const, text: failure }
     : stuck ? { tone: 'progress' as const, text: 'This asks you to pick one of its answers, so your words can\'t be sent. Clear them to send.' }
-      : movedToWords ? { tone: 'progress' as const, text: answer?.key === 'words' ? 'Your words will be sent as the answer.' : `Your words go with “${answer?.label}”.` }
+      : movedToWords ? { tone: 'progress' as const, text: `${answer?.key === 'words' ? 'Your words will be sent as the answer.' : `Your words go with “${answer?.label}”.`}${droppedNote === undefined ? '' : ` Your note on “${droppedNote}” is not sent with them.`}` }
         : undefined
   return <DecisionCard
     density={density}
@@ -215,6 +221,7 @@ export const AnswerAlert = ({
     }))}
     selected={shownSelected}
     onSelect={(ids) => store.setSelected(alert, ids)}
+    {...(notable ? { notes: { values: notes, onChange: (id: string, note: string) => store.setNote(alert, id, note), only: parts.options.filter((choice) => choice.notes === true).map((choice) => choice.key) } } : {})}
     {...(choices === null ? {} : {
       words: {
         value: words,

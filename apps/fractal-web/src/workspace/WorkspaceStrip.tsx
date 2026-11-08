@@ -5,6 +5,7 @@ import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packa
 import { Menu, MenuItem, MenuPopover, MenuTrigger } from '../ui-compat/components.tsx'
 import { EditorTabs, type EditorTabItem } from '../workbench-kit/EditorTabs.tsx'
 import { IconButton } from '../workbench-kit/IconButton.tsx'
+import { useCurrentSpace, useDragState, useWorkspaceContext } from '@fractal/ui/workspace/react'
 import type { Command } from './model.ts'
 
 const PlusIcon = () => <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M6 2v8M2 6h8" /></svg>
@@ -16,10 +17,15 @@ const openable = [
 ] as const
 
 /** The tab strip at every width. The panel it hosts keeps one identity, so no activation remounts a surface. */
-export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, leading, trailing, bar = false, children }: {
+export const WorkspaceStrip = ({ items, refs, active, group, focused = true, narrow, dispatch, open, leading, trailing, bar = false, children }: {
   readonly items: readonly EditorTabItem[]
+  /** Each tab's ref, which a drag of it carries. */
+  readonly refs: ReadonlyMap<string, string>
   readonly active: string | null
+  /** The pane this strip belongs to. */
   readonly group: string
+  /** Whether its pane has the focus: its shown tab carries the accent, another split's a grey line. */
+  readonly focused?: boolean
   readonly narrow: boolean
   readonly dispatch: (command: Command) => void
   readonly open: (ref: string) => void
@@ -47,6 +53,23 @@ export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, l
     event.stopPropagation()
     dispatch({ _tag: 'Close', tab: id })
   }
+  // Tabs drag on the workspace's pointer drag: within and between strips, and onto a pane's centre or edges.
+  const { drag, describe } = useWorkspaceContext()
+  const space = useCurrentSpace().id
+  const dropIndex = useDragState(state => state.over?._tag === 'Strip' && state.over.pane === group ? state.over.slot : null)
+  const hostDrag = React.useMemo(() => ({
+    stripProps: { 'data-drop-strip': group },
+    dropIndex,
+    tabProps: (tab: EditorTabItem) => ({
+      'data-workspace-tab': '',
+      onPointerDown: (event: React.PointerEvent) => {
+        const ref = refs.get(tab.id)
+        // A phone shows one pane: a touch press scrolls the strip.
+        if (event.button !== 0 || event.pointerType === 'touch' || ref === undefined) return
+        drag.press(event, () => ({ entity: describe(ref), ref, tab: { space, id: tab.id } }))
+      },
+    }),
+  }), [group, dropIndex, refs, drag, describe, space])
   return <div onContextMenu={onContextMenu} onKeyDownCapture={onKeyDownCapture} {...stylex.props(styles.host)}>
     <EditorTabs
       label="Workspace tabs"
@@ -56,10 +79,11 @@ export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, l
       variant={bar ? "bar" : "compact"}
       leading={leading}
       end={bar ? trailing : undefined}
-      isGroupFocused
+      isGroupFocused={focused}
       dragType="application/x-fractal-workspace-tab"
       stablePanel
       touch={narrow}
+      hostDrag={hostDrag}
       onActivate={id => dispatch({ _tag: 'Activate', tab: id })}
       onClose={id => dispatch({ _tag: 'Close', tab: id })}
       onMove={({ source, toIndex }) => dispatch({ _tag: 'Move', tab: source.tabId, to: { _tag: 'Strip', pane: group, index: toIndex } })}
@@ -84,7 +108,14 @@ export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, l
       <Aria.Menu aria-label="Tab actions" autoFocus="first" onClose={() => setMenu(undefined)} onAction={key => {
         if (key === 'close') dispatch({ _tag: 'Close', tab: menu.id })
         else if (key === 'close-others') dispatch({ _tag: 'CloseOthers', tab: menu.id })
+        // One tab per entity, so a split from a tab moves it into the new pane.
+        else if (key === 'split-right') dispatch({ _tag: 'Split', pane: group, side: 'right', tab: menu.id })
+        else if (key === 'split-down') dispatch({ _tag: 'Split', pane: group, side: 'bottom', tab: menu.id })
       }} {...stylex.props(styles.menu)}>
+        {narrow ? null : <>
+          <Aria.MenuItem id="split-right" isDisabled={items.length < 2} {...stylex.props(styles.menuItem)}>Split right</Aria.MenuItem>
+          <Aria.MenuItem id="split-down" isDisabled={items.length < 2} {...stylex.props(styles.menuItem)}>Split down</Aria.MenuItem>
+        </>}
         <Aria.MenuItem id="close" {...stylex.props(styles.menuItem)}>Close</Aria.MenuItem>
         <Aria.MenuItem id="close-others" isDisabled={items.length < 2} {...stylex.props(styles.menuItem)}>Close others</Aria.MenuItem>
       </Aria.Menu>

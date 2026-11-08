@@ -131,6 +131,8 @@ const styles = stylex.create({
     alignItems: 'center',
     gap: space.sm,
     paddingInline: space.md,
+    // Clear of the tab row's divider by the same step the Alerts and Missions lists start below it.
+    paddingTop: space.lg,
     paddingBottom: space.md,
   },
   searchSlot: { position: 'relative', flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0 },

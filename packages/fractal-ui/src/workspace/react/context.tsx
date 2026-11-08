@@ -26,6 +26,9 @@ export interface WorkspaceContextValue {
 
 const WorkspaceContext = React.createContext<WorkspaceContextValue | undefined>(undefined)
 
+/** The enclosing workspace, if any: for what can also live outside one, such as a draggable list row. */
+export const useOptionalWorkspaceContext = (): WorkspaceContextValue | undefined => React.useContext(WorkspaceContext)
+
 export const useWorkspaceContext = (): WorkspaceContextValue => {
   const value = React.useContext(WorkspaceContext)
   if (value === undefined) throw new Error('Workspace primitives need a WorkspaceProvider')

@@ -12,10 +12,21 @@ import { workspaceKinds } from './kinds.ts'
 import { showsTerminal, type Tab, type TabView } from './model.ts'
 import { parsePane, subjectAgent } from './subject.ts'
 import type { Tier } from './resources.ts'
+import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
+import { surfacePlacement } from './WorkspaceSplits.tsx'
 
 export interface WorkspaceBodyProps {
   readonly tabs: readonly Tab[]
+  /** The focused pane's shown tab: the URL's subject, and where an explicit face toggle moves focus. */
   readonly active: string | null
+  /** Each pane's shown tab. */
+  readonly shown: ReadonlySet<string>
+  /** Each tab's pane, whose content slot its surface sits over. */
+  readonly paneOf: ReadonlyMap<string, string>
+  /** Each pane's header action slot, where its shown conversation portals its status. */
+  readonly headerSlots: ReadonlyMap<string, HTMLElement>
+  /** A press or focus inside a surface focuses its pane. */
+  readonly onFocusPane: (pane: string) => void
   readonly tiers: ReadonlyMap<string, Tier>
   readonly views: Readonly<Record<string, TabView>>
   readonly names: ReadonlyMap<string, string>
@@ -28,7 +39,6 @@ export interface WorkspaceBodyProps {
   /** Set by an explicit face toggle: the next commit moves focus to what it revealed. */
   readonly focusShownFace: React.RefObject<boolean>
   readonly ux?: UxTelemetry
-  readonly empty: React.ReactNode
 }
 
 const scrollerWithin = (root: HTMLElement): HTMLElement | undefined => {
@@ -78,8 +88,10 @@ const useScrollMemory = ({ enabled, shown, scrollTop, save }: {
 }
 
 /** One tab's retained surface. Its props are stable so a roster tick or another tab's switch never re-renders it. */
-const TabSurface = React.memo(function TabSurface({ tab, shown, covered, name, view, onOpenTool, onOpen, onReplace, onClose, onBackToAlerts, onView, ux }: {
+const TabSurface = React.memo(function TabSurface({ tab, pane, headerSlot, shown, covered, name, view, onOpenTool, onOpen, onReplace, onClose, onBackToAlerts, onView, ux }: {
   readonly tab: Tab
+  readonly pane: string
+  readonly headerSlot: HTMLElement | null
   readonly shown: boolean
   readonly covered: boolean
   readonly name: string | undefined
@@ -111,20 +123,28 @@ const TabSurface = React.memo(function TabSurface({ tab, shown, covered, name, v
     ref={memory.host}
     aria-hidden={!shown}
     data-tab-surface={tab.ref}
+    data-tab-surface-id={tab.id}
+    data-surface-pane={pane}
     data-tab-kind={kind.id}
     onScrollCapture={memory.onScrollCapture}
-    {...stylex.props(styles.surface, shown ? styles.shown : covered ? null : styles.hidden, surface.hidden === 'activity' && !shown && styles.inert)}
+    style={surfacePlacement(pane)}
+    {...stylex.props(styles.surface, shown ? styles.shown : covered ? null : styles.hidden, !shown && styles.inert)}
   >
-    {surface.hidden === 'activity' ? <React.Activity mode={shown ? 'visible' : 'hidden'}>{body}</React.Activity> : body}
+    <ThreadHeaderSlotContext.Provider value={headerSlot as HTMLDivElement | null}>
+      {surface.hidden === 'activity' ? <React.Activity mode={shown ? 'visible' : 'hidden'}>{body}</React.Activity> : body}
+    </ThreadHeaderSlotContext.Provider>
   </div>
 })
 
+const sameSet = (left: ReadonlySet<string>, right: ReadonlySet<string>) => left.size === right.size && [...left].every(id => right.has(id))
+
 /**
- * Hosts every retained surface in id order: strip order never reaches the DOM, because moving a
- * mounted subtree discards its rendering state. A hidden surface is revealed, not re-rendered, on a
- * switch; the outgoing pane stays covered through the switch frame, since locking it costs O(its rows).
+ * Hosts every retained surface in id order: neither strip order nor the split layout reaches the DOM,
+ * because moving a mounted subtree discards its rendering state. Each surface sits over its pane's
+ * content slot. A hidden surface is revealed, not re-rendered, on a switch; the outgoing one stays
+ * covered through the switch frame, since locking it costs O(its rows).
  */
-export function WorkspaceBody({ tabs, active, tiers, views, names, onOpenTool, onOpen, onReplace, onClose, onBackToAlerts, onView, focusShownFace, ux, empty }: WorkspaceBodyProps) {
+export function WorkspaceBody({ tabs, active, shown, paneOf, headerSlots, onFocusPane, tiers, views, names, onOpenTool, onOpen, onReplace, onClose, onBackToAlerts, onView, focusShownFace, ux }: WorkspaceBodyProps) {
   // Work-log folds outlive the surface and reload; reading positions stay with this surface.
   const registry = React.useContext(RegistryContext)
   const [viewportStore] = React.useState(() => new ViewportStore({ folds: persistedFolds(registry) }))
@@ -134,15 +154,15 @@ export function WorkspaceBody({ tabs, active, tiers, views, names, onOpenTool, o
   }, [viewportStore])
   const activeRow = tabs.find(tab => tab.id === active)
   // Reload restores tabs, not subtrees: a hidden tab first mounts when it is first shown.
-  const [shownOnce, setShownOnce] = React.useState<ReadonlySet<string>>(() => new Set(active === null ? [] : [active]))
-  if (active !== null && !shownOnce.has(active)) setShownOnce(new Set([...shownOnce, active]))
-  const [switched, setSwitched] = React.useState<{ readonly shown: string | null; readonly covered: string | null }>({ shown: active, covered: null })
-  if (switched.shown !== active) setSwitched({ shown: active, covered: switched.shown })
+  const [shownOnce, setShownOnce] = React.useState<ReadonlySet<string>>(() => shown)
+  if ([...shown].some(id => !shownOnce.has(id))) setShownOnce(new Set([...shownOnce, ...shown]))
+  const [switched, setSwitched] = React.useState<{ readonly shown: ReadonlySet<string>; readonly covered: ReadonlySet<string> }>({ shown, covered: new Set() })
+  if (!sameSet(switched.shown, shown)) setSwitched({ shown, covered: new Set([...switched.shown].filter(id => !shown.has(id))) })
   React.useEffect(() => {
-    if (switched.covered === null) return
+    if (switched.covered.size === 0) return
     let timer: number | undefined
     // rAF runs before the switch frame paints; the timeout runs after it.
-    const frame = window.requestAnimationFrame(() => { timer = window.setTimeout(() => setSwitched(value => ({ shown: value.shown, covered: null }))) })
+    const frame = window.requestAnimationFrame(() => { timer = window.setTimeout(() => setSwitched(value => ({ shown: value.shown, covered: new Set() }))) })
     return () => { window.cancelAnimationFrame(frame); window.clearTimeout(timer) }
   }, [switched])
   const reading = React.useMemo(() => new Set(tabs.flatMap(tab => {
@@ -172,24 +192,33 @@ export function WorkspaceBody({ tabs, active, tiers, views, names, onOpenTool, o
     if (!focusShownFace.current) return
     focusShownFace.current = false
     if (narrow) return
-    area.current?.querySelector<HTMLElement>(terminalFace ? '[data-testid="terminal-pane"][data-terminal-shown="true"]' : '[data-wf-shown-pane] textarea:not(:disabled)')?.focus({ preventScroll: true })
-  }, [terminalFace, focusShownFace, narrow])
+    const surface = active === null ? null : area.current?.querySelector<HTMLElement>(`[data-tab-surface-id="${CSS.escape(active)}"]`)
+    surface?.querySelector<HTMLElement>(terminalFace ? '[data-testid="terminal-pane"][data-terminal-shown="true"]' : '[data-wf-shown-pane] textarea:not(:disabled)')?.focus({ preventScroll: true })
+  }, [terminalFace, focusShownFace, narrow, active])
+  // The surfaces sit outside their panes, so a press or focus in one focuses its pane here.
+  const focusPaneOf = (event: React.SyntheticEvent) => {
+    const id = event.target instanceof Element ? event.target.closest('[data-tab-surface-id]')?.getAttribute('data-tab-surface-id') : undefined
+    const pane = id === null || id === undefined ? undefined : paneOf.get(id)
+    if (pane !== undefined) onFocusPane(pane)
+  }
   const mounted = tabs
     .filter(tab => {
       const tier = tiers.get(tab.id)
-      return tier === 'active' || tab.id === active || (tier === 'mounted' && shownOnce.has(tab.id)) || tab.id === switched.covered
+      return tier === 'active' || shown.has(tab.id) || (tier === 'mounted' && shownOnce.has(tab.id)) || switched.covered.has(tab.id)
     })
     .toSorted((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
   return <ViewportStoreContext.Provider value={viewportStore}>
-    <div ref={area} data-testid="workspace-body" {...stylex.props(styles.area)}>
+    <div ref={area} data-testid="workspace-body" onPointerDownCapture={focusPaneOf} onFocusCapture={focusPaneOf} {...stylex.props(styles.area)}>
       {mounted.map(tab => {
         const agent = subjectAgent(parsePane(tab.ref))
         return <TabSurface
           // A replaced tab keeps its place but is another surface.
           key={`${tab.id}:${tab.ref}`}
           tab={tab}
-          shown={tab.id === active}
-          covered={tab.id === switched.covered}
+          pane={paneOf.get(tab.id) ?? ''}
+          headerSlot={headerSlots.get(paneOf.get(tab.id) ?? '') ?? null}
+          shown={shown.has(tab.id)}
+          covered={switched.covered.has(tab.id)}
           name={agent === undefined ? undefined : names.get(agent)}
           view={views[tab.id]}
           onOpenTool={onOpenTool}
@@ -201,16 +230,16 @@ export function WorkspaceBody({ tabs, active, tiers, views, names, onOpenTool, o
           {...(ux === undefined ? {} : { ux })}
         />
       })}
-      {tabs.length === 0 ? empty : null}
     </div>
   </ViewportStoreContext.Provider>
 }
 
 const styles = stylex.create({
-  area: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, flexBasis: 0, minWidth: 0, minHeight: 0 },
+  area: { position: 'absolute', inset: 0 },
   // Identical geometry in both states: revealing a pane must not invalidate its layout. Only
   // non-inherited properties toggle, so a reveal does not restyle the retained subtree.
-  surface: { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, backgroundColor: c.canvas },
+  // Placed over its pane's slot by `surfacePlacement`; the host itself takes no pointer.
+  surface: { position: 'absolute', display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, backgroundColor: c.canvas, pointerEvents: 'auto' },
   shown: { zIndex: 1 },
   hidden: { contentVisibility: 'hidden' },
   inert: { pointerEvents: 'none' },
