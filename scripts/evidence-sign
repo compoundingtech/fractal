@@ -215,6 +215,42 @@ def git(repo, *args, stdin=None, env=None):
     return done.stdout
 
 
+def hydrate_commit(repo, commit):
+    """A local upload-pack cannot lazy-fetch missing objects from a partial clone.
+
+    Hydrate in the source repository, where its promisor remote is available, before
+    fetching into the signer's scratch repository. Include history, not just HEAD's tree.
+    """
+    def missing_objects():
+        return [line[1:] for line in
+                git(repo, 'rev-list', '--objects', '--missing=print', commit,
+                    env={'GIT_NO_LAZY_FETCH': '1'}).decode().splitlines()
+                if line.startswith('?')]
+
+    missing = missing_objects()
+    if not missing:
+        return
+    remotes = [match.group(1) for line in git(repo, 'config', '--list').decode().splitlines()
+               if (match := re.fullmatch(r'remote\.(.+)\.promisor=true', line))]
+    if not remotes:
+        raise Refused(f'cannot hydrate {len(missing)} missing objects before signing: no promisor remote')
+    while missing:
+        before = set(missing)
+        for offset in range(0, len(missing), 200):
+            batch = missing[offset:offset + 200]
+            try:
+                git(repo, '-c', 'maintenance.auto=false', '-c', 'gc.auto=0',
+                    '-c', 'fetch.negotiationAlgorithm=noop', 'fetch', '--quiet',
+                    '--no-tags', '--no-write-fetch-head', '--no-auto-maintenance',
+                    '--no-recurse-submodules', '--filter=blob:none', '--stdin', remotes[0],
+                    stdin=(''.join(oid + '\n' for oid in batch)).encode())
+            except Refused as error:
+                raise Refused(f'cannot hydrate missing objects before signing: {error}') from error
+        missing = missing_objects()
+        if missing and set(missing) >= before:
+            raise Refused(f'cannot hydrate {len(missing)} missing objects before signing: fetch made no progress')
+
+
 def check_nix(request):
     """A `nix` request is `nix build .#checks.<system>.<check>` and says what that build produced. The signer
     cannot run Nix or see the store, so it holds the claim to its shape: store paths, a NAR hash, the signatures
@@ -309,6 +345,7 @@ def main():
     lock = git(checkout, 'show', f'{commit}:flake.lock')
     if hashlib.sha256(lock).hexdigest() != request['inputs']['flake_lock_sha256']:
         raise Refused('flake_lock_sha256 does not match flake.lock in the commit')
+    hydrate_commit(checkout, commit)
 
     if not scratch.exists():
         subprocess.run([TOOLS['git'], 'init', '--quiet', '--bare', str(scratch)], check=True, env=child_environment())
