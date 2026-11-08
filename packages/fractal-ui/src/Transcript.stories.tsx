@@ -10,6 +10,7 @@ import { EmbraceComposer } from './assistant-ui/EmbraceComposer'
 import type { ConversationItem, SendState, TextItem } from './assistant-ui/embrace-data/model'
 import { workLogTurnFromItems, type WorkLogCall } from './assistant-ui/taste/work-log'
 import { WorkLogV1 } from './assistant-ui/taste/WorkLogV1'
+import { Button, Tooltip } from './assistant-ui/composition/Controls'
 import type { SyncStatus } from './assistant-ui/sync-presentation/sync-status'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
@@ -641,6 +642,51 @@ export const NativeToolOutput: Story = { tags: ['critical'], render: args => <ma
   await expectNoOutputWithControl(canvasElement)
 } }
 export const NativeToolOutputLight: Story = { ...NativeToolOutput, args: { scheme: 'light' } }
+// A ~50KB output must never surface on hover: the row's label tooltip repeats only a cut-off title, bounded inside the viewport.
+const hugeOutputMarker = 'HUGE-OUTPUT-BODY'
+const hugeOutput = Array.from({ length: 900 }, (_, line) => `{"page":${line},"cursor":"${hugeOutputMarker}-${line}","items":[${'"x",'.repeat(8)}"x"]}`).join('\n')
+const hugeOutputItems: readonly ConversationItem[] = [
+  { name: 'Extracting bounded pagination result from every cursor page of the paginated response', id: 'long' },
+  { name: 'Running a command', id: 'short' },
+].map(({ name, id }) => ({ _tag: 'ToolCall', id: `huge-output/${id}`, callId: `huge-call/${id}`, name, input: {}, status: 'success', callSeen: true, at, result: { content: hugeOutput, isError: false, at } }))
+const hugeOutputTurn = workLogTurnFromItems(hugeOutputItems, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true })
+export const HugeOutputHoverLabel: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><div {...stylex.props(styles.narrowLog)}><WorkLogV1 turn={hugeOutputTurn} /></div><Tooltip label={hugeOutput}><Button>Kit tooltip fed the whole output</Button></Tooltip></main>, play: async ({ canvasElement }) => {
+  await expect(hugeOutput.length).toBeGreaterThan(50_000)
+  const canvas = within(canvasElement)
+  await userEvent.click(canvas.getByRole('button', { name: 'Worked · 2 tools' }))
+  const tooltips = () => within(document.body).queryAllByRole('tooltip')
+  // One overlay tier: no native title anywhere in the log competes with the kit tooltip.
+  await expect(canvasElement.querySelectorAll('[title]')).toHaveLength(0)
+  const short = canvas.getByRole('button', { name: /^Running a command/ })
+  await userEvent.hover(short)
+  await new Promise(resolve => setTimeout(resolve, 600))
+  await expect(tooltips()).toHaveLength(0)
+  await userEvent.unhover(short)
+  const long = canvas.getByRole('button', { name: /^Extracting bounded pagination result/ })
+  await userEvent.hover(long)
+  await waitFor(() => expect(tooltips()).toHaveLength(1))
+  const tooltip = tooltips()[0]!
+  await expect(tooltip).toHaveTextContent(/^Extracting bounded pagination result/)
+  await expect(tooltip).not.toHaveTextContent(hugeOutputMarker)
+  const box = tooltip.getBoundingClientRect()
+  await expect(box.top).toBeGreaterThanOrEqual(0)
+  await expect(box.left).toBeGreaterThanOrEqual(0)
+  await expect(box.bottom).toBeLessThanOrEqual(window.innerHeight)
+  await expect(box.right).toBeLessThanOrEqual(window.innerWidth)
+  await expect(box.height).toBeLessThanOrEqual(160)
+  await userEvent.unhover(long)
+  await waitFor(() => expect(tooltips()).toHaveLength(0))
+  // The kit surface itself bounds a label it should never have been given.
+  const kit = canvas.getByRole('button', { name: 'Kit tooltip fed the whole output' })
+  await userEvent.hover(kit)
+  await waitFor(() => expect(tooltips()).toHaveLength(1))
+  const kitBox = tooltips()[0]!.getBoundingClientRect()
+  await expect(kitBox.height).toBeLessThanOrEqual(160)
+  await expect(kitBox.top).toBeGreaterThanOrEqual(0)
+  await expect(kitBox.bottom).toBeLessThanOrEqual(window.innerHeight)
+  await expect(kitBox.right).toBeLessThanOrEqual(window.innerWidth)
+  await userEvent.unhover(kit)
+} }
 export const Streaming: Story = { tags: ['critical'], args: { state: 'streaming' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await canvas.findByTestId('live-work')
@@ -1446,6 +1492,7 @@ export const NoGreenAllStates: Story = { tags: ['critical', 'merge-only'], rende
 export const NoGreenAllStatesLight: Story = { ...NoGreenAllStates, tags: ['critical', '!merge-only'], args: { scheme: 'light' } }
 const styles = stylex.create({
   root: { height: '100vh', width: '100%', minWidth: 0, boxSizing: 'border-box', display: 'flex', flexDirection: 'column', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
+  narrowLog: { width: '360px', maxWidth: '100%' },
   frame: { flex: '1 1 0', minHeight: 0 }, cell: { height: '720px', display: 'flex', flexDirection: 'column' }, paging: { height: '420px', flexShrink: 0, display: 'flex', flexDirection: 'column' }, detail: { padding: s.lg, maxHeight: g.previewMax, overflow: 'auto', fontSize: t.metaSize },
   thread: { flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column' }, composerDock: { flexShrink: 0, boxSizing: 'border-box', width: '100%', maxWidth: g.lane, marginInline: 'auto', padding: s.lg },
   all: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) minmax(0, 1fr)', gap: s.lg, padding: s.lg, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans },
