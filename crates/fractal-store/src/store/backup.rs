@@ -1,4 +1,4 @@
-//! Backup reads pin a pooled reader and page the sync envelopes; restore uses normal admission.
+//! Backup reads pin a pooled reader and page sync envelopes; restore revalidates source-admitted history.
 use super::*;
 use super::backup_format::{Header, PAGE, Record, RestoreReport, TableDigest, write_record};
 use crate::model::{ReplicaEnvelope, ReplicaEnvelopeId, ReplicaEnvelopeSignature};
@@ -642,6 +642,55 @@ mod tests {
         store
             .write_backup(&mut fs::File::create(path).unwrap())
             .unwrap()
+    }
+
+    #[test]
+    fn restore_preserves_historical_usage_credits_with_no_current_writers() {
+        let root = tempfile::tempdir().unwrap();
+        let source = Store::open_memory("alder").unwrap();
+        source.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
+        let input = ClaimInput {
+            subject: "agent/sample/usage-producer".into(),
+            kind: fractal_schema::usage_limits::KIND.into(),
+            actor: Some("agent/sample/usage-producer".into()),
+            fields: serde_json::from_value(json!({
+                "readings": [],
+                "credit_readings": [{
+                    "account": "digest",
+                    "account_ref": "account/sample",
+                    "provider": "anthropic",
+                    "credit_id": "durable-credit",
+                    "expires_at": "2026-11-08T10:00:00Z",
+                    "measured_at": "2026-11-07T10:00:00Z",
+                    "state": "redeemed",
+                    "disposition": {
+                        "kind": "redeemed",
+                        "at": "2026-11-07T09:00:00Z",
+                        "evidence_ref": "doc/sample/credit-receipt"
+                    },
+                    "coverage": "reported",
+                    "source": "omp-usage",
+                    "host": "sample-host"
+                }]
+            })).unwrap(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        };
+        let historical = source.append_claim(&input).unwrap();
+        source.set_usage_limits_writers(Vec::new()).unwrap();
+        let backup_path = root.path().join("usage.jsonl");
+        let header = archive(&source, &backup_path);
+        let target_path = root.path().join("restored.db");
+        let report = backup::restore(&backup_path, &target_path, root.path()).unwrap();
+        assert!(report.projections_match);
+        assert_eq!(report.graph_digest, header.graph_digest);
+        assert_eq!(report.tables["claim_sources"], header.tables["claim_sources"]);
+        let restored = Store::open(&target_path, &report.writer).unwrap();
+        let retained = restored.claim_by_id(&historical.id).unwrap().unwrap();
+        assert_eq!(retained.body, historical.body);
+        assert!(restored.append_claim(&input).is_err(), "historical import must not authorize new trusted writes");
+        assert!(restored.append_client_claim(&input).is_err(), "historical import must not authorize new public writes");
     }
 
     #[test]
