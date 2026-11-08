@@ -354,6 +354,10 @@ member admission remain quarantined: their bytes are preserved, but their claims
 authority. `operation_envelopes_quarantined` reports the count, and a counts-only warning
 indicates that pairing or terminal attachment must be repeated. On a standalone daemon,
 pairings and terminal attachments do not survive backup restoration.
+This quarantine is permanent: later member signatures do not restore admission.
+The append-only `replica_restore_quarantine` ledger survives subsequent archives
+and restores. Any archive carrying quarantine uses version `6`, which older
+readers refuse; archives without quarantine retain their existing version.
 
 The complete envelope-log digest always has to match, including certified tombstone identities.
 Without quarantined operation envelopes, the same registry fingerprint requires the claim

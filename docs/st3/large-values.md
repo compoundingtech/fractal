@@ -117,6 +117,15 @@ conversion must retain the exact writer-chain comparison.
 `lv-h756acba9d94c` replaces the admitted-only log reader. It pages exact envelope
 identities and certified tombstones, including quarantined identities only after the
 archive adapter validates the complete quarantined set; it never reads claim authority.
+Terminal restore quarantine keeps exact writer/sequence/envelope identities in an
+append-only local ledger, carried by archive version 6. Reviewed sites
+`lv-hbd09a1c36932` and `lv-h48a46332d4fa` stamp and union those identities;
+`lv-h48ab0ffcf698` adds their table to the core schema, and
+`lv-h900c9ea8feaa` excludes marked identities from retained signing.
+The relevant owners remain `fractal_store::store::backup`,
+`fractal_store::store::backup_ledgers`, `smallclaims::store` and
+`smallclaims::store::prepared_seal`. Representation changes must preserve
+identity equality and permanent non-admission.
 
 ### Membership projection generation inventory (PR #5381)
 
