@@ -134,7 +134,7 @@ pub async fn pin(State(state): State<AppState>, Extension(session): Extension<Cl
     value["transport"] = json!(session.transport);
     value["outcome"] = json!("read-attestor-pinned");
     let result = append(&state, subject, POLICY, issuer, value, Some(&previous));
-    audit(&state, "pin-read-attestor", &session.actor, session.transport, Some(&id), &result)?;
+    audit(&state, "pin-read-attestor", &session.actor, session.transport, Some(&id), None, &result)?;
     result?;
     signal_changed(&state);
     Ok(Json(projection(&state, &granted)?))
@@ -273,7 +273,7 @@ pub async fn read_with(State(state): State<AppState>, Extension(session): Extens
     if result.is_err() {
         let granted=session.pairing_grant.as_deref().map(|subject| latest(&state,subject,GRANTED)).transpose()?.flatten();
         let grant_id=granted.as_ref().and_then(|claim| claim.body.pointer("/fields/grant_id")).and_then(Value::as_str);
-        audit(&state,"read",&session.actor,session.transport,grant_id,&result)?;
+        audit(&state,"read",&session.actor,session.transport,grant_id,None,&result)?;
     }
     result
 }
@@ -428,7 +428,7 @@ pub async fn finish(state: &AppState, receipt: &ReadReceipt, bytes: &[u8],
         let grant_id=receipt.pending_used.as_ref().and_then(|used| used.get("grant_id"))
             .or_else(|| consumed.as_ref().and_then(|claim| claim.body.pointer("/fields/grant_id")))
             .and_then(Value::as_str);
-        audit(state,"read",&receipt.actor,receipt.transport,grant_id,&authorization)?;
+        audit(state,"read",&receipt.actor,receipt.transport,grant_id,None,&authorization)?;
     }
     authorization
 }
