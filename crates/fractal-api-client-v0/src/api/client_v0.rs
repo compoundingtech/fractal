@@ -5648,7 +5648,7 @@ pub async fn pairing_begin(
     }
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject,
             kind: "custom.client.pairing-begun".into(),
             actor: Some(person_id.clone()),
@@ -5781,31 +5781,19 @@ fn fabric_node_still_paired(
     device: &str,
     node: &str,
 ) -> Result<bool, ApiError> {
-    let revoked = state
-        .store
-        .claims_for_kind_at("custom.client.pairing-revoked", None, true, 10_000)
-        .map_err(ApiError::internal)?
-        .claims
-        .into_iter()
-        .filter_map(|claim| {
-            claim
-                .body
-                .pointer("/fields/device_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .collect::<BTreeSet<_>>();
     let now = client_now_ms();
-    Ok(completed.iter().any(|claim| {
+    for claim in completed {
         let field = |name: &str| claim.body.pointer(&format!("/fields/{name}"));
-        let other = field("device_id").and_then(Value::as_str);
-        claim.origin == state.node
+        if claim.origin == state.node
             && field("fabric_node_id").and_then(Value::as_str) == Some(node)
-            && other.is_some_and(|other| other != device && !revoked.contains(other))
-            && field("expires_at_unix_ms")
-                .and_then(Value::as_u64)
-                .is_some_and(|expires| u128::from(expires) > now)
-    }))
+            && field("device_id").and_then(Value::as_str).is_some_and(|other| other != device)
+            && state.store.pairing_completion_is_trusted(claim, now).map_err(ApiError::internal)?
+            && !state.store.pairing_completion_is_revoked(claim).map_err(ApiError::internal)?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 // Proof preparation must not let simultaneous completions enroll a second key after another
@@ -5858,6 +5846,9 @@ pub async fn pairing_complete(
             details: Box::default(),
         });
     }
+    if !state.store.client_operation_is_trusted(&begun).map_err(ApiError::internal)? {
+        return Err(forbidden("the pairing challenge requires a new pairing"));
+    }
     let used = !state
         .store
         .claims_for_subject_kind_at(&subject, "custom.client.pairing-completed", None, true, 1)
@@ -5902,8 +5893,7 @@ pub async fn pairing_complete(
         .to_owned();
     let session_actor = format!("{person_id}/session/{actor_suffix}");
     let expires_at = client_now_ms() + 30 * 24 * 60 * 60 * 1_000;
-    // The concrete scope list was sealed into the authenticated local begin
-    // claim. Legacy pending challenges retain their original limited grant.
+    // The concrete scope list was sealed into the authenticated local begin claim.
     let scopes = match begun.body.pointer("/fields/scopes") {
         Some(Value::Array(values)) => values
             .iter()
@@ -5994,7 +5984,7 @@ pub async fn pairing_complete(
     if let Some(node) = request.fabric_node_id.as_ref().filter(|_| fabric_wanted) {
         fields.insert("fabric_node_id".into(), Value::String(node.clone()));
     }
-    let completed = state.store.append_claim(&ClaimInput {
+    let completed = state.store.append_client_operation_claim(&ClaimInput {
         subject: begun.subject.clone(),
         kind: "custom.client.pairing-completed".into(),
         actor: Some(person_id.clone()),
@@ -6598,6 +6588,31 @@ fn terminal_attachment_subject(id: &str) -> Result<String, ApiError> {
         .ok_or_else(|| validation("the terminal attachment ID is invalid"))
 }
 
+fn trusted_terminal_attachment(state: &AppState, claim: &ClaimRecord, session: &ClientSession) -> Result<bool, ApiError> {
+    let actor = if session.authority_actor.starts_with("person/")
+        || session.authority_actor.starts_with("agent/") {
+        session.authority_actor.as_str()
+    } else {
+        "requester"
+    };
+    Ok(claim.actor.as_deref() == Some(actor)
+        && state.store.client_operation_is_trusted(claim).map_err(ApiError::internal)?)
+}
+
+fn admitted_terminal_record<'a>(
+    state: &AppState, claims: &'a [ClaimRecord], session: &ClientSession, kind: Option<&str>,
+) -> Result<Option<&'a ClaimRecord>, ApiError> {
+    for claim in claims.iter().rev() {
+        if matches!(claim.kind.as_str(), "custom.client.terminal-attached" | "custom.client.terminal-consumed" | "custom.client.terminal-detached")
+            && kind.is_none_or(|kind| kind == claim.kind)
+            && claim.origin == state.store.origin()
+            && trusted_terminal_attachment(state, claim, session)? {
+            return Ok(Some(claim));
+        }
+    }
+    Ok(None)
+}
+
 fn terminal_attachment_id(session: &ClientSession, request: &ActionRequest) -> String {
     let stable = hex::encode(Sha256::digest(
         format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
@@ -6617,10 +6632,10 @@ fn existing_terminal_attachment(
         .store
         .claims_for(&subject, None)
         .map_err(ApiError::internal)?;
-    let Some(attached) = claims
-        .iter()
-        .find(|claim| claim.kind == "custom.client.terminal-attached")
-    else {
+    let Some(attached) = admitted_terminal_record(state, &claims, session, Some("custom.client.terminal-attached"))? else {
+        if claims.iter().any(|claim| claim.kind == "custom.client.terminal-attached") {
+            return Err(forbidden("the terminal attachment requires a new attach operation"));
+        }
         return Ok(None);
     };
     let old_digest = attached
@@ -6736,10 +6751,8 @@ fn terminal_attachment_response(
         .store
         .claims_for(&subject, None)
         .map_err(ApiError::internal)?;
-    let attached = claims
-        .iter()
-        .find(|claim| claim.kind == "custom.client.terminal-attached")
-        .ok_or_else(|| ApiError::internal("the terminal attachment claim is missing"))?;
+    let attached = admitted_terminal_record(state, &claims, session, Some("custom.client.terminal-attached"))?
+        .ok_or_else(|| forbidden("the terminal attachment requires a new attach operation"))?;
     if attached.origin != state.store.origin() {
         return Err(forbidden(
             "the terminal attachment belongs to another gateway",
@@ -6762,9 +6775,8 @@ fn terminal_attachment_response(
     {
         return Err(remote_unavailable_for_owner(state, owner_host_id));
     }
-    let latest = claims
-        .last()
-        .ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
+    let latest = admitted_terminal_record(state, &claims, session, None)?
+        .ok_or_else(|| forbidden("the terminal attachment requires a new attach operation"))?;
     let expires = field("expires_at_unix_ms")
         .and_then(Value::as_u64)
         .map(u128::from)
@@ -6843,7 +6855,7 @@ fn create_terminal_attachment(
         derive_terminal_capability(state, &session.actor, &attachment_id, &live.owner_host_id)?;
     let digest = credential_digest(&capability);
     let expires_at = client_now_ms() + TERMINAL_ATTACHMENT_TTL_MS;
-    let appended = state.store.append_claim(&ClaimInput {
+    let appended = state.store.append_client_operation_claim(&ClaimInput {
         subject,
         kind: "custom.client.terminal-attached".into(),
         actor: Some(session_claim_actor(session)),
@@ -6933,6 +6945,7 @@ fn consume_terminal_attachment_mode(
         remote_terminal_live_session(state, &terminal_subject(terminal_id), incarnation)
     }).transpose()?;
     let valid = is_current
+        && trusted_terminal_attachment(state, &attached, session)?
         && attached.origin == state.store.origin()
         && field("session_actor").and_then(Value::as_str) == Some(session.actor.as_str())
         && field("raw_mode").and_then(Value::as_str) == raw_mode
@@ -6969,20 +6982,27 @@ fn consume_terminal_attachment_mode(
         return Ok(());
     }
     let _span = crate::profile::span("terminal/capability-consume");
+    let claims = state.store.claims_for(&attached.subject, None).map_err(ApiError::internal)?;
+    if admitted_terminal_record(state, &claims, session, None)?.is_none_or(|head| head.id != attached.id) {
+        return Err(forbidden("the terminal stream capability was already consumed"));
+    }
+    let raw_head = claims.last().ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: attached.subject.clone(),
             kind: "custom.client.terminal-consumed".into(),
             actor: Some(session_claim_actor(session)),
-            fields: BTreeMap::from([(
-                "attachment_id".into(),
-                field("attachment_id")
-                    .cloned()
-                    .ok_or_else(|| ApiError::internal("terminal attachment ID is missing"))?,
-            )]),
+            fields: BTreeMap::from([
+                (
+                    "attachment_id".into(),
+                    field("attachment_id")
+                        .cloned()
+                        .ok_or_else(|| ApiError::internal("terminal attachment ID is missing"))?,
+                ),
+            ]),
             evidence: vec![attached.id.clone()],
-            expected_subject: Some(Some(attached.id.clone())),
+            expected_subject: Some(Some(raw_head.id.clone())),
             idempotency_key: None,
         })
         .map_err(|_| forbidden("the terminal stream capability was already consumed"))?;
@@ -7001,14 +7021,8 @@ fn detach_terminal_attachment(
         .store
         .claims_for(&subject, None)
         .map_err(ApiError::internal)?;
-    let attached = claims
-        .iter()
-        .find(|claim| claim.kind == "custom.client.terminal-attached")
-        .ok_or_else(|| {
-            ApiError::not_found(format!(
-                "terminal attachment `{attachment_id}` does not exist"
-            ))
-        })?;
+    let attached = admitted_terminal_record(state, &claims, session, Some("custom.client.terminal-attached"))?
+        .ok_or_else(|| forbidden("the terminal attachment requires a new attach operation"))?;
     if attached.origin != state.store.origin() {
         return Err(forbidden(
             "the terminal attachment belongs to another gateway",
@@ -7030,24 +7044,23 @@ fn detach_terminal_attachment(
     if incarnation != request.fence.runtime_incarnation.as_deref() {
         return Err(stale("the terminal attachment incarnation fence is stale"));
     }
-    let latest = claims
-        .last()
-        .ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
+    let latest = admitted_terminal_record(state, &claims, session, None)?
+        .ok_or_else(|| forbidden("the terminal attachment requires a new attach operation"))?;
+    let raw_head = claims.last().ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
     if latest.kind == "custom.client.terminal-detached" {
         return Ok(attachment_id);
     }
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject,
             kind: "custom.client.terminal-detached".into(),
             actor: Some(session_claim_actor(session)),
-            fields: BTreeMap::from([(
-                "attachment_id".into(),
-                Value::String(attachment_id.clone()),
-            )]),
+            fields: BTreeMap::from([
+                ("attachment_id".into(), Value::String(attachment_id.clone())),
+            ]),
             evidence: vec![latest.id.clone()],
-            expected_subject: Some(Some(latest.id.clone())),
+            expected_subject: Some(Some(raw_head.id.clone())),
             idempotency_key: None,
         })
         .map_err(ApiError::bad)?;
@@ -9040,19 +9053,17 @@ async fn dispatch_action(
                 .store
                 .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
                 .map_err(ApiError::internal)?;
-            let paired = claims
-                .claims
-                .iter()
-                .find(|claim| {
-                    claim
-                        .body
-                        .pointer("/fields/device_id")
-                        .and_then(Value::as_str)
-                        == Some(device.as_str())
-                })
-                .ok_or_else(|| {
-                    ApiError::not_found(format!("paired device `{device}` does not exist"))
-                })?;
+            let mut paired = None;
+            for claim in &claims.claims {
+                if claim.body.pointer("/fields/device_id").and_then(Value::as_str) == Some(device.as_str())
+                    && state.store.pairing_completion_is_admitted(claim, client_now_ms()).map_err(ApiError::internal)? {
+                    paired = Some(claim);
+                    break;
+                }
+            }
+            let paired = paired.ok_or_else(|| {
+                ApiError::not_found(format!("paired device `{device}` does not exist"))
+            })?;
             if paired.origin != state.node {
                 let issuer = client_host_id(&paired.origin);
                 return Err(ApiError {
@@ -9069,7 +9080,7 @@ async fn dispatch_action(
             }
             state
                 .store
-                .append_claim(&ClaimInput {
+                .append_client_operation_claim(&ClaimInput {
                     subject: paired.subject.clone(),
                     kind: "custom.client.pairing-revoked".into(),
                     actor: Some(authority_actor.clone()),
@@ -11482,7 +11493,7 @@ mission "differential" state="ready" {
         for collection in ["missions", "arrangements"] {
             let root = tempfile::tempdir().unwrap();
             let state = smallclaims::sqlite::with_read_limit_for_test(1, || test_state(root.path()));
-            let paired = state.store.append_claim(&ClaimInput {
+            let paired = state.store.append_client_operation_claim(&ClaimInput {
                 subject: "custom/client/admission-preparation".into(),
                 kind: "custom.client.pairing-completed".into(), actor: Some("person/ada".into()),
                 fields: serde_json::from_value(json!({
@@ -13289,6 +13300,45 @@ mission "differential" state="ready" {
         }
     }
 
+    #[tokio::test]
+    async fn pairing_operations_issue_authenticated_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let app = super::super::router(state.clone());
+        let response = app.clone().oneshot(Request::builder()
+            .method("POST").uri("/v1/client/pairings")
+            .header(LOCAL_PERSON_HEADER, "person/ada")
+            .header("Content-Type", "application/json")
+            .body(Body::from(json!({
+                "api_version": CLIENT_API_VERSION, "device_name": "Test phone",
+                "person_id": "person/ada", "scopes": ["read.projections"]
+            }).to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        let begun: Value = serde_json::from_slice(&bytes).unwrap();
+        let challenge = &begun["value"];
+        let id = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
+        let response = app.oneshot(Request::builder()
+            .method("POST").uri(format!("/v1/client/pairings/{id}/complete"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(json!({
+                "api_version": CLIENT_API_VERSION, "code": challenge["code"],
+                "device_public_key": "test-device-public-key-with-at-least-32-characters"
+            }).to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        let completed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, StatusCode::OK, "{completed}");
+        let credential = completed["value"]["credential"].as_str().unwrap();
+        let request = Request::builder().uri("/v1/client/agents")
+            .header(AUTHORIZATION, format!("Bearer {credential}"))
+            .body(Body::empty()).unwrap();
+        let session = authenticate(&state, &request, "fabric-loopback").unwrap();
+        assert_eq!(session.authority_actor, "person/ada");
+        assert!(session.allows("read.projections"));
+        assert!(revalidate_session(&state, &session).is_ok());
+    }
+
     #[test]
     fn a_timeline_page_stays_under_its_byte_budget_and_keeps_the_newest_entries() {
         let entry = |size: usize| (json!({"body": "x".repeat(size)}), ());
@@ -13627,7 +13677,7 @@ mission "differential" state="ready" {
         let credential = "resources-reader";
         let app = super::super::fabric_router(state.clone());
         for (scopes, expected) in [(json!([]), StatusCode::FORBIDDEN), (json!(["read.projections"]), StatusCode::OK)] {
-            state.store.append_claim(&ClaimInput {
+            state.store.append_client_operation_claim(&ClaimInput {
                 subject: "custom/client/resources-reader".into(),
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/ada".into()),
@@ -15328,7 +15378,7 @@ subscription "watch/source" {
         let subject = "custom/client/pairing-named";
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: "custom.client.pairing-begun".into(),
                 actor: Some("person/alex".into()),
@@ -15343,7 +15393,7 @@ subscription "watch/source" {
             .unwrap();
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/alex".into()),
@@ -15374,9 +15424,7 @@ subscription "watch/source" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let append = |subject: &str, kind: &str, fields: Value| {
-            state
-                .store
-                .append_claim(&ClaimInput {
+            let input = ClaimInput {
                     subject: subject.into(),
                     kind: kind.into(),
                     actor: Some("person/alex".into()),
@@ -15384,8 +15432,12 @@ subscription "watch/source" {
                     evidence: Vec::new(),
                     expected_subject: None,
                     idempotency_key: None,
-                })
-                .unwrap()
+                };
+            if kind.starts_with("custom.client.pairing") {
+                state.store.append_client_operation_claim(&input)
+            } else {
+                state.store.append_claim(&input)
+            }.unwrap()
         };
         let seed = append(
             "message/history-seed",
@@ -15462,7 +15514,7 @@ subscription "watch/source" {
         for index in 0..300 {
             state
                 .store
-                .append_claim(&ClaimInput {
+                .append_client_operation_claim(&ClaimInput {
                     subject: format!("custom/client/pairing-{index}"),
                     kind: "custom.client.pairing-completed".into(),
                     actor: Some("person/alex".into()),
@@ -15481,7 +15533,7 @@ subscription "watch/source" {
         }
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: "custom/client/pairing-0".into(),
                 kind: "custom.client.pairing-revoked".into(),
                 actor: Some("person/alex".into()),
@@ -16088,7 +16140,7 @@ subscription "watch/source" {
     }
 
     #[test]
-    fn legacy_terminal_attachment_replay_conflicts_without_execution() {
+    fn unmarked_terminal_attachment_requires_a_new_attach_operation() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let session = ClientSession::local(Some("person/alex")).unwrap();
@@ -16116,8 +16168,9 @@ subscription "watch/source" {
         let before = state.store.status(None).unwrap().store_index;
         let error = existing_terminal_attachment(&state, &session, &request, &current_digest)
             .unwrap_err();
-        assert_eq!(error.status, StatusCode::CONFLICT);
-        assert_eq!(error.code, "idempotency-conflict");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(error.code, "forbidden");
+        assert!(terminal_attachment_response(&state, &session, &attachment_id).is_err());
         assert_eq!(state.store.status(None).unwrap().store_index, before);
     }
 
@@ -16198,6 +16251,80 @@ subscription "watch/source" {
     }
 
     #[test]
+    fn temporary_pairing_allowance_preserves_scope_expiry_and_revocation() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let cap = fractal_store::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS;
+        let now = cap - 60_000;
+        let claim = state.store.append_claim(&ClaimInput {
+            subject:"custom/client/pairing-existing".into(), kind:"custom.client.pairing-completed".into(),
+            actor:Some("person/alex".into()),
+            fields:serde_json::from_value(json!({
+                "credential_hash":"existing-test-digest", "session_actor":"client/existing",
+                "person_id":"person/alex", "scopes":["read.projections"],
+                "expires_at_unix_ms":cap + 60_000
+            })).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());
+        state.store.configure_pairing_legacy_allowances(&[crate::config::LegacyPairingAllowance {
+            completion_id:claim.id.clone(),
+            record_hash:fractal_store::pairing::record_hash(
+                &claim.origin, claim.actor.as_deref(), &claim.body["fields"],
+            ).unwrap(),
+            until_unix_ms:(cap + 60_000) as u64,
+        }]).unwrap();
+        let session = paired_client_session_at(&state, &claim, "fabric-loopback", false, now).unwrap();
+        assert!(session.allows("read.projections"));
+        assert!(!session.allows("terminal.control"));
+        assert_eq!(session.grant_expires_at, Some(cap));
+        assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, cap).is_err());
+        let mut changed = claim.clone();
+        changed.body["fields"]["scopes"] = json!(ALL_SCOPES);
+        assert!(paired_client_session_at(&state, &changed, "fabric-loopback", false, now).is_err());
+        state.store.append_client_operation_claim(&ClaimInput {
+            subject:claim.subject.clone(), kind:"custom.client.pairing-revoked".into(),
+            actor:Some("person/alex".into()), fields:BTreeMap::new(),
+            evidence:vec![claim.id.clone()], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());
+    }
+
+    #[tokio::test]
+    async fn unmarked_pairing_records_require_a_new_pairing() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for actor in [Some("agent/example"), Some("person/alex"), None] {
+            let credential = format!("legacy-{actor:?}");
+            // Retained records use the same internal append seam as historical admission.
+            state.store.append_claim(&ClaimInput {
+                subject: format!("custom/client/legacy-{}", credential_digest(&credential)),
+                kind: "custom.client.pairing-completed".into(),
+                actor: actor.map(str::to_owned),
+                fields: BTreeMap::from([
+                    ("credential_hash".into(), json!(credential_digest(&credential))),
+                    ("person_id".into(), json!("person/alex")),
+                    ("pairing_operation_version".into(), json!(1)),
+                    ("session_actor".into(), json!("client/legacy-session")),
+                    ("scopes".into(), json!(["read.projections"])),
+                    ("expires_at_unix_ms".into(), json!(client_now_ms() as u64 + 60_000)),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let request = Request::builder().uri("/v1/client/agents")
+                .header(AUTHORIZATION, format!("Bearer {credential}"))
+                .body(Body::empty()).unwrap();
+            assert!(authenticate(&state, &request, "fabric-loopback").is_err());
+            let response = super::super::fabric_router(state.clone()).oneshot(
+                Request::builder().uri("/v1/client/agents")
+                    .header(AUTHORIZATION, format!("Bearer {credential}"))
+                    .body(Body::empty()).unwrap(),
+            ).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+    }
+
+    #[test]
     fn paired_authentication_uses_pairing_claims_and_honors_revocation() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -16205,7 +16332,7 @@ subscription "watch/source" {
         let credential = "pairing-auth-test-secret";
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/alex".into()),
@@ -16259,7 +16386,7 @@ subscription "watch/source" {
         assert!(!authenticate(&state, &negotiated_request, "fabric-loopback").unwrap().messages_paging);
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: "custom.client.pairing-revoked".into(),
                 actor: Some("person/alex".into()),
@@ -23149,6 +23276,7 @@ mission "example/zero-run" state="ready" {
             .collect::<Vec<_>>();
         assert_eq!(lifecycle.len(), 2);
         for claim in lifecycle {
+            assert!(trusted_terminal_attachment(&restarted, &claim, &session).unwrap());
             let projected = safe_event_projection(
                 &restarted,
                 &EventRecord {
@@ -23600,6 +23728,75 @@ mission "example/zero-run" state="ready" {
         }
     }
 
+    #[tokio::test]
+    async fn terminal_operations_mark_attach_consume_and_detach_records() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        state.store.append_claim(&ClaimInput {
+            subject: "agent/terminal-owner".into(), kind: "runtime.observed".into(),
+            actor: Some("agent/terminal-owner".into()),
+            fields: serde_json::from_value(json!({
+                "runtime_id":"terminal-runtime", "incarnation_id":"terminal-runtime:i1",
+                "status":"running", "terminal":true
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let Json(attachment) = raw_terminal::attachment(
+            State(state.clone()), Extension(session.clone()), AxumPath("agent/terminal-owner".into()),
+            Json(serde_json::from_value(json!({
+                "runtime_incarnation":"terminal-runtime:i1", "mode":"attach"
+            })).unwrap()),
+        ).await.unwrap();
+        let capability = attachment["stream_capability"].as_str().unwrap();
+        let attached = state.store.claims_for_kind_at(
+            "custom.client.terminal-attached", None, true, 1,
+        ).unwrap().claims.remove(0);
+        assert!(trusted_terminal_attachment(&state, &attached, &session).unwrap());
+        let peer_root = tempfile::tempdir().unwrap();
+        let peer = test_state_named(peer_root.path(), "terminal-peer");
+        let retained = |kind: &str| {
+            peer.store.append_claim(&ClaimInput {
+                subject:attached.subject.clone(),kind:kind.into(),actor:attached.actor.clone(),
+                fields:serde_json::from_value(attached.body["fields"].clone()).unwrap(),
+                evidence:vec![],expected_subject:None,idempotency_key:None,
+            }).unwrap();
+            let exchange = peer.store.export_replication_exchange(
+                "terminal-fleet", &state.store.replication_inventory().unwrap(),
+            ).unwrap();
+            state.store.receive_replication_exchange(peer.store.origin(), "terminal-fleet", &exchange).unwrap();
+            state.store.validate_replication_backlog().unwrap();
+            state.store.project_replication_backlog().unwrap();
+        };
+        retained("custom.client.terminal-attached");
+        retained("custom.client.terminal-consumed");
+        let attachment_id = attached.body["fields"]["attachment_id"].as_str().unwrap();
+        assert_eq!(terminal_attachment_response(&state, &session, attachment_id).unwrap()["state"], "available");
+        consume_terminal_attachment_mode(
+            &state, &session, "terminal/agent/terminal-owner", "terminal-runtime:i1",
+            Some(capability), Some("attach"),
+        ).unwrap();
+        assert!(consume_terminal_attachment_mode(
+            &state, &session, "terminal/agent/terminal-owner", "terminal-runtime:i1",
+            Some(capability), Some("attach"),
+        ).is_err());
+        retained("custom.client.terminal-detached");
+        assert_eq!(terminal_attachment_response(&state, &session, attachment_id).unwrap()["state"], "consumed");
+        detach_terminal_attachment(&state, &session, &ActionRequest {
+            api_version: CLIENT_API_VERSION.into(), id:"action/detach-marked".into(),
+            action_type:"terminal.detach".into(), idempotency_key:"detach-marked".into(),
+            fence: Fence { runtime_incarnation:Some("terminal-runtime:i1".into()), ..Fence::default() },
+            parameters:json!({"target_id":attachment_id}),
+        }).unwrap();
+        let claims = state.store.claims_for(&attached.subject, None).unwrap();
+        assert_eq!(claims.len(), 6);
+        let admitted = claims.iter().filter(|claim| trusted_terminal_attachment(&state, claim, &session).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(admitted.len(), 3);
+        assert_eq!(admitted[1].kind, "custom.client.terminal-consumed");
+        assert_eq!(admitted[2].kind, "custom.client.terminal-detached");
+    }
+
     #[test]
     fn raw_capability_refuses_changed_selected_owner_or_runtime() {
         for (bound_owner, bound_runtime) in [("host/another-owner", "r"), ("host/matrix-owner", "old")] {
@@ -23623,7 +23820,7 @@ mission "example/zero-run" state="ready" {
                 evidence: Vec::new(), expected_subject: None, idempotency_key: None,
             }).unwrap();
             let capability = "matrix-capability";
-            state.store.append_claim(&ClaimInput {
+            state.store.append_client_operation_claim(&ClaimInput {
                 subject: terminal_attachment_subject("terminal-attachment/matrix").unwrap(),
                 kind: "custom.client.terminal-attached".into(),
                 actor: Some(session_claim_actor(&session)),
