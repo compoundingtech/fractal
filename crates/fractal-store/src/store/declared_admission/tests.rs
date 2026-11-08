@@ -184,6 +184,79 @@ fn direct_claim_publication_cannot_bypass_the_barrier() {
 }
 
 #[test]
+fn direct_declaration_claims_persist_metadata_with_complete_fleet_evidence() {
+    let (store, anchor) = enabled();
+    let (peer, _) = peer(&store, &anchor);
+    started(&peer, json!({"declared_admission":1}));
+    sync(&peer, &store);
+    let intent = crate::graph::parse_intent(
+        "version 2\nagent \"example/new\" { command \"true\"; declared-lane \"check\"; }\nmission \"new\" state=\"ready\" { goal \"Work.\"; declared-priority \"normal\"; step \"work\" { assigned-to \"agent/example/worker\"; goal \"Work.\"; } }\n",
+        "alder",
+    ).unwrap();
+    for (subject, kind, body) in [
+        ("agent/example/new", "intent.desired", serde_json::to_value(&intent.subjects["agent/example/new"]).unwrap()),
+        ("mission/new", "mission.published", serde_json::to_value(&intent.missions["new"]).unwrap()),
+    ] {
+        let record = store.connection.batched(|transaction| {
+            append_claim_tx(
+                transaction, "alder", subject, kind, Some("person/avery"), &body, &[], None,
+            )
+        }).unwrap().unwrap();
+        let persisted = claim_by_id_tx(&store.readers.get(), &record.id).unwrap().unwrap();
+        assert_eq!(persisted.subject, subject);
+        assert_eq!(persisted.kind, kind);
+        assert_eq!(persisted.body, body);
+    }
+    let (desired, _) = store.desired_subject_with_writer("agent/example/new").unwrap().unwrap();
+    assert_eq!(
+        desired.member.unwrap().declared_lane,
+        Some(crate::model::DeclaredLane::Check),
+    );
+    assert_eq!(
+        store.mission_spec("new", None).unwrap().unwrap().declared_priority,
+        Some(crate::model::DeclaredPriority::Normal),
+    );
+}
+
+#[test]
+fn malformed_advertisement_signatures_refuse_like_unsigned_advertisements() {
+    for malformed in [false, true] {
+        let (store, anchor) = enabled();
+        let (peer, _) = peer(&store, &anchor);
+        started(&peer, json!({"declared_admission":1}));
+        let mut exchange = peer.export_replication_exchange(
+            FLEET, &store.replication_inventory().unwrap(),
+        ).unwrap();
+        assert!(!exchange.envelopes.is_empty());
+        // Do not allow a detached valid signature to repair the damaged envelope.
+        exchange.signatures.clear();
+        for envelope in &mut exchange.envelopes {
+            assert_eq!(envelope.writer, "birch");
+            if malformed {
+                envelope.signature.as_mut().unwrap().truncate(8);
+            } else {
+                envelope.signature = None;
+            }
+        }
+        store.receive_replication_exchange("birch", FLEET, &exchange).unwrap();
+        store.validate_replication_backlog().unwrap();
+        store.apply_replication_repairs().unwrap();
+        assert!(store.project_replication_backlog().unwrap());
+        let source = "version 2\nagent \"new\" { command \"true\"; declared-lane \"check\"; }\n";
+        let before = store.index().unwrap();
+        assert_eq!(
+            publish(&store, source, "invalid-advertisement").unwrap_err().code,
+            ERROR,
+            "malformed={malformed}",
+        );
+        assert_eq!(store.index().unwrap(), before);
+        // The same advertisement works once the genuine incarnation signature arrives.
+        sync(&peer, &store);
+        publish(&store, source, "repaired-advertisement").unwrap();
+    }
+}
+
+#[test]
 fn pending_membership_and_unfenced_legacy_writers_fail_closed() {
     let (store, _) = enabled();
     let source = "version 2\nagent \"new\" { command \"true\"; declared-budgets {} }\n";
