@@ -20,12 +20,13 @@ _loader = importlib.machinery.SourceFileLoader("review_script", str(HERE / "revi
 _spec = importlib.util.spec_from_loader("review_script", _loader)
 _module = importlib.util.module_from_spec(_spec)
 _loader.exec_module(_module)
-restriction_problem, extract_json = _module.restriction_problem, _module.extract_json
+restriction_problem, extract_json, harness_launch = _module.restriction_problem, _module.extract_json, _module.harness_launch
 
 FAKE = '''#!/usr/bin/env python3
 import json, os, sys
 prompt = sys.stdin.read()
 folder = os.environ["FAKE_DIR"]
+open(os.path.join(folder, "argv0.txt"), "w").write(sys.argv[0])
 count = len([name for name in os.listdir(folder) if name.startswith("prompt-")])
 inputs = ".review-input"
 listing = sorted(os.path.join(root, name)[len(inputs) + 1:] for root, _, names in os.walk(inputs) for name in names) if os.path.isdir(inputs) else []
@@ -623,6 +624,28 @@ class Review(unittest.TestCase):
         prompt = self.prompts()[0]
         self.assertIn(".review-input/", prompt)
         self.assertNotIn("git diff", prompt.split("== THE STANDARD")[0])
+
+    def test_a_shell_reading_harness_runs_by_its_real_path(self):
+        link = self.fake / "link"
+        link.symlink_to(self.fake / "agent")
+        config = json.loads(self.config.read_text())
+        config["harnesses"]["fake"]["reads"] = "shell"
+        config["harnesses"]["fake"]["command"][0] = str(link)
+        self.config.write_text(json.dumps(config))
+        done, _ = self.review()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual((self.fake / "argv0.txt").read_text(), str((self.fake / "agent").resolve()))
+
+    def test_only_a_shell_reading_harness_changes_how_it_starts(self):
+        link = self.fake / "link"
+        link.symlink_to(self.fake / "agent")
+        command = [str(link), "-x"]
+        self.assertEqual(harness_launch({}, command, platform="darwin"), (command, None))
+        self.assertEqual(harness_launch({"reads": "tools"}, command, platform="darwin"), (command, None))
+        resolved, env = harness_launch({"reads": "shell"}, command, platform="darwin")
+        self.assertEqual(resolved, [str((self.fake / "agent").resolve()), "-x"])
+        self.assertEqual(env["PATH"], "/usr/bin:/bin")
+        self.assertEqual(harness_launch({"reads": "shell"}, command, platform="linux")[1], None)
 
     def test_a_harness_without_the_restriction_does_not_run(self):
         config = json.loads(self.config.read_text())

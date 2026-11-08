@@ -78,8 +78,8 @@ function Hierarchy({ scheme = 'dark', narrow = false, failure = 'none', showSeat
     const element = <T extends HTMLElement>(selector: string) => root.current!.querySelector<T>(selector)!
     if (failure === 'fold-indent') element('[data-testid="work-log-children"]').style.paddingInlineStart = '0'
     if (failure === 'rail') { const style = document.createElement('style'); style.textContent = '[data-testid="work-log-children"]::before { display: none }'; root.current.append(style) }
-    if (failure === 'chevron-x') element('[data-tool-status="error"] [data-call-word]').style.display = 'none'
-    if (failure === 'status-end') element('[data-tool-status="success"] [data-call-duration]').style.textAlign = 'left'
+    if (failure === 'chevron-x') element('[data-tool-status="error"] [data-row-disclosure]').style.order = '1'
+    if (failure === 'status-end') element('[data-tool-status="success"] [data-call-meta]').style.justifyContent = 'flex-start'
     if (failure === 'word-clip') element('[data-tool-status="interrupted"] [data-call-word]').style.maxWidth = '2ch'
     if (failure === 'title-wrap') element('[data-tool-status="error"] [data-call-title]').style.whiteSpace = 'normal'
     if (failure === 'thinking-row') element('[data-testid="thinking-entry"] button').style.gridTemplateColumns = 'auto auto'
@@ -153,13 +153,13 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   const edge = scroller.getBoundingClientRect().left + scroller.clientLeft + scroller.clientWidth
   for (const entry of [...rows, thinkingRow]) await expect(Math.abs(entry.getBoundingClientRect().right - edge)).toBeLessThan(0.5)
 
-  // Rows: every chevron shares one x and every duration ends at the lane edge, including the longest values.
-  const chevron = rows[0]!.children[3]!.getBoundingClientRect().left
+  // Rows: every chevron leads its row at one x and every duration ends at the lane edge, including the longest values.
+  const chevron = rows[0]!.children[0]!.getBoundingClientRect().left
   for (const entry of [...rows, thinkingRow]) {
     await expect(entry.getBoundingClientRect().height).toBe(24)
-    await expect(Math.abs(entry.children[3]!.getBoundingClientRect().left - chevron)).toBeLessThan(0.5)
+    await expect(Math.abs(entry.children[0]!.getBoundingClientRect().left - chevron)).toBeLessThan(0.5)
   }
-  await expect(Math.abs(chevron - (edge - 80 - 6 - 16))).toBeLessThan(0.5)
+  await expect(Math.abs(chevron - lane.left - 22)).toBeLessThan(0.5)
   for (const entry of rows) {
     const duration = entry.querySelector<HTMLElement>('[data-call-duration]')!
     await expect(getComputedStyle(duration).fontVariantNumeric).toBe('tabular-nums')
@@ -168,6 +168,7 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
     if (entry.parentElement!.getAttribute('data-tool-status') === 'running') {
       await expect(duration).toBeEmptyDOMElement()
       await expect(entry.querySelector('[data-call-word]')).toHaveTextContent(/^Running$/)
+      await expect(Math.abs(entry.querySelector('[data-call-word]')!.getBoundingClientRect().right - edge)).toBeLessThan(1)
     } else {
       await expect(duration.textContent).not.toBe('')
       const text = document.createRange()
@@ -180,7 +181,7 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(status('error').querySelector('[data-call-duration]')).toHaveTextContent(/^23h 59m$/)
   await expect(status('interrupted').querySelector('[data-call-duration]')).toHaveTextContent(/^59m 59s$/)
 
-  // Non-success rows keep their state word visible beside the chevron; the title ellipsizes before it.
+  // Non-success rows keep their state word visible beside the duration; the title ellipsizes before it.
   for (const state of ['error', 'interrupted']) {
     const entry = status(state)
     const word = entry.querySelector<HTMLElement>('[data-call-word]')!
@@ -188,7 +189,7 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
     await expect(word).toHaveTextContent(state === 'error' ? /^Failed$/ : /^Interrupted$/)
     await expect(word.getBoundingClientRect().width).toBeGreaterThan(0)
     await expect(word.scrollWidth).toBeLessThanOrEqual(word.clientWidth)
-    await expect(word.getBoundingClientRect().right).toBeLessThanOrEqual(entry.children[3]!.getBoundingClientRect().left)
+    await expect(word.getBoundingClientRect().right).toBeLessThanOrEqual(entry.querySelector('[data-call-duration]')!.getBoundingClientRect().left)
     await expect(title.getBoundingClientRect().right).toBeLessThanOrEqual(word.getBoundingClientRect().left)
     await expect(getComputedStyle(title).textOverflow).toBe('ellipsis')
     await expect(title.scrollWidth).toBeGreaterThan(title.clientWidth)
@@ -199,7 +200,7 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   // Thinking matches a tool row: height, type, columns and title column.
   const toolTitle = rows[0]!.querySelector('[data-call-title]')!
   const thinkingTitle = thinkingRow.querySelector('[data-call-title]')!
-  await expect(getComputedStyle(thinkingRow).gridTemplateColumns).toBe(getComputedStyle(rows[0]!).gridTemplateColumns)
+  await expect(getComputedStyle(thinkingRow).gridTemplateColumns.split(' ').slice(0, 2)).toEqual(getComputedStyle(rows[0]!).gridTemplateColumns.split(' ').slice(0, 2))
   await expect(getComputedStyle(thinkingTitle).fontSize).toBe(getComputedStyle(toolTitle).fontSize)
   await expect(getComputedStyle(thinkingTitle).lineHeight).toBe(getComputedStyle(toolTitle).lineHeight)
   await expect(thinkingTitle.getBoundingClientRect().left).toBeCloseTo(toolTitle.getBoundingClientRect().left, 1)
