@@ -86,6 +86,7 @@ pub async fn attachment(
             kind: "custom.client.terminal-attached".into(),
             actor: Some(session_claim_actor(&session)),
             fields: BTreeMap::from([
+                ("terminal_operation_version".into(), json!(1)),
                 ("attachment_id".into(), json!(attachment_id)),
                 ("terminal_id".into(), json!(terminal_id)),
                 ("runtime_incarnation".into(), json!(live.incarnation_id)),

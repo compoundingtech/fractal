@@ -32,6 +32,7 @@ pub mod render;
 pub mod client_values;
 pub mod graph;
 pub mod maintenance;
+pub mod pairing;
 pub mod owner_indexes;
 pub mod references;
 pub mod private_notes;
@@ -45,3 +46,34 @@ pub mod work_eta;
 
 pub use graph::{parse_intent, validate_mission_runtimes};
 pub use model::{NormalizedIntent, FractalError};
+
+/// Version of the server-established pairing operation admission.
+pub const PAIRING_OPERATION_VERSION: &str = "pairing_operation_version";
+
+/// Pairing authority is admitted only by the dedicated pairing operation.
+/// Unmarked records require a new pairing, including records retained across upgrades.
+pub fn trusted_pairing_fields(actor: Option<&str>, fields: &serde_json::Value) -> bool {
+    fields.get(PAIRING_OPERATION_VERSION).and_then(serde_json::Value::as_u64) == Some(1)
+        && actor.is_some_and(|actor| {
+            actor.starts_with("person/")
+                && actor.matches('/').count() == 1
+                && fields.get("person_id").and_then(serde_json::Value::as_str) == Some(actor)
+        })
+}
+
+#[cfg(test)]
+mod pairing_admission_tests {
+    #[test]
+    fn pairing_operation_marker_requires_the_concrete_person_writer() {
+        let fields = serde_json::json!({"pairing_operation_version":1,"person_id":"person/example"});
+        assert!(super::trusted_pairing_fields(Some("person/example"), &fields));
+        for actor in [None, Some("agent/example"), Some("person/other"), Some("person/example/session/phone")] {
+            assert!(!super::trusted_pairing_fields(actor, &fields));
+        }
+        for marker in [serde_json::Value::Null, serde_json::json!(true), serde_json::json!(2)] {
+            let mut fields = fields.clone();
+            fields["pairing_operation_version"] = marker;
+            assert!(!super::trusted_pairing_fields(Some("person/example"), &fields));
+        }
+    }
+}

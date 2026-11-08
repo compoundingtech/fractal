@@ -1047,6 +1047,7 @@ async fn idle_inventory_windows_do_not_reread_across_the_old_client_intervals() 
         "custom.client.pairing-completed",
         Some("person/ada"),
         json!({"session_actor":"person/ada/session/idle-inventory", "person_id":"person/ada",
+            "pairing_operation_version":1,
             "expires_at_unix_ms":(client_now_ms()+600_000) as u64,"scopes":["read.projections"]}),
     );
     let grant = state
@@ -1085,6 +1086,7 @@ async fn inventory_pairing_expiry_ends_held_windows_without_a_clock_poll() {
     let grant = state.store.append_claim(&ClaimInput {
         subject:"custom/client/inventory-expiry".into(), kind:"custom.client.pairing-completed".into(), actor:Some("person/ada".into()),
         fields:serde_json::from_value(json!({"session_actor":"person/ada/session/inventory-expiry", "person_id":"person/ada",
+            "pairing_operation_version":1,
             "expires_at_unix_ms":(client_now_ms()+3_000) as u64,"scopes":["read.projections"]})).unwrap(),
         evidence:vec![], expected_subject:None, idempotency_key:None,
     }).unwrap();
@@ -1147,6 +1149,7 @@ async fn devices_inventory_follows_local_push_changes_without_a_graph_claim() {
         kind: "custom.client.pairing-completed".into(),
         actor: Some("person/ada".into()),
         fields: serde_json::from_value(json!({
+            "pairing_operation_version":1,
             "credential_hash": credential_digest(credential),
             "session_actor": "person/ada/session/push-fixture", "person_id": "person/ada",
             "device_id": "device/push-fixture", "expires_at_unix_ms": (client_now_ms()+600_000) as u64,
@@ -1379,6 +1382,7 @@ async fn a_revoked_grant_ends_a_waiting_work_window_through_the_real_read() {
         subject: grant.into(), kind: "custom.client.pairing-completed".into(),
         actor: Some("person/avery".into()),
         fields: serde_json::from_value(json!({
+            "pairing_operation_version":1,
             "session_actor":"client/phone-work", "person_id":"person/avery",
             "credential_hash":"test-not-a-secret", "expires_at_unix_ms":u64::MAX,
             "scopes":["read.projections"],
