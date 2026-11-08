@@ -17,8 +17,10 @@ Re-pairing refuses before sending the code if Fabric is connected to another mem
 Begin the replacement pairing on the member served by that saved gateway (or the selected
 Fabric member), not another trusted fleet machine. Completion is origin-bound even when the
 pending challenge has replicated. With QR pairing, run the pair command on the member served
-by `--gateway`; a configured different member is refused before begin, and an unresolved
-gateway prints a warning. Neither the QR nor a gateway forwarder changes where pairing begins.
+by `--gateway`; a configured different member is refused offline before begin. The CLI then
+checks the gateway's public health node and refuses a different member; an unreachable gateway
+or health response without a node prints a warning. Neither the QR nor a gateway forwarder
+changes where pairing begins.
 
 Terminal creation failures, including an answer without a terminal ID, appear in the error banner. Feed live/recovery transitions and successful background reads do not dismiss action feedback; dismiss the banner or complete a successful action to clear it.
 Alternatively, start `fractal devices pair` with its explicit `--gateway` URL and select **Scan pairing QR code** on the phone's pairing screen. Scanning only fills a candidate gateway, pairing ID and code; copy the person-root fingerprint separately, then tap **Pair this device**. A change of gateway (including its base path) requires confirmation before the form changes. Cancelling the scan or that confirmation preserves the existing draft and saved profile. The saved credential and root pin are replaced only after successful pairing. Expired or invalid QR codes are rejected without showing their contents; camera denial leaves manual entry on the same screen. QR scanning requires a fresh native build with the local `fractal-pairing-scanner` Expo module and camera permission; it does not work in Expo Go.
