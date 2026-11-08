@@ -1,3 +1,4 @@
+import { markdownBlock } from './assistant-ui/composition/markdown-text'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
@@ -69,9 +70,9 @@ export function MarkdownCanvas({ scenario = 'rich-text', scheme = 'dark' }: { sc
   return <main data-testid="markdown-story" data-stream-stage={stage} {...stylex.props(styles.canvas, ...baselineTheme, scheme === 'light' && lightTheme)}><ThemePortal>
     <div {...stylex.props(styles.lane)}>
       {streaming ? <div {...stylex.props(styles.toolbar)}><Button data-testid="append-stream" onPress={() => setStage(value => value + 1)} isDisabled={stage === stages.length - 1} {...stylex.props(styles.button)}>Append stream chunk</Button><span>{stage === stages.length - 1 ? 'Complete' : 'Streaming'}</span></div> : null}
-      <Markdown text={text} streaming={streaming && stage < stages.length - 1} resources={resources} onOpenResource={openResource} renderInlineReference={renderInlineReference} />
+      <Markdown text={markdownBlock(text)} streaming={streaming && stage < stages.length - 1} resources={resources} onOpenResource={openResource} renderInlineReference={renderInlineReference} />
       {opened ? <output data-testid="opened-resource">Opened {opened}</output> : null}
-      {scenario === 'all' ? <><h2 {...stylex.props(styles.heading)}>Code languages</h2><Markdown text={languageText} /><h2 {...stylex.props(styles.heading)}>Open streaming fence</h2><Markdown text={streamChunks[0]} streaming /><h2 {...stylex.props(styles.heading)}>Partial inline streams</h2>{inlineStreamStages.map(value => <Markdown key={value} text={value} streaming resources={resources} />)}</> : null}
+      {scenario === 'all' ? <><h2 {...stylex.props(styles.heading)}>Code languages</h2><Markdown text={markdownBlock(languageText)} /><h2 {...stylex.props(styles.heading)}>Open streaming fence</h2><Markdown text={markdownBlock(streamChunks[0])} streaming /><h2 {...stylex.props(styles.heading)}>Partial inline streams</h2>{inlineStreamStages.map(value => <Markdown key={value} text={markdownBlock(value)} streaming resources={resources} />)}</> : null}
     </div>
   </ThemePortal></main>
 }

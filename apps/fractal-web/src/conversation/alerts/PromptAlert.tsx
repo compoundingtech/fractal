@@ -1,3 +1,4 @@
+import { markdownBlock, markdownInline } from '@fractal/client/markdown'
 import { optionalSource } from '@fractal/client/markdown'
 import type * as Native from '@fractal/client/schema'
 import * as stylex from '@stylexjs/stylex'
@@ -83,10 +84,10 @@ export const PromptAlert = ({ alert, onAnswer, now = Date.now(), density = 'dock
     label={firstLine(alert.title)}
     data={{ 'data-alert-kind': alert.attention_kind }}
     meta={[alertFrom(alert), 'Prompt', `waited ${ago(DateTime.formatIso(alert.requested_at), now)}`]}
-    heading={<InlineMarkdown text={heading} />}
+    heading={<InlineMarkdown text={markdownInline(heading)} />}
     headingText={markdownLine(heading)}
     {...(line === '' || line === markdownLine(alert.title) ? {} : { context: line })}
-    {...(overflows ? { contextFull: <div {...stylex.props(styles.detail)}><Markdown text={detail} /></div> } : {})}
+    {...(overflows ? { contextFull: <div {...stylex.props(styles.detail)}><Markdown text={markdownBlock(detail)} /></div> } : {})}
     {...(body === undefined ? {} : { body })}
     options={options}
     mode={question?.multiSelect === true ? 'any' : 'one'}

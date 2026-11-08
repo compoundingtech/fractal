@@ -1,3 +1,4 @@
+import { markdownBlock } from './markdown-text'
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import * as stylex from '@stylexjs/stylex'
@@ -138,8 +139,10 @@ function TranscriptMessage() {
 }
 /** Mail delivered to the seat and harness messages are written as Markdown; an event's title is a label. */
 function SemanticProse({ item }: { readonly item: Extract<ConversationItem, { _tag: 'Text' | 'Event' }> }) {
-  return <>{item._tag === 'Event' && <span {...stylex.props(styles.semanticText)}>{item.title}</span>}<Markdown text={item.text} tone="muted" /></>
+  return <>{item._tag === 'Event' && <span {...stylex.props(styles.semanticText)}>{item.title}</span>}<Markdown text={markdownBlock(item.text)} tone="muted" /></>
 }
+/** A message's text parts are Markdown by the transcript's contract. */
+const MESSAGE_PARTS = { Text: ({ text }: { readonly text: string }) => <Markdown text={markdownBlock(text)} /> }
 const messageComponents = { Message: TranscriptMessage }
 /** Keep mixed bodies out of the collapsed DOM, using the same raw disclosure as tool inspection. */
 function MixedContentMessage({ item }: { readonly item: Extract<ConversationItem, { _tag: 'UnknownEvent' }> }) {
@@ -166,7 +169,7 @@ export function UserMessage({ item }: { readonly item: TextItem & { readonly rol
     if (element === null || expanded || !active) return
     return observeUserMessageOverflow(element, setOverflows)
   }, [item.text, expanded, active])
-  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><div id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}><Markdown text={expanded ? item.text : collapsed} tone={item.sendState?._tag === 'Pending' ? 'muted' : 'foreground'} hardBreaks /></div>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}<TranscriptAttachments attachments={item.attachments} messageId={item.id} /><SendStatus state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} /></MessagePrimitive.Root>
+  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><div id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}><Markdown text={markdownBlock(expanded ? item.text : collapsed)} tone={item.sendState?._tag === 'Pending' ? 'muted' : 'foreground'} hardBreaks /></div>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}<TranscriptAttachments attachments={item.attachments} messageId={item.id} /><SendStatus state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} /></MessagePrimitive.Root>
 }
 /**
  * The callback must resolve only after the host has successfully copied the answer. Only a fulfilled copy sets
@@ -205,7 +208,7 @@ export function SeatProse({ item, senderLine, continuation = false }: { readonly
       {senderLine !== undefined && <p data-testid="message-sender" {...stylex.props(styles.sender)}>{senderLine}</p>}
       {!streaming && <span {...stylex.props(styles.answerMeta)}><RuntimeCopyAnswer visible={hovered} />{rowTimes && Number.isFinite(completed) && <time data-testid="message-time" dateTime={new Date(completed).toISOString()}>{messageTimeFormatter.format(completed)}</time>}</span>}
     </div>}
-    {item._tag === 'Text' ? <><Markdown text={item.text} streaming={item.streaming} /><TranscriptAttachments attachments={item.attachments} messageId={item.id} /></> : <MessagePrimitive.Parts components={{ Text: Markdown }} />}
+    {item._tag === 'Text' ? <><Markdown text={markdownBlock(item.text)} streaming={item.streaming} /><TranscriptAttachments attachments={item.attachments} messageId={item.id} /></> : <MessagePrimitive.Parts components={MESSAGE_PARTS} />}
   </MessagePrimitive.Root>
 }
 /** Human intent first; a failure shows its one-line reason, the diagnostic itself requires a second disclosure. A host's semantic detail stands in for the summary line; the raw disclosure always remains. */

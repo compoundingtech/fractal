@@ -1,3 +1,4 @@
+import { markdownBlock } from '@fractal/client/markdown'
 import * as stylex from '@stylexjs/stylex'
 import { Markdown } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui/work-log'
@@ -26,7 +27,7 @@ export const TypedToolResult = ({ call }: TypedToolResultProps) => {
       {source.url !== undefined && <div>{recordedWebHref(source.url) === undefined ? source.url : <a href={recordedWebHref(source.url)} target="_blank" rel="noreferrer">{source.url}</a>}</div>}
       {source.snippet !== undefined && <p {...stylex.props(styles.note)}>{source.snippet}</p>}
     </li>)}</ul></section>}
-    {result.kind === 'subagent' && result.tasks.length > 0 && <section aria-label="Recorded tasks"><h3 {...stylex.props(styles.label)}>Tasks</h3><ul {...stylex.props(styles.list)}>{result.tasks.map((task, index) => <li key={index}>{task.requested && <p role="status" {...stylex.props(styles.note)}>Requested</p>}{task.name !== undefined && <strong>{task.name}</strong>}{task.agent !== undefined && task.agent !== task.name && <p {...stylex.props(styles.note)}>Agent type: {task.agent}</p>}{task.state !== undefined && <p {...stylex.props(styles.note)}>{task.state === 'pending' ? 'State at task launch' : 'Recorded state at tool return'}: {task.state}</p>}{task.ref !== undefined && <pre {...stylex.props(styles.text)}>{task.ref}</pre>}{task.sessionId !== undefined && <p {...stylex.props(styles.note)}>Session: {task.sessionId}</p>}{task.report !== undefined && <section aria-label="Recorded task report"><Markdown text={task.report} /></section>}</li>)}</ul></section>}
+    {result.kind === 'subagent' && result.tasks.length > 0 && <section aria-label="Recorded tasks"><h3 {...stylex.props(styles.label)}>Tasks</h3><ul {...stylex.props(styles.list)}>{result.tasks.map((task, index) => <li key={index}>{task.requested && <p role="status" {...stylex.props(styles.note)}>Requested</p>}{task.name !== undefined && <strong>{task.name}</strong>}{task.agent !== undefined && task.agent !== task.name && <p {...stylex.props(styles.note)}>Agent type: {task.agent}</p>}{task.state !== undefined && <p {...stylex.props(styles.note)}>{task.state === 'pending' ? 'State at task launch' : 'Recorded state at tool return'}: {task.state}</p>}{task.ref !== undefined && <pre {...stylex.props(styles.text)}>{task.ref}</pre>}{task.sessionId !== undefined && <p {...stylex.props(styles.note)}>Session: {task.sessionId}</p>}{task.report !== undefined && <section aria-label="Recorded task report"><Markdown text={markdownBlock(task.report)} /></section>}</li>)}</ul></section>}
     {result.kind === 'wait' && <dl {...stylex.props(styles.facts)}>
       {result.awaited.length > 0 && <><dt>Awaited</dt><dd {...stylex.props(styles.value)}>{result.awaited.map((ref, index) => <pre key={index} {...stylex.props(styles.text)}>{ref}</pre>)}</dd></>}
       {result.arrived.length > 0 && <><dt>Arrived</dt><dd {...stylex.props(styles.value)}>{result.arrived.map((ref, index) => <pre key={index} {...stylex.props(styles.text)}>{ref}</pre>)}</dd></>}
@@ -36,7 +37,7 @@ export const TypedToolResult = ({ call }: TypedToolResultProps) => {
       {result.interrupted && <><dt>Status</dt><dd {...stylex.props(styles.value)}>Interrupted</dd></>}
       {result.completed && !result.running && !result.interrupted && <><dt>Status</dt><dd {...stylex.props(styles.value)}>Completed</dd></>}
     </dl>}
-    {result.kind !== 'unknown' && result.body !== undefined && <section aria-label="Recorded result body" {...stylex.props(styles.body)}>{result.kind === 'web' || result.kind === 'subagent' ? <Markdown text={result.body} /> : <pre {...stylex.props(styles.text)}>{result.body}</pre>}</section>}
+    {result.kind !== 'unknown' && result.body !== undefined && <section aria-label="Recorded result body" {...stylex.props(styles.body)}>{result.kind === 'web' || result.kind === 'subagent' ? <Markdown text={markdownBlock(result.body)} /> : <pre {...stylex.props(styles.text)}>{result.body}</pre>}</section>}
     {raw !== undefined && <details {...stylex.props(styles.raw)}><summary>Raw evidence</summary><pre {...stylex.props(styles.text)}>{raw}</pre></details>}
   </section>
 }

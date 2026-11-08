@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { markdownBlock } from '@fractal/client/markdown'
 import { act } from 'react'
 import { createRoot } from 'react-dom/client'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -36,7 +37,7 @@ describe('document references', () => {
   it('lets a host make doc names in any Markdown below it open, through the transcript\'s policy', () => {
     const html = renderToStaticMarkup(
       <MarkdownImagePolicy.Provider value={{ renderInlineReference: documentReferences(() => {}) }}>
-        <Markdown text="Read `doc/garden-notes` and `src/main.rs`." />
+        <Markdown text={markdownBlock('Read `doc/garden-notes` and `src/main.rs`.')} />
       </MarkdownImagePolicy.Provider>,
     )
     expect(html).toContain('<a href="doc/garden-notes">doc/garden-notes</a>')

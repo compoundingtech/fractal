@@ -1,3 +1,4 @@
+import { markdownInline } from '@fractal/client/markdown'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
@@ -80,7 +81,7 @@ export const AlertDetailsPane = ({ id, ux, onOpenAlert, onOpenRef, onClose, onBa
                 <h2 {...stylex.props(styles.goneTitle)}>{answeredHere ? 'All answered' : 'No longer open'}</h2>
                 {next === undefined
                   ? <p {...stylex.props(styles.goneText)}>Nothing else needs you.</p>
-                  : <Aria.Link onPress={() => onOpenAlert(next.id)} {...stylex.props(styles.goneLink)}>Next: <InlineMarkdown text={next.title} /></Aria.Link>}
+                  : <Aria.Link onPress={() => onOpenAlert(next.id)} {...stylex.props(styles.goneLink)}>Next: <InlineMarkdown text={markdownInline(next.title)} /></Aria.Link>}
               </div>}
       </div>
     </div>
