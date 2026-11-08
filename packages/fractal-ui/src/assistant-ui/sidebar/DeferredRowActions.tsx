@@ -13,6 +13,14 @@ import { useTouchLayout } from './useTouchLayout'
 const loadAgentRowMenu = deferredLoader<AgentRowActionsProps>(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentRowMenu })))
 const loadAgentReportedDetails = deferredLoader<AgentRowActionsProps>(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentReportedDetails })))
 const loadHoverCard = deferredLoader<{ readonly row: Row; readonly reportedStatusOnly?: boolean } & SidebarClock>(() => import('./RowOverlays.tsx').then(module => ({ default: module.AgentHoverCard })))
+/** Runs `task` once the page is idle, or soon where idle callbacks are missing; never during render. */
+const whenIdle = (task: () => void): void => {
+  if (typeof window === 'undefined') return
+  if (typeof window.requestIdleCallback === 'function') window.requestIdleCallback(task, { timeout: 4000 })
+  else window.setTimeout(task, 1500)
+}
+// Hover cards open at 150ms, faster than a cold chunk: fetch the card ahead, so its first open is never an empty frame.
+whenIdle(loadHoverCard.preload)
 export function AgentHoverCard(props: { readonly row: Row; readonly reportedStatusOnly?: boolean } & SidebarClock) {
   return <DeferredSurfaceBoundary load={loadHoverCard} surfaceProps={props} fallback={<span role="alert">This agent hover card could not load.</span>} />
 }
