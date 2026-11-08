@@ -38,7 +38,21 @@ let originalScrollIntoView: PropertyDescriptor | undefined
 let viewportHeight: number
 let viewportWidth: number
 
-const renderedRows = (lane: Element) => [...lane.querySelectorAll<HTMLElement>('[data-test-tail-row], [data-testid="transcript-turn"]')]
+const rowSelector = '[data-test-tail-row], [data-testid="transcript-turn"]'
+// The emulated layout reads the rows on every geometry query (scrollHeight, getBoundingClientRect). jsdom selector
+// matching over hundreds of mounted turns made that O(rows) per read and dominated the long-history tests, so each
+// element's rows are queried again only after the DOM changed, read synchronously from the observer's pending records.
+let rowMutations: MutationObserver
+const rowsByElement = new Map<Element, readonly HTMLElement[]>()
+const renderedRows = (lane: Element): readonly HTMLElement[] => {
+  if (rowMutations.takeRecords().length > 0) rowsByElement.clear()
+  let rows = rowsByElement.get(lane)
+  if (rows === undefined) {
+    rows = [...lane.querySelectorAll<HTMLElement>(rowSelector)]
+    rowsByElement.set(lane, rows)
+  }
+  return rows
+}
 const rect = (top: number, height: number) => ({ top, bottom: top + height, left: 0, right: 600, width: 600, height, x: 0, y: top, toJSON() {} })
 
 beforeEach(() => {
@@ -90,12 +104,16 @@ beforeEach(() => {
   } })
   container = document.createElement('div')
   document.body.appendChild(container)
+  rowMutations = new MutationObserver(() => rowsByElement.clear())
+  rowMutations.observe(container, { subtree: true, childList: true, attributes: true, attributeFilter: ['data-test-tail-row', 'data-testid'] })
   root = createRoot(container)
 })
 
 afterEach(async () => {
   await act(async () => root.unmount())
   container.remove()
+  rowMutations.disconnect()
+  rowsByElement.clear()
   Reflect.deleteProperty(document, 'elementFromPoint')
   if (originalScrollIntoView === undefined) Reflect.deleteProperty(HTMLElement.prototype, 'scrollIntoView')
   else Object.defineProperty(HTMLElement.prototype, 'scrollIntoView', originalScrollIntoView)
