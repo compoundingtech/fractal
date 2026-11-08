@@ -204,18 +204,34 @@ The native runtime suite and documentation tests remain covered.
 After a `main` run of **Fractal tag release** passes every job, its last job (`release-publish-edge`)
 moves one GitHub pre-release, tagged `edge`, to that commit. It is a single release that is updated, not
 one release per commit. It builds nothing: it takes the run's `fractal-release` artifact, re-checks the
-checksums and the source recorded in each archive, then replaces the assets (both target archives and
-their compatibility archives, their `.sha256` files, `SHA256SUMS` and `RELEASE.json`), rewrites the notes, and moves the tag. The notes give the exact
-source commit, a link to the run, and the merged pull request titles since the previous edge (at most 30).
+checksums and the source recorded in each archive, uploads source-qualified staging copies, and moves
+the tag before replacing the fixed-name archives and `.sha256` files one file at a time, then
+`SHA256SUMS`, then `RELEASE.json` alone as the source commit marker. A multi-file `gh release upload`
+can upload concurrently; separate commands enforce alias and sidecar ordering.
+It then removes stale assets and rewrites the notes, which give the exact source commit, a link to the run,
+and the merged pull request titles since the previous edge (at most 30).
 Archives carry no tag in `BUILD.json`; `source` identifies the commit.
 
 - Versioned releases and tags are unchanged. `edge` is marked as a pre-release and never as latest, so the
   daily release, `latest/download` and the default installer ignore it.
 - Edge has no upgrade-impact section. Read the changes since the previous edge before installing it on a
   store that holds work, and take a [claim backup](backups.md) first.
-- A run for a commit older than the current edge changes nothing, so a slow run cannot move edge
-  backwards. Runs are serialized. While assets are being replaced, a download can briefly pair a new
-  archive with an old checksum; the installer fails closed on the mismatch, so retry after a minute.
+- The candidate must descend from (or equal) both the edge tag and `RELEASE.json` source; newer or
+  divergent published sources refuse publication. Needed history is fetched explicitly; fetch and
+  ancestry lookup errors fail closed. Equal-source runs compare every fixed asset's digest with its
+  source-qualified staged copy, repair missing or incorrect assets in the same order, and finish
+  cleanup/notes. Source markers alone never skip byte verification. Runs share the release mutation lock.
+  Staging is one build unit: a source-qualified `STAGING-LEDGER.sha256` hashes every staged archive,
+  sidecar, public `SHA256SUMS`, and `RELEASE.json`. It is distinct from the installer's public
+  `SHA256SUMS` and uploads alone, last among staged files, as their commit marker. A complete set
+  matching its ledger is retained even if a same-source rerun has different build bytes. A missing
+  or invalid ledger, missing staged file, or digest mismatch restages the whole unit from validated
+  dist before moving the tag or repairing aliases; partial builds are never mixed.
+  A failed tag move preserves the previous fixed-name assets and manifest.
+- Between the tag move and alias replacement, installers briefly receive the previous binaries.
+  The installer verifies each archive's `.sha256` sidecar, not `SHA256SUMS`: a consistent new pair
+  can install before `SHA256SUMS` is replaced. A mismatched pair fails closed; retry after a minute.
+  An interrupted replacement or finalization converges on the next run.
 - The `edge` tag is excluded from the tag trigger, and a tag moved with the workflow's token starts no workflow.
 - `scripts/release-fractal-edge --dry-run --source SHA --dist DIRECTORY` verifies a downloaded artifact
   and prints the notes without publishing.
