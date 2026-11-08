@@ -3,7 +3,7 @@ import { Deferred, Effect, Layer, Option, Queue, Schema, Stream } from 'effect'
 import * as KeyValueStore from 'effect/persistence/KeyValueStore'
 import * as TestClock from 'effect/testing/TestClock'
 import { itEffect } from './testing.ts'
-import { currentSpace, emptyWorkspace, legacyDecoder, makeWorkspaceSchema, panesOf, tabsOf, transition, type Layout, type SpaceBody, type WorkspaceConfig, type WorkspaceState } from './mod.ts'
+import { currentSpace, emptyWorkspace, legacyDecoder, makeWorkspaceSchema, panesOf, tabsOf, toBinary, transition, type Layout, type SpaceBody, type WorkspaceConfig, type WorkspaceState } from './mod.ts'
 import { makeWorkspaceStore, memoryPersistence, stableKey, WorkspacePersistence, type SpaceEvent, type SpaceSync } from './store.ts'
 
 const View = Schema.Struct({ scrollTop: Schema.optional(Schema.Finite) })
@@ -205,6 +205,26 @@ describe('syncing spaces with an external store', () => {
     yield* settle
     expect(fake.published).toHaveLength(2)
     expect(refs(store.getState())).toEqual(['doc:a', 'doc:b'])
+  }).pipe(Effect.provide(memoryPersistence())))
+
+  itEffect('knows its own write by the body the external store kept, not the one it sent', () => Effect.gen(function* () {
+    const fake = yield* fakeSync()
+    // This store keeps splits binary: three panes in a row come back nested.
+    const kept = (body: SpaceBody): SpaceBody => ({ ...body, layout: toBinary(body.layout) })
+    const publish = fake.sync.publish
+    ;(fake as { sync: SpaceSync }).sync = { ...fake.sync, publish: (space, body, meta) => publish(space, body, meta).pipe(Effect.map(result => ({ ...result, body: kept(body) }))) }
+    const three: SpaceBody = { name: 'Main', layout: { axis: 'row', children: [{ tabs: [{ ref: 'doc:a' }] }, { tabs: [{ ref: 'doc:b' }] }, { tabs: [{ ref: 'doc:c' }] }] } }
+    const start = () => transition(initial(), { _tag: 'Receive', space: 'space', body: three }, counter('s'))
+    const store = yield* makeWorkspaceStore({ config: counter('a'), schema, initial: start, sync: [fake.sync] })
+    store.dispatch({ _tag: 'Open', ref: 'doc:d' })
+    yield* settle
+    const layout = currentSpace(store.getState()).layout
+    expect(fake.published).toHaveLength(1)
+    expect((fake.published[0]!.body.layout as { children: unknown[] }).children, 'sent as this client keeps it').toHaveLength(3)
+    yield* Queue.offer(fake.incoming, { _tag: 'Body', space: 'space', body: kept(fake.published[0]!.body), revision: 'r1' })
+    yield* settle
+    expect(currentSpace(store.getState()).layout, 'its own echo is not adopted').toBe(layout)
+    expect(fake.published).toHaveLength(1)
   }).pipe(Effect.provide(memoryPersistence())))
 
   itEffect('does not write its stored spaces again on load', () => Effect.gen(function* () {

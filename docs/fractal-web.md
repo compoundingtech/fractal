@@ -728,7 +728,8 @@ adopted wholesale, as the TUI's `glasses_from_graph` does, and is never written 
 adopting it normalised it (an agent and its terminal become one tab). A glass is written only when
 a command here changes its structure, on the revision it was made on; a write st refuses for good is
 dropped, and the next glass to arrive stands. Without the grant, the workspace lives in memory for
-the page. Focus, shown tabs, faces, zoom and recency are this page's alone and are not stored.
+the page. When the grant is there but st cannot be reached within five seconds, the strip says
+**Layout not syncing · Retry**; a retry that reaches the glasses starts the workspace from them. Focus, shown tabs, faces, zoom and recency are this page's alone and are not stored.
 
 Every surface opens through one verb, `open(ref)` from `openable.ts`, and `useOpenable(ref)` gives
 a surface click, Cmd-click for behind, Alt+Enter and Alt+Shift+Enter for a split, and the drag

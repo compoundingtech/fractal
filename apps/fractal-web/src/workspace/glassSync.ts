@@ -225,7 +225,9 @@ export const glassSync = ({ gateway, follow, ratios, written = new Set<string>()
       Effect.map(envelope => {
         if (envelope === undefined) return undefined
         written.add(envelope.value.revision)
-        return { revision: envelope.value.revision }
+        // st keeps the body binary and clamped: the store knows its echo by this, and by the revision above.
+        const stored = envelope.value.body
+        return stored === null ? { revision: envelope.value.revision } : { revision: envelope.value.revision, body: fromGlassBody(stored) }
       }),
     )
   }),
@@ -238,9 +240,9 @@ const boots = new WeakMap<GlassGateway, Promise<GlassBoot>>()
  * Boots once per gateway for the page's life: a remount (StrictMode's, in development) shares the boot,
  * so a person without glasses never gets two `Main` glasses.
  */
-export const bootGlassesOnce = (options: Parameters<typeof bootGlasses>[0]): Promise<GlassBoot> => {
+export const bootGlassesOnce = (options: Parameters<typeof bootGlasses>[0], { fresh = false }: { readonly fresh?: boolean } = {}): Promise<GlassBoot> => {
   const known = boots.get(options.gateway)
-  if (known !== undefined) return known
+  if (known !== undefined && !fresh) return known
   const boot = bootGlasses(options)
   boots.set(options.gateway, boot)
   return boot

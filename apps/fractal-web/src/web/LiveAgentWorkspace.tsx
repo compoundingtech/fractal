@@ -28,7 +28,7 @@ import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
 import { LiveAlertNames } from '../conversation/alerts/LiveAlertNames.tsx'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
-import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g, geometryNumbers, sidebarRowSize } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g, geometryNumbers, sidebarRowSize, interactionVars as interaction } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import * as React from 'react'
 import { RegisteredPortal, usePortalContainerRegistration } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import * as Aria from 'react-aria-components'
@@ -267,23 +267,38 @@ interface WorkspaceProps {
   readonly glasses?: GlassGateway
 }
 
-type Boot = { readonly initial?: WorkspaceStateValue; readonly sync?: readonly SpaceSync[] }
+type Boot = {
+  readonly initial?: WorkspaceStateValue
+  readonly sync?: readonly SpaceSync[]
+  /** The glasses were granted but out of reach, so this page's layout is its own until a retry reaches them. */
+  readonly retry?: () => void
+}
 const memoryBoot: Boot = {}
 
 /** Waits for the person's glasses before the workspace mounts, so it never starts from a layout st does not have. */
-const useGlassBoot = (glasses: GlassGateway | undefined): Boot | undefined => {
-  const [boot, setBoot] = React.useState<Boot | undefined>(glasses === undefined ? memoryBoot : undefined)
+const useGlassBoot = (glasses: GlassGateway | undefined): { readonly boot: Boot | undefined; readonly attempt: number } => {
+  const [state, setState] = React.useState<{ readonly boot: Boot | undefined; readonly attempt: number }>({ boot: glasses === undefined ? memoryBoot : undefined, attempt: 0 })
+  const attempt = state.attempt
   React.useEffect(() => {
     if (glasses === undefined) return
     let live = true
-    // One boot per gateway for the page's life; its follow stays open with it.
-    void bootGlassesOnce({ gateway: glasses, config: workspaceConfig() }).then(result => {
-      if (live) setBoot(result._tag === 'Synced' ? { initial: result.initial, sync: [result.sync] } : memoryBoot)
+    // One boot per gateway for the page's life, its follow open with it; a retry starts a fresh one.
+    void bootGlassesOnce({ gateway: glasses, config: workspaceConfig() }, { fresh: attempt > 0 }).then(result => {
+      if (!live) return
+      const retry = () => setState(current => ({ boot: undefined, attempt: current.attempt + 1 }))
+      setState(current => ({ ...current, boot: result._tag === 'Synced' ? { initial: result.initial, sync: [result.sync] } : result.reason === 'unreachable' ? { retry } : memoryBoot }))
     })
     return () => { live = false }
-  }, [glasses])
-  return boot
+  }, [glasses, attempt])
+  return state
 }
+
+/** Said in the strip when the person's glasses could not be reached: the layout is this page's alone. */
+const LayoutSyncNote = ({ retry }: { readonly retry: () => void }) => <span {...stylex.props(styles.syncNote)}>
+  <span role="status">Layout not syncing</span>
+  <span aria-hidden="true">·</span>
+  <Aria.Button onPress={retry} {...stylex.props(styles.syncRetry)}>Retry</Aria.Button>
+</span>
 
 /**
  * React Aria overlays (menus, popovers, tooltips, modals) portal into a host inside the themed
@@ -295,11 +310,11 @@ export function LiveAgentWorkspace(props: WorkspaceProps) {
   const overlayHost = React.useRef<HTMLDivElement>(null)
   const getContainer = React.useCallback(() => overlayHost.current, [])
   usePortalContainerRegistration(getContainer)
-  const boot = useGlassBoot(props.glasses)
+  const { boot, attempt } = useGlassBoot(props.glasses)
   // Alerts name their senders as the roster does, in the docked card and the alert pane alike.
   return <UNSAFE_PortalProvider getContainer={getContainer}><LiveAlertNames>{boot === undefined
     ? <div role="status" aria-label={props.workspaceLabel ?? 'Agent workspace'} {...stylex.props(styles.booting)}>Loading your layout…</div>
-    : <Workspace {...props} boot={boot} overlayHost={overlayHost} />}</LiveAlertNames></UNSAFE_PortalProvider>
+    : <Workspace key={attempt} {...props} boot={boot} overlayHost={overlayHost} />}</LiveAlertNames></UNSAFE_PortalProvider>
 }
 
 const activeAgentOf = (store: { readonly getState: () => WorkspaceStateValue }) => {
@@ -669,11 +684,12 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
                   </>}
                   trailing={narrow
                     ? <>
+                      {boot.retry === undefined ? null : <LayoutSyncNote retry={boot.retry} />}
                       {(terminalRef !== undefined || terminalDisabledReason !== undefined || terminalOpen) ? <PhoneTerminalToggle pressed={terminalOpen} onPress={toggleTerminal} {...(shownTerminalDisabledReason === undefined ? {} : { disabledReason: shownTerminalDisabledReason })} /> : undefined}
                       <div data-testid="native-action-slot" ref={setHeaderSlot} {...stylex.props(styles.barSlot)}>{agentHeaderActions}</div>
                       <ChromeControl icon="panel" label="Agent details" edge="trail" popup="dialog" expanded={narrowDetailsOpen} active={narrowDetailsOpen} onPress={() => { if (narrowDetailsOpen) closeDetails(); else setSheetOpen(true) }} />
                     </>
-                    : <ThreadActions nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} terminalAvailable={terminalRef !== undefined || terminalOpen} {...(shownTerminalDisabledReason === undefined ? {} : { terminalDisabledReason: shownTerminalDisabledReason })} panelOpen={panel.open} terminalOpen={terminalOpen} onTogglePanel={() => setPanel({ open: !panel.open })} onToggleTerminal={toggleTerminal} />}>
+                    : <>{boot.retry === undefined ? null : <LayoutSyncNote retry={boot.retry} />}<ThreadActions nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} terminalAvailable={terminalRef !== undefined || terminalOpen} {...(shownTerminalDisabledReason === undefined ? {} : { terminalDisabledReason: shownTerminalDisabledReason })} panelOpen={panel.open} terminalOpen={terminalOpen} onTogglePanel={() => setPanel({ open: !panel.open })} onToggleTerminal={toggleTerminal} /></>}>
                   <GatewayConnectionStatus />
                   <AlertFlashBand onOpen={openAlert} />
                   <div ref={setPaneHost} {...stylex.props(styles.body)} />
@@ -763,6 +779,8 @@ const styles = stylex.create({
   skeletonHost: { gridRow: '2', width: '44%' },
   workspace: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0 },
   barSlot: { display: 'flex', alignItems: 'center', minWidth: 0 },
+  syncNote: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, paddingInline: s.sm, color: c.fgMuted, fontSize: t.metaSize, whiteSpace: 'nowrap' },
+  syncRetry: { appearance: 'none', border: 0, padding: 0, background: 'none', color: c.fg, font: 'inherit', textDecoration: 'underline', cursor: 'pointer', outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: '2px', outlineColor: interaction.focusRing, outlineOffset: '1px', borderRadius: 2 },
   body: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },
   changesPanel: { display: 'flex', flexDirection: 'column', flexShrink: 0, minWidth: 0, minHeight: 0, overflowY: 'auto', borderLeftWidth: 1, borderLeftStyle: 'solid', borderLeftColor: c.border },
   sheetPanel: { flexGrow: 1, borderLeftWidth: 0 },
