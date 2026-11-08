@@ -43,21 +43,21 @@ fn existing_store_startup_installs_desired_kind_index_without_offline_work() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("state.sqlite3");
     let store = Store::open(&path, "node").unwrap();
+    let mut kdl = String::from("version 2\n");
+    for number in 0..ROWS {
+        kdl.push_str(&format!(
+            "agent \"index-startup/{number:05}\" {{ command \"true\"; workspace \".\"; restart \"never\"; }}\n",
+        ));
+    }
+    let intent = crate::graph::parse_intent(&kdl, store.origin()).unwrap();
+    crate::store::publication_tests_shared::publish(&store, &intent, "index-startup-fixture");
     {
-        let mut connection = store.connection.write();
-        let transaction = connection.transaction().unwrap();
-        for number in 0..ROWS {
-            let subject = format!("exec/index-startup-{number:05}");
-            append_claim_tx(
-                &transaction, "node", &subject, "intent.desired", None,
-                &json!({"subject":subject,"kind":"exec","desired":{"number":number}}),
-                &[], None,
-            ).unwrap();
-        }
-        transaction.commit().unwrap();
+        let connection = store.connection.write();
         assert_eq!(connection.query_row("SELECT COUNT(*) FROM desired", [], |row| row.get::<_, u64>(0)).unwrap(), ROWS);
         // Model an existing member's old schema; normal Store::open must do the upgrade.
-        connection.execute_batch("DROP INDEX desired_kind_subject_index").unwrap();
+        // Test-owned fixed DDL only: no bound values, new columns, or production writer.
+        // Preserve this missing-index startup regression through representation/reclamation changes.
+        connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h2abdf327c0d1 owner=fractal_store::store::desired_batch_index_tests TODO=bound-or-reference-values-and-reclamation */ "DROP INDEX desired_kind_subject_index").unwrap();
         assert!(!connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='index' AND name='desired_kind_subject_index')",
             [], |row| row.get::<_, bool>(0),
