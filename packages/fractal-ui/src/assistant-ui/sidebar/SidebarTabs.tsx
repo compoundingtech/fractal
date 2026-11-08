@@ -1,11 +1,14 @@
 // The sidebar's one-row tab bar (Agents, Alerts, Missions, Fleet) over the selected tab's content.
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { mergeProps, useFocusRing, useTab, useTabList } from 'react-aria'
-import { Item, useTabListState, type TabListState } from 'react-stately'
+import { mergeProps, useFocusRing, useTab, useTabList, useTooltipTrigger } from 'react-aria'
+import { TooltipContext, TooltipTriggerStateContext } from 'react-aria-components'
+import { Item, useTabListState, useTooltipTriggerState, type TabListState } from 'react-stately'
 import { borderVars as border, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { Icon, type IconName } from '../composition/Icons'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
+import { TooltipSurface } from '../composition/Controls'
+import { ThemePortal } from '../taste/ThemePortal'
 
 /** Shared status glyphs: working ●, idle ○, ended ×, fault !, pending ~. */
 export type SidebarTabGlyph = '●' | '○' | '×' | '!' | '~'
@@ -67,7 +70,22 @@ export function sidebarTabName(tab: SidebarTab): string {
 /** Sub-pixel slack: rects are fractional, and a row that fits by rounding must not flip counts in and out. */
 const fitSlack = 0.5
 
-function TabFace({ tab, showCount, showIcon = true }: { readonly tab: SidebarTab; readonly showCount: boolean; readonly showIcon?: boolean }) {
+/**
+ * How the row gives way as the sidebar narrows, widest first; the first that fits, padding and gaps included, wins.
+ * Icons only repeat the label, so they go first; then counts drop to compact badges (attention stays as a dot). Only
+ * when even that cannot fit does each tab become its icon and count, the label moving to a tooltip and staying in its
+ * name. The icon steps apply only when every tab has an icon.
+ */
+export const sidebarTabFits = [
+  { fit: 'full', icon: true, label: true, counts: true },
+  { fit: 'labels', icon: false, label: true, counts: true },
+  { fit: 'compact', icon: false, label: true, counts: false },
+  { fit: 'icons', icon: true, label: false, counts: true },
+  { fit: 'icons-compact', icon: true, label: false, counts: false },
+] as const
+type Fit = typeof sidebarTabFits[number]
+
+function TabFace({ tab, showCount, showIcon = true, showLabel = true }: { readonly tab: SidebarTab; readonly showCount: boolean; readonly showIcon?: boolean; readonly showLabel?: boolean }) {
   const marker = markerOf(tab)
   // Icon, label, then a pill. Needing the person is a filled pill and a neutral count an unfilled one, so colour is never the only cue.
   // When counts drop a filled pill stays as a dot and a neutral one goes. The count is painted, not DOM text, so the tab's only
@@ -75,7 +93,7 @@ function TabFace({ tab, showCount, showIcon = true }: { readonly tab: SidebarTab
   const pill = marker !== null && (showCount || marker.kind !== 'count')
   return <span {...stylex.props(styles.face)}>
     {tab.icon === undefined || !showIcon ? null : <span aria-hidden="true" data-sidebar-tab-icon={tab.icon} {...stylex.props(styles.icon)}><Icon name={tab.icon} size={12} /></span>}
-    <span data-sidebar-tab-label>{tab.label}</span>
+    {showLabel || tab.icon === undefined ? <span data-sidebar-tab-label>{tab.label}</span> : null}
     {pill ? <span aria-hidden="true" data-sidebar-tab-marker={marker.kind} data-sidebar-tab-count={showCount && marker.count > 0 ? (marker.count > 99 ? '99+' : marker.count) : undefined} {...stylex.props(styles.pill, marker.icon !== undefined ? styles.iconOnly : !(showCount && marker.count > 0) && styles.dot, marker.kind === 'question' || marker.kind === 'needs-you' ? styles.attention : marker.kind === 'status' ? (tab.status?.glyph === '!' ? styles.fault : styles.neutral) : styles.neutral)}>{marker.icon === undefined ? null : <Icon name={marker.icon} size={12} />}</span> : null}
   </span>
 }
@@ -86,18 +104,15 @@ export function CountPill({ count, needsYou = false }: { readonly count: number;
 }
 
 /**
- * Controlled sidebar tabs (React Aria): ←/→ move between tabs, Home/End to the ends. Every tab spans the full row and labels
- * never truncate. Tab icons only repeat the label, so they give way first; only when even the iconless row cannot hold every
- * count do all counts drop together, attention staying as a dot.
+ * Controlled sidebar tabs (React Aria): ←/→ move between tabs, Home/End to the ends. Every tab spans the full row, with side
+ * padding and a gap between tabs at every width, and labels never truncate: the row steps down through `sidebarTabFits`.
  */
 export function SidebarTabs({ tabs, selectedId, onSelectionChange, panelHasTabbableContent = false, children }: SidebarTabsProps) {
   const narrow = React.useContext(NarrowLayoutContext)
-  const [countsFit, setCountsFit] = React.useState(true)
-  const [iconsFit, setIconsFit] = React.useState(true)
+  const fits = React.useMemo(() => tabs.every(tab => tab.icon !== undefined) ? sidebarTabFits : sidebarTabFits.filter(step => step.label), [tabs])
+  const [fit, setFit] = React.useState<Fit>(sidebarTabFits[0])
   const bar = React.useRef<HTMLDivElement>(null)
-  const replica = React.useRef<HTMLDivElement>(null)
-  const iconlessReplica = React.useRef<HTMLDivElement>(null)
-  const countlessReplica = React.useRef<HTMLDivElement>(null)
+  const replicas = React.useRef<(HTMLDivElement | null)[]>([])
   const prefix = React.useId()
   const list = React.useRef<HTMLDivElement>(null)
   const state = useTabListState({
@@ -109,63 +124,60 @@ export function SidebarTabs({ tabs, selectedId, onSelectionChange, panelHasTabba
   const { tabListProps } = useTabList({ 'aria-label': 'Sidebar' }, state, list)
   const { focusProps, isFocusVisible } = useFocusRing()
   React.useLayoutEffect(() => {
-    const host = bar.current, row = replica.current, iconless = iconlessReplica.current, countless = countlessReplica.current
-    if (host === null || row === null || iconless === null || countless === null) return
-    const fit = () => {
+    const host = bar.current, rows = replicas.current.slice(0, fits.length)
+    if (host === null || rows.some(row => row === null)) return
+    const fitRow = () => {
       const width = host.getBoundingClientRect().width + fitSlack
-      const whole = row.getBoundingClientRect().width <= width
-      const counts = whole || iconless.getBoundingClientRect().width <= width
-      setCountsFit(counts)
-      setIconsFit(whole || (!counts && countless.getBoundingClientRect().width <= width))
+      const index = rows.findIndex(row => row!.getBoundingClientRect().width <= width)
+      setFit(fits[index === -1 ? fits.length - 1 : index]!)
     }
-    fit()
-    const observer = new ResizeObserver(fit)
+    fitRow()
+    const observer = new ResizeObserver(fitRow)
     observer.observe(host)
-    observer.observe(row)
-    observer.observe(iconless)
-    observer.observe(countless)
+    for (const row of rows) observer.observe(row!)
     return () => observer.disconnect()
-  }, [])
-  return <div ref={bar} data-sidebar-tabs data-sidebar-tab-counts={countsFit ? 'shown' : 'dropped'} {...stylex.props(styles.root)}>
-    {/* Hidden replica of the row with every count, at intrinsic width and outside the tablist. */}
-    <div ref={replica} aria-hidden inert data-sidebar-tabs-measure {...stylex.props(styles.bar, narrow && styles.touch, styles.measure)}>
-      {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount /></span>)}
-    </div>
-    {/* The next step down: counts kept, icons gone. */}
-    <div ref={iconlessReplica} aria-hidden inert data-sidebar-tabs-measure-iconless {...stylex.props(styles.bar, narrow && styles.touch, styles.measure)}>
-      {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount showIcon={false} /></span>)}
-    </div>
-    {/* Then no counts, icons back. If even this overflows the icons go too, because labels never truncate. */}
-    <div ref={countlessReplica} aria-hidden inert data-sidebar-tabs-measure-countless {...stylex.props(styles.bar, narrow && styles.touch, styles.measure)}>
-      {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount={false} /></span>)}
-    </div>
+  }, [fits])
+  return <ThemePortal><div ref={bar} data-sidebar-tabs data-sidebar-tab-fit={fit.fit} data-sidebar-tab-counts={fit.counts ? 'shown' : 'dropped'} {...stylex.props(styles.root)}>
+    {/* Hidden replicas of each step at intrinsic width, outside the tablist; the first is the whole row. */}
+    {fits.map((step, index) => <div key={step.fit} ref={row => { replicas.current[index] = row }} aria-hidden inert data-sidebar-tabs-measure={index === 0 ? '' : undefined} data-sidebar-tabs-measure-fit={step.fit} {...stylex.props(styles.bar, narrow && styles.touch, styles.measure)}>
+      {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount={step.counts} showIcon={step.icon} showLabel={step.label} /></span>)}
+    </div>)}
     <div {...stylex.props(styles.root)}>
       <div {...tabListProps} ref={list} {...stylex.props(styles.bar, narrow && styles.touch)}>
-        {tabs.map(tab => <SidebarTabButton key={tab.id} tab={tab} state={state} prefix={prefix} narrow={narrow} showCount={countsFit} showIcon={iconsFit} />)}
+        {tabs.map(tab => <SidebarTabButton key={tab.id} tab={tab} state={state} prefix={prefix} narrow={narrow} fit={fit} />)}
       </div>
       {/* Static host knowledge avoids a visibility walk on every roster render and subtree mutation. */}
       {tabs.map(tab => tab.id === selectedId
         ? <div {...focusProps} key={tab.id} id={`${prefix}-panel-${tab.id}`} role="tabpanel" aria-labelledby={`${prefix}-tab-${tab.id}`} tabIndex={panelHasTabbableContent ? -1 : 0} data-sidebar-tab-panel={tab.id} data-focus-visible={isFocusVisible || undefined} {...stylex.props(styles.panel)}>{children}</div>
         : <div key={tab.id} id={`${prefix}-panel-${tab.id}`} role="tabpanel" aria-labelledby={`${prefix}-tab-${tab.id}`} data-sidebar-tab-panel={tab.id} hidden />)}
     </div>
-  </div>
+  </div></ThemePortal>
 }
 
-function SidebarTabButton({ tab, state, prefix, narrow, showCount, showIcon }: { readonly tab: SidebarTab; readonly state: TabListState<SidebarTab>; readonly prefix: string; readonly narrow: boolean; readonly showCount: boolean; readonly showIcon: boolean }) {
+function SidebarTabButton({ tab, state, prefix, narrow, fit }: { readonly tab: SidebarTab; readonly state: TabListState<SidebarTab>; readonly prefix: string; readonly narrow: boolean; readonly fit: Fit }) {
   const ref = React.useRef<HTMLDivElement>(null)
   const { tabProps, isSelected } = useTab({ key: tab.id }, state, ref)
   const { focusProps, isFocusVisible } = useFocusRing()
-  return <div {...mergeProps(tabProps, focusProps)} ref={ref} id={`${prefix}-tab-${tab.id}`} aria-controls={`${prefix}-panel-${tab.id}`} aria-label={sidebarTabName(tab)} data-sidebar-tab={tab.id} data-selected={isSelected || undefined} data-focus-visible={isFocusVisible || undefined} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount={showCount} showIcon={showIcon} /></div>
+  // Icon-only steps move the label into a tooltip; the tab's name still carries it. The contexts are what RAC's TooltipTrigger
+  // provides, which needs a RAC trigger; this tab is React Aria's useTab.
+  const labelHidden = !fit.label && tab.icon !== undefined
+  const tooltip = useTooltipTriggerState({ delay: 350, closeDelay: 0, isDisabled: !labelHidden })
+  const { triggerProps, tooltipProps } = useTooltipTrigger({ delay: 350, closeDelay: 0, isDisabled: !labelHidden }, tooltip, ref)
+  return <div {...mergeProps(tabProps, focusProps, labelHidden ? triggerProps : {})} ref={ref} id={`${prefix}-tab-${tab.id}`} aria-controls={`${prefix}-panel-${tab.id}`} aria-label={sidebarTabName(tab)} data-sidebar-tab={tab.id} data-selected={isSelected || undefined} data-focus-visible={isFocusVisible || undefined} {...stylex.props(styles.tab, narrow && styles.touchTab)}>
+    <TabFace tab={tab} showCount={fit.counts} showIcon={fit.icon} showLabel={fit.label} />
+    {labelHidden ? <TooltipTriggerStateContext.Provider value={tooltip}><TooltipContext.Provider value={{ ...tooltipProps, triggerRef: ref }}><TooltipSurface placement="bottom">{tab.label}</TooltipSurface></TooltipContext.Provider></TooltipTriggerStateContext.Provider> : null}
+  </div>
 }
 
 const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusInset } as const
 const styles = stylex.create({
   root: { position: 'relative', display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0 },
-  bar: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'auto', alignItems: 'center', gap: 0, flexShrink: 0, boxSizing: 'border-box', height: g.controlLg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  // Side padding lines the tabs up with the search field and lists below; the gap keeps chips apart at every step.
+  bar: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'auto', alignItems: 'center', gap: s.xs, paddingInline: s.md, flexShrink: 0, boxSizing: 'border-box', height: g.controlLg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   // Same box as the bar but sized by its content and taking no layout space, so measuring never changes what is measured.
   measure: { position: 'absolute', top: 0, insetInlineStart: 0, width: 'max-content', visibility: 'hidden', pointerEvents: 'none' },
-  // Tracks start from content and share the rest, so three tabs with counts fit a 256px sidebar; labels never shrink.
-  tab: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box', paddingInline: s.xs2, height: g.controlSm, borderRadius: r.control, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', cursor: 'pointer', outline: 'none', ':hover': { color: ink.fg }, ':is([data-selected])': { backgroundColor: surface.rowActive, color: ink.fg }, ':is([data-focus-visible])': focusRing },
+  // Tracks start from content and share the rest; labels never shrink, the row steps down instead.
+  tab: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', boxSizing: 'border-box', paddingInline: s.xs, height: g.controlSm, borderRadius: r.control, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', cursor: 'pointer', outline: 'none', ':hover': { color: ink.fg }, ':is([data-selected])': { backgroundColor: surface.rowActive, color: ink.fg }, ':is([data-focus-visible])': focusRing },
   touch: { height: g.touchTarget },
   touchTab: { height: g.touchTarget, minWidth: g.touchTarget, boxSizing: 'border-box' },
   face: { display: 'inline-flex', alignItems: 'center', gap: s.xs2, whiteSpace: 'nowrap' },
