@@ -1537,6 +1537,16 @@ impl Store {
         let explicit_reviewer_only = source.starts_with("daemon/")
             && claim.kind == "operational.failure"
             && f["condition"] == API_READINESS_SLO_MISSED;
+        if explicit_reviewer_only && failure.subject.starts_with("slo-objective/readiness-case/") {
+            item.episode.clone_from(&failure.subject);
+        }
+        if explicit_reviewer_only {
+            if let Some(adoption) = self.operation_claim(&format!("{}:readiness-case", failure.request))? {
+                if let Some(episode) = adoption.body["fields"]["episode"].as_str() {
+                    item.episode = episode.to_owned();
+                }
+            }
+        }
         Ok(Some(OperationalFault { item, explicit_reviewer_only }))
     }
 
