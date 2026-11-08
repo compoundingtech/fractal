@@ -1,4 +1,5 @@
 /** The Conversation subtab: the opening body, then reviews, review threads and comments, oldest first. */
+import { markdownBlock } from '@fractal/client/markdown'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 
@@ -11,8 +12,9 @@ import { detailStyles as d, ExternalLink, Person, toneStyle } from './DetailShel
 /** Images in bodies stay links: the kit defers them, and opening one leaves Fractal for the source. */
 const openImage = (src: string) => { window.open(src, '_blank', 'noopener,noreferrer') }
 
+/** A GitHub body: GitHub defines these fields as GitHub Flavored Markdown, so the text is Markdown by contract. */
 export function GithubMarkdown({ text }: { readonly text: string }) {
-  return <div {...stylex.props(d.body)}><Markdown text={text} onLoadImage={openImage} /></div>
+  return <div {...stylex.props(d.body)}><Markdown text={markdownBlock(text)} onLoadImage={openImage} /></div>
 }
 
 function When({ at, url, now }: { readonly at: string | null; readonly url: string; readonly now: number }) {
