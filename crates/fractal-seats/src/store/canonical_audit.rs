@@ -219,6 +219,8 @@ fn every_persistent_table_has_a_projection_scope() {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     let store = Store::open_memory("alder").unwrap();
+    // Exercise the lazily installed credit tables as well as the always-present schema.
+    store.wait_for_usage_credit_backfill().unwrap();
     let connection = store.readers.get();
     assert_eq!(
         SHARED_TABLES,

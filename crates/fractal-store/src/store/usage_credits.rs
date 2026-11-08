@@ -39,8 +39,8 @@ impl Store {
     pub(super) fn start_usage_credit_backfill(&self) -> Result<()> {
         let mut worker = self.usage_credit_backfill.lock().unwrap_or_else(PoisonError::into_inner);
         let reader = self.readers.get();
-        if let Some((through, target)) = progress(&reader)? {
-            if through == target { return Ok(()); }
+        if let Some((through, target)) = progress(&reader)? && through == target {
+            return Ok(());
         }
         if worker.as_ref().is_none_or(|worker| worker.handle.as_ref().is_none_or(std::thread::JoinHandle::is_finished)) {
             if let Some(handle) = worker.as_mut().and_then(|worker| worker.handle.take()) {
