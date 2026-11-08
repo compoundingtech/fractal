@@ -1,7 +1,8 @@
 // Editor tabs on React Aria `Tabs`: RAC owns the tablist semantics, roving focus, arrow, Home and End
-// navigation and automatic activation; react-aria `useDrag`/`useDrop` own drag and drop (mouse,
-// touch, and the keyboard/screen-reader drag mode started with Enter on a tab, dropped with Enter
-// on a highlighted target). wf adds Alt+Shift+←/→ (↑/↓ when vertical) reorder announced through a
+// navigation and automatic activation. A tab drags with the platform's own drag and drop, and the strip
+// receives it through react-aria `useDrop`. React Aria's `useDrag` is not used: it reads a press at a tab's
+// exact centre, or a virtual click, as a screen reader's drag and leaves the app inert until Escape, and a
+// tab's keyboard way to move is Alt+Shift+Arrow below. wf adds Alt+Shift+←/→ (↑/↓ when vertical) reorder announced through a
 // live region, Delete to close, dirty/live/attention markers and an "Open surfaces"
 // overflow menu. The close glyph is pointer-only (`aria-hidden`) so a
 // tab holds no nested interactive element.
@@ -11,11 +12,12 @@ import {
   useEffect,
   useRef,
   useState,
+  type DragEvent,
   type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
 } from 'react'
-import { mergeProps, useDrag, useDrop, type DropItem } from 'react-aria'
+import { mergeProps, useDrop, type DropItem } from 'react-aria'
 import { Tab, TabList, TabPanel, Tabs, type Key } from 'react-aria-components'
 
 import { Menu, MenuItem, MenuPopover, MenuTrigger } from '../ui-compat/components.tsx'
@@ -384,14 +386,27 @@ export const EditorTabs = ({
   const [announcement, setAnnouncement] = useState('')
   const vertical = variant === 'vertical'
 
-  // Keep the active tab visible when it changes (keyboard cycling, quick-open, overflow menu).
+  // Keep the active tab visible when it changes (keyboard cycling, quick-open, overflow menu), and when the
+  // strip or its tabs change size under it: a phone's width and restored titles arrive after the selection.
   useEffect(() => {
-    if (activeId === null) return
-    const active = [...(list.current?.querySelectorAll('[data-tab-id]') ?? [])].find(
-      (node) => node.getAttribute('data-tab-id') === activeId,
-    )
-    active?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
-  }, [activeId])
+    const strip = list.current
+    if (activeId === null || strip === null) return
+    // React Aria renders the tabs after this effect, and their titles grow as data arrives: watch both.
+    const resized = typeof ResizeObserver === 'undefined' ? undefined : new ResizeObserver(() => reveal())
+    const reveal = () => {
+      const nodes = [...strip.querySelectorAll('[data-tab-id]')]
+      for (const node of nodes) resized?.observe(node)
+      nodes.find((node) => node.getAttribute('data-tab-id') === activeId)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+    }
+    resized?.observe(strip)
+    const added = typeof MutationObserver === 'undefined' ? undefined : new MutationObserver(reveal)
+    added?.observe(strip, { childList: true })
+    reveal()
+    return () => {
+      resized?.disconnect()
+      added?.disconnect()
+    }
+  }, [activeId, tabs.length])
 
   /** Insertion index and indicator offset for a point relative to the strip (react-aria drop coordinates). */
   const dropTarget = ({ x, y }: { readonly x: number; readonly y: number }) => {
@@ -583,12 +598,18 @@ const TabItem = ({
   touch,
 }: TabItemProps) => {
   const [hovered, setHovered] = useState(false)
-  const { dragProps, isDragging } = useDrag({
-    getItems: () => [
-      { [dragType]: JSON.stringify({ groupId, tabId: tab.id }), 'text/plain': tab.title },
-    ],
-    getAllowedDropOperations: () => ['move'],
-  })
+  const [isDragging, setDragging] = useState(false)
+  const dragProps = {
+    draggable: true,
+    onDragStart: (event: DragEvent) => {
+      event.dataTransfer.setData(dragType, JSON.stringify({ groupId, tabId: tab.id }))
+      event.dataTransfer.setData('text/plain', tab.title)
+      event.dataTransfer.effectAllowed = 'move'
+      setDragging(true)
+    },
+    // A drag that ends anywhere, dropped or not, leaves nothing behind.
+    onDragEnd: () => setDragging(false),
+  }
   const back = variant === 'vertical' ? 'ArrowUp' : 'ArrowLeft'
   const forward = variant === 'vertical' ? 'ArrowDown' : 'ArrowRight'
   const vertical = variant === 'vertical'
