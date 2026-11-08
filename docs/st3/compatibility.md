@@ -178,6 +178,13 @@ source. Both pins record the release tag, its full source commit and native rele
 URLs with hex SHA256 checksums. Fleet compatibility runs the extracted published `bin/st3`;
 historical messaging uses the channel source from the same release commit.
 
+`scripts/compat-baseline` first downloads the pinned browser URL. On HTTP 5xx or a timeout,
+it resolves the same release asset through GitHub's API, with at most two attempts per API
+request and a 60-second timeout per request. `GH_TOKEN` (or `GITHUB_TOKEN`) authenticates API
+requests when present. Diagnostics on stderr identify which path supplied the archive;
+both paths must pass the same SHA256 and `BUILD.json` source/target checks.
+`COMPAT_BASELINE_ARCHIVE` still bypasses network access and uses those same checks.
+
 After each stable publication, release automation opens a baseline maintenance PR against
 `main`. It derives the source from `RELEASE.json`, verifies the dereferenced tag and the two
 archives, and advances both unheld pins. It does **not** change the already-published release
