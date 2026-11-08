@@ -1,6 +1,6 @@
 type Color = readonly [number, number, number, number]
 
-/** Normalize computed CSS colors (including color-mix) through the browser's sRGB canvas. */
+/** Normalize computed CSS colors (including color-mix and lab) through the browser's sRGB canvas. */
 function color(value: string): Color {
   const context = document.createElement('canvas').getContext('2d')!
   context.clearRect(0, 0, 1, 1)
@@ -17,93 +17,53 @@ function luminance(rgb: Color): number {
   const linear = rgb.slice(0, 3).map(channel => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4)
   return linear[0]! * 0.2126 + linear[1]! * 0.7152 + linear[2]! * 0.0722
 }
+function contrast(element: Element) {
+  const backdrop = background(element)
+  const ink = over(color(getComputedStyle(element).color), backdrop)
+  const [lighter, darker] = [luminance(ink), luminance(backdrop)].sort((a, b) => b - a)
+  return (lighter! + 0.05) / (darker! + 0.05)
+}
+/** Background through shadow boundaries: an element's own paint over its ancestors' (the host included). */
 function background(element: Element | null): Color {
   if (element === null) return [1, 1, 1, 1]
   const own = color(getComputedStyle(element).backgroundColor)
-  return own[3] === 1 ? own : over(own, background(element.parentElement))
-}
-function hue(rgb: Color): number {
-  const [red, green, blue] = rgb
-  const maximum = Math.max(red, green, blue), minimum = Math.min(red, green, blue)
-  const chroma = maximum - minimum
-  if (chroma === 0) return NaN
-  return ((maximum === red ? (green - blue) / chroma : maximum === green ? (blue - red) / chroma + 2 : (red - green) / chroma + 4) * 60 + 360) % 360
+  if (own[3] === 1) return own
+  const parent = element.parentElement ?? ((element.parentNode as ShadowRoot | null)?.host ?? null)
+  return over(own, background(parent))
 }
 
-function declarationTokens(element: Element, property: string): Set<string> {
-  const candidates = new Set<string>()
-  const visit = (rules: CSSRuleList) => {
-    for (const rule of rules) {
-      if (rule instanceof CSSStyleRule && element.matches(rule.selectorText)) {
-        const value = rule.style.getPropertyValue(property)
-        for (const match of value.matchAll(/var\((--[^,)]+)/g)) candidates.add(match[1]!)
-      } else if (rule instanceof CSSGroupingRule) visit(rule.cssRules)
-    }
-  }
-  for (const sheet of document.styleSheets) visit(sheet.cssRules)
-  return candidates
+/** Pierre renders into a shadow root; find the first DiffView's rendered lines. */
+export function diffShadow(canvas: HTMLElement): ShadowRoot {
+  const host = [...canvas.querySelectorAll('[data-diff-file] *')].find(element => element.shadowRoot?.querySelector('[data-content]'))
+  if (!host) throw new Error('No rendered DiffView lines')
+  return host.shadowRoot!
 }
 
-function sharedDeclarationToken(wash: HTMLElement, gutter: HTMLElement): string | undefined {
-  const candidates = new Set([...declarationTokens(wash, 'background-color'), ...declarationTokens(gutter, 'border-left-color')])
-  const originalWash = getComputedStyle(wash).backgroundColor
-  const originalGutter = getComputedStyle(gutter).borderLeftColor
-  const originalStyles = [wash, gutter].map(element => element.getAttribute('style'))
-  let shared: string | undefined
-  // Let the browser resolve layers, specificity and conditional rules. Exactly
-  // one candidate must cause both paints; every other candidate must cause neither.
-  for (const token of candidates) {
-    let washChanged: boolean
-    let gutterChanged: boolean
-    try {
-      wash.style.setProperty(token, 'rgb(1 2 3)', 'important')
-      gutter.style.setProperty(token, 'rgb(1 2 3)', 'important')
-      washChanged = getComputedStyle(wash).backgroundColor !== originalWash
-      gutterChanged = getComputedStyle(gutter).borderLeftColor !== originalGutter
-    } finally {
-      for (const [index, element] of [wash, gutter].entries()) {
-        const style = originalStyles[index]
-        if (style === null) element.removeAttribute('style')
-        else element.setAttribute('style', style!)
-      }
-      if (getComputedStyle(wash).backgroundColor !== originalWash || getComputedStyle(gutter).borderLeftColor !== originalGutter) throw new Error('Diff tint probe did not restore computed styles')
-    }
-    if (washChanged !== gutterChanged || (washChanged && shared !== undefined)) throw new Error('Added wash and gutter do not share a semantic token')
-    if (washChanged) shared = token
-  }
-  return shared
-}
-
-/** Also accepts the pre-token row markup, so the same assertion serves as a negative control. */
+/**
+ * The diff tint contract on the kit DiffView (@pierre/diffs): changed-line syntax ink and line
+ * numbers read at 4.5:1 or better over their wash, the addition wash is tinted rather than grey, and the
+ * one addition variable drives it (an unrelated variable does not).
+ */
 export function assertDiffTint(canvas: HTMLElement) {
-  const rows = [...canvas.querySelectorAll('code')].map(code => code.parentElement!).filter(row => row.children[0]?.textContent?.trim().endsWith('+') || row.children[0]?.textContent?.trim().endsWith('−'))
-  const added = rows.find(row => row.children[0]?.textContent?.trim().endsWith('+'))
-  const removed = rows.find(row => row.children[0]?.textContent?.trim().endsWith('−'))
+  const root = diffShadow(canvas)
+  const view = canvas.querySelector<HTMLElement>('[data-testid="diff-view"], [data-testid="diff-code"]')!
+  const added = root.querySelector<HTMLElement>('[data-content] [data-line-type="change-addition"]')
+  const removed = root.querySelector<HTMLElement>('[data-content] [data-line-type="change-deletion"]')
   if (!added || !removed) throw new Error('Diff tint requires an added and a removed row')
-  const washToken = sharedDeclarationToken(added, added.children[0]! as HTMLElement)
-  const gutterToken = washToken
-  if (washToken === undefined) throw new Error('Added wash and gutter do not share a semantic token')
-  const addWash = color(getComputedStyle(added).backgroundColor)
-  const deleteWash = color(getComputedStyle(removed).backgroundColor)
-  const marker = color(getComputedStyle(added.children[0]!).borderLeftColor)
-  const pane = background(added.parentElement)
-  const addComposite = over(addWash, pane), deleteComposite = over(deleteWash, pane)
-  const addDelta = Math.abs(luminance(addComposite) - luminance(pane))
-  const deleteDelta = Math.abs(luminance(deleteComposite) - luminance(pane))
-  const chroma = Math.max(...addComposite.slice(0, 3)) - Math.min(...addComposite.slice(0, 3))
-  const addHue = hue(addComposite)
-  if (chroma < 0.01) throw new Error('Added-row wash is neutral grey')
-  if (addHue >= 90 && addHue <= 170) throw new Error('Added-row wash is green')
-  // Canvas unpremultiplication of a 9% wash can round by up to 6/255.
-  if (addWash.slice(0, 3).some((channel, index) => Math.abs(channel - marker[index]!) > 6 / 255)) throw new Error('Added wash and gutter do not share addition ink')
-  if (deleteDelta === 0 || Math.abs(addDelta / deleteDelta - 1) > 0.2) throw new Error(`Addition/deletion luminance delta mismatch: ${addDelta} / ${deleteDelta}`)
-  const contrast = (element: Element) => {
-    const backdrop = background(element)
-    const ink = over(color(getComputedStyle(element).color), backdrop)
-    const [lighter, darker] = [luminance(ink), luminance(backdrop)].sort((a, b) => b - a)
-    return (lighter! + 0.05) / (darker! + 0.05)
+  const tokens = [added, removed].flatMap(row => [...row.querySelectorAll<HTMLElement>('span')].filter(token => token.children.length === 0 && (token.textContent ?? '').trim() !== ''))
+  const numbers = [...root.querySelectorAll<HTMLElement>('[data-gutter] [data-line-type^="change"] [data-line-number-content]')]
+  const minimumTextContrast = Math.min(...tokens.map(contrast))
+  const minimumGutterContrast = Math.min(...numbers.map(contrast))
+  const wash = background(added)
+  if (Math.max(...wash.slice(0, 3)) - Math.min(...wash.slice(0, 3)) < 0.01) throw new Error('Added-row wash is neutral grey')
+  const follows = (property: string) => {
+    const before = getComputedStyle(added).backgroundColor
+    view.style.setProperty(property, 'rgb(1, 200, 3)')
+    const after = getComputedStyle(added).backgroundColor
+    view.style.removeProperty(property)
+    return before !== after
   }
-  const minimumTextContrast = Math.min(...rows.flatMap(row => [...row.querySelectorAll('code, [data-syntax-token]')].map(contrast)))
-  const minimumGutterContrast = Math.min(...rows.map(row => contrast(row.children[0]!)))
-  return { pane, addWash, deleteWash, marker, washToken, gutterToken, addComposite, deleteComposite, paneLuminance: luminance(pane), addLuminance: luminance(addComposite), deleteLuminance: luminance(deleteComposite), addDelta, deleteDelta, deltaRatio: addDelta / deleteDelta, chroma, hue: addHue, minimumTextContrast, minimumGutterContrast }
+  if (!follows('--fractal-diff-addition')) throw new Error('Added wash does not follow the addition variable')
+  if (follows('--fractal-diff-unrelated')) throw new Error('Diff tint probe is not specific')
+  return { minimumTextContrast: Math.round(minimumTextContrast * 100) / 100, minimumGutterContrast: Math.round(minimumGutterContrast * 100) / 100 }
 }

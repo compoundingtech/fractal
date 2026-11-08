@@ -35,6 +35,7 @@ peerDependencyRules:
     vitest: ">=4.0.0"
     unplugin: ">=3.0.0"
     "@overeng/devbar>@overeng/utils": "file:.devenv/pnpm-source-inputs/current/repos/effect-utils/packages/@overeng/utils"
+    "@pierre/theming>@pierre/theme": ">=1.1.0"
 
 minimumReleaseAgeExclude: ["@types/node"]
 

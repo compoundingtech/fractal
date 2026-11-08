@@ -114,8 +114,17 @@ export const Files: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(canvas.getByRole('tab', { name: 'Files 3' })).toHaveAttribute('aria-selected', 'true')
-    await expect(canvas.getByRole('complementary', { name: 'Files changed, acme/garden#7' })).toBeVisible()
-    await expect(canvas.getAllByText('src/scheduler.rs').length).toBeGreaterThan(0)
+    // diffshub: one viewer with a file tree, per-file +/− and collapse, unified or split.
+    const viewer = canvas.getByRole('region', { name: 'Files changed, acme/garden#7' })
+    await expect(viewer).toBeVisible()
+    await expect(within(viewer).getByRole('toolbar', { name: 'Diff options' })).toBeVisible()
+    // The tree shows beside the files when there is room, and behind its toggle in narrow panes.
+    const treeToggle = within(viewer).getByRole('button', { name: 'File tree' })
+    if (treeToggle.getAttribute('aria-pressed') === 'false') await userEvent.click(treeToggle)
+    await expect(within(viewer).getByRole('navigation', { name: 'Changed files' })).toBeInTheDocument()
+    const section = viewer.querySelector<HTMLElement>('[data-diff-files-section="src/scheduler.rs"]')!
+    await expect(within(section).getByRole('button', { name: 'src/scheduler.rs' })).toHaveAttribute('aria-expanded', 'true')
+    await expect(within(section).getByLabelText(/^\d+ added, \d+ removed$/)).toBeInTheDocument()
     await expect(canvas.getByRole('link', { name: 'View assets/beds.png on GitHub' })).toHaveAttribute('href', 'https://github.com/acme/garden/pull/7/files')
     await expectGithubLinksOnly(canvasElement)
   },

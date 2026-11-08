@@ -10,7 +10,7 @@ import type * as Highlights from '@pierre/highlights'
 import remarkGfm from 'remark-gfm'
 import { createLazyChunk } from '../../lazy-chunk'
 import { MarkdownLinkPreviewContext } from './markdownLinkPreview.ts'
-import { surfaceVars as surface, textVars as textColor, borderVars as border, interactionVars as interaction, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { surfaceVars as surface, textVars as textColor, borderVars as border, interactionVars as interaction, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, syntaxVars as syntax } from '../composition-tokens.stylex'
 import { Tooltip as CopyTooltip } from './Controls'
 import { Icon } from './Icons'
 import { useCopyFeedback } from './useCopyFeedback'
@@ -506,12 +506,13 @@ const styles = stylex.create({
   itemBlock: { marginBlockStart: { default: s.md, ':first-child': 0 } },
   strong: { fontWeight: t.weightBold, color: textColor.fg }, strongMuted: { color: 'inherit' },
   emphasis: { fontStyle: 'italic' },
-  syntaxComment: { color: textColor.fgMuted, fontStyle: 'italic' },
-  syntaxKeyword: { color: status.runningFg },
-  syntaxString: { color: textColor.fgMuted },
-  syntaxLiteral: { color: `var(--fractal-diff-literal, ${status.attention})` },
-  syntaxFunction: { color: textColor.fg, fontWeight: t.weightMedium },
-  syntaxDeleted: { color: status.dangerFg },
+  // One palette with the kit DiffView (syntaxVars: Pierre's default theme), so code blocks and diffs never disagree.
+  syntaxComment: { color: syntax.comment, fontStyle: 'italic' },
+  syntaxKeyword: { color: syntax.keyword },
+  syntaxString: { color: syntax.string },
+  syntaxLiteral: { color: syntax.constant },
+  syntaxFunction: { color: syntax.func },
+  syntaxDeleted: { color: syntax.deleted },
   blockquote: { display: 'flex', flexDirection: 'column', gap: s.md, margin: 0, paddingInlineStart: s.lg, borderInlineStartWidth: g.focusRing, borderInlineStartStyle: 'solid', borderInlineStartColor: border.railStrong, color: textColor.fgMuted },
   tableScroll: { maxWidth: '100%', overflowX: 'auto', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   table: { width: '100%', borderCollapse: 'collapse', fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit' },

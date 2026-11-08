@@ -6,8 +6,12 @@ import type { GithubRef } from '../refs.ts'
 import { githubUrlOf } from '../refs.ts'
 import type { GithubComment, GithubConversation, GithubFile, GithubFiles, GithubRead, GithubReview, GithubReviewThread } from '../schema.ts'
 
-/** The kit DiffPanel's file shape, restated so this module stays free of the kit's runtime. */
-export interface DetailDiffFile { readonly path: string; readonly diff: readonly string[]; readonly added: number; readonly removed: number }
+/** The kit DiffFiles' git status words (from @pierre/trees), restated so this module stays free of the kit's runtime. */
+export type DetailFileStatus = 'added' | 'deleted' | 'modified' | 'renamed'
+/** One patched file, shaped for the kit DiffFiles viewer. */
+export interface DetailDiffFile { readonly path: string; readonly diff: readonly string[]; readonly added: number; readonly removed: number; readonly status?: DetailFileStatus; readonly previousPath?: string }
+
+const detailStatus: Readonly<Record<GithubFile['status'], DetailFileStatus | undefined>> = { added: 'added', removed: 'deleted', modified: 'modified', changed: 'modified', renamed: 'renamed', copied: 'renamed', unchanged: undefined }
 
 /** GitHub lists at most this many files for a PR. */
 export const githubFileListLimit = 3000
@@ -20,7 +24,7 @@ export const diffLinesOf = (patch: string): readonly string[] => {
 }
 
 export interface FilesView {
-  /** Files with a patch, shaped for the DiffPanel. */
+  /** Files with a patch, shaped for the kit DiffFiles viewer. */
   readonly diffs: readonly DetailDiffFile[]
   /** Files GitHub sent without a patch (binary or too large): linked out. */
   readonly withoutPatch: readonly GithubFile[]
@@ -34,7 +38,10 @@ export const filesView = (files: GithubFiles): FilesView => {
   const withoutPatch: GithubFile[] = []
   for (const file of files.files) {
     if (file.patch === null) withoutPatch.push(file)
-    else diffs.push({ path: file.path, diff: diffLinesOf(file.patch), added: file.additions, removed: file.deletions })
+    else {
+      const status = detailStatus[file.status]
+      diffs.push({ path: file.path, diff: diffLinesOf(file.patch), added: file.additions, removed: file.deletions, ...(status ? { status } : {}), ...(file.previous_path ? { previousPath: file.previous_path } : {}) })
+    }
   }
   return { diffs, withoutPatch, partial: files.truncated || files.total > githubFileListLimit || files.total > files.files.length, total: files.total }
 }
