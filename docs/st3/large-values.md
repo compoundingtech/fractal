@@ -114,6 +114,9 @@ The reference/chunk TODO must preserve all four values at every continuation.
 predecessor probe binds the archived writer, sequence and exact batch digest while
 checking quarantined operation history. It reads only an existence flag; reference
 conversion must retain the exact writer-chain comparison.
+`lv-h756acba9d94c` replaces the admitted-only log reader. It pages exact envelope
+identities and certified tombstones, including quarantined identities only after the
+archive adapter validates the complete quarantined set; it never reads claim authority.
 
 ### Membership projection generation inventory (PR #5381)
 
