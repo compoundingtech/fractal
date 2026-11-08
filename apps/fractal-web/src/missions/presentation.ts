@@ -1,3 +1,4 @@
+import { markdownPlainText } from '../../../../packages/fractal-ui/src/assistant-ui/composition/markdown-source.ts'
 import { optionalSource } from '@fractal/client/markdown'
 import type * as Fractal from '@fractal/client/schema'
 import type { DecodedAgent } from '@fractal/sdk/read'
@@ -197,7 +198,7 @@ export const missionFaulted = (presentation: MissionPresentation): boolean => pr
 export const missionReaderTitle = (mission: Fractal.Mission): string => {
   const steps = missionSteps(mission as Row)
   const step = steps.find((step) => !FINISHED.has(step.state)) ?? steps[0]
-  return missionDisplayTitle({ title: mission.title, work: step === undefined ? undefined : { title: Option.getOrUndefined(step.title), goal: optionalSource(step.goals?.[0]) } })
+  return missionDisplayTitle({ title: mission.title, work: step === undefined ? undefined : { title: Option.getOrUndefined(step.title), goal: step.goals?.[0] === undefined ? undefined : markdownPlainText(optionalSource(step.goals[0]) ?? '') } })
 }
 
 /** Hidden by default, in the client as the contract says: Fractal's own, never started, or settled before today. */
