@@ -35,7 +35,7 @@ const source = fixtureSource({ world: { ...fixtureProjections, conversations: { 
 const EpisodeTranscript = ({ scheme }: { readonly scheme: 'dark' | 'light' }) => {
   const [registry] = React.useState(() => AtomRegistry.make())
   return <main data-scheme={scheme} {...stylex.props(styles.root, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
-    <DataSourceProvider source={source} registry={registry}><ConversationPane agentRef={agentRef} agentName="Quay" onOpenTool={() => undefined} /></DataSourceProvider>
+    <DataSourceProvider source={source} registry={registry}><ConversationPane agentRef={agentRef} agentName="Quay" /></DataSourceProvider>
   </main>
 }
 const meta = { excludeStories: ['scenarioExemptions'],

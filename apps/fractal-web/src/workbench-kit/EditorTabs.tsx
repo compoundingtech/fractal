@@ -9,6 +9,7 @@
 
 import * as stylex from '@stylexjs/stylex'
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -18,6 +19,7 @@ import {
   type ReactNode,
   type Ref,
 } from 'react'
+import { createPortal } from 'react-dom'
 import { mergeProps, mergeRefs, useDrop, type DropItem } from 'react-aria'
 import { Tab, TabList, TabPanel, Tabs, type Key } from 'react-aria-components'
 import { HoverCardSurface, useHoverCardIntent } from '../../../../packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx'
@@ -88,6 +90,8 @@ export interface EditorTabsProps {
   readonly stablePanel?: boolean
   /** 44px targets for a coarse pointer. */
   readonly touch?: boolean
+  /** The strip's own menu of its open tabs; a host that lists them elsewhere, as a phone's More actions does, leaves it out. */
+  readonly surfacesMenu?: boolean
   /** Before the tabs, in the same row: in `bar`, the controls that lead the window's top bar. */
   readonly leading?: ReactNode
   /** After the strip's own controls: in `bar`, the controls that end the window's top bar. */
@@ -149,6 +153,9 @@ const styles = stylex.create({
   },
   listCompact: { alignItems: 'center', gap: '2px' },
   stripTouch: { height: '2.75rem' },
+  // A phone's top bar: tall enough for 44px tabs above its hairline, with the gutter its edge controls' 44px targets
+  // overhang, so neither leaves the window.
+  stripBarTouch: { height: `calc(${geometryVars.touchTarget} + 1px)`, paddingInline: `calc((${geometryVars.touchTarget} - ${geometryVars.controlMd}) / 2)` },
   stripBar: {
     height: '2.5rem',
     alignItems: 'stretch',
@@ -173,6 +180,7 @@ const styles = stylex.create({
     boxShadow: `inset 0 2px 0 ${tokens['--ds-blue-700']}`,
   },
   tabTouch: { height: '2.5rem', flexShrink: 0 },
+  tabBarTouch: { height: '100%' },
   trailingTouch: { width: '1.75rem', height: '1.75rem' },
   listVertical: {
     flexDirection: 'column',
@@ -462,6 +470,7 @@ export const EditorTabs = ({
   children,
   stablePanel = false,
   touch = false,
+  surfacesMenu = true,
   leading,
   end,
   hostDrag,
@@ -469,6 +478,17 @@ export const EditorTabs = ({
   const list = useRef<HTMLDivElement>(null)
   const [drop, setDrop] = useState<{ readonly index: number; readonly offset: number } | null>(null)
   const [announcement, setAnnouncement] = useState('')
+  // RAC's panel useId retains its first id. Remount only its semantic shell; move this same portal target into it.
+  // Render the portal outside Tabs so its collection builder and selectedKey never leak into nested pane tabs.
+  const [content] = useState(() => {
+    if (!stablePanel) return null
+    const node = document.createElement('div')
+    node.className = stylex.props(styles.panel).className ?? ''
+    return node
+  })
+  const attachPanel = useCallback((panel: HTMLDivElement | null) => {
+    if (panel !== null && content !== null) panel.appendChild(content)
+  }, [content])
   const vertical = variant === 'vertical'
   // The top bar is the window's banner, as the header it replaces was; other strips are plain rows.
   const Bar = variant === 'bar' ? 'header' : 'div'
@@ -560,6 +580,7 @@ export const EditorTabs = ({
   }
 
   return (
+    <>
     <Tabs
       {...(activeId === null ? {} : { selectedKey: activeId })}
       onSelectionChange={(key: Key) => onActivate(String(key))}
@@ -579,6 +600,7 @@ export const EditorTabs = ({
                 ? styles.stripBar
                 : styles.stripVertical,
           touch && styles.stripTouch,
+          touch && variant === 'bar' && styles.stripBarTouch,
         )}
       >
         {leading}
@@ -634,7 +656,7 @@ export const EditorTabs = ({
         )}
         <div {...stylex.props(styles.actions, vertical && styles.actionsVertical)}>
           {actions}
-          <MenuTrigger>
+          {surfacesMenu ? <MenuTrigger>
             <IconButton label="Open surfaces" icon={<MoreIcon />} />
             <MenuPopover>
               <Menu
@@ -660,7 +682,7 @@ export const EditorTabs = ({
                 ))}
               </Menu>
             </MenuPopover>
-          </MenuTrigger>
+          </MenuTrigger> : null}
           {end}
         </div>
         <span role="status" aria-live="polite" {...stylex.props(styles.srOnly)}>
@@ -668,9 +690,7 @@ export const EditorTabs = ({
         </span>
       </Bar>
       {stablePanel ? (
-        <TabPanel key="stable" id={activeId ?? ''} shouldForceMount {...stylex.props(styles.panel)}>
-          {children}
-        </TabPanel>
+        <TabPanel key={activeId ?? ''} id={activeId ?? ''} shouldForceMount ref={attachPanel} {...stylex.props(styles.panel)} />
       ) : activeId === null ? (
         children
       ) : (
@@ -679,8 +699,11 @@ export const EditorTabs = ({
         </TabPanel>
       )}
     </Tabs>
+    {content === null ? null : createPortal(children, content)}
+    </>
   )
 }
+
 
 interface TabItemProps {
   readonly tab: EditorTabItem
@@ -797,6 +820,7 @@ const TabItem = ({
           active && variant === 'bar' && !isGroupFocused && styles.tabBarUnfocused,
           tab.status === 'unavailable' && styles.unavailable,
           touch && styles.tabTouch,
+          touch && variant === 'bar' && styles.tabBarTouch,
           isDragging && styles.dragging,
           isFocusVisible && styles.focusVisible,
         ).className ?? ''

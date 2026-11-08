@@ -36,11 +36,6 @@
           if (boot['sidebar.open'] === false) root.dataset.wfBootSidebar = 'closed'
           const ratio = boot['sidebar.ratio']
           if (typeof ratio === 'number' && ratio > 0 && ratio < 1) root.style.setProperty('--wf-boot-sidebar-w', Math.round(ratio * innerWidth) + 'px')
-          const width = boot['dock.width']
-          if (boot['dock.open'] === true && typeof width === 'number' && location.pathname.startsWith('/w/')) {
-            root.dataset.wfBootDock = 'open'
-            root.style.setProperty('--wf-boot-dock-w', Math.round(width) + 'px')
-          }
         } catch {}
       })()
     </script>
@@ -56,8 +51,6 @@
       [data-wf-sidebar-skeleton] i { width: 16px; height: 16px; border-radius: 50%; flex-shrink: 0; background: var(--wf-boot-line, #242424); }
       [data-wf-sidebar-skeleton] span { height: 8px; width: 65%; border-radius: 4px; background: var(--wf-boot-line, #242424); }
       [data-wf-workspace-skeleton] { flex: 1; min-width: 0; }
-      [data-wf-dock-skeleton] { display: none; box-sizing: border-box; width: var(--wf-boot-dock-w, 440px); max-width: 50vw; border-left: 1px solid var(--wf-boot-line, #242424); }
-      html[data-wf-boot-dock='open'] [data-wf-dock-skeleton] { display: block; }
       html[data-wf-boot-sidebar='closed'] [data-wf-sidebar-skeleton] { display: none; }
       [data-wf-header-skeleton] { height: 52px; box-sizing: border-box; border-bottom: 1px solid var(--wf-boot-line, #242424); display: flex; align-items: center; padding-inline: 16px; }
       [data-wf-header-skeleton] span { width: 140px; height: 8px; border-radius: 4px; background: var(--wf-boot-line, #242424); }
@@ -150,7 +143,6 @@
           <div><i></i><span></span></div><div><i></i><span></span></div>
         </aside>
         <div data-wf-workspace-skeleton aria-hidden="true"><div data-wf-header-skeleton><span></span></div></div>
-        <div data-wf-dock-skeleton aria-hidden="true"></div>
       </div>
     </div>
     <script type="module" src="/main.tsx"></script>

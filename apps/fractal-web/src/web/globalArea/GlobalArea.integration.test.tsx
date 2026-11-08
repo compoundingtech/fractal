@@ -16,7 +16,6 @@ import { fixtureSource } from '../../data/fixtureSource.ts'
 import { initialFeedSync, type FeedSyncObservation } from '../../data/feedSync.ts'
 import { observed, type ConversationPage, type DataSource, type Feed } from '../../data/source.ts'
 import { AlertAnswersContext, createAlertAnswers, type AlertAnswers } from '../../conversation/alerts/alertAnswers.ts'
-import { rightPanelAtom } from '../rightPanel.ts'
 import { LiveAgentWorkspace } from '../LiveAgentWorkspace.tsx'
 import { writeCellsLikeAnotherWindow } from '../../state/cell/testing.ts'
 
@@ -50,7 +49,6 @@ beforeEach(() => {
   // The sidebar's open state is a cell shared across mounts; every test starts with the dock open.
   writeCellsLikeAnotherWindow({ 'panels.leftSidebar': { value: { open: true, ratio: 256 / 1440 } } })
   registry = AtomRegistry.make()
-  registry.set(rightPanelAtom, { open: false, tab: 'details' })
   gatewaySync = Atom.make<FeedSyncObservation>({ status: { _tag: 'Live', since: 0 }, observedAt: 0 })
   const agents = Atom.make<Feed<readonly DecodedAgent[]>>(observed({ value: [agent, other] })).pipe(Atom.keepAlive)
   source = {

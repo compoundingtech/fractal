@@ -1,22 +1,22 @@
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, fn, userEvent, within } from 'storybook/test'
+import { expect, userEvent, within } from 'storybook/test'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui/work-log'
 import { colorVars as c } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import { TypedToolPreview } from './TypedToolPreview.tsx'
+import { TypedToolResult } from './TypedToolResult.tsx'
 
 const base = { title: 'scout', status: 'success', kind: 'subagent', startedAt: '2026-01-15T12:00:00Z', toolName: 'task' } as const
 const defaultTask: WorkLogCall = { ...base, id: 'example/default-task', input: { tasks: [{ name: 'ExampleReview', agent: 'scout', task: '#### Review\n\nInspect **readable fields** and `agent://ExampleWorker`.\n\n- Preserve evidence' }] }, metadata: { progress: [{id:'ExampleReview',agent:'scout',status:'pending'}], results: [] }, output: [{ type: 'text', text: 'Spawned agent `ExampleReview` (job `ExampleReview`).\n\nResults **auto-deliver** at `agent://ExampleWorker`.' }] }
 const unknownTask: WorkLogCall = { ...base, id: 'example/opaque-task', input: { tasks: [{ task: 42 }] }, output: { future_only: 'Opaque native field' } }
-const RecordedTaskResult = ({ onOpen }: { readonly onOpen: () => void }) => <div {...stylex.props(styles.canvas)}>
-  <section data-testid="task-default"><TypedToolPreview call={defaultTask} onOpen={onOpen} /></section>
-  <section data-testid="task-opaque"><TypedToolPreview call={unknownTask} onOpen={onOpen} /></section>
+const RecordedTaskResult = () => <div {...stylex.props(styles.canvas)}>
+  <section data-testid="task-default"><TypedToolResult call={defaultTask} /></section>
+  <section data-testid="task-opaque"><TypedToolResult call={unknownTask} /></section>
 </div>
 const styles = stylex.create({canvas:{display:'flex',flexDirection:'column',gap:24,backgroundColor:c.canvas,color:c.fg,padding:24,minWidth:560}})
-const meta = { title: 'Fractal Web/Transcript/Readable task results', component: RecordedTaskResult, args: { onOpen: fn() } } satisfies Meta<typeof RecordedTaskResult>
+const meta = { title: 'Fractal Web/Transcript/Readable task results', component: RecordedTaskResult } satisfies Meta<typeof RecordedTaskResult>
 export default meta
 type Story = StoryObj<typeof meta>
-export const AllStates: Story = { play: async ({ canvasElement, args }) => {
+export const AllStates: Story = { play: async ({ canvasElement }) => {
   const recorded = within(canvasElement).getByTestId('task-default')
   const inline = recorded.querySelector('[aria-label="Recorded result body"]')!
   await expect(inline.querySelector('pre')).toBeNull()
@@ -26,8 +26,8 @@ export const AllStates: Story = { play: async ({ canvasElement, args }) => {
   await expect(recorded.querySelector('[aria-label="Recorded tasks"] strong')).toHaveTextContent('ExampleReview')
   await expect(recorded.querySelector('[aria-label="Recorded tasks"]')).toHaveTextContent('Agent type: scout')
   await expect(recorded).toHaveTextContent('State at task launch: pending')
-  await userEvent.click(within(recorded).getByRole('button', { name: 'Open inspector for task' }))
-  await expect(args.onOpen).toHaveBeenCalledOnce()
+  // The result reads in place; there is no separate inspector to open.
+  await expect(within(recorded).queryByRole('button', { name: /^Open inspector/ })).toBeNull()
   // Failing control: an opaque result stays explicit raw evidence, never a typed fact.
   const opaque = within(canvasElement).getByTestId('task-opaque')
   const primary = opaque.cloneNode(true) as HTMLElement
