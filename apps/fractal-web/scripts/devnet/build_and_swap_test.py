@@ -46,7 +46,7 @@ if args and pathlib.Path(args[0]).name == 'candidate_sandbox.py':
     root = pathlib.Path(os.environ['SNAPSHOT_LEASE_FIXTURE'])
     with (root / 'sandbox-calls.jsonl').open('a') as stream:
         stream.write(json.dumps(args) + '\\n')
-    if args == ['--check-config']:
+    if args == ['--check-config', '--worktree', str(root / 'source')]:
         raise SystemExit(0)
     if args == ['--print-policy']:
         print(os.environ['SNAPSHOT_LEASE_POLICY'])
@@ -268,9 +268,10 @@ os.execv({shutil.which('mv')!r}, ["mv", *sys.argv[1:]])
                                     for warning in failure_log['cleanupWarnings']))
                 sandbox_calls = [json.loads(line) for line in
                                  (fixture / 'sandbox-calls.jsonl').read_text().splitlines()]
-                self.assertEqual(sandbox_calls.count(['--check-config']), 4)
+                configuration = ['--check-config', '--worktree', str(source.resolve())]
+                self.assertEqual(sandbox_calls.count(configuration), 4)
                 self.assertEqual(sandbox_calls.count(['--print-policy']), 4)
-                executions = [args for args in sandbox_calls if args not in (['--check-config'], ['--print-policy'])]
+                executions = [args for args in sandbox_calls if args not in (configuration, ['--print-policy'])]
                 self.assertEqual(len(executions), 4)
                 self.assertEqual({args[5] for args in executions},
                                  {str(fixture / 'build-root-a/shared/builds' / first_sha),

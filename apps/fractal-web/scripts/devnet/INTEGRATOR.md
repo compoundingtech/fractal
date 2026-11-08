@@ -60,7 +60,15 @@ paths overlap: neither may contain the other, and equal paths are refused.
 These checks prevent candidate-writable mounts from exposing the trusted cache.
 Candidate worktree overlap is checked before any sandbox tool bootstrap or
 trusted package realization, including on cold invocations and when the cache
-path is a symlink into the worktree.
+path is a symlink into the worktree. CLI execution and `--check-config --worktree`
+pass the worktree to `validate_configuration`; the integrator passes its configured
+candidate clone (including the dry-run clone), and `build-and-swap.sh` passes
+`SOURCE` before creating worktrees. Direct `run` and `run_package` calls check
+their worktree before tool or package realization. A standalone `--check-config`
+without `--worktree` validates only deployment configuration: no candidate path
+is known. `tools` and `realize_megarepo` are trusted bootstrap primitives; callers
+with a candidate path must validate it first. The capacity precheck uses no
+persistent cache or candidate filesystem access.
 
 The configured package store is mounted only in candidate children at
 `/sandbox/pnpm-store`; trusted install invocations pass that path with pnpm's

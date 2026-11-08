@@ -111,8 +111,8 @@ def bootstrap_cache_path():
     return (directory('FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT') / 'nix-bootstrap-cache').resolve()
 
 
-def candidate_worktree(worktree):
-    worktree = Path(worktree).resolve(strict=True)
+def candidate_worktree(worktree, *, strict=True):
+    worktree = Path(worktree).resolve(strict=strict)
     cache = bootstrap_cache_path()
     if cache.is_relative_to(worktree) or worktree.is_relative_to(cache):
         raise RuntimeError('Nix bootstrap cache must be disjoint from the candidate worktree')
@@ -179,7 +179,11 @@ def tools():
     return binaries, state, store
 
 
-def validate_configuration():
+def validate_configuration(*candidate_worktrees):
+    # A configured clone may not exist yet; resolve existing symlinks before
+    # bootstrapping, without requiring clone creation first.
+    for worktree in candidate_worktrees:
+        candidate_worktree(worktree, strict=False)
     tools()
 
 
@@ -374,7 +378,7 @@ def main():
                 parser.error('--prepare-removal requires --snapshot-root')
             prepare_removal(options.prepare_removal, options.snapshot_root)
             return 0
-        validate_configuration()
+        validate_configuration(*([options.worktree] if options.worktree else []))
         if options.check_config:
             return 0
         command = options.command[1:] if options.command[:1] == ['--'] else options.command

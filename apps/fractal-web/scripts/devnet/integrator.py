@@ -861,7 +861,7 @@ def tick():
         except BlockingIOError: row.update(build='skipped',reason='lock-held'); return
         candidate_sandbox.capacity_precheck()
         capacity_prechecked=True
-        candidate_sandbox.validate_configuration()
+        candidate_sandbox.validate_configuration(C)
         SELECTION_DEADLINE = time.monotonic() + SELECTION_BUDGET_SECONDS
         # Trust metadata is fetched before any PR files or executable content.
         permission_cache={}

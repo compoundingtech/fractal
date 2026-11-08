@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 """Runner unit tests; add --real to exercise the pinned Linux sandbox too."""
+import ast
+import contextlib
+import io
 import errno
 import os
 from pathlib import Path
@@ -407,6 +410,61 @@ class RunnerTest(unittest.TestCase):
 
 
 class ConfigurationTest(unittest.TestCase):
+    def test_candidate_entrypoints_reject_overlap_before_cold_bootstrap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / 'state'
+            state.mkdir()
+            cache = state / 'nix-bootstrap-cache'
+            outside = root / 'outside'
+            outside.mkdir()
+            # Exercise the actual integrator validation expression, retaining its
+            # configured clone argument without invoking tick's logging/recovery.
+            tree = ast.parse(Path(sandbox.__file__).with_name('integrator.py').read_text())
+            call, = [node for node in ast.walk(tree)
+                     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                     and isinstance(node.func.value, ast.Name)
+                     and node.func.value.id == 'candidate_sandbox'
+                     and node.func.attr == 'validate_configuration']
+            integrator_validation = compile(ast.Expression(call), 'integrator.py', 'eval')
+            environment = {
+                'FRACTAL_INTEGRATOR_SANDBOX': 'bwrap',
+                'FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT': str(state),
+                'FRACTAL_INTEGRATOR_PNPM_STORE': str(root / 'pnpm')}
+            for layout in ('contains-cache', 'equal-cache', 'inside-cache', 'symlink'):
+                if layout == 'symlink':
+                    cache.symlink_to(outside, target_is_directory=True)
+                    candidate = outside
+                else:
+                    candidate = {'contains-cache': state, 'equal-cache': cache,
+                                 'inside-cache': cache / 'not-created-clone'}[layout]
+                for entry in ('configuration', 'integrator', 'cli', 'check-config'):
+                    sandbox.tools.cache_clear()
+                    with self.subTest(layout=layout, entry=entry), \
+                            patch.dict(os.environ, environment), \
+                            patch.object(sandbox.shutil, 'which', return_value='/trusted/nix'), \
+                            patch.object(sandbox.subprocess, 'run') as execute:
+                        if entry == 'configuration':
+                            with self.assertRaisesRegex(RuntimeError, 'disjoint from the candidate worktree'):
+                                sandbox.validate_configuration(outside, candidate)
+                        elif entry == 'integrator':
+                            with self.assertRaisesRegex(RuntimeError, 'disjoint from the candidate worktree'):
+                                eval(integrator_validation, {'candidate_sandbox': sandbox, 'C': candidate})
+                        else:
+                            arguments = ['candidate_sandbox.py', '--worktree', str(candidate)]
+                            arguments += ['--check-config'] if entry == 'check-config' else ['--', 'true']
+                            stderr = io.StringIO()
+                            with patch.object(sys, 'argv', arguments), \
+                                    contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit) as error:
+                                sandbox.main()
+                            self.assertEqual(error.exception.code, 1)
+                            self.assertIn('disjoint from the candidate worktree', stderr.getvalue())
+                        execute.assert_not_called()
+                        self.assertEqual(sandbox.tools.cache_info().misses, 0)
+                if cache.is_symlink():
+                    cache.unlink()
+            sandbox.tools.cache_clear()
+
     def test_policy_cli_needs_no_configuration_or_nix(self):
         result = subprocess.run([sys.executable, str(Path(sandbox.__file__).resolve()), '--print-policy'],
                                 env={'PATH': ''}, capture_output=True, text=True)
