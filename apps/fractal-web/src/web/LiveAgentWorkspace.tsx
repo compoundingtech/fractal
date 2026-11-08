@@ -760,8 +760,8 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   }, [go, store, openPalette])
   const renderDragChip = React.useCallback((entity: EntityDescriptor) => <DragChip entity={entity} scheme={scheme} />, [scheme])
   // One description per entity, for the drag chip as for the tab: the tab's own presentation, read live.
-  const presentLatest = React.useRef((ref: string) => tabPresentation({ tab: { id: ref, ref }, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef, unread }))
-  presentLatest.current = (ref: string) => tabPresentation({ tab: { id: ref, ref }, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef, unread })
+  const presentLatest = React.useRef((ref: string) => tabPresentation({ tab: { id: ref, ref }, world: presentationWorld, unread }))
+  presentLatest.current = (ref: string) => tabPresentation({ tab: { id: ref, ref }, world: presentationWorld, unread })
   const describeEntity = React.useCallback((ref: string): EntityDescriptor => {
     const item = presentLatest.current(ref)
     return { kind: item.kind ?? 'resource', id: ref, title: item.title, status: item.icon }
