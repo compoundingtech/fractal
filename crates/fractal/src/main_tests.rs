@@ -6865,9 +6865,14 @@ async fn device_renewal_staging_posts_sealed_terms_and_returns_only_receipt() {
             let sent = sent.clone();
             async move {
                 sent.lock().unwrap().take().unwrap().send((headers, body)).unwrap();
-                let mut envelope: Value = serde_json::from_str(include_str!(
-                    "../../../docs/st3/client-v0/fixtures/events.json"
-                )).unwrap();
+                let mut envelope = json!({
+                    "api_version": CLIENT_V0_API_VERSION,
+                    "request_id": "request/renew-stage",
+                    "snapshot": {
+                        "id": "snapshot/host-a/1844/44cd", "host_id": "host/host-a", "store_index": 1844,
+                        "projection_version": "client-projection.v0", "created_at": "2026-09-20T12:00:02Z"
+                    },
+                });
                 envelope["value"] = json!({
                     "kind": "device-renewal-staged",
                     "renewal_id": "renewal/phone",
