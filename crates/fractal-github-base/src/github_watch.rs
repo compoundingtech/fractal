@@ -726,9 +726,13 @@ fn excerpts() -> &'static Mutex<HashMap<(String, String, u64), Option<String>>> 
     EXCERPTS.get_or_init(Default::default)
 }
 
-/// `text` cut to `EXCERPT_CHARS` at a word, quoted line by line.
+/// `text` cut to `EXCERPT_CHARS` at a word, quoted line by line. HTML goes first: comments (bot metadata, hidden
+/// notes) and script or style content entirely, other tags of real HTML elements leaving their words. So hidden markup
+/// neither spends the excerpt nor leaves a half tag or an open `<!--` at the cut. A code fence the cut leaves open is
+/// closed, so the quote renders as the comment does.
 pub fn quote(text: &str) -> Option<String> {
-    let text = text.trim();
+    let visible = without_html_tags(&without_html_comments(text));
+    let text = visible.trim();
     if text.is_empty() {
         return None;
     }
@@ -738,6 +742,9 @@ pub fn quote(text: &str) -> Option<String> {
             cut.truncate(space);
         }
         cut = format!("{} …", cut.trim_end());
+        if let Some(fence) = open_fence(&cut) {
+            cut = format!("{cut}\n{fence}");
+        }
     }
     Some(
         cut.lines()
@@ -745,6 +752,95 @@ pub fn quote(text: &str) -> Option<String> {
             .collect::<Vec<_>>()
             .join("\n"),
     )
+}
+
+/// `text` without its HTML comments; an unterminated one hides the rest, as GitHub renders it.
+fn without_html_comments(text: &str) -> String {
+    let mut visible = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<!--") {
+        visible.push_str(&rest[..start]);
+        match rest[start + 4..].find("-->") {
+            Some(end) => rest = &rest[start + 4 + end + 3..],
+            None => return visible,
+        }
+    }
+    visible.push_str(rest);
+    visible
+}
+
+/// HTML element names whose tags an excerpt drops. A tag-like word outside them (`Array<string>`) stays.
+const HTML_ELEMENTS: &[&str] = &[
+    "a", "abbr", "b", "blockquote", "br", "caption", "center", "code", "col", "colgroup", "dd", "del", "details", "div",
+    "dl", "dt", "em", "figcaption", "figure", "font", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "ins", "kbd",
+    "li", "mark", "ol", "p", "picture", "pre", "q", "s", "samp", "section", "small", "source", "span", "strike",
+    "strong", "sub", "summary", "sup", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "tt", "u", "ul", "var",
+    "video", "audio", "iframe", "wbr",
+];
+
+/// `text` without the tags of real HTML elements; script and style elements go with their content.
+fn without_html_tags(text: &str) -> String {
+    let mut visible = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        visible.push_str(&rest[..start]);
+        let tag = &rest[start..];
+        let Some(end) = tag[1..].find(|c| c == '<' || c == '>').map(|end| end + 1) else {
+            visible.push_str(tag);
+            return visible;
+        };
+        let name = tag[1..end]
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if tag.as_bytes()[end] != b'>' {
+            visible.push('<');
+            rest = &tag[1..];
+            continue;
+        }
+        if matches!(name.as_str(), "script" | "style") && !tag[1..].starts_with('/') {
+            let close = format!("</{name}");
+            rest = match tag.to_ascii_lowercase().find(&close) {
+                Some(close) => tag[close..].find('>').map_or("", |end| &tag[close + end + 1..]),
+                None => "",
+            };
+            continue;
+        }
+        if HTML_ELEMENTS.contains(&name.as_str()) {
+            rest = &tag[end + 1..];
+        } else {
+            visible.push_str(&tag[..=end]);
+            rest = &tag[end + 1..];
+        }
+    }
+    visible.push_str(rest);
+    visible
+}
+
+/// The fence that closes a code block still open at the end of `text`, if one is.
+fn open_fence(text: &str) -> Option<String> {
+    let mut open: Option<(char, usize)> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start_matches(' ');
+        if line.len() - trimmed.len() > 3 {
+            continue;
+        }
+        let Some(marker) = trimmed.chars().next().filter(|c| *c == '`' || *c == '~') else {
+            continue;
+        };
+        let run = trimmed.chars().take_while(|c| *c == marker).count();
+        if run < 3 {
+            continue;
+        }
+        match open {
+            None if !(marker == '`' && trimmed[run..].contains('`')) => open = Some((marker, run)),
+            Some((char, length)) if char == marker && run >= length && trimmed[run..].trim().is_empty() => open = None,
+            _ => {}
+        }
+    }
+    open.map(|(marker, length)| marker.to_string().repeat(length))
 }
 
 /// Read a comment's or review's text from GitHub, at most `EXCERPT_TIMEOUT`. A review without a
@@ -1412,5 +1508,22 @@ mod tests {
         assert!(quoted.chars().count() <= EXCERPT_CHARS + 4);
         assert!(quoted.ends_with("word …"));
         assert_eq!(quote("  "), None);
+        // Hidden HTML neither spends the excerpt nor hides what follows it.
+        let bot = format!("<!-- {} -->\nThe real comment.", "metadata ".repeat(200));
+        assert_eq!(quote(&bot).as_deref(), Some("> The real comment."));
+        assert_eq!(quote("Shown <!-- never closed").as_deref(), Some("> Shown"));
+        assert_eq!(quote("<!-- only metadata -->"), None);
+        // Tags of real elements go before the cut, so it never lands inside one; their words stay.
+        let image = format!("{}<img src=\"https://example.test/{}\">done", "word ".repeat(115), "x".repeat(80));
+        assert!(!quote(&image).unwrap().contains("<img"));
+        assert_eq!(
+            quote("<details><summary>Plan</summary>Use Array<string> here.<script>x()</script></details>").as_deref(),
+            Some("> PlanUse Array<string> here.")
+        );
+        // A cut inside a code block closes it.
+        let code = format!("Run this:\n```sh\n{}", "echo step\n".repeat(120));
+        let quoted = quote(&code).unwrap();
+        assert!(quoted.ends_with("> ```"), "{quoted}");
+        assert!(quoted.chars().count() <= EXCERPT_CHARS + 2 * quoted.lines().count() + 8);
     }
 }
