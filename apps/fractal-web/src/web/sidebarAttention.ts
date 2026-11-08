@@ -6,15 +6,21 @@ import type { SidebarNode } from '../folders/sidebarContract.ts'
 const pendingAskAgents = (agents: readonly Agent[]): readonly Agent[] =>
   agents.filter(agent => agent.ask._tag === 'Known' && agent.ask.value === 'question')
 
-/** Count agents, not attention cards or missions. Unknown attention never requests action. */
-export const sidebarAttention = ({ agents, subjects }: {
+/**
+ * Count agents, not attention cards or missions. Unknown attention never requests action. `asking` is each agent's own
+ * open ask (`askingAgentRefs`): a card the agent raised for the person needs you even when its subject carries no flag,
+ * so the amber rows agree with what Alerts and "Waiting for answer" count.
+ */
+export const sidebarAttention = ({ agents, subjects, asking }: {
   readonly agents: readonly Agent[]
   readonly subjects: readonly SubjectSummary[]
+  readonly asking?: ReadonlySet<string>
 }): ReadonlySet<string> => {
   const agentRefs = new Set(agents.map(agent => agent.ref))
   const refs = new Set(subjects.filter(subject => subject.icon === 'conversation' &&
     subject.attention === true && agentRefs.has(subject.ref)).map(subject => subject.ref))
   for (const agent of pendingAskAgents(agents)) refs.add(agent.ref)
+  for (const ref of asking ?? []) if (agentRefs.has(ref)) refs.add(ref)
   return refs
 }
 

@@ -4,6 +4,7 @@ import * as React from 'react'
 
 import { geometryVars as g, spaceVars as s } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DecisionCard } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/DecisionCard.tsx'
+import { NarrowLayoutContext } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import type { UxTelemetry } from '../../telemetry/ux.ts'
 import { useAlertAnswersStore } from './alertAnswers.ts'
 import { conversationAlerts } from './alertChoices.ts'
@@ -11,8 +12,10 @@ import { AnswerAlert } from './AnswerAlert.tsx'
 import { PromptAlert } from './PromptAlert.tsx'
 import { useAlertAnswers, type Act, type Answer } from './useAlertAnswers.ts'
 
-/** The transcript strip a docked card always leaves above it, so the conversation stays in view behind the question. */
+/** What a docked card always leaves of its column for the transcript and composer, so the conversation stays in view. */
 const TRANSCRIPT_KEEP = 200
+/** A phone's column also holds its tab bar, find line and a taller composer. */
+const TRANSCRIPT_KEEP_NARROW = 280
 /** Below this the card starts folded to one line, unless the person unfolded it. */
 const FOLD_BELOW = 480
 const DOCK_MIN = 220
@@ -22,7 +25,7 @@ const DOCK_MIN = 220
  * once and only an unusually tall one scrolls, as a whole, with its controls kept in view. A share of the room clipped a
  * three-option decision at an 800px window.
  */
-export const dockBlockSize = (room: number): number => Math.max(DOCK_MIN, room - TRANSCRIPT_KEEP)
+export const dockBlockSize = (room: number, narrow: boolean): number => Math.max(DOCK_MIN, room - (narrow ? TRANSCRIPT_KEEP_NARROW : TRANSCRIPT_KEEP))
 
 const isDocumentRef = (ref: string): boolean => ref.startsWith('doc/')
 
@@ -56,6 +59,7 @@ export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct, onOpenDocument 
   readonly onOpenDocument?: (ref: string) => void
 }): React.ReactNode => {
   const store = useAlertAnswersStore()
+  const narrow = React.useContext(NarrowLayoutContext)
   const [roomRef, room] = useRoom()
   const [foldChoice, setFoldChoice] = React.useState<boolean>()
   const [currentId, setCurrentId] = React.useState<string>()
@@ -86,7 +90,7 @@ export const AgentAlerts = ({ alerts, agentRef, onAnswer, onAct, onOpenDocument 
   })
   if (open.length === 0 && records.length === 0) return null
   const folded = foldChoice ?? (room !== undefined && room < FOLD_BELOW)
-  const maxBlockSize = room === undefined ? undefined : dockBlockSize(room)
+  const maxBlockSize = room === undefined ? undefined : dockBlockSize(room, narrow)
   const pager = open.length > 1 ? {
     index, count: open.length,
     onPrevious: () => setCurrentId(open[index - 1]?.id),

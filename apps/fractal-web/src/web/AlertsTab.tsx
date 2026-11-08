@@ -191,7 +191,8 @@ const styles = stylex.create({
   main: { flexGrow: 1, minWidth: 0, minHeight: g.sidebarRow, display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: 2, paddingBlock: s.xs, paddingInline: s.row, borderWidth: 0, borderRadius: 4, backgroundColor: 'transparent', color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, textAlign: 'start', cursor: 'pointer', ...focus },
   line: { display: 'flex', alignItems: 'baseline', gap: s.sm, minWidth: 0 },
   glyph: { flexShrink: 0, width: g.iconSm, textAlign: 'center', color: c.attention, fontWeight: 600, '::before': { content: 'attr(data-alert-row-glyph)' } },
-  question: { color: c.primary },
+  // A question is attention like any other ask: amber, told apart by its glyph, not by the accent.
+  question: { color: c.attention },
   fault: { color: c.danger },
   title: { flexGrow: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   metric: { flexShrink: 0, color: c.fgSoft, fontSize: t.metaSize, fontVariantNumeric: 'tabular-nums' },
