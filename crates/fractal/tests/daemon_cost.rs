@@ -139,10 +139,6 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
-        "GET /v1/client/ready-work",
-        "requires a declared cohort and a current work publication matching both graph head and healthy attention frontier, with at most 5,000 work rows; this census mutates the store between probes, so a plain GET would measure stale-cut refusal rather than ready-demand handoff reads; populated same-cut cost probe follow-up: #5776",
-    ),
-    (
         "POST /v1/fleet/admission-override",
         "an operator's rare release of a waiting member; it reads this member's peers and its newest daemon.started claim and appends one claim, none of which grows with claim history; placement_handoff::a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_override covers the real route through the CLI",
     ),
@@ -1731,6 +1727,78 @@ impl Fixture {
     }
 }
 
+const READY_WORK_COST_ROUTE: &str = "GET /v1/client/ready-work";
+
+#[tokio::test]
+async fn populated_ready_work_cost_by_cohort_size() {
+    use axum::{body::{Body, to_bytes}, http::{Request, StatusCode}};
+    use tower::ServiceExt;
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), NODE).unwrap());
+    let seats: Vec<_> = (0..64).map(|i| format!("bench/ready-cost/{i}")).collect();
+    let mut source = String::from("version 2\n");
+    for seat in &seats {
+        source.push_str(&format!("agent {seat:?} {{ workspace \"/tmp\"; command \"true\" }}\n"));
+    }
+    let intent = fractal_daemon::parse_intent(&source, NODE).unwrap();
+    store.apply_internal(&intent, "ready-cost-seats").unwrap();
+    let cohort: Vec<_> = seats.iter().map(|seat| format!("agent/{seat}")).collect();
+    for (index, actor) in cohort.iter().enumerate() {
+        for step in 0..2 {
+            store.start_work(&fractal_daemon::model::WorkStartRequest {
+                actor: actor.clone(),
+                title: format!("Ready cost fixture {index}/{step}"),
+                idempotency_key: format!("ready-cost-{index}-{step}"),
+            }).unwrap();
+        }
+    }
+
+    let state = AppState {
+        seat_admission: Default::default(),
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: NODE.into(),
+        state_dir: root.path().join("state"),
+        pty_root: root.path().join("pty"),
+        pty_binary: stub_pty(root.path()),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: Some(root.path().join("home")),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
+    fractal_daemon::api::start_published_lists(&state);
+    let app = fractal_daemon::api::router(state);
+    for size in [1, 8, 32, 64] {
+        let cut = store.index().unwrap();
+        tokio::time::timeout(Duration::from_secs(10),
+            fractal_daemon::api::wait_published_lists_at_least(&store, cut))
+            .await.expect("ready cost publication reaches graph cut").unwrap();
+        let path = format!("/v1/client/ready-work?cohort={}", urlencoding::encode(&cohort[..size].join(",")));
+        let sample = counted(|| async {
+            let reply = app.clone().oneshot(Request::builder().uri(path)
+                .body(Body::empty()).unwrap()).await.unwrap();
+            let status = reply.status();
+            let body = to_bytes(reply.into_body(), 64 * 1024).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(status, StatusCode::OK, "{value}");
+            assert_eq!(value["snapshot"]["store_index"], cut);
+            assert_eq!(value["value"]["ready_count"], size * 2);
+            assert_eq!(value["value"]["coverage"], "local-graph-cut");
+            Ok(value)
+        }).await;
+        assert!(sample.vm_steps > 0 && sample.statements > 0);
+        println!("ready-work cohort={size} ready={} vm_steps={} statements={} fullscan_steps={} max_repeat={} shape={}",
+            size * 2, sample.vm_steps, sample.statements, sample.fullscan_steps, sample.max_repeat, sample.top_shape);
+    }
+}
+
 /// Historical runs may grow the answer, but must not repeat the assignee's message scan.
 #[tokio::test]
 async fn mission_detail_many_finished_runs_do_not_repeat_step_history() {
@@ -2059,6 +2127,7 @@ fn the_cost_check_covers_every_route() {
     let measured = PROBES
         .iter()
         .map(|probe| probe.route)
+        .chain([READY_WORK_COST_ROUTE])
         .collect::<BTreeSet<_>>();
     let skipped = NOT_MEASURED
         .iter()
