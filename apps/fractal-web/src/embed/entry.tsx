@@ -6,8 +6,11 @@ import { I18nProvider } from 'react-aria/I18nProvider'
 import { setTheme } from '../ui-compat/foundations.ts'
 import { Embed, fragments } from './Embed.tsx'
 import { installFocusModality } from '../../../../packages/fractal-ui/src/focus-modality.ts'
+import { setPulldownEnabled } from '../../../../packages/fractal-ui/src/assistant-ui/composition/markdown-pulldown.ts'
 
 installFocusModality()
+// The embed uses no browser transport, and the WebAssembly Markdown parser arrives by fetch: keep the JavaScript parser.
+setPulldownEnabled(false)
 
 /** The production entry and tests share exactly the same CSS, theme and lifecycle setup. */
 export const mountEmbed = (rootElement: HTMLElement): (() => void) => {
