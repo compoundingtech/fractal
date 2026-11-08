@@ -27,7 +27,7 @@ use ring::{rand::SystemRandom, signature::{Ed25519KeyPair, KeyPair as _}};
 use serde_json::{Value, json};
 use tokio::sync::Barrier;
 
-const OWNER: &str = "person/admission-bench";
+const OWNER: &str = "person/bench-operator";
 const NODE: &str = "admission-bench";
 const GRANTED: &str = "custom.client.assistant.v1.granted";
 const INDEX: &str = "claims_assistant_v1_principal_index";

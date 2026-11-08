@@ -148,8 +148,8 @@ This derived access path does not change `STORAGE_VERSION` (20),
 replication digests: row formats, vocabulary, shared projections and retention
 semantics are unchanged. It follows the schema-on-open index installation used
 for the assistant mission-run collection indexes. The first open builds the
-index synchronously over retained claims. On dev5 (AMD Ryzen 9 9955HX,
-16 cores/32 threads, Linux x86_64), exact index creation on a synthetic
+index synchronously over retained claims. On a 16-core x86_64 benchmark host
+(AMD Ryzen 9 9955HX, 32 threads, Linux), exact index creation on a synthetic
 1,000,000-claim real Store schema took 1.525 seconds and grew the main database
 by 59,518,976 bytes. This measures index-build work, not complete daemon startup
 or cold-disk restart time; local history and hardware determine first-open delay.
@@ -160,7 +160,7 @@ Admission excludes revoked and effectively expired history in SQL while
 preserving the latest-policy and malformed-fields validation semantics. SQL work
 still scales with matching principal history, but inactive records no longer
 hydrate into Rust. With 10,000 expired grants per principal and concurrent pairing
-completions, real authenticated summary GET p95 on dev5 was 54.154 ms
+completions, real authenticated summary GET p95 on that benchmark host was 54.154 ms
 (approval-once) and 46.173 ms (caller-bound-allow), compared with 965.184 ms and
 933.049 ms on baseline `98e550cb75` (200 samples per mode). Both indexed modes
 meet q39's 100 ms budget. The opt-in `daemon_cost::assistant_admission` tests use

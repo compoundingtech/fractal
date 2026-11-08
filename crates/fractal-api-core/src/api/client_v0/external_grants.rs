@@ -84,12 +84,20 @@ const ADMISSION_QUERY: &str =
          CASE WHEN json_type(body,'$.fields') IS NULL THEN 1 ELSE
              COALESCE(json_type(body,'$.fields.expires_at_unix_ms')='integer'
                  AND json_extract(body,'$.fields.expires_at_unix_ms')>?5,0) END))";
+fn admission_now_ms() -> u128 {
+    #[cfg(test)]
+    if let Some(now) = tests::ADMISSION_NOW.get() {
+        return now;
+    }
+    client_now_ms()
+}
+
 fn admit_profile(state: &AppState, source: &Value) -> Result<(), ApiError> {
     let profile = Profile::stored(source)?;
     let principal = principal(source)?;
     // Without a valid owner the old scan must still surface its configuration
     // error before examining expiry; do not prefilter those rows.
-    let expiry_cut = owning_person(state).ok().map(|_| client_now_ms() as u64);
+    let expiry_cut = owning_person(state).ok().map(|_| admission_now_ms() as u64);
     let ids = {
         let connection = state.store.readers.get();
         let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h99f1a302c7b1 owner=fractal_api_core::api::client_v0::external_grants TODO=trace-statement-and-value-representation */ ADMISSION_QUERY).map_err(ApiError::internal)?;
@@ -105,7 +113,7 @@ fn admit_profile(state: &AppState, source: &Value) -> Result<(), ApiError> {
         }
         let policy = effective(state, &grant)?;
         let active = fields(&policy)?;
-        if active["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) > client_now_ms() {
+        if active["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) > admission_now_ms() {
             profile.compatible(Profile::stored(fields(&grant)?)?)?;
             profile.compatible(Profile::stored(active)?)?;
         }
@@ -311,6 +319,7 @@ mod tests {
     // the real mutation/session boundary. Production issuable() stays closed.
     thread_local! {
         pub(super) static SERVICE_PROFILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        pub(super) static ADMISSION_NOW: std::cell::Cell<Option<u128>> = const { std::cell::Cell::new(None) };
     }
 
     fn concurrent_grants(profiles: [&str; 2]) -> (usize, usize) {
@@ -345,6 +354,109 @@ mod tests {
                 .filter(|grant| session(&state, grant, "http").is_ok()).count()
         }).join().unwrap();
         (admitted, usable)
+    }
+
+    // 98e550cb's Rust-only admission, retained independently as the differential
+    // oracle. Only its wall clock is substituted so expiry == now is exact.
+    fn rust_only_admission(state: &AppState, source: &Value) -> Result<(), ApiError> {
+        let profile = Profile::stored(source)?;
+        let principal = principal(source)?;
+        let ids = {
+            let connection = state.store.readers.get();
+            let mut query = connection.prepare(
+                "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2"
+            ).map_err(ApiError::internal)?;
+            query.query_map(rusqlite::params![GRANTED, principal], |row| row.get::<_, String>(0))
+                .map_err(ApiError::internal)?.collect::<Result<Vec<_>, _>>().map_err(ApiError::internal)?
+        };
+        for id in ids {
+            let grant = state.store.claim_by_id(&id).map_err(ApiError::internal)?
+                .ok_or_else(|| forbidden("external grant is absent"))?;
+            if grant.origin != state.store.origin() || grant.actor.as_deref() != Some(owning_person(state)?)
+                || latest(state, &grant.subject, REVOKED)?.is_some() {
+                continue;
+            }
+            let policy = effective(state, &grant)?;
+            let active = fields(&policy)?;
+            if active["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) > admission_now_ms() {
+                profile.compatible(Profile::stored(fields(&grant)?)?)?;
+                profile.compatible(Profile::stored(active)?)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn prefiltered_admission_matches_rust_only_reference() {
+        struct Clock;
+        impl Drop for Clock {
+            fn drop(&mut self) { ADMISSION_NOW.set(None); }
+        }
+        ADMISSION_NOW.set(Some(100));
+        let _clock = Clock;
+        let cases = [
+            ("live", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
+            ("expired", json!({"expires_at_unix_ms":99}), vec![], 0, false, false),
+            ("equal-boundary", json!({"expires_at_unix_ms":100}), vec![], 0, false, false),
+            ("null-expiry", json!({"expires_at_unix_ms":null}), vec![], 0, false, false),
+            ("missing-expiry", json!({}), vec![], 0, false, false),
+            ("replicated-revoke", json!({"expires_at_unix_ms":101}), vec![], 1, true, false),
+            ("revoke-of-revoke", json!({"expires_at_unix_ms":101}), vec![], 2, false, false),
+            ("several-policies-live", json!({"expires_at_unix_ms":99}), vec![102, 98, 101], 0, false, true),
+            ("several-policies-expired", json!({"expires_at_unix_ms":101}), vec![99, 102, 100], 0, false, false),
+            ("unrelated-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, false),
+            ("legacy-default-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
+        ];
+        for (name, mut source, policies, revokes, replicated, denied) in cases {
+            let root = tempfile::tempdir().unwrap();
+            let mut state = crate::api::tests_shared::state(root.path());
+            state.owning_person = Some("person/owner".into());
+            source["profile"] = json!("service");
+            if name != "legacy-default-principal" {
+                source["principal"] = json!(if name == "unrelated-principal" { MCP_PRINCIPAL } else { PRINCIPAL });
+            }
+            let subject = format!("custom/client/differential-{name}");
+            let append_fixture = |store: &Store, kind: &str, value: Value, previous: Option<&ClaimRecord>| {
+                store.append_claim(&ClaimInput {
+                    subject:subject.clone(), kind:kind.into(), actor:Some("person/owner".into()),
+                    fields:serde_json::from_value(value).unwrap(),
+                    evidence:previous.map(|claim| vec![claim.id.clone()]).unwrap_or_default(),
+                    expected_subject:None, idempotency_key:None,
+                }).unwrap()
+            };
+            let mut previous = append_fixture(&state.store, GRANTED, source.clone(), None);
+            for expiry in policies {
+                let mut policy = source.clone();
+                policy["expires_at_unix_ms"] = json!(expiry);
+                previous = append_fixture(&state.store, POLICY, policy, Some(&previous));
+            }
+            if replicated {
+                let peer = Store::open_memory("peer").unwrap();
+                let revoke = append_fixture(&peer, REVOKED, source.clone(), None);
+                state.store.import_replication("peer", &peer.export_replication(0).unwrap()).unwrap();
+                let imported = latest(&state, &subject, REVOKED).unwrap().unwrap();
+                assert_eq!(imported.id, revoke.id);
+                assert_eq!(imported.origin, "peer");
+            } else {
+                for _ in 0..revokes {
+                    // The second revoke cites the first revoke, not the grant:
+                    // neither reader may interpret that as restoring authority.
+                    previous = append_fixture(&state.store, REVOKED, source.clone(), Some(&previous));
+                }
+            }
+            for owner in [Some("person/owner"), None] {
+                state.owning_person = owner.map(str::to_owned);
+                for profile in ["assistant", "service"] {
+                    let candidate = json!({"profile":profile,"principal":PRINCIPAL});
+                    let old = rust_only_admission(&state, &candidate).map_err(|error| error.code);
+                    let new = admit_profile(&state, &candidate).map_err(|error| error.code);
+                    assert_eq!(new, old, "{name}: owner={owner:?}, profile={profile}");
+                    if owner.is_some() {
+                        assert_eq!(new.is_err(), denied && profile == "assistant", "{name}: expected decision");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
