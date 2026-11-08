@@ -385,6 +385,21 @@ fn slo_list_groups_objectives_and_budgets_and_explain_prints_the_plain_words() {
 }
 
 #[test]
+fn slo_list_and_explanation_show_observation_source_host_and_unsupported() {
+    let row = json!({"id":"claude/example/5h","kind":"budget","status":"unsupported",
+        "current":"unsupported","target":"100% allowance","window":"5-hour",
+        "source":"omp-usage","host":"example-host","remaining_percent":null,
+        "explain":"The provider does not support this window."});
+    let list = render_slo_list(std::slice::from_ref(&row));
+    assert!(list.contains("SOURCE"));
+    assert!(list.contains("HOST"));
+    assert!(list.contains("unsupported"));
+    assert!(list.contains("omp-usage"));
+    assert!(list.contains("example-host"));
+    assert!(render_slo_explanation(&row).contains("SOURCE   omp-usage · example-host"));
+}
+
+#[test]
 fn slo_chart_draws_the_lowest_reading_of_each_column_and_marks_gaps() {
     let row = json!({"id": "person-read", "kind": "objective"});
     let history = json!({
