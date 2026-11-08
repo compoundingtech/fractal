@@ -13,7 +13,7 @@ import { showsTerminal, type Tab, type TabView } from './model.ts'
 import { parsePane, subjectAgent } from './subject.ts'
 import type { Tier } from './resources.ts'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
-import { surfacePlacement } from './WorkspaceSplits.tsx'
+import { attributeValue, surfacePlacement } from './WorkspaceSplits.tsx'
 
 export interface WorkspaceBodyProps {
   readonly tabs: readonly Tab[]
@@ -192,7 +192,7 @@ export function WorkspaceBody({ tabs, active, shown, paneOf, headerSlots, onFocu
     if (!focusShownFace.current) return
     focusShownFace.current = false
     if (narrow) return
-    const surface = active === null ? null : area.current?.querySelector<HTMLElement>(`[data-tab-surface-id="${CSS.escape(active)}"]`)
+    const surface = active === null ? null : area.current?.querySelector<HTMLElement>(`[data-tab-surface-id="${attributeValue(active)}"]`)
     surface?.querySelector<HTMLElement>(terminalFace ? '[data-testid="terminal-pane"][data-terminal-shown="true"]' : '[data-wf-shown-pane] textarea:not(:disabled)')?.focus({ preventScroll: true })
   }, [terminalFace, focusShownFace, narrow, active])
   // The surfaces sit outside their panes, so a press or focus in one focuses its pane here.
