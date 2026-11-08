@@ -43,7 +43,7 @@ What a space shares and what stays on the client:
 
 Each `SpaceSync` is an external store that keeps spaces as whole bodies. The store's behaviour toward it:
 
-- **Publishing.** A space is published only when its structure changes. View-only changes never publish.
+- **Publishing.** A space is published only when a command here changed its structure. View-only changes never publish, and neither does adopting a body: one that arrived, another window's, or the stored document's, even where adoption normalised it. Closing a space here is the only thing that removes it there.
 - **Write metadata.** Each write carries `base` (the space's last revision) and a `key` that stays the same across retries of the same body on the same base.
 - **No echoes.** A body the store just sent or adopted is never sent back.
 - **In-flight hold.** While a space's write is out, incoming bodies for that space are held. When the write settles, only the latest held body is applied.

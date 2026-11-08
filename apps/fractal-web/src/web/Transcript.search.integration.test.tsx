@@ -207,3 +207,10 @@ it('loads the next page when a reader scrolls up to the boundary, and never on o
   await scrollTo(40); await scrollTo(0)
   expect(load).toHaveBeenCalledTimes(1)
 })
+
+it('leaves the shortcut to a focused terminal', async () => {
+  await render(<>{view(longTurns)}<section data-testid="terminal-pane"><div tabIndex={0} aria-roledescription="terminal" data-testid="terminal-surface" /></section></>)
+  container.querySelector<HTMLElement>('[data-testid="terminal-surface"]')!.focus()
+  expect((await press({ key: 'f', metaKey: true })).defaultPrevented).toBe(false)
+  expect(find()).toBeNull()
+})

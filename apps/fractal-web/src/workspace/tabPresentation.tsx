@@ -1,5 +1,5 @@
 import type { Attention } from '@fractal/client/schema'
-import { AgentHoverCard } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/DeferredRowActions.tsx'
+import { EntityHoverCard } from '../../../../packages/fractal-ui/src/assistant-ui/entity/EntityHoverCard.tsx'
 import { SidebarStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarStatus.tsx'
 import { rowStatusLabel } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { sidebarRow } from '../web/sidebarRow.ts'
@@ -29,21 +29,21 @@ export const tabPresentation = ({ tab, agents, rosterKnown, needsYou, attention,
   /** New prose since the person last looked, by agent ref: a count, or `some` when only a newer time is known. */
   readonly unread?: ReadonlyMap<string, number | 'some'>
 }): EditorTabItem => {
-  const subject = parsePane(tab.pane)
+  const subject = parsePane(tab.ref)
   const base = { id: tab.id, kind: workspaceKinds.kindOf(subject).id }
   switch (subject._tag) {
     case 'Conversation':
     case 'Terminal': {
       const agent = agents.find(row => row.ref === subject.agent)
       const needsMe = needsYou.has(subject.agent)
-      // The sidebar row's own status circle and hover card: amber when the agent needs you, red when it failed.
+      // The sidebar row's own status circle, amber when the agent needs you and red when it failed, and its one card.
       const row = agent === undefined ? undefined : sidebarRow({ agent, stale: false, needsMe })
       return {
         ...base,
         title: tab.title ?? agent?.name ?? lastSegment(subject.agent),
         ...(row === undefined ? {} : {
           icon: <SidebarStatus status={row.status} statusLabel={rowStatusLabel(row)} variant="Marks" needsYou={needsMe} iconOnly decorative freshness="live" />,
-          hoverCard: <AgentHoverCard row={row} />,
+          hoverCard: <EntityHoverCard entity={{ kind: 'agent', id: subject.agent }} />,
         }),
         ...(needsMe ? { attention: true } : {}),
         // Needs-you keeps the slot; unread shows only on the conversation itself.

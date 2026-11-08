@@ -57,6 +57,8 @@ it('keeps raw input, the literal send command with its flags, and output beside 
   </EmbraceRuntimeProvider>))
   await act(async () => { await Promise.resolve() })
   await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="work-log"] button')!.click())
+  // A finished turn's rows open on click.
+  await act(async () => { for (const row of container.querySelectorAll<HTMLButtonElement>('[data-testid="work-log"] [data-tool-status] > button')) row.click() })
 
   const preview = (id: string) => container.querySelector<HTMLElement>(`[data-scroll-anchor-id="${id}"] [data-testid="tool-detail-preview"]`)!
   const showRaw = async (id: string) => {

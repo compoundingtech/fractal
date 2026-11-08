@@ -68,14 +68,14 @@ vi.mock('../data/react.tsx', () => ({
   useNow: () => 0,
   useNowSnapshot: () => 0,
   useGatewaySync: () => gatewayObservation,
-  useDataSource: () => ({ gateway: 'alpha.example', reconnect, prefetchTerminal: terminalPrefetch, agents: waitingFeed, missions: waitingFeed, attention: waitingFeed, usage: { _tag: 'undeclared' } }),
+  useDataSource: () => ({ gateway: 'alpha.example', reconnect, prefetchTerminal: terminalPrefetch, terminal: () => waitingFeed, agents: waitingFeed, missions: waitingFeed, attention: waitingFeed, usage: { _tag: 'undeclared' } }),
   useFeedInterest: () => {},
 }))
 
 let workspace: typeof WorkspaceModule
 let body: typeof BodyModule
 /** The body hosting one agent's tab, on the face asked for. */
-const bodyFor = (agent: string, terminal = false, others: readonly string[] = []) => <body.WorkspaceBody tabs={[agent, ...others].map(id => ({ id, pane: `agent:${id}` }))} active={agent} tiers={new Map([[agent, 'active' as const], ...others.map(id => [id, 'mounted' as const] as const)])} views={terminal ? { [agent]: { terminal: true } } : {}} names={new Map([agent, ...others].map(id => [id, id]))} onOpenTool={() => {}} onOpen={() => {}} onReplace={() => {}} onClose={() => {}} onBackToAlerts={() => {}} onView={() => {}} focusShownFace={{ current: false }} empty={null} />
+const bodyFor = (agent: string, terminal = false, others: readonly string[] = []) => <body.WorkspaceBody tabs={[agent, ...others].map(id => ({ id, ref: `agent:${id}` }))} active={agent} tiers={new Map([[agent, 'active' as const], ...others.map(id => [id, 'mounted' as const] as const)])} views={terminal ? { [agent]: { terminal: true } } : {}} names={new Map([agent, ...others].map(id => [id, id]))} onOpenTool={() => {}} onOpen={() => {}} onReplace={() => {}} onClose={() => {}} onBackToAlerts={() => {}} onView={() => {}} focusShownFace={{ current: false }} empty={null} />
 let root: Root
 let container: HTMLDivElement
 let resolveImport: () => void

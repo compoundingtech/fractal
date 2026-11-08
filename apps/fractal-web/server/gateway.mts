@@ -30,10 +30,13 @@ export const cleanHeaders = (headers: IncomingHttpHeaders, upgrade = false): Out
  * Old daemons ignore an unknown feature.
  */
 export const participantsFeature = 'conversation-message-participants.v1'
+/** A native user turn names the Fractal message it consumed (`delivers`), so a re-delivered prompt is known by link. */
+export const deliveryLinksFeature = 'conversation-delivery-links.v1'
 export const withClientFeatures = (requested: string | readonly string[] | undefined): string => {
   const list: string = typeof requested === 'string' ? requested : requested === undefined ? 'custom-subjects.v1, conversation-blocks.v1' : requested.join(',')
   const features = list.split(',').map(feature => feature.trim()).filter(feature => feature !== '')
-  return (features.includes(participantsFeature) ? features : [...features, participantsFeature]).join(', ')
+  for (const feature of [participantsFeature, deliveryLinksFeature]) if (!features.includes(feature)) features.push(feature)
+  return features.join(', ')
 }
 export const clientRoute = (url: string): boolean => {
   const path = url.split('?')[0] ?? ''

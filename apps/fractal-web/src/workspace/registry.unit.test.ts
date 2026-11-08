@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { emptyWorkspace, tabsOf, transition } from './model.ts'
+import { currentSpace, emptyWorkspace, tabsOf, transition, workspaceConfig } from './model.ts'
 import { corePolicies, makeKindRegistry, TabKindClaimConflict, type KindContribution } from './registry.ts'
 import { defaultBudget, desiredHolds, planTiers } from './resources.ts'
 import { parsePane, subjectOfRef, type SubjectKind } from './subject.ts'
@@ -69,11 +69,11 @@ describe('the tab-kind registry', () => {
   it('plans a contributed kind\'s data through its own policy', () => {
     const registry = makeKindRegistry({ views, contributions: [github] })
     const policyOf = (subject: Parameters<typeof registry.kindOf>[0]) => registry.kindOf(subject).policy
-    const context = { newId: (() => { let next = 0; return () => `id-${next++}` })() }
-    let state = transition(emptyWorkspace, { _tag: 'Open', pane: 'resource:resource/github/acme/1' }, context)
-    state = transition(state, { _tag: 'Open', pane: 'list:home' }, context)
-    const tabs = tabsOf(state.layout)
-    const tiers = planTiers({ state, budget: defaultBudget, policyOf })
+    const context = workspaceConfig((() => { let next = 0; return () => `id-${next++}` })())
+    let state = transition(emptyWorkspace(context), { _tag: 'Open', ref: 'resource:resource/github/acme/1' }, context)
+    state = transition(state, { _tag: 'Open', ref: 'list:home' }, context)
+    const tabs = tabsOf(state)
+    const tiers = planTiers({ state: { layout: currentSpace(state).layout, mru: currentSpace(state).local.mru }, budget: defaultBudget, policyOf })
     expect(desiredHolds({ tabs, tiers, policyOf }).get(tabs[0]!.id)).toEqual([{ _tag: 'Contributed', kind: 'github.pull-request', ref: 'resource/github/acme/1' }])
   })
 })

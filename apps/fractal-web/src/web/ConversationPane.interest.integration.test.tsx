@@ -382,6 +382,10 @@ describe('ConversationPane conversation demand', () => {
     const workspace = container.querySelector('section[aria-label="Agent workspace"]')!
     expect(workspace.querySelector('[data-testid="transcript-turn"]')).not.toBeNull()
     expect(container.querySelector('aside[aria-label="Tool detail"]')).toBeNull()
+    // A finished turn's work log and its rows open on click.
+    const fold = container.querySelector<HTMLButtonElement>('[data-testid="work-log"] > button')
+    if (fold?.getAttribute('aria-expanded') === 'false') flushSync(() => fold.click())
+    for (const row of container.querySelectorAll<HTMLButtonElement>('[data-testid="work-log"] [data-tool-status] > button')) flushSync(() => row.click())
     const raw = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')!
     expect(raw).toBeDefined()
     flushSync(() => raw.click())
