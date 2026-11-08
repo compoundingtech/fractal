@@ -32,7 +32,7 @@ const lasting = (onSet?: (value: string) => void): { readonly layer: WorkspaceSt
 const sharedDocument = () => {
   const backing = new Map<string, string>()
   const writes = Effect.runSync(PubSub.unbounded<number>())
-  let windows = 0
+  let windows = 0, written = 0
   const window = (): WorkspaceStorageLayer => {
     const self = windows++
     return Layer.merge(
@@ -40,10 +40,14 @@ const sharedDocument = () => {
         key,
         changed: Stream.fromPubSub(writes).pipe(Stream.filter(writer => writer !== self), Stream.as(undefined)),
       })),
-      Layer.succeed(KeyValueStore.KeyValueStore, backedBy(backing, () => { Effect.runSync(PubSub.publish(writes, self)) })),
+      Layer.succeed(KeyValueStore.KeyValueStore, backedBy(backing, () => {
+        written += 1
+        Effect.runSync(PubSub.publish(writes, self))
+      })),
     )
   }
-  return { window, read: () => backing.get(key) }
+  // A count, not the stored string: two windows rewriting the same document forever would leave the string unchanged.
+  return { window, writes: () => written }
 }
 
 const panes = (layout: Layout) => tabsOf(layout).map(tab => tab.pane)
@@ -157,11 +161,11 @@ describe('workspace store', () => {
     right.dispatch({ _tag: 'Open', pane: 'list:home' })
     await vi.waitFor(() => expect(panes(left.getState().layout)).toEqual(['agent:agent/a', 'agent:agent/b', 'list:home']))
     expect(activeTab(left.getState())?.pane).toBe('agent:agent/b')
-    // Quiet means no window writes again: wait out any exchange still in flight, then watch for another.
+    // Settled means neither window writes again: wait out any exchange still in flight, then count writes over a window.
     await quiet()
-    const settled = shared.read()
+    const settled = shared.writes()
     await quiet()
-    expect(shared.read()).toBe(settled)
+    expect(shared.writes(), 'no window writes once adoption settles').toBe(settled)
     left.dispose()
     right.dispose()
   })
