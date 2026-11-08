@@ -1,5 +1,10 @@
-import { Attention, Mission, Work, decodeUnknownSync, type AttentionEncoded, type MissionEncoded, type MissionStepEncoded, type WorkEncoded } from '@fractal/client/schema'
+import { Attention, Mission, UsagePeriod, Work, decodeUnknownSync, type AttentionEncoded, type MissionEncoded, type MissionStepEncoded, type WorkEncoded } from '@fractal/client/schema'
+import type * as Native from '@fractal/client/schema'
 import { Option } from 'effect'
+import * as Atom from 'effect/reactivity/Atom'
+
+import type { NativeDetailsSource } from '../../data/nativeDetailsSource.ts'
+import { observed, unavailable, waiting, type Feed } from '../../data/source.ts'
 
 import { worldNow } from '../../fixtures/world.ts'
 import type { UsageRowLike } from './detailModel.ts'
@@ -167,4 +172,17 @@ export const withServedHistory = (mission: Mission): Mission => {
       steps: Option.map(run.steps, list => list.map(step => history[step.path] === undefined ? step : Object.assign({}, step, history[step.path]))),
     })),
   }) as Mission
+}
+
+/** A `usage.period` read over rows: what the gateway returns for the mission detail's spend. */
+export const usagePeriodOf = (rows: readonly UsageRowLike[], since = syncStart): Native.UsagePeriod => decodeUnknownSync(UsagePeriod)({
+  since_ms: since, until_ms: syncNow,
+  rows: rows.map(row => ({ agent: syncSeats.server, input_tokens: row.total_tokens, output_tokens: 0, cached_tokens: 0, cache_write_tokens: 0, cache_write_1h_tokens: 0, reported_cost_microusd: 0, unpriced_tokens: 0, ...row })),
+})
+
+/** The native details a fixture source carries for the mission detail: spend observed, still loading, or unavailable. */
+export const missionDetailsFixture = (spend: 'observed' | 'waiting' | 'unavailable' = 'observed', rows: readonly UsageRowLike[] = syncUsageRows): NativeDetailsSource => {
+  const notHere = Atom.make<Feed<never>>(unavailable({ reason: 'unsupported', detail: 'Not in this fixture' }))
+  const period = Atom.make<Feed<Native.UsagePeriod>>(spend === 'observed' ? observed({ value: usagePeriodOf(rows) }) : spend === 'waiting' ? waiting : unavailable({ reason: 'unsupported', detail: 'This gateway does not serve usage.' }))
+  return { usagePeriod: () => notHere, missionUsage: () => period, rawDeclarations: () => notHere, declarations: () => notHere, retry: () => undefined, refresh: () => undefined }
 }
