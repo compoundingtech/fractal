@@ -153,9 +153,9 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
       if (viewportHeight.current && target !== offset.current) scroll.current?.scrollTo({ y: target, animated: true });
     });
   }, []);
-  const { palette } = useTextAppearance();
+  const appearance = useTextAppearance();
   if (!threads.length && !page.issue && !page.more) return null;
-  return <View style={{ backgroundColor: palette.mantle }}>
+  return <View style={{ backgroundColor: appearance.system ? appearance.colors.grouped : appearance.palette.mantle }}>
     <Pressable accessibilityRole="button" accessibilityState={{ expanded: show }} onPress={() => setShow(previous => !previous)}
       style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 6 }}>
       <T numberOfLines={1} style={{ flex: 1 }}><T bold color={theme.accent}>{title}</T>{threads[0] ? <T dim> · {threads[0].title}</T> : null}</T>
