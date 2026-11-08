@@ -83,7 +83,7 @@ const humanTitle = (resource: ResourceObservation): string => {
   return title !== resource.id ? title : `${resourceKind(resource.kind).label} ${resource.id.split('/').at(-1)}`
 }
 
-/** Click opens through the panel's host; a Cmd-click asks for the background once the tab shell's `useOpenable` replaces this. */
+/** Click opens the resource as a workspace tab; Cmd or Ctrl-click opens it in a new pane beside this one. */
 /** Failure words draw the kit's red status; any other reported state stays a neutral word. */
 const stateTone = (state: string): EntityStatusTone => /fail|error|cancel/i.test(state) ? 'failed' : /success|merged|closed|done|complete/i.test(state) ? 'done' : 'neutral'
 
@@ -100,7 +100,7 @@ const ObservedResourceCard = ({ resource }: { readonly resource: ResourceObserva
     ]} />
 }
 
-export const ResourceRow = ({ resource, onOpen }: { readonly resource: ResourceObservation; readonly onOpen: (ref: string, background: boolean) => void }) => {
+export const ResourceRow = ({ resource, onOpen }: { readonly resource: ResourceObservation; readonly onOpen: (ref: string, split: boolean) => void }) => {
   const narrow = React.useContext(NarrowLayoutContext)
   const kind = resourceKind(resource.kind)
   const state = resourceState(resource)
@@ -132,7 +132,7 @@ const ReadNotice = ({ feed, label }: { readonly feed: Exclude<Feed<unknown>, { r
 /** Sections the agent reports that belong with its resources rather than its facts. */
 const movedSections: readonly DetailsSection['title'][] = ['Reviews', 'Declared bindings']
 
-const ReportedSections = ({ agentRef, onOpen }: { readonly agentRef: string; readonly onOpen: (ref: string, background: boolean) => void }) => {
+const ReportedSections = ({ agentRef, onOpen }: { readonly agentRef: string; readonly onOpen: (ref: string, split: boolean) => void }) => {
   const native = useNativeDetails({ agentRef })
   const now = useNowSnapshot()
   return <DetailsResources state={native.state} sections={native.sections.filter(section => movedSections.includes(section.title))} trace={native.trace} now={now} form="R2" empty="E3" onOpen={onOpen} />
@@ -140,7 +140,7 @@ const ReportedSections = ({ agentRef, onOpen }: { readonly agentRef: string; rea
 
 export const AgentResourcesView = ({ agentRef, onOpen, opening, cache }: {
   readonly agentRef: string
-  readonly onOpen: (ref: string, background: boolean) => void
+  readonly onOpen: (ref: string, split: boolean) => void
   readonly opening?: OpenOperation | undefined
   readonly cache?: 'retained' | 'cold'
 }) => {

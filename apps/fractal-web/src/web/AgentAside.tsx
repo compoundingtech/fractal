@@ -15,7 +15,8 @@ export interface AsidePanelProps {
   /** `dock` beside the content in its pane; `fill` in the phone's bottom sheet. */
   readonly width: 'dock' | 'fill'
   readonly scheme: 'dark' | 'light'
-  readonly onOpen: (ref: string) => void
+  /** Opens a ref as a workspace tab; `split` (Cmd or Ctrl) puts it in a new pane beside this one. */
+  readonly onOpen: (ref: string, gesture?: { readonly split: 'right' }) => void
   readonly onClose: () => void
 }
 
@@ -29,6 +30,6 @@ export const AgentAside = ({ subject, width, scheme, onOpen, onClose }: AsidePan
   if (agentRef === undefined) return null
   const view = views.find(each => each === stored) ?? 'details'
   return <React.Suspense fallback={<SystemNotice kind="loading" title="Loading agent details" />}>
-    <AgentDetailsPanel key={agentRef} agentRef={agentRef} width={width} scheme={scheme} view={view} onViewChange={setStored} onClose={onClose} onOpen={uri => onOpen(uri.startsWith('agent:') ? `agent/${uri.slice('agent:'.length)}` : uri)} />
+    <AgentDetailsPanel key={agentRef} agentRef={agentRef} width={width} scheme={scheme} view={view} onViewChange={setStored} onClose={onClose} onOpen={(uri, split) => onOpen(uri.startsWith('agent:') ? `agent/${uri.slice('agent:'.length)}` : uri, split ? { split: 'right' } : undefined)} />
   </React.Suspense>
 }
