@@ -6996,6 +6996,7 @@ fn open_daemon_store(
         Some(admitted) => Store::open_admitted(admitted.clone(), &config.node)?,
         None => Store::open(&config.store_path(), &config.node)?,
     };
+    store.configure_pairing_legacy_allowances(&config.pairing_legacy_allowances)?;
     store.set_usage_limits_writers(config.usage_limits.as_ref().map(|usage| usage.writers.clone()).unwrap_or_default())?;
     if let Some(person) = &config.person {
         let _ = store.question_principal_default.set(person.clone());

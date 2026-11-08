@@ -871,7 +871,9 @@ impl Registry {
         if kind.starts_with("custom.client.assistant.")
             || subject.starts_with("custom/client/assistant-v1-")
             || kind.starts_with("custom.client.pairing")
-            || subject.starts_with("custom/client/pairing") {
+            || subject.starts_with("custom/client/pairing")
+            || kind.starts_with("custom.client.terminal")
+            || subject.starts_with("custom/client/terminal-") {
             return Err(error(
                 "claim-write-forbidden",
                 "client authority claims require a dedicated trusted-local operation",
