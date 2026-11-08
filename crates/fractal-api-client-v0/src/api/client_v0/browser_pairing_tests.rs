@@ -92,7 +92,7 @@ async fn browser_pairing_pending_deny_and_exact_single_use_grant_revocation() {
     assert!(answer(&state,&browser,&next_request,"approve").is_err());
     let snapshot = new_client_snapshot(&state);
     let send: ActionRequest = serde_json::from_value(json!({
-        "api_version":CLIENT_API_VERSION,"id":"action/browser-send","type":"message.send","idempotency_key":"browser-send",
+        "api_version":CLIENT_API_VERSION,"id":"action/browser-send","type":"message.send","idempotency_key":"browser-pairing-send-proof",
         "fence":{"snapshot_id":snapshot.id,"subject_revisions":{}},
         "parameters":{"to":"person/operator","content":"Browser pairing proof"}
     })).unwrap();
@@ -100,7 +100,7 @@ async fn browser_pairing_pending_deny_and_exact_single_use_grant_revocation() {
     assert!(!sent["affected_ids"].as_array().unwrap().is_empty());
     let snapshot = new_client_snapshot(&state);
     let mission: ActionRequest = serde_json::from_value(json!({
-        "api_version":CLIENT_API_VERSION,"id":"action/browser-mission","type":"mission.start","idempotency_key":"browser-mission",
+        "api_version":CLIENT_API_VERSION,"id":"action/browser-mission","type":"mission.start","idempotency_key":"browser-pairing-mission-proof",
         "fence":{"snapshot_id":snapshot.id,"subject_revisions":{}},"parameters":{}
     })).unwrap();
     assert!(action(State(state.clone()),Extension(snapshot),Extension(browser.clone()),Json(mission)).await.is_err());
