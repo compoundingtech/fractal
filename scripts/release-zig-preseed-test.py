@@ -5,10 +5,13 @@ import contextlib
 import http.server
 import importlib.util
 import json
+import io
 from pathlib import Path
 import subprocess
 import tempfile
 import threading
+import time
+from unittest.mock import patch
 import urllib.request
 
 spec = importlib.util.spec_from_file_location("preseed", Path(__file__).with_name("release-zig-preseed.py"))
@@ -96,13 +99,11 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack
 
     Handler.primary_ok = False
     Handler.fallback_ok = False
-    try:
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output):
         preseed.seed(source, fetch=lambda _: (_ for _ in ()).throw(AssertionError("fetched after failure")), **options)
-    except urllib.error.HTTPError:
-        pass
-    else:
-        raise AssertionError("exhausted transports accepted")
-    print("PASS exhausted transports fail closed")
+    assert f"WARNING Zig preseed transport unavailable for {expected}" in output.getvalue()
+    print("PASS exhausted transports warn and continue")
 
     # Changing the manifest changes the fetch target and expected hash, without
     # changing the script. Exercise commit-style codeload conversion as well.
@@ -142,3 +143,52 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack
     else:
         raise AssertionError("Git hash mismatch accepted")
     print("PASS Git-source hash mismatch refused")
+
+    output = io.StringIO()
+    with patch.object(preseed.subprocess, "check_output", side_effect=subprocess.TimeoutExpired("zig", 0.02)) as process:
+        with contextlib.redirect_stdout(output):
+            preseed.seed(source, attempt_timeout=0.02, **options)
+        assert process.call_count == 3
+        assert all(0 < call.kwargs["timeout"] <= 0.02 for call in process.call_args_list)
+    assert "WARNING Zig preseed transport unavailable for git-content-hash" in output.getvalue()
+    print("PASS Git subprocess deadline retries then warns")
+
+    url = "https://deps.files.example/unicode.tar.zst"
+    expected = "non-github-unicode-hash"
+    manifest.write_text(json.dumps([{"type": "archive", "url": url, "dest": f"vendor/p/{expected}"}]))
+    Handler.primary_ok = True
+    def fetch_unicode(archive):
+        assert archive.name == "unicode.tar.zst"
+        return fetch(archive)
+    preseed.seed(source, fetch=fetch_unicode, **options)
+    print("PASS non-GitHub pins are seeded and archive suffix is preserved")
+
+    Handler.primary_ok = False
+    Handler.paths.clear()
+    with contextlib.redirect_stdout(io.StringIO()):
+        preseed.seed(source, fetch=fetch_unicode, **options)
+    assert Handler.paths == ["/primary/archive.tar.gz"] * 3
+    print("PASS non-GitHub failures retry original without codeload")
+
+    class DripResponse:
+        headers = {}
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            pass
+        def read(self, *_):
+            time.sleep(0.005)
+            return b"x"
+
+    # A trickle never trips a per-socket timeout, but must hit elapsed deadlines.
+    manifest.write_text(json.dumps([{"url": url, "dest": f"vendor/p/{expected}"}] * 2))
+    output = io.StringIO()
+    started = time.monotonic()
+    with contextlib.redirect_stdout(output):
+        preseed.seed(source, fetch=lambda _: (_ for _ in ()).throw(AssertionError("accepted endless response")),
+                     total_timeout=0.07, attempt_timeout=0.03,
+                     sleep=lambda _: None, open_url=lambda *_args, **_kwargs: DripResponse())
+    assert time.monotonic() - started < 0.5
+    assert "archive attempt elapsed deadline exceeded" in output.getvalue()
+    assert "WARNING Zig preseed total deadline reached" in output.getvalue()
+    print("PASS drip responses obey per-attempt and total elapsed deadlines with warning")
