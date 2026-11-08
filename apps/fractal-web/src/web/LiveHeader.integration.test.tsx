@@ -161,9 +161,9 @@ describe('live header parity', () => {
     const setting = await openSettings()
     await act(async () => setting.click())
     // The persistence boundary flushes on pagehide; no debounce sleeps are needed.
-    window.dispatchEvent(new Event('pagehide'))
-    const stored = window.localStorage.getItem('wf.ui@1') ?? ''
-    expect(stored).toContain('"conversation.systemEvents":')
+    await act(async () => { window.dispatchEvent(new Event('pagehide')); await new Promise((resolve) => setTimeout(resolve, 0)) })
+    const stored = window.localStorage.getItem('wf.c/conversation.systemEvents') ?? ''
+    expect(stored).toContain('"d":true')
     expect(stored).not.toContain(agent.id)
     expect(stored).not.toContain(source.label)
     expect(stored).not.toContain(source.gateway)

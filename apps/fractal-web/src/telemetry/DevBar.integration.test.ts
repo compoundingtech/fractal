@@ -115,8 +115,8 @@ it('opens recent changes from the devbar segment, acknowledges them, and closes 
   expect(recentChanges()?.textContent).toContain("What's new")
   expect(trigger.getAttribute('aria-label')).toBe('Changes')
   expect(trigger.querySelector('[data-testid="changelog-unseen"]')).toBeNull()
-  const stored = JSON.parse(window.localStorage.getItem('wf.ui@1') ?? '{}')
-  expect(stored.entries?.['changelog.fractal-web.main']?.value).toEqual({ visited: true, entryIds: [fixture.entryId] })
+  const stored = JSON.parse(window.localStorage.getItem('wf.c/changelog.fractal-web.main') ?? '{}')
+  expect(stored.d).toEqual({ visited: true, entryIds: [fixture.entryId] })
 
   const dialog = recentChanges()!
   await act(async () => { dialog.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })) })

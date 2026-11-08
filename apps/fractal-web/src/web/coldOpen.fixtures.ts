@@ -7,15 +7,15 @@ export const coldOpenDocument = (control?: ColdOpenControl, scheme?: 'dark' | 'l
   for (const node of document.querySelectorAll('script:not([data-wf-theme-bootstrap]), link')) node.remove()
   if (scheme !== undefined) {
     const bootstrap = document.querySelector('[data-wf-theme-bootstrap]')!
-    const saved = JSON.stringify({ version: 1, entries: { 'round2.scheme': { version: 1, value: scheme } } })
+    const saved = JSON.stringify({ v: 1, t: 1, w: 'cold-open', d: scheme })
     bootstrap.textContent = `;(() => {
-      const previous = localStorage.getItem('wf.ui@1')
+      const previous = localStorage.getItem('wf.c/round2.scheme')
       try {
-        localStorage.setItem('wf.ui@1', ${JSON.stringify(saved)})
+        localStorage.setItem('wf.c/round2.scheme', ${JSON.stringify(saved)})
         ${bootstrap.textContent}
       } finally {
-        if (previous === null) localStorage.removeItem('wf.ui@1')
-        else localStorage.setItem('wf.ui@1', previous)
+        if (previous === null) localStorage.removeItem('wf.c/round2.scheme')
+        else localStorage.setItem('wf.c/round2.scheme', previous)
       }
     })()`
   }
