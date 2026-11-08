@@ -5627,7 +5627,7 @@ fn begin_person_challenge(
     let stable = pairing_verifier::random_id().map_err(ApiError::internal)?;
     let pairing_id = format!("pairing/{stable}");
     let subject = format!("custom/client/pairing-{stable}");
-    let expires_at = client_now_ms() + pairing_verifier::PERSON_TTL_MS;
+    let expires_at = client_now_ms() + pairing_verifier::CHALLENGE_TTL_MS;
     let verifier_key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
     let person_id = request.person_id;
     let fabric_gateway = request.fabric_gateway == Some(true);
@@ -5884,12 +5884,7 @@ pub async fn pairing_complete(
         .map_err(ApiError::internal)?
         .claims
         .is_empty();
-    let restart = || ApiError {
-        status: StatusCode::FORBIDDEN,
-        code: "pairing-restart-required".into(),
-        message: "start pairing again".into(),
-        details: Box::default(),
-    };
+    let restart = pairing_verifier::restart;
     let expires = begun
         .body
         .pointer("/fields/expires_at_unix_ms")
@@ -5912,9 +5907,7 @@ pub async fn pairing_complete(
         }
         Some(_) => return Err(restart()),
         None => {
-            if expires <= now || expires.checked_sub(begun.accepted_at_unix_ms)
-                .is_none_or(|lifetime| lifetime > pairing_verifier::PERSON_TTL_MS)
-            {
+            if !pairing_verifier::legacy_window_open(expires, begun.accepted_at_unix_ms, now) {
                 return Err(restart());
             }
             expected == credential_digest(&request.code)
