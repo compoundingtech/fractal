@@ -4180,6 +4180,7 @@ pub type ManagedSessionOwner = (String, Option<String>, Option<String>);
 thread_local! {
     static MANAGED_OWNER_AFTER_PIN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    static MANAGED_OWNER_MAP_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -4194,24 +4195,33 @@ pub fn managed_session_owner_at(
     snapshot_index: u64,
     session_id: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
-    // Pin identity/repair state and bypass the shared logical-cut owner cache.
+    // Pin identity/repair state; the memo belongs to this SQLite snapshot, not its cut
+    // or pooled connection. A repair may rebuild a shared logical-cut cache concurrently.
     crate::performance::task("conversation/owner", || store.read_snapshot(|_| {
         #[cfg(test)]
         managed_owner_after_pin();
-        let connection = store.readers.get();
-        let owners = crate::store::conversation_reads::owners_from_connection(&connection, snapshot_index)?;
-        for owner in owners.values() {
-            if !store.generic_status_subject_visible_at(&owner.subject, snapshot_index)? {
-                continue;
+        let owners = store.readers.pinned_memo(snapshot_index, || {
+            #[cfg(test)]
+            MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(count.get() + 1));
+            let connection = store.readers.get();
+            let owners = crate::store::conversation_reads::owners_from_connection(&connection, snapshot_index)?;
+            let mut sessions = std::collections::HashMap::with_capacity(owners.len());
+            for (_, owner) in owners {
+                let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
+                    continue;
+                };
+                sessions.insert(managed_session_id(&owner.subject, identity),
+                    (owner.subject, owner.incarnation, owner.origin));
             }
-            let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
-                continue;
-            };
-            if managed_session_id(&owner.subject, identity) == session_id {
-                return Ok(Some((owner.subject.clone(), owner.incarnation.clone(), owner.origin.clone())));
-            }
+            Ok(sessions)
+        })?;
+        let Some(owner) = owners.get(session_id) else {
+            return Ok(None);
+        };
+        if !store.generic_status_subject_visible_at(&owner.0, snapshot_index)? {
+            return Ok(None);
         }
-        Ok(None)
+        Ok(Some(owner.clone()))
     }))
 }
 

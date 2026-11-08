@@ -428,7 +428,8 @@ fn refresh(
         old,
     } = runtime
         .block_on(crate::api::read_deadline::store_read(&admission_store, move || {
-            inventory(inventory_state, inventory_session, old, old_sizes)
+            let store = inventory_state.store.clone();
+            store.read_snapshot(|_| inventory(inventory_state, inventory_session, old, old_sizes))
         }))
         .map_err(anyhow::Error::from)??;
     for source in sources {
@@ -525,7 +526,8 @@ fn refresh(
             let fetch_slots = start_slots;
             let (fetched, used, notes, failed) = runtime
                 .block_on(crate::api::read_deadline::store_read(&admission_store, move || {
-                    local_pages(
+                    let store = local_state.store.clone();
+                    store.read_snapshot(|_| Ok(local_pages(
                         local_state,
                         local_snapshot,
                         local_session,
@@ -533,9 +535,9 @@ fn refresh(
                         local_owner,
                         (fetch_budget, fetch_slots),
                         assistant_text_only,
-                    )
+                    )))
                 }))
-                .map_err(anyhow::Error::from)?;
+                .map_err(anyhow::Error::from)??;
             entries = fetched;
             incomplete.extend(notes);
             unavailable = failed;
