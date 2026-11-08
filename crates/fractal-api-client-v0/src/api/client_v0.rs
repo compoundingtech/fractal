@@ -37,6 +37,9 @@ pub use fractal_api_core::api::client_v0::{authenticate, bound_mission_cards, ca
 pub use fractal_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
 pub mod arrangements;
 pub mod assistant;
+pub mod browser_pairing;
+#[cfg(test)]
+mod browser_pairing_tests;
 pub mod pairing_verifier;
 pub mod collection_ivm;
 pub mod collection_windows;
@@ -195,6 +198,9 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/missions-rich", get(assistant::read_projection))
         .route("/v1/client/assistant/agents-rich", get(assistant::read_projection))
         .route("/v1/client/pairings", post(pairing_begin))
+        .route("/v1/client/pairing/browser-requests", post(browser_pairing::begin))
+        .route("/v1/client/pairing/browser-requests/{id}/redeem", post(browser_pairing::redeem))
+        .route("/v1/client/pairing/browser-requests/revoke-current", post(browser_pairing::revoke_current))
         .route("/v1/client/assistant/grants/{id}", get(assistant::inspect))
         .route("/v1/client/assistant/grants/{id}/revoke", post(assistant::revoke))
         .route("/v1/client/assistant/grants/{id}/read-trust", post(assistant::pin_read_trust))
@@ -5867,6 +5873,13 @@ pub async fn pairing_complete(
                 == Some(pairing_id.as_str())
         })
         .ok_or_else(|| ApiError::not_found(format!("pairing `{pairing_id}` does not exist")))?;
+    if begun.body["fields"]["browser_request"] == true
+        && (browser_pairing::approval(&state, &begun)? != "approved"
+            || request.device_public_key != format!("browser:{id}")
+            || request.fabric_node_id.is_some())
+    {
+        return Err(forbidden("browser pairing requires its owner's approved request"));
+    }
     if begun.origin != state.store.origin() {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
@@ -8239,7 +8252,7 @@ async fn dispatch_action(
             let target = parameter_string(p, "target_id")?;
             let result = state
                 .store
-                .finish_person_step_authorized(
+                .finish_person_step_kind(
                     &PersonStepResponse {
                         delegation: None,
                         subject: target,
@@ -8273,6 +8286,8 @@ async fn dispatch_action(
                     },
                     action == "work.cancel-ask",
                     session.assistant_write.as_ref(),
+                    false,
+                    session.pairing_grant.as_deref().filter(|_| !session.local_peer).map(|grant| (grant, session.actor.as_str())),
                 )
                 .map_err(|error| {
                     if error.code == "forbidden" {
@@ -13827,6 +13842,7 @@ mission "differential" state="ready" {
         AppState {
             seat_admission: Default::default(),
             owning_person: Some("person/operator".into()),
+            browser_pairing_login: None,
             store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
