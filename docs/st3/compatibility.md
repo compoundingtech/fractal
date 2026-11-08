@@ -57,9 +57,11 @@ binary labels a plugin service record as an assistant grant even though its
 credential cannot authenticate.
 
 This is only a service-credential refusal boundary, **not a general rollback
-guarantee**. In particular, the old binary can authenticate the deliberately
-seeded, unissuable `assistant/chatgpt` plus service-profile counterexample when
-it has assistant scopes. Unknown-field retention or a successful owner inspect
+guarantee**. With an authoritative-origin grant written offline using that node's
+signing keys, the old binary can authenticate the deliberately seeded
+`assistant/chatgpt` + service-profile counterexample when it has assistant scopes.
+This fixture is not issuable through the supported pairing API and is not a
+demonstrated remote authorization bypass. Unknown-field retention or a successful owner inspect
 is not evidence of safe authorization. Any future service issuance must retain
 the plugin-principal invariant and revisit compatibility before enabling it.
 
