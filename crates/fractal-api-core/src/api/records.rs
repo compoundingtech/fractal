@@ -389,9 +389,14 @@ pub async fn list_claims(
     let store = state.store.clone();
     let page = blocking_store(move || {
         let kinds = (service && query.has_selector()).then_some(SERVICE_CLAIM_KINDS);
-        let subject = query.subject.as_deref().map(|subject| {
-            crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
-        }).transpose()?;
+        let subject = if service {
+            // Services select literal canonical subjects, without alias resolution.
+            query.subject
+        } else {
+            query.subject.as_deref().map(|subject| {
+                crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
+            }).transpose()?
+        };
         generic_claims_page(
             &store,
             subject.as_deref(),

@@ -158,6 +158,10 @@ never match withheld rows: filtered store queries restrict kinds to the disclosu
 allowlist in SQL before paging. Filtered pages contain only allowlisted claims,
 never withheld markers or indexes; empty filtered pages retain the ordinary empty
 page/cursor shape. Unfiltered paging still includes withheld positions.
+Service `subject` selectors match literal canonical subjects only; services must
+supply the stored canonical subject, not an alias. No identity-reference or
+lifecycle resolution runs for service selectors. `owner_run` remains a literal
+ownership comparison. Non-service reference resolution is unchanged.
 The new client claim/work aliases admit only services; device, assistant and
 browser clients gain no new routes. Existing native routes retain non-service
 semantics. No declaration, assistant, action, upgrade, HEAD or unknown route is admitted.

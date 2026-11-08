@@ -423,3 +423,70 @@ async fn service_selectors_match_only_disclosed_claim_kinds() {
         }
     }
 }
+
+#[tokio::test]
+async fn service_subject_selectors_are_literal_canonical_names() {
+    use crate::store::identities::{IdentityKind, IdentityStore, RenameRequest};
+    let root = tempfile::tempdir().unwrap();
+    let (state,_) = fixture(root.path(),SERVICE_SCOPES);
+    let source = r#"version 2
+agent "literal-reader" { command "true" }
+mission "literal-service" state="ready" {
+  goal "Exercise canonical selectors."
+  step "work" { assigned-to "agent/node.literal-reader" }
+}
+"#;
+    let intent = crate::graph::parse_test_intent(source,"node").unwrap();
+    let plan = state.store.mission(&intent,crate::model::IntentInput { kdl:source.into(),source_name:None }).unwrap();
+    state.store.apply(&intent,&plan.subject_tokens,"literal-selectors").unwrap();
+    let identities = [
+        (IdentityKind::Agent,"agent/node.literal-reader","agent/node.literal-reader-alias","agent.renamed"),
+        (IdentityKind::Mission,"mission/literal-service","mission/literal-service-alias","mission.renamed"),
+    ];
+    for (kind,subject,alias,_) in identities {
+        state.store.rename_identity(kind,&RenameRequest {
+            from:subject.into(),to:alias.into(),actor:"person/owner".into(),
+            reason:"Exercise canonical selectors.".into(),expected_naming_revision:None,
+            expected_declaration:None,idempotency_key:format!("literal-{subject}"),
+        },&[]).unwrap();
+        assert_eq!(crate::store::identities::resolve_reference_conn(&state.store.readers.get(),alias).unwrap(),subject);
+    }
+    for lifecycle in ["unknown","invalid"] {
+        for (_,subject,_,kind) in identities {
+            state.store.connection.lock().unwrap().execute(
+                "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms)
+                 VALUES(?1,'test-peer',1,?1,0,'{}',?2,?3,?4,'1')",
+                rusqlite::params![format!("record/{lifecycle}/{subject}"),lifecycle,subject,kind],
+            ).unwrap();
+        }
+        for (_,subject,alias,_) in identities {
+            for name in [subject,alias] {
+                let error = crate::store::identities::resolve_reference_conn(&state.store.readers.get(),name).unwrap_err();
+                assert_eq!(error.code,"lifecycle-unavailable");
+                assert_eq!(error.details["reason"],if lifecycle == "invalid" { "conflict" } else { "pending-replication" });
+            }
+        }
+        for gateway in [false,true] {
+            let app = if gateway { crate::api::fabric_router(state.clone()) } else { crate::api::router(state.clone()) };
+            call(&app,"GET","/v1/client/claims?limit=1",Value::Null,false).await;
+            for prefix in if gateway { vec!["/v1/client/claims"] } else { vec!["/v1/client/claims","/v1/claims"] } {
+                for (_,subject,alias,_) in identities {
+                    for name in [subject,alias] {
+                        for owner in ["","&owner_run=mission-run/literal-unused"] {
+                            for bounds in ["&limit=1","&limit=500&order=desc","&after=1&before=9223372036854775807"] {
+                                let selected = page_wire(&app,&format!("{prefix}?subject={name}{owner}{bounds}")).await;
+                                let absent = page_wire(&app,&format!("{prefix}?subject=agent/node.literal-unused{owner}{bounds}")).await;
+                                assert_eq!(selected,absent);
+                                assert_eq!(selected.0,StatusCode::OK);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let native = crate::api::router(state.clone());
+        let response = native.oneshot(Request::builder().uri("/v1/claims?subject=agent/node.literal-reader")
+            .body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(),StatusCode::CONFLICT);
+    }
+}
