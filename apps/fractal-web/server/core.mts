@@ -8,6 +8,7 @@ import { createContentSecurityPolicy } from './csp.mts'
 import { clientRoute, Gateway } from './gateway.mts'
 import { RuntimeIdentity, StaticAssets } from './static.mts'
 import { requestSpanOptions } from './tracing.mts'
+import { handlePairing, pairingRoute, type BrowserPairingOptions } from './pairing.mts'
 
 /** The host supplies authentication/CSRF policy; no deployment identity is assumed. */
 export interface MiddlewareOptions {
@@ -15,6 +16,7 @@ export interface MiddlewareOptions {
   readonly admit: (request: IncomingMessage) => boolean | Promise<boolean>
   readonly gateway: { readonly socketPath: string; readonly host: string; readonly authorization: string; readonly timeoutMs: number }
   readonly tracer: Tracer.Tracer
+  readonly pairing?: BrowserPairingOptions
   /** Explicit cross-origin HTTP collectors; the gateway itself is always same-origin. */
   readonly connectOrigins?: readonly string[]
 }
@@ -79,6 +81,9 @@ const makeBoundary = (options: MiddlewareOptions, assets?: { root: string; ident
       if (!await admitted(req)) { reject(res, 403, 'Forbidden\n'); return }
       const dispatch = Effect.gen(function* () {
         const url = req.url ?? ''
+        if (pairingRoute(url)) {
+          return yield* Effect.promise(() => handlePairing(req, res, options.gateway, options.pairing))
+        }
         if (clientRoute(url)) {
           const parent = yield* Effect.currentSpan.pipe(Effect.orDie)
           return yield* gateway.http(req, res, parent)

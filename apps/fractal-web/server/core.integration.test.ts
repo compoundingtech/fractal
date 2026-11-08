@@ -144,6 +144,19 @@ it('proxies only the paired client API, streams bodies and injects trusted crede
   expect(setup.received).toHaveLength(1)
   expect(setup.spans.some((span) => span.name === 'fractal.gateway.request')).toBe(true)
 })
+
+it.each([undefined, 'other=private', `other=private; fractal_device=${'a'.repeat(43)}; another=private`, 'fractal_device=invalid', `fractal_device=${'a'.repeat(43)}; fractal_device=${'b'.repeat(43)}`])('selects only the browser credential for HTTP and WebSocket (%s)', async cookie => {
+  const setup = await fixture()
+  const headers = cookie === undefined ? {} : { cookie }
+  await fetch(`${setup.base}/v1/client/capabilities`, { headers })
+  expect(await openUpgrade(setup.port, '/v1/client/stream', headers)).toContain('101')
+  const expected = cookie?.startsWith('other=private; fractal_device=') === true ? `Bearer ${'a'.repeat(43)}` : gatewayAuthorization
+  expect(setup.received).toHaveLength(2)
+  for (const request of setup.received) {
+    expect(request.auth).toBe(expected)
+    expect(request.cookie).toBeUndefined()
+  }
+})
 it.each([
   ['br, gzip', 'br'],
   ['gzip, br;q=0', 'gzip'],

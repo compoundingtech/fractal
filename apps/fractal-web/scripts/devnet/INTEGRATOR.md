@@ -107,6 +107,20 @@ Keep the listener loopback-only and preserve these headers between Serve and
 the app. Local processes can forge proxy headers, the same trust assumption as
 the Hub. The old edge URL retains its existing access policy.
 
+Browser sending uses a separate 30-day revocable device grant per browser, never
+the publisher's read-only bearer. `startHost` enables the cookie-only pairing
+endpoints automatically. Custom deployment overlays must pass
+`pairing: { admit: tailnetAdmission({ origin, logins, listener }) }` to the web
+server or middleware in addition to their general admission policy. The pairing
+admission must require the personal login allowlist, even if the read-only app
+also has an edge URL. Keep `WF_TAILNET_LOGINS` restricted to personal account
+logins; tagged infrastructure is not an approved browser device.
+The compose control requests approval in Fractal and shows the matching display
+code. Request secrets and device credentials are held exclusively in HttpOnly,
+Secure, SameSite=Strict cookies. Forgetting revokes the current device before
+clearing its cookie. HTTP and WebSocket gateway requests use that device's
+bearer when present and otherwise retain the read-only publisher bearer.
+
 ## Trust boundary
 
 Only same-repository PR heads are eligible: `isCrossRepository` must be false
