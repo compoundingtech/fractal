@@ -148,6 +148,8 @@ describe('conversationAlerts', () => {
   })
 })
 
+/** Markup's text, as a person reads it. */
+const textOf = (html: string): string => html.replace(/<[^>]+>/g, '')
 describe('what a card shows of the choices', () => {
   const ask = item({ request: decision })
   const all = alertChoices(ask)!
@@ -197,13 +199,27 @@ describe('what a card shows of the choices', () => {
   })
 })
 
+describe('a note on an answer', () => {
+  it('goes with a named answer as its text, and an answer that asks for changes takes the words instead', () => {
+    const choices = alertChoices(item({ request: decision }))!
+    const merge = choices.find((choice) => choice.key === 'merge')!
+    const change = choices.find((choice) => choice.key === 'change')!
+    expect(merge.notes).toBe(true)
+    expect(merge.action('', '  after the release branch is cut ')).toEqual({ type: 'work.done', summary: 'Merge: after the release branch is cut', answer: { id: 'merge', text: 'after the release branch is cut' } })
+    expect(merge.action('', '   ')).toEqual({ type: 'work.done', summary: 'Merge', answer: { id: 'merge' } })
+    expect(change.notes).toBe(false)
+    expect(change.action('Split it in two', 'ignored')).toEqual({ type: 'work.done', summary: 'Split it in two', answer: { id: 'change', text: 'Split it in two' } })
+  })
+})
+
 describe('AnswerAlert', () => {
   const now = Date.parse(at) + 5 * 60_000
   const sent = async () => ({ _tag: 'Sent' }) as const
 
   it('shows who asks, the step it holds and how long it waited, with its answers', () => {
     const html = renderToStaticMarkup(<AnswerAlert alert={item({ blocked: { step: 'build', step_run_id: 'step-run/example/build', goal: 'Build it', attempt: 1 } })} onAct={sent} now={now} />)
-    expect(html).toContain('example/atlas · Request · step build · waited 5m')
+    // Who asked is its own part of the line, read first; the text still reads as one line.
+    expect(textOf(html)).toContain('example/atlas · Request · step build · waited 5m')
     expect(html).toContain('The parser now accepts trailing commas.')
     expect(html).toContain('Yes')
     expect(html).toContain('>Nothing to do<')
@@ -259,7 +275,7 @@ describe('AnswerAlert', () => {
 
   it('shows what a launch would start, or why it has nothing to approve', () => {
     const html = renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'launch-approval', title: 'Launch nightly', actions: ['launch.approve'], preview: Option.some(preview) })} onAct={sent} now={now} />)
-    expect(html).toContain('example/atlas · Launch approval')
+    expect(textOf(html)).toContain('example/atlas · Launch approval')
     expect(html).toContain('Launch nightly')
     expect(html).toContain('Review it<span> · after build</span>')
     expect(html).toContain('Agents: example/builder on example-host')

@@ -25,17 +25,19 @@ const alert = (fields: Record<string, unknown> = {}): Native.Attention => ({
 }) as unknown as Native.Attention
 const names = (ref: string) => (ref === reviewer ? 'Atlas Reviewer' : undefined)
 const now = Date.parse('2026-10-14T10:05:00Z')
+/** Markup's text, as a person reads it. */
+const textOf = (html: string): string => html.replace(/<[^>]+>/g, '')
 
 describe('who an alert is from', () => {
   it('names the asking agent as the roster does, not by its ref', () => {
     const answer = renderToStaticMarkup(<AlertNames.Provider value={names}><AnswerAlert alert={alert()} now={now} /></AlertNames.Provider>)
-    expect(answer).toContain('Atlas Reviewer · Request')
+    expect(textOf(answer)).toContain('Atlas Reviewer · Request')
     expect(answer).not.toContain('example/atlas/reviewer')
     const prompt = renderToStaticMarkup(<AlertNames.Provider value={names}><PromptAlert alert={alert({ attention_kind: 'harness-prompt' })} now={now} /></AlertNames.Provider>)
-    expect(prompt).toContain('Atlas Reviewer · Prompt')
+    expect(textOf(prompt)).toContain('Atlas Reviewer · Prompt')
   })
 
   it('falls back to the ref when the roster has no name for it', () => {
-    expect(renderToStaticMarkup(<AnswerAlert alert={alert()} now={now} />)).toContain('example/atlas/reviewer · Request')
+    expect(textOf(renderToStaticMarkup(<AnswerAlert alert={alert()} now={now} />))).toContain('example/atlas/reviewer · Request')
   })
 })

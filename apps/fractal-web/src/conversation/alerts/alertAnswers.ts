@@ -24,6 +24,8 @@ type Draft = {
   /** The revision `selected` was made on: a new revision may ask something new. Words outlive it, they are the person's. */
   readonly revision?: string
   readonly selected?: Readonly<Record<string, readonly string[]>>
+  /** Notes on individual answers, by answer id, on `revision` like the choice they annotate. */
+  readonly notes?: Readonly<Record<string, string>>
   readonly step?: number
 }
 
@@ -134,7 +136,17 @@ export const createAlertAnswers = () => {
     setSelected: (item: AnswerScope, ids: readonly string[], step = 'main'): void => {
       const current = draft(item.id)
       const kept = current.revision === item.revision ? current.selected : undefined
-      putDraft(item.id, { ...current, revision: item.revision, selected: { ...kept, [step]: ids } })
+      putDraft(item.id, { ...current, revision: item.revision, selected: { ...kept, [step]: ids }, notes: current.revision === item.revision ? current.notes : undefined })
+    },
+    /** The person's notes on this revision's answers, by answer id. */
+    notes: (item: AnswerScope): Readonly<Record<string, string>> => {
+      const current = draft(item.id)
+      return current.revision === item.revision ? current.notes ?? {} : {}
+    },
+    setNote: (item: AnswerScope, answer: string, note: string): void => {
+      const current = draft(item.id)
+      const same = current.revision === item.revision
+      putDraft(item.id, { ...current, revision: item.revision, selected: same ? current.selected : undefined, notes: { ...(same ? current.notes : undefined), [answer]: note } })
     },
     step: (item: AnswerScope): number => {
       const current = draft(item.id)
