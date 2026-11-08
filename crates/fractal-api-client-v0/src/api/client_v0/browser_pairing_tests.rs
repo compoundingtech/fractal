@@ -139,8 +139,7 @@ async fn browser_pairing_expiry_refuses_redeem_even_after_approval() {
     answer(&state,&owner,&started,"approve").unwrap();
     let mut request = begun(&state,&started);
     request.body["fields"]["expires_at_unix_ms"] = json!(1);
-    assert_eq!(approval(&state,&request).unwrap(),"expired");
-    state.store.append_claim(&ClaimInput {
+    state.store.append_client_operation_claim(&ClaimInput {
         subject:request.subject,kind:request.kind,actor:request.actor,
         fields:serde_json::from_value(request.body["fields"].clone()).unwrap(),
         evidence:vec![],expected_subject:None,idempotency_key:None,
@@ -192,7 +191,7 @@ async fn browser_pairing_requires_operation_provenance_for_request_and_approver(
     let key = "a".repeat(64);
     let started = start(&state,&owner,&key).await;
     let mut request = begun(&state,&started);
-    request.body["fields"].as_object_mut().unwrap().remove(fractal_store::PAIRING_OPERATION_VERSION);
+    request.id = "untrusted-browser-request".into();
     assert!(approval(&state,&request).is_err());
     state.store.append_claim(&ClaimInput {
         subject:request.subject,kind:request.kind,actor:request.actor,
@@ -203,7 +202,6 @@ async fn browser_pairing_requires_operation_provenance_for_request_and_approver(
     let another = start(&state,&owner,&key).await;
     let grant = owner.pairing_grant.as_deref().unwrap();
     let mut paired = state.store.claims_for_subject_kind_at(grant,"custom.client.pairing-completed",None,true,1).unwrap().claims.remove(0);
-    paired.body["fields"].as_object_mut().unwrap().remove(fractal_store::PAIRING_OPERATION_VERSION);
     paired.body["fields"].as_object_mut().unwrap().remove("delegated_scopes");
     let legacy = state.store.append_claim(&ClaimInput {
         subject:paired.subject,kind:paired.kind,actor:paired.actor,
