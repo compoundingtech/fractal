@@ -32,6 +32,40 @@ keeps its current build while new CLI invocations use the installed build. Follo
 the [upgrade procedure](../site/guides/upgrading.md) rather than treating installation
 alone as a daemon upgrade.
 
+### Service-grant refusal on the pinned baseline
+
+The service downgrade fixtures target the baseline in
+`.github/fleet-compat-baseline.json` (v0.3.30, commit
+`9146398018b0835728266cf8269f0d96f02ad652`). Service credentials remain disabled
+in production. A service grant must use a `plugin/<host>/<name>` principal,
+never an assistant principal. The candidate refuses service-profile issuance
+and authentication, including the counterexample `assistant/chatgpt` plus
+`profile=service`; the closed assistant pairing grammar cannot issue that shape.
+
+The old binary ignores the profile field, but refuses plugin service grants
+through its exact `assistant/chatgpt` principal check and refuses non-assistant
+scopes through its closed assistant scope set. Replicated grants additionally
+fail its authoritative-origin check. The ignored fleet tests exercise both
+issuer-origin roles and a candidate → old → candidate restart on the same database,
+with retained GRANTED/POLICY claims and live, expired, and revoked assistant
+controls. Fixtures are signed offline by the candidate store using the stopped
+node's own origin and existing node/principal keys: the public claims API refuses
+these authority kinds, and the old binary cannot issue service grants. A candidate-only
+test exercises the same offline seeding, restart, replication, and refusal path.
+The rollback fixture also characterizes owner inspection: the old
+binary labels a plugin service record as an assistant grant even though its
+credential cannot authenticate.
+
+This is only a service-credential refusal boundary, **not a general rollback
+guarantee**. With an authoritative-origin grant written offline using that node's
+signing keys, the old binary can authenticate the deliberately seeded
+`assistant/chatgpt` + service-profile counterexample when it has assistant scopes.
+This fixture is not issuable through the supported pairing API and is not a
+demonstrated remote authorization bypass. Unknown-field retention or a successful owner inspect
+is not evidence of safe authorization. Any future service issuance must retain
+the plugin-principal invariant and revisit compatibility before enabling it.
+
+
 ### Additive claims and unknown-field retention
 
 During the window, optional claim fields must be additive: absence preserves old
@@ -82,6 +116,13 @@ false, conflicted, unsigned, or unanchored capability evidence and unfenced lega
 writers. A refusal rejects the full publication before any declaration is written;
 an old member never receives a new-child publication through a refused write.
 Upgrade all active members or fence legacy peers before publishing the metadata.
+Keep every member on a supporting binary while populated metadata exists.
+This is an ongoing requirement. The gate checks support only at write time.
+It does not prevent a member from starting an old binary later.
+It does not prevent an old member from joining later.
+An old member drops agent metadata and fails mission revision validation.
+Remove the metadata with upgraded readers before a rollback.
+
 This per-feature gate does not establish the general adjacent-release guarantee
 described above. See [declared admission](priority.md#declared-admission).
 

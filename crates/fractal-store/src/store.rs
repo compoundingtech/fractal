@@ -130,6 +130,8 @@ pub mod projectors;
 pub mod projectors_tests;
 #[cfg(test)]
 mod mission_start_production_copy_tests;
+#[cfg(test)]
+mod declared_admission_compatibility_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
