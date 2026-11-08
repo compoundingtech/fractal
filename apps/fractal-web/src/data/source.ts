@@ -178,6 +178,8 @@ export interface Agent {
   readonly ask: Known<string>
   /** Last observed activity, not the boundary of the current status. */
   readonly lastActivityAt: Known<number>
+  /** Newest conversation prose; omitted by daemons predating read-position support. */
+  readonly lastProseAt?: Known<number>
   /** Exact observed state boundary when supplied (currently suspension), not last activity. */
   readonly statusSince?: number
   readonly subagents?: readonly AgentSubagent[]
