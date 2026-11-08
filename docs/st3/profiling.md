@@ -1405,6 +1405,11 @@ The native episode is `slo-objective/NODE/fractal-agents-success-fast` on `daemo
 Inspect that episode and reconcile any open fault with its original reviewer.
 Changing the setting never reassigns an already-open fault.
 
+Before acknowledging a queued missed cut, the adapter delivers its notice through the existing
+native fault sender. A queued recovery cannot overtake that delivery, including when both cuts
+are replayed after a restart. Sender failure retains the missed cut and blocks later cuts;
+retrying after a sent notice reuses the native sender's episode idempotency key.
+
 Overflow means the 64-entry pending queue could not retain another transition. The daemon can
 replay retained entries but stops admitting new ones. The marker survives restart and changes to
 the binding. Before clearing it, an operator reviews the retained and quarantined decisions,

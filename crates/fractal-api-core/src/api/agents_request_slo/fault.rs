@@ -48,6 +48,25 @@ pub(super) fn route(store: &Store, reviewer: &str, cut: &PendingFault) -> Result
         result.unowned == 0,
         "agent-list SLO reviewer became unavailable"
     );
+    if cut.status == "missed" {
+        // A queued recovery must not hide this failure from the native sender.
+        // Keep the cut pending if delivery fails; the sender's episode key makes
+        // a retry after delivery but before the ledger acknowledgement harmless.
+        let episode = crate::objective_faults::episode(store.origin(), OBJECTIVE);
+        let failure = store
+            .operational_failure(&episode)?
+            .ok_or_else(|| anyhow::anyhow!("agent-list SLO failure is unavailable for delivery"))?;
+        let fault = store
+            .fault_snapshot(crate::gate_check::now_ms())?
+            .into_iter()
+            .find(|fault| fault.item.episode == failure.request)
+            .ok_or_else(|| anyhow::anyhow!("agent-list SLO failure is absent from native delivery"))?;
+        ensure!(
+            fault.owner.as_deref() == Some(failure.reviewer.as_str()),
+            "agent-list SLO failure has no native reviewer"
+        );
+        crate::reconcile::append_fault_message(store, &failure.reviewer, &fault.item)?;
+    }
     Ok(())
 }
 

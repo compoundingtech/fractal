@@ -718,4 +718,68 @@ mod tests {
             0
         );
     }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn queued_miss_and_recovery_deliver_one_native_notice_before_recovery() {
+        use crate::model::IntentInput;
+        use crate::store::Store;
+
+        for restart in [false, true] {
+            let scratch = tempfile::tempdir().unwrap();
+            let graph = scratch.path().join("graph.db");
+            let path = scratch.path().join("minutes.sqlite3");
+            let store = Store::open(&graph, "node").unwrap();
+            let source = "version 2\nagent \"node.ops\" { command \"true\" }\nagent \"node.backup\" { command \"true\"; handles-faults }\n";
+            let intent = crate::graph::parse_intent(source, "node").unwrap();
+            let preview = store.mission(&intent, IntentInput {
+                kdl: source.into(), source_name: None,
+            }).unwrap();
+            store.apply(&intent, &preview.subject_tokens, "queued-slo-reviewer").unwrap();
+            let reviewer = "agent/node.ops";
+            let mut ledger = Ledger::open(&path, "node").unwrap();
+            ledger.0.execute_batch(
+                "WITH RECURSIVE slots(slot) AS (
+                     SELECT 1 UNION ALL SELECT slot + 1 FROM slots WHERE slot < 10079
+                 ) INSERT INTO minute_receipts SELECT slot, 0, 0 FROM slots;"
+            ).unwrap();
+            let missed = ledger.update(WINDOW + 1, Some(Receipt {
+                slot: WINDOW, eligible: 20, fast: 0,
+            }), None, Some(reviewer)).unwrap();
+            assert_eq!(missed.verdict, Verdict::Missed);
+            let met = ledger.update(WINDOW + 2, Some(Receipt {
+                slot: WINDOW + 1, eligible: 1_000, fast: 1_000,
+            }), None, Some(reviewer)).unwrap();
+            assert_eq!(met.verdict, Verdict::Met);
+            assert_eq!(ledger.pending_fault_count().unwrap(), 2);
+            assert!(store.messages(Some(reviewer), false).unwrap().is_empty());
+            assert!(store.claims_for("daemon/node", Some("operational.failure")).unwrap().is_empty());
+
+            // Both transitions are durable before any graph routing or delivery.
+            // Reopening both stores exercises the same backlog after a restart.
+            drop(store);
+            let store = Store::open(&graph, "node").unwrap();
+            if restart {
+                drop(ledger);
+                ledger = Ledger::open(&path, "node").unwrap();
+            }
+            ledger.drain_faults(|cut| super::super::fault::route(&store, reviewer, cut)).unwrap();
+            assert_eq!(ledger.pending_fault_count().unwrap(), 0);
+            let messages = store.messages(Some(reviewer), false).unwrap();
+            assert_eq!(messages.len(), 1);
+            assert_eq!(messages[0].from, "daemon/runtime");
+            assert!(crate::silent::always_wakes(&messages[0].from, &messages[0].tags));
+            assert!(store.messages(Some("agent/node.backup"), false).unwrap().is_empty());
+            let failures = store.claims_for("daemon/node", Some("operational.failure")).unwrap();
+            let recovered = store.claims_for("daemon/node", Some("operational.recovered")).unwrap();
+            assert_eq!(failures.len(), 1);
+            assert_eq!(recovered.len(), 1);
+            assert_eq!(recovered[0].body["fields"]["failure"], failures[0].id);
+            assert_eq!(store.claims_for(&messages[0].subject, Some("message.sent")).unwrap().len(), 1);
+            let index = store.index().unwrap();
+            ledger.drain_faults(|cut| super::super::fault::route(&store, reviewer, cut)).unwrap();
+            assert_eq!(store.index().unwrap(), index);
+            assert_eq!(store.messages(Some(reviewer), false).unwrap().len(), 1);
+        }
+    }
 }
