@@ -33,6 +33,7 @@ elif args[:2] == ['run', 'view']:
     row.update(json.loads(os.environ['FAKE_RUN']))
     print(json.dumps(row))
 elif args[0] == 'api' and args[1].endswith('/artifacts'):
+    assert args[1] == 'repos/example/project/actions/runs/' + os.environ['FAKE_EXPECTED_RUN'] + '/artifacts', args
     artifact = {'id': int(os.environ['FAKE_ARTIFACT_ID']),
                 'name': os.environ['FAKE_ARTIFACT'], 'expired': False}
     print(json.dumps([{'artifacts': [{'id': 700, 'name': 'fractal-release', 'expired': False}]},
@@ -54,10 +55,14 @@ elif args[0] == 'api' and '/actions/runs/' in args[1]:
         state.write_text(str(reads + 1))
         if reads:
             attempt = int(os.environ['FAKE_FINAL_ATTEMPT'])
-    print(json.dumps({'status': 'completed', 'conclusion': 'success', 'run_attempt': attempt,
+    fields = json.loads(os.environ['FAKE_RUN'])
+    print(json.dumps({'status': fields.get('status', 'completed'),
+                      'conclusion': fields.get('conclusion', 'success'), 'run_attempt': attempt,
                       'id': int(args[1].split('/actions/runs/')[1].split('/')[0]),
-                      'workflow_id': 42, 'head_sha': os.environ['FAKE_SHA'],
-                      'head_branch': 'main', 'event': 'push', 'display_title': 'Main build'}))
+                      'workflow_id': 42, 'head_sha': fields.get('headSha', os.environ['FAKE_SHA']),
+                      'head_branch': fields.get('headBranch', 'main'),
+                      'event': fields.get('event', 'push'),
+                      'display_title': fields.get('displayTitle', 'Main build')}))
 elif args[0] == 'api' and args[-1] == 'repos/example/project/releases?per_page=100':
     print(json.dumps([[{'tag_name': 'v0.3.17', 'draft': False, 'prerelease': False,
                        'published_at': '2026-10-07T00:00:00Z', 'id': 17}]]))
@@ -158,6 +163,7 @@ with tempfile.TemporaryDirectory() as temporary:
     sh('git', 'config', '--local', 'tag.gpgsign', 'false', cwd=checkout)
     sh('git', 'config', 'user.name', 'Fixture', cwd=checkout)
     sh('git', 'config', 'user.email', 'fixture@example.invalid', cwd=checkout)
+    sh('git', 'remote', 'add', 'origin', str(checkout), cwd=checkout)
     shas = []
     for index in range(2):
         (checkout / 'file').write_text(str(index))
@@ -176,7 +182,7 @@ with tempfile.TemporaryDirectory() as temporary:
 
     def daily(failure='', token=TOKEN, notes='notes\n', dry_run=False, impact=None,
               artifact='fractal-release-attempt-1', run_id=None, run_fields=None, summary='',
-              attempt=1, final_attempt=None):
+              attempt=1, final_attempt=None, sha=''):
         receipt.unlink(missing_ok=True)
         (root / 'attempt-reads').unlink(missing_ok=True)
         (root / 'notes.md').write_text(notes)
@@ -189,9 +195,12 @@ with tempfile.TemporaryDirectory() as temporary:
                    FAKE_ARTIFACT_ID='701', FAKE_ATTEMPT=str(attempt),
                    FAKE_FINAL_ATTEMPT=str(attempt if final_attempt is None else final_attempt),
                    FAKE_ATTEMPT_READS=str(root / 'attempt-reads'))
+        env['FAKE_EXPECTED_RUN'] = str(7 if run_id is None else run_id)
         args = ['python3', 'scripts/release-fractal-daily', '--summary', summary]
         if run_id is not None:
             args += ['--run', str(run_id)]
+        if sha:
+            args += ['--sha', sha]
         return subprocess.run(args + (['--dry-run'] if dry_run else []), cwd=checkout, env=env,
                               text=True, capture_output=True, timeout=60)
 
@@ -213,6 +222,24 @@ with tempfile.TemporaryDirectory() as temporary:
     # An explicitly selected older run wins over the newer run returned by `run list`.
     done = daily(dry_run=True, run_id=6)
     assert done.returncode == 0 and '(run 6)' in done.stdout, done
+    print('PASS: explicit push run reuse remains unchanged')
+
+    # The workflow dispatch head may differ from its exact candidate source.
+    candidate = {'event': 'workflow_dispatch', 'headSha': shas[0],
+                 'displayTitle': f'Fractal candidate {shas[1]} unique-request'}
+    done = daily(run_id=6, sha=shas[1], run_fields=candidate)
+    assert done.returncode == 0 and '(run 6)' in done.stdout and receipt.exists(), done
+    print('PASS: matching exact candidate SHA reuses selected run artifacts without rebuilding')
+    done = daily(dry_run=True, run_id=6, sha=shas[1],
+                 run_fields=dict(candidate, displayTitle=f'Fractal candidate {shas[0]} unique-request'))
+    assert done.returncode == 1 and 'not a successful Fractal tag release' in done.stdout, done
+    assert not (root / 'attempt-reads').exists() and not receipt.exists(), done
+    print('PASS: mismatched exact candidate SHA is refused before artifact download')
+    done = daily(dry_run=True, run_id=6, sha=shas[1],
+                 run_fields=dict(candidate, conclusion='failure'))
+    assert done.returncode == 1 and 'not a successful Fractal tag release' in done.stdout, done
+    assert not (root / 'attempt-reads').exists() and not receipt.exists(), done
+    print('PASS: failed exact candidate run is refused before artifact download')
     for field, value in (('headBranch', 'feature'), ('event', 'workflow_dispatch'),
                          ('status', 'in_progress'), ('conclusion', 'failure'),
                          ('workflowName', 'Another workflow'), ('databaseId', 8)):
@@ -350,6 +377,13 @@ for conclusion in ('success', 'failure'):
     assert calls[0] == ('gh', 'workflow', 'run', 'release-fractal.yml', '--ref', 'main',
                         '-f', f'sha={source}', '-f', 'request_id=request')
     assert ('gh', 'run', 'watch', '9', '--exit-status', '--interval', '15') in calls
+
+# An explicit run and SHA must reach exact validation without rebuilding the candidate.
+for filename in ('release-daily.yml', 'release-daily.yml.genie.ts'):
+    workflow = (repo / '.github/workflows' / filename).read_text()
+    assert "inputs.mode == 'candidate' && inputs.sha != '' && inputs.run == ''" in workflow
+    assert 'needs.build.outputs.build_run || inputs.run' in workflow
+    assert "always() && !cancelled() && (needs.build.result == 'success' || needs.build.result == 'skipped')" in workflow
 
 # The build phase emits its result and never enters release selection/mutation.
 with tempfile.TemporaryDirectory() as temporary:

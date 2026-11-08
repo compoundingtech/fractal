@@ -6324,7 +6324,7 @@ schedule "orchard" {{ host "ivory"; {standby}
 #[cfg(test)]
 mod declared_admission_tests {
     use super::*;
-    use crate::model::{DeclaredLane, DeclaredPriority};
+    use crate::model::{DeclaredBudgets, DeclaredLane, DeclaredPriority};
 
     const FIELDS: &str = r#"declared-priority "normal"; declared-lane "check"; declared-budgets { cpu-seconds 300; memory-max "8G"; disk-max "20G"; token-budget 100000; }"#;
 
@@ -6340,6 +6340,7 @@ mod declared_admission_tests {
         assert_eq!(member.declared_lane, Some(DeclaredLane::Check));
         assert_eq!(member.declared_budgets, mission.declared_budgets);
         assert_eq!(mission.declared_budgets.as_ref().unwrap().cpu_seconds, Some(300));
+        fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
         let json = serde_json::to_value(&intent).unwrap();
         let decoded: NormalizedIntent = serde_json::from_value(json).unwrap();
         assert_eq!(decoded.missions["example/work"].declared_budgets, mission.declared_budgets);
@@ -6367,6 +6368,21 @@ mod declared_admission_tests {
         }
     }
 
+    #[test]
+    fn typed_publication_validation_cannot_bypass_kdl_rules() {
+        let mut intent = parse_intent(
+            "version 2\nagent \"example/worker\" { command \"true\"; }\nmission \"example/work\" state=\"ready\" { goal \"Work.\"; }",
+            "node",
+        ).unwrap();
+        intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap().declared_priority = Some(DeclaredPriority::Unknown("urgent".into()));
+        let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+        assert_eq!(error.details["field"], "declared_priority");
+        intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap().declared_priority = None;
+        intent.missions.get_mut("example/work").unwrap().declared_budgets = Some(DeclaredBudgets { token_budget: Some(0), ..DeclaredBudgets::default() });
+        let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+        assert_eq!(error.details["field"], "declared_budgets.token_budget");
+        assert_eq!(error.details["subject"], "mission/example/work");
+    }
 
     #[test]
     fn omission_and_empty_budgets_do_not_serialize_new_fields() {
@@ -6382,4 +6398,36 @@ mod declared_admission_tests {
         }
     }
 
+    #[test]
+    fn typed_publication_refuses_admission_representation_drift() {
+        for fields in ["", "declared-priority \"normal\";"] {
+            let mut intent = parse_intent(
+                &format!("version 2\nagent \"example/worker\" {{ command \"true\"; {fields} }}"),
+                "node",
+            ).unwrap();
+            fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
+            let member = intent.subjects.get_mut("agent/example/worker").unwrap().member.as_mut().unwrap();
+            member.declared_priority = if fields.is_empty() { Some(DeclaredPriority::Normal) } else { None };
+            let error = fractal_missions_base::declared_admission::validate_publication(&intent).unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["field"], "declared_priority");
+        }
+    }
+
+    #[test]
+    fn non_agent_desired_children_pass_both_typed_entrypoints() {
+        let mut intent = parse_intent(
+            "version 2\nagent \"example/worker\" { command \"true\"; }",
+            "node",
+        ).unwrap();
+        let desired = intent.subjects.get_mut("agent/example/worker").unwrap();
+        desired.kind = "resource".into();
+        desired.member = None;
+        desired.desired = serde_json::json!({"children": [{"name": "declared-priority"}]});
+        let body = serde_json::to_value(&*desired).unwrap();
+        fractal_missions_base::declared_admission::validate_claim(
+            "intent.desired", &desired.subject, &body,
+        ).unwrap();
+        fractal_missions_base::declared_admission::validate_publication(&intent).unwrap();
+    }
 }

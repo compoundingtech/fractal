@@ -6982,6 +6982,7 @@ fn open_daemon_store(
         Some(admitted) => Store::open_admitted(admitted.clone(), &config.node)?,
         None => Store::open(&config.store_path(), &config.node)?,
     };
+    store.set_usage_limits_writers(config.usage_limits.as_ref().map(|usage| usage.writers.clone()).unwrap_or_default())?;
     if let Some(person) = &config.person {
         let _ = store.question_principal_default.set(person.clone());
     }
@@ -7403,7 +7404,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -10426,6 +10427,9 @@ fn render_product_page_headed(
                 if let Some(usage) = &item.usage {
                     let _ = writeln!(output, "  usage {}", render_usage(usage));
                 }
+                if let Some(admission) = &item.declared_admission {
+                    render_declared_admission(&mut output, admission);
+                }
                 if item.runs_truncated {
                     let _ = writeln!(output, "  inspect: fractal missions show {}", item.header.id);
                 } else if let Some(run) = item.runs.last() {
@@ -10704,11 +10708,13 @@ fn render_slo_list(rows: &[Value]) -> String {
                     text(row, "current"),
                     text(row, "window"),
                     left(row),
+                    text(row, "source"),
+                    text(row, "host"),
                 ]
             })
             .collect::<Vec<_>>();
-        let header = ["STATUS", "ID", "TARGET", "CURRENT", "WINDOW", "LEFT"].map(str::to_owned);
-        let widths: Vec<usize> = (0..6)
+        let header = ["STATUS", "ID", "TARGET", "CURRENT", "WINDOW", "LEFT", "SOURCE", "HOST"].map(str::to_owned);
+        let widths: Vec<usize> = (0..8)
             .map(|column| {
                 std::iter::once(&header)
                     .chain(&table)
@@ -10822,6 +10828,9 @@ fn render_slo_explanation(row: &Value) -> String {
     let _ = writeln!(output, "{}  {} · {}", text("id"), text("kind"), text("status"));
     let _ = writeln!(output, "TARGET   {}", text("target"));
     let _ = writeln!(output, "CURRENT  {} · {}", text("current"), text("window"));
+    if row["source"].is_string() {
+        let _ = writeln!(output, "SOURCE   {} · {}", text("source"), text("host"));
+    }
     if let Some(left) = row["remaining_percent"].as_f64() {
         let _ = writeln!(output, "LEFT     {left:.0}% of the {}", if row["kind"] == "budget" { "allowance" } else { "error budget" });
     }
@@ -14530,7 +14539,36 @@ fn render_client_agent(
     for runtime in &agent.runtime_ids {
         let _ = writeln!(output, "RUNTIME      {runtime}");
     }
+    if let Some(admission) = &agent.declared_admission {
+        render_declared_admission(&mut output, admission);
+    }
     output
+}
+
+fn render_declared_admission(output: &mut String, admission: &fractal_client::DeclaredAdmission) {
+    use std::fmt::Write as _;
+    let _ = writeln!(output, "Declared admission — declared, not enforced.");
+    let _ = writeln!(output, "st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.");
+    if let Some(priority) = &admission.priority {
+        let _ = writeln!(output, "  priority: {priority}");
+    }
+    if let Some(lane) = &admission.lane {
+        let _ = writeln!(output, "  lane: {lane}");
+    }
+    if let Some(budgets) = &admission.budgets {
+        if let Some(seconds) = budgets.cpu_seconds {
+            let _ = writeln!(output, "  cpu_seconds: {seconds}");
+        }
+        if let Some(memory) = &budgets.memory_max {
+            let _ = writeln!(output, "  memory_max: {memory}");
+        }
+        if let Some(disk) = &budgets.disk_max {
+            let _ = writeln!(output, "  disk_max: {disk}");
+        }
+        if let Some(tokens) = budgets.token_budget {
+            let _ = writeln!(output, "  token_budget: {tokens}");
+        }
+    }
 }
 
 /// One line naming a running subagent: what it does, its type, and, given the time, when it
