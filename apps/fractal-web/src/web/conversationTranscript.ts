@@ -15,6 +15,7 @@ import { credentialExpiredMessage, type ConversationPage, type Feed } from '../d
 import { sendFailureDetail } from './composerSend.ts'
 import { toolKindFor } from '../conversation/toolClassification.ts'
 import { isHiddenSystemRecord } from '../conversation/systemRecords.ts'
+import { personAvatarUrl } from '../conversation/people.ts'
 
 /** Unknown protocol events are hidden by default; mixed messages retain an explicit body disclosure. */
 type KitConversationItem = NonNullable<ConversationRuntimeOptions['messages']>[number]
@@ -160,14 +161,17 @@ const quietMachineRows = (items: readonly KitConversationItem[]): KitConversatio
 }
 
 /** A participant as the transcript names it: the roster name, else the ref's last segment; `ref` is the full path for hover. */
-export interface ParticipantName { readonly label: string; readonly ref?: string }
+export interface ParticipantName { readonly label: string; readonly ref?: string; readonly kind?: 'person' | 'agent' | 'machine'; readonly avatarUrl?: string }
 export const participantName = (ref: string | undefined, names: TranscriptTurnOptions['names']): ParticipantName | undefined => {
   if (ref === undefined || ref === '') return undefined
-  if (ref.startsWith('daemon/')) return { label: 'Fractal', ref }
+  if (ref.startsWith('daemon/')) return { label: 'Fractal', ref, kind: 'machine' }
   const named = names?.(ref)
-  if (named !== undefined && named !== '') return { label: named, ref }
-  if (ref.startsWith('person/')) return { label: ref.slice('person/'.length), ref }
-  return { label: ref.split('/').filter(part => part !== '').at(-1) ?? ref, ref }
+  if (ref.startsWith('person/')) {
+    const avatarUrl = personAvatarUrl(ref)
+    return { label: named !== undefined && named !== '' ? named : ref.slice('person/'.length), ref, kind: 'person', ...(avatarUrl === undefined ? {} : { avatarUrl }) }
+  }
+  if (named !== undefined && named !== '') return { label: named, ref, kind: 'agent' }
+  return { label: ref.split('/').filter(part => part !== '').at(-1) ?? ref, ref, kind: 'agent' }
 }
 
 /**

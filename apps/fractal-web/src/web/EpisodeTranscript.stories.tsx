@@ -66,12 +66,14 @@ const assertEpisodes: NonNullable<Story['play']> = async ({ canvasElement }) => 
   const wake = canvas.getAllByTestId('harness-notice')[0]!
   await userEvent.click(within(wake).getByRole('button', { name: 'Read message' }))
   await expect(within(wake).getByTestId('harness-payload')).toHaveTextContent('Wake: automatic attempt 1 (ready)')
-  // One object per message: sender to recipient, subject, then body; unresolved refs read as their last segment.
-  const mails = canvas.getAllByTestId('mail-message')
+  // One card per message: sender, subject, then body; unresolved refs read as their last segment. Mail to this
+  // conversation's own agent names no recipient.
+  const mails = canvas.getAllByTestId('message-card')
   await expect(mails).toHaveLength(2)
-  await expect(within(mails[0]!).getByTestId('mail-header')).toHaveTextContent('harbor → quay · Key audit')
+  await expect(within(mails[0]!).getByTestId('message-head')).toHaveTextContent('harbor · Key audit')
+  await expect(within(mails[0]!).queryByTestId('message-recipient')).toBeNull()
   await expect(within(mails[0]!).getByTitle('agent/example/harbor')).toBeInTheDocument()
-  await expect(mails[0]).toHaveAttribute('data-mail-look', 'between_others')
+  await expect(mails[0]).toHaveAttribute('data-message-look', 'between_others')
   // A long body collapses behind Read message.
   await expect(within(mails[1]!).getByRole('button', { name: 'Read message' })).toHaveAttribute('aria-expanded', 'false')
   // Trigger, work, outcome: one timestamp per episode, and a day line where the day changes.

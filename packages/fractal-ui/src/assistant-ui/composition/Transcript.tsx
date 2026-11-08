@@ -19,7 +19,8 @@ import { SendStatus, TranscriptEmptyContent, type TranscriptEmptyState } from '.
 import type { ComposerAvailability } from '../embrace-composer/send'
 import { TranscriptAttachmentImagesContext, TranscriptAttachments, type TranscriptAttachmentImages } from './TranscriptAttachments'
 import { HarnessNotice } from './HarnessNotice'
-import { MailMessage, type MailParticipants } from './MailMessage'
+import { MessageCard, MessageRow, messageShape, type MessageParticipants } from './MessageCard'
+import { messageRunLayout, type MessageRunLayout } from './message-runs'
 import { UnsupportedRecord } from './UnsupportedRecord'
 import { TranscriptSkeleton } from './TranscriptSkeleton'
 import { Icon } from './Icons'
@@ -53,7 +54,7 @@ export interface TranscriptTurn {
    */
   readonly triggerId?: string
   /** Host naming for each message item, by item id. */
-  readonly participants?: Readonly<Record<string, MailParticipants>>
+  readonly participants?: Readonly<Record<string, MessageParticipants>>
 }
 /** `Unavailable` is the whole status: one host reason line and no sync line. `detail` may be diagnostic, so it stays behind "Show details". `action` is the host's recovery, e.g. `{ label: 'Try again', onPress }`. */
 export type TranscriptAvailability = { readonly _tag: 'Available' } | { readonly _tag: 'Unavailable'; readonly reason: string; readonly detail?: string; readonly action?: { readonly label: string; readonly onPress: () => void } }
@@ -112,9 +113,15 @@ export interface TranscriptProps {
   readonly unreadFrom?: string
   /** Items of turns that came into view while this transcript is active, the document visible and Find closed. */
   readonly onSeen?: (itemIds: readonly string[]) => void
+  /** The transcript's own agent: a message head names no recipient that is this agent, and its own prose carries no sender line. */
+  readonly self?: { readonly ref?: string; readonly label?: string }
 }
 const SenderCaption = React.createContext<string | undefined>(undefined)
-const MailNames = React.createContext<MailParticipants | undefined>(undefined)
+const MailNames = React.createContext<MessageParticipants | undefined>(undefined)
+/** The transcript's own agent, by ref and name. */
+const SelfContext = React.createContext<TranscriptProps['self']>(undefined)
+/** Each message's place in its same-sender run, for the episode being drawn. */
+const MessageLayouts = React.createContext<ReadonlyMap<string, MessageRunLayout>>(new Map())
 const SeatHeader = React.createContext(true)
 /** True for a prose block that continues the same sender's run inside one turn. */
 const RunContinuation = React.createContext(false)
@@ -131,12 +138,16 @@ function TranscriptMessage() {
   const caption = React.useContext(SenderCaption)
   const mailNames = React.useContext(MailNames)
   const continuation = React.useContext(RunContinuation)
+  const self = React.useContext(SelfContext)
+  const layouts = React.useContext(MessageLayouts)
   if (item === undefined || item._tag === 'ToolCall' || item._tag === 'Reasoning') return null
-  if (item._tag === 'Text' && item.role !== 'system') return item.role === 'user' ? <UserMessage item={{ ...item, role: 'user' }} /> : <SeatProse item={{ ...item, role: 'assistant' }} senderLine={caption} continuation={continuation} />
+  // The transcript's own agent writes regular output: no sender line repeats its name.
+  if (item._tag === 'Text' && item.role !== 'system') return item.role === 'user' ? <UserMessage item={{ ...item, role: 'user' }} /> : <SeatProse item={{ ...item, role: 'assistant' }} senderLine={caption !== undefined && caption === self?.label ? undefined : caption} continuation={continuation} />
   // Mail names its participants; a message with neither (an imported handoff) keeps the seat's prose.
-  if (item._tag === 'Message') return item.text === undefined && item.from === undefined && item.to === undefined && item.author === undefined && mailNames === undefined
-    ? <SeatProse item={item} senderLine={caption ?? item.sender?.label} />
-    : <MailMessage item={item} participants={mailNames} />
+  if (item._tag === 'Message' && item.text === undefined && item.from === undefined && item.to === undefined && item.author === undefined && mailNames === undefined) return <SeatProse item={item} senderLine={caption ?? item.sender?.label} />
+  const shape = messageShape(item, mailNames)
+  if (shape?._tag === 'Card') return <MessageCard item={item} shape={shape} layout={layouts.get(item.id)} />
+  if (shape?._tag === 'Row' && item._tag === 'Event') return <MessageRow item={item} shape={shape} layout={layouts.get(item.id)} />
   if (item._tag === 'Unsupported') return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag}><UnsupportedRecord item={item} /></MessagePrimitive.Root>
   if (item._tag === 'Event' && item.notice !== undefined) return <MessagePrimitive.Root data-testid="transcript-message" data-item-id={item.id} data-item-kind={item._tag}><HarnessNotice item={{ ...item, notice: item.notice }} weight="row" showTime={false} /></MessagePrimitive.Root>
   if (item._tag === 'UnknownEvent' && item.mixedContent === true) return <MixedContentMessage item={item} />
@@ -338,6 +349,14 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, 
   const trigger = turn.triggerId === undefined ? undefined : turn.items.find(item => item.id === turn.triggerId)
   const shown = turn.items.filter(item => item._tag !== 'ToolCall' && item._tag !== 'Reasoning' && item !== trigger)
   const started = startedAt ?? turnStart(turn)
+  const self = React.useContext(SelfContext)
+  // Stacking, recipient and time are decided once per episode, from the trigger through every shown item.
+  const layouts = messageRunLayout((trigger === undefined ? shown : [trigger, ...shown]).map(item => {
+    const shape = stranded?.has(item.id) === true ? undefined : messageShape(item, turn.participants?.[item.id])
+    if (shape === undefined) return undefined
+    const { from, to } = shape.participants
+    return { id: item.id, sender: from.ref ?? from.label, ...(to === undefined ? {} : { recipient: to.ref ?? to.label }), at: item.at, failed: shape._tag === 'Row' && shape.failed }
+  }), { self: [self?.ref, self?.label].filter(key => key !== undefined), ...(Number.isFinite(started) ? { shownAt: started } : {}) })
   const renderItem = (item: ConversationItem, continuation = false, runText?: string) => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <MailNames.Provider key={item.id} value={turn.participants?.[item.id]}><SenderCaption.Provider value={turn.senderCaptions?.[item.id]}><RunContinuation.Provider value={continuation}><RunCopyText.Provider value={runText}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></RunCopyText.Provider></RunContinuation.Provider></SenderCaption.Provider></MailNames.Provider>
   // A shown block continues a prose run when it and the block before it are the same sender's adopted prose.
   const continues = shown.map((item, index) => [item, shown[index - 1]].every(entry => entry?._tag === 'Text' && entry.role === 'assistant' && stranded?.has(entry.id) !== true) && turn.senderCaptions?.[item.id] === turn.senderCaptions?.[shown[index - 1]!.id])
@@ -351,7 +370,7 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, 
   const head = turn.prompt !== undefined
     ? (stranded?.has(turn.prompt.id) ? <StrandedItem item={turn.prompt} /> : <ThreadPrimitive.Unstable_MessageById messageId={turn.prompt.id} components={messageComponents} />)
     : trigger === undefined ? undefined : renderItem(trigger)
-  return <section ref={tailRef} data-testid="transcript-turn" data-item-id={turn.id} data-source-ids={[...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)].join(' ')} data-scroll-anchor-container {...stylex.props(styles.turn)}><RowTimes.Provider value={false}>
+  return <section ref={tailRef} data-testid="transcript-turn" data-item-id={turn.id} data-source-ids={[...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)].join(' ')} data-scroll-anchor-container {...stylex.props(styles.turn)}><MessageLayouts.Provider value={layouts}><RowTimes.Provider value={false}>
     {newDay === true && Number.isFinite(started) && <DaySeparator time={started} />}
     {unreadFrom !== undefined && (unreadFrom === turn.prompt?.id || unreadFrom === trigger?.id || !shown.some(item => item.id === unreadFrom)) && <UnreadSeparator />}
     <div data-testid="turn-head" {...stylex.props(styles.turnHead)}>
@@ -362,7 +381,7 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, 
     {shown.map((item, index) => item.id === unreadFrom ? <React.Fragment key={item.id}><UnreadSeparator />{renderItem(item, continues[index]!, runTexts[index])}</React.Fragment> : renderItem(item, continues[index]!, runTexts[index]))}
     {turn.work.running && <LiveActivity state={turn.activity ?? { _tag: 'Working' }} startedAt={turn.work.startedAt} now={now} />}
     {!turn.work.running && renderFooter?.(turn)}
-  </RowTimes.Provider></section>
+  </RowTimes.Provider></MessageLayouts.Provider></section>
 })
 /**
  * Reports the source items of every turn in the viewport as seen: on scroll into view, and again when
@@ -525,7 +544,7 @@ function HistoryBoundary({ history }: { readonly history: Extract<TranscriptHist
   </div>
 }
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
-export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, renderToolDetail, onRetrySync, onRetryRun, onRetrySend, sendAvailability, resolveImage, onLoadImage, renderInlineReference, attachmentImages, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, renderTurnFooter, showSeatHeader = true, active = true, tailRef, unreadFrom, onSeen }: TranscriptProps) {
+export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, renderToolDetail, onRetrySync, onRetryRun, onRetrySend, sendAvailability, resolveImage, onLoadImage, renderInlineReference, attachmentImages, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, renderTurnFooter, showSeatHeader = true, active = true, tailRef, unreadFrom, onSeen, self }: TranscriptProps) {
   const scrollId = React.useId()
   useSeenTurns(scrollId, active, onSeen)
   const [reveal] = React.useState(createTranscriptRevealStore)
@@ -616,7 +635,7 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
     {progress !== undefined && <ProgressBar aria-label="Thread synchronization" value={progress.done} maxValue={progress.total} {...stylex.props(styles.progress)}><div {...stylex.props(styles.track)}><div {...stylex.props(styles.fill(`${progress.total === 0 ? 0 : progress.done! / progress.total! * 100}%`))} /></div></ProgressBar>}
     {committed.length > 0 && <SyncLine status={sync} label="conversation" now={now} observedAt={observedAt} onRetry={onRetrySync} inline={!showHeader} />}
   </>
-  return <TranscriptRevealContext.Provider value={reveal}><TurnFooterRenderer.Provider value={renderTurnFooter}><ToolDetailRenderer.Provider value={renderToolDetail}><TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><TranscriptAttachmentImagesContext.Provider value={attachmentImages}><RetrySend.Provider value={sendAvailability === undefined || sendAvailability._tag === 'Ready' ? onRetrySend : undefined}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
+  return <SelfContext.Provider value={self}><TranscriptRevealContext.Provider value={reveal}><TurnFooterRenderer.Provider value={renderTurnFooter}><ToolDetailRenderer.Provider value={renderToolDetail}><TranscriptActiveContext.Provider value={active}><SeatHeader.Provider value={showSeatHeader}><MarkdownImagePolicy.Provider value={imageOptions}><TranscriptAttachmentImagesContext.Provider value={attachmentImages}><RetrySend.Provider value={sendAvailability === undefined || sendAvailability._tag === 'Ready' ? onRetrySend : undefined}><ThreadPrimitive.Root aria-label={`Transcript${landmarkContext ? `, ${landmarkContext}` : ''}`} {...stylex.props(styles.frame)}>
     {showHeader && <header data-testid="transcript-header" {...stylex.props(styles.header)}><strong {...stylex.props(styles.title)}>{title}</strong>{headerStatus}</header>}
     {!showHeader && headerActionsHost != null && active ? createPortal(<div data-testid="transcript-header-status" {...stylex.props(styles.headerStatus, progress !== undefined && styles.headerProgress)}>{headerStatus}</div>, headerActionsHost) : null}
     <ErrorOverlayHost lane><EmbraceScrollViewport items={rows} anchorHistory={anchorHistory} stateKey={viewportKey} initialTailCount={transcriptInitialSourceRowCount} wholeMountSlack={0} scrollToBottomKey={scrollToBottomKey} running={committed.at(-1)?.work.running === true && committed.at(-1)?.activity?._tag !== 'WaitingForAnswer'} active={active} id={scrollId} data-testid="transcript-scroll" role="group" aria-label="Conversation history" tabIndex={0} {...stylex.props(styles.lane)} contentProps={stylex.props(readingColumnStyles.column, styles.content)}
@@ -637,7 +656,7 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
         </>
       }}
     </EmbraceScrollViewport>{failure?.tone === 'error' && <ErrorOverlay id={`sync-${failure.text}`} title={failure.text} detail="History stays on screen." onRetry={onRetrySync} />}</ErrorOverlayHost>
-  </ThreadPrimitive.Root></RetrySend.Provider></TranscriptAttachmentImagesContext.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider></TranscriptActiveContext.Provider></ToolDetailRenderer.Provider></TurnFooterRenderer.Provider></TranscriptRevealContext.Provider>
+  </ThreadPrimitive.Root></RetrySend.Provider></TranscriptAttachmentImagesContext.Provider></MarkdownImagePolicy.Provider></SeatHeader.Provider></TranscriptActiveContext.Provider></ToolDetailRenderer.Provider></TurnFooterRenderer.Provider></TranscriptRevealContext.Provider></SelfContext.Provider>
 }
 const styles = stylex.create({
   frame: { minWidth: 0, minHeight: g.threadViewportMin, height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
@@ -648,7 +667,7 @@ const styles = stylex.create({
   lane: { outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusInset, flex: '1 1 0', minHeight: 0, minWidth: 0, overflowY: 'auto', overflowX: 'hidden', overflowAnchor: 'none' },
   // The shared reading column keeps rows and a reading-column composer on the same bounds.
   // A host may float a dock over the lane's end (`--transcript-end-inset`); the last line then ends above it.
-  content: { paddingTop: s.lg, paddingBottom: `calc(${s.lg} + var(--transcript-end-inset, 0px))` }, timeline: { display: 'flex', flexDirection: 'column', gap: s.xl, minWidth: 0 }, turn: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
+  content: { paddingTop: s.lg, paddingBottom: `calc(${s.lg} + var(--transcript-end-inset, 0px))` }, timeline: { display: 'flex', flexDirection: 'column', gap: s.section, minWidth: 0 }, turn: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   workList: { maxHeight: 'none', overflowY: 'visible', overscrollBehavior: 'auto' },
   user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere' },
   userClamp: { maxHeight: `calc(${g.userClamp} - ${s.xs} * 2 - ${g.controlSm})`, overflow: 'hidden' },

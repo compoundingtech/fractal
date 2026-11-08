@@ -53,7 +53,8 @@ export const createContentSecurityPolicy = (
     ["style-src 'self'", ...reactAriaStyleSources, ...styleHashes].join(' '),
     "style-src-attr 'unsafe-inline'",
     ...(development ? ["style-src-elem 'self' 'unsafe-inline'"] : []),
-    "img-src 'self' data: blob:",
+    // Message avatars: a person's GitHub avatar, by login. No other remote image source is allowed.
+    "img-src 'self' data: blob: https://avatars.githubusercontent.com",
     "font-src 'self'",
   ]
   const afterConnections = ["object-src 'none'", "base-uri 'self'", "frame-ancestors 'none'", "form-action 'self'"]

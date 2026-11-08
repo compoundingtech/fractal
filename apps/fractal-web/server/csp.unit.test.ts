@@ -30,7 +30,7 @@ it('allows only explicitly configured connection origins, never arbitrary CSP so
 })
 it('does not interpret a malformed request authority as additional source expressions', () => {
   const policy = createContentSecurityPolicy()
-  expect(policy('app.example')).toContain("img-src 'self' data: blob:")
+  expect(policy('app.example')).toContain("img-src 'self' data: blob: https://avatars.githubusercontent.com")
   expect(() => policy('app.example;img-src *')).toThrow(TypeError)
   expect(() => policy('user@app.example')).toThrow(TypeError)
   expect(policy('[::1]:8080')).toContain('ws://[::1]:8080 wss://[::1]:8080')

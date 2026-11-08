@@ -172,23 +172,35 @@ export const HarnessEvents: Story = {
   render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={harnessEventData} onRetry={() => {}} /></main>,
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    const initial = await canvas.findAllByTestId('harness-notice')
-    await expect(initial).toHaveLength(6)
-    await expect(initial.map(notice => notice.dataset.itemId)).toEqual(harnessWeightExamples.slice(-6).map(item => item.id))
+    // People and agents write cards, machine results are rows, everything else stays a quiet notice row.
+    const entries = () => [...canvasElement.querySelectorAll<HTMLElement>('[data-testid=harness-notice], [data-testid=message-card], [data-testid=message-row]')]
+    await canvas.findAllByTestId('message-card')
+    await expect(entries().map(entry => entry.dataset.itemId)).toEqual(harnessWeightExamples.slice(-6).map(item => item.id))
     await userEvent.click(canvas.getByRole('button', { name: 'Show all messages' }))
     await waitFor(() => expect(canvas.getByTestId('transcript-history-controls')).toHaveAttribute('data-state', 'complete'))
-    const notices = canvas.getAllByTestId('harness-notice')
-    await expect(notices).toHaveLength(harnessWeightExamples.length)
-    await expect(notices.map(notice => notice.dataset.itemId)).toEqual(harnessWeightExamples.map(item => item.id))
-    for (const notice of notices) await expect(notice).toHaveAttribute('data-harness-weight', 'row')
-    const failed = notices.find(notice => notice.dataset.itemId === 'weight/failed-job')!
-    await expect(within(failed).getByTestId('harness-kind')).toHaveTextContent('failed')
+    await expect(entries().map(entry => entry.dataset.itemId)).toEqual(harnessWeightExamples.map(item => item.id))
+    await expect(entries().map(entry => entry.dataset.testid)).toEqual(['harness-notice', 'message-card', 'message-row', 'message-row', 'message-row', 'message-row', 'message-card', 'message-card', 'harness-notice'])
+    for (const notice of canvas.getAllByTestId('harness-notice')) await expect(notice).toHaveAttribute('data-harness-weight', 'row')
+    // A failure keeps a red edge and a red status word, never a red fill.
+    const failed = entries().find(entry => entry.dataset.itemId === 'weight/failed-job')!
+    await expect(failed).toHaveAttribute('data-failed', 'true')
+    await expect(within(failed).getByTestId('message-status')).toHaveTextContent('failed')
+    await expect(getComputedStyle(failed).backgroundColor).toBe('rgba(0, 0, 0, 0)')
   },
 }
 export const HarnessEventsLight: Story = { ...HarnessEvents, args: { scheme: 'light' } }
 export const StrandedHarnessEvents: Story = {
   ...HarnessEvents,
   render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><EmbraceRuntimeProvider options={{ messages: [], onNew: async () => {} }}><RuntimeAdoptedIds.Provider value={undefined}><Transcript title="Harness events" turns={harnessEventData.turns} sync={harnessEventData.sync} now={now} observedAt={now - 8000} /></RuntimeAdoptedIds.Provider></EmbraceRuntimeProvider></main>,
+  // Items the runtime never adopted keep the notice row: they have no message runtime to draw a card in.
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(await canvas.findAllByTestId('harness-notice')).toHaveLength(6)
+    await userEvent.click(canvas.getByRole('button', { name: 'Show all messages' }))
+    await waitFor(() => expect(canvas.getAllByTestId('harness-notice').map(notice => notice.dataset.itemId)).toEqual(harnessWeightExamples.map(item => item.id)))
+    const failed = canvas.getAllByTestId('harness-notice').find(notice => notice.dataset.itemId === 'weight/failed-job')!
+    await expect(within(failed).getByTestId('harness-kind')).toHaveTextContent('failed')
+  },
 }
 const adjacentReasoning = Array.from({ length: 11 }, (_, index): ConversationItem => ({
   _tag: 'Reasoning', id: `reasoning-run/${index}`, text: `Check ${index + 1}: keep the observed reasoning in order.`, streaming: false, at,
