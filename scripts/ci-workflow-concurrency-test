@@ -124,6 +124,13 @@ for block in (daily_jobs['release'], daily_jobs['publish'],
 # One run can never queue both development publishers on the single pending mutex slot.
 edge_needs = re.search(r'^    needs: \[([^\]]+)\]$', native_jobs['publishEdge'], re.M).group(1)
 assert set(edge_needs.split(', ')) == {'assemble', 'publishEmbed'}
+# Immutable archive selection survives rerunning only a downstream publisher:
+# the successful assembler's output remains its original artifact ID.
+assert 'name: "fractal-release-attempt-${{ github.run_attempt }}"' in native_jobs['assemble']
+assert 'artifact-id: ${{ steps.release.outputs.artifact-id }}' in native_jobs['assemble']
+assert 'id: release' in native_jobs['assemble']
+assert 'artifact-ids: ${{ needs.assemble.outputs.artifact-id }}' in native_jobs['publishEdge']
+assert 'fractal-release-attempt-' not in native_jobs['publishEdge']
 for name in ('publishEmbed', 'publishEdge'):
     assert "github.event_name == 'push'" in native_jobs[name]
     assert "github.ref == 'refs/heads/main'" in native_jobs[name]

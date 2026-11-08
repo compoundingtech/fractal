@@ -287,6 +287,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         "installer"
       ],
       "runs-on": "ubuntu-latest",
+      "outputs": { "artifact-id": "${{ steps.release.outputs.artifact-id }}" },
       "steps": [
         {
           "uses": "actions/checkout@v4",
@@ -311,9 +312,10 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
           "run": "set -euo pipefail\ncd dist\ncat ./*.sha256 > SHA256SUMS\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-fractal-manifest.py \"$SOURCE_SHA\"\ncp ../docs/st3/binary-releases.md RELEASE-NOTES.md\n# Markdown backticks are literal, not command substitution.\n# shellcheck disable=SC2016\nprintf '\\nExact source: `%s`. See RELEASE.json for the PTY revision and targets.\\n' \"$SOURCE_SHA\" >> RELEASE-NOTES.md\n"
         },
         {
+          "id": "release",
           "uses": "actions/upload-artifact@v4",
           "with": {
-            "name": "fractal-release",
+            "name": "fractal-release-attempt-${{ github.run_attempt }}",
             "path": "dist/*",
             "if-no-files-found": "error",
             "retention-days": 7
@@ -346,7 +348,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         {
           "uses": "actions/download-artifact@v4",
           "with": {
-            "name": "fractal-release",
+            "artifact-ids": "${{ needs.assemble.outputs.artifact-id }}",
             "path": "dist"
           }
         },
