@@ -188,6 +188,9 @@ pub struct ReadinessSloConfig {
     pub member: String,
     pub reviewer: String,
     pub evidence_file: PathBuf,
+    /// Optional, root-owned retained short readings for the read-only Usage row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_pairs_file: Option<PathBuf>,
 }
 
 /// An operator-selected external quota source; clients cannot override its URL.

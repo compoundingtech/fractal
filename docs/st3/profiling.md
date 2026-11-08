@@ -480,6 +480,28 @@ the policy, since older readers do not recognize this no-fallback condition.
 This objective does not implement that
 delivery policy or its off-host availability fallback.
 
+An additional read-only early-warning row is available only when
+`readiness_slo.retained_pairs_file` names a different file directly under
+`/run/fractal-slo-evidence`, with the same root-ownership and path protections.
+This option is absent by default; the weekly reader, sampling and fault routing
+are unchanged. No deployment is enabled by supplying reader support.
+
+The optional file is a JSON object with `version: 1` and `pairs`, an ascending
+list of at most four exact `{weekly, short}` pairs spanning at most three
+minutes. The complete document is limited to 8 KiB. Each `weekly` uses the
+existing weekly schema. Each `short` contains `version`, `objective`, `member`,
+`end_ms`, `observed_at_ms` matching its weekly reading, and `observations`.
+Each observation has `at_ms` and boolean `ready`; at most five distinct,
+strictly ascending minutes belong to the half-open five-minute window ending
+at the pair's cut. Unknown fields and invalid bundles are rejected.
+
+`GET /v1/slo` selects the latest fresh pair at or before the independently
+trusted weekly cut, requiring an identical weekly reading when the cuts match.
+The early-warning row exposes the selected cut timestamp. At least four
+completed minutes are required for a verdict; three failed minutes are a miss.
+Missing or untrusted evidence yields `no-data`. This observational row does
+not write checkpoints, sample short history, issue claims or route faults.
+
 `fractal slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
 `7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
 remaining percent of every row to `<state>/slo-history/YYYY-MM-DD.jsonl` (UTC day) and deletes a
