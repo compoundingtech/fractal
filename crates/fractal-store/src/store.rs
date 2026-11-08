@@ -942,6 +942,10 @@ ON claims(kind, COALESCE(json_extract(body,'$.fields.principal'),'assistant/chat
 CREATE INDEX IF NOT EXISTS claims_assistant_v1_principal_expiry_index
 ON claims(kind, COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'),
     json_extract(body,'$.fields.expires_at_unix_ms'));
+-- Installed on reopen as well as creation: unauthoritative actor/origin overlays
+-- must not increase the cost of selecting an issuer's latest valid transition.
+CREATE INDEX IF NOT EXISTS claims_assistant_v1_transition_index
+ON claims(subject, kind, origin, actor, store_index);
 -- A runtime incarnation's claims about a subject by acceptance time, so when a session began
 -- and last changed are two seeks instead of a read of every claim the subject has. The
 -- expression is INCARNATION_OF_CLAIM, which queries repeat so the planner uses this index.

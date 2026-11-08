@@ -3868,8 +3868,8 @@
         "disclosure_consent": { "type": "boolean" },
         "consent_evidence": { "type": "string", "minLength": 1, "maxLength": 512 },
         "revoked": { "type": "boolean" },
-        "conflict": { "anyOf": [{ "$ref": "#/$defs/GrantProfileConflictWitness" }, { "type": "null" }], "description": "Current opposite-profile conflict, or null when no active conflict exists. Present only on grant inspection with witness=1; omitted from default inspection, pairing and mutation responses." },
-        "cleared_conflicts": { "type": "array", "items": { "$ref": "#/$defs/ClearedGrantProfileConflictWitness" }, "description": "Revoked or expired opposite-profile witnesses; emitted only on grant inspection with witness=1 when conflict is null." },
+        "conflict": { "anyOf": [{ "$ref": "#/$defs/GrantProfileConflictWitness" }, { "type": "null" }], "description": "Current opposite-profile conflict, or null when no active conflict exists. Present only on daemon-configured-owner grant inspection with witness=1; omitted from default inspection, bearer authentication errors, pairing and mutation responses." },
+        "cleared_conflicts": { "type": "array", "items": { "$ref": "#/$defs/ClearedGrantProfileConflictWitness" }, "description": "Revoked or expired opposite-profile witnesses; emitted only on daemon-configured-owner grant inspection with witness=1 when conflict is null. Never disclosed by bearer authentication errors or pairing." },
         "read_trust": { "$ref": "#/$defs/AssistantReadTrust", "description": "Owner-provisioned public pins for SCG read proofs. Absent means every assistant read is denied." }
       }
     },

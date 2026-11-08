@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Adds the typed client error grant-profile-conflict (GrantProfileConflict in Rust), returned as HTTP 409, plus inspect-only ?witness=1 opt-in conflict and cleared_conflicts witnesses with typed assistant/service profiles and revoked/expired causes. Default grant responses retain their previous shape for old strict clients. Adds a principal/expiry expression index at store open without rewriting grant claims."
+    "detail": "Adds the typed client error grant-profile-conflict (GrantProfileConflict in Rust), returned as HTTP 409. Bearer authentication and pairing disclose only this code and the fixed message principal has active grants of opposite profiles; revoke one to clear the conflict, without witness details. Only daemon-configured-owner inspection with ?witness=1 exposes conflict and cleared_conflicts witnesses with typed assistant/service profiles and revoked/expired causes. Default grant responses retain their previous shape for old strict clients. Adds a principal/expiry expression index at store open without rewriting grant claims."
   },
   "rules": {
     "status": "changed",

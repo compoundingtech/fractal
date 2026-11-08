@@ -102,6 +102,69 @@ async fn request(app: Router, credential: &str, method: &str, path: &str, header
 }
 
 #[tokio::test]
+async fn p1_owner_transitions_ignore_wrong_origin_overlays_but_fence_the_subject_head() {
+    for kind in [POLICY, REVOKED] {
+        let fixture = fixture(SCOPES, false).await;
+        let subject = subject(&fixture.grant).unwrap();
+        let granted = latest(&fixture.state, &subject, GRANTED).unwrap().unwrap();
+        let peer = Store::open_memory("wrong-origin").unwrap();
+        let overlay = || {
+            let mut value = fields(&granted).unwrap().clone();
+            if kind == POLICY {
+                value["policy_revision"] = json!(999);
+                value["expires_at_unix_ms"] = json!(1);
+                value["scopes"] = json!([]);
+            }
+            let claim = peer.append_claim(&ClaimInput {
+                subject: subject.clone(), kind: kind.into(), actor: Some(OWNER.into()),
+                fields: serde_json::from_value(value).unwrap(), evidence: Vec::new(),
+                expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            fixture.state.store.import_replication("wrong-origin", &peer.export_replication(0).unwrap()).unwrap();
+            assert_eq!(latest(&fixture.state, &subject, kind).unwrap().unwrap().id, claim.id);
+            assert!(authenticate(&fixture.state, &credential_digest(&fixture.credential), "fabric-loopback").unwrap().is_some());
+        };
+
+        overlay();
+        let policy = serde_json::from_value::<AssistantGrantPolicy>(json!({
+            "api_version": CLIENT_API_VERSION, "scopes": SCOPES, "expires_in_seconds": 86400,
+            "disclosure_consent": true, "consent_evidence": "recorded owner consent",
+            "minimal_read_mode": "approval-once",
+        })).unwrap();
+        let Json(renewed) = update_policy(State(fixture.state.clone()),
+            Extension(ClientSession::local(Some(OWNER)).unwrap()), AxumPath(fixture.grant.clone()),
+            Json(policy)).await.unwrap();
+        assert_eq!(renewed["policy_revision"], 2);
+        assert_eq!(renewed["revoked"], false);
+        let renewed_claim = effective(&fixture.state, &granted).unwrap();
+        assert_eq!(renewed_claim.body["evidence"], json!([granted.id]));
+
+        overlay();
+        let Json(pinned) = pin(State(fixture.state.clone()),
+            Extension(ClientSession::local(Some(OWNER)).unwrap()), AxumPath(fixture.grant.clone()),
+            Json(fixture.trust_request())).await.unwrap();
+        assert_eq!(pinned["policy_revision"], 3);
+        assert_eq!(pinned["read_trust"]["key_id"], "approval-key/test");
+        let pinned_claim = effective(&fixture.state, &granted).unwrap();
+        assert_eq!(pinned_claim.body["evidence"], json!([renewed_claim.id]));
+
+        overlay();
+        let Json(revoked) = revoke(State(fixture.state.clone()),
+            Extension(ClientSession::local(Some(OWNER)).unwrap()),
+            AxumPath(fixture.grant.clone())).await.unwrap();
+        assert_eq!(revoked["revoked"], true);
+        let revocation = latest(&fixture.state, &subject, REVOKED).unwrap().unwrap();
+        assert_eq!(revocation.origin, granted.origin);
+        assert_eq!(revocation.body["evidence"], json!([pinned_claim.id]));
+        assert!(authenticate(&fixture.state, &credential_digest(&fixture.credential), "fabric-loopback").is_err());
+        assert_eq!(fixture.request("/v1/client/assistant/summary", None).await.0, StatusCode::FORBIDDEN);
+        assert_eq!(pin(State(fixture.state.clone()), Extension(ClientSession::local(Some(OWNER)).unwrap()),
+            AxumPath(fixture.grant.clone()), Json(fixture.trust_request())).await.unwrap_err().status,
+            StatusCode::FORBIDDEN);
+    }
+}
+
+#[tokio::test]
 async fn scg_read_accepts_header_aliases_and_binds_presented_domain() {
     let fixture = fixture(SCOPES, true).await;
     let path = "/v1/client/assistant/summary";

@@ -93,6 +93,7 @@ fn assert_conflict(error: &ApiError) {
     let typed: ErrorCode = serde_json::from_value(json!(error.code)).unwrap();
     assert_eq!(typed, ErrorCode::GrantProfileConflict);
     assert_eq!(error.status, StatusCode::CONFLICT);
+    assert!(error.details.is_empty(), "bearer errors must not expose owner witnesses");
 }
 
 fn assert_witness(value: &Value) {
@@ -122,7 +123,6 @@ fn disconnected_opposite_profiles_conflict_on_both_members_and_revocation_recove
             let error = authenticate_id(state, fields(grant).unwrap()["grant_id"].as_str().unwrap())
                 .err().expect("both credentials must be suspended on either member");
             assert_conflict(&error);
-            assert_witness(&Value::Object((*error.details).clone())["conflict"]);
             assert_witness(&profile_conflict(state, grant).unwrap().unwrap());
             assert_witness(&projection_with_witness(state, grant).unwrap()["conflict"]);
         }
@@ -227,8 +227,25 @@ fn admission_refuses_a_known_authenticated_foreign_opposite_profile() {
     replicate(&b, &a);
     let error = issue(&a, ASSISTANT_ID, "assistant").err().unwrap();
     assert_conflict(&error);
-    assert_witness(&Value::Object((*error.details).clone())["conflict"]);
     assert!(latest(&a, &subject(ASSISTANT_ID).unwrap(), GRANTED).unwrap().is_none());
+}
+
+#[test]
+fn malformed_local_owner_actor_grants_cannot_suspend_a_local_credential() {
+    let root = tempfile::tempdir().unwrap();
+    for invalid in ["profile", "grant_id", "principal", "issuer", "session_actor",
+        "minimal_read_mode", "disclosure_consent", "scopes", "credential_hash"] {
+        let state = member(root.path(), "alder");
+        let local = issue(&state, ASSISTANT_ID, "assistant").unwrap();
+        let mut source = grant_fields(SERVICE_ID, "service");
+        source[invalid] = Value::Null;
+        let malformed = raw_claim(&state, &subject(SERVICE_ID).unwrap(), GRANTED, OWNER, source);
+        assert_eq!(malformed.origin, local.origin);
+        assert_eq!(malformed.actor.as_deref(), Some(OWNER));
+        assert!(profile_conflict(&state, &local).unwrap().is_none(), "{invalid}");
+        assert!(authenticate_id(&state, ASSISTANT_ID).unwrap().is_some(), "{invalid}");
+        assert!(projection_with_witness(&state, &local).unwrap()["conflict"].is_null(), "{invalid}");
+    }
 }
 
 #[test]
@@ -388,9 +405,68 @@ fn admission_scan_uses_the_real_principal_index() {
     println!("external grant admission query plan:\n{}", plan.join("\n"));
     assert!(plan.iter().any(|step| step.contains("claims_assistant_v1_principal_index")),
         "principal admission must use its production index: {plan:?}");
-    assert!(plan.iter().any(|step| step.contains("revoked USING INDEX claims_subject_kind_accepted_index")),
-        "revocation must seek by subject rather than scan the principal: {plan:?}");
+    assert!(plan.iter().any(|step| step.contains("revoked USING INDEX claims_assistant_v1_transition_index")),
+        "revocation must seek by subject, kind, origin and actor rather than scan overlays: {plan:?}");
     assert!(plan.iter().any(|step| step.contains("claims_assistant_v1_principal_expiry_index")
         && step.contains("<expr>>?")),
         "expired grant bodies must be pruned by an index range: {plan:?}");
+}
+
+#[test]
+fn p1_policy_candidates_keep_read_acquisitions_bounded_with_expired_history() {
+    // Profiling is process-global, so isolate it using the profiler's own
+    // subprocess convention instead of mutating parallel tests' environment.
+    const CHILD: &str = "FRACTAL_POLICY_CANDIDATE_PROFILE_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact",
+                "api::client_v0::external_grants::conflict_tests::p1_policy_candidates_keep_read_acquisitions_bounded_with_expired_history",
+                "--nocapture"])
+            .env(CHILD, "1")
+            .env("ST3_PROFILE_DIR", directory.path())
+            .env("ST3_PROFILE_SLOW_MS", "0")
+            .status().unwrap();
+        assert!(status.success(), "isolated policy candidate regression failed");
+        let log = std::fs::read_to_string(directory.path().join("slow.jsonl")).unwrap();
+        let rows = log.lines().map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>();
+        let acquisitions = |label: &str| rows.iter().find(|row| row["label"] == label)
+            .unwrap()["read_acquisitions"].as_u64().unwrap();
+        let before = acquisitions("p1-policy-candidates-before");
+        let after = acquisitions("p1-policy-candidates-after");
+        assert!(before > 0, "the measured scan must acquire real read connections");
+        assert_eq!(after, before, "expired policy history and wrong-origin renewals must be pruned before per-grant reads");
+        return;
+    }
+    smallclaims::profile::init_from_env();
+    let root = tempfile::tempdir().unwrap();
+    let a = member(root.path(), "alder");
+    let b = member(root.path(), "birch");
+    let local = issue(&a, ASSISTANT_ID, "assistant").unwrap();
+    let measure = |label: &'static str| {
+        let operation = smallclaims::profile::Op::start(label, None).unwrap();
+        {
+            let _entered = operation.enter();
+            let candidates = candidate_grants(&a, PRINCIPAL, Some(100)).unwrap();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].0.id, local.id);
+        }
+        operation.finish();
+    };
+    measure("p1-policy-candidates-before");
+    for index in 0..128 {
+        let id = format!("{:024x}", index + 1000);
+        let subject = subject(&id).unwrap();
+        let mut expired = grant_fields(&id, "service");
+        expired["expires_at_unix_ms"] = json!(1);
+        raw_claim(&a, &subject, GRANTED, OWNER, expired.clone());
+        raw_claim(&a, &subject, POLICY, OWNER, expired.clone());
+        // A future policy from another origin must not pull this expired
+        // issuer grant back into the per-candidate Rust authority fold.
+        expired["expires_at_unix_ms"] = json!(u64::MAX);
+        raw_claim(&b, &subject, POLICY, OWNER, expired);
+    }
+    replicate(&b, &a);
+    measure("p1-policy-candidates-after");
 }

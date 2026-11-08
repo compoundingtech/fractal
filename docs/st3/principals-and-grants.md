@@ -116,8 +116,11 @@ issuance is disabled and service has no assistant route or disclosure rights.
 Several active grants of a principal's own profile are allowed. Admission refuses
 a known opposite-profile grant, including one replicated from another issuer.
 If disconnected issuers create opposite-profile grants, authentication suspends
-every conflicting grant with `grant-profile-conflict`; there is no winner.
-Inspect with `?witness=1` exposes a `conflict.grants` witness with both grant IDs, origins and
+every conflicting grant with HTTP 409 `grant-profile-conflict`; there is no winner.
+Bearer authentication and pairing return only that code and the fixed message
+`principal has active grants of opposite profiles; revoke one to clear the conflict`,
+without witness details. Only the daemon-configured owner can inspect with
+`?witness=1` to expose a `conflict.grants` witness with both grant IDs, origins and
 profiles. Once an owner's revoke replicates (or the opposite grant expires),
 the remaining grant works again on its authoritative issuer; replication never
 makes foreign credentials authenticate on another member.

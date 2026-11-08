@@ -1,19 +1,40 @@
 //! Opt-in, real HTTP/Unix daemon measurement (not a router oneshot or mocked daemon).
-//! Run this same test source on the named revisions, sequentially on the same host:
+//! Run this same test source on both revisions, sequentially on the same host, from each
+//! worktree root (cargo runs tests from crates/fractal, so pass absolute paths):
 //! ```sh
-//! ST_ADMISSION_VARIANT=baseline cargo test --release -p fractal --test integration daemon_cost::assistant_admission::authenticated_get_during_pairing -- --exact --nocapture --test-threads=1
-//! ST_ADMISSION_VARIANT=indexed cargo test --release -p fractal --test integration daemon_cost::assistant_admission::authenticated_get_during_pairing -- --exact --nocapture --test-threads=1
+//! # fixed head: full q39 scenario plus read counts
+//! ST3_PROFILE_DIR="$PWD/tmp/867-admission/fixed-profile" ST3_PROFILE_SLOW_MS=0 ST_ADMISSION_VARIANT=indexed ST_ADMISSION_FOREIGN_ACTIVE=3 ST_ADMISSION_REPORT="$PWD/tmp/867-admission/fixed.json" CARGO_TARGET_DIR="$PWD/tmp/867-admission/target" cargo test --release -p fractal --test integration daemon_cost::assistant_admission::authenticated_get_during_pairing -- --exact --nocapture --test-threads=1
+//! # origin/main: read counts only, without overlays its admission does not ignore
+//! ST3_PROFILE_DIR="$PWD/tmp/867-admission/main-profile" ST3_PROFILE_SLOW_MS=0 ST_ADMISSION_VARIANT=baseline ST_ADMISSION_READ_COUNTS_ONLY=1 ST_ADMISSION_WRONG_ORIGIN_OVERLAYS=0 ST_ADMISSION_REPORT="$PWD/tmp/867-admission/main.json" CARGO_TARGET_DIR="$PWD/tmp/867-admission/target" cargo test --release -p fractal --test integration daemon_cost::assistant_admission::authenticated_get_during_pairing -- --exact --nocapture --test-threads=1
 //! ```
-//! Copy only this file and its `mod assistant_admission;` registration to the A worktree.
-//! The baseline must actually be built from 98e550cb: dropping an index on PR3-B does not
-//! restore A's admission query. Use distinct CARGO_TARGET_DIR paths for the two worktrees:
-//! Cargo freshness can otherwise reuse the baseline's artifacts for the indexed checkout.
+//! For a like-for-like count, also run the fixed head with the origin/main command's
+//! ST_ADMISSION_READ_COUNTS_ONLY=1 ST_ADMISSION_WRONG_ORIGIN_OVERLAYS=0 settings
+//! (VARIANT=indexed there). Each revision has its own worktree, hence its own tmp/.
+//! Backport to origin/main (d477c67ad1), which lacks this file and three head APIs:
+//! 1. copy this file to crates/fractal/tests/daemon_cost/assistant_admission.rs and add
+//!    `mod assistant_admission;` to crates/fractal/tests/daemon_cost.rs;
+//! 2. replace the body of `mod revision_api` at the end of this file with the
+//!    origin/main body documented in its comment. Nothing else changes.
+//! On origin/main, only ST_ADMISSION_READ_COUNTS_ONLY=1, ST_ADMISSION_FOREIGN_ACTIVE=0 and
+//! ST_ADMISSION_WRONG_ORIGIN_OVERLAYS=0 are valid: it has no provenance check and does
+//! not ignore wrong-origin overlays, and its credential-hash admission has no index probe.
 //! ST_ADMISSION_HISTORY (default 10000) is expired grants PER principal; ST_ADMISSION_SAMPLES
 //! (default 200) is measured GET/completion pairs PER read mode. Setup and proof creation are
 //! outside timing. Each pair starts behind a barrier, with no sleeps, polling, retries or timers.
 //! ST_ADMISSION_FOREIGN_ACTIVE optionally adds verified same-profile active foreign grants
 //! (default 0; use 3 for the provenance-check scenario). ST_ADMISSION_REPORT optionally
 //! saves the complete JSON report. Hardware is observed from uname/lscpu, not inferred.
+//! Each expired grant has three still-expired POLICY renewals. Each active session has
+//! ST_ADMISSION_WRONG_ORIGIN_OVERLAYS (default 1000; 0 allowed) authenticated wrong-origin
+//! overlays, alternating POLICY and REVOKED; every measured read must still succeed.
+//! ST_ADMISSION_READ_COUNTS_ONLY=1 measures only read counts: it skips the index probe,
+//! candidate SQL, latency pairs, the q39 gate and the release-build requirement.
+//! Read counts require a fresh ST3_PROFILE_DIR and ST3_PROFILE_SLOW_MS=0. The existing
+//! profile `read_acquisitions` counts pooled read-connection/snapshot acquisitions per
+//! operation (not SQL rows), for direct authentication and one standalone GET per mode.
+//! SQL work uses existing smallclaims sqlite::work trace counters (statements/VM steps).
+//! Authentication work is thread-scoped; standalone GET work is process-global through the
+//! receipt flush and can include background daemon SQL. No production code changes.
 //! The index DDL timing is a synthetic startup migration probe on the populated disposable
 //! real store, not total daemon startup or cold-disk startup. Latencies use the real daemon's
 //! bound sockets, bearer middleware, grant lookup, projection and durable approval consumption.
@@ -31,16 +52,23 @@ use tokio::sync::Barrier;
 const OWNER: &str = "person/bench-operator";
 const NODE: &str = "benchmark-member";
 const GRANTED: &str = "custom.client.assistant.v1.granted";
+const POLICY: &str = "custom.client.assistant.v1.policy";
+const REVOKED: &str = "custom.client.assistant.v1.revoked";
+const POLICY_RENEWALS: usize = 3;
 const INDEX: &str = "claims_assistant_v1_principal_expiry_index";
 const CREATE_INDEX: &str = "CREATE INDEX claims_assistant_v1_principal_expiry_index ON claims(kind,COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'),json_extract(body,'$.fields.expires_at_unix_ms'))";
 const A_QUERY: &str = "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2";
-const INDEXED_QUERY: &str = api::client_v0::external_grants::admission_query_for_test();
+const INDEXED_QUERY: &str = revision_api::ADMISSION_QUERY;
 const PATH: &str = "/v1/client/assistant/summary";
 
 fn number(name: &str, default: usize) -> usize {
     let value = std::env::var(name).map_or(default, |s| s.parse().expect("positive integer setting"));
     assert!(value > 0, "{name} must be positive");
     value
+}
+
+fn count(name: &str, default: usize) -> usize {
+    std::env::var(name).map_or(default, |s| s.parse().expect("nonnegative integer setting"))
 }
 
 fn value(response: Value) -> Value {
@@ -103,14 +131,33 @@ fn explain(connection: &rusqlite::Connection, query: &str) -> Vec<String> {
     plan
 }
 
-fn p95(samples: &mut [f64]) -> f64 {
+fn p95(samples: &mut [f64]) -> Option<f64> {
     samples.sort_by(f64::total_cmp);
-    samples[(samples.len() * 95).div_ceil(100) - 1]
+    (!samples.is_empty()).then(|| samples[(samples.len() * 95).div_ceil(100) - 1])
+}
+
+fn sql_work(work: smallclaims::sqlite::work::SqliteWork) -> Value {
+    assert!(work.statements > 0, "SQL work instrumentation must be enabled");
+    json!({"statements":work.statements,"vm_steps":work.vm_steps,
+        "fullscan_steps":work.fullscan_steps,"sorts":work.sorts,"autoindex_rows":work.autoindex_rows})
+}
+
+fn profile_lines(path: &std::path::Path) -> usize {
+    std::fs::read_to_string(path).map_or(0, |log| log.lines().count())
+}
+
+/// The read acquisitions of the single `label` operation recorded after line `from`.
+fn profile_reads(path: &std::path::Path, from: usize, label: &str) -> u64 {
+    let log = std::fs::read_to_string(path).expect("profile slow.jsonl must be readable");
+    let rows = log.lines().skip(from).map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|row| row["label"] == label).collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1, "expected exactly one new {label} profile row; set ST3_PROFILE_SLOW_MS=0");
+    rows[0]["read_acquisitions"].as_u64().expect("profile rows report read_acquisitions")
 }
 
 // Real signed membership and replication, outside measured requests. Merely
 // copying origin text would not exercise the authentication provenance check.
-fn foreign_same_profile(store: &Store, anchor: Arc<smallclaims::fleet::MemberKey>, template: &Value, count: usize) {
+fn foreign_same_profile(store: &Store, anchor: Arc<smallclaims::fleet::MemberKey>, template: &Value, count: usize, active: &[(String, Value)], overlays: usize) {
     let fleet = super::super::daemon_bench::FLEET;
     store.pin_fleet_anchor(anchor.public()).unwrap();
     store.set_member_key(Some(anchor.clone())).unwrap();
@@ -150,9 +197,22 @@ fn foreign_same_profile(store: &Store, anchor: Arc<smallclaims::fleet::MemberKey
         }).unwrap();
         ids.push(grant.id);
     }
+    for (subject, template) in active {
+        for row in 0..overlays {
+            let mut fields = template.clone();
+            fields["expires_at_unix_ms"] = json!(1);
+            fields["policy_revision"] = json!(row + 100);
+            let overlay = peer.append_claim(&ClaimInput {
+                subject:subject.clone(), kind:if row % 2 == 0 { POLICY } else { REVOKED }.into(),
+                actor:Some(OWNER.into()), fields:serde_json::from_value(fields).unwrap(),
+                evidence:vec![], expected_subject:None, idempotency_key:None,
+            }).unwrap();
+            ids.push(overlay.id);
+        }
+    }
     sync(&peer, store);
     for id in ids {
-        assert!(store.claim_has_authenticated_member_writer(&id).unwrap(),
+        assert!(revision_api::verified_writer(store, &id),
             "the foreign-grant scenario must exercise verified provenance");
     }
 }
@@ -161,12 +221,19 @@ fn foreign_same_profile(store: &Store, anchor: Arc<smallclaims::fleet::MemberKey
 async fn authenticated_get_during_pairing() {
     let Ok(variant) = std::env::var("ST_ADMISSION_VARIANT") else { return };
     assert!(matches!(variant.as_str(), "baseline" | "indexed"));
-    assert!(fractal_daemon::test_support::optimized_build(), "use --release");
+    let counts_only = std::env::var_os("ST_ADMISSION_READ_COUNTS_ONLY").is_some();
+    assert!(counts_only || fractal_daemon::test_support::optimized_build(), "use --release");
+    assert_eq!(std::env::var("ST3_PROFILE_SLOW_MS").as_deref(), Ok("0"),
+        "set ST3_PROFILE_SLOW_MS=0 to capture every measured operation");
+    let profile_log = PathBuf::from(std::env::var_os("ST3_PROFILE_DIR")
+        .expect("set a fresh ST3_PROFILE_DIR for each revision")).join("slow.jsonl");
+    smallclaims::profile::init_from_env();
+    assert!(smallclaims::profile::enabled(), "profiling must initialize before Store::open");
     let indexed = variant == "indexed";
     let history = number("ST_ADMISSION_HISTORY", 10_000);
-    let samples = number("ST_ADMISSION_SAMPLES", 200);
-    let foreign_active: usize = std::env::var("ST_ADMISSION_FOREIGN_ACTIVE")
-        .map_or(0, |value| value.parse().expect("nonnegative foreign grant count"));
+    let samples = if counts_only { 0 } else { number("ST_ADMISSION_SAMPLES", 200) };
+    let foreign_active = count("ST_ADMISSION_FOREIGN_ACTIVE", 0);
+    let overlays = count("ST_ADMISSION_WRONG_ORIGIN_OVERLAYS", 1000);
     let root = tempfile::tempdir().unwrap();
     let database = root.path().join("admission.sqlite");
     let store = Arc::new(Store::open(&database, NODE).unwrap());
@@ -229,8 +296,13 @@ async fn authenticated_get_during_pairing() {
     // authorize a request. Grant history is deliberately nonempty for BOTH principals.
     let template_subject = format!("custom/client/assistant-v1-{}", sessions[0].1["grant"]["id"].as_str().unwrap().trim_start_matches("assistant-grant/"));
     let template = store.claims_for_subject_kind_at(&template_subject, GRANTED, None, true, 1).unwrap().claims.pop().unwrap();
-    if foreign_active > 0 {
-        foreign_same_profile(&store, node_key, &template.body["fields"], foreign_active);
+    let active = sessions.iter().map(|(_, paired)| {
+        let subject = format!("custom/client/assistant-v1-{}", paired["grant"]["id"].as_str().unwrap().trim_start_matches("assistant-grant/"));
+        let grant = store.claims_for_subject_kind_at(&subject, GRANTED, None, true, 1).unwrap().claims.pop().unwrap();
+        (subject, grant.body["fields"].clone())
+    }).collect::<Vec<_>>();
+    if foreign_active > 0 || overlays > 0 {
+        foreign_same_profile(&store, node_key, &template.body["fields"], foreign_active, &active, overlays);
     }
     let fixture_store = store.clone();
     tokio::task::spawn_blocking(move || {
@@ -243,25 +315,37 @@ async fn authenticated_get_during_pairing() {
                 fields["session_actor"] = json!(format!("{principal}/session/assistant-grant/{id}"));
                 fields["expires_at_unix_ms"] = json!(1);
                 fields["credential_hash"] = json!(hex::encode(ring::digest::digest(&ring::digest::SHA256, id.as_bytes()).as_ref()));
-                fixture_store.append_claim(&ClaimInput { subject:format!("custom/client/assistant-v1-{id}"), kind:GRANTED.into(),
-                    actor:Some(OWNER.into()), fields:serde_json::from_value(fields).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+                let subject = format!("custom/client/assistant-v1-{id}");
+                fixture_store.append_claim(&ClaimInput { subject:subject.clone(), kind:GRANTED.into(),
+                    actor:Some(OWNER.into()), fields:serde_json::from_value(fields.clone()).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+                for revision in 0..POLICY_RENEWALS {
+                    fields["policy_revision"] = json!(revision + 2);
+                    fields["expires_at_unix_ms"] = json!(revision + 2);
+                    fixture_store.append_claim(&ClaimInput { subject:subject.clone(), kind:POLICY.into(),
+                        actor:Some(OWNER.into()), fields:serde_json::from_value(fields.clone()).unwrap(),
+                        evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
+                }
             }
         }
     }).await.unwrap();
     let connection = rusqlite::Connection::open(&database).unwrap();
     let query = if indexed { INDEXED_QUERY } else { A_QUERY };
-    let index_exists: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)", [INDEX], |r| r.get(0)).unwrap();
-    assert_eq!(index_exists, indexed, "build baseline on 98e550cb; indexed on PR3-B");
-    let (before, after, build_ms) = if indexed {
-        connection.execute_batch("DROP INDEX claims_assistant_v1_principal_expiry_index").unwrap();
-        let before = explain(&connection, query);
-        let started = Instant::now();
-        connection.execute_batch(CREATE_INDEX).unwrap();
-        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-        let after = explain(&connection, query);
-        assert!(after.iter().any(|line| line.contains(INDEX)), "{after:?}");
-        (before, after, Some(elapsed))
-    } else { (explain(&connection, query), Vec::new(), None) };
+    let (before, after, build_ms) = if counts_only {
+        (Vec::new(), Vec::new(), None)
+    } else {
+        let index_exists: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)", [INDEX], |r| r.get(0)).unwrap();
+        assert_eq!(index_exists, indexed, "build baseline on 98e550cb; indexed on PR3-B");
+        if indexed {
+            connection.execute_batch("DROP INDEX claims_assistant_v1_principal_expiry_index").unwrap();
+            let before = explain(&connection, query);
+            let started = Instant::now();
+            connection.execute_batch(CREATE_INDEX).unwrap();
+            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+            let after = explain(&connection, query);
+            assert!(after.iter().any(|line| line.contains(INDEX)), "{after:?}");
+            (before, after, Some(elapsed))
+        } else { (explain(&connection, query), Vec::new(), None) }
+    };
     let total_rows: u64 = connection.query_row("SELECT count(*) FROM claims", [], |r| r.get(0)).unwrap();
     let mut principal_rows = BTreeMap::new();
     for principal in ["assistant/chatgpt", "assistant/mcp"] {
@@ -271,28 +355,40 @@ async fn authenticated_get_during_pairing() {
     // Isolate indexed SQL from claim/policy loading, provenance and locks.
     // Diagnostic work stays outside HTTP samples; no request-path cache.
     let mut diagnostics = Vec::new();
-    if indexed { for _ in 0..8 {
-        let started = Instant::now();
-        let candidate_ids = connection.prepare(query).unwrap().query_map(rusqlite::params![
-            GRANTED,"assistant/chatgpt","custom.client.assistant.v1.revoked","custom.client.assistant.v1.policy",
-            u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap(),NODE
-        ], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-        let candidate_sql_ms = started.elapsed().as_secs_f64() * 1000.0;
+    for _ in 0..8 {
+        let candidate = (indexed && !counts_only).then(|| {
+            let started = Instant::now();
+            let candidate_ids = connection.prepare(query).unwrap().query_map(rusqlite::params![
+                GRANTED,"assistant/chatgpt","custom.client.assistant.v1.revoked","custom.client.assistant.v1.policy",
+                u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap(),NODE
+            ], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+            (candidate_ids.len(), started.elapsed().as_secs_f64() * 1000.0)
+        });
         let credential = sessions[0].1["credential"].as_str().unwrap();
         let digest = hex::encode(ring::digest::digest(&ring::digest::SHA256, credential.as_bytes()).as_ref());
+        let profile_from = profile_lines(&profile_log);
         let started = Instant::now();
+        let authentication_profile = smallclaims::profile::Op::start("admission-bench/authenticate", None).unwrap();
+        let entered = authentication_profile.enter();
+        let work_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
         assert!(api::client_v0::external_grants::authenticate(&state, &digest, "http").unwrap().is_some());
-        diagnostics.push(json!({"candidate_count":candidate_ids.len(),"candidate_sql_ms":candidate_sql_ms,
-            "direct_auth_ms":started.elapsed().as_secs_f64()*1000.0}));
-    }}
+        let authentication_sql_work = sql_work(work_scope.finish());
+        drop(entered);
+        authentication_profile.finish();
+        let direct_auth_ms = started.elapsed().as_secs_f64()*1000.0;
+        let authentication_read_acquisitions = profile_reads(&profile_log, profile_from, "admission-bench/authenticate");
+        diagnostics.push(json!({"candidate_count":candidate.map(|(count, _)| count),
+            "candidate_sql_ms":candidate.map(|(_, ms)| ms),
+            "direct_auth_ms":direct_auth_ms,"authentication_sql_work":authentication_sql_work,
+            "authentication_read_acquisitions":authentication_read_acquisitions}));
+    }
     let inspected = store.claims_for_subject_kind_at(&template_subject, GRANTED, None, true, 1).unwrap().claims.pop().unwrap();
     let started = Instant::now();
     api::client_v0::external_grants::projection(&state, &inspected).unwrap();
     let legacy_projection_ms = started.elapsed().as_secs_f64()*1000.0;
-    let started = Instant::now();
-    api::client_v0::external_grants::projection_with_witness(&state, &inspected).unwrap();
-    let witness_projection_ms = started.elapsed().as_secs_f64()*1000.0;
-    println!("ADMISSION_DIAGNOSTICS {}", json!({"plan":explain(&connection, query),"samples":diagnostics,
+    let witness_projection_ms = revision_api::witness_projection_ms(&state, &inspected);
+    let plan = if counts_only { Vec::new() } else { explain(&connection, query) };
+    println!("ADMISSION_DIAGNOSTICS {}", json!({"plan":plan,"samples":diagnostics,
         "legacy_projection_ms":legacy_projection_ms,"witness_projection_ms":witness_projection_ms}));
     drop(connection);
     api::wait_published_lists_at_least(&store, store.index().unwrap()).await.unwrap();
@@ -306,6 +402,23 @@ async fn authenticated_get_during_pairing() {
         let warm = if mode == "approval-once" { warm.header(HEADER, proof(&paired, &signer, samples + 1)) } else { warm };
         let response = warm.send().await.unwrap();
         assert!(response.status().is_success(), "warm GET: {}", response.text().await.unwrap());
+        // A separate unpaired read work window avoids attributing pairing completion
+        // SQL to the GET. Global counters can still include background daemon work.
+        state.assistant_receipts.flush().await.unwrap();
+        api::wait_published_lists_at_least(&store, store.index().unwrap()).await.unwrap();
+        let measured_read = http.get(format!("{base}{PATH}")).bearer_auth(credential);
+        let measured_read = if mode == "approval-once" {
+            measured_read.header(HEADER, proof(&paired, &signer, samples + 2))
+        } else { measured_read };
+        let before_read = smallclaims::sqlite::work::total();
+        let profile_from = profile_lines(&profile_log);
+        let response = measured_read.send().await.unwrap();
+        let status = response.status();
+        let body = response.bytes().await.unwrap();
+        state.assistant_receipts.flush().await.unwrap();
+        let standalone_read_sql_work = sql_work(smallclaims::sqlite::work::total() - before_read);
+        assert!(status.is_success(), "standalone GET {status}: {}", String::from_utf8_lossy(&body));
+        let standalone_read_acquisitions = profile_reads(&profile_log, profile_from, &format!("GET {PATH}"));
         for sequence in 0..samples {
             let challenge = begin(&owner, mode).await;
             let get = http.get(format!("{base}{PATH}")).bearer_auth(credential);
@@ -338,7 +451,10 @@ async fn authenticated_get_during_pairing() {
         let get_p95 = p95(&mut get_ms);
         let completion_p95 = p95(&mut completion_ms);
         measurements.push(json!({"mode":mode,"get_samples":get_ms.len(),"completion_samples":completion_ms.len(),
-            "get_p95_ms":get_p95,"completion_p95_ms":completion_p95,"q39_budget_ms":100,"q39_pass":get_p95 <= 100.0,
+            "get_p95_ms":get_p95,"completion_p95_ms":completion_p95,"q39_budget_ms":100,
+            "q39_pass":get_p95.map(|p95| p95 <= 100.0),
+            "standalone_read_sql_work":standalone_read_sql_work,
+            "standalone_read_acquisitions":standalone_read_acquisitions,
             "get_ms":get_ms,"completion_ms":completion_ms}));
     }
     let hardware = |program: &str, args: &[&str]| {
@@ -348,11 +464,19 @@ async fn authenticated_get_during_pairing() {
     };
     let final_connection = rusqlite::Connection::open(&database).unwrap();
     let final_rows: u64 = final_connection.query_row("SELECT count(*) FROM claims", [], |r| r.get(0)).unwrap();
-    let report = json!({"variant":variant,"baseline_revision":"98e550cb75", "hardware_uname":hardware("uname", &["-a"]),
+    let report = json!({"variant":variant,"read_counts_only":counts_only,"revision_api":revision_api::REVISION,
+        "hardware_uname":hardware("uname", &["-a"]),
         "hardware_lscpu":hardware("lscpu", &["-J"]),"hardware_hostname":hardware("hostname", &[]),
         "host_description":"Observed local benchmark host; no prescribed hardware identity",
         "fixture_person_ids":[OWNER],"verified_foreign_same_profile_active_grants":foreign_active,
         "history_grants_per_principal":history,"initial_total_claim_rows":total_rows,"initial_granted_rows_by_principal":principal_rows,
+        "policy_renewals_per_expired_grant":POLICY_RENEWALS,
+        "wrong_origin_overlays_per_active_grant":overlays,
+        "wrong_origin_overlay_active_grants":active.len(),
+        "sql_work_scope":{"authentication":"current-thread completed traced SQL statements",
+            "standalone_read":"process-global, unpaired HTTP GET through receipt flush; may include background daemon SQL",
+            "read_count_limit":"statement/VM work counters, not logical rows read or storage IO",
+            "read_acquisitions":"existing profile read_acquisitions: pooled read-connection/snapshot acquisitions per operation"},
         "final_total_claim_rows":final_rows,"admission_query":query,
         "conflict_fold_diagnostics":diagnostics,
         "legacy_projection_ms":legacy_projection_ms,"witness_projection_ms":witness_projection_ms,
@@ -362,7 +486,7 @@ async fn authenticated_get_during_pairing() {
     if let Some(path) = std::env::var_os("ST_ADMISSION_REPORT") { std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap(); }
     local.abort();
     fabric.abort();
-    if indexed {
+    if indexed && !counts_only {
         assert!(report["measurements"].as_array().unwrap().iter().all(|row| row["q39_pass"] == true), "q39: authenticated GET p95 must be <=100ms; see report");
     }
 }
@@ -467,5 +591,31 @@ fn synthetic_large_store_index_build() {
     println!("ADMISSION_INDEX_BUILD {}", serde_json::to_string_pretty(&report).unwrap());
     if let Some(path) = std::env::var_os("ST_ADMISSION_INDEX_REPORT") {
         std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+}
+
+/// The only head-specific API surface. To backport the harness to origin/main
+/// (d477c67ad1), replace this module's body with exactly:
+/// ```ignore
+/// use super::*;
+/// pub const REVISION: &str = "origin/main";
+/// // origin/main admission is a credential-hash lookup with no candidate query.
+/// pub const ADMISSION_QUERY: &str = A_QUERY;
+/// pub fn verified_writer(_: &Store, _: &str) -> bool {
+///     panic!("origin/main has no provenance check; use FOREIGN_ACTIVE=0 and WRONG_ORIGIN_OVERLAYS=0")
+/// }
+/// pub fn witness_projection_ms(_: &AppState, _: &fractal_daemon::model::ClaimRecord) -> Option<f64> { None }
+/// ```
+mod revision_api {
+    use super::*;
+    pub const REVISION: &str = "fixed-head";
+    pub const ADMISSION_QUERY: &str = api::client_v0::external_grants::admission_query_for_test();
+    pub fn verified_writer(store: &Store, id: &str) -> bool {
+        store.claim_has_authenticated_member_writer(id).unwrap()
+    }
+    pub fn witness_projection_ms(state: &AppState, inspected: &fractal_daemon::model::ClaimRecord) -> Option<f64> {
+        let started = Instant::now();
+        api::client_v0::external_grants::projection_with_witness(state, inspected).unwrap();
+        Some(started.elapsed().as_secs_f64() * 1000.0)
     }
 }
