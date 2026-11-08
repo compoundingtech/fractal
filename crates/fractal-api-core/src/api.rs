@@ -2732,11 +2732,11 @@ pub fn client_work_resources(
         // that chooses its next work and wake.
         let seat_ready = match actor {
             Some(actor) => {
-                let seat = if actor.contains('/') {
-                    actor.to_owned()
-                } else {
-                    format!("agent/{actor}")
-                };
+                // Queue lookup uses the same canonical actor as the shared seat selector,
+                // including when persisted steps still use a legacy spelling.
+                let actor = smallclaims::store::normalize_actor(actor, "agent");
+                let seat = fractal_schema::canonical_agent_actor(&actor)
+                    .unwrap_or(std::borrow::Cow::Borrowed(&actor));
                 let order = store.seat_run_order(&seat)?;
                 let steps = work
                     .iter()
@@ -2965,7 +2965,7 @@ fn client_work_values(
                 "definition_id": work.definition_hash,
                 "path": work.step,
                 "title": work.title,
-                "assigned_to": work.assigned_to,
+                "assigned_to": work.assigned_to.as_deref().and_then(fractal_schema::canonical_agent_actor),
                 "last_progress": work.progress_summary,
                 "progress_at": work.progress_at_unix_ms.map(client_timestamp),
                 "state": state,
@@ -2973,7 +2973,7 @@ fn client_work_values(
                 "gate_kind": gate_kind,
                 "attempt": work.attempt,
                 "readiness_epoch": work.readiness_epoch,
-                "claimant": work.claimant,
+                "claimant": work.claimant.as_deref().and_then(fractal_schema::canonical_agent_actor),
                 "claim_incarnation": work.claim_incarnation,
                 "submitted_incarnation": work.submitted_incarnation,
                 "claim_expires_at_unix_ms": work.claim_expires_at_unix_ms,

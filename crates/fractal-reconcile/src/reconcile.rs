@@ -6116,7 +6116,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // The last durable automatic wake records the head already announced;
         // using its subject in the key also permits returning to an earlier head.
         let steps = work.iter().map(crate::seat_queue::SeatStep::from).collect::<Vec<_>>();
-        let selection = crate::seat_queue::select(agent, &steps, &run_order);
+        let selection = crate::seat_queue::select_literal(agent, &steps, &run_order);
         let last_wake = messages.iter().filter(|message| {
             !crate::silent::message_tag_values(
                 message.tags.iter().map(String::as_str), "wake-source:",
@@ -20116,11 +20116,6 @@ fn work_wake_deadline(
         })
         .collect::<BTreeSet<_>>();
     work.iter()
-        .filter(|step| {
-            step.assigned_to
-                .as_ref()
-                .is_some_and(|assignee| local_agents.contains(assignee))
-        })
         .filter(|step| wakes.contains(step.subject.as_str()))
         .filter_map(|step| {
             let wake = step.wake.as_ref()?;
@@ -20186,7 +20181,7 @@ fn seat_chooses_between_runs(agent: &str, work: &[StepRunView]) -> bool {
         .iter()
         .map(crate::seat_queue::SeatStep::from)
         .collect::<Vec<_>>();
-    let selection = crate::seat_queue::select(agent, &steps, &[]);
+    let selection = crate::seat_queue::select_literal(agent, &steps, &[]);
     if !selection.held.is_empty() {
         return false;
     }
@@ -20209,7 +20204,7 @@ fn next_work_wake_for_agent<'a>(
         .iter()
         .map(crate::seat_queue::SeatStep::from)
         .collect::<Vec<_>>();
-    crate::seat_queue::select(agent, &steps, run_order).wake()
+    crate::seat_queue::select_literal(agent, &steps, run_order).wake()
 }
 
 /// Inherited work is woken only after an early parent submission. A turn that is still working can
@@ -20225,7 +20220,7 @@ fn defers_inherited_work_wake(
 fn nested_under_work(step: &StepRunView, work: &[StepRunView]) -> bool {
     let nested = crate::seat_queue::SeatStep::from(step);
     work.iter().any(|ancestor| {
-        crate::seat_queue::nests_under(&crate::seat_queue::SeatStep::from(ancestor), &nested)
+        crate::seat_queue::nests_under_literal(&crate::seat_queue::SeatStep::from(ancestor), &nested)
     })
 }
 
@@ -23786,7 +23781,7 @@ agent "worker" { workspace "/tmp"; command "true" }
 mission "nested-wake" state="ready" {
   goal "Complete nested work."
   step "outer" {
-    assigned-to "agent/worker"
+    assigned-to "agent/node.worker"
     mission "work" {
       goal "Complete the child work."
       step "first" { }
@@ -24520,7 +24515,7 @@ version 2
     goal "Complete mission product."
     completion { when "all-steps-exhausted" }
     step "publish" {
-      assigned-to "agent/worker"
+      assigned-to "agent/node.worker"
         produces {
           resource "mission-run/${ST_MISSION_RUN}/change" {
             kind "custom.st3.product-test"
@@ -24600,7 +24595,7 @@ version 2
             .append_claim(&ClaimInput {
                 subject: format!("resource/mission-run/{}/change", run.id),
                 kind: "resource.observed".into(),
-                actor: Some("agent/worker".into()),
+                actor: Some("agent/node.worker".into()),
                 fields: BTreeMap::from([
                     (
                         "kind".into(),
@@ -24628,6 +24623,80 @@ version 2
     }
 
     #[test]
+    fn stored_mission_declarations_preserve_legacy_invalid_assignee_normalization() {
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        let source = r#"version 2
+mission "legacy-declarations" state="ready" {
+  goal "Materialize declarations stored before canonical agent IDs."
+  step "wait" { agentless }
+}
+"#;
+        let declarations = r#"version 2
+mission "legacy-child" state="ready" {
+  goal "Preserve historical assignee normalization."
+  step "empty-agent-name" { assigned-to "agent/" }
+  step "whitespace" { assigned-to "example/worker name" }
+}
+"#;
+        // Persist the historical declaration source without admitting it through today's parser.
+        let mut intent = parse_intent(source, "node").unwrap();
+        intent.missions.get_mut("legacy-declarations").unwrap().declarations_kdl =
+            Some(declarations.into());
+        let planned = store
+            .mission(
+                &intent,
+                crate::model::IntentInput {
+                    kdl: source.into(),
+                    source_name: None,
+                },
+            )
+            .unwrap();
+        store
+            .apply(&intent, &planned.subject_tokens, "publish-legacy-declarations")
+            .unwrap();
+        let mission = store
+            .mission_spec("legacy-declarations", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(mission.declarations_kdl.as_deref(), Some(declarations));
+        let run = store
+            .create_mission_run(&crate::model::MissionRunRequest {
+                mission: "legacy-declarations".into(),
+                revision: None,
+                workspace: "/tmp".into(),
+                requester: Some("person/test".into()),
+                mode: Some("run".into()),
+                inputs: BTreeMap::new(),
+                idempotency_key: "run-legacy-declarations".into(),
+            })
+            .unwrap();
+        let reconciler = Reconciler::new(
+            store.clone(),
+            Arc::new(FakeRuntime::default()),
+            "node".into(),
+            Arc::new(Notify::new()),
+        );
+        assert!(
+            reconciler
+                .materialize_mission_declarations(&run, &mission, None)
+                .unwrap()
+        );
+        let nested = store.mission_spec("legacy-child", None).unwrap().unwrap();
+        assert_eq!(
+            nested.steps["empty-agent-name"].work_selector,
+            Some(WorkSelector::Assigned {
+                agent: "agent/node.".into(),
+            })
+        );
+        assert_eq!(
+            nested.steps["whitespace"].work_selector,
+            Some(WorkSelector::Assigned {
+                agent: "example/worker name".into(),
+            })
+        );
+    }
+
+    #[test]
     fn a_step_uses_the_exact_mission_revision_produced_by_an_earlier_step() {
         let store = Arc::new(Store::open_memory("node").unwrap());
         let bootstrap = r#"
@@ -24638,11 +24707,11 @@ version 2
     goal "Complete mission bootstrap."
     completion { when "all-steps-exhausted" }
     step "compile" {
-      assigned-to "agent/planner"
+      assigned-to "agent/node.planner"
       produces-mission "project/work"
     }
     step "execute" {
-      assigned-to "agent/planner"
+      assigned-to "agent/node.planner"
       depends-on { step "compile" completed }
       uses-mission output-of="compile"
     }
@@ -24879,7 +24948,7 @@ version 2
 
   mission "assignment" state="ready" {
     goal "Complete mission assignment."
-    step "work" { assigned-to "agent/worker" }
+    step "work" { assigned-to "agent/node.worker" }
   }
 
 "#,
@@ -29460,7 +29529,7 @@ mission "proof" state="ready" {{
   goal "Land the change."
   completion {{ when "all-steps-exhausted" }}
   step "land" {{
-    assigned-to "agent/worker"
+    assigned-to "agent/node.worker"
     goal "Land the change on main."
     gate "the suite passes on main" {{
       exec {gate:?}
@@ -30470,7 +30539,7 @@ mission "publish" state="ready" {
             r#"version 2
 mission "asks" state="ready" {
   goal "Ask a person for a decision while working."
-  step "work" { assigned-to "agent/asker" }
+  step "work" { assigned-to "agent/node.asker" }
 }
 "#,
             "asks-mission",
@@ -34661,7 +34730,7 @@ mission "absent-stop" state="ready" {
               mission "release" state="ready" {
                 goal "Complete mission release."
                 step "publish" {
-                  assigned-to "agent/worker"
+                  assigned-to "agent/node.worker"
                   depends-on {
                     field "decision" "resource/approval" "is" "approve"
                   }
@@ -49033,6 +49102,17 @@ mission "ios-proof-blocked" state="ready" {
             updated_at_unix_ms: 1,
             person_answers: Vec::new(),
         };
+        let legacy = step("step-run/run-1/legacy", "legacy", "node/worker");
+        assert_eq!(
+            next_work_wake_for_agent("agent/node/worker", std::slice::from_ref(&legacy), &[]),
+            Some(legacy.subject.as_str()),
+            "a legacy-only ready row must wake its canonical seat"
+        );
+        assert_eq!(
+            next_work_wake_for_agent("daemon/node/worker", std::slice::from_ref(&legacy), &[]),
+            None,
+            "recognized non-agent kinds remain distinct"
+        );
         let parent = step("step-run/run-1/build", "build", "agent/builder");
         let inherited = step(
             "step-run/run-1/build/work/inspect",
@@ -49198,6 +49278,18 @@ mission "ios-proof-blocked" state="ready" {
             updated_at_unix_ms: 10,
             person_answers: Vec::new(),
         };
+        let mut legacy = first.clone();
+        legacy.assigned_to = Some("node/worker".into());
+        assert_eq!(
+            work_wake_deadline(
+                &[legacy],
+                &BTreeSet::from(["agent/node/worker".into()]),
+                &BTreeMap::new(),
+                2_000,
+            ),
+            Some(1_000 + WORK_WAKE_RETRY_MS),
+            "a legacy-only ready row keeps its canonical seat's wake deadline"
+        );
         let mut second = first.clone();
         second.subject = "step-run/newer/work".into();
         second.run = "mission-run/newer".into();

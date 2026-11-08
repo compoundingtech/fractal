@@ -13,6 +13,37 @@ use serde::{Deserialize, Serialize};
 
 pub const MOVED_CLAIM: &str = "agent.queue.moved";
 
+/// Compare work actors without changing persisted rows or conflating recognized actor kinds.
+pub fn work_actor_matches(candidate: Option<&str>, actor: &str) -> bool {
+    let Some(candidate) = candidate.and_then(fractal_schema::canonical_agent_actor) else {
+        return false;
+    };
+    fractal_schema::canonical_agent_actor(actor).as_deref() == Some(candidate.as_ref())
+}
+
+#[derive(Clone, Copy)]
+enum ActorMatching {
+    Literal,
+    Aliases,
+}
+
+impl ActorMatching {
+    fn matches(self, candidate: Option<&str>, actor: &str) -> bool {
+        match self {
+            Self::Literal => candidate == Some(actor),
+            Self::Aliases => work_actor_matches(candidate, actor),
+        }
+    }
+
+    fn same(self, left: Option<&str>, right: Option<&str>) -> bool {
+        match (left, right) {
+            (Some(left), Some(right)) => self.matches(Some(left), right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Placement {
@@ -218,12 +249,26 @@ impl<'a> SeatSelection<'a> {
 /// place either: a ready step whose claim by this seat a revision dropped comes
 /// first until the seat claims it again.
 pub fn select<'a>(agent: &str, steps: &[SeatStep<'a>], run_order: &[String]) -> SeatSelection<'a> {
+    select_with_matching(agent, steps, run_order, ActorMatching::Aliases)
+}
+
+/// Select mutation-admission work using the exact persisted actor spellings.
+pub fn select_literal<'a>(agent: &str, steps: &[SeatStep<'a>], run_order: &[String]) -> SeatSelection<'a> {
+    select_with_matching(agent, steps, run_order, ActorMatching::Literal)
+}
+
+fn select_with_matching<'a>(
+    agent: &str,
+    steps: &[SeatStep<'a>],
+    run_order: &[String],
+    matching: ActorMatching,
+) -> SeatSelection<'a> {
     let held = steps
         .iter()
         .filter(|step| {
             matches!(step.status, "claimed" | "working" | "verifying")
-                && (step.claimant == Some(agent) || step.assignee == Some(agent))
-                && !submitted_with_ready_nested_work(step, steps)
+                && (matching.matches(step.claimant, agent) || matching.matches(step.assignee, agent))
+                && !submitted_with_ready_nested_work_matching(step, steps, matching)
         })
         .map(|step| step.subject)
         .collect();
@@ -237,11 +282,13 @@ pub fn select<'a>(agent: &str, steps: &[SeatStep<'a>], run_order: &[String]) -> 
         .iter()
         .filter(|step| {
             step.status == "ready"
-                && step.assignee == Some(agent)
-                && !reached_through_parent(step, steps)
+                && matching.matches(step.assignee, agent)
+                && !steps.iter().any(|candidate| {
+                    nests_under_matching(candidate, step, matching) && candidate.status != "verifying"
+                })
         })
         .collect::<Vec<_>>();
-    let waits_its_turn = |step: &SeatStep<'_>| step.carried_claimant != Some(agent);
+    let waits_its_turn = |step: &SeatStep<'_>| !matching.matches(step.carried_claimant, agent);
     ready.sort_by(|left, right| {
         waits_its_turn(left)
             .cmp(&waits_its_turn(right))
@@ -267,9 +314,21 @@ pub fn reached_through_parent(step: &SeatStep<'_>, steps: &[SeatStep<'_>]) -> bo
 /// True when `step` is nested under the listed `ancestor` in the same run and
 /// both have the same selector.
 pub fn nests_under(ancestor: &SeatStep<'_>, step: &SeatStep<'_>) -> bool {
+    nests_under_matching(ancestor, step, ActorMatching::Aliases)
+}
+
+/// Compare nested selectors for mutation admission without merging actor aliases.
+pub fn nests_under_literal(ancestor: &SeatStep<'_>, step: &SeatStep<'_>) -> bool {
+    nests_under_matching(ancestor, step, ActorMatching::Literal)
+}
+
+fn nests_under_matching(ancestor: &SeatStep<'_>, step: &SeatStep<'_>, matching: ActorMatching) -> bool {
     ancestor.run == step.run
-        && ancestor.assignee == step.assignee
-        && ancestor.available_to == step.available_to
+        && matching.same(ancestor.assignee, step.assignee)
+        && ancestor.available_to.len() == step.available_to.len()
+        && ancestor.available_to.iter().zip(step.available_to).all(|(left, right)| {
+            matching.matches(Some(left), right)
+        })
         && ancestor.step.len() < step.step.len()
         && step.step.starts_with(ancestor.step)
         && step.step.as_bytes().get(ancestor.step.len()) == Some(&b'/')
@@ -280,10 +339,18 @@ pub fn nests_under(ancestor: &SeatStep<'_>, step: &SeatStep<'_>) -> bool {
 /// inherited parent message was consumed, and the seat looks occupied. Such a
 /// parent frees the seat so the ready nested step gets its own wake.
 pub fn submitted_with_ready_nested_work(parent: &SeatStep<'_>, steps: &[SeatStep<'_>]) -> bool {
+    submitted_with_ready_nested_work_matching(parent, steps, ActorMatching::Aliases)
+}
+
+fn submitted_with_ready_nested_work_matching(
+    parent: &SeatStep<'_>,
+    steps: &[SeatStep<'_>],
+    matching: ActorMatching,
+) -> bool {
     parent.status == "verifying"
         && steps
             .iter()
-            .any(|step| step.status == "ready" && nests_under(parent, step))
+            .any(|step| step.status == "ready" && nests_under_matching(parent, step, matching))
 }
 
 #[cfg(test)]
@@ -428,6 +495,49 @@ mod tests {
                 live_order(&joins),
                 "case {case}: joins {joins:?}, moves {moves:?}, live {live:?}"
             );
+        }
+    }
+
+    #[test]
+    fn mixed_actor_spellings_share_ready_held_carried_and_nested_selection() {
+        let available = vec!["node/worker".to_owned()];
+        let canonical_available = vec!["agent/node/worker".to_owned()];
+        let first = SeatStep {
+            subject: "step-run/first/build", run: "mission-run/first", step: "build",
+            status: "ready", assignee: Some("node/worker"), claimant: None,
+            available_to: &available, created_at_unix_ms: 10, carried_claimant: None,
+        };
+        let second = SeatStep {
+            subject: "step-run/second/build", run: "mission-run/second",
+            assignee: Some("agent/node/worker"), created_at_unix_ms: 20, ..first
+        };
+        let order = vec![first.run.to_owned(), second.run.to_owned()];
+        assert_eq!(
+            select_literal("agent/node/worker", &[second, first], &order).ready,
+            [second.subject],
+        );
+        for actor in ["node/worker", "agent/node/worker"] {
+            assert_eq!(select(actor, &[second, first], &order).ready, [first.subject, second.subject]);
+            let carried = SeatStep { carried_claimant: Some("node/worker"), ..second };
+            assert_eq!(select(actor, &[first, carried], &order).next(), Some(second.subject));
+            let held = SeatStep { status: "working", claimant: Some("node/worker"), ..second };
+            assert_eq!(select(actor, &[first, held], &order).held, [second.subject]);
+        }
+        let nested = SeatStep {
+            subject: "step-run/first/build/check", step: "build/check",
+            assignee: Some("agent/node/worker"), available_to: &canonical_available, ..first
+        };
+        assert!(reached_through_parent(&nested, &[first, nested]));
+        assert_eq!(
+            select_literal("agent/node/worker", &[first, nested], &order).ready,
+            [nested.subject],
+            "an alias-assigned parent must not hide literally assigned nested work",
+        );
+        let submitted = SeatStep { status: "verifying", ..first };
+        assert!(submitted_with_ready_nested_work(&submitted, &[submitted, nested]));
+        for other in ["daemon/node/worker", "person/test", "host/node/worker"] {
+            assert!(select(other, &[first, second], &order).ready.is_empty());
+            assert!(!nests_under(&SeatStep { assignee: Some(other), ..first }, &nested));
         }
     }
 
