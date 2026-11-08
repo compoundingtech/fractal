@@ -112,7 +112,7 @@ the PATH of the terminal running `fractal apply`, nor just launchd's or systemd'
 service environment. Agent `env` entries overlay that environment. Fractal also
 prepends its own executable directory so its wrapper can be found.
 
-Managed `omp`, `claude`, and `codex` launches read the absolute path in
+Daemon-managed `omp`, `claude`, and `codex` launches read the absolute path in
 `AGENT_RUNTIME_PROFILE`, or
 `$HOME/.local/state/nix/profiles/coding-agent-runtime/share/coding-agents/profile.json`
 when that variable is unset. Each launch reads the current profile through its
@@ -125,6 +125,16 @@ the driver's own PATH is unchanged. The profile publisher selects the directory;
 Fractal does not duplicate persona-to-path rules. A missing persona entry,
 `harnessBin`, or executable wrapper refuses launch, naming the missing key/path.
 There is no fallback to a raw provider or to a different persona.
+Only a confirmed missing Agent Spec permits the environment/default persona
+fallback; authorization, transport, malformed-response, and server errors refuse
+managed launch. Prelaunch contract capture measures the selected wrapper, not a
+raw executable from login PATH. Driver re-exec uses the managed wrapper for helper
+commands while adopting, without restarting the running provider.
+
+The daemon marks managed typed-driver invocations explicitly. Person-owned
+terminal invocations such as
+`fractal driver claude --subject agent/example -- /native/claude`
+are not marked and retain their native executable and PATH.
 
 Before upgrading a host to this launch contract, publish and activate a runtime
 profile containing `personas.launch.<persona>.harnessBin` for its managed seats.

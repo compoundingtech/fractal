@@ -13,20 +13,7 @@ static PROVIDER_PATH: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceL
 /// Select the managed executable, including when argv names a raw provider by absolute path.
 /// Other harnesses retain their own launch contracts.
 pub fn resolve(harness: &str, argv: &mut [String], spec: &serde_json::Value) -> Result<()> {
-    if !matches!(harness, "omp" | "claude" | "codex") {
-        return Ok(());
-    }
-    let profile = profile_path()?;
-    let environment_persona = std::env::var("AGENT_PERSONA")
-        .map(Some)
-        .or_else(|error| match error {
-            std::env::VarError::NotPresent => Ok(None),
-            error => Err(error),
-        }).context("read AGENT_PERSONA")?;
-    let persona = selected_persona(spec, environment_persona.as_deref())?;
-    resolve_for_persona(harness, argv, &profile, persona)?;
-    let bin = Path::new(&argv[0]).parent().context("managed wrapper has no parent")?;
-    let path = prefixed_path(bin, std::env::var_os("PATH").as_deref())?;
+    let path = resolve_from_source(harness, argv, spec, &|name| std::env::var_os(name))?;
     if let Some(existing) = PROVIDER_PATH.get() {
         ensure!(existing == &path, "driver already selected a different managed provider PATH");
     } else {
@@ -35,8 +22,45 @@ pub fn resolve(harness: &str, argv: &mut [String], spec: &serde_json::Value) -> 
     Ok(())
 }
 
-fn profile_path() -> Result<PathBuf> {
-    profile_path_from(&|name| std::env::var_os(name))
+/// Resolve a daemon seat using the effective captured launch environment, without global state.
+pub fn resolve_with_environment(
+    harness: &str,
+    argv: &mut [String],
+    spec: &serde_json::Value,
+    environment: &std::collections::BTreeMap<String, String>,
+) -> Result<std::ffi::OsString> {
+    resolve_from_source(harness, argv, spec, &|name| environment.get(name).map(std::ffi::OsString::from))
+}
+
+fn resolve_from_source(
+    harness: &str,
+    argv: &mut [String],
+    spec: &serde_json::Value,
+    env: &impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<std::ffi::OsString> {
+    ensure!(matches!(harness, "omp" | "claude" | "codex"), "unsupported managed harness {harness}");
+    let profile = profile_path_from(env)?;
+    let environment_persona = env("AGENT_PERSONA")
+        .map(|value| value.into_string().map_err(|_| anyhow::anyhow!("AGENT_PERSONA is not UTF-8")))
+        .transpose()?;
+    let persona = selected_persona(spec, environment_persona.as_deref())?;
+    resolve_for_persona(harness, argv, &profile, persona)?;
+    let bin = Path::new(&argv[0]).parent().context("managed wrapper has no parent")?;
+    prefixed_path(bin, env("PATH").as_deref())
+}
+
+pub fn is_managed_harness(daemon_managed: bool, harness: &str) -> bool {
+    daemon_managed && matches!(harness, "omp" | "claude" | "codex")
+}
+
+/// Mark only the daemon's typed-driver launch, never a person-owned terminal invocation.
+pub fn mark_daemon_launch(argv: &mut Vec<String>) -> Result<()> {
+    let separator = argv.iter().position(|arg| arg == "--")
+        .context("managed driver launch has no provider separator")?;
+    if !argv[..separator].iter().any(|arg| arg == "--managed-launch") {
+        argv.insert(separator, "--managed-launch".into());
+    }
+    Ok(())
 }
 
 fn profile_path_from(env: &impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<PathBuf> {
@@ -111,7 +135,7 @@ pub fn provider_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::C
 fn prefixed_path(bin: &Path, inherited: Option<&std::ffi::OsStr>) -> Result<std::ffi::OsString> {
     let mut paths = vec![bin.to_path_buf()];
     if let Some(inherited) = inherited {
-        paths.extend(std::env::split_paths(inherited));
+        paths.extend(std::env::split_paths(inherited).filter(|path| path.as_path() != bin));
     }
     std::env::join_paths(paths).context("prepend managed harness directory to provider PATH")
 }
@@ -246,7 +270,7 @@ mod tests {
     #[test]
     fn provider_path_starts_with_managed_bin_without_changing_driver_path() {
         let before = std::env::var_os("PATH");
-        let path = prefixed_path(Path::new("/managed/bin"), Some(std::ffi::OsStr::new("/native/bin:/usr/bin"))).unwrap();
+        let path = prefixed_path(Path::new("/managed/bin"), Some(std::ffi::OsStr::new("/native/bin:/managed/bin:/usr/bin:/managed/bin"))).unwrap();
         let mut command = std::process::Command::new("/managed/bin/omp");
         apply_path(&mut command, Some(&path));
         let provider_path = command.get_envs().find(|(name, _)| *name == std::ffi::OsStr::new("PATH"))
@@ -261,5 +285,52 @@ mod tests {
         let error = profile_path_from(&|name| (name == "AGENT_RUNTIME_PROFILE")
             .then(|| "relative/profile.json".into())).unwrap_err();
         assert!(format!("{error:#}").contains("AGENT_RUNTIME_PROFILE must be absolute"));
+    }
+
+    #[test]
+    fn malformed_profile_and_relative_wrapper_directory_refuse() {
+        let (_root, _bin, profile) = fixture();
+        std::fs::write(&profile, "{").unwrap();
+        let error = resolve_for_persona("omp", &mut ["omp".into()], &profile, "generalist").unwrap_err();
+        assert!(format!("{error:#}").contains("parse managed runtime profile"));
+        std::fs::write(&profile, r#"{"personas":{"launch":{"generalist":{"harnessBin":"relative/bin"}}}}"#).unwrap();
+        let error = resolve_for_persona("omp", &mut ["omp".into()], &profile, "generalist").unwrap_err();
+        assert!(format!("{error:#}").contains("managed wrapper directory must be absolute"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn profile_link_is_read_again_for_each_launch_and_broken_link_refuses() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+        let (root, first_bin, first_profile) = fixture();
+        let second_bin = root.path().join("second/bin");
+        std::fs::create_dir_all(&second_bin).unwrap();
+        for bin in [&first_bin, &second_bin] {
+            let wrapper = bin.join("codex");
+            std::fs::write(&wrapper, "#!/bin/sh\nprintf managed-helper\n").unwrap();
+            std::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let second_profile = root.path().join("second-profile.json");
+        std::fs::write(&second_profile, serde_json::to_vec(&serde_json::json!({
+            "personas": {"launch": {"generalist": {"harnessBin": second_bin}}},
+        })).unwrap()).unwrap();
+        let link = root.path().join("current-profile.json");
+        let environment = std::collections::BTreeMap::from([
+            ("AGENT_RUNTIME_PROFILE".into(), link.display().to_string()),
+            ("PATH".into(), "/missing/native/bin".into()),
+        ]);
+        for (profile, bin) in [(&first_profile, &first_bin), (&second_profile, &second_bin)] {
+            symlink(profile, &link).unwrap();
+            let mut argv = ["codex".into(), "--version".into()];
+            let path = resolve_with_environment("codex", &mut argv, &serde_json::json!({}), &environment).unwrap();
+            assert_eq!(Path::new(&argv[0]), bin.join("codex"));
+            assert_eq!(std::env::split_paths(&path).next().unwrap(), *bin);
+            let output = std::process::Command::new(&argv[0]).arg(&argv[1]).env("PATH", path).output().unwrap();
+            assert_eq!(output.stdout, b"managed-helper");
+            std::fs::remove_file(&link).unwrap();
+        }
+        symlink(root.path().join("missing-profile.json"), &link).unwrap();
+        let error = resolve_with_environment("codex", &mut ["codex".into()], &serde_json::json!({}), &environment).unwrap_err();
+        assert!(format!("{error:#}").contains("read managed runtime profile"));
     }
 }
