@@ -115,4 +115,18 @@ describe('mail as one object', () => {
     expect(ids).not.toContain(`${P}2c2c2c2c2c2c2c2c-message`)
     expect(ids).toContain(`${P}2c2c2c2c2c2c2c2c-content`)
   })
+  it('keeps a header row when its body projects to something other than the message', () => {
+    const entries = raw().map(entry => entry.id === `${P}2c2c2c2c2c2c2c2c-content`
+      ? { ...entry, body: { ...entry.body, blocks: [{ id: 'mail/hidden', kind: 'text', source_type: 'content', visibility: 'internal', payload: { body_ref: true } }] } } : entry)
+    const items = project(entries)
+    expect(items.find(item => item.id === `${P}2c2c2c2c2c2c2c2c-message`)).toMatchObject({ _tag: 'Message', title: 'Key audit' })
+    expect(items.find(item => item.id === `${P}2c2c2c2c2c2c2c2c-content`)).toMatchObject({ _tag: 'UnknownEvent' })
+  })
+  it('keeps a native turn header with an author but no graph message id a turn header', () => {
+    const header = { id: `${P}native-turn`, sequence: 20, revision: 1, timestamp: '2026-11-07T09:00:00.000Z', role: 'assistant', final: true, type: 'message', body: { message_id: 'native-turn-20', author: 'agent/example/quay' } }
+    const body = { id: `${P}native-turn-content`, sequence: 21, revision: 1, timestamp: '2026-11-07T09:00:00.000Z', role: 'assistant', final: true, type: 'content', body: { media_type: 'text/plain', text: 'Own words.' } }
+    const items = project([...raw(), header, body])
+    expect(items.map(item => item.id)).not.toContain(`${P}native-turn`)
+    expect(items.find(item => item.id === `${P}native-turn-content`)).toMatchObject({ _tag: 'Text', role: 'assistant', text: 'Own words.' })
+  })
 })
