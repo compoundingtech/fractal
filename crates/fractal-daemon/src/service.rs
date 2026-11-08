@@ -1741,6 +1741,7 @@ mod tests {
         codex_work_without_asking: None,
         wait_for_peers_after_start: None,
         readiness_slo: None,
+        agents_request_slo_fault: None,
         fleet: None, };
         let spec = ServiceSpec::new("/usr/bin/st3", config, 1024)?;
         let unit = render_systemd_user_unit(&spec);

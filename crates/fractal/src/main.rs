@@ -7701,6 +7701,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
             agents_request_slo.get_or_init(|| fractal_daemon::api::start_agents_request_slo(
                 config.state_dir.clone(),
                 config.node.clone(),
+                // Measurement stays on everywhere; native delivery requires this exact member's opt-in.
+                config.agents_request_slo_fault.as_ref()
+                    .filter(|fault| fault.member == store.origin())
+                    .map(|fault| (store.clone(), fault.reviewer.clone())),
             ));
             let activation_store = store.clone();
             // A member that trims locally still runs the pass, which only finishes a trim it had
