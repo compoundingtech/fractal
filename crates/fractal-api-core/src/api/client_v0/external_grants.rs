@@ -51,6 +51,10 @@ impl Profile {
 }
 
 fn assistant_profile(source: &Value) -> Result<(), ApiError> {
+    #[cfg(test)]
+    if tests::SERVICE_PROFILE.get() && Profile::stored(source)? == Profile::Service {
+        return Ok(());
+    }
     Profile::stored(source)?.issuable()
 }
 
@@ -65,16 +69,31 @@ fn digest_only(source: &Value) -> Result<(), ApiError> {
 }
 
 // Issuance-only scan: authentication retains its existing indexed lookup and reads.
-// TRANSITIONS serializes completion; several grants of the same profile are allowed.
+// append owns the admission lock; several grants of the same profile are allowed.
+// Filter revoked/expired history before loading claim bodies into Rust. Expiry
+// uses the latest policy, not the original grant. Keep malformed missing fields
+// in the result so the existing validation below still reports them.
+const ADMISSION_QUERY: &str =
+    "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
+     AND (?5 IS NULL OR NOT EXISTS (SELECT 1 FROM claims AS revoked WHERE revoked.subject=claims.subject AND revoked.kind=?3))
+     AND (?5 IS NULL OR COALESCE(
+         (SELECT CASE WHEN json_type(policy.body,'$.fields') IS NULL THEN 1 ELSE
+             COALESCE(json_type(policy.body,'$.fields.expires_at_unix_ms')='integer'
+                 AND json_extract(policy.body,'$.fields.expires_at_unix_ms')>?5,0) END
+          FROM claims AS policy WHERE policy.subject=claims.subject AND policy.kind=?4 ORDER BY policy.store_index DESC LIMIT 1),
+         CASE WHEN json_type(body,'$.fields') IS NULL THEN 1 ELSE
+             COALESCE(json_type(body,'$.fields.expires_at_unix_ms')='integer'
+                 AND json_extract(body,'$.fields.expires_at_unix_ms')>?5,0) END))";
 fn admit_profile(state: &AppState, source: &Value) -> Result<(), ApiError> {
     let profile = Profile::stored(source)?;
     let principal = principal(source)?;
+    // Without a valid owner the old scan must still surface its configuration
+    // error before examining expiry; do not prefilter those rows.
+    let expiry_cut = owning_person(state).ok().map(|_| client_now_ms() as u64);
     let ids = {
         let connection = state.store.readers.get();
-        let mut query = connection.prepare(
-            "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2"
-        ).map_err(ApiError::internal)?;
-        query.query_map(rusqlite::params![GRANTED, principal], |row| row.get::<_, String>(0))
+        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h99f1a302c7b1 owner=fractal_api_core::api::client_v0::external_grants TODO=trace-statement-and-value-representation */ ADMISSION_QUERY).map_err(ApiError::internal)?;
+        query.query_map(rusqlite::params![GRANTED, principal, REVOKED, POLICY, expiry_cut], |row| row.get::<_, String>(0))
             .map_err(ApiError::internal)?.collect::<Result<Vec<_>, _>>().map_err(ApiError::internal)?
     };
     for id in ids {
@@ -111,6 +130,10 @@ pub const SCOPES: &[&str] = &[
 // against concurrent writers in the authoritative store.
 pub static TRANSITIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+// Synchronous because append never awaits. Callers may already hold TRANSITIONS:
+// always acquire that outer lifecycle lock first, never from inside admission.
+static ADMISSIONS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn owning_person(state: &AppState) -> Result<&str, ApiError> {
     state.owning_person.as_deref()
         .filter(|person| person.starts_with("person/") && person.matches('/').count() == 1 && person.len() > 7)
@@ -140,6 +163,13 @@ pub fn latest(state: &AppState, subject: &str, kind: &str) -> Result<Option<Clai
 }
 pub fn append(state: &AppState, subject: String, kind: &str, actor: &str,
           value: Value, previous: Option<&ClaimRecord>) -> Result<ClaimRecord, ApiError> {
+    // Subject fences do not serialize grants on independent subjects for one
+    // principal. Keep the cross-subject scan and authoritative append indivisible.
+    let _admission = if kind == GRANTED {
+        Some(ADMISSIONS.lock().map_err(|_| ApiError::internal("external grant admission lock poisoned"))?)
+    } else {
+        None
+    };
     if matches!(kind, BEGUN | GRANTED | POLICY | REVOKED) {
         assistant_profile(&value)?;
         digest_only(&value)?;
@@ -277,6 +307,105 @@ pub fn authorize_route(session: &ClientSession, request: &Request<Body>) -> Resu
 mod tests {
     use super::*;
 
+    // Only the current fixture thread can exercise the reserved profile through
+    // the real mutation/session boundary. Production issuable() stays closed.
+    thread_local! {
+        pub(super) static SERVICE_PROFILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    fn concurrent_grants(profiles: [&str; 2]) -> (usize, usize) {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = crate::api::tests_shared::state(root.path());
+        state.owning_person = Some("person/owner".into());
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let handles = profiles.into_iter().enumerate().map(|(index, profile)| {
+                let state = &state;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    SERVICE_PROFILE.set(true);
+                    let id = if index == 0 { "111111111111111111111111" } else { "222222222222222222222222" };
+                    let source = json!({"profile":profile,"grant_id":id,"principal":PRINCIPAL,
+                        "issuer":"person/owner","session_actor":format!("{PRINCIPAL}/session/{id}"),
+                        "expires_at_unix_ms":u64::MAX,"minimal_read_mode":"approval-once",
+                        "disclosure_consent":true,"scopes":["read.assistant.summary"],
+                        "credential_hash":credential_digest(id)});
+                    let subject = subject(id).unwrap();
+                    let begun = append(state, subject.clone(), BEGUN, "person/owner", source.clone(), None).unwrap();
+                    barrier.wait();
+                    append(state, subject, GRANTED, "person/owner", source, Some(&begun))
+                })
+            }).collect::<Vec<_>>();
+            handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+        });
+        let admitted = results.iter().filter(|result| result.is_ok()).count();
+        let usable = std::thread::spawn(move || {
+            SERVICE_PROFILE.set(true);
+            results.iter().filter_map(|result| result.as_ref().ok())
+                .filter(|grant| session(&state, grant, "http").is_ok()).count()
+        }).join().unwrap();
+        (admitted, usable)
+    }
+
+    #[test]
+    fn admission_sql_filters_only_inactive_effective_policies() {
+        let connection = rusqlite::Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE claims(id TEXT,subject TEXT,kind TEXT,body TEXT,store_index INTEGER PRIMARY KEY);
+             CREATE INDEX principal_scan ON claims(kind,COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'));
+             CREATE INDEX subject_kind ON claims(subject,kind,store_index);"
+        ).unwrap();
+        let fixtures = [
+            ("expired", json!({"fields":{"expires_at_unix_ms":99}}), None, false),
+            ("live", json!({"fields":{"expires_at_unix_ms":101}}), None, true),
+            ("boundary", json!({"fields":{"expires_at_unix_ms":100}}), None, false),
+            ("max", json!({"fields":{"expires_at_unix_ms":u64::MAX}}), None, true),
+            ("negative", json!({"fields":{"expires_at_unix_ms":-1}}), None, false),
+            ("string", json!({"fields":{"expires_at_unix_ms":"101"}}), None, false),
+            ("float", json!({"fields":{"expires_at_unix_ms":101.0}}), None, false),
+            ("absent-expiry", json!({"fields":{}}), None, false),
+            // Missing fields must still reach fields() and its existing error.
+            ("absent-fields", json!({}), None, true),
+            ("renewed", json!({"fields":{"expires_at_unix_ms":99}}),
+                Some(json!({"fields":{"expires_at_unix_ms":101}})), true),
+            ("shortened", json!({"fields":{"expires_at_unix_ms":101}}),
+                Some(json!({"fields":{"expires_at_unix_ms":99}})), false),
+            ("invalid-policy", json!({"fields":{"expires_at_unix_ms":99}}),
+                Some(json!({})), true),
+        ];
+        let mut expected = Vec::new();
+        for (id, grant, policy, included) in fixtures {
+            connection.execute("INSERT INTO claims(id,subject,kind,body) VALUES(?1,?1,?2,?3)",
+                rusqlite::params![id, GRANTED, grant.to_string()]).unwrap();
+            if let Some(policy) = policy {
+                connection.execute("INSERT INTO claims(id,subject,kind,body) VALUES(?1,?2,?3,?4)",
+                    rusqlite::params![format!("{id}-policy"), id, POLICY, policy.to_string()]).unwrap();
+            }
+            if included { expected.push(id.to_owned()); }
+        }
+        let mut found = connection.prepare(ADMISSION_QUERY).unwrap()
+            .query_map(rusqlite::params![GRANTED, PRINCIPAL, REVOKED, POLICY, 100_u64],
+                |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        found.sort();
+        expected.sort();
+        assert_eq!(found, expected);
+        let unfiltered = connection.prepare(ADMISSION_QUERY).unwrap()
+            .query_map(rusqlite::params![GRANTED, PRINCIPAL, REVOKED, POLICY, Option::<u64>::None],
+                |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(unfiltered.len(), 12, "invalid owner configuration must not hide validation errors");
+    }
+
+    #[test]
+    fn concurrent_opposite_profiles_have_exactly_one_usable_grant() {
+        assert_eq!(concurrent_grants(["assistant", "service"]), (1, 1));
+    }
+
+    #[test]
+    fn concurrent_same_profile_grants_remain_usable() {
+        assert_eq!(concurrent_grants(["assistant", "assistant"]), (2, 2));
+        assert_eq!(concurrent_grants(["service", "service"]), (2, 2));
+    }
+
     #[test]
     fn persisted_active_profiles_are_checked_at_grant_admission() {
         let root = tempfile::tempdir().unwrap();
@@ -302,8 +431,16 @@ mod tests {
         state.store.append_claim(&ClaimInput {
             subject: service_subject, kind: REVOKED.into(), actor: Some("person/owner".into()),
             fields: BTreeMap::new(), evidence: vec![grant.id.clone()],
-            expected_subject: Some(Some(grant.id)), idempotency_key: None,
+            expected_subject: Some(Some(grant.id.clone())), idempotency_key: None,
         }).unwrap();
+        let candidates = {
+            let connection = state.store.readers.get();
+            connection.prepare(ADMISSION_QUERY).unwrap()
+                .query_map(rusqlite::params![GRANTED, PRINCIPAL, REVOKED, POLICY, client_now_ms() as u64], |row| row.get::<_, String>(0))
+                .unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(candidates.len(), 2);
+        assert!(!candidates.contains(&grant.id), "revoked history must not reach the admission loop");
         assert!(append(&state, next, GRANTED, "person/owner", source, None).is_ok());
     }
 
