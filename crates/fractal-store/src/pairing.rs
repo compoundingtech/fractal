@@ -132,7 +132,6 @@ pub fn revocation_is_trusted(connection: &Connection, revoked: &ClaimRecord, com
     if !operation_is_trusted(connection, &completed.id, &completed.origin, completed.actor.as_deref(), &completed.body["fields"])? {
         return Ok(true);
     }
-    if revoked.actor != completed.actor { return Ok(false); }
     let linked: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='client.operation-authorized' AND origin=?2 AND actor IS ?3 AND json_extract(body,'$.fields.record_id')=?4 AND json_extract(body,'$.fields.completion_id')=?5)",
         params![format!("custom/client/operation-{}", revoked.id), revoked.origin, revoked.actor, revoked.id, completed.id],
@@ -164,7 +163,7 @@ pub fn completion_is_revoked(
             params![format!("custom/client/operation-{id}"), origin, actor, id, completion_id],
             |row| row.get(0),
         )?;
-        if origin == issuer_origin && (legacy || (actor == writer && linked
+        if origin == issuer_origin && (legacy || (linked
             && operation_is_trusted(connection, &id, &origin, actor.as_deref(), &body["fields"])?)) {
             revoked = true;
         } else {

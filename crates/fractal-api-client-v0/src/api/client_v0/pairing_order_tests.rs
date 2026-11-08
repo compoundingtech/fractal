@@ -5,6 +5,45 @@ use super::*;
 const GRANT: &str = "custom/client/pairing-order";
 const PERSON: &str = "person/avery";
 
+#[tokio::test]
+async fn issuer_operation_withdrawal_accepts_another_local_person() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "pairing-issuer");
+    let completed = complete(&state, later());
+    let other = Store::open_memory("other-issuer").unwrap();
+    let copy = other.append_client_operation_claim(&ClaimInput {
+        subject:GRANT.into(),kind:completed.kind.clone(),actor:completed.actor.clone(),
+        fields:serde_json::from_value(completed.body["fields"].clone()).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    let withdrawal = other.append_client_operation_claim(&ClaimInput {
+        subject:GRANT.into(),kind:"custom.client.pairing-revoked".into(),
+        actor:Some("person/alex".into()),fields:BTreeMap::new(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    assert!(!state.store.pairing_revocation_is_trusted(&withdrawal, &completed).unwrap());
+    assert!(other.pairing_revocation_is_trusted(&withdrawal, &copy).unwrap());
+    let mut fields = completed.body["fields"].clone();
+    fields["credential_hash"] = json!(credential_digest("issuer-withdrawal"));
+    let replacement = state.store.append_client_operation_claim(&ClaimInput {
+        subject:GRANT.into(),kind:completed.kind.clone(),actor:completed.actor.clone(),
+        fields:serde_json::from_value(fields).unwrap(),evidence:vec![],
+        expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    let request = || Request::builder().uri("/v1/client/capabilities")
+        .header(AUTHORIZATION, "Bearer issuer-withdrawal").body(Body::empty()).unwrap();
+    assert!(authenticate(&state, &request(), "fabric-loopback").is_ok());
+    state.store.append_client_operation_claim(&ClaimInput {
+        subject:GRANT.into(),kind:"custom.client.pairing-revoked".into(),
+        actor:Some("person/alex".into()),fields:BTreeMap::new(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    assert!(!state.store.pairing_completion_is_revoked(&completed).unwrap());
+    assert!(state.store.pairing_completion_is_revoked(&replacement).unwrap());
+    assert_eq!(authenticate(&state, &request(), "fabric-loopback").unwrap_err().status, StatusCode::FORBIDDEN);
+    assert!(paired_client_session(&state, &replacement, "fabric-loopback", false).is_err());
+}
+
 pub(super) fn replicate(from: &AppState, to: &AppState) {
     if from.store.member_key.read().unwrap().is_none() {
         let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
