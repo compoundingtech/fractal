@@ -8,16 +8,26 @@ use anyhow::{Context, Result, ensure};
 const WRAPPER_DIRECTORY_KEY: &str = "harnessBin";
 
 // A driver owns one seat. Keep launch-only environment separate from the driver's environment.
-static PROVIDER_PATH: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
+struct ProviderEnvironment {
+    path: std::ffi::OsString,
+    subject: String,
+}
+static PROVIDER_ENVIRONMENT: std::sync::OnceLock<ProviderEnvironment> = std::sync::OnceLock::new();
 
 /// Select the managed executable, including when argv names a raw provider by absolute path.
 /// Other harnesses retain their own launch contracts.
-pub fn resolve(harness: &str, argv: &mut [String], spec: &serde_json::Value) -> Result<()> {
+pub fn resolve(harness: &str, argv: &mut [String], spec: &serde_json::Value, subject: &str) -> Result<()> {
+    if is_person_bound(spec)? {
+        return Ok(());
+    }
+    ensure!(subject.starts_with("agent/"), "managed harness launch requires a fenced agent subject");
     let path = resolve_from_source(harness, argv, spec, &|name| std::env::var_os(name))?;
-    if let Some(existing) = PROVIDER_PATH.get() {
-        ensure!(existing == &path, "driver already selected a different managed provider PATH");
+    if let Some(existing) = PROVIDER_ENVIRONMENT.get() {
+        ensure!(existing.path == path && existing.subject == subject,
+            "driver already selected a different managed provider environment");
     } else {
-        PROVIDER_PATH.set(path).map_err(|_| anyhow::anyhow!("managed provider PATH already selected"))?;
+        PROVIDER_ENVIRONMENT.set(ProviderEnvironment { path, subject: subject.into() })
+            .map_err(|_| anyhow::anyhow!("managed provider environment already selected"))?;
     }
     Ok(())
 }
@@ -32,6 +42,21 @@ pub fn resolve_with_environment(
     resolve_from_source(harness, argv, spec, &|name| environment.get(name).map(std::ffi::OsString::from))
 }
 
+/// Person-owned terminal bindings retain their native harness launch contract.
+/// Callers supply the declaration read through the driver's authenticated client.
+pub fn is_person_bound(spec: &serde_json::Value) -> Result<bool> {
+    let Some(binding) = spec.get("children").and_then(serde_json::Value::as_array)
+        .and_then(|nodes| nodes.iter().find(|node| node["name"] == "bind-terminal")) else {
+        return Ok(false);
+    };
+    let subject = binding.get("arguments").and_then(serde_json::Value::as_array)
+        .and_then(|arguments| arguments.first()).and_then(serde_json::Value::as_str)
+        .context("terminal binding is missing its subject")?;
+    let owner = fractal_schema::owned_terminals::owner(subject)
+        .map_err(|error| anyhow::anyhow!("{}", error.message))?;
+    Ok(owner.is_some_and(|owner| owner.starts_with("person/")))
+}
+
 fn resolve_from_source(
     harness: &str,
     argv: &mut [String],
@@ -39,6 +64,9 @@ fn resolve_from_source(
     env: &impl Fn(&str) -> Option<std::ffi::OsString>,
 ) -> Result<std::ffi::OsString> {
     ensure!(matches!(harness, "omp" | "claude" | "codex"), "unsupported managed harness {harness}");
+    if is_person_bound(spec)? {
+        return Ok(env("PATH").unwrap_or_default());
+    }
     let profile = profile_path_from(env)?;
     let environment_persona = env("AGENT_PERSONA")
         .map(|value| value.into_string().map_err(|_| anyhow::anyhow!("AGENT_PERSONA is not UTF-8")))
@@ -48,7 +76,6 @@ fn resolve_from_source(
     let bin = Path::new(&argv[0]).parent().context("managed wrapper has no parent")?;
     prefixed_path(bin, env("PATH").as_deref())
 }
-
 
 fn profile_path_from(env: &impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<PathBuf> {
     if let Some(profile) = env("AGENT_RUNTIME_PROFILE") {
@@ -103,8 +130,25 @@ fn resolve_for_persona(
 }
 
 /// Apply the managed launch environment only to a provider child.
-pub fn apply_provider_path(command: &mut std::process::Command) {
-    apply_path(command, PROVIDER_PATH.get().map(std::ffi::OsString::as_os_str));
+pub fn apply_provider_environment(command: &mut std::process::Command) {
+    if let Some(environment) = PROVIDER_ENVIRONMENT.get() {
+        apply_path(command, Some(&environment.path));
+        apply_agent_identity(command, &environment.subject, &|name| std::env::var_os(name));
+    }
+}
+
+fn apply_agent_identity(
+    command: &mut std::process::Command,
+    subject: &str,
+    inherited: &impl Fn(&str) -> Option<std::ffi::OsString>,
+) {
+    for name in ["ST_AGENT", "FRACTAL_AGENT"] {
+        let present = command.get_envs().find(|(key, _)| *key == std::ffi::OsStr::new(name))
+            .map(|(_, value)| value.is_some()).unwrap_or_else(|| inherited(name).is_some());
+        if !present {
+            command.env(name, subject);
+        }
+    }
 }
 
 fn apply_path(command: &mut std::process::Command, path: Option<&std::ffi::OsStr>) {
@@ -115,7 +159,7 @@ fn apply_path(command: &mut std::process::Command, path: Option<&std::ffi::OsStr
 
 pub fn provider_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let mut command = std::process::Command::new(program);
-    apply_provider_path(&mut command);
+    apply_provider_environment(&mut command);
     command
 }
 
@@ -319,5 +363,43 @@ mod tests {
         symlink(root.path().join("missing-profile.json"), &link).unwrap();
         let error = resolve_with_environment("codex", &mut ["codex".into()], &serde_json::json!({}), &environment).unwrap_err();
         assert!(format!("{error:#}").contains("read managed runtime profile"));
+    }
+
+    #[test]
+    fn person_bound_driver_keeps_native_argv_without_a_managed_profile() {
+        let spec = serde_json::json!({"children": [{
+            "name": "bind-terminal",
+            "arguments": ["pty/person/avery/019a0000-0000-7000-8000-000000000001"],
+        }]});
+        let environment = std::collections::BTreeMap::from([("PATH".into(), "/native/bin".into())]);
+        for harness in ["omp", "claude", "codex"] {
+            let mut argv = [format!("/native/{harness}")];
+            let path = resolve_with_environment(harness, &mut argv, &spec, &environment).unwrap();
+            assert_eq!(path, std::ffi::OsStr::new("/native/bin"));
+            assert_eq!(argv[0], format!("/native/{harness}"));
+        }
+        let agent_binding = serde_json::json!({"children": [{
+            "name": "bind-terminal",
+            "arguments": ["pty/agent/worker/019a0000-0000-7000-8000-000000000001"],
+        }]});
+        assert!(!is_person_bound(&agent_binding).unwrap());
+        assert!(resolve_with_environment("omp", &mut ["omp".into()], &agent_binding, &environment).is_err());
+    }
+
+    #[test]
+    fn provider_identity_fills_missing_aliases_and_preserves_existing_authority() {
+        let mut missing = std::process::Command::new("omp");
+        apply_agent_identity(&mut missing, "agent/worker", &|_| None);
+        let values = missing.get_envs().collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(values[std::ffi::OsStr::new("ST_AGENT")], Some(std::ffi::OsStr::new("agent/worker")));
+        assert_eq!(values[std::ffi::OsStr::new("FRACTAL_AGENT")], Some(std::ffi::OsStr::new("agent/worker")));
+        let mut existing = std::process::Command::new("omp");
+        existing.env("ST_AGENT", "agent/explicit");
+        apply_agent_identity(&mut existing, "agent/worker", &|name| {
+            (name == "FRACTAL_AGENT").then(|| "agent/inherited".into())
+        });
+        let values = existing.get_envs().collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(values[std::ffi::OsStr::new("ST_AGENT")], Some(std::ffi::OsStr::new("agent/explicit")));
+        assert!(!values.contains_key(std::ffi::OsStr::new("FRACTAL_AGENT")));
     }
 }

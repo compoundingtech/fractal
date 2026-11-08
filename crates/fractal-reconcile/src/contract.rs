@@ -79,26 +79,7 @@ fn capture_with(store: &Store, desired: &DesiredSubject, member: &MemberSpec, ru
         }
     };
     let mut provider = Cow::Borrowed(provider);
-    let binding = crate::terminal_binding::from_desired(&desired.desired)?;
-    let person_bound = if let Some(binding) = &binding {
-        let owner = fractal_schema::owned_terminals::owner(&binding.subject)
-            .map_err(|error| anyhow::anyhow!(error.message))?;
-        anyhow::ensure!(
-            owner.is_some_and(|owner| owner.starts_with("person/"))
-                && member.terminal_binding.as_ref() == Some(binding)
-                && member.lifecycle == crate::model::MemberLifecycle::TerminalBound,
-            "native launch contract requires a validated person-terminal binding",
-        );
-        true
-    } else {
-        anyhow::ensure!(member.terminal_binding.is_none()
-            && member.lifecycle != crate::model::MemberLifecycle::TerminalBound,
-            "native launch contract is missing its person-terminal binding");
-        false
-    };
-    if let Some(harness @ ("omp" | "claude" | "codex")) = member.driver.as_deref()
-        && !person_bound
-    {
+    if let Some(harness @ ("omp" | "claude" | "codex")) = member.driver.as_deref() {
         // Measure the provider child, not the raw executable in the authored expansion.
         // Wrapper selection and its interpreter PATH must agree with driver startup without
         // changing the daemon's environment or selecting process-global driver state.
@@ -173,7 +154,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt as _;
     fn isolated_capture(store: &Store, desired: &DesiredSubject, ready: bool, input: &dyn Fn(&Path) -> Result<()>) -> Result<Option<Contract>> {
         let environment = |declared: &BTreeMap<String, String>, _: &Path| Ok(Some(declared.clone()));
-        let identity = |path: &Path, resolve: &dyn Fn(&str) -> Result<std::path::PathBuf>, input: &dyn Fn(&Path) -> Result<()>| {
+        let identity = move |path: &Path, resolve: &dyn Fn(&str) -> Result<std::path::PathBuf>, input: &dyn Fn(&Path) -> Result<()>| {
             if ready {
                 fractal_drivers::harness_admission::executable_identity_ready_observed(path, resolve, input)
             } else {

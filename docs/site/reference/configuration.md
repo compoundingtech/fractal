@@ -112,7 +112,7 @@ the PATH of the terminal running `fractal apply`, nor just launchd's or systemd'
 service environment. Agent `env` entries overlay that environment. Fractal also
 prepends its own executable directory so its wrapper can be found.
 
-Daemon-managed `omp`, `claude`, and `codex` launches read the absolute path in
+Supported `omp`, `claude`, and `codex` agent-seat driver launches read the absolute path in
 `AGENT_RUNTIME_PROFILE`, or
 `$HOME/.local/state/nix/profiles/coding-agent-runtime/share/coding-agents/profile.json`
 when that variable is unset. Each launch reads the current profile through its
@@ -121,8 +121,10 @@ directly. The Agent Spec's `persona` selects the persona; `AGENT_PERSONA` is nex
 and `generalist` is the last fallback. A declared persona that disagrees with
 `AGENT_PERSONA` refuses launch. The selected `harnessBin` is prepended to the
 provider child's PATH, so provider subprocesses also resolve managed wrappers;
-the driver's own PATH is unchanged. The profile publisher selects the directory;
-Fractal does not duplicate persona-to-path rules. A missing persona entry,
+the driver's own PATH is unchanged. The provider child also receives `ST_AGENT`
+and `FRACTAL_AGENT` from the fenced driver subject when those variables are absent;
+existing identity values remain unchanged. The profile publisher selects the
+directory; Fractal does not duplicate persona-to-path rules. A missing persona entry,
 `harnessBin`, or executable wrapper refuses launch, naming the missing key/path.
 There is no fallback to a raw provider or to a different persona.
 Only a confirmed missing Agent Spec permits the environment/default persona
@@ -131,17 +133,15 @@ managed launch. Prelaunch contract capture measures the selected wrapper, not a
 raw executable from login PATH. Driver re-exec uses the managed wrapper for helper
 commands while adopting, without restarting the running provider.
 
-Wrapper selection follows the authoritative seat declaration, not a launch flag
-or an environment-based guess. Flagless invocations and legacy driver re-exec
-are managed too. A native exemption requires a validated `bind-terminal`
-declaration for a person-owned terminal, an authenticated session belonging to
-that person, and the seat's current incarnation matching the binding exactly.
-Missing or mismatched proof refuses the exemption.
+Supported agent-seat driver invocations use this contract, including flagless
+legacy driver re-exec. There is no caller-supplied opt-in flag. Declaration reads
+use the driver's authenticated client context, not an anonymous projection client.
 
-For a positively verified person-terminal binding,
-`fractal driver claude --subject agent/example -- /native/claude`
-retains its native executable and PATH. Merely naming an agent subject from a
-person shell does not establish a native exemption.
+Person-owned `bind-terminal` sessions retain their native harness and environment.
+The authenticated declaration read determines this exemption; agent-owned
+bindings and declarations without a binding use managed launch. Read failures
+refuse rather than silently selecting native launch. Prelaunch contract capture
+uses the same binding rule.
 
 Before upgrading a host to this launch contract, publish and activate a runtime
 profile containing `personas.launch.<persona>.harnessBin` for its managed seats.
