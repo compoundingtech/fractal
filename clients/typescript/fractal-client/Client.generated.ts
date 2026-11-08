@@ -4,7 +4,7 @@
 import { API_VERSION } from './Models.generated.ts';
 import type {
     AgentRelatedRuns, DeviceCommand, DeviceCommandRequest, DeviceResult,
-    PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
+    ThreadListQuery, ThreadSummary, ThreadSummaryPage, ThreadTimelinePage, PushRegistration, PushRegistrationResponse, ObservationReport, ObservationResponse, AgentDeclaration, Glass, GlassPut, GlassDelete, ActionOf, ActionRequest, ActionResult, AgentQueue, StatusHistory, BlobChunk, BlobUpload, Capabilities, DocumentContent, DocumentsPage, DocumentReferences, MessageBody, EnvelopeOf,
     ClientDiagnosticsBatch, ClientDiagnosticsAck,
     ResourcesFilter, ResourcesPage, DirectiveNotes, HarnessQuestion, SchedulesPage,
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState,
@@ -16,6 +16,7 @@ import type {
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
     AssistantAgentDetailRequest, AssistantConversationTimelineRequest, AssistantConversationSearchRequest,
     AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage,
+    ThreadCollectionContext, ThreadTimelineEvent,
 } from './Models.generated.ts';
 
 // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both:
@@ -25,6 +26,16 @@ const acceptsApiVersion = (value: unknown): boolean => value === API_VERSION || 
 export type PageOptions = { cursor?: string; limit?: number };
 /** Transport options, never serialized into a query or action body. */
 export type RequestOptions = { signal?: AbortSignal };
+
+// Older native runtimes provide an AbortSignal without throwIfAborted.
+function checkAbort(signal?: AbortSignal): void {
+    if (!signal?.aborted) return;
+    if (typeof signal.throwIfAborted === 'function') signal.throwIfAborted();
+    if (signal.reason !== undefined) throw signal.reason;
+    const error = new Error('The operation was aborted.');
+    error.name = 'AbortError';
+    throw error;
+}
 /** Validate framing only, leaving resource rows and timeline entries raw for tolerant consumers.
  * Unknown kinds and additive fields retain the existing forward-compatible behavior. */
 function validateCollectionFrame(frame: unknown): void {
@@ -133,7 +144,9 @@ export type CollectionStream = {
     subscribeAgentsPublication(id: string): void;
     subscribeArrangements(id: string, person: string, limit?: number, subject?: ArrangementId): void;
     subscribeOrderedMemberships(id: string, person: string, subject: ArrangementId, limit?: number): void;
-    subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships'>, limit?: number, filters?: CollectionFilters): void;
+    subscribe(id: string, collection: 'threads', limit: number | undefined, filters: { thread_context: ThreadCollectionContext }): void;
+    subscribe(id: string, collection: 'thread-timeline', limit: number | undefined, filters: { subject: string }): void;
+    subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships' | 'threads' | 'thread-timeline'>, limit?: number, filters?: CollectionFilters): void;
     /** Follow exactly one current agent's card, intersected with `status`. Rejects, sending nothing,
      * when the daemon does not grant `collection.agents.exact-selector`. */
     subscribeAgent(id: string, agent: string, status?: string | null): Promise<void>;
@@ -153,8 +166,14 @@ export type CollectionWindow<TItem extends { id: string } = Resource> = { items:
     & ([TItem] extends [OrderedMembership] ? { membership: OrderedMembershipState } : unknown);
 /** A `snapshot` or `changes` frame of an `ordered-memberships` subscription. */
 export type OrderedMembershipFrame = Extract<CollectionFrame, { collection: 'ordered-memberships' }>;
-/** Every frame except an `ordered-memberships` window's: its windows hold resources. */
-export type ResourceCollectionFrame = Exclude<CollectionFrame, OrderedMembershipFrame>;
+export type ThreadSummaryFrame = Extract<CollectionFrame, { collection: 'threads' }>;
+export type ThreadTimelineFrame = Extract<CollectionFrame, { collection: 'thread-timeline' }>;
+/** Collection frames whose windows hold resources. */
+export type ResourceCollectionFrame = Exclude<CollectionFrame, OrderedMembershipFrame | ThreadSummaryFrame | ThreadTimelineFrame>;
+export function isResourceCollectionFrame(frame: CollectionFrame): frame is ResourceCollectionFrame {
+    return (frame.kind !== 'snapshot' && frame.kind !== 'changes')
+        || (frame.collection !== 'ordered-memberships' && frame.collection !== 'threads' && frame.collection !== 'thread-timeline');
+}
 
 /** Apply one `snapshot` or `changes` frame to a window: removals and upserts first, then the
  * frame's complete order. A `changes` frame without an earlier snapshot has nothing to apply to.
@@ -162,6 +181,8 @@ export type ResourceCollectionFrame = Exclude<CollectionFrame, OrderedMembership
  * membership `changes` frame that leaves rows, order, and `hasMore` alone still replaces the
  * window's `membership` state. */
 export function applyWindow(window: CollectionWindow<OrderedMembership> | undefined, frame: OrderedMembershipFrame): CollectionWindow<OrderedMembership> | undefined;
+export function applyWindow(window: CollectionWindow<ThreadSummary> | undefined, frame: ThreadSummaryFrame): CollectionWindow<ThreadSummary> | undefined;
+export function applyWindow(window: CollectionWindow<ThreadTimelineEvent> | undefined, frame: ThreadTimelineFrame): CollectionWindow<ThreadTimelineEvent> | undefined;
 export function applyWindow(window: CollectionWindow | undefined, frame: ResourceCollectionFrame): CollectionWindow | undefined;
 export function applyWindow(window: CollectionWindow<{ id: string }> | undefined, frame: CollectionFrame): CollectionWindow<{ id: string }> | CollectionWindow<OrderedMembership> | undefined {
     if (frame.kind !== 'snapshot' && frame.kind !== 'changes') return window;
@@ -221,6 +242,14 @@ function routedId(id: string): string {
     return id.replace(/^(launch|session|pairing)\//, '');
 }
 
+function threadPathSegment(id: string): string {
+    const segment = id.replace(/^thread\//, '');
+    if (segment.length === 0 || segment.length > 128 || /[^a-zA-Z0-9_-]/.test(segment)) {
+        throw new TypeError('Invalid thread identifier');
+    }
+    return segment;
+}
+
 function query(options: Record<string, string | number | boolean | undefined>): string {
     const params = new URLSearchParams();
     for (const [key, value] of Object.entries(options)) {
@@ -267,7 +296,7 @@ export class FractalClient {
     }
 
     async discover(options: RequestOptions = {}): Promise<EnvelopeOf<Capabilities>> {
-        options.signal?.throwIfAborted();
+        checkAbort(options.signal);
         return this.discoveryCache.value ?? this.capabilities(options);
     }
 
@@ -320,9 +349,9 @@ export class FractalClient {
     }
 
     private async request<T>(method: 'GET' | 'POST' | 'PUT' | 'DELETE', path: string, body?: unknown, idempotencyKey?: string, raw?: { contentType: string }, options: RequestOptions = {}, readAuthorization?: { header: string; budget: number }): Promise<EnvelopeOf<T>> {
-        options.signal?.throwIfAborted();
+        checkAbort(options.signal);
         const credential = await this.credential?.();
-        options.signal?.throwIfAborted();
+        checkAbort(options.signal);
         // TODO(live-migration: arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both): keep old names until all members accept aliases; sunset 60 days after first shipping release.
         const headers: Record<string, string> = { Accept: 'application/json', 'x-st3-features': this.features() };
         if (idempotencyKey) headers['Idempotency-Key'] = idempotencyKey;
@@ -346,15 +375,15 @@ export class FractalClient {
         try {
             if (readAuthorization) {
                 const bytes = new Uint8Array(await response.arrayBuffer());
-                options.signal?.throwIfAborted();
+                checkAbort(options.signal);
                 if (bytes.byteLength > readAuthorization.budget) throw new AssistantReadRejected('assistant response exceeded max_response_bytes');
                 payload = JSON.parse(new TextDecoder().decode(bytes));
             } else {
                 payload = await response.json();
-                options.signal?.throwIfAborted();
+                checkAbort(options.signal);
             }
         } catch (error) {
-            options.signal?.throwIfAborted();
+            checkAbort(options.signal);
             // HTTP middleware can reject a request before the client API writes a JSON envelope.
             if (response.ok || !(error instanceof SyntaxError)) throw error;
             throw new ClientError({ api_version: API_VERSION, error_version: 'st3.client.error.v0',
@@ -383,7 +412,7 @@ export class FractalClient {
             if (typeof value === 'number' && !(Number.isSafeInteger(value) && value >= 0)) throw new AssistantReadRejected('assistant parameters must be scalar strings or unsigned integers');
             parameters[name] = String(value);
         }
-        options.signal?.throwIfAborted();
+        checkAbort(options.signal);
         if (proof.payload.projection !== projection) throw new AssistantReadRejected('assistant proof names a different projection');
         const signed = Object.entries(proof.payload.parameters).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
         const sent = Object.entries(parameters).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
@@ -398,7 +427,7 @@ export class FractalClient {
 
     private async get<T>(path: string, kind?: 'events', options: RequestOptions = {}): Promise<EnvelopeOf<T>> {
         const capabilities = await this.discover(options);
-        options.signal?.throwIfAborted();
+        checkAbort(options.signal);
         const url = new URL(path, this.baseUrl + '/');
         const limit = url.searchParams.get('limit');
         if (limit !== null) bounded(Number(limit), kind === 'events' ? capabilities.value.limits.max_event_items : capabilities.value.limits.max_page_items, 'limit');
@@ -637,10 +666,14 @@ export class FractalClient {
             subscribeAgentsPublication: id => send({kind: 'subscribe', id, collection: 'agents', agents_publication_version: 1}),
             subscribeArrangements: (id, person, limit = 100, subject) => send({kind: 'subscribe', id, collection: 'arrangements', person, limit, ...(subject === undefined ? {} : {subject})}),
             subscribeOrderedMemberships: (id, person, subject, limit = 100) => send({kind: 'subscribe', id, collection: 'ordered-memberships', person, subject, limit}),
-            subscribe: (id, collection, limit, filters = {}) => {
-                // Only subscribeAgent may send an exact selector: it first checks the daemon.
-                if ((filters as { agent?: unknown }).agent != null) throw new TypeError('Follow one exact agent with subscribeAgent');
+            subscribe: (id, collection, limit, filters: CollectionFilters | { thread_context: ThreadCollectionContext } | { subject: string } = {}) => {
                 const command: Record<string, unknown> = { kind: 'subscribe', id, collection, ...(limit === undefined ? {} : { limit }), ...filters };
+                if (collection === 'threads' || collection === 'thread-timeline') {
+                    send(command);
+                    return;
+                }
+                // Only subscribeAgent may send an exact agent selector for the agents collection.
+                if ((filters as { agent?: unknown }).agent != null) throw new TypeError('Follow one exact agent with subscribeAgent');
                 delete command.agent;
                 send(command);
             },
@@ -673,6 +706,9 @@ export class FractalClient {
         return response;
     }
 
+    async threadList(options: ThreadListQuery, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadSummaryPage>> { return this.get('/v1/client/threads' + query(options), undefined, requestOptions); }
+    async threadGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadSummary>> { return this.get(`/v1/client/threads/${threadPathSegment(id)}`, undefined, requestOptions); }
+    async threadTimeline(id: string, options: { cursor?: string; limit?: number } = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ThreadTimelinePage>> { return this.get(`/v1/client/threads/${threadPathSegment(id)}/timeline` + query(options), undefined, requestOptions); }
     async harnessQuestions(options: Pick<PageOptions, 'cursor' | 'limit'> = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/harness-questions' + query(options), undefined, requestOptions); }
     async harnessQuestion(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<HarnessQuestion>> { return this.get(`/v1/client/harness-questions/${encodeURIComponent(id)}`, undefined, requestOptions); }
     async notesList(requestOptions: RequestOptions = {}): Promise<EnvelopeOf<DirectiveNotes>> { return this.get('/v1/client/notes', undefined, requestOptions); }
@@ -806,6 +842,11 @@ export class FractalClient {
     async terminalEnd(input: Omit<ActionOf<'terminal.end'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'terminal.end' } as ActionOf<'terminal.end'>, requestOptions); }
     async terminalInput(input: Omit<ActionOf<'terminal.input'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'terminal.input' } as ActionOf<'terminal.input'>, requestOptions); }
     async terminalResize(input: Omit<ActionOf<'terminal.resize'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'terminal.resize' } as ActionOf<'terminal.resize'>, requestOptions); }
+    async threadClose(input: Omit<ActionOf<'thread.close'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.close' } as ActionOf<'thread.close'>, requestOptions); }
+    async threadRename(input: Omit<ActionOf<'thread.rename'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.rename' } as ActionOf<'thread.rename'>, requestOptions); }
+    async threadReopen(input: Omit<ActionOf<'thread.reopen'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.reopen' } as ActionOf<'thread.reopen'>, requestOptions); }
+    async threadReply(input: Omit<ActionOf<'thread.reply'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.reply' } as ActionOf<'thread.reply'>, requestOptions); }
+    async threadStart(input: Omit<ActionOf<'thread.start'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.start' } as ActionOf<'thread.start'>, requestOptions); }
     async workAsk(input: Omit<ActionOf<'work.ask'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.ask' } as ActionOf<'work.ask'>, requestOptions); }
     async workCancelAsk(input: Omit<ActionOf<'work.cancel-ask'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.cancel-ask' } as ActionOf<'work.cancel-ask'>, requestOptions); }
     async workClaim(input: Omit<ActionOf<'work.claim'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'work.claim' } as ActionOf<'work.claim'>, requestOptions); }

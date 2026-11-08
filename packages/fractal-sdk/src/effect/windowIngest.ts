@@ -1,4 +1,4 @@
-import type { CollectionFrame, Resource, ResourceCollectionName, Snapshot } from '@fractal/client'
+import { isResourceCollectionFrame, type CollectionFrame, type Resource, type ResourceCollectionName, type Snapshot } from '@fractal/client'
 import type { Undecodable } from './resourceDecode.ts'
 
 /** A decoded window and its exact wire rows (the roster snapshot boundary needs both). */
@@ -189,8 +189,7 @@ export const makeWindowIngest = <A>({
     get rejectedRowCount(): number { return rejected.size },
     accept: (frame: CollectionFrame): void => {
       if (frame.kind !== 'snapshot' && frame.kind !== 'changes') return
-      // An ordered-membership window is not a resource window; this ingest never holds one.
-      if (frame.collection === 'ordered-memberships') return
+      if (!isResourceCollectionFrame(frame)) return
       frames.push(frame)
       if (cancel === undefined && !running) cancel = schedule(run)
     },

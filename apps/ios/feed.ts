@@ -1,5 +1,5 @@
 import type { MembershipEffect, MembershipEvent, MembershipPage, MembershipToken } from './sidebarMemberships';
-import { applyWindow, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type FractalClient, type TerminalScreen, type TimelineEntry } from '../../clients/typescript/fractal-client';
+import { applyWindow, isResourceCollectionFrame, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type FractalClient, type TerminalScreen, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import type { InventoryName } from '@fractal/views';
 import { InventoryFeed, type InventoryHandlers } from './inventoryFeed';
 import type { SidebarArrangement } from './sidebarEdits';
@@ -392,7 +392,7 @@ export class Feed {
     // The app holds no ordered-membership window; its windows hold resources.
     if (this.inventory.frame(frame)) return;
     const id = 'id' in frame ? frame.id : undefined;
-    if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'ordered-memberships') return;
+    if (!isResourceCollectionFrame(frame)) return;
     if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.id === ARRANGEMENTS) {
       const follow = this.arrangements;
       if (!follow) return;

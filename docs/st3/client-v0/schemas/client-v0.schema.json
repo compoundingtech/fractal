@@ -892,7 +892,7 @@
         "kind": { "const": "capabilities" },
         "machine_version": { "type": "string", "description": "Compile-time build identity of the responding daemon; absent on older servers." },
         "session_actor": { "$ref": "#/$defs/Id" },
-        "transport": { "enum": ["unix", "fabric-loopback"] },
+        "transport": { "enum": ["unix", "fabric-loopback", "local-web"] },
         "capabilities": { "type": "array", "items": { "$ref": "#/$defs/Capability" } },
         "limits": {
           "type": "object",
@@ -2462,6 +2462,20 @@
         "reason": { "type": ["string", "null"] }
       }
     },
+    "ThreadSummary": {"type": "object", "additionalProperties": false, "required": ["id", "agent_id", "title", "title_revision", "revision", "state"], "properties": {"id": {"$ref": "#/$defs/Id"}, "agent_id": {"$ref": "#/$defs/Id"}, "title": {"type": "string"}, "title_revision": {"$ref": "#/$defs/Revision"}, "revision": {"$ref": "#/$defs/Revision"}, "state": {"enum": ["open", "closed"]}, "message_count": {"type": "integer", "minimum": 0}, "unread": {"type": "boolean"}}},
+    "ThreadSummaryPage": {"type": "object", "additionalProperties": false, "required": ["items", "next_cursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/ThreadSummary"}}, "next_cursor": {"oneOf": [{"type": "string"}, {"type": "null"}]}}},
+    "ThreadRenamedEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms", "previous_title", "title"], "properties": {"kind": {"const": "thread.renamed"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}, "previous_title": {"type": "string"}, "title": {"type": "string"}}},
+    "ThreadClosedEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms"], "properties": {"kind": {"const": "thread.closed"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}}},
+    "ThreadReopenedEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms"], "properties": {"kind": {"const": "thread.reopened"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}}},
+    "ThreadCollectionContext": {"oneOf": [{"type": "object", "additionalProperties": false, "required": ["agent_id"], "properties": {"agent_id": {"$ref": "#/$defs/AgentId"}}}, {"type": "object", "additionalProperties": false, "required": ["origin_ask", "origin_ask_episode"], "properties": {"origin_ask": {"$ref": "#/$defs/Id"}, "origin_ask_episode": {"$ref": "#/$defs/Revision"}}}, {"type": "object", "additionalProperties": false, "required": ["mission_id"], "properties": {"mission_id": {"$ref": "#/$defs/Id"}}}, {"type": "object", "additionalProperties": false, "required": ["recently_closed"], "properties": {"recently_closed": {"const": true}}}]},
+    "ThreadListQuery": {"oneOf": [{"type": "object", "additionalProperties": false, "required": ["agent_id"], "properties": {"agent_id": {"$ref": "#/$defs/Id"}, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}, {"type": "object", "additionalProperties": false, "required": ["origin_ask", "origin_ask_episode"], "properties": {"origin_ask": {"$ref": "#/$defs/Id"}, "origin_ask_episode": {"$ref": "#/$defs/Revision"}, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}, {"type": "object", "additionalProperties": false, "required": ["mission_id"], "properties": {"mission_id": {"$ref": "#/$defs/Id"}, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}, {"type": "object", "additionalProperties": false, "required": ["recently_closed"], "properties": {"recently_closed": {"const": true}, "cursor": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}]},
+    "ThreadMessageEvent": {"type": "object", "additionalProperties": false, "required": ["kind", "id", "actor_id", "accepted_at_unix_ms", "content", "thread_quote_id"], "properties": {"kind": {"const": "message"}, "id": {"$ref": "#/$defs/Id"}, "actor_id": {"$ref": "#/$defs/Id"}, "accepted_at_unix_ms": {"type": "integer", "minimum": 0}, "content": {"type": "string"}, "thread_quote_id": {"oneOf": [{"$ref": "#/$defs/Id"}, {"type": "null"}]}}},
+    "ThreadStartParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "agent_id", "origin_ask", "origin_ask_episode", "title", "content"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "agent_id": {"$ref": "#/$defs/Id"}, "origin_ask": {"$ref": "#/$defs/Id"}, "origin_ask_episode": {"$ref": "#/$defs/Revision"}, "title": {"type": "string", "minLength": 1, "maxLength": 512}, "content": {"type": "string", "minLength": 1, "maxLength": 8192}, "signature": {"$ref": "#/$defs/DeviceSignature"}}},
+    "ThreadReplyParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "content"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "content": {"type": "string", "minLength": 1, "maxLength": 8192}, "thread_quote_id": {"$ref": "#/$defs/Id"}, "signature": {"$ref": "#/$defs/DeviceSignature"}}},
+    "ThreadTimelineEvent": {"oneOf": [{"$ref": "#/$defs/ThreadRenamedEvent"}, {"$ref": "#/$defs/ThreadClosedEvent"}, {"$ref": "#/$defs/ThreadReopenedEvent"}, {"$ref": "#/$defs/ThreadMessageEvent"}]},
+    "ThreadTimelinePage": {"type": "object", "additionalProperties": false, "required": ["items", "next_cursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/$defs/ThreadTimelineEvent"}}, "next_cursor": {"oneOf": [{"type": "string"}, {"type": "null"}]}}},
+    "ThreadTargetParameters": {"type": "object", "additionalProperties": false, "required": ["target_id"], "properties": {"target_id": {"$ref": "#/$defs/Id"}}},
+    "ThreadRenameParameters": {"type": "object", "additionalProperties": false, "required": ["target_id", "title", "title_revision"], "properties": {"target_id": {"$ref": "#/$defs/Id"}, "title": {"type": "string", "minLength": 1, "maxLength": 512}, "title_revision": {"$ref": "#/$defs/Revision"}}},
     "AgentDeclaration": {
       "type": "object",
       "additionalProperties": false,
@@ -3344,6 +3358,11 @@
             "harness.answer",
             "arrangement.edit",
             "arrangement.membership.edit",
+            "thread.rename",
+            "thread.start",
+            "thread.reply",
+            "thread.close",
+            "thread.reopen",
             "custom.reply",
             "private-notes.write",
             "prompt.respond",
@@ -3544,6 +3563,11 @@
         {"properties": {"type": {"const": "harness.answer"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["runtime_incarnation"]}]}, "parameters": {"$ref": "#/$defs/HarnessAnswerParameters"}, "id": {"allOf": [{"$ref": "#/$defs/Id"}, {"maxLength": 256, "description": "At most 256 UTF-8 bytes; runtime enforces byte length before settlement."}]}}},
         {"properties": {"type": {"const": "arrangement.edit"}, "parameters": {"$ref": "#/$defs/ArrangementEditParameters"}}},
         {"properties": {"type": {"const": "arrangement.membership.edit"}, "parameters": {"$ref": "#/$defs/ArrangementMembershipEditParameters"}}},
+        {"properties": {"type": {"const": "thread.rename"},"parameters": {"$ref": "#/$defs/ThreadRenameParameters"}}},
+        {"properties": {"type": {"const": "thread.start"}, "parameters": {"$ref": "#/$defs/ThreadStartParameters"}}},
+        {"properties": {"type": {"const": "thread.reply"}, "parameters": {"$ref": "#/$defs/ThreadReplyParameters"}}},
+        {"properties": {"type": {"const": "thread.close"},"parameters": {"$ref": "#/$defs/ThreadTargetParameters"}}},
+        {"properties": {"type": {"const": "thread.reopen"},"parameters": {"$ref": "#/$defs/ThreadTargetParameters"}}},
         {"properties": {"type": {"const": "custom.reply"}, "parameters": {"$ref": "#/$defs/CustomReplyParameters"}}},
         {"properties": {"type": {"const": "private-notes.write"}, "fence": {"allOf": [{"$ref": "#/$defs/Fence"}, {"required": ["private_notes"]}]}, "parameters": {"$ref": "#/$defs/PrivateNotesWriteParameters"}}},
         {"properties": {"type": {"const": "prompt.respond"}, "parameters": {"$ref": "#/$defs/PromptRespondParameters"}}},
@@ -3799,7 +3823,8 @@
         "terminal_attachment": { "oneOf": [{ "$ref": "#/$defs/TerminalAttachment" }, { "type": "null" }] },
         "arrangement_revision": { "$ref": "#/$defs/Revision" },
         "harness_answer": {"$ref": "#/$defs/HarnessAnswerResult"},
-        "membership_revision": { "$ref": "#/$defs/Revision" }
+        "membership_revision": { "$ref": "#/$defs/Revision" },
+        "metadata_revision": { "$ref": "#/$defs/Revision" }
       }
     },
     "AssistantPrincipal": { "enum": ["assistant/chatgpt"] },
@@ -4458,7 +4483,9 @@
       "devices",
       "commands",
       "sessions",
-      "terminals"
+      "terminals",
+      "threads",
+      "thread-timeline"
     ] },
     "ResourceCollectionName": { "description": "Collections whose windows hold resources.", "enum": [
       "missions",
@@ -4528,6 +4555,8 @@
     "CollectionCommand": {
       "oneOf": [
         { "$ref": "#/$defs/AgentsPublicationSubscribe" },
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "subject"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "thread-timeline"}, "subject": {"type": "string", "pattern": "^thread/[A-Za-z0-9_-]{1,128}$"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "thread_context"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "threads"}, "thread_context": {"$ref": "#/$defs/ThreadCollectionContext"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "commands"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "actor": {"type": ["string", "null"]}, "status": {"type": ["string", "null"]}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}, "collection": {"enum": ["clients", "usage", "machines", "devices", "sessions", "terminals"]}, "actor": {"type":"null"}, "status": {"type":"null"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "person": {"type": ["string", "null"]}, "since_ms": {"type": "integer", "minimum": 0}, "until_ms": {"type": "integer", "minimum": 0}}},
         {
@@ -4725,6 +4754,10 @@
       "oneOf": [
         { "$ref": "#/$defs/AgentsSnapshotChunk" },
         { "$ref": "#/$defs/AgentsChanges" },
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "snapshot", "upserts", "order", "has_more", "removes"], "properties": {"kind": {"const": "changes"}, "id": {"type": "string"}, "collection": {"const": "thread-timeline"}, "snapshot": {"$ref": "#/$defs/Snapshot"}, "upserts": {"type": "array", "items": {"$ref": "#/$defs/ThreadTimelineEvent"}}, "order": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "has_more": {"type": "boolean"}, "removes": {"type": "array", "items": {"$ref": "#/$defs/Id"}}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "snapshot", "items", "order", "has_more"], "properties": {"kind": {"const": "snapshot"}, "id": {"type": "string"}, "collection": {"const": "thread-timeline"}, "snapshot": {"$ref": "#/$defs/Snapshot"}, "items": {"type": "array", "items": {"$ref": "#/$defs/ThreadTimelineEvent"}}, "order": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "has_more": {"type": "boolean"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "snapshot", "upserts", "order", "has_more", "removes"], "properties": {"kind": {"const": "changes"}, "id": {"type": "string"}, "collection": {"const": "threads"}, "snapshot": {"$ref": "#/$defs/Snapshot"}, "upserts": {"type": "array", "items": {"$ref": "#/$defs/ThreadSummary"}}, "order": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "has_more": {"type": "boolean"}, "removes": {"type": "array", "items": {"$ref": "#/$defs/Id"}}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "snapshot", "items", "order", "has_more"], "properties": {"kind": {"const": "snapshot"}, "id": {"type": "string"}, "collection": {"const": "threads"}, "snapshot": {"$ref": "#/$defs/Snapshot"}, "items": {"type": "array", "items": {"$ref": "#/$defs/ThreadSummary"}}, "order": {"type": "array", "items": {"$ref": "#/$defs/Id"}}, "has_more": {"type": "boolean"}}},
         {
           "type": "object",
           "additionalProperties": false,

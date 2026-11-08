@@ -858,7 +858,8 @@ async fn connected(
                         }
                     }
                     // The feed holds no ordered-membership window.
-                    CollectionEvent::MembershipSnapshot { .. } | CollectionEvent::MembershipChanges { .. } => {}
+                    CollectionEvent::MembershipSnapshot { .. } | CollectionEvent::MembershipChanges { .. }
+                        | CollectionEvent::ThreadWindow { .. } => {}
                 }
             }
             command = commands.recv() => match command {

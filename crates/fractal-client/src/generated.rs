@@ -3385,6 +3385,16 @@ pub enum ActionType {
     ArrangementEdit,
     #[serde(rename = "arrangement.membership.edit")]
     ArrangementMembershipEdit,
+    #[serde(rename = "thread.rename")]
+    ThreadRename,
+    #[serde(rename = "thread.start")]
+    ThreadStart,
+    #[serde(rename = "thread.reply")]
+    ThreadReply,
+    #[serde(rename = "thread.close")]
+    ThreadClose,
+    #[serde(rename = "thread.reopen")]
+    ThreadReopen,
     #[serde(rename = "attention.resolve")]
     AttentionResolve,
     #[serde(rename = "review.approve")]
@@ -4197,6 +4207,76 @@ impl ActionRequest {
             &parameters,
         )
     }
+    pub fn thread_close(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadTargetParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadClose,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn thread_rename(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadRenameParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadRename,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn thread_reopen(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadTargetParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadReopen,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn thread_reply(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadReplyParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadReply,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
+    pub fn thread_start(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadStartParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadStart,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
     pub fn work_ask(
         id: impl Into<String>,
         idempotency_key: impl Into<String>,
@@ -4768,6 +4848,109 @@ pub struct TerminalResizeParameters {
     pub columns: u16,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ThreadState {
+    Open,
+    Closed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadSummary {
+    pub id: String,
+    pub agent_id: String,
+    pub title: String,
+    pub title_revision: String,
+    pub revision: String,
+    pub state: ThreadState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadSummaryPage {
+    pub items: Vec<ThreadSummary>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadTimelineEvent {
+    pub id: String,
+    pub actor_id: String,
+    pub accepted_at_unix_ms: u64,
+    #[serde(flatten)]
+    pub change: ThreadTimelineChange,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind")]
+pub enum ThreadTimelineChange {
+    #[serde(rename = "message")]
+    Message {
+        content: String,
+        thread_quote_id: Option<String>,
+    },
+    #[serde(rename = "thread.renamed")]
+    Renamed {
+        previous_title: String,
+        title: String,
+    },
+    #[serde(rename = "thread.closed")]
+    Closed,
+    #[serde(rename = "thread.reopened")]
+    Reopened,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadTimelinePage {
+    pub items: Vec<ThreadTimelineEvent>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadListScope<'a> {
+    Agent(&'a str),
+    Ask { id: &'a str, episode: &'a str },
+    Mission(&'a str),
+    RecentlyClosed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ThreadStartParameters {
+    pub target_id: String,
+    pub agent_id: String,
+    pub origin_ask: String,
+    pub origin_ask_episode: String,
+    pub title: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<DeviceSignature>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ThreadReplyParameters {
+    pub target_id: String,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_quote_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature: Option<DeviceSignature>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadTargetParameters {
+    pub target_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadRenameParameters {
+    pub target_id: String,
+    pub title: String,
+    pub title_revision: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ActionResult {
     pub kind: String,
@@ -4786,6 +4969,8 @@ pub struct ActionResult {
     pub harness_answer: Option<HarnessAnswerResult>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub membership_revision: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_revision: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
