@@ -113,16 +113,20 @@ impl Admission {
         Ok(())
     }
 
+    fn reset_recovered(&mut self) {
+        if self.weekly.recovered {
+            self.case = None;
+            self.weekly = Weekly { through: self.weekly.through, ..Weekly::default() };
+            self.notices.retain(|notice| !notice.recorded && !notice.held);
+        }
+    }
+
     fn plan(&mut self, config: &ReadinessSloConfig, summary: ShortSummary) -> bool {
         if self.legacy_draining || summary.end_ms <= self.through {
             return false;
         }
         self.through = summary.end_ms;
-        if self.weekly.recovered {
-            self.case = None;
-            self.weekly = Weekly::default();
-            self.notices.retain(|notice| !notice.recorded && !notice.held);
-        }
+        self.reset_recovered();
         // Once an early case opens, a later clear or Unknown never closes it.
         if self.case.is_none() && summary.known >= 4 && summary.failed >= 3 {
             self.case = Some(Opening {
@@ -174,6 +178,8 @@ impl Admission {
         if self.legacy_draining || reading.end_ms <= self.weekly.through {
             return Ok(());
         }
+        // Weekly-only cases must restart even when no retained short cuts are available.
+        self.reset_recovered();
         if self.case.is_none() && reading.status() == "missed" {
             self.case = Some(Opening {
                 episode: format!("slo-objective/readiness-case/{}/{OBJECTIVE}/{}/{}",
@@ -515,6 +521,21 @@ fn drain_legacy(admission: &mut Admission, policy: &Policy, store: &Store, journ
     Ok(row)
 }
 
+/// Fresh input must advance the drain watermark. Exact pending replay bypasses this check.
+fn drain_fresh_legacy(
+    admission: &mut Admission,
+    policy: &Policy,
+    store: &Store,
+    journal: &Path,
+    reading: &Reading,
+    now: u64,
+) -> Result<Value> {
+    if reading.end_ms <= admission.weekly.through {
+        return Ok(policy.row(None));
+    }
+    drain_legacy(admission, policy, store, journal, reading, now)
+}
+
 /// The enabled shared route replaces (and never calls) the legacy weekly dispatcher.
 pub(super) fn run_sampler(policy: &Policy, store: &Store, now: u64) -> Result<Value> {
     ensure!(policy.config.shared_case, "shared readiness routing is disabled");
@@ -525,7 +546,7 @@ pub(super) fn run_sampler(policy: &Policy, store: &Store, now: u64) -> Result<Va
     import_legacy(&mut admission, policy, store, &journal)?;
     if admission.legacy_draining {
         let (reading, _) = policy.checked_reading(now)?;
-        return drain_legacy(&mut admission, policy, store, &journal, &reading, now);
+        return drain_fresh_legacy(&mut admission, policy, store, &journal, &reading, now);
     }
     // Admitted work remains replayable even while the publisher is unavailable.
     admission.replay(&journal, |opening| record(store, config, opening))?;
@@ -1027,10 +1048,22 @@ mod migration_tests {
         drain_notices(&mut admission, &journal, &store, Some("agent/fixture.unavailable")).unwrap();
         assert_eq!(store.messages(Some(&policy.config.reviewer), true).unwrap().len(), 1);
         assert!(store.fault_delivery_snapshot(u128::from(now_ms()) + 1).unwrap().is_empty());
+        let first_episode = admission.case.as_ref().unwrap().episode.clone();
         let met = reading(missed.end_ms + MINUTE_MS, 0);
         admission.weekly(&journal, &policy.config, &store, &met, met.end_ms,
             |opening, action| record_weekly(&store, opening, action)).unwrap();
         assert!(admission.weekly.recovered);
+        let mut admission = Admission::load(&journal, &policy.config).unwrap();
+        let next_miss = reading(met.end_ms + MINUTE_MS, 11);
+        // No plan/reconcile call or short summary occurs anywhere in this lifecycle.
+        admission.weekly(&journal, &policy.config, &store, &next_miss, next_miss.end_ms,
+            |opening, action| record_weekly(&store, opening, action)).unwrap();
+        assert_ne!(admission.case.as_ref().unwrap().episode, first_episode);
+        assert!(admission.weekly.escalated);
+        assert!(!admission.weekly.recovered);
+        drain_notices(&mut admission, &journal, &store, None).unwrap();
+        drain_notices(&mut admission, &journal, &store, None).unwrap();
+        assert_eq!(store.messages(Some(&policy.config.reviewer), true).unwrap().len(), 2);
     }
 
     #[test]
@@ -1056,6 +1089,57 @@ mod migration_tests {
         assert!(!restarted.legacy_draining);
         assert!(store.messages(Some(&policy.config.reviewer), true).unwrap().is_empty());
         assert_eq!(store.operational_failure(&legacy_episode).unwrap().unwrap().status, "resolved");
+        assert_eq!(fs::read(&policy.checkpoint).unwrap(), legacy_bytes);
+    }
+
+    #[test]
+    fn legacy_drain_rejects_fresh_rewind_and_rewritten_equal_cut_before_routing() {
+        let (dir, policy, store) = fixture();
+        let start = (MINUTES + 10) * MINUTE_MS;
+        let legacy = reading(start, 11);
+        policy.checkpoint(&legacy, false).unwrap();
+        policy.route(&store, &legacy).unwrap();
+        let legacy_bytes = fs::read(&policy.checkpoint).unwrap();
+        let episode = crate::objective_faults::episode(
+            store.origin(), &format!("{OBJECTIVE}/{}", policy.config.member),
+        );
+        let journal = dir.path().join("case.json");
+        let mut admission = Admission::load(&journal, &policy.config).unwrap();
+        import_legacy(&mut admission, &policy, &store, &journal).unwrap();
+
+        let newest = reading(start + 2 * MINUTE_MS, 11);
+        drain_fresh_legacy(&mut admission, &policy, &store, &journal, &newest, newest.end_ms).unwrap();
+        let committed = fs::read(&journal).unwrap();
+        let index = store.index().unwrap();
+        for end in [start + MINUTE_MS, newest.end_ms] {
+            let stale_met = reading(end, 0);
+            assert!(policy.admit(&stale_met, newest.end_ms).unwrap());
+            let row = drain_fresh_legacy(
+                &mut admission, &policy, &store, &journal, &stale_met, newest.end_ms,
+            ).unwrap();
+            assert_eq!(row["status"], "no-data");
+            assert!(admission.legacy_draining);
+            assert_eq!(store.index().unwrap(), index);
+            assert_eq!(fs::read(&journal).unwrap(), committed);
+            assert_eq!(store.operational_failure(&episode).unwrap().unwrap().status, "pending");
+        }
+
+        let duplicate = drain_fresh_legacy(
+            &mut admission, &policy, &store, &journal, &newest, newest.end_ms,
+        ).unwrap();
+        assert_eq!(duplicate["status"], "no-data");
+        assert_eq!(store.index().unwrap(), index);
+        assert_eq!(fs::read(&journal).unwrap(), committed);
+        assert_eq!(store.operational_failure(&episode).unwrap().unwrap().status, "pending");
+
+        let next = reading(newest.end_ms + MINUTE_MS, 0);
+        admission.legacy_pending = Some(next);
+        admission.persist(&journal).unwrap();
+        let mut restarted = Admission::load(&journal, &policy.config).unwrap();
+        import_legacy(&mut restarted, &policy, &store, &journal).unwrap();
+        assert!(restarted.legacy_pending.is_none());
+        assert!(!restarted.legacy_draining);
+        assert_eq!(store.operational_failure(&episode).unwrap().unwrap().status, "resolved");
         assert_eq!(fs::read(&policy.checkpoint).unwrap(), legacy_bytes);
     }
 

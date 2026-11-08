@@ -500,6 +500,9 @@ through the legacy writer before reading a newer publication. Enabling the
 shared route uses drain-before-enable: every already-open weekly episode
 finishes under its existing writer and receives no shared-case primary notice.
 Only episodes opened after that drain belong to the shared sender.
+Fresh legacy-drain readings must strictly advance the durable case-journal
+cursor; older and equal cuts are not routed. Exact admitted pending work
+replays separately using its original observation clock.
 Receivers classify managed failures by their originating daemon and linked
 opening, independently of the receiver's local policy configuration.
 Keep `readiness-case.json` across
