@@ -404,8 +404,9 @@ class ViewportController {
         if ((event.key === 'Enter' || event.key === ' ') && target?.closest(disclosureSelector) != null) return 'history'
         return upwardKeys[event.key] === true || (event.key === ' ' && event.shiftKey) ? 'history' : 'end'
       }
-      // Expanding a row: the reader wants that row to stay put, not the live end.
-      if (event.type === 'pointerdown' && target?.closest(disclosureSelector) != null) return 'history'
+      // Expanding a row: the reader wants that row to stay put, not the live end. Assistive tech may activate it with a click
+      // alone, so the click counts too; it reaches the lane (capture) before the disclosure's own handler changes the content.
+      if ((event.type === 'pointerdown' || event.type === 'click') && target?.closest(disclosureSelector) != null) return 'history'
       return 'none'
     }
     const manual = (event: Event) => {
@@ -427,6 +428,10 @@ class ViewportController {
       if (this.frame !== undefined) cancelAnimationFrame(this.frame)
       this.frame = undefined
       this.dock()
+    }
+    // Only a disclosure click is reader intent; any other click (text, links, row actions) keeps the lane as it is.
+    const disclosureClick = (event: MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest(disclosureSelector) !== null && element.contains(event.target)) manual(event)
     }
     const scroll = () => {
       if (this.programmaticTop !== undefined && Math.abs(element.scrollTop - this.programmaticTop) < geometryNumbers.scrollEndTolerance) {
@@ -508,6 +513,7 @@ class ViewportController {
     element.addEventListener('touchmove', manual, { passive: true })
     element.addEventListener('keydown', manual)
     element.addEventListener('pointerdown', manual, { passive: true })
+    element.addEventListener('click', disclosureClick, { capture: true })
     element.addEventListener('focusin', manual)
     element.addEventListener('scroll', scroll, { passive: true })
     page.addEventListener('pointerdown', press, true)
@@ -537,6 +543,7 @@ class ViewportController {
       element.removeEventListener('touchmove', manual)
       element.removeEventListener('keydown', manual)
       element.removeEventListener('pointerdown', manual)
+      element.removeEventListener('click', disclosureClick, { capture: true })
       element.removeEventListener('focusin', manual)
       element.removeEventListener('scroll', scroll)
       page.removeEventListener('pointerdown', press, true)
