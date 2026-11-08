@@ -57,6 +57,7 @@ jobs:
       - proof-evidence-gate-rust-tests
       - proof-upgrade-impact
       - proof-genie-freshness
+      - proof-hm-module-eval
       - proof-ci-script-tests
       - proof-typescript-client
       - proof-swift-client-changes
@@ -2700,6 +2701,41 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+  proof-hm-module-eval:
+    name: post-merge hm-module-eval
+    needs: [main-checks, proof-pick-runner]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (!cancelled()) ) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Prove Home Manager activation ownership and rollback
+        run: "nix build .#checks.x86_64-linux.hm-module-eval --no-link --print-build-logs"
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Builds only shell activation fixtures in the runner's Nix store; no Rust or product build and no separate Actions build cache.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
   proof-ci-script-tests:
     name: post-merge ci-script-tests
     env:
@@ -5030,6 +5066,7 @@ jobs:
       - proof-linux-fleet-compat
       - proof-ci-script-tests
       - proof-evidence-gate-ci-script-tests
+      - proof-hm-module-eval
       - proof-evidence-gate-rust-tests
       - proof-evidence-gate-linux-clippy
       - proof-evidence-gate-linux-fleet-compat
@@ -5084,6 +5121,10 @@ jobs:
           [ "$SCRIPT_TESTS_RESULT" = success ] && exit 0
           [ "$SCRIPT_TESTS_RESULT" = skipped ] && [ "${SCRIPT_TESTS_SKIPPED_BY_GATE:-}" = true ] && exit 0
           exit 1
+      - name: Require fixture-only HM activation proof to pass
+        env:
+          HM_RESULT: ${{ needs.proof-hm-module-eval.result }}
+        run: test "$HM_RESULT" = success
       - name: Report job cache coverage
         if: always()
         shell: bash
