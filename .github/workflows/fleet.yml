@@ -2256,15 +2256,12 @@ jobs:
         run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
       - name: Download the prepared compatibility archive
         id: compat-archive
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
-          path: ${{ steps['compat-identity'].outputs.directory }}
-      - name: Verify the prepared compatibility archive
         shell: bash
         env:
-          COMPAT_ARCHIVE_CACHE_HIT: "true"
-        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -2492,15 +2489,12 @@ jobs:
         run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
       - name: Download the prepared compatibility archive
         id: compat-archive
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
-          path: ${{ steps['compat-identity'].outputs.directory }}
-      - name: Verify the prepared compatibility archive
         shell: bash
         env:
-          COMPAT_ARCHIVE_CACHE_HIT: "true"
-        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -2770,15 +2764,12 @@ jobs:
         run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
       - name: Download the prepared compatibility archive
         id: compat-archive
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
-          path: ${{ steps['compat-identity'].outputs.directory }}
-      - name: Verify the prepared compatibility archive
         shell: bash
         env:
-          COMPAT_ARCHIVE_CACHE_HIT: "true"
-        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -3045,15 +3036,12 @@ jobs:
         run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
       - name: Download the prepared compatibility archive
         id: compat-archive
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
-          path: ${{ steps['compat-identity'].outputs.directory }}
-      - name: Verify the prepared compatibility archive
         shell: bash
         env:
-          COMPAT_ARCHIVE_CACHE_HIT: "true"
-        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -3320,15 +3308,12 @@ jobs:
         run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
       - name: Download the prepared compatibility archive
         id: compat-archive
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
-          path: ${{ steps['compat-identity'].outputs.directory }}
-      - name: Verify the prepared compatibility archive
         shell: bash
         env:
-          COMPAT_ARCHIVE_CACHE_HIT: "true"
-        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -3819,15 +3804,12 @@ jobs:
         run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
       - name: Download the prepared compatibility archive
         id: compat-archive
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-fleet'] }}
-          path: ${{ steps['compat-identity'].outputs.directory }}
-      - name: Verify the prepared compatibility archive
         shell: bash
         env:
-          COMPAT_ARCHIVE_CACHE_HIT: "true"
-        run: 'python3 scripts/ci-compat-archive prepare fleet x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-fleet'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-id-fleet'] }}
+        run: 'python3 scripts/ci-compat-archive download fleet x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -5108,8 +5090,10 @@ jobs:
     permissions:
       contents: read
     outputs:
-      artifact-messaging: "${{ steps['identity-0'].outputs.key }}-attempt-${{ github.run_attempt }}"
-      artifact-fleet: "${{ steps['identity-1'].outputs.key }}-attempt-${{ github.run_attempt }}"
+      artifact-messaging: ${{ steps['identity-0'].outputs['artifact-name'] }}
+      artifact-id-messaging: ${{ steps.upload-0.outputs.artifact-id }}
+      artifact-fleet: ${{ steps['identity-1'].outputs['artifact-name'] }}
+      artifact-id-fleet: ${{ steps.upload-1.outputs.artifact-id || steps.upload-0.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -5141,9 +5125,10 @@ jobs:
           path: ${{ steps['identity-0'].outputs['cache-path'] }}
           key: ${{ steps['identity-0'].outputs.key }}
       - name: Share verified messaging archive
+        id: upload-0
         uses: actions/upload-artifact@v4
         with:
-          name: "${{ steps['identity-0'].outputs.key }}-attempt-${{ github.run_attempt }}"
+          name: ${{ steps['identity-0'].outputs['artifact-name'] }}
           path: ${{ steps['identity-0'].outputs.path }}
           if-no-files-found: error
           retention-days: 7
@@ -5169,14 +5154,18 @@ jobs:
           path: ${{ steps['identity-1'].outputs['cache-path'] }}
           key: ${{ steps['identity-1'].outputs.key }}
       - name: Share verified fleet archive
+        id: upload-1
         if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256
         uses: actions/upload-artifact@v4
         with:
-          name: "${{ steps['identity-1'].outputs.key }}-attempt-${{ github.run_attempt }}"
+          name: ${{ steps['identity-1'].outputs['artifact-name'] }}
           path: ${{ steps['identity-1'].outputs.path }}
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
-      - name: Report compatibility archive cache coverage
+      - name: Report job cache coverage
+        if: always()
         shell: bash
-        run: 'echo "Compatibility archives: exact native-target + pinned-SHA256 restore/save; every restored archive is reverified before use." >> "$GITHUB_STEP_SUMMARY"'
+        env:
+          CACHE_ENTRIES: '[{"name":"Restore messaging archive","outcome":"${{ steps.archive-0.outcome }}","hit":"${{ steps.archive-0.outputs.cache-hit }}","matched":"${{ steps.archive-0.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore fleet archive","outcome":"${{ steps.archive-1.outcome }}","hit":"${{ steps.archive-1.outputs.cache-hit }}","matched":"${{ steps.archive-1.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
+        run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'

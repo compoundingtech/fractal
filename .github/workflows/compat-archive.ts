@@ -1,3 +1,5 @@
+import { auditCaches } from './cache-audit.ts'
+
 type Kind = 'fleet' | 'messaging'
 type Step = { name?: string; uses?: string; [key: string]: unknown }
 type Job = { steps: readonly Step[]; needs?: string | readonly string[]; [key: string]: unknown }
@@ -44,14 +46,11 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
       { name: 'Require an explicit prepared archive name', shell: 'bash',
         env: { COMPAT_ARCHIVE_NAME: `\${{ needs['${producer}'].outputs['artifact-${kind}'] }}` },
         run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }' },
-      { name: 'Download the prepared compatibility archive', id: 'compat-archive',
-        uses: 'actions/download-artifact@v4', with: {
-          name: `\${{ needs['${producer}'].outputs['artifact-${kind}'] }}`,
-          path: "${{ steps['compat-identity'].outputs.directory }}",
-        } },
-      { name: 'Verify the prepared compatibility archive', shell: 'bash',
-        env: { COMPAT_ARCHIVE_CACHE_HIT: 'true' },
-        run: `python3 scripts/ci-compat-archive prepare ${kind} ${target} "\${{ steps['compat-identity'].outputs.path }}"` },
+      { name: 'Download the prepared compatibility archive', id: 'compat-archive', shell: 'bash',
+        env: { GH_TOKEN: '${{ github.token }}',
+          COMPAT_ARCHIVE_NAME: `\${{ needs['${producer}'].outputs['artifact-${kind}'] }}`,
+          CI_TEST_ARCHIVE_ARTIFACT_ID: `\${{ needs['${producer}'].outputs['artifact-id-${kind}'] }}` },
+        run: `python3 scripts/ci-compat-archive download ${kind} ${target} "\${{ steps['compat-identity'].outputs.path }}"` },
       ...job.steps.slice(checkout + 1),
     ] }
   }
@@ -60,9 +59,10 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
       name: `Prepare verified compatibility archives (${target})`,
       'runs-on': 'ubuntu-latest', 'timeout-minutes': 15,
       permissions: { contents: 'read' },
-      outputs: Object.fromEntries([...kinds].map((kind, index) => [
-        `artifact-${kind}`,
-        `\${{ steps['identity-${index}'].outputs.key }}-attempt-\${{ github.run_attempt }}`,
+      outputs: Object.fromEntries([...kinds].flatMap((kind, index) => [
+        [`artifact-${kind}`, `\${{ steps['identity-${index}'].outputs['artifact-name'] }}`],
+        [`artifact-id-${kind}`, index === 0 ? '${{ steps.upload-0.outputs.artifact-id }}'
+          : '${{ steps.upload-1.outputs.artifact-id || steps.upload-0.outputs.artifact-id }}'],
       ])),
       steps: [
         { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
@@ -80,18 +80,18 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
             { name: `Save verified ${kind} archive`,
               if: `${index === 0 ? '' : "steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256 && "}steps.archive-${index}.outputs.cache-hit != 'true'`,
               uses: 'actions/cache/save@v4', with: cache(`identity-${index}`) },
-            { name: `Share verified ${kind} archive`, ...condition,
+            { name: `Share verified ${kind} archive`, id: `upload-${index}`, ...condition,
               uses: 'actions/upload-artifact@v4', with: {
-                name: `\${{ steps['identity-${index}'].outputs.key }}-attempt-\${{ github.run_attempt }}`,
+                name: `\${{ steps['identity-${index}'].outputs['artifact-name'] }}`,
                 path: `\${{ steps['identity-${index}'].outputs.path }}`,
                 'if-no-files-found': 'error', 'retention-days': 7, 'compression-level': 0,
               } },
           ]
         }),
-        { name: 'Report compatibility archive cache coverage', shell: 'bash',
-          run: 'echo "Compatibility archives: exact native-target + pinned-SHA256 restore/save; every restored archive is reverified before use." >> "$GITHUB_STEP_SUMMARY"' },
       ],
     }
+    const producerId = `compat-archives-${target}`
+    jobs[producerId] = auditCaches({ jobs: { [producerId]: jobs[producerId] } }).jobs[producerId]
   }
   return { ...workflow, jobs }
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline producer contract and generated workflow archive wiring regressions."""
 import importlib.machinery
+import hashlib
 import importlib.util
 import json
 import os
@@ -9,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import zipfile
 import unittest
 from unittest.mock import patch
 
@@ -114,10 +116,10 @@ class ArchiveTests(unittest.TestCase):
                     job = jobs[name]
                     self.assertIn(producer_id, job)
                     self.assertIn("ci-compat-archive identity", job)
-                    self.assertIn("uses: actions/download-artifact@v4", job)
-                    self.assertIn("outputs.directory", job)
-                    self.assertIn("Verify the prepared compatibility archive", job)
-                    self.assertIn("COMPAT_ARCHIVE_CACHE_HIT: \"true\"", job)
+                    self.assertNotIn("actions/download-artifact@", job)
+                    self.assertIn("python3 scripts/ci-compat-archive download", job)
+                    self.assertIn("CI_TEST_ARCHIVE_ARTIFACT_ID:", job)
+                    self.assertIn("GH_TOKEN: ${{ github.token }}", job)
                     self.assertNotIn("Restore the prepared compatibility archive", job)
                     self.assertIn("Require successful archive preparation", job)
                     self.assertNotIn("uses: actions/cache/save@v4", job.split("steps:", 1)[1].split("- name: Require successful archive preparation", 1)[0])
@@ -128,35 +130,36 @@ class ArchiveTests(unittest.TestCase):
             artifacts = re.findall(
                 r"uses: actions/(?:upload|download)-artifact@v4\n(.*?)(?=\n      - |\n  [\w-]+:|\Z)",
                 text, re.S)
-            compatibility = [block for block in artifacts if ".outputs.key }}" in block]
+            compatibility = [block for block in artifacts if ".outputs['artifact-name']" in block]
             self.assertTrue(compatibility, workflow)
             for block in compatibility:
-                self.assertIn(".outputs.key }}-attempt-${{ github.run_attempt }}", block, workflow)
+                self.assertIn(".outputs['artifact-name']", block, workflow)
                 self.assertNotIn("overwrite:", block, workflow)
                 self.assertIn("retention-days: 7", block, workflow)
+        first = helper.artifact_name("pin", "producer", "1")
+        self.assertNotEqual(first, helper.artifact_name("pin", "producer", "2"))
+        self.assertNotEqual(first, helper.artifact_name("pin", "proof-producer", "1"))
 
     def test_partial_rerun_consumers_keep_the_producer_attempt(self):
         for workflow in ("fleet", "main-upkeep", "daily-long", "debug-assertions-daily", "macos"):
             text = (ROOT / f".github/workflows/{workflow}.yml").read_text()
             producer_outputs = dict(re.findall(r"artifact-(fleet|messaging): (.+)", text))
             downloads = re.findall(
-                r"uses: actions/download-artifact@v4\n(.*?)(?=\n      - |\n  [\w-]+:|\Z)",
+                r"- name: Download the prepared compatibility archive\n(.*?)(?=\n      - |\n  [\w-]+:|\Z)",
                 text, re.S)
             compatibility = [block for block in downloads if "outputs['artifact-" in block]
             self.assertTrue(compatibility, workflow)
             for block in compatibility:
                 self.assertNotIn("github.run_attempt", block, workflow)
                 kind = re.search(r"outputs\['artifact-(fleet|messaging)'\]", block).group(1)
-                self.assertRegex(block, r"needs\['compat-archives-[^']+'\]\.outputs")
+                self.assertRegex(block, r"needs(?:\['(?:proof-)?compat-archives-[^']+'\]|\.(?:proof-)?compat-archives-[\w-]+)\.outputs")
                 output = producer_outputs[kind]
-                self.assertIn("-attempt-${{ github.run_attempt }}", output)
-                # GitHub preserves successful producer outputs when only the failed
-                # consumer reruns: producer attempt 1, consumer attempt 2.
-                produced_name = re.sub(r"\$\{\{ steps\[[^}]+\.outputs\.key \}\}", "pinned-archive", output)
-                retained_output = produced_name.replace("${{ github.run_attempt }}", "1").strip('"')
+                self.assertIn(".outputs['artifact-name']", output)
+                # Successful producer step outputs survive consumer-only reruns.
+                retained_output = helper.artifact_name("pinned-archive", "producer", "1")
                 needs = {f"artifact-{kind}": retained_output}
-                self.assertEqual(needs[f"artifact-{kind}"], "pinned-archive-attempt-1")
-                self.assertNotEqual(needs[f"artifact-{kind}"], "pinned-archive-attempt-2")
+                self.assertEqual(needs[f"artifact-{kind}"], "pinned-archive-job-producer-attempt-1")
+                self.assertNotEqual(needs[f"artifact-{kind}"], "pinned-archive-job-producer-attempt-2")
 
     def test_empty_artifact_name_fails_before_download(self):
         source = (ROOT / ".github/workflows/compat-archive.ts").read_text()
@@ -175,10 +178,54 @@ class ArchiveTests(unittest.TestCase):
             self.assertTrue(guards, workflow)
             self.assertEqual(len(guards), text.count("- name: Download the prepared compatibility archive"))
             for guard in guards:
-                self.assertIn("COMPAT_ARCHIVE_NAME: ${{ needs[", guard)
+                self.assertRegex(guard, r"COMPAT_ARCHIVE_NAME: \$\{\{ needs(?:\[|\.)")
                 self.assertIn("outputs['artifact-", guard)
                 self.assertIn(command, guard)
                 self.assertNotIn("\n        if:", guard)
+
+    def test_private_zip_is_verified_before_consumer_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / ".github").mkdir()
+            payload = b"verified baseline archive"
+            sha = hashlib.sha256(payload).hexdigest()
+            (root / ".github/fleet-compat-baseline.json").write_text(
+                json.dumps({"bundles": {LINUX: {"sha256": sha}}}))
+            zipped = root / "fixture.zip"
+            with zipfile.ZipFile(zipped, "w") as bundle:
+                bundle.writestr(f"{sha}.tar.gz", payload)
+            metadata = {"id": 123, "name": "pinned-attempt-1", "expired": False,
+                        "workflow_run": {"id": 456, "head_sha": "a" * 40},
+                        "size_in_bytes": zipped.stat().st_size,
+                        "digest": "sha256:" + hashlib.sha256(zipped.read_bytes()).hexdigest()}
+            destination = root / "consumer/baseline.tar.gz"
+
+            def transfer(endpoint, archive, size, metrics, timeout):
+                self.assertFalse(destination.exists())
+                archive.write_bytes(zipped.read_bytes())
+
+            def verify(kind, target, archive, *, cache_hit, root):
+                self.assertFalse(destination.exists())
+                self.assertTrue(cache_hit)
+                self.assertEqual(archive.read_bytes(), payload)
+
+            env = {"CI_TEST_ARCHIVE_ARTIFACT_ID": "123", "COMPAT_ARCHIVE_NAME": "pinned-attempt-1",
+                   "GITHUB_REPOSITORY_ID": "789", "GITHUB_RUN_ID": "456", "GITHUB_SHA": "a" * 40}
+            implementation = {"transfer_zip": transfer,
+                              "digest": lambda path: hashlib.sha256(path.read_bytes()).hexdigest()}
+            with patch.dict(os.environ, env), patch.object(helper.subprocess, "check_output",
+                    side_effect=lambda *a, **k: json.dumps(metadata).encode()), \
+                 patch.object(helper.runpy, "run_path", return_value=implementation), \
+                 patch.object(helper, "prepare", side_effect=verify) as verified:
+                helper.download("fleet", LINUX, destination, root=root)
+                self.assertEqual(destination.read_bytes(), payload)
+                verified.assert_called_once()
+                destination.unlink()
+                metadata["digest"] = "sha256:" + "0" * 64
+                with self.assertRaisesRegex(ValueError, "ZIP size/digest"):
+                    helper.download("fleet", LINUX, destination, root=root)
+                self.assertFalse(destination.exists())
+                self.assertEqual(verified.call_count, 1)
 
 
 if __name__ == "__main__":

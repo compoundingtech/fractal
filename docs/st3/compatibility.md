@@ -184,9 +184,13 @@ verified bytes as an artifact retained for seven days. Artifact names include th
 `github.run_attempt`, so reruns never overwrite bytes used by another attempt. The producer
 exports each artifact name as a job output; a consumer-only rerun uses that retained output,
 not its own attempt number. Fleet and messaging share artifacts when their pins match.
-Downstream jobs download the producer-selected artifact,
-reverify SHA256 and `BUILD.json` source/target, and use `COMPAT_BASELINE_ARCHIVE`, never a
-live release download. Artifacts bridge GitHub-hosted, Namespace and macOS runners without
+Downstream jobs download the producer-selected numeric artifact ID to a private directory,
+using the bounded transfer implementation from `scripts/ci-test-archive`. They check the
+authenticated ZIP identity, size and digest before opening it, then reverify the pinned
+archive's SHA256 and `BUILD.json` source/target before atomically publishing consumer bytes.
+`COMPAT_BASELINE_ARCHIVE` supplies those bytes, never a live release download. Producer job
+IDs also namespace artifact names so ordinary and projected proof producers cannot collide.
+Artifacts bridge GitHub-hosted, Namespace and macOS runners without
 assuming their cache backends are shared. Missing or corrupt artifacts fail closed;
 producer cache hits are also reverified. Evidence-only gates do not depend on archives.
 
