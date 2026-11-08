@@ -318,3 +318,63 @@ it('collapses to the focused pane on a phone, and the pane switcher reaches the 
   expect(window.location.pathname).toBe('/w/agent/b')
   expect(surface('agent:agent/b')!.getAttribute('aria-hidden')).toBe('false')
 })
+
+it('keeps one glass per space: the switcher writes new, renamed and closed spaces, and switching writes nothing', async () => {
+  const glasses = new Map<string, Glass>()
+  const writes: string[] = []
+  let revision = 0
+  const gateway: GlassGateway = {
+    discover: async () => ({ value: { capabilities: [{ id: 'glasses', version: 2, state: 'granted' }] } }) as never,
+    collectionStream: async options => ({
+      subscribeGlasses: (id: string) => queueMicrotask(() => options.onFrame({ kind: 'snapshot', id, collection: 'glasses', items: [...glasses.values()], order: [...glasses.keys()], has_more: false, snapshot: {} } as never)),
+      close: () => {},
+    }) as unknown as CollectionStream,
+    putGlass: async (id, request) => {
+      revision += 1
+      writes.push(`put ${request.body.name}`)
+      const glass = { id: `glass/person/avery/${id}`, kind: 'glass', revision: `r${revision}`, updated_at: '2026-11-08T00:00:00Z', deleted: false, body: request.body, base_revision: request.base_revision, replaced_revision: null } as Glass
+      glasses.set(glass.id, glass)
+      return { value: glass } as never
+    },
+    deleteGlass: async id => {
+      revision += 1
+      const key = `glass/person/avery/${id}`
+      writes.push(`delete ${glasses.get(key)?.body?.name}`)
+      glasses.delete(key)
+      return { value: { id: key, kind: 'glass', revision: `r${revision}`, updated_at: '2026-11-08T00:00:00Z', deleted: true, body: null } } as never
+    },
+  }
+  await mount(gateway)
+  const names = () => [...glasses.values()].map(glass => glass.body?.name).toSorted()
+  await vi.waitFor(() => expect(names()).toEqual(['Main']))
+  const switcher = () => host.querySelector<HTMLButtonElement>('[data-testid="space-switcher"]')!
+  const choose = async (label: string) => {
+    await act(async () => switcher().click())
+    await act(async () => [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(node => node.textContent === label)!.click())
+  }
+  const name = async (value: string) => {
+    const field = document.querySelector<HTMLInputElement>('input[placeholder="Space name"]')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, value)
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => field.form!.requestSubmit())
+  }
+  await choose('New space…')
+  await name('Review')
+  await vi.waitFor(() => expect(names()).toEqual(['Main', 'Review']))
+  await choose('Rename…')
+  await name('Reviews')
+  await vi.waitFor(() => expect(names()).toEqual(['Main', 'Reviews']))
+  const before = writes.length
+  await key('KeyG')
+  expect(switcher().textContent).toBe('Main')
+  await key('KeyG')
+  expect(switcher().textContent).toBe('Reviews')
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 400)) })
+  expect(writes.slice(before), 'switching is this client\'s alone').toEqual([])
+  await choose('Close space…')
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>('button')].find(node => node.textContent === 'Close space')!.click())
+  await vi.waitFor(() => expect(names()).toEqual(['Main']))
+  expect(writes.at(-1)).toBe('delete Reviews')
+})
