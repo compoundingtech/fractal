@@ -77,8 +77,10 @@ fractal devices renew-stage --as agent/NAME device/DEVICE_ID \
 
 `--allow` is required: supply the audited exact source record body's digest, encoded
 as 64 lowercase hexadecimal SHA-256 characters. The source is the historical
-`pairing-completed` claim's `ClaimRecord.body`; hash its canonical JSON bytes as
-serialized by `serde_json::to_vec`, not a pretty-printed document or the whole claim.
+`pairing-completed` claim's `ClaimRecord.body`. Its digest is defined by
+`device_renewal::audited_grant_digest`: SHA-256 of the UTF-8 bytes returned by
+`smallclaims::hash::canonical_json_text`, which recursively sorts object keys.
+Do not hash insertion-order JSON, a pretty-printed document, or the whole claim.
 The member validates the digest and migration epoch before staging.
 
 The approval window defaults to 72 hours. Set `--expires-in-hours HOURS` to choose

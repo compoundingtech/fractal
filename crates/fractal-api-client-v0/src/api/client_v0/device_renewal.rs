@@ -54,6 +54,11 @@ fn fresh_id() -> Result<String, ApiError> {
     getrandom::fill(&mut bytes).map_err(ApiError::internal)?;
     Ok(hex::encode(bytes))
 }
+pub fn audited_grant_digest(body: &Value) -> Result<String, ApiError> {
+    smallclaims::hash::canonical_json_text(body)
+        .map(|canonical| credential_digest(&canonical))
+        .map_err(ApiError::internal)
+}
 fn matching_claims(state: &AppState, kind: &str, name: &str, value: &str) -> Result<Vec<ClaimRecord>, ApiError> {
     let ids = {
         let connection = state.store.readers.get();
@@ -105,7 +110,7 @@ fn source(state: &AppState, stage: &ClaimRecord) -> Result<ClaimRecord, ApiError
     let claim = state.store.claim_by_id(id).map_err(ApiError::internal)?
         .ok_or_else(|| forbidden("the source grant is unavailable"))?;
     if claim.kind != "custom.client.pairing-completed" || claim.origin != state.store.origin()
-        || credential_digest(&serde_json::to_string(&claim.body).map_err(ApiError::internal)?) != text(stage, "allow_digest")?
+        || audited_grant_digest(&claim.body)? != text(stage, "allow_digest")?
     { return Err(forbidden("the audited source grant changed")); }
     not_revoked(state, &claim)?;
     Ok(claim)
@@ -141,7 +146,7 @@ pub async fn stage(State(state): State<AppState>, Extension(session): Extension<
         || request.allow_digest.len() != 64 || !request.allow_digest.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     { return Err(validation("renewal requires an epoch, audited grant digest, and expiry of 1 to 168 hours")); }
     let source = matching_claims(&state, "custom.client.pairing-completed", "device_id", &request.device_id)?.into_iter().find(|claim| {
-        serde_json::to_string(&claim.body).ok().is_some_and(|body| credential_digest(&body) == request.allow_digest)
+        audited_grant_digest(&claim.body).is_ok_and(|digest| digest == request.allow_digest)
     }).ok_or_else(|| forbidden("no device grant matches the explicitly allowed digest"))?;
     let person = text(&source, "person_id")?;
     if !person.starts_with("person/") || person.matches('/').count() != 1

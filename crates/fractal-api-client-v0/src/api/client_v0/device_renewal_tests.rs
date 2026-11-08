@@ -15,8 +15,21 @@ fn fixture() -> (tempfile::TempDir, AppState, MemberKey, ClaimRecord) {
     }).unwrap();
     (root,state,old,source)
 }
+#[test]
+fn audited_grant_digest_is_stable_across_append_and_reload() {
+    let (_root, state, _old, source) = fixture();
+    let reloaded = state.store.claim_by_id(&source.id).unwrap().unwrap();
+    let mut reordered = source.body.clone();
+    let fields = reordered["fields"].as_object_mut().unwrap();
+    let entries = fields.iter().rev().map(|(key, value)| (key.clone(), value.clone())).collect::<Vec<_>>();
+    fields.clear();
+    fields.extend(entries);
+    assert_ne!(serde_json::to_string(&source.body).unwrap(), serde_json::to_string(&reordered).unwrap());
+    assert_eq!(audited_grant_digest(&source.body).unwrap(), audited_grant_digest(&reordered).unwrap());
+    assert_eq!(audited_grant_digest(&source.body).unwrap(), audited_grant_digest(&reloaded.body).unwrap());
+}
 fn staging(source: &ClaimRecord) -> Stage {
-    serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"device_id":"device/historical-phone","migration_epoch":"phone-2026","allow_digest":credential_digest(&serde_json::to_string(&source.body).unwrap())})).unwrap()
+    serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"device_id":"device/historical-phone","migration_epoch":"phone-2026","allow_digest":audited_grant_digest(&source.body).unwrap()})).unwrap()
 }
 async fn staged(state: &AppState, source: &ClaimRecord) -> Value {
     stage(State(state.clone()), Extension(ClientSession::local(Some(PERSON)).unwrap()),Json(staging(source))).await.unwrap().0
