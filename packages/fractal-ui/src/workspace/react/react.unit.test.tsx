@@ -177,8 +177,35 @@ describe('splits', () => {
     store.dispatch({ _tag: 'Split', side: 'right', tab: tabsOf(currentSpace(store.getState()).layout)[1]!.id })
     render(<App store={store} />)
     key(document.body, { key: 'ø', code: 'KeyO', altKey: true })
-    expect(container.querySelectorAll('[data-pane]')).toHaveLength(1)
+    expect(container.querySelectorAll('[data-pane-slot]:not([hidden])')).toHaveLength(1)
+    expect(container.querySelectorAll('[data-divider]')).toHaveLength(0)
     expect(container.querySelector('[data-workspace]')!.hasAttribute('data-zoomed')).toBe(true)
+  })
+})
+
+describe('pane identity', () => {
+  it('never remounts a pane\'s content when the layout splits, a neighbour closes, or it zooms', () => {
+    const mounts = new Map<string, number>()
+    const Probe = ({ id }: { readonly id: string }) => {
+      React.useState(() => mounts.set(id, (mounts.get(id) ?? 0) + 1))
+      return <p>{id}</p>
+    }
+    const store = memoryStore(['doc:a', 'doc:b'])
+    const first = panesOf(currentSpace(store.getState()).layout)[0]!.id
+    render(<WorkspaceProvider store={store} describe={describeRef}>
+      <Workspace renderPane={pane => <Pane key={pane.id} pane={pane}><PaneContent><Probe id={pane.id} /></PaneContent></Pane>} />
+    </WorkspaceProvider>)
+    act(() => store.dispatch({ _tag: 'Split', side: 'right', tab: tabsOf(currentSpace(store.getState()).layout)[1]!.id }))
+    const second = panesOf(currentSpace(store.getState()).layout)[1]!.id
+    act(() => store.dispatch({ _tag: 'Split', side: 'bottom', pane: first, ref: 'note:x' }))
+    act(() => store.dispatch({ _tag: 'FocusPane', pane: first }))
+    act(() => store.dispatch({ _tag: 'ToggleZoom' }))
+    expect(container.querySelectorAll('[data-pane-slot]:not([hidden])')).toHaveLength(1)
+    act(() => store.dispatch({ _tag: 'ToggleZoom' }))
+    act(() => store.dispatch({ _tag: 'Close', tab: tabsOf(currentSpace(store.getState()).layout).find(tab => tab.ref === 'doc:b')!.id }))
+    expect(panesOf(currentSpace(store.getState()).layout).map(pane => pane.id)).not.toContain(second)
+    expect(mounts.get(first)).toBe(1)
+    expect(mounts.get(second)).toBe(1)
   })
 })
 
@@ -195,10 +222,12 @@ describe('pointer drag and drop', () => {
     expect(document.querySelector('[data-testid="chip"]'), 'a press is not yet a drag').toBeNull()
     pointer(window, 'pointermove', { clientX: 390, clientY: 150 })
     expect(document.querySelector('[data-testid="chip"]')?.textContent).toBe('NOTE:X')
+    expect(document.documentElement.style.userSelect, 'no text selection while dragging').toBe('none')
     expect(container.querySelector('[data-testid="overlay"]')?.textContent).toBe('right')
     expect(content.getAttribute('data-drop-zone')).toBe('right')
     pointer(window, 'pointerup', { clientX: 390, clientY: 150 })
     expect(document.querySelector('[data-testid="chip"]')).toBeNull()
+    expect(document.documentElement.style.userSelect).toBe('')
     expect(panesOf(currentSpace(store.getState()).layout).map(pane => pane.tabs.map(tab => tab.ref))).toEqual([['doc:a'], ['note:x']])
   })
 

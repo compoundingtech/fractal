@@ -1,7 +1,8 @@
 import * as React from 'react'
 import { mergeProps, useFocusRing, useKeyboard, useMove } from 'react-aria'
-import { isPane, minimumSize, sharesOf, type Layout, type Pane, type Split } from '../layout.ts'
-import { focusedPane, shownPanes } from '../model.ts'
+import { paneRects, splitRects, type Rect } from '../geometry.ts'
+import { minimumSize, panesOf, sharesOf, splitsOf, type Pane, type Split } from '../layout.ts'
+import { focusedPane } from '../model.ts'
 import { useCurrentSpace, useDispatch } from './context.tsx'
 import { dataAttributes, resolveClassName, resolveStyle, type StyleRenderProps } from './renderProps.ts'
 
@@ -19,54 +20,57 @@ export interface WorkspaceProps extends StyleRenderProps<WorkspaceRenderValues> 
   readonly collapsed?: boolean | undefined
 }
 
-/** A flex child that may shrink below its content and keeps absolutely positioned content inside it. */
-const fill: React.CSSProperties = { display: 'flex', flex: '1 1 0px', minWidth: 0, minHeight: 0, position: 'relative', overflow: 'clip' }
+const percent = (value: number) => `${value * 100}%`
 
-/** The current space's layout, or only its zoomed (or, collapsed, its focused) pane. */
+const placement = (rect: Rect): React.CSSProperties =>
+  ({ position: 'absolute', left: percent(rect.x), top: percent(rect.y), width: percent(rect.width), height: percent(rect.height) })
+
+/**
+ * The current space's layout. Every pane renders as a flat sibling keyed by its id and placed from the
+ * split sizes, so splitting, closing a neighbour, zooming or collapsing never remounts a pane's
+ * content: an agent's composer keeps its draft and its terminal stays attached. Zoomed or collapsed,
+ * the chosen pane fills the workspace and the others stay mounted but `hidden`.
+ */
 export const Workspace = ({ renderPane, renderDivider, collapsed = false, className, style }: WorkspaceProps) => {
   const space = useCurrentSpace()
+  const container = React.useRef<HTMLDivElement>(null)
   const values: WorkspaceRenderValues = { isZoomed: space.local.zoomed !== null, isCollapsed: collapsed }
-  const single = collapsed ? focusedPane(space) : space.local.zoomed !== null ? shownPanes(space)[0] : undefined
+  const single = collapsed ? focusedPane(space)?.id : space.local.zoomed ?? undefined
+  const panes = panesOf(space.layout)
+  const rects = paneRects(space.layout)
+  const splits = single === undefined ? splitsOf(space.layout) : []
+  const splitAreas = splitRects(space.layout)
   return <div
+    ref={container}
     data-workspace=""
     {...dataAttributes({ zoomed: values.isZoomed, collapsed })}
     className={resolveClassName(className, values)}
-    style={resolveStyle(style, values, fill)}
+    style={resolveStyle(style, values, { display: 'block', flex: '1 1 0px', minWidth: 0, minHeight: 0, position: 'relative', overflow: 'clip' })}
   >
-    {single !== undefined ? renderPane(single) : <LayoutNode node={space.layout} renderPane={renderPane} renderDivider={renderDivider} />}
-  </div>
-}
-
-const LayoutNode = ({ node, renderPane, renderDivider }: {
-  readonly node: Layout
-  readonly renderPane: (pane: Pane) => React.ReactNode
-  readonly renderDivider: ((props: DividerProps) => React.ReactNode) | undefined
-}) => isPane(node) ? <>{renderPane(node)}</> : <SplitView split={node} renderPane={renderPane} renderDivider={renderDivider} />
-
-export interface SplitViewProps extends StyleRenderProps<{ readonly axis: Split['axis'] }> {
-  readonly split: Split
-  readonly renderPane: (pane: Pane) => React.ReactNode
-  readonly renderDivider?: ((props: DividerProps) => React.ReactNode) | undefined
-}
-
-/** One split: its children sized by their shares, with a divider between each two. */
-export const SplitView = ({ split, renderPane, renderDivider, className, style }: SplitViewProps) => {
-  const container = React.useRef<HTMLDivElement>(null)
-  const shares = sharesOf(split)
-  const values = { axis: split.axis }
-  return <div
-    ref={container}
-    data-split={split.id}
-    data-axis={split.axis}
-    className={resolveClassName(className, values)}
-    style={resolveStyle(style, values, { ...fill, flexDirection: split.axis === 'row' ? 'row' : 'column' })}
-  >
-    {split.children.map((child, index) => <React.Fragment key={child.id}>
-      {index === 0 ? null : (renderDivider ?? defaultDivider)({ split, index: index - 1, container })}
-      <div data-split-child="" style={{ ...fill, flex: `${shares[index]} 1 0px` }}>
-        <LayoutNode node={child} renderPane={renderPane} renderDivider={renderDivider} />
+    {panes.map(pane => {
+      const shown = single === undefined || single === pane.id
+      return <div
+        key={pane.id}
+        data-pane-slot={pane.id}
+        hidden={!shown}
+        style={{ ...placement(single === pane.id ? { x: 0, y: 0, width: 1, height: 1 } : rects.get(pane.id)!), display: shown ? 'flex' : 'none', minWidth: 0, minHeight: 0, overflow: 'clip' }}
+      >
+        {renderPane(pane)}
       </div>
-    </React.Fragment>)}
+    })}
+    {splits.flatMap(split => split.children.slice(1).map((_, index) => {
+      const area = splitAreas.get(split.id)!
+      const props: DividerProps = {
+        split,
+        index,
+        area,
+        extent: () => {
+          const rect = container.current?.getBoundingClientRect()
+          return rect === undefined ? 0 : split.axis === 'row' ? rect.width * area.width : rect.height * area.height
+        },
+      }
+      return <React.Fragment key={`${split.id}:${index}`}>{(renderDivider ?? defaultDivider)(props)}</React.Fragment>
+    }))}
   </div>
 }
 
@@ -82,8 +86,10 @@ export interface DividerProps extends StyleRenderProps<DividerRenderValues> {
   readonly split: Split
   /** Between child `index` and `index + 1`. */
   readonly index: number
-  /** The split's element, whose size a drag measures against. */
-  readonly container: React.RefObject<HTMLElement | null>
+  /** The split's area within the workspace, as fractions. */
+  readonly area: Rect
+  /** The split's length along its axis, in pixels, which a drag measures against. */
+  readonly extent: () => number
   readonly 'aria-label'?: string | undefined
   /** Fraction an arrow press moves; five times that with Shift. */
   readonly step?: number | undefined
@@ -98,10 +104,11 @@ export const shiftShares = (shares: readonly number[], index: number, delta: num
 }
 
 /**
- * A resizable border, a focusable `separator`: drag it, use the arrow keys along its axis (Shift for
- * larger steps), Home and End for the extremes, and double-click or Enter to share equally again.
+ * A resizable border, a focusable `separator` centred on the boundary it moves (give it a width or
+ * height): drag it, use the arrow keys along its axis (Shift for larger steps), Home and End for the
+ * extremes, and double-click or Enter to share equally again.
  */
-export const Divider = ({ split, index, container, className, style, step = 0.02, 'aria-label': label }: DividerProps) => {
+export const Divider = ({ split, index, area, extent, className, style, step = 0.02, 'aria-label': label }: DividerProps) => {
   const dispatch = useDispatch()
   const [dragging, setDragging] = React.useState(false)
   const drag = React.useRef<{ readonly size: number; readonly shares: readonly number[]; moved: number } | undefined>(undefined)
@@ -111,8 +118,7 @@ export const Divider = ({ split, index, container, className, style, step = 0.02
   const { moveProps } = useMove({
     onMoveStart: event => {
       if (event.pointerType === 'keyboard') return
-      const rect = container.current?.getBoundingClientRect()
-      drag.current = { size: rect === undefined ? 0 : row ? rect.width : rect.height, shares, moved: 0 }
+      drag.current = { size: extent(), shares, moved: 0 }
       setDragging(true)
     },
     onMove: event => {
@@ -142,6 +148,9 @@ export const Divider = ({ split, index, container, className, style, step = 0.02
   const { focusProps, isFocusVisible } = useFocusRing()
   const before = shares.slice(0, index + 1).reduce((sum, share) => sum + share, 0)
   const values: DividerRenderValues = { axis: split.axis, isDragging: dragging, isFocusVisible }
+  const position: React.CSSProperties = row
+    ? { position: 'absolute', left: percent(area.x + area.width * before), top: percent(area.y), height: percent(area.height), transform: 'translateX(-50%)', cursor: 'col-resize' }
+    : { position: 'absolute', top: percent(area.y + area.height * before), left: percent(area.x), width: percent(area.width), transform: 'translateY(-50%)', cursor: 'row-resize' }
   return <div
     {...mergeProps(moveProps, keyboardProps, focusProps)}
     role="separator"
@@ -155,7 +164,7 @@ export const Divider = ({ split, index, container, className, style, step = 0.02
     data-axis={split.axis}
     {...dataAttributes({ dragging, focusVisible: isFocusVisible })}
     className={resolveClassName(className, values)}
-    style={resolveStyle(style, values, { flex: '0 0 auto', touchAction: 'none', cursor: row ? 'col-resize' : 'row-resize' })}
+    style={resolveStyle(style, values, { ...position, touchAction: 'none', zIndex: 1 })}
     onDoubleClick={() => dispatch({ _tag: 'ResetSizes', split: split.id })}
   />
 }

@@ -59,11 +59,16 @@ export class DragController {
     const source = event.currentTarget instanceof Node ? event.currentTarget : undefined
     const origin = { x: event.clientX, y: event.clientY }
     let started = false
+    let restoreSelect: string | undefined
     const move = (moved: PointerEvent) => {
       if (moved.pointerId !== event.pointerId) return
       if (!started) {
         if (Math.hypot(moved.clientX - origin.x, moved.clientY - origin.y) < dragThreshold) return
         started = true
+        // A drag is not a text selection: none starts, and any the press began goes.
+        restoreSelect = document.documentElement.style.userSelect
+        document.documentElement.style.userSelect = 'none'
+        document.getSelection()?.removeAllRanges()
         this.set({ payload: payload(), pointer: undefined, over: undefined })
       }
       moved.preventDefault()
@@ -98,6 +103,8 @@ export class DragController {
       window.removeEventListener('pointerup', up, true)
       window.removeEventListener('pointercancel', cancel, true)
       window.removeEventListener('keydown', key, true)
+      if (restoreSelect !== undefined) document.documentElement.style.userSelect = restoreSelect
+      restoreSelect = undefined
       this.teardown = undefined
       if (this.state !== idle) this.set(idle)
     }
