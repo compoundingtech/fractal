@@ -399,7 +399,8 @@ async fn dispatch(adapter: &Adapter, name: &str, args: &Value, observation: &mut
         let query: Vec<_> = object.iter().map(|(k,v)| (k.as_str(),v.as_str().map(str::to_owned).unwrap_or_else(||v.to_string()))).collect();
         adapter.client.get(url).query(&query)
     };
-    let response = request.bearer_auth(&adapter.bearer).send().await.map_err(|_| json!({"code":"unavailable","message":"The paired Fractal daemon is unavailable."}))?;
+    let response = request.header("x-st3-client", concat!("fractal-chatgpt ", env!("CARGO_PKG_VERSION")))
+        .bearer_auth(&adapter.bearer).send().await.map_err(|_| json!({"code":"unavailable","message":"The paired Fractal daemon is unavailable."}))?;
     let status = response.status();
     // reqwest's JSON decoder already buffers the body. Reuse that exact buffer
     // for byte accounting, without reserializing content or trusting Content-Length.
