@@ -241,9 +241,13 @@ async fn browser_pairing_authorizes_only_the_exact_browser_to_send_thread_messag
     use crate::store::thread_delivery::append_reply;
     use std::sync::Arc;
 
-    let (_root, state, owner) = fixture().await;
+    let root = tempfile::tempdir().unwrap();
+    let mut state = super::tests::test_state_named(root.path(), "browser-thread-issuer");
+    state.owning_person = Some("person/operator".into());
+    state.browser_pairing_login = Some("owner@example.test".into());
     state.store.configure_thread_write_rollout([]);
     state.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    let owner = paired_device(&state, ALL_SCOPES, "owner-phone").await;
     let person = "person/operator";
     let agent = "agent/garden/reviewer";
     let thread = "thread/browser-thread-proof";
@@ -286,7 +290,8 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = format!("http://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(axum::serve(listener, crate::api::fabric_router(state.clone())).into_future());
+    let router = crate::api::fabric_router(state.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, router).await });
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     let get = |bearer: &str, path: &str| client.get(format!("{address}/v1/client/{path}")).bearer_auth(bearer);
     let post = |bearer: &str, kind: &str, key: &str, parameters: Value| {
@@ -360,6 +365,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].body["fields"]["thread_quote_id"], first);
     assert_eq!(sent[0].body["fields"]["to"], agent);
+    let envelopes = state.store.export_replication(0).unwrap();
     assert_eq!(state.store.graph.claim_signature(&sent[0].id).unwrap().unwrap().signer, person);
     let timeline: Value = get(&native_bearer, "threads/browser-thread-proof/timeline")
         .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
@@ -371,6 +377,20 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         .body(axum::body::Body::empty()).unwrap();
     let browser = authenticate(&state, &browser_request, "fabric-loopback").unwrap();
     let admitted = thread_access::browser_message_authority(&state, &browser).unwrap();
+    let replica_root = tempfile::tempdir().unwrap();
+    let replica = super::tests::test_state_named(replica_root.path(), "browser-thread-receiver");
+    replica.store.configure_thread_write_rollout([]);
+    replica.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    replica.store.import_replication(state.store.origin(), &envelopes).unwrap();
+    let replica_page = crate::store::thread_metadata::mixed_timeline(
+        &replica.store, person, thread, None, 40,
+    ).unwrap();
+    let replica_items = serde_json::to_value(replica_page.items).unwrap();
+    assert!(replica_items.as_array().unwrap().iter()
+        .any(|item| item["id"] == reply && item["thread_quote_id"] == first));
+    assert!(replica.store.claim_by_id(browser.pairing_completion.as_deref().unwrap()).unwrap().is_some());
+    assert!(thread_access::browser_message_authority(&replica, &browser).is_none());
+
     let already_sent = prepare_inline_thread_message(&state, ThreadMessageDraft {
         key: "browser-reply", thread, from: person, to: agent, title: None,
         quote: Some(first), origin: None, content: "Also check the restart path.",

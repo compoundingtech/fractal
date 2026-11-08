@@ -142,7 +142,7 @@ pub fn mark_read(
         store.graph.ensure_principal_key(person)?;
     }
     store.connection.batched(|tx| {
-        authority.check(tx, person)?;
+        authority.check(store, tx, person)?;
         store.thread_write_rollout(tx)?;
         let creation = owned_creation(tx, thread, person, false)
             .map_err(|_| unavailable())?.ok_or_else(unavailable)?;

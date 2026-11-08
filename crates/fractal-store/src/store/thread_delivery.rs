@@ -198,7 +198,7 @@ pub fn append_reply(
                 return Err(unavailable());
             }
         } else {
-            principal.check(connection, person)?;
+            principal.check(store, connection, person)?;
             check_enrollment(connection, &principal, person, signature)?;
         }
         Ok(())

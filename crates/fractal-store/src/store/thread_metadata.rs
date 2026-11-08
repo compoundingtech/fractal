@@ -56,12 +56,14 @@ pub fn browser_send_authority<'a>(
     actor: &'a str,
 ) -> Result<PersonAuthority<'a>, FractalError> {
     let authority = PersonAuthority::PairedBrowser(BrowserSendAuthority { grant, completion, actor });
-    authority.check(&store.readers.get(), person)?;
+    authority.check(store, &store.readers.get(), person)?;
     Ok(authority)
 }
 
 impl PersonAuthority<'_> {
-    pub(super) fn check(&self, connection: &Connection, person: &str) -> Result<(), FractalError> {
+    pub(super) fn check(
+        &self, store: &Store, connection: &Connection, person: &str,
+    ) -> Result<(), FractalError> {
         let forbidden = || {
             FractalError::new(
                 "thread-authority-expired",
@@ -105,7 +107,9 @@ impl PersonAuthority<'_> {
                     return Err(forbidden());
                 }
                 if matches!(self, Self::PairedBrowser(_))
-                    && !has_browser_pairing_provenance(connection, &pair, person)?
+                    && (pair.origin != store.origin()
+                        || !store.graph.has_local_claim_signer()
+                        || !has_browser_pairing_provenance(connection, &pair, person)?)
                 {
                     return Err(forbidden());
                 }
@@ -230,7 +234,7 @@ fn apply_inner(
         if require_rollout {
             store.thread_write_rollout(connection)?;
         }
-        principal.check(connection, person)?;
+        principal.check(store, connection, person)?;
         owned_creation(connection, subject, person, revision.is_none()).map(|_| ())
     };
 
@@ -345,7 +349,7 @@ fn rename_snapshot(
     principal: &PersonAuthority<'_>,
 ) -> Result<String, FractalError> {
     let connection = store.readers.get();
-    principal.check(&connection, person)?;
+    principal.check(store, &connection, person)?;
     owned_creation(&connection, subject, person, false)?;
     if let Some(claim) = claim_by_id_tx(&connection, observed).map_err(internal)?
         && claim.subject == subject
@@ -1083,7 +1087,7 @@ pub fn start_from_ask_as(
         .connection
         .batched(|tx| {
             store.thread_write_rollout(tx)?;
-            principal.check(tx, person)?;
+            principal.check(store, tx, person)?;
             super::thread_delivery::check_enrollment(tx, &principal, person, signature)?;
             if let Some((saved_digest, canonical, state)) =
                 operation_tx(tx, &operation_id).map_err(internal)?

@@ -1400,6 +1400,11 @@ impl Store {
         Ok(())
     }
 
+    /// Whether this writer has the node key required to seal locally authored claims.
+    pub fn has_local_claim_signer(&self) -> bool {
+        self.keyring.node().is_some()
+    }
+
     fn node_subject(&self) -> String {
         format!("host/{}", self.origin)
     }
