@@ -7352,7 +7352,10 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
     let rollback = restored.as_ref().unwrap_or(&o);
     let rolled_back = [status(rollback, &delivered).await, status(rollback, &staged).await, status(rollback, &unsent).await];
     if restored.is_some() {
-        assert_eq!(rolled_back, ["delivered", "staged", "sent"]);
+        // The archive's fresh writer cannot act as the original seat host. A replicated
+        // staging claim remains visible, while a host-local mark needs the original member.
+        let archived_stage = if release_staged_reads { "sent" } else { "staged" };
+        assert_eq!(rolled_back, ["delivered", archived_stage, "sent"]);
     } else if release_marks {
         assert_eq!(rolled_back, upgraded, "rolled back to a release that reads staging marks, mail went back");
         assert_eq!(listed(&o).await, before_rollback, "rolled back, the mailbox's reads changed");
@@ -8104,6 +8107,17 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
     assert_eq!(this_build["message"]["subject"], last, "this build's CLI on the release reads the graph: {this_build}");
 }
 
+const OUTBOX_READER: &str = "agent/fleet/outbox-reader";
+
+fn declare_outbox_reader(node: &Node) {
+    let declaration = node.root.join("outbox-recipient.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"fleet/outbox-reader\" {{ host {:?}; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        node.name, node.root,
+    )).unwrap();
+    node.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
+}
+
 /// Leave the message `subject` from `from` in stopped `node`'s message outbox, refused
 /// `attempts` times already: what a sender that queues there (4c-3) leaves when its daemon stops
 /// before the drain, or when the member rolls back from it.
@@ -8113,7 +8127,7 @@ fn leave_in_outbox(node: &Node, subject: &str, from: &str, attempts: i64) {
         kind: "message.sent".into(),
         actor: Some(from.into()),
         fields: serde_json::from_value(json!({
-            "from": from, "to": "agent/fleet-reader", "content": "through the outbox", "status": "sent"
+            "from": from, "to": OUTBOX_READER, "content": "through the outbox", "status": "sent"
         }))
         .unwrap(),
         evidence: Vec::new(),
@@ -8174,7 +8188,7 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
         async move {
             let receipt: Value = client
                 .post("/v1/messages", &json!({
-                    "idempotency_key": key, "from": PERSON, "to": "agent/fleet-reader",
+                    "idempotency_key": key, "from": PERSON, "to": OUTBOX_READER,
                     "content": format!("graph mail {key}"),
                 }))
                 .await
@@ -8186,7 +8200,7 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
         let client = node.client();
         async move {
             let page: MessagePage = client
-                .get("/v1/messages/page?to=agent/fleet-reader&include_closed=true")
+                .get(&format!("/v1/messages/page?to={OUTBOX_READER}&include_closed=true"))
                 .await
                 .unwrap();
             page.items.into_iter().map(|item| (item.subject, item.status)).collect::<Vec<_>>()
@@ -8199,7 +8213,7 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
         let _: Value = o
             .client()
             .post(&path, &json!({
-                "lifecycle": lifecycle, "actor": "agent/fleet-reader",
+                "lifecycle": lifecycle, "actor": OUTBOX_READER,
                 "idempotency_key": format!("release-{lifecycle}"),
             }))
             .await
@@ -8210,12 +8224,7 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
 
     // The drain checks the recipient's host again after restart. Give the queued item a
     // local recipient eligible for the stream rather than relying on an undeclared seat.
-    let declaration = root.path().join("outbox-recipient.kdl");
-    fs::write(&declaration, format!(
-        "version 2\nagent \"fleet-reader\" {{ host \"o\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
-        o.root,
-    )).unwrap();
-    o.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
+    declare_outbox_reader(&o);
 
     let recovery = previous_release_archive(&o, root.path());
     // Upgrade in place: the mail reads the same, and the outbox is there and empty.
@@ -8290,6 +8299,7 @@ async fn a_message_left_in_the_outbox_drains_once_when_the_daemon_starts() {
     let root = tempfile::tempdir().unwrap();
     let mut n = Node::new(root.path(), "n");
     n.start().await;
+    declare_outbox_reader(&n);
     let held = "message/0000000000000f01";
     append_stream_item(&n, held).await;
     n.stop();
