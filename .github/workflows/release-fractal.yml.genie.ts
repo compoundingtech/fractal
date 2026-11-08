@@ -51,6 +51,8 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         "scripts/release-build-stamp.py",
         "scripts/release-rust-version",
         "scripts/fixtures/install-release-v0.3.17",
+        "scripts/release-zig-preseed*",
+        "vendor/libghostty-vt-sys/**",
         "scripts/release-fractal*",
         "scripts/release_artifact.py",
         "scripts/release-fractal-embed.mjs",
@@ -262,7 +264,11 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         },
         {
           "name": "Test installer",
-          "run": "scripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release-fractal-test\npython3 scripts/release_notes_test.py\n"
+          "run": "scripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release-fractal-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-zig-preseed-test.py\n"
+        },
+        {
+          name: 'Preseed hash-verified Zig GitHub archives',
+          run: 'python3 scripts/release-zig-preseed.py --github-env "$GITHUB_ENV"',
         },
         {
           "name": "Build, package, and test extracted tools",

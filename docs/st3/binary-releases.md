@@ -27,6 +27,16 @@ Each archive has the physical `bin/fractal`, temporary `bin/st3` and `bin/st` re
 libc functions do not add GLIBC_2.39 requirements or loader noise. These
 archives need neither Nix nor Rust installed. Harness CLIs and their logins remain separate.
 
+Before each native Cargo build, `scripts/release-zig-preseed.py` checks out the Ghostty
+revision pinned by `vendor/libghostty-vt-sys/build.rs` and reads its
+`flatpak/zig-packages.json` package-cache pins (including transitive dependencies).
+GitHub archive downloads retry after 1 and 3 seconds, then use the equivalent
+`codeload.github.com` transport. Each archive enters the default Zig global cache
+through `zig fetch`; its printed content hash must equal the upstream pin or the
+job fails. Cargo reuses that exact source checkout through `GHOSTTY_SOURCE_DIR`,
+without modifying dependency URLs or hashes. The loopback-only regression test is
+`python3 scripts/release-zig-preseed-test.py`.
+
 The embedded web UI ships in `share/fractal-web` in both release archives and
 the complete Nix `fractal` package (also selected by transitional `st3` package attributes). The archive installer preserves that tree at
 `../share/fractal-web` relative to the chosen bin directory, including upgrade
