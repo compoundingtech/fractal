@@ -1,9 +1,10 @@
 import type { ComponentProps } from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { waitFor } from 'storybook/test'
+import { expect, waitFor } from 'storybook/test'
 import { AppStorySpecimen, type AppStoryArgs } from '../fixtures/AppStoryHarness.tsx'
 import { assertProductionAppState } from '../fixtures/appStoryAssertions.ts'
 import { appStoryAgent, appStoryStates } from '../fixtures/appStoryStates.ts'
+import { fixtureProjections } from '../fixtures/projections.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import { writeCellsLikeAnotherWindow } from '../state/cell/testing.ts'
 
@@ -46,6 +47,7 @@ export const scenarioExemptions: readonly string[] = [
   'Offline:contract-fixture',
   'Populated:contract-fixture',
   'ScriptedRepair:contract-fixture',
+  'TabSwitchGeometry:contract-fixture',
   'Unavailable:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
@@ -59,3 +61,33 @@ export const FailedTool: Story = { args: { state: 'failed-tool' } }
 export const Offline: Story = { args: { state: 'offline' } }
 export const Unavailable: Story = { args: { state: 'unavailable' } }
 export const ScriptedRepair: Story = { args: { state: 'scripted-repair' } }
+
+/** Every tab's box and the strip's height, rounded to a tenth of a pixel. */
+const stripGeometry = (canvas: HTMLElement) => {
+  const strip = canvas.querySelector<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"]')!
+  const box = (element: Element) => { const rect = element.getBoundingClientRect(); return [rect.x, rect.y, rect.width, rect.height].map(value => Math.round(value * 10) / 10) }
+  return { strip: box(strip)[3], tabs: [...strip.querySelectorAll('[role="tab"]')].map(box) }
+}
+
+/** Switching tabs changes colour and the accent line only: every tab keeps its box, and the strip its height. */
+export const TabSwitchGeometry: Story = {
+  args: { state: 'populated' },
+  play: async ({ canvasElement, args }) => {
+    await waitFor(() => assertProductionAppState(canvasElement, args.state, true), { timeout: 60000 })
+    // Two more agents' tabs, opened as a link would.
+    for (const agent of fixtureProjections.agents.filter(row => row.id !== appStoryAgent(args.state)).slice(0, 2)) {
+      window.history.pushState(null, '', `/w/${agent.id}`)
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    }
+    const tabs = () => [...canvasElement.querySelectorAll<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"] [role="tab"]')]
+    await waitFor(() => expect(tabs()).toHaveLength(3))
+    await document.fonts.ready
+    const before = stripGeometry(canvasElement)
+    for (const index of [0, 1, 2, 0]) {
+      tabs()[index]!.click()
+      await waitFor(() => expect(tabs()[index]!.getAttribute('aria-selected')).toBe('true'))
+      expect(stripGeometry(canvasElement)).toEqual(before)
+    }
+    canvasElement.dataset.proof = 'passed'
+  },
+}
