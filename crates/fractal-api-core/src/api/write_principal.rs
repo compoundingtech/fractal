@@ -96,6 +96,14 @@ impl WritePrincipal {
 
 fn native_scope(path: &str, value: Option<&Value>) -> Option<&'static str> {
     if path.starts_with("/v1/client/") { return None; }
+    let action = match path {
+        "/v1/work/done" => Some("work.done"),
+        "/v1/custom/reply" => Some("custom.reply"),
+        _ => None,
+    };
+    if let Some(action) = action {
+        return client_v0::action_scope(action);
+    }
     let family = if path == "/v1/claims" {
         value.and_then(|value| value.get("kind")).and_then(Value::as_str)
     } else {

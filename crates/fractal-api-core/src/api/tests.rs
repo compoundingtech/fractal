@@ -12708,6 +12708,45 @@ async fn writer_binding_pairing_uses_authority_actor_for_claims_and_senders() {
 }
 
 #[tokio::test]
+async fn writer_binding_legacy_attention_operations_require_attention_scope() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let intent = crate::graph::parse_internal_intent(
+        "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
+        state.store.origin(),
+    ).unwrap();
+    state.store.apply_internal(&intent, "scope-api-agent").unwrap();
+    let actor = format!("agent/{}.asker", state.store.origin());
+    let app = router(state.clone());
+    let (status, ask) = json_request(app.clone(), "/v1/work/ask", json!({
+        "person":"person/example", "title":"Choose a date", "reason":"A date",
+        "actor":actor, "new_run":"scope-date", "idempotency_key":"scope-ask"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{ask}");
+    let subject = ask["subject"].as_str().unwrap();
+    let episode = state.store.claims_for(subject, Some("work.person-asked")).unwrap()[0].id.clone();
+    let credential = "writer-binding-work-only";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.work"]);
+    for (path, body) in [
+        ("/v1/work/done", json!({"subject":subject, "actor":"person/example",
+            "summary":"Friday", "episode":episode, "evidence":[], "idempotency_key":"scope-done"})),
+        ("/v1/custom/reply", json!({"subject":"custom/example/reply",
+            "registration":"custom/example/registration", "revision":"revision/one",
+            "episode":"episode/one", "fields":{}, "actor":"person/example",
+            "idempotency_key":"scope-reply"})),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, response) = writer_binding_request(
+            app.clone(), path, None, Some(credential), body,
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {response}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+    let projection = state.store.step_run(subject).unwrap().unwrap();
+    assert!(projection.person_answers.is_empty());
+}
+
+#[tokio::test]
 async fn writer_binding_native_sessions_and_internal_routes_retain_their_authority() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());

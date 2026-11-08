@@ -1978,7 +1978,9 @@ attribution. An omitted claim actor uses the derived identity; ordinary local wr
 such an identity retain their nullable actor. Native drivers and active Claude hooks retain
 seat attribution, including initial-message, seed, and subagent receipts. Paired native claim
 writes require the claim family's control scope (`control.work` for other generic kinds);
-message claims use `control.messages`. Session credential IDs are not claim authors.
+message claims use `control.messages`. Legacy ask completion (`/v1/work/done`) and custom
+replies (`/v1/custom/reply`) use the same `control.attention` scope as their client actions.
+Session credential IDs are not claim authors.
 
 ## Conversation stream
 
