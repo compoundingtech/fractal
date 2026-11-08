@@ -153,13 +153,14 @@ function TranscriptAttachment({ attachment, messageId }: { readonly attachment: 
 const styles = stylex.create({
   list: { display: 'flex', flexWrap: 'wrap', alignItems: 'flex-start', gap: s.sm, minWidth: 0, marginTop: s.xs },
   // Focusable by script only: it holds focus while the read leaves no action to press.
-  card: { display: 'inline-flex', alignItems: 'center', columnGap: s.md, minWidth: 0, maxWidth: '100%', minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, outlineStyle: 'none', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
+  // No fill of its own: the card is not a control, and the control fill over a message card's tint drops the muted size below 4.5:1.
+  card: { display: 'inline-flex', alignItems: 'center', columnGap: s.md, minWidth: 0, maxWidth: '100%', minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, outlineStyle: 'none', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   // Phones: the read status and its action wrap below the name instead of squeezing it.
   cardNarrow: { flexWrap: 'wrap', paddingBlock: s.xs },
   cardIdentity: { display: 'inline-flex', alignItems: 'center', gap: s.sm, minWidth: 0 },
   cardName: { minWidth: 0, maxWidth: '28ch', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fg, fontSize: t.metaSize },
   cardDetail: { flexShrink: 0, color: ink.fgMuted, fontVariantNumeric: 'tabular-nums' },
-  more: { color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
+  more: { backgroundColor: surface.controlFill, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   cardStatus: { display: 'inline-flex', alignItems: 'center', gap: s.sm, flexShrink: 0, whiteSpace: 'nowrap' },
   statusFailed: { color: status.dangerFg },
   action: { display: 'inline-flex', alignItems: 'center', minHeight: g.controlSm, paddingBlock: 0, paddingInline: s.xs, borderWidth: 0, borderRadius: r.control, backgroundColor: surface.transparent, color: status.runningFg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
