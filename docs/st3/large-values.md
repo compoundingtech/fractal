@@ -36,15 +36,26 @@ These markers record transitional debt. They neither grant permanent permission
 nor transfer source ownership. The source module owns the TODO until its normal
 maintainer changes the representation through review. A changed statement,
 function, owner, TODO or dependency set requires an explicit inventory review;
-removing a site requires removing its exception. There is no “accept all” or
-regeneration command in the check. The first inventory deliberately keeps
+removing a site requires removing its exception. Formatting does not accept new
+exceptions or refresh source metadata. The first inventory deliberately keeps
 conservative candidates instead of silently treating an ambiguous call as safe.
 
 The inventory uses one complete entry per physical line (including nested column
-metadata), with site records ordered by `(path, id)` and manual flows by
-`(path, function)`. Declarations follow deterministic source-path/statement order,
-with table, added-column and index groups within each template. Keep this layout
-when reviewing changes so unrelated additions can merge as independent records.
+metadata), with site records ordered lexicographically by stable `id`. Hash order
+distributes independent additions rather than concentrating them at the front or
+within one producer's path. Manual flows retain `(path, function)` order.
+Declarations follow deterministic source-path/statement order, with table,
+added-column and index groups within each template. Independent insertions into
+different gaps merge cleanly; insertions into the same gap can still conflict.
+The guard rejects non-canonical order or formatting. After reviewing edits, run:
+
+```sh
+python3 scripts/check-sqlite-large-values --format
+```
+
+This command only sorts and formats existing JSON records. It preserves
+`reviewed_base` as review provenance, rather than updating it to the current
+commit on every regeneration. No CI or merge-queue step rewrites the inventory.
 
 Use the read-only maintenance helper after a source edit:
 
