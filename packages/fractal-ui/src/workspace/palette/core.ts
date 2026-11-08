@@ -108,19 +108,44 @@ export interface RankedGroup<A> {
   readonly items: readonly RankedItem<A>[]
 }
 
-/**
- * Sections in their given order. An empty query lists each section by recency; a query keeps only
- * matches, by section order, then match quality, then recency. `section` scopes to one section.
- */
-export const rank = <A>(items: readonly PaletteItem<A>[], options: {
+/** A row that jumps its section to the top while `query` is typed, such as a command typed as it begins. */
+export type Leads<A> = (item: PaletteItem<A>, query: string) => boolean
+
+export interface RankOptions<A> {
   readonly query: string
   readonly sections: readonly PaletteSection[]
   readonly section?: string | undefined
   readonly ranker?: Ranker | undefined
-}): readonly RankedGroup<A>[] => {
+  /** Section ids in the order a typed query ranks them; the given order when absent. Missing ids follow. */
+  readonly typedOrder?: readonly string[] | undefined
+  readonly leads?: Leads<A> | undefined
+}
+
+const typedSections = <A>(items: readonly PaletteItem<A>[], options: RankOptions<A>, query: string): readonly PaletteSection[] => {
+  const position = (id: string) => {
+    const at = options.typedOrder?.indexOf(id) ?? -1
+    return at === -1 ? Number.MAX_SAFE_INTEGER : at
+  }
+  const leading = new Set(options.leads === undefined ? [] : items.filter(item => options.leads!(item, query)).map(item => item.section))
+  return options.sections
+    .map((section, index) => ({ section, index }))
+    .toSorted((left, right) =>
+      Number(leading.has(right.section.id)) - Number(leading.has(left.section.id))
+      || position(left.section.id) - position(right.section.id)
+      || left.index - right.index)
+    .map(row => row.section)
+}
+
+/**
+ * An empty query lists each section by recency, in the given order. A query keeps only matches, by
+ * section (`typedOrder`, with a section whose row `leads` first), then match quality, then recency.
+ * `section` scopes to one section.
+ */
+export const rank = <A>(items: readonly PaletteItem<A>[], options: RankOptions<A>): readonly RankedGroup<A>[] => {
   const ranker = options.ranker ?? fuzzyWords
   const query = options.query.trim()
-  return options.sections.flatMap(section => {
+  const sections = query === '' ? options.sections : typedSections(items, options, query)
+  return sections.flatMap(section => {
     if (options.section !== undefined && options.section !== section.id) return []
     const ranked = items.flatMap((item): RankedItem<A>[] => {
       if (item.section !== section.id) return []

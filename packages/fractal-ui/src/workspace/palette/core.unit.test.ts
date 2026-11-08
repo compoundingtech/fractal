@@ -48,6 +48,19 @@ describe('ranking', () => {
     expect(flatten(rank([item('people', 'Atlas'), item('people', 'Atlas', 3)], { query: 'atlas', sections })).map(row => row.recency)).toEqual([3, 0])
   })
 
+  it('ranks a typed query in its own section order, as the TUI does, while the empty list keeps the given one', () => {
+    const typed = ['commands', 'projects', 'people']
+    expect(rank(items, { query: 't', sections, typedOrder: typed }).map(group => group.section.id)).toEqual(['commands', 'projects', 'people'])
+    expect(rank(items, { query: '', sections, typedOrder: typed }).map(group => group.section.id)).toEqual(['people', 'projects', 'commands'])
+  })
+
+  it('puts a section first when one of its rows leads, such as a command typed as it begins', () => {
+    const leads = (row: PaletteItem<string>, query: string) => row.section === 'commands' && row.label.toLowerCase().startsWith(query.toLowerCase())
+    expect(rank(items, { query: 't', sections }).map(group => group.section.id)).toEqual(['people', 'projects', 'commands'])
+    expect(rank(items, { query: 'to', sections, leads }).map(group => group.section.id)).toEqual(['commands'])
+    expect(rank(items, { query: 't', sections, leads }).map(group => group.section.id)).toEqual(['commands', 'people', 'projects'])
+  })
+
   it('scopes by prefix', () => {
     const parsed = parseQuery('#atl', sections)
     expect(parsed).toEqual({ section: 'projects', text: 'atl' })
