@@ -48,7 +48,7 @@ mission "diff/flow" state="ready" timeout="2h" {
     depends-on { step "review" completed }
   }
   step "work" {
-    assigned-to "agent/worker"
+    assigned-to "agent/node.worker"
     depends-on { step "prepare" completed }
   }
   step "team" {
