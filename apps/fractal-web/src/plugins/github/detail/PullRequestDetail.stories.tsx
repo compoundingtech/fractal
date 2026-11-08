@@ -104,7 +104,7 @@ export const Checks: Story = {
     await expect(rows[1]).toHaveTextContent('2 tests failed: scheduler::skips_dormant, scheduler::rain')
     await expect(rows[3]).toHaveTextContent('In progress')
     await expect(rows[3]).toHaveTextContent('44m')
-    await expect(panel.getByRole('link', { name: 'Logs for test (ubuntu) on GitHub' })).toHaveAttribute('href', 'https://github.com/acme/garden/actions/runs/9001/job/2')
+    await expect(panel.getByRole('link', { name: 'Logs on GitHub for test (ubuntu)' })).toHaveAttribute('href', 'https://github.com/acme/garden/actions/runs/9001/job/2')
     await expectGithubLinksOnly(canvasElement)
   },
 }
@@ -125,7 +125,7 @@ export const Files: Story = {
     const section = viewer.querySelector<HTMLElement>('[data-diff-files-section="src/scheduler.rs"]')!
     await expect(within(section).getByRole('button', { name: 'src/scheduler.rs' })).toHaveAttribute('aria-expanded', 'true')
     await expect(within(section).getByLabelText(/^\d+ added, \d+ removed$/)).toBeInTheDocument()
-    await expect(canvas.getByRole('link', { name: 'View assets/beds.png on GitHub' })).toHaveAttribute('href', 'https://github.com/acme/garden/pull/7/files')
+    await expect(canvas.getByRole('link', { name: 'View on GitHub: assets/beds.png' })).toHaveAttribute('href', 'https://github.com/acme/garden/pull/7/files')
     await expectGithubLinksOnly(canvasElement)
   },
 }
@@ -210,7 +210,7 @@ export const Run: Story = {
     await expect(canvas.getByRole('heading', { name: 'CI run 9001' })).toBeVisible()
     await expect(canvas.getByText('Failed', { selector: '[data-tone]' })).toHaveAttribute('data-tone', 'failure')
     await expect(canvas.getByRole('tab', { name: 'Jobs 3' })).toHaveAttribute('aria-selected', 'true')
-    await expect(canvas.getByRole('link', { name: 'Logs for build on GitHub' })).toHaveAttribute('href', 'https://github.com/acme/garden/actions/runs/9001/job/1')
+    await expect(canvas.getByRole('link', { name: 'Logs on GitHub for build' })).toHaveAttribute('href', 'https://github.com/acme/garden/actions/runs/9001/job/1')
     await userEvent.click(canvas.getByRole('button', { name: 'PR #7' }))
     await expect(onOpen).toHaveBeenCalledWith('resource/github/acme/garden/pull-request/7')
     await expectGithubLinksOnly(canvasElement)
