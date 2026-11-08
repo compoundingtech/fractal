@@ -113,6 +113,85 @@ pub async fn client_work(
     .await
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadyWorkCohortQuery {
+    /// Explicit comma-separated canonical Factory seat references, at most 64.
+    cohort: String,
+}
+
+pub async fn client_ready_work(
+    State(state): State<AppState>,
+    Query(query): Query<ReadyWorkCohortQuery>,
+) -> Result<(Extension<ClientSnapshot>, Json<Value>), ApiError> {
+    use crate::AttentionListStore;
+    use crate::store::published_list::ListRead;
+
+    let cohort: Vec<String> = query.cohort.split(',').take(65).map(str::to_owned).collect();
+    if cohort.len() > 64
+        || cohort.iter().any(|agent| agent.strip_prefix("agent/").is_none_or(str::is_empty) || agent.len() > 128)
+    {
+        return Err(client_v0::validation("cohort must name 1 to 64 agents"));
+    }
+
+    let list = state.store.published_work_list();
+    let ListRead::Served(publication, publication_id) = list.current() else {
+        return Err(published_lists::work_list_not_ready());
+    };
+    let cut = publication.cut;
+    let published_at = publication.published_at_unix_ms;
+    let evaluated_at = publication.rows.time_unix_ms;
+    let frontier = publication.rows.frontier;
+    let valid_until = publication.valid_until_unix_ms;
+    let available = || ApiError {
+        status: StatusCode::SERVICE_UNAVAILABLE,
+        code: "ready-work-unavailable".into(),
+        message: "a current work cut and all cohort declarations are required".into(),
+        details: Box::default(),
+    };
+    // No live refold or unbounded native handoff scan on this opt-in route.
+    if publication.rows.rows.len() > 5_000 {
+        return Err(available());
+    }
+    let store = state.store.clone();
+    let count = blocking_store(move || {
+        store.read_snapshot(|head| {
+            // The frontier tracks projected replication. Local commits can advance head
+            // without advancing it, so match both fences independently.
+            if head != cut
+                || !store.attention_projection_frontier()?.is_some_and(|(status, at)| {
+                    status == "healthy" && at == frontier
+                })
+                || store.replication_catching_up()
+                || store.replication_diverged()
+                || valid_until.is_some_and(|until| until <= client_now_ms())
+            {
+                return Ok(None);
+            }
+            store.ready_work_cohort_count(
+                publication.rows.rows.values().map(|row| row.view.as_ref()),
+                &cohort,
+                evaluated_at,
+            )
+        })
+    })
+    .await?
+    .ok_or_else(available)?;
+    // The same generation fence as published work paging. This result has no continuation.
+    if valid_until.is_some_and(|until| until <= client_now_ms())
+        || !matches!(list.current(), ListRead::Served(_, id)
+            if id.list == publication_id.list && id.generation == publication_id.generation)
+    {
+        return Err(published_lists::work_list_not_ready());
+    }
+    Ok((Extension(roster_snapshot(&state, cut, published_at)), Json(json!({
+        "coverage": "local-graph-cut",
+        "evaluated_at": client_timestamp(evaluated_at),
+        "projection_frontier": frontier,
+        "ready_count": count,
+    }))))
+}
+
 /// A current work page from the work list's publications. A first page serves the newest
 /// current publication, or with `fresh=true` one at least as new as the request; a continuation
 /// serves the publication its first page did. Neither folds the list: with nothing current to
