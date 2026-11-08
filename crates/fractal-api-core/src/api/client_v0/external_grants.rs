@@ -252,7 +252,7 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         // An assistant grant is not a device pairing: it never registers push tokens.
         pairing_issued_here: false,
         grant_expires_at: source["expires_at_unix_ms"].as_u64().map(u128::from), transport, custom_forms:false,
-        assistant_write: None,
+        assistant_write: None, bound_agent: None, pairing_completion: None,
         conversation_blocks:false, conversation_delivery_links:false, conversation_message_participants:false, messages_paging:false, assistant_content_handles:false, local_peer:false, peer_process:None, scopes })
 }
 
