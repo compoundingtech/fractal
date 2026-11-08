@@ -428,6 +428,9 @@ pub async fn list_messages_page(
         mailbox::hold_pre_boot_mail(
             &store, peer.as_ref().map(|peer| &peer.0), to.as_deref(), &mut items,
         )?;
+        mailbox::attach_polled_thread_context(
+            &store, native, bound_recipient(&bound), to.as_deref(), &mut items,
+        )?;
         Ok((items, next_after))
     })
     .await?;

@@ -38,30 +38,42 @@ async fn legacy_mail_poll_delivers_thread_content_only_to_the_bound_recipient() 
         },
         crate::store::thread_metadata::PersonAuthority::TrustedLocal, None,
     ).unwrap();
-    let app = router(state).layer(Extension(NativeDeliveryPeer {
-        agent: agent.into(), transport: "app-server", pid: 20, archives_inbox: true,
-    }));
+    let app = router(state);
     let route = "/v1/messages/page?to=agent%2Feval.worker";
-    for (bound, visible) in [(None, false), (Some("agent/other"), false), (Some(agent), true)] {
-        let app = match bound {
-            Some(bound) => app.clone().layer(Extension(BoundAgent(bound.into()))),
-            None => app.clone(),
-        };
+    for (bound, native, visible, with_context) in [
+        (None, Some(agent), false, false),
+        (Some("agent/other"), Some(agent), false, false),
+        (Some(agent), None, true, false),
+        (Some(agent), Some("agent/other"), true, false),
+        (Some(agent), Some(agent), true, true),
+    ] {
+        let mut app = app.clone();
+        if let Some(bound) = bound {
+            app = app.layer(Extension(BoundAgent(bound.into())));
+        }
+        if let Some(native) = native {
+            app = app.layer(Extension(NativeDeliveryPeer {
+                agent: native.into(), transport: "app-server", pid: 20, archives_inbox: true,
+            }));
+        }
         let (status, body) = get_request(app.clone(), route).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let message = body["items"].as_array().unwrap().iter()
             .find(|message| message["subject"] == "message/thread-poll");
-        if visible {
-            let message = message.unwrap();
+        assert_eq!(message.is_some(), visible, "{body}");
+        if let Some(message) = message {
             assert_eq!(message["content"], "Check CI.");
-            assert!(message.get("delivery_thread").is_none(), "{body}");
-        } else {
-            assert!(message.is_none(), "{body}");
+            assert_eq!(message.get("delivery_thread").and_then(Value::as_str),
+                with_context.then_some(thread), "{body}");
         }
         let (status, unpaged) = get_request(app, "/v1/messages?to=agent%2Feval.worker").await;
         assert_eq!(status, StatusCode::OK, "{unpaged}");
-        assert_eq!(unpaged.as_array().unwrap().iter()
-            .any(|message| message["subject"] == "message/thread-poll"), visible, "{unpaged}");
+        let message = unpaged.as_array().unwrap().iter()
+            .find(|message| message["subject"] == "message/thread-poll");
+        assert_eq!(message.is_some(), visible, "{unpaged}");
+        if let Some(message) = message {
+            assert!(message.get("delivery_thread").is_none(), "{unpaged}");
+        }
     }
 }
 
