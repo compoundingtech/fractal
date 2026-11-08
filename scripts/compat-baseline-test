@@ -9,6 +9,7 @@ from pathlib import Path
 import sys
 import tarfile
 import tempfile
+import urllib.error
 import unittest
 from unittest.mock import patch
 
@@ -91,10 +92,73 @@ class BundleTests(unittest.TestCase):
                 self.run_loader()
 
     def test_download_timeout_does_not_publish(self):
-        with patch.object(module.urllib.request, "urlopen", side_effect=TimeoutError("download timed out")):
-            with self.assertRaisesRegex(TimeoutError, "download timed out"):
+        self.remote_bundle()
+        with patch.object(module.urllib.request, "urlopen", side_effect=TimeoutError("download timed out")), \
+             patch.object(module.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "browser: download timed out; API fallback: download timed out"):
                 self.run_loader()
         self.assertEqual([], list(self.output.iterdir()))
+
+    def remote_bundle(self):
+        self.pin["bundles"][self.target]["url"] = (
+            "https://github.com/compoundingtech/fractal/releases/download/v0.3.17/bundle.tar.gz")
+
+    def api_download(self, payload=None, primary=None):
+        self.remote_bundle()
+        primary = primary or urllib.error.HTTPError("browser", 504, "Gateway Timeout", {}, None)
+        metadata = io.BytesIO(json.dumps({"assets": [{"id": 123, "name": "bundle.tar.gz"}]}).encode())
+        archive = io.BytesIO(payload if payload is not None else (self.root / "bundle.tar.gz").read_bytes())
+        with patch.dict(module.os.environ, {"GH_TOKEN": "test-token"}), \
+             patch.object(module.urllib.request, "urlopen", side_effect=[primary, metadata, archive]) as opener, \
+             patch("sys.stderr", new=io.StringIO()) as stderr:
+            self.run_loader()
+        self.assertIn("API asset served the archive", stderr.getvalue())
+        metadata_request = opener.call_args_list[1].args[0]
+        asset_request = opener.call_args_list[2].args[0]
+        self.assertEqual(metadata_request.full_url,
+                         "https://api.github.com/repos/compoundingtech/fractal/releases/tags/v0.3.17")
+        self.assertEqual(asset_request.full_url,
+                         "https://api.github.com/repos/compoundingtech/fractal/releases/assets/123")
+        for request in (metadata_request, asset_request):
+            self.assertEqual(request.get_header("Authorization"), "Bearer test-token")
+        self.assertEqual(asset_request.get_header("Accept"), "application/octet-stream")
+
+    def test_primary_504_falls_back_and_verifies_digest(self):
+        self.api_download()
+        self.assertTrue((self.output / self.pin["bundles"][self.target]["sha256"] / self.package.name / "bin/st3").is_file())
+
+    def test_primary_timeout_falls_back(self):
+        self.api_download(primary=TimeoutError("browser timed out"))
+
+    def test_fallback_digest_mismatch_does_not_publish(self):
+        with self.assertRaisesRegex(ValueError, "SHA-256 mismatch"):
+            self.api_download(payload=b"corrupt archive")
+        self.assertEqual([], list(self.output.iterdir()))
+
+    def test_fallback_source_mismatch_does_not_publish(self):
+        self.pin["commit"] = "b" * 40
+        with self.assertRaisesRegex(ValueError, "source/target"):
+            self.api_download()
+        self.assertEqual([], list(self.output.iterdir()))
+
+    def test_both_5xx_fail_clearly_with_bounded_retries(self):
+        self.remote_bundle()
+        failure = urllib.error.HTTPError("download", 504, "Gateway Timeout", {}, None)
+        metadata = io.BytesIO(json.dumps({"assets": [{"id": 123, "name": "bundle.tar.gz"}]}).encode())
+        with patch.object(module.urllib.request, "urlopen",
+                          side_effect=[failure, metadata, failure, failure]) as opener, \
+             patch.object(module.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "browser: HTTP Error 504.*API fallback: HTTP Error 504"):
+                self.run_loader()
+        self.assertEqual(opener.call_count, 4)
+        self.assertEqual([], list(self.output.iterdir()))
+
+    def test_primary_404_does_not_fall_back(self):
+        failure = urllib.error.HTTPError("browser", 404, "Not Found", {}, None)
+        with patch.object(module.urllib.request, "urlopen", side_effect=failure) as opener:
+            with self.assertRaises(urllib.error.HTTPError):
+                self.run_loader()
+        self.assertEqual(opener.call_count, 1)
 
     def test_checksum_mismatch_does_not_publish(self):
         self.pin["bundles"][self.target]["sha256"] = "0" * 64

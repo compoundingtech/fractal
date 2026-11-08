@@ -10,8 +10,13 @@ import json
 import os
 from pathlib import Path
 import platform
+import socket
+import sys
 import tarfile
 import tempfile
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
 
 REPO = Path(__file__).resolve().parent.parent
@@ -25,6 +30,80 @@ def bundle_binary(root, target):
         package = root / f"smalltalk-{target}"
     legacy = package / "bin/st3"
     return legacy if legacy.is_file() else package / "bin/fractal"
+
+
+def transient(error):
+    return (isinstance(error, urllib.error.HTTPError) and 500 <= error.code < 600
+            or isinstance(error, (TimeoutError, socket.timeout))
+            or isinstance(error, urllib.error.URLError)
+            and isinstance(error.reason, (TimeoutError, socket.timeout)))
+
+
+def api_request(url, accept):
+    headers = {"Accept": accept, "User-Agent": "fractal-compat-baseline"}
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return urllib.request.Request(url, headers=headers)
+
+
+def api_asset(bundle):
+    url = urllib.parse.urlsplit(bundle["url"])
+    parts = url.path.strip("/").split("/")
+    if url.hostname != "github.com" or len(parts) != 6 or parts[2:4] != ["releases", "download"]:
+        raise ValueError("API fallback requires a GitHub release download URL")
+    owner, repo, _, _, tag, name = parts
+    endpoint = f"https://api.github.com/repos/{owner}/{repo}/releases"
+    request = api_request(f"{endpoint}/tags/{tag}", "application/vnd.github+json")
+    for attempt in range(2):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                release = json.load(response)
+            break
+        except (OSError, urllib.error.HTTPError) as error:
+            if not transient(error) or attempt == 1:
+                raise
+            time.sleep(1)
+    asset = next((asset for asset in release["assets"]
+                  if asset["name"] == urllib.parse.unquote(name)), None)
+    if asset is None:
+        raise ValueError(f"API fallback: release {tag} has no asset {name}")
+    return api_request(f"{endpoint}/assets/{int(asset['id'])}", "application/octet-stream")
+
+
+def download(bundle, archive):
+    def transfer(source):
+        digest = hashlib.sha256()
+        with source as response, archive.open("wb") as stream:
+            while chunk := response.read(1024 * 1024):
+                digest.update(chunk)
+                stream.write(chunk)
+        return digest.hexdigest()
+
+    local = os.environ.get("COMPAT_BASELINE_ARCHIVE")
+    if local:
+        return transfer(Path(local).open("rb"))
+    try:
+        digest = transfer(urllib.request.urlopen(bundle["url"], timeout=60))
+        print("compat-baseline: browser download served the archive", file=sys.stderr)
+        return digest
+    except (OSError, urllib.error.HTTPError) as primary:
+        if not transient(primary):
+            raise
+        print(f"compat-baseline: browser download failed ({primary}); trying API asset", file=sys.stderr)
+        try:
+            request = api_asset(bundle)
+            for attempt in range(2):
+                try:
+                    digest = transfer(urllib.request.urlopen(request, timeout=60))
+                    print("compat-baseline: API asset served the archive", file=sys.stderr)
+                    return digest
+                except (OSError, urllib.error.HTTPError) as error:
+                    if not transient(error) or attempt == 1:
+                        raise
+                    time.sleep(1)
+        except (OSError, ValueError, KeyError) as fallback:
+            raise RuntimeError(f"baseline download failed: browser: {primary}; API fallback: {fallback}") from fallback
 
 
 def main():
@@ -47,14 +126,8 @@ def main():
         with tempfile.TemporaryDirectory(prefix="download-", dir=output) as temporary:
             work = Path(temporary)
             archive = work / "bundle.tar.gz"
-            digest = hashlib.sha256()
-            local = os.environ.get("COMPAT_BASELINE_ARCHIVE")
-            source = Path(local).open("rb") if local else urllib.request.urlopen(bundle["url"], timeout=60)
-            with source as response, archive.open("wb") as stream:
-                while chunk := response.read(1024 * 1024):
-                    digest.update(chunk)
-                    stream.write(chunk)
-            if digest.hexdigest() != bundle["sha256"]:
+            digest = download(bundle, archive)
+            if digest != bundle["sha256"]:
                 raise ValueError(f"{pin['tag']} bundle SHA-256 mismatch")
             extracted = work / "extracted"
             extracted.mkdir()
