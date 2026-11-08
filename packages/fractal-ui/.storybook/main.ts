@@ -40,7 +40,8 @@ const config: StorybookConfig = {
       englishAriaLocales(),
       tailwindcss(),
       // Keep compiled rules on the eager preview entry, not a lazy app pane's CSS asset.
-      ...createStylexVitePlugins({ entries: [new URL('./preview.ts', import.meta.url).pathname] }),
+      // The developer bar kit ships StyleX source; compile it here as the app does, not prebundle it.
+      ...createStylexVitePlugins({ externalPackages: ['@overeng/devbar'], entries: [new URL('./preview.ts', import.meta.url).pathname] }),
     ],
   }),
 }
