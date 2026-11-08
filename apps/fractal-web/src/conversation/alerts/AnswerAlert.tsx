@@ -153,9 +153,13 @@ export const AnswerAlert = ({
   const selected = chosen ?? parts.options.filter((choice) => choice.recommended === true).map((choice) => choice.key)
   const answer = choices === null ? undefined : effectiveChoice(choices, selected[0], words)
   const from = alertFrom(alert, React.useContext(AlertNames))
+  const notes = store.notes(alert)
+  // A note rides with a named answer as its text; only answers that carry one offer it.
+  const notable = onAct !== undefined && parts.options.some((choice) => choice.notes === true)
   const send = (choice: NonNullable<typeof answer>) => {
     if (onAct === undefined) return
-    store.send(alert, answeredLabel(choice, words), () => onAct(alert, choice.action(words)))
+    const note = choice.notes === true ? notes[choice.key] : undefined
+    store.send(alert, answeredLabel(choice, words), () => onAct(alert, choice.action(words, note)))
     onBegin?.(alert)
   }
   const [armed, arm] = useArmed(alert.id)
@@ -215,6 +219,7 @@ export const AnswerAlert = ({
     }))}
     selected={shownSelected}
     onSelect={(ids) => store.setSelected(alert, ids)}
+    {...(notable ? { notes: { values: notes, onChange: (id: string, note: string) => store.setNote(alert, id, note), only: parts.options.filter((choice) => choice.notes === true).map((choice) => choice.key) } } : {})}
     {...(choices === null ? {} : {
       words: {
         value: words,

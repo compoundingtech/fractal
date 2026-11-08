@@ -31,7 +31,8 @@ const Story = ({ scheme, show, density = 'docked', readOnly = false }: Args) => 
   const [store] = React.useState(createAlertAnswers)
   const [now] = React.useState(Date.now)
   const [alerts] = React.useState(() => answerableAlerts(now))
-  const onAct = readOnly ? {} : { onAct: reply }
+  const [acted, setActed] = React.useState<string>()
+  const onAct = readOnly ? {} : { onAct: (alert: Native.Attention, action: unknown) => { setActed(JSON.stringify(action)); return reply(alert) } }
   const onAnswer = readOnly ? {} : { onAnswer: reply }
   const one = alerts.find((alert) => alert.id.endsWith(`-${show}`))
   return <AlertAnswersContext.Provider value={store}>
@@ -42,6 +43,7 @@ const Story = ({ scheme, show, density = 'docked', readOnly = false }: Args) => 
             : one.attention_kind === 'harness-prompt' ? <PromptAlert alert={one} density={density} now={now} {...onAnswer} />
               : <AnswerAlert alert={one} density={density} now={now} {...onAct} />}
       </div>
+      <output data-testid="acted" hidden>{acted}</output>
     </main>
   </AlertAnswersContext.Provider>
 }
@@ -64,6 +66,7 @@ type S = StoryObj<Args>
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
+  'AnnotatedAnswer:contract-fixture',
   'Conversation:contract-fixture',
   'Gate:contract-fixture',
   'Launch:contract-fixture',
@@ -92,6 +95,27 @@ export const Conversation: S = {
     await expect(canvas.getByRole('region', { name: 'What should the upgrade banner say?' })).toBeVisible()
   },
 }
+/** A note on the chosen answer goes with it, as its text beside its id; Fractal records both. */
+export const AnnotatedAnswer: S = {
+  args: { show: 'decide' },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(await canvas.findByRole('radio', { name: /Thread the session through/ })).toBeChecked()
+    await userEvent.click(canvas.getByRole('button', { name: 'Add a note to Thread the session through' }))
+    await userEvent.keyboard('Start with packages/worker')
+    await userEvent.keyboard('{Enter}')
+    await expect(canvas.getByTestId('acted').textContent).toBe('')
+    // Asking for changes carries the person's words already, so it offers no note.
+    await userEvent.click(canvas.getByText('Do something else'))
+    await expect(canvas.queryByRole('button', { name: /Add a note to/ })).toBeNull()
+    await userEvent.click(canvas.getByText('Thread the session through'))
+    await expect(canvas.getByRole('textbox', { name: 'Note for Thread the session through' })).toHaveValue('Start with packages/worker')
+    await userEvent.click(canvas.getByRole('button', { name: 'Send' }))
+    await expect(JSON.parse(canvas.getByTestId('acted').textContent!)).toEqual({
+      type: 'work.done', summary: 'Thread the session through', answer: { id: 'thread', text: 'Start with packages/worker' },
+    })
+  },
+}
 export const RecommendedFull: S = { args: { show: 'decide', density: 'full' } }
 export const RecommendedLight: S = { args: { show: 'decide', scheme: 'light' } }
 export const WordsOnly: S = { args: { show: 'banner' } }
@@ -103,6 +127,10 @@ export const MultipleQuestions: S = {
     const canvas = within(canvasElement)
     await canvas.findByText('1 of 3')
     await expect(canvas.getByRole('button', { name: 'Next' })).toBeDisabled()
+    // A harness question's answer is positions only (docs/st3/harness-questions.md): nothing would carry a note.
+    await userEvent.click(canvas.getByRole('checkbox', { name: /packages\/web/ }))
+    await expect(canvas.queryByRole('button', { name: /Add a note to/ })).toBeNull()
+    await userEvent.click(canvas.getByRole('checkbox', { name: /packages\/web/ }))
     await userEvent.click(canvas.getByRole('checkbox', { name: /packages\/api/ }))
     await userEvent.click(canvas.getByRole('checkbox', { name: /packages\/worker/ }))
     await userEvent.click(canvas.getByRole('button', { name: 'Next' }))
