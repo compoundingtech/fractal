@@ -556,6 +556,9 @@ pub struct Attention {
     /// Whether this item blocks or waits on its person's answer; absent on older daemons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alert: Option<bool>,
+    /// An unread incoming reply in an owned thread for this exact ask episode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_unread: Option<bool>,
     /// The agent whose conversation this item belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
@@ -3408,6 +3411,8 @@ pub enum ActionType {
     MessageSend,
     #[serde(rename = "message.read")]
     MessageRead,
+    #[serde(rename = "thread.read")]
+    ThreadRead,
     #[serde(rename = "message.close")]
     MessageClose,
     #[serde(rename = "launch.create")]
@@ -4222,6 +4227,20 @@ impl ActionRequest {
             &parameters,
         )
     }
+    pub fn thread_read(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadReadParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadRead,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
     pub fn thread_rename(
         id: impl Into<String>,
         idempotency_key: impl Into<String>,
@@ -4426,6 +4445,13 @@ impl ActionRequest {
             &parameters,
         )
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadReadParameters {
+    pub target_id: String,
+    pub through_message_id: Option<String>,
+    pub seen_message_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

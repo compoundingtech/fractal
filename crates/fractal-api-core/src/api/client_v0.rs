@@ -87,6 +87,8 @@ pub struct CollectionSubscribe {
     pub subject: Option<String>,
     /// Select exactly one owner-scoped thread context.
     pub thread_context: Option<ThreadCollectionContext>,
+    #[serde(default)]
+    pub attention_thread_hints: bool,
     pub actor: Option<String>,
     /// Follow exactly one current agent instead of the fleet window.
     pub agent: Option<String>,
@@ -303,6 +305,8 @@ pub fn collection_ignores(collection: &str, kind: &str) -> bool {
         || (kind == "harness.usage" && collection != "agents")
 }
 
+pub const ATTENTION_THREAD_HINTS_CAPABILITY: &str = "collection.attention.thread-hints";
+
 /// Advertised in `/v1/client/capabilities`: an agents subscription may select one exact agent.
 /// Clients send `agent` only to a daemon that grants it; an older one ignores the selector.
 pub const EXACT_AGENT_SELECTOR_CAPABILITY: &str = "collection.agents.exact-selector";
@@ -508,6 +512,12 @@ pub struct ClientSession {
 }
 
 impl ClientSession {
+    /// A paired bearer can arrive over Unix and still needs its grant revalidated.
+    pub fn is_unpaired_unix(&self) -> bool {
+        self.transport == "unix" && self.pairing_grant.is_none()
+    }
+
+
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_tests(actor: &str, authority_actor: &str, transport: &'static str) -> Self {
         Self {
@@ -653,6 +663,10 @@ pub fn capabilities(state: &AppState, session: &ClientSession) -> Vec<Value> {
     capabilities.push(json!({"id":"summary", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     // Attention rows say whether each is an alert and name its agent conversation; `alerts` names
     // the attention collection and routes, and the summary counts alerts.
+    capabilities.push(json!({
+        "id": ATTENTION_THREAD_HINTS_CAPABILITY, "version": 1,
+        "state": if thread_access::read_person(session).is_ok() { "granted" } else { "ungranted" },
+    }));
     capabilities.push(json!({"id":"alerts", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"slo", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
     capabilities.push(json!({"id":"inventory-collections", "version":1, "state":if session.allows("read.projections") {"granted"} else {"ungranted"}}));
@@ -963,7 +977,7 @@ pub fn revalidate_session(state: &AppState, session: &ClientSession) -> Result<C
         }
         return Ok(session.clone());
     }
-    if session.transport == "unix" && acting_party(session) {
+    if session.is_unpaired_unix() && acting_party(session) {
         return Ok(session.clone());
     }
     // With a grant, the canonical newest completion, so every member checks the same one.
@@ -4496,7 +4510,7 @@ pub struct Fence {
 }
 
 pub fn action_scope(action: &str) -> Option<&'static str> {
-    if matches!(action, "thread.rename" | "thread.close" | "thread.reopen" | "thread.start" | "thread.reply") {
+    if matches!(action, "thread.read" | "thread.rename" | "thread.close" | "thread.reopen" | "thread.start" | "thread.reply") {
         return Some("control.messages");
     }
     if action == "thread.link-ask" {

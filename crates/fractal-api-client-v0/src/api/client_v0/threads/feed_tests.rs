@@ -1,6 +1,6 @@
 use super::*;
 use axum::body::{Body, to_bytes};
-use fractal_client::{Client, Fence, Resource, TargetParameters};
+use fractal_client::{Client, Fence, Resource, ThreadReadParameters};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::UnixStream;
 use tokio_tungstenite::{
@@ -12,6 +12,10 @@ use tower::ServiceExt as _;
 type Socket = WebSocketStream<UnixStream>;
 
 async fn connect(path: &std::path::Path, person: &str) -> Socket {
+    connect_with_header(path, LOCAL_PERSON_HEADER, person).await
+}
+
+async fn connect_with_header(path: &std::path::Path, header: &'static str, value: &str) -> Socket {
     let stream = UnixStream::connect(path).await.unwrap();
     let mut request = "ws://localhost/v1/client/collections/stream"
         .into_client_request()
@@ -22,7 +26,7 @@ async fn connect(path: &std::path::Path, person: &str) -> Socket {
     );
     request
         .headers_mut()
-        .insert(LOCAL_PERSON_HEADER, person.parse().unwrap());
+        .insert(header, value.parse().unwrap());
     tokio_tungstenite::client_async(request, stream)
         .await
         .unwrap()
@@ -154,6 +158,12 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     )
     .await;
     assert_eq!(frame(&mut outsider).await["items"], json!([]));
+    subscribe(&mut outsider, "exact", "threads", ("subject", json!(thread))).await;
+    let refusal = frame(&mut outsider).await;
+    assert_eq!(refusal["kind"], "error", "{refusal}");
+    assert_eq!(refusal["code"], "not-found");
+    assert!(refusal.get("items").is_none());
+
 
     let action = json!({
         "api_version": CLIENT_API_VERSION, "id": "action/feed-agent-reply",
@@ -193,31 +203,72 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     assert_eq!(list["upserts"][0]["message_count"], 1);
     assert_eq!(history["upserts"][0]["id"], reply, "{history}");
 
+    let grant = "custom/client/pairing-thread-summary-reader";
+    let credential = "fixture-thread-summary-reader";
+    state.store.append_claim(&ClaimInput {
+        subject: grant.into(), kind: "custom.client.pairing-completed".into(), actor: None,
+        fields: BTreeMap::from([
+            ("person_id".into(), json!(person)),
+            ("session_actor".into(), json!("client/paired/thread-summary-reader")),
+            ("credential_hash".into(), json!(credential_digest(credential))),
+            ("expires_at_unix_ms".into(), json!(client_now_ms() as u64 + 60_000)),
+            ("scopes".into(), json!(["read.projections"])),
+        ]),
+        evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let mut exact = connect_with_header(&path, "authorization", &format!("Bearer {credential}")).await;
+    subscribe(&mut exact, "summary", "threads", ("subject", json!(thread))).await;
+    let initial = frame(&mut exact).await;
+    assert_eq!(initial["items"][0]["unread"], true, "{initial}");
+    assert_eq!(initial["has_more"], false);
+    assert_eq!(initial["items"].as_array().unwrap().len(), 1);
+
     let client = Client::unix_as(&path, person);
     let observed = client.messages_get(reply).await.unwrap();
-    let Resource::Message(message) = observed.value else {
-        panic!("expected the ordinary message")
-    };
-    client
-        .message_read(
-            "action/thread-read",
-            "thread-read-receipt",
-            Fence {
-                snapshot_id: observed.snapshot.id,
-                subject_revisions: [(reply.into(), message.header.revision)].into(),
-                ..Fence::default()
-            },
-            TargetParameters {
-                target_id: reply.into(),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+    assert!(matches!(observed.value, Resource::Message(_)));
+    let receipt = client.thread_read(
+        "action/thread-read",
+        "thread-read-receipt",
+        Fence { snapshot_id: observed.snapshot.id, ..Fence::default() },
+        ThreadReadParameters {
+            target_id: thread.into(),
+            through_message_id: Some(reply.into()),
+            seen_message_ids: vec![reply.into()],
+        },
+    ).await.unwrap();
+    assert_eq!(receipt.value.affected_ids, [reply]);
     let cleared = frame(&mut owner).await;
     assert_eq!(cleared["id"], "list", "{cleared}");
     assert_eq!(cleared["upserts"][0]["unread"], false);
     assert_eq!(cleared["upserts"][0]["message_count"], 1);
     assert_eq!(cleared["upserts"][0]["state"], "closed");
+    let exact_clear = frame(&mut exact).await;
+    assert_eq!(exact_clear["id"], "summary", "{exact_clear}");
+    assert_eq!(exact_clear["upserts"][0]["id"], thread);
+    assert_eq!(exact_clear["upserts"][0]["unread"], false);
+    assert_eq!(exact_clear["upserts"][0]["revision"], initial["items"][0]["revision"]);
+    assert!(tokio::time::timeout(std::time::Duration::from_millis(120), frame(&mut owner)).await.is_err(),
+        "a read-only change must not produce a timeline patch");
+
+    state.store.append_claim(&ClaimInput {
+        subject: grant.into(), kind: "custom.client.pairing-revoked".into(), actor: None,
+        fields: BTreeMap::new(), evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    crate::api::signal_visible_change(&state);
+    let refusal = frame(&mut exact).await;
+    assert_eq!(refusal["kind"], "error", "{refusal}");
+    assert_eq!(refusal["id"], "summary");
+    assert_eq!(refusal["code"], "forbidden");
+    assert!(refusal.get("upserts").is_none());
+    let current = thread_metadata::summary(&state.store, person, thread).unwrap();
+    thread_metadata::apply(&state.store, person, thread, "rename-after-revocation", thread_metadata::Edit::Rename {
+        title: "Still visible locally", title_revision: &current.title_revision, revision: &current.revision,
+    }).unwrap();
+    crate::api::signal_visible_change(&state);
+    let one = frame(&mut owner).await;
+    let two = frame(&mut owner).await;
+    let (list, history) = if one["id"] == "list" { (one, two) } else { (two, one) };
+    assert_eq!(list["upserts"][0]["title"], "Still visible locally");
+    assert_eq!(history["upserts"][0]["kind"], "thread.renamed");
     server.abort();
 }

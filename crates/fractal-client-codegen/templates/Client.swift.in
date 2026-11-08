@@ -153,6 +153,12 @@ public actor FractalClient {
         return threadCollectionStream(["kind": .string("subscribe"), "id": .string(subscriptionID), "collection": .string("threads"), "thread_context": .object(context), "limit": .number(Double(limit))])
     }
 
+    /// Follow one thread's summary, including shared unread progress.
+    /// Requires the daemon's `thread-summary-feed` capability.
+    public func threadSummaryStream(threadID: String, subscriptionID: String = "thread-summary") -> AsyncThrowingStream<ThreadCollectionFrame<ThreadSummary>, Error> {
+        threadCollectionStream(["kind": .string("subscribe"), "id": .string(subscriptionID), "collection": .string("threads"), "subject": .string(threadID), "limit": .number(1)])
+    }
+
     /// Follow accepted messages and lifecycle rows of exactly one thread.
     public func threadTimelineStream(threadID: String, subscriptionID: String = "thread-timeline", limit: Int = 50) -> AsyncThrowingStream<ThreadCollectionFrame<ThreadTimelineEvent>, Error> {
         threadCollectionStream(["kind": .string("subscribe"), "id": .string(subscriptionID), "collection": .string("thread-timeline"), "subject": .string(threadID), "limit": .number(Double(limit))])

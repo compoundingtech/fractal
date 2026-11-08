@@ -52,6 +52,7 @@ public enum ActionType: String, Codable, CaseIterable, Sendable {
     case terminalInput = "terminal.input"
     case terminalResize = "terminal.resize"
     case threadClose = "thread.close"
+    case threadRead = "thread.read"
     case threadRename = "thread.rename"
     case threadReopen = "thread.reopen"
     case threadReply = "thread.reply"

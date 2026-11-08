@@ -74,10 +74,15 @@ Use the conversation composer with an explicit destination. When a thread is act
 composer sends into it without a separate reply mode. A quoted reply adds the message target.
 Agent conversation and thread drafts are separate and survive switching destinations.
 
-Track read progress per reader and thread against ordered messages. Moving a cursor forward can
-clear an unread reply on the existing Inbox row without creating an ask, changing the alert count
-or resolving an approval. Which visible interaction advances the read cursor should be tested
-with real UI visibility and reviewed before client implementations treat it as read.
+Mark shown messages read explicitly. The client submits up to 50 exact rendered message IDs
+and the newest of those IDs as an anchor. Fetching or preloading a page alone does not mark it
+read. The daemon verifies the authenticated person's ownership and every selected message before
+writing ordinary replicated read facts for incoming replies. A late arrival stays unread even if
+it sorts before the anchor. A retry of the same selection returns the same acknowledged incoming
+IDs without duplicating facts. Empty selections acknowledge nothing.
+
+Read progress also works in closed threads and requires the same message-control scope as
+ordinary read actions. It does not reopen a thread, resolve an ask, or change the alert count.
 
 ## Daemon boundary
 

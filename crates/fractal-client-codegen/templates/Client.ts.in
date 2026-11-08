@@ -116,7 +116,7 @@ export type TerminalStream = { close(): void };
 /** `person` applies to attention and usage, `actor` to work, `status` to agents;
  * `since_ms` and `until_ms` select the optional usage inventory period. Follow one exact agent
  * with `subscribeAgent`, which checks that the daemon advertises it. */
-export type CollectionFilters = { person?: string | null; actor?: string | null; status?: string | null; since_ms?: number; until_ms?: number };
+export type CollectionFilters = { person?: string | null; actor?: string | null; status?: string | null; since_ms?: number; until_ms?: number; attention_thread_hints?: boolean };
 /** Advertised in `/v1/client/capabilities` when an agents subscription may select one exact
  * agent. An older daemon ignores the selector and answers with the fleet. */
 export const EXACT_AGENT_SELECTOR_CAPABILITY = 'collection.agents.exact-selector';
@@ -144,7 +144,7 @@ export type CollectionStream = {
     subscribeAgentsPublication(id: string): void;
     subscribeArrangements(id: string, person: string, limit?: number, subject?: ArrangementId): void;
     subscribeOrderedMemberships(id: string, person: string, subject: ArrangementId, limit?: number): void;
-    subscribe(id: string, collection: 'threads', limit: number | undefined, filters: { thread_context: ThreadCollectionContext }): void;
+    subscribe(id: string, collection: 'threads', limit: number | undefined, filters: { thread_context: ThreadCollectionContext } | { subject: string }): void;
     subscribe(id: string, collection: 'thread-timeline', limit: number | undefined, filters: { subject: string }): void;
     subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships' | 'threads' | 'thread-timeline'>, limit?: number, filters?: CollectionFilters): void;
     /** Follow exactly one current agent's card, intersected with `status`. Rejects, sending nothing,

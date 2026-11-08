@@ -116,7 +116,7 @@ export type TerminalStream = { close(): void };
 /** `person` applies to attention and usage, `actor` to work, `status` to agents;
  * `since_ms` and `until_ms` select the optional usage inventory period. Follow one exact agent
  * with `subscribeAgent`, which checks that the daemon advertises it. */
-export type CollectionFilters = { person?: string | null; actor?: string | null; status?: string | null; since_ms?: number; until_ms?: number };
+export type CollectionFilters = { person?: string | null; actor?: string | null; status?: string | null; since_ms?: number; until_ms?: number; attention_thread_hints?: boolean };
 /** Advertised in `/v1/client/capabilities` when an agents subscription may select one exact
  * agent. An older daemon ignores the selector and answers with the fleet. */
 export const EXACT_AGENT_SELECTOR_CAPABILITY = 'collection.agents.exact-selector';
@@ -144,7 +144,7 @@ export type CollectionStream = {
     subscribeAgentsPublication(id: string): void;
     subscribeArrangements(id: string, person: string, limit?: number, subject?: ArrangementId): void;
     subscribeOrderedMemberships(id: string, person: string, subject: ArrangementId, limit?: number): void;
-    subscribe(id: string, collection: 'threads', limit: number | undefined, filters: { thread_context: ThreadCollectionContext }): void;
+    subscribe(id: string, collection: 'threads', limit: number | undefined, filters: { thread_context: ThreadCollectionContext } | { subject: string }): void;
     subscribe(id: string, collection: 'thread-timeline', limit: number | undefined, filters: { subject: string }): void;
     subscribe(id: string, collection: Exclude<CollectionName, 'arrangements' | 'ordered-memberships' | 'threads' | 'thread-timeline'>, limit?: number, filters?: CollectionFilters): void;
     /** Follow exactly one current agent's card, intersected with `status`. Rejects, sending nothing,
@@ -843,6 +843,7 @@ export class FractalClient {
     async terminalInput(input: Omit<ActionOf<'terminal.input'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'terminal.input' } as ActionOf<'terminal.input'>, requestOptions); }
     async terminalResize(input: Omit<ActionOf<'terminal.resize'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'terminal.resize' } as ActionOf<'terminal.resize'>, requestOptions); }
     async threadClose(input: Omit<ActionOf<'thread.close'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.close' } as ActionOf<'thread.close'>, requestOptions); }
+    async threadRead(input: Omit<ActionOf<'thread.read'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.read' } as ActionOf<'thread.read'>, requestOptions); }
     async threadRename(input: Omit<ActionOf<'thread.rename'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.rename' } as ActionOf<'thread.rename'>, requestOptions); }
     async threadReopen(input: Omit<ActionOf<'thread.reopen'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.reopen' } as ActionOf<'thread.reopen'>, requestOptions); }
     async threadReply(input: Omit<ActionOf<'thread.reply'>, 'api_version' | 'type'>, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<ActionResult>> { return this.submitAction({ ...input, api_version: API_VERSION, type: 'thread.reply' } as ActionOf<'thread.reply'>, requestOptions); }

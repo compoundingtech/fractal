@@ -552,6 +552,18 @@ impl CollectionStream {
     ) -> Result<(), ClientError> {
         self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":collection, "limit":limit, "actor":actor, "status":status})).await
     }
+    /// Opt into the owner unread-thread badge after the daemon grants collection.attention.thread-hints.
+    pub async fn subscribe_attention(
+        &mut self,
+        id: &str,
+        limit: usize,
+        thread_hints: bool,
+    ) -> Result<(), ClientError> {
+        if !thread_hints {
+            return self.subscribe(id, "attention", limit, None, None).await;
+        }
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"attention", "limit":limit, "attention_thread_hints":true})).await
+    }
     /// Follow a usage report for a named period; an omitted end follows current usage.
     pub async fn subscribe_usage(
         &mut self,
@@ -632,6 +644,15 @@ impl CollectionStream {
             ThreadListScope::RecentlyClosed => json!({"recently_closed":true}),
         };
         self.send(&json!({"kind":"subscribe", "id":id, "collection":"threads", "thread_context":context, "limit":limit})).await
+    }
+    /// Follow this person's exact thread summary, including shared unread progress.
+    /// Requires the daemon's `thread-summary-feed` capability.
+    pub async fn subscribe_thread_summary(
+        &mut self,
+        id: &str,
+        thread: &str,
+    ) -> Result<(), ClientError> {
+        self.send(&serde_json::json!({"kind":"subscribe", "id":id, "collection":"threads", "subject":thread, "limit":1})).await
     }
     /// Follow the newest admitted rows of exactly one thread.
     pub async fn subscribe_thread_timeline(
@@ -3625,6 +3646,17 @@ impl Client {
         parameters: ThreadTargetParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let request = ActionRequest::thread_close(id, idempotency_key, fence, parameters)
+            .map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.action_internal(&request).await
+    }
+    pub async fn thread_read(
+        &self,
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadReadParameters,
+    ) -> Result<Envelope<ActionResult>, ClientError> {
+        let request = ActionRequest::thread_read(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
         self.action_internal(&request).await
     }

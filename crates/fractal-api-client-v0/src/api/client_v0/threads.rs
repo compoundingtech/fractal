@@ -121,7 +121,7 @@ fn store_error(error: FractalError) -> ApiError {
             message: error.message,
             details: Box::default(),
         },
-        "invalid-thread-cursor" | "invalid-thread-message" | "invalid-thread-start"
+        "invalid-thread-cursor" | "invalid-thread-message" | "invalid-thread-start" | "invalid-thread-read"
         | "invalid-thread-decision" | "invalid-thread-title" => validation(&error.message),
         _ => ApiError::bad(error),
     }
@@ -178,6 +178,7 @@ fn validate_subject(subject: &str) -> Result<(), ApiError> {
 #[derive(Clone)]
 pub(super) enum StreamSelection {
     Context(ThreadCollectionContext),
+    Summary(String),
     Thread(String),
 }
 
@@ -203,12 +204,17 @@ pub(super) fn stream_selection(
         ));
     }
     let selection = if request.collection == "threads" {
-        let context = request
-            .thread_context
-            .as_ref()
-            .ok_or_else(|| validation("thread discovery requires exactly one valid context"))?;
-        resolve_context(context)?;
-        StreamSelection::Context(context.clone())
+        match (request.subject.as_deref(), request.thread_context.as_ref()) {
+            (Some(subject), None) => {
+                validate_subject(subject)?;
+                StreamSelection::Summary(subject.into())
+            }
+            (None, Some(context)) => {
+                resolve_context(context)?;
+                StreamSelection::Context(context.clone())
+            }
+            _ => return Err(validation("threads require exactly one subject or context")),
+        }
     } else {
         let subject = request
             .subject
@@ -240,6 +246,10 @@ pub(super) fn stream_rows(
             )
             .map_err(store_error)?;
             stream_page(page.items, page.next_cursor.is_some())
+        }
+        StreamSelection::Summary(subject) => {
+            let summary = thread_metadata::summary(store, person, subject).map_err(store_error)?;
+            stream_page(vec![summary], false)
         }
         StreamSelection::Thread(subject) => {
             let page = thread_metadata::mixed_timeline(store, person, subject, None, limit)
@@ -352,6 +362,45 @@ fn run_lifecycle(
         "status": "completed", "affected_ids": [claim.subject], "metadata_revision": claim.id,
         "snapshot_id": new_client_snapshot(state).id,
     })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadParameters {
+    target_id: String,
+    through_message_id: Option<String>,
+    seen_message_ids: Vec<String>,
+}
+
+pub(super) async fn read_action(
+    state: AppState,
+    session: ClientSession,
+    request: ActionRequest,
+) -> Result<Json<Value>, ApiError> {
+    validate_action_admission(&session, &request)?;
+    blocking_store(move || Ok((|| {
+        let current = current_session(&state, &session)?;
+        let person = read_person(&current)?;
+        require_scope(&current, "control.messages")?;
+        let authority = edit_authority(&current)?;
+        validate_snapshot_fence(&state, &request.fence)?;
+        let operation_id = format!("operation/{}", action_request_digest(&request)?);
+        let parameters: ReadParameters = serde_json::from_value(request.parameters)
+            .map_err(|error| validation(error.to_string()))?;
+        validate_subject(&parameters.target_id)?;
+        let (acknowledged, appended) = thread_metadata::mark_read(
+            &state.store, authority, person, &parameters.target_id,
+            parameters.through_message_id.as_deref(), &parameters.seen_message_ids,
+        ).map_err(store_error)?;
+        if appended {
+            crate::api::signal_visible_change(&state);
+        }
+        Ok(Json(json!({
+            "kind": "action-result", "action_id": request.id, "operation_id": operation_id,
+            "status": "completed", "affected_ids": acknowledged,
+            "snapshot_id": new_client_snapshot(&state).id,
+        })))
+    })())).await?
 }
 
 #[derive(Deserialize)]
@@ -601,7 +650,7 @@ mod tests {
         state.store.configure_thread_write_rollout([]);
         let (status, ready) = get_capabilities(&state, LOCAL_PERSON_HEADER, person).await;
         assert_eq!(status, StatusCode::OK);
-        for id in ["threads-v1", "thread.start", "thread.reply", "thread.rename", "thread.close", "thread.reopen"] {
+        for id in ["threads-v1", "thread-summary-feed", "thread.start", "thread.reply", "thread.rename", "thread.close", "thread.reopen"] {
             assert_eq!(grant(&ready, id), "granted", "{id}");
         }
         assert_eq!(grant(&ready, "thread.link-ask"), "ungranted");
@@ -651,9 +700,22 @@ mod tests {
         let (status, read) = get_capabilities(&state, AUTHORIZATION.as_str(), &bearer).await;
         assert_eq!(status, StatusCode::OK, "{read}");
         assert_eq!(grant(&read, "threads-v1"), "granted");
-        for id in ["thread.start", "thread.reply", "thread.rename", "thread.close", "thread.reopen", "thread.link-ask"] {
+        assert_eq!(grant(&read, "thread-summary-feed"), "granted");
+        for id in ["thread.read", "thread.start", "thread.reply", "thread.rename", "thread.close", "thread.reopen", "thread.link-ask"] {
             assert_eq!(grant(&read, id), "ungranted", "{id}");
         }
+
+        let blocked = crate::api::router(state.clone()).oneshot(
+            Request::builder().method("POST").uri("/v1/client/actions")
+                .header(AUTHORIZATION, &bearer).header("Content-Type", "application/json")
+                .body(Body::from(json!({
+                    "api_version": CLIENT_API_VERSION, "id": "action/thread-read-denied",
+                    "type": "thread.read", "idempotency_key": "thread-read-denied-key",
+                    "fence": {"snapshot_id": new_client_snapshot(&state).id},
+                    "parameters": {"target_id": "thread/unknown", "through_message_id": null, "seen_message_ids": []},
+                }).to_string())).unwrap(),
+        ).await.unwrap();
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
 
         state.store.append_claim(&ClaimInput {
             subject: grant_id.into(),
@@ -666,6 +728,78 @@ mod tests {
         }).unwrap();
         let (status, revoked) = get_capabilities(&state, AUTHORIZATION.as_str(), &bearer).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{revoked}");
+    }
+
+    #[tokio::test]
+    async fn paired_thread_read_updates_the_same_owner_on_another_device() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "thread-read-devices");
+        state.store.configure_thread_write_rollout([]);
+        let person = "person/operator";
+        let agent = "agent/example";
+        let thread = "thread/read-devices";
+        let message = "message/read-device-reply";
+        thread_metadata::apply(&state.store, person, thread, "create-read-devices", thread_metadata::Edit::Create {
+            agent, title: "Review",
+        }).unwrap();
+        crate::store::thread_delivery::append_reply(&state.store, &ClaimInput {
+            subject: message.into(), kind: "message.sent".into(), actor: Some(agent.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(agent)), ("to".into(), json!(person)),
+                ("content".into(), json!("Reply")), ("status".into(), json!("sent")),
+                ("thread_id".into(), json!(thread)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: Some("send-device-reply".into()),
+        }, thread_metadata::PersonAuthority::TrustedLocal, None).unwrap();
+        let pair = |name: &str, scopes: &[&str]| {
+            state.store.append_claim(&ClaimInput {
+                subject: format!("custom/client/pairing-{name}"), kind: "custom.client.pairing-completed".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("person_id".into(), json!(person)),
+                    ("session_actor".into(), json!(format!("client/paired/{name}"))),
+                    ("credential_hash".into(), json!(credential_digest(name))),
+                    ("expires_at_unix_ms".into(), json!(client_now_ms() as u64 + 60_000)),
+                    ("scopes".into(), json!(scopes)),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            format!("Bearer {name}")
+        };
+        let writer = pair("thread-read-writer", &["read.projections", "control.messages"]);
+        let observer = pair("thread-read-observer", &["read.projections"]);
+        let app = crate::api::router(state.clone());
+        let summary = |bearer: &str| {
+            let app = app.clone();
+            let request = Request::builder().uri("/v1/client/threads/read-devices")
+                .header(AUTHORIZATION, bearer).body(Body::empty()).unwrap();
+            async move {
+                let response = app.oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                serde_json::from_slice::<Value>(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap()
+            }
+        };
+        assert_eq!(summary(&observer).await["value"]["unread"], true);
+        let action = json!({
+            "api_version": CLIENT_API_VERSION, "id": "action/read-devices", "type": "thread.read",
+            "idempotency_key": "read-devices-operation",
+            "fence": {"snapshot_id": new_client_snapshot(&state).id},
+            "parameters": {"target_id": thread, "through_message_id": message, "seen_message_ids": [message]},
+        });
+        for _ in 0..2 {
+            let response = app.clone().oneshot(
+                Request::builder().method("POST").uri("/v1/client/actions")
+                    .header(AUTHORIZATION, &writer).header("Content-Type", "application/json")
+                    .body(Body::from(action.to_string())).unwrap(),
+            ).await.unwrap();
+            let status = response.status();
+            let result: Value = serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap();
+            assert_eq!(status, StatusCode::OK, "{result}");
+            assert_eq!(result["value"]["affected_ids"], json!([message]));
+            assert!(result["value"]["operation_id"].is_string());
+        }
+        assert_eq!(summary(&observer).await["value"]["unread"], false);
+        assert_eq!(state.store.claims_for(message, Some("message.read")).unwrap().len(), 1);
     }
 
     #[tokio::test]

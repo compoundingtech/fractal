@@ -58,6 +58,8 @@ pub(super) fn capabilities(state: &AppState, session: &ClientSession) -> impl It
     let link = bound && session.allows("control.work");
     [
         ("threads-v1", 1, read),
+        ("thread-summary-feed", 1, read),
+        ("thread.read", 0, read && edit),
         ("thread.start", 0, edit),
         ("thread.reply", 0, reply),
         ("thread.rename", 0, edit),
