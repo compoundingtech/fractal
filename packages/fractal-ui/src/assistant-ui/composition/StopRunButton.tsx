@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as text, typeVars as t } from '../composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as text, typeVars as t, interactionVars } from '../composition-tokens.stylex'
 import { Icon } from './Icons'
 
 /**
@@ -44,7 +44,7 @@ const styles = stylex.create({
     fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, whiteSpace: 'nowrap',
     cursor: 'pointer',
     transition: 'background-color 150ms ease-out',
-    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset },
+    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset },
   },
   pending: { cursor: 'default', opacity: 0.72 },
   // A filled square inside a disc, legible at 16px.

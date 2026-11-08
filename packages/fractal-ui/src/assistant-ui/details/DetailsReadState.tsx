@@ -4,7 +4,7 @@ import { Button, VisuallyHidden } from 'react-aria-components'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { HumanTime, useClockLabel } from '../../time/HumanTime'
 import { formatRelative } from '../../time/human-time'
-import { accentVars as accent, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { accentVars as accent, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../composition-tokens.stylex'
 import type { DetailsReadFailure, DetailsSpendRead } from './model'
 
 type FailureSentence = { readonly message: string; readonly retainedAt?: number | undefined }
@@ -166,7 +166,7 @@ export function DetailsSpendReadLine({ read }: { readonly read: DetailsSpendRead
 const styles = stylex.create({
   line: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', columnGap: s.xs, margin: s.zero, minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   text: { minWidth: 0, overflowWrap: 'normal' },
-  action: { display: 'inline-flex', alignItems: 'center', height: g.controlSm, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outline: `2px solid ${accent.primary}` } },
+  action: { display: 'inline-flex', alignItems: 'center', height: g.controlSm, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } },
   actionTouch: { height: g.touchTarget, minWidth: g.touchTarget, paddingInline: s.md },
   actionPending: { color: ink.fgMuted, cursor: 'default', ':hover': { backgroundColor: surface.transparent } },
 })

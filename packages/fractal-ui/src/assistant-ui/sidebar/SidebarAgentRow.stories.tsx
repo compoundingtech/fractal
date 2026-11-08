@@ -6,7 +6,7 @@ import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { SidebarAgentRow, sidebarRowDescription, type RowVariant } from './SidebarAgentRow'
 import { AgentHoverCard } from './DeferredRowActions.tsx'
 import type { SidebarAgentRow as Row } from './model'
-import { accentVars as accent, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, geometryVars as g, borderVars as border, radiusVars as r, elevationVars as elevation } from '../composition-tokens.stylex'
+import { accentVars as accent, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, geometryVars as g, borderVars as border, radiusVars as r, elevationVars as elevation, interactionVars } from '../composition-tokens.stylex'
 import { baselineTheme } from '../neutral-theme'
 import { lightTheme, type Scheme } from '../composition-theme'
 import { ThemePortal } from '../taste/ThemePortal'
@@ -192,9 +192,11 @@ async function assertThemedOverlay(surfaceElement: HTMLElement, overlay: Element
   await expect(surfaceElement.contains(overlay)).toBe(true)
   await expect(getComputedStyle(overlay).backgroundColor).toBe(raised)
 }
-async function assertNeutralRing(element: Element, focus: string) {
+async function assertFocusRing(element: Element, focus: string) {
   const style = getComputedStyle(element)
   await expect(style.outlineStyle).toBe('solid')
+  await expect(style.outlineWidth).toBe('1px')
+  await expect(style.outlineOffset).toBe('-1px')
   await expect(style.outlineColor).toBe(focus)
 }
 
@@ -471,11 +473,11 @@ export const ThemedOverlaysAndFocus: StoryObj<{ scheme: Scheme }> = {
     const popover = menu.closest('[data-trigger="MenuTrigger"]')!
     await assertThemedOverlay(themed, popover, raised)
     const item = await waitFor(() => { const element = menu.querySelector('[role="menuitem"][data-focus-visible]'); if (element === null) throw new Error('no keyboard-focused item'); return element })
-    await assertNeutralRing(item, focus)
+    await assertFocusRing(item, focus)
     await userEvent.keyboard('r')
     const reportedDetails = within(menu as HTMLElement).getByRole('menuitem', { name: 'Reported agent details' })
     await expect(reportedDetails).toHaveFocus()
-    await assertNeutralRing(reportedDetails, focus)
+    await assertFocusRing(reportedDetails, focus)
     // Negative controls: an overlay outside the themed surface and an accent ring must both be rejected.
     const escaped = document.createElement('div')
     escaped.className = popover.className
@@ -483,16 +485,16 @@ export const ThemedOverlaysAndFocus: StoryObj<{ scheme: Scheme }> = {
     await expect(assertThemedOverlay(themed, escaped, raised)).rejects.toThrow()
     escaped.remove()
     ;(item as HTMLElement).style.outlineColor = accentColor
-    await expect(assertNeutralRing(item, focus)).rejects.toThrow()
+    await expect(assertFocusRing(item, focus)).rejects.toThrow()
     ;(item as HTMLElement).style.removeProperty('outline-color')
     await userEvent.keyboard('{Escape}')
     await waitFor(() => expect(document.querySelector('[role="menu"]')).toBeNull())
-    // Keyboard focus on the active row: the same neutral ring.
+    // Keyboard focus on the active row: the same focus ring.
     const rowButton = row.querySelector<HTMLElement>(':scope > button')!
     rowButton.focus()
     await userEvent.keyboard('{Shift}')
     await waitFor(() => expect(rowButton).toHaveAttribute('data-focus-visible'))
-    await assertNeutralRing(rowButton, focus)
+    await assertFocusRing(rowButton, focus)
     await waitFor(() => expect(within(document.body).getByRole('tooltip')).toHaveAccessibleName(`Reported details for ${row.querySelector('[data-row-column="title-text"]')!.textContent}`))
   },
 }
@@ -503,5 +505,5 @@ const styles = stylex.create({
   list: { display: 'flex', flexDirection: 'column', gap: s.xs, width: g.specimenAside, minWidth: 0 },
   phoneList: { width: 360, maxWidth: '100%' },
   aside: { width: g.specimenAside, maxWidth: '100%', minWidth: 0, boxSizing: 'border-box', padding: s.lg, backgroundColor: surface.raised, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, boxShadow: elevation.popover },
-  tokenProbe: { position: 'absolute', width: 0, height: 0, overflow: 'hidden', backgroundColor: surface.raised, color: ink.fgMuted, borderTopStyle: 'solid', borderTopWidth: 0, borderTopColor: accent.primary },
+  tokenProbe: { position: 'absolute', width: 0, height: 0, overflow: 'hidden', backgroundColor: surface.raised, color: interactionVars.focusRing, borderTopStyle: 'solid', borderTopWidth: 0, borderTopColor: accent.primary },
 })

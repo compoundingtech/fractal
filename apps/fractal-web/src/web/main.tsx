@@ -3,6 +3,7 @@
 import './app.css'
 
 import { StrictMode } from 'react'
+import { installFocusModality } from '../../../../packages/fractal-ui/src/focus-modality.ts'
 import { createRoot } from 'react-dom/client'
 
 import { setTheme } from '../ui-compat/foundations.ts'
@@ -12,6 +13,8 @@ import { live, telemetry } from './liveRuntime.ts'
 import { installPageLifecycle } from './pageLifecycle.ts'
 import { PortalContainerRegistrationContext } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import { markStart } from './perfMarks.ts'
+
+installFocusModality()
 
 markStart('sidebar_interactive', { startTime: 0 })
 const initialAgent = window.location.pathname.match(/^\/w\/(agent\/.+)$/)?.[1]

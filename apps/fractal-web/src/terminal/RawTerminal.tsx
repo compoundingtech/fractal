@@ -32,7 +32,7 @@ import {
 } from './rawTerminalInput.ts'
 import { gridFor, makeResizeDebouncer, type RawPreparation, type RawTerminalPort } from './rawTerminalState.ts'
 import { TERMINAL_FONT_FAMILY, terminalFontsReady } from './terminalFonts.ts'
-import { borderVars, interactionVars, statusVars, surfaceVars, textVars, spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars, interactionVars, statusVars, surfaceVars, textVars, spaceVars , geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** The emulator or its asset could not be prepared; the pane falls back to the projected screen. */
 class RawTerminalUnprepared extends Schema.TaggedError<RawTerminalUnprepared>()('RawTerminalUnprepared', {
@@ -713,6 +713,6 @@ const styles = stylex.create({
     cursor: 'pointer',
     outlineStyle: { default: 'none', ':is([data-focus-visible])': 'solid' },
     outlineColor: interactionVars.focusRing,
-    outlineWidth: '2px',
+    outlineWidth: geometryVars.focusRing,
   },
 })

@@ -28,12 +28,13 @@ function ShowMenuHarness({ dark = true, width = 1440 }: { readonly dark?: boolea
 }
 
 /** The sidebar's one Filter menu: its sections, a folded More, finished agents on by default, and Reset. */
-function FilterMenuHarness() {
+function FilterMenuHarness({ dark = true, width = 1440 }: { readonly dark?: boolean; readonly width?: number } = {}) {
   const [selected, setSelected] = React.useState<ReadonlySet<string>>(new Set(['show:ended', 'show:retired']))
-  return <main data-scheme="dark" {...stylex.props(styles.canvas, styles.wide)}>
+  return <main data-scheme={dark ? 'dark' : 'light'} {...stylex.props(styles.canvas, width === 440 ? styles.narrow : styles.wide, !dark && compositionLightTheme)}>
     <div {...stylex.props(styles.bar)}>
       <span {...stylex.props(styles.search)}>Find an agent</span>
       <ShowMenu
+        {...(dark ? {} : { popoverTheme: compositionLightTheme })}
         label="Filter"
         activeCount={[...selected].filter(key => !key.startsWith('show:')).length + 2 - [...selected].filter(key => key.startsWith('show:')).length}
         groups={[
@@ -146,6 +147,10 @@ export const scenarioExemptions: readonly string[] = [
   'FilterSections:contract-fixture',
   'Narrow440Dark:contract-fixture',
   'Narrow440Light:contract-fixture',
+  'OpensOnFirstOption1280Dark:contract-fixture',
+  'OpensOnFirstOption1280Light:contract-fixture',
+  'OpensOnFirstOption440Dark:contract-fixture',
+  'OpensOnFirstOption440Light:contract-fixture',
   'Wide1440Dark:contract-fixture',
   'Wide1440Light:contract-fixture',
 ]
@@ -171,6 +176,32 @@ export const FilterSections: Story = {
     await expect(within(canvasElement).getByRole('button', { name: 'Filter' })).toBeVisible()
   },
 }
+/**
+ * The Filter menu has no search field, so opening it focuses its first option, by keyboard or pointer,
+ * even while a later entry (Show ended) is checked.
+ */
+const opensOnFirstOption: Story['play'] = async ({ canvasElement }) => {
+  const page = within(canvasElement.ownerDocument.body)
+  const trigger = within(canvasElement).getByRole('button', { name: 'Filter' })
+  const first = async () => {
+    const menu = await page.findByRole('menu')
+    const firstOption = menu.querySelector<HTMLElement>('[role^="menuitem"]')!
+    await expect(firstOption).toHaveAccessibleName('Waiting for answer, 2')
+    await waitFor(() => expect(canvasElement.ownerDocument.activeElement).toBe(firstOption))
+  }
+  trigger.focus()
+  await userEvent.keyboard('{Enter}')
+  await first()
+  await userEvent.keyboard('{Escape}')
+  await waitFor(() => expect(page.queryByRole('menu')).toBeNull())
+  await userEvent.click(trigger)
+  await first()
+  await userEvent.keyboard('{Escape}')
+}
+export const OpensOnFirstOption1280Dark: Story = { render: () => <FilterMenuHarness />, play: opensOnFirstOption }
+export const OpensOnFirstOption1280Light: Story = { render: () => <FilterMenuHarness dark={false} />, play: opensOnFirstOption }
+export const OpensOnFirstOption440Dark: Story = { render: () => <FilterMenuHarness width={440} />, globals: { viewport: { value: 'show440', isRotated: false } }, play: opensOnFirstOption }
+export const OpensOnFirstOption440Light: Story = { render: () => <FilterMenuHarness dark={false} width={440} />, globals: { viewport: { value: 'show440', isRotated: false } }, play: opensOnFirstOption }
 export const Wide1440Dark: Story = { play }
 export const Wide1440Light: Story = { args: { dark: false }, play }
 export const Narrow440Dark: Story = { args: { width: 440 }, globals: { viewport: { value: 'show440', isRotated: false } }, play }

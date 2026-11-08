@@ -53,12 +53,6 @@ const styles = stylex.create({
       zIndex: 2,
     },
   },
-  attentionRing: {
-    outlineWidth: '1px',
-    outlineStyle: 'solid',
-    outlineColor: statusVars.attention,
-    outlineOffset: '-1px',
-  },
   body: {
     position: 'relative',
     display: 'flex',
@@ -119,7 +113,6 @@ export const EditorGroup = ({
     {...stylex.props(
       styles.group,
       surface === 'flat' && isFocused && styles.flatFocused,
-      attention && styles.attentionRing,
       surface === 'card' && styles.card,
       surface === 'card' && isFocused && styles.cardFocused,
       surface === 'ring' && styles.ring,

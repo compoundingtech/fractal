@@ -4,7 +4,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Dialog, Popover, Text } from 'react-aria-components'
 import { Menu, MenuItem, Popover as MenuPopover } from '../composition/Controls'
 import { Icon } from '../composition/Icons'
-import { borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../composition-tokens.stylex'
 import { rowAttention, rowHasUnread, rowStatusLabel, type SidebarAgentRow as Row } from './model'
 import type { AgentRowActionsProps } from './DeferredRowActions.tsx'
 import { sidebarRowTitle, sidebarSubagentObservationText, usageText, tokenCount, spendCount, openRow } from './rowPresentation.tsx'
@@ -136,7 +136,7 @@ const styles = stylex.create({
   cardChildren: { margin: s.zero, padding: s.zero, listStyleType: 'none', color: ink.fgSoft },
   detailLabel: { margin: s.zero, color: ink.fgSoft },
   detailValue: { margin: s.zero, minWidth: 0, color: ink.fg },
-  menuItemFocus: { outlineColor: { ':is([data-focus-visible])': ink.fgMuted } },
+  menuItemFocus: { outlineColor: { ':is([data-focus-visible])': interactionVars.focusRing } },
   menuReason: { display: 'block', whiteSpace: 'normal', fontSize: t.metaSize, lineHeight: t.metaLeading, paddingBlockEnd: s.xs },
-  menuItemFocusNarrow: { outlineColor: { ':is([data-focus-visible])': ink.fgMuted }, height: 'auto', minHeight: g.touchTarget },
+  menuItemFocusNarrow: { outlineColor: { ':is([data-focus-visible])': interactionVars.focusRing }, height: 'auto', minHeight: g.touchTarget },
 })

@@ -13,7 +13,7 @@ import {
 } from 'react-aria-components'
 
 import type { TerminalResizePort } from './terminal-resize-port.ts'
-import { borderVars, interactionVars, surfaceVars, textVars, radiusVars, spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars, interactionVars, surfaceVars, textVars, radiusVars, spaceVars , geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** Changing dimensions is deliberate: other viewers share the same PTY. */
 export const TerminalResize = ({
@@ -152,7 +152,7 @@ const styles = stylex.create({
     cursor: 'pointer',
     outlineStyle: { default: 'none', ':is([data-focus-visible])': 'solid' },
     outlineColor: interactionVars.focusRing,
-    outlineWidth: '2px',
+    outlineWidth: geometryVars.focusRing,
   },
   overlay: {
     position: 'fixed',

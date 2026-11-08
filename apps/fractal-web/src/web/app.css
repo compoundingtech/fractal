@@ -12,11 +12,6 @@ body,
   color: var(--canvas);
 }
 
-/* Keyboard focus on menu and list items: the kit's neutral ring, not the legacy accent ring. */
-[data-testid='live-agent-workspace'] :is([role='menuitem'], [role='menuitemradio'], [role='menuitemcheckbox'], [role='option'])[data-focus-visible] {
-  outline: 2px solid var(--muted);
-  outline-offset: -2px;
-}
 
 /*
  * Reserve the HUD's own strip without subscribing the workbench to its preference. The bar publishes its

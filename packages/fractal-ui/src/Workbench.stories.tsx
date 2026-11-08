@@ -265,6 +265,6 @@ export const AllStatesLight: Story = { ...AllStates, tags: ['critical', '!both-w
 const styles = stylex.create({
   canvas: { display: 'flex', flexDirection: 'column', height: '100vh', minWidth: 0, overflow: 'hidden', backgroundColor: surface.canvas, color: text.fg, fontFamily: t.fontSans, fontSize: t.metaSize },
   toolbar: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: s.lg, padding: s.sm, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border }, workspace: { display: 'flex', flex: '1 1 0', minHeight: 0, minWidth: 0 },
-  button: { minHeight: g.controlMd, paddingInline: s.sm, backgroundColor: surface.controlFill, color: text.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
+  button: { minHeight: g.controlMd, paddingInline: s.sm, backgroundColor: surface.controlFill, color: text.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   override: { display: 'flex', flexDirection: 'column', gap: s.md, padding: s.lg }, matrix: { display: 'flex', flexDirection: 'column', gap: s.xl }, specimen: { minWidth: 0 },
 })

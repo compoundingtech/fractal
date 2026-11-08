@@ -4,7 +4,7 @@ import { Button, Dialog, Heading, Popover, Tooltip, TooltipTrigger, VisuallyHidd
 import { syncLine, canRetrySyncFailure, syncFailureRecovery } from './sync-line'
 import type { SyncStatus } from './sync-status'
 import { SyncFailureDetails } from './SyncLine'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../composition-tokens.stylex'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { LiveRing } from '../composition/LiveRing'
 import { loadingGlyphDelayMs } from '../composition/loading-glyph-delay'
@@ -90,10 +90,10 @@ const styles = stylex.create({
   word: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, height: g.controlSm, color: status.dangerFg, fontFamily: t.fontSans, fontSize: t.denseSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap' },
   wordStatic: { display: { default: 'inline-flex', [folded]: 'none' }, paddingInline: s.xs2 },
   // Below 200px header content the word opens Details; below 160px mounted width it is the sole status action.
-  wordTrigger: { display: { default: 'none', [folded]: 'inline-flex' }, boxSizing: 'border-box', width: { default: 'auto', [glyphOnly]: g.controlSm, [glyphFallback]: g.controlSm }, justifyContent: 'center', gap: { default: s.xs, [glyphOnly]: s.zero, [glyphFallback]: s.zero }, paddingInline: { default: s.xs2, [glyphOnly]: s.zero, [glyphFallback]: s.zero }, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  wordTrigger: { display: { default: 'none', [folded]: 'inline-flex' }, boxSizing: 'border-box', width: { default: 'auto', [glyphOnly]: g.controlSm, [glyphFallback]: g.controlSm }, justifyContent: 'center', gap: { default: s.xs, [glyphOnly]: s.zero, [glyphFallback]: s.zero }, paddingInline: { default: s.xs2, [glyphOnly]: s.zero, [glyphFallback]: s.zero }, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } },
   // The padded-header glyph fallback still applies when the status word cannot fit.
   wordLabel: { display: { default: 'inline', [glyphOnly]: 'none', [glyphFallback]: 'none' } },
-  action: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxSizing: 'border-box', minWidth: g.controlSm, height: g.controlSm, paddingInline: { default: s.xs, [narrow]: s.zero }, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.denseSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  action: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxSizing: 'border-box', minWidth: g.controlSm, height: g.controlSm, paddingInline: { default: s.xs, [narrow]: s.zero }, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.denseSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } },
   detailsAction: { display: { default: 'inline-flex', [folded]: 'none' } },
   actionIcon: { display: { default: 'none', [narrow]: 'inline' } },
   actionLabel: { display: { default: 'inline', [narrow]: 'none' } },
@@ -106,7 +106,7 @@ const styles = stylex.create({
   failureText: { color: ink.fg },
   cause: { color: ink.fgMuted, overflowWrap: 'anywhere' },
   dialogActions: { display: 'flex', gap: s.xs, paddingTop: s.xs },
-  primary: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minHeight: g.controlSm, paddingInline: s.sm, borderWidth: 0, borderRadius: r.control, backgroundColor: accent.primary, color: accent.onPrimary, fontFamily: t.fontSans, fontSize: t.denseSize, lineHeight: t.metaLeading, cursor: 'pointer', ':hover': { backgroundColor: accent.primaryHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.onPrimary } },
+  primary: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minHeight: g.controlSm, paddingInline: s.sm, borderWidth: 0, borderRadius: r.control, backgroundColor: accent.primary, color: accent.onPrimary, fontFamily: t.fontSans, fontSize: t.denseSize, lineHeight: t.metaLeading, cursor: 'pointer', ':hover': { backgroundColor: accent.primaryHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.onPrimary, outlineOffset: g.focusOffset } },
   // Phone hosts: the row grows to the 44px targets (a P1 inline tab row is auto-height); min-width beats glyph-only widths.
   rootTouch: { height: 'auto', minHeight: g.touchTarget },
   touch: { height: g.touchTarget, minWidth: g.touchTarget },

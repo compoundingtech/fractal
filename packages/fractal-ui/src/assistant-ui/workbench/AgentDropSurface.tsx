@@ -133,7 +133,7 @@ const zoneStyles = stylex.create({
   center: { top: '25%', left: '25%', width: '50%', height: '50%' },
 })
 const styles = stylex.create({
-  surface: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, minHeight: 0, minWidth: 0, overflow: 'hidden', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusOffset})` } },
+  surface: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, minHeight: 0, minWidth: 0, overflow: 'hidden', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusInset } },
   hitLayer: { position: 'absolute', inset: 0, zIndex: 1 },
   preview: { position: 'absolute', zIndex: 2, pointerEvents: 'none', opacity: 0, left: 'var(--drop-left)', top: 'var(--drop-top)', width: 'var(--drop-width)', height: 'var(--drop-height)', boxSizing: 'border-box', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: s.lg, borderWidth: g.focusRing, borderStyle: 'solid', borderColor: ac.primary, borderRadius: r.md, backgroundColor: sf.rowActive, color: tx.fg, fontSize: t.metaSize, fontWeight: t.weightMedium },
   previewActive: { opacity: 1 },
@@ -142,7 +142,7 @@ const styles = stylex.create({
   previewLabel: { pointerEvents: 'auto', paddingInline: s.md, paddingBlock: s.xs, backgroundColor: sf.raised, color: tx.fg, borderRadius: r.control, borderWidth: g.hairline, borderStyle: 'solid', borderColor: bd.borderStrong, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   zones: { position: 'absolute', zIndex: 3, inset: 0, pointerEvents: 'none' },
   chips: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: s.xs, flexWrap: 'wrap', alignContent: 'center', padding: s.sm },
-  dropChip: { minHeight: g.controlMd, cursor: 'copy', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
+  dropChip: { minHeight: g.controlMd, cursor: 'copy', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   gridChip: { position: 'absolute', boxSizing: 'border-box', pointerEvents: 'auto', borderWidth: 0, borderColor: 'transparent', backgroundColor: 'transparent' },
   chipActive: { borderColor: ac.primary, backgroundColor: sf.rowActive },
 })

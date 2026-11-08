@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { useLocale } from 'react-aria'
 import { Button, ButtonContext, CheckboxContext, CheckboxFieldContext, Collection, DEFAULT_SLOT, DragAndDropContext, ListLayout, Rect, Size, Tree, TreeItem, TreeItemContent, Virtualizer, type Key, type ListLayoutOptions, type TreeItemRenderProps, type TreeProps } from 'react-aria-components'
-import { accentVars as accent, borderVars as border, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, interactionVars } from '../composition-tokens.stylex'
 import { scrollToLayoutKey } from '../composition/virtual-layout'
 import { Icon } from '../composition/Icons'
 import { useTouchLayout } from './useTouchLayout'
@@ -523,7 +523,7 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
       {!pinned && props.dragAndDropHooks !== undefined && <DragSessionObserver onChange={dragObserver} />}
     </div>
   }
-  const renderItem = (item: T): React.ReactElement => <TreeItem id={item.id} textValue={item.textValue} aria-label={item.accessibleName ?? item.textValue} isDisabled={item.isDisabled} data-sidebar-tree-key={String(item.id)} data-sidebar-disabled={item.isDisabled || undefined} onContextMenu={event => props.onRowContextMenu?.(item, event)} className={({ isFocusVisible, isDisabled }) => stylex.props(styles.item, isDisabled ? styles.disabled : isFocusVisible && styles.focused).className ?? ''}>
+  const renderItem = (item: T): React.ReactElement => <TreeItem id={item.id} textValue={item.textValue} aria-label={item.accessibleName ?? item.textValue} isDisabled={item.isDisabled} data-sidebar-tree-key={String(item.id)} data-sidebar-disabled={item.isDisabled || undefined} onContextMenu={event => props.onRowContextMenu?.(item, event)} className={({ isFocusVisible, isDisabled }) => stylex.props(stylex.defaultMarker(), styles.item, isDisabled ? styles.disabled : isFocusVisible && styles.focused).className ?? ''}>
     <TreeItemContent>{({ isExpanded }) => row(item, isExpanded, false)}</TreeItemContent>
     <Collection items={item.children ?? []} dependencies={[props.renderRow, props.onRowContextMenu, props.dragAndDropHooks !== undefined, touch]}>{renderItem}</Collection>
   </TreeItem>
@@ -560,9 +560,10 @@ export function SidebarTree<T extends SidebarTreeItem<T>>(props: SidebarTreeProp
 }
 const styles = stylex.create({
   root: { position: 'relative', height: '100%', minHeight: 0, minWidth: 0, overflow: 'hidden', color: ink.fg },
-  tree: { height: '100%', minHeight: 0, overflowY: 'auto', outline: 'none' },
+  tree: { height: '100%', minHeight: 0, overflowY: 'auto', outlineStyle: { default: 'none', ':is([data-focus-visible])': 'solid' }, outlineWidth: g.focusRing, outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset },
   item: { outline: 'none' },
-  focused: { outlineStyle: 'solid', outlineWidth: g.focusRing, outlineOffset: `calc(-1 * ${g.focusRing})`, outlineColor: ink.fgMuted },
+  // A row with its own surface shows focus there, not across the indent.
+  focused: { backgroundColor: { default: interactionVars.focusFill, ':has([data-milestone-row])': 'transparent' }, outlineStyle: { default: 'solid', ':has([data-milestone-row])': 'none' }, outlineWidth: g.focusRing, outlineOffset: g.focusInset, outlineColor: interactionVars.focusRing },
   // Display-only rows are never a press target (no pointer cursor, focus ring or pressed state) yet keep full ink:
   // display-only is not dimmed disabled.
   disabled: { cursor: 'default', opacity: 1, color: 'inherit' },
@@ -579,7 +580,7 @@ const styles = stylex.create({
   rowAction: { position: 'relative', zIndex: 1 },
   rowActionTouch: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minWidth: g.touchTarget, minHeight: g.touchTarget, boxSizing: 'border-box' },
   // The host's trailing column: a touch-target square whose chevron turns a quarter as the row expands.
-  trailing: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: g.touchTarget, height: g.touchTarget, flexShrink: 0, padding: 0, borderWidth: 0, borderRadius: 0, backgroundColor: { default: 'transparent', ':is([data-pressed])': surface.rowHover }, color: ink.fgMuted, ':focus-visible': { outlineStyle: 'solid', outlineWidth: g.focusRing, outlineColor: ink.fgMuted } },
+  trailing: { display: 'flex', alignItems: 'center', justifyContent: 'center', width: g.touchTarget, height: g.touchTarget, flexShrink: 0, padding: 0, borderWidth: 0, borderRadius: 0, backgroundColor: { default: 'transparent', ':is([data-pressed])': surface.rowHover }, color: ink.fgMuted, ':focus-visible': { outlineStyle: 'solid', outlineWidth: g.focusRing, outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } },
   trailingGlyph: { display: 'flex', transitionProperty: 'transform', transitionDuration: { default: m.fast, '@media (prefers-reduced-motion: reduce)': '0s' }, transitionTimingFunction: 'ease-out' },
   turned: { transform: 'rotate(90deg)' },
   turnedRtl: { transform: 'scaleX(-1) rotate(90deg)' },

@@ -72,7 +72,7 @@ export function PaneHeaderToggle({ label, icon, isSelected, onChange }: { readon
 
 /** Wide enough that a typical agent title is readable before it truncates. */
 const tabMax = '240px'
-const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: '-2px' } as const
+const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusInset } as const
 const styles = stylex.create({
   pane: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0 },
   identity: { display: 'flex', alignItems: 'center', gap: s.sm, minWidth: 0, flex: '0 1 auto', paddingInline: s.sm },

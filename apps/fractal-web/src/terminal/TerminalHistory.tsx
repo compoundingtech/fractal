@@ -9,7 +9,7 @@ import type { HistoryState } from './history.ts'
 import type { TerminalHistoryPort } from './historySource.ts'
 import type { TerminalPalette } from './palette.ts'
 import { TERMINAL_FONT_FAMILY, terminalFontsReady } from './terminalFonts.ts'
-import { borderVars, interactionVars, surfaceVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars, interactionVars, surfaceVars, textVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const styles = stylex.create({
   root: { display: 'flex', flexDirection: 'column', alignItems: 'flex-start', minWidth: 0 },
@@ -30,7 +30,7 @@ const styles = stylex.create({
     color: textVars.fg,
     backgroundColor: surfaceVars.canvas,
     cursor: 'pointer',
-    outline: { default: 'none', ':focus-visible': `2px solid ${interactionVars.focusRing}` },
+    outline: { default: 'none', ':focus-visible': `${geometryVars.focusRing} solid ${interactionVars.focusRing}` },
   },
   note: { margin: '6px 0', fontSize: 12, color: textVars.fg },
   rows: {

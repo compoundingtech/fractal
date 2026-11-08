@@ -101,7 +101,7 @@ const styles = stylex.create({
   workspace: { flex: '1 1 0', minWidth: 0, display: 'flex', flexDirection: 'column', gap: s.md, padding: s.lg, overflowY: 'auto' },
   header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: s.md },
   transcript: { margin: 0, paddingInlineStart: s.lg, display: 'flex', flexDirection: 'column', gap: s.sm },
-  button: { paddingBlock: s.xs, paddingInline: s.md, borderWidth: 0, borderRadius: 6, backgroundColor: c.rowHover, color: c.fg, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
+  button: { paddingBlock: s.xs, paddingInline: s.md, borderWidth: 0, borderRadius: 6, backgroundColor: c.rowHover, color: c.fg, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   panelBody: { flex: '1 1 0', minHeight: 0, padding: s.lg, overflowY: 'auto' },
   title: { fontSize: t.uiSize, marginBlock: s.md },
 })

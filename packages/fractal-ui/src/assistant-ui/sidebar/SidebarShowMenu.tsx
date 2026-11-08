@@ -4,7 +4,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Button, Header, Menu, MenuItem, MenuSection, MenuTrigger, Popover, VisuallyHidden, type Selection } from 'react-aria-components'
 import { Icon } from '../composition/Icons'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
-import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../composition-tokens.stylex'
 
 /** One checkbox entry; `id` is the host's selection key. */
 export interface ShowMenuEntry {
@@ -52,6 +52,18 @@ export function ShowMenuItem({ id, label, count }: ShowMenuEntry) {
 }
 
 /** Trigger plus multiple-selection menu; it stays open while entries toggle. */
+/**
+ * The menu has no search field, so it opens on its first option, by keyboard or pointer. React Aria would
+ * open on the first checked entry instead; this moves focus once the menu has mounted and taken focus.
+ */
+const focusFirstOption = (menu: HTMLDivElement | null) => {
+  if (menu === null) return
+  requestAnimationFrame(() => {
+    const first = menu.querySelector<HTMLElement>('[role^="menuitem"]:not([aria-disabled="true"])')
+    if (first !== null && menu.contains(menu.ownerDocument.activeElement)) first.focus({ preventScroll: true })
+  })
+}
+
 export function ShowMenu({ groups, selectedKeys, onSelectionChange, label = 'Show', activeCount, actions = [], popoverTheme }: ShowMenuProps) {
   const active = activeCount ?? selectedKeys.size
   const narrow = React.useContext(NarrowLayoutContext)
@@ -69,7 +81,7 @@ export function ShowMenu({ groups, selectedKeys, onSelectionChange, label = 'Sho
       {active > 0 && <><span aria-hidden="true" {...stylex.props(styles.badge)}>{active}</span><VisuallyHidden>, {active} active</VisuallyHidden></>}
     </Button>
     <Popover placement="bottom end" {...stylex.props(styles.popover, popoverTheme)}>
-      <Menu aria-label={label} selectionMode="multiple" selectedKeys={selectedKeys} onSelectionChange={select} {...stylex.props(styles.menu)}>
+      <Menu ref={focusFirstOption} aria-label={label} selectionMode="multiple" selectedKeys={selectedKeys} onSelectionChange={select} {...stylex.props(styles.menu)}>
         {groups.flatMap(group => {
           const open = expanded.has(group.id)
           const canToggle = group.more !== undefined && group.more.length > 0 && !forced.includes(group)
@@ -96,7 +108,7 @@ export function ShowMenu({ groups, selectedKeys, onSelectionChange, label = 'Sho
 }
 
 const styles = stylex.create({
-  trigger: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, minHeight: g.controlMd, paddingInline: s.sm, boxSizing: 'border-box', borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: { default: surface.controlFill, ':hover': surface.rowHover }, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', cursor: 'pointer', outlineStyle: 'none', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  trigger: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, minHeight: g.controlMd, paddingInline: s.sm, boxSizing: 'border-box', borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: { default: surface.controlFill, ':hover': surface.rowHover }, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'nowrap', cursor: 'pointer', outlineStyle: 'none', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } },
   triggerActive: { color: ink.fg, backgroundColor: surface.rowActive },
   // Narrow (phone) hosts: the trigger and every entry are 44px touch targets.
   touchRow: { minHeight: g.touchTarget },
@@ -107,7 +119,7 @@ const styles = stylex.create({
   moreSection: { ':not(:first-child)': { marginTop: s.zero, paddingTop: s.zero, borderTopWidth: s.zero } },
   section: { display: 'flex', flexDirection: 'column', ':not(:first-child)': { marginTop: s.xs, paddingTop: s.xs, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border } },
   header: { minHeight: g.controlSm, display: 'flex', alignItems: 'center', paddingInline: s.md, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
-  item: { minHeight: g.menuRow, display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr) auto`, alignItems: 'center', columnGap: s.md, paddingInline: s.md, borderRadius: r.sm, cursor: 'pointer', outlineStyle: 'none', ':is([data-focused])': { backgroundColor: surface.rowActive }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  item: { minHeight: g.menuRow, display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr) auto`, alignItems: 'center', columnGap: s.md, paddingInline: s.md, borderRadius: r.sm, cursor: 'pointer', outlineStyle: 'none', ':is([data-focused])': { backgroundColor: surface.rowActive }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
   command: { color: ink.fgMuted, ':is([data-disabled])': { opacity: 0.64, cursor: 'default' } },
   action: { display: 'flex' },
   moreGlyph: { width: g.icon, display: 'inline-flex', justifyContent: 'center' },

@@ -4,7 +4,7 @@ import { Button, Dialog, DialogTrigger, MenuTrigger, Popover, VisuallyHidden } f
 import { Icon } from '../composition/Icons'
 import { deferredLoader, DeferredSurfaceBoundary } from '../composition/DeferredSurfaceBoundary.tsx'
 import { ThemePortal } from '../taste/ThemePortal'
-import { accentVars as accent, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink } from '../composition-tokens.stylex'
+import { accentVars as accent, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, interactionVars } from '../composition-tokens.stylex'
 import type { SidebarActions, SidebarAgentRow as Row } from './model'
 import type { SidebarClock } from './SidebarTime'
 import { useTouchLayout } from './useTouchLayout'
@@ -67,5 +67,5 @@ const styles = stylex.create({
   failureSurface: { backgroundColor: surface.raised, color: ink.fg, padding: s.lg, borderRadius: r.md, maxWidth: 'calc(100vw - 32px)' },
   menuNarrow: { gridColumn: '-2 / -1', gridRow: '1 / -1', width: g.touchTarget, height: g.touchTarget, opacity: 1 },
   detailsTouchTarget: { width: g.touchTarget, height: g.touchTarget },
-  iconButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, minHeight: g.controlSm, borderWidth: 0, padding: s.zero, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, cursor: 'pointer', ':hover': { color: ink.fg, backgroundColor: surface.rowActive }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  iconButton: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, minHeight: g.controlSm, borderWidth: 0, padding: s.zero, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, cursor: 'pointer', ':hover': { color: ink.fg, backgroundColor: surface.rowActive }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } },
 })

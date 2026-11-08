@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { ReactNode } from 'react'
-import { accentVars as accent, borderVars as border, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type } from '../composition-tokens.stylex.ts'
+import { accentVars as accent, borderVars as border, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type, interactionVars } from '../composition-tokens.stylex.ts'
 import type { TraceSeries } from './trace-series.ts'
 import { contextOccupancy, estimatedOccupancyExplanation, traceCoverageState, type ContextOccupancy, type TraceAccumulationWindow, type TraceCoverage, type TraceCoverageState, type TraceFact, type TraceSpendScope } from './trace-series.ts'
 import { Button, Tooltip, TooltipTrigger } from 'react-aria-components'
@@ -433,7 +433,7 @@ const styles = stylex.create({
   coverageSummary: { flexBasis: '100%', minWidth: 0, overflowWrap: 'normal' },
   coverageTooltip: { backgroundColor:surface.canvas, color:text.fg, borderWidth:1, borderStyle:'solid', borderColor:border.borderStrong, padding:space.md, fontSize:type.metaSize, maxWidth:280 },
   occupancy: { display: 'inline-flex', alignItems: 'baseline', gap: space.xs },
-  estimate: { appearance: 'none', borderWidth: 0, padding: 0, backgroundColor: surface.transparent, color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, cursor: 'help', borderRadius: radius.sm, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: geometry.focusOffset } },
+  estimate: { appearance: 'none', borderWidth: 0, padding: 0, backgroundColor: surface.transparent, color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, cursor: 'help', borderRadius: radius.sm, ':focus-visible': { outlineWidth: geometry.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: geometry.focusOffset } },
   contextSnapshot: { display: 'flex', flexDirection: 'column', gap: space.xs, minWidth: 0 },
   numberRow: { display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap', gap: space.md, fontVariantNumeric: 'tabular-nums' },
   track: { height: geometry.progressMd, backgroundColor: surface.rowActive, borderRadius: radius.full, overflow: 'hidden' },

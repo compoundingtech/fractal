@@ -55,12 +55,12 @@ const pinItemId = 'keep-effort-for-next-messages'
 const effortLabel = (value: string): string => value.replace(/\b\p{L}/gu, letter => letter.toUpperCase())
 const styles = stylex.create({
   group: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, whiteSpace: 'nowrap' },
-  reasonTrigger: { display: 'inline-flex', borderRadius: r.control, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
+  reasonTrigger: { display: 'inline-flex', borderRadius: r.control, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   header: { minHeight: g.controlSm, display: 'flex', alignItems: 'center', paddingInline: s.md, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
   separator: { height: g.hairline, marginBlock: s.sm, marginInline: s.md, backgroundColor: border.border, borderWidth: 0 },
   label: { display: 'flex', alignItems: 'center', gap: s.md },
   defaultBadge: { paddingInline: s.xs, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fgMuted, fontSize: t.denseSize },
-  button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
+  button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   buttonCompact: { paddingInline: s.xs, gap: s.xs2 },
   disabled: { opacity: 0.64, cursor: 'not-allowed', pointerEvents: 'none' },
 })

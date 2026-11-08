@@ -1,0 +1,58 @@
+[
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/TranscriptAttachments.tsx",
+    "rule": "outline-width",
+    "detail": "outlineWidth: g.hairline",
+    "owner": "focus-fix",
+    "reason": "Decorative hairline on image edges; not focus, selection or attention."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/TranscriptAttachments.tsx",
+    "rule": "outline-color",
+    "detail": "outlineColor: `color-mix(in srgb, ${ink.fg} 10%, transparent)`",
+    "owner": "focus-fix",
+    "reason": "Decorative hairline on image edges; not focus, selection or attention."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/TranscriptAttachments.tsx",
+    "rule": "outline-offset",
+    "detail": "outlineOffset: `calc(-1 * ${g.hairline})`",
+    "owner": "focus-fix",
+    "reason": "Decorative hairline on image edges; not focus, selection or attention."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/embrace-composer/AttachmentTray.tsx",
+    "rule": "outline-width",
+    "detail": "outlineWidth: g.hairline",
+    "owner": "focus-fix",
+    "reason": "Decorative hairline on attachment thumbnails; not focus, selection or attention."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/embrace-composer/AttachmentTray.tsx",
+    "rule": "outline-color",
+    "detail": "outlineColor: border.rail",
+    "owner": "focus-fix",
+    "reason": "Decorative hairline on attachment thumbnails; not focus, selection or attention."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/embrace-composer/AttachmentTray.tsx",
+    "rule": "outline-offset",
+    "detail": "outlineOffset: `calc(${g.hairline} * -1)`",
+    "owner": "focus-fix",
+    "reason": "Decorative hairline on attachment thumbnails; not focus, selection or attention."
+  },
+  {
+    "path": "apps/fractal-web/src/workbench-kit/EditorTabs.tsx",
+    "rule": "ring-shadow",
+    "detail": "boxShadow: `0 0 0 2px ${tokens['--ds-amber-300']}`",
+    "owner": "tabs-build",
+    "reason": "Halo on the 6px needs-you status dot; a status glyph, not an outline on the tab."
+  },
+  {
+    "path": "apps/fractal-web/src/missions/explore/RowVariants.tsx",
+    "rule": "ring-shadow",
+    "detail": "boxShadow: step.state === 'pending' || step.state === 'ready' ? `inset 0 0 0 1px ${C.strong}` : undefined",
+    "owner": "mission-explore",
+    "reason": "Hollow step cell in an exploration variant: a status glyph's edge, not focus, selection or attention on a control."
+  }
+]

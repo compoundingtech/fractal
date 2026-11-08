@@ -7,7 +7,7 @@ import { MissionGroupHeader, MissionListRow, missionRowAccessibleName } from '@f
 
 import { Menu, MenuItem, MenuTrigger, Popover } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
-import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource, useMissionsDecode, useNow } from '../data/react.tsx'
 import type { Feed, RosterDecode } from '../data/source.ts'
 import { defaultMissionsListView, missionsListView, missionsShowAll, type MissionsListView } from '../state/cells/lists.ts'
@@ -118,7 +118,7 @@ const styles = stylex.create({
   toolbar: { display: 'flex', alignItems: 'center', gap: s.sm, flexShrink: 0, height: g.controlMd, paddingInlineStart: s.md, paddingInlineEnd: s.xs, fontFamily: t.fontSans, fontSize: t.denseSize, color: ink.fgSoft },
   count: { flex: '1 1 0', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' },
   stale: { flexShrink: 0, color: ink.fgMuted },
-  viewButton: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, height: g.controlSm, paddingInline: s.sm, borderWidth: 0, borderRadius: r.control, backgroundColor: 'transparent', color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.denseSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted } },
+  viewButton: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, height: g.controlSm, paddingInline: s.sm, borderWidth: 0, borderRadius: r.control, backgroundColor: 'transparent', color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.denseSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing } },
   menuHeader: { paddingInline: s.md, paddingBlock: s.xs, color: ink.fgMuted, fontSize: t.denseSize, fontFamily: t.fontSans },
   scroller: { flex: '1 1 0', minHeight: 0, overflowY: 'auto' },
   list: { display: 'flex', flexDirection: 'column', outlineStyle: 'none' },

@@ -32,7 +32,7 @@ export type ButtonSize = 'sm' | 'md'
 export function Button({ variant = 'secondary', size = 'md', square = false, className = '', ...props }: Aria.ButtonProps & { variant?: 'primary' | 'secondary' | 'quiet' | 'danger'; size?: ButtonSize; square?: boolean }) {
   const variantClass = variant === 'primary' ? 'bg-accent text-on-accent border-accent' : variant === 'quiet' ? 'bg-transparent border-transparent text-muted' : variant === 'danger' ? 'bg-transparent border-danger text-danger' : 'bg-panel border-line text-ink'
   const sizeClass = size === 'sm' ? 'min-h-[calc(var(--control-height)*0.78)] px-2' : 'min-h-control px-3'
-  return <Aria.Button {...props} className={Aria.composeRenderProps(className, className => `${stylex.props(styles.focus, size === 'sm' && styles.denseType).className} inline-flex items-center justify-center gap-2 rounded-control border font-semibold transition-colors cursor-pointer data-[hovered]:bg-selection data-[hovered]:text-ink data-[hovered]:border-line data-[pressed]:translate-y-px data-[disabled]:opacity-45 data-[disabled]:cursor-not-allowed ${square ? 'w-[var(--control-height)] px-0' : ''} ${sizeClass} ${variantClass} ${className}`)} />
+  return <Aria.Button {...props} className={Aria.composeRenderProps(className, className => `${stylex.props(styles.focus, size === 'sm' && styles.denseType).className} inline-flex items-center justify-center gap-2 rounded-control border font-semibold transition-[color,background-color,border-color] cursor-pointer data-[hovered]:bg-selection data-[hovered]:text-ink data-[hovered]:border-line data-[pressed]:translate-y-px data-[disabled]:opacity-45 data-[disabled]:cursor-not-allowed ${square ? 'w-[var(--control-height)] px-0' : ''} ${sizeClass} ${variantClass} ${className}`)} />
 }
 
 /* Pill / Badge / StatusDot / Spinner / Progress — labeled state surfaces. */
@@ -91,8 +91,8 @@ export function EmptyState({ title, hint, action }: { title: string; hint: strin
 
 /* Input / Toggle / Checkbox — form controls. */
 export function Input({ label, value, onChange, placeholder, autoFocusKey = '/', clearKey = 'Escape' }: { label: string; value: string; onChange: (value: string) => void; placeholder?: string; autoFocusKey?: string | null; clearKey?: string | null }) {
-  return <Aria.TextField aria-label={label} value={value} onChange={onChange} className="flex w-full min-h-control items-center gap-2 rounded-control border border-line bg-panel px-3 focus-within:border-accent transition-colors">
-    <Aria.Input placeholder={placeholder} onKeyDown={event => { if (clearKey && value !== '' && event.key === clearKey) { event.preventDefault(); onChange('') } }} className={`${focusClass} w-full bg-transparent text-ink placeholder:text-muted`} />{value === '' && autoFocusKey ? <Kbd>{autoFocusKey}</Kbd> : <Button aria-label={`Clear ${label.toLowerCase()}`} square size="sm" variant="quiet" onPress={() => onChange('')}><XCircleIcon /></Button>}
+  return <Aria.TextField aria-label={label} value={value} onChange={onChange} className={`${stylex.props(styles.fieldFrame).className} flex w-full min-h-control items-center gap-2 rounded-control border border-line bg-panel px-3`}>
+    <Aria.Input placeholder={placeholder} onKeyDown={event => { if (clearKey && value !== '' && event.key === clearKey) { event.preventDefault(); onChange('') } }} className="w-full bg-transparent text-ink outline-none placeholder:text-muted" />{value === '' && autoFocusKey ? <Kbd>{autoFocusKey}</Kbd> : <Button aria-label={`Clear ${label.toLowerCase()}`} square size="sm" variant="quiet" onPress={() => onChange('')}><XCircleIcon /></Button>}
   </Aria.TextField>
 }
 export function Toggle({ label, isSelected, onChange }: { label: string; isSelected: boolean; onChange: (selected: boolean) => void }) {
@@ -138,7 +138,7 @@ export function Modal({ theme, title, children, trigger }: { theme: Theme; title
 export function Tabs({ tabs, selectedKey, onSelectionChange, shouldForceMount = false, children }: { tabs: readonly { id: string; label: string }[]; selectedKey: string; onSelectionChange?: (key: React.Key) => void; shouldForceMount?: boolean; children: Record<string, React.ReactNode> }) {
   return <Aria.Tabs selectedKey={selectedKey} onSelectionChange={onSelectionChange}>
     <Aria.TabList aria-label="Views" className="flex gap-1 border-b border-line px-4">
-      {tabs.map(tab => <Aria.Tab key={tab.id} id={tab.id} className={`${focusClass} cursor-pointer border-b-2 border-transparent px-3 py-3 font-semibold text-muted capitalize data-[selected]:border-accent data-[selected]:text-ink data-[hovered]:text-ink transition-colors`}>{tab.label}</Aria.Tab>)}
+      {tabs.map(tab => <Aria.Tab key={tab.id} id={tab.id} className={`${focusClass} cursor-pointer border-b-2 border-transparent px-3 py-3 font-semibold text-muted capitalize data-[selected]:border-accent data-[selected]:text-ink data-[hovered]:text-ink transition-[color,border-color]`}>{tab.label}</Aria.Tab>)}
     </Aria.TabList>
     {tabs.map(tab => <Aria.TabPanel key={tab.id} id={tab.id} shouldForceMount={shouldForceMount} className={`${focusClass} ${selectedKey === tab.id ? '' : 'hidden'}`}>{children[tab.id]}</Aria.TabPanel>)}
   </Aria.Tabs>
@@ -180,7 +180,7 @@ export function CommandMenu({ groups, placeholder = 'Type a command…', emptyHi
     <Aria.Autocomplete inputValue={query} onInputChange={setQuery}>
       <Aria.SearchField aria-label="Find a command" className="flex items-center gap-2 border-b border-line px-3 py-2.5">
         <span aria-hidden="true" className="text-accent"><svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round"><circle cx="6.8" cy="6.8" r="4.6" /><path d="M10.4 10.4 14 14" /></svg></span>
-        <Aria.Input placeholder={placeholder} className={`${focusClass} w-full bg-transparent text-ink placeholder:text-muted`} />
+        <Aria.Input placeholder={placeholder} className="w-full bg-transparent text-ink outline-none placeholder:text-muted" />
         {query !== '' ? <Button aria-label="Clear command search" square size="sm" variant="quiet" onPress={() => setQuery('')}><XCircleIcon /></Button> : <Kbd>/</Kbd>}
       </Aria.SearchField>
       <Aria.ListBox aria-label="Commands" onAction={key => { const item = groups.flatMap(group => group.items).find(candidate => candidate.id === key); item?.onSelect?.(); setStatus(item ? `Ran: ${item.label}` : ''); onAction?.(key) }} renderEmptyState={() => <p className="px-4 py-5 text-[12px] text-muted">{emptyHint}</p>} className="max-h-[min(28rem,60vh)] overflow-auto p-2">
@@ -207,6 +207,7 @@ const styles = stylex.create({
       outlineOffset: g.focusOffset,
     },
   },
+  fieldFrame: { ':focus-within': { borderColor: interaction.focusRing } },
   separator: { height: g.hairline, marginBlock: s.xs, borderWidth: 0, backgroundColor: border.border },
   denseType: { fontSize: t.denseSize },
   metaType: { fontSize: t.metaSize },

@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
 import type { Undecodable } from '@fractal/sdk/read'
-import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, typeVars as t, spaceVars as s, interactionVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import type { Feed, Fleet, RosterDecode } from '../data/source.ts'
 
 /** Roster rows the latest decode could not show, never rows shown with an omitted open leaf. */
@@ -81,8 +81,8 @@ const styles = stylex.create({
   notice: { padding: s.lg, fontSize: t.metaSize, color: c.fgMuted },
   decode: { display: 'flex', flexDirection: 'column', gap: s.xs, paddingBlockStart: 0, flexShrink: 0 },
   sentence: { margin: 0 },
-  disclosure: { alignSelf: 'flex-start', padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, textDecoration: 'underline', cursor: 'pointer', outline: { default: 'none', ':focus-visible': `2px solid ${c.primary}` }, outlineOffset: 2 },
-  failures: { margin: 0, paddingInlineStart: s.lg, display: 'flex', flexDirection: 'column', gap: s.xs, maxHeight: 160, overflowY: 'auto', overflowWrap: 'anywhere' },
+  disclosure: { alignSelf: 'flex-start', padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, textDecoration: 'underline', cursor: 'pointer', outline: { default: 'none', ':focus-visible': `${geometryVars.focusRing} solid ${interactionVars.focusRing}` }, outlineOffset: geometryVars.focusOffset },
+  failures: { outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: geometryVars.focusRing, outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusInset, margin: 0, paddingInlineStart: s.lg, display: 'flex', flexDirection: 'column', gap: s.xs, maxHeight: 160, overflowY: 'auto', overflowWrap: 'anywhere' },
   identity: { color: c.fg },
   path: { fontFamily: t.fontMono, fontSize: t.denseSize },
 })

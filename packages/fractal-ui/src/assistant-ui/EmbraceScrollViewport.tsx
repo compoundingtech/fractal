@@ -2,7 +2,7 @@ import { LiveRing } from './composition/LiveRing'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
-import { surfaceVars, textVars, borderVars, radiusVars, spaceVars, typeVars, geometryNumbers, motionNumbers } from './composition-tokens.stylex'
+import { surfaceVars, textVars, borderVars, radiusVars, spaceVars, typeVars, geometryNumbers, motionNumbers, geometryVars, interactionVars } from './composition-tokens.stylex'
 
 const rowSelector = '[data-item-id], [data-embrace-entry-id]'
 /** History anchors also resolve to leaf rows inside a turn: tool calls, thoughts and work summaries. */
@@ -654,5 +654,5 @@ const styles = stylex.create({
   frame: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, minWidth: 0 },
   // A visible jump control gets its own dock, never covering a reader's current line.
   jumpWorking: { display: 'inline-flex', alignItems: 'center', gap: spaceVars.sm },
-  jump: { flexShrink: 0, marginInline: 'auto', marginBlock: spaceVars.md, paddingBlock: spaceVars.xs, paddingInline: spaceVars.md, borderRadius: radiusVars.full, borderWidth: spaceVars.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, backgroundColor: surfaceVars.raised, color: textVars.fg, fontSize: typeVars.metaSize, cursor: 'pointer' },
+  jump: { outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: geometryVars.focusRing, outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusOffset, flexShrink: 0, marginInline: 'auto', marginBlock: spaceVars.md, paddingBlock: spaceVars.xs, paddingInline: spaceVars.md, borderRadius: radiusVars.full, borderWidth: spaceVars.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, backgroundColor: surfaceVars.raised, color: textVars.fg, fontSize: typeVars.metaSize, cursor: 'pointer' },
 })

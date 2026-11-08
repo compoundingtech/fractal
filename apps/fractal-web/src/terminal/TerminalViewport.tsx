@@ -4,7 +4,7 @@ import { useKeyboard } from 'react-aria'
 import { Button, Input, Label, SearchField } from 'react-aria-components'
 
 import { terminalMatches, terminalText } from './terminalText.ts'
-import { borderVars, interactionVars, surfaceVars, textVars, spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars, interactionVars, surfaceVars, textVars, spaceVars , geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const searches = new Map<string, readonly Range[]>()
 const activeSearches = new Map<string, readonly Range[]>()
@@ -275,7 +275,7 @@ const styles = stylex.create({
     cursor: 'pointer',
     outlineStyle: { default: 'none', ':is([data-focus-visible])': 'solid' },
     outlineColor: interactionVars.focusRing,
-    outlineWidth: '2px',
+    outlineWidth: geometryVars.focusRing,
   },
   status: { whiteSpace: 'nowrap', color: textVars.fg },
   copyStatus: {

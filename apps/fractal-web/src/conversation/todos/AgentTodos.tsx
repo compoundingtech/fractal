@@ -4,7 +4,7 @@ import { DateTime, Option } from 'effect'
 import * as React from 'react'
 
 import { scale, tokens } from '../../ui-compat/tokens.stylex.ts'
-import { borderVars as border, colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, typeVars as t } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars as border, colorVars as c, geometryVars as g, interactionVars, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, typeVars as t } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { Icon } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { LiveRing } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/LiveRing.tsx'
 import { NarrowLayoutContext } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
@@ -46,7 +46,7 @@ const styles = stylex.create({
     cursor: 'pointer',
     paddingBlock: s.md,
     minWidth: 0,
-    outline: { default: 'none', ':focus-visible': `2px solid ${tokens['--ds-blue-700']}` },
+    outline: { default: 'none', ':focus-visible': `${g.focusRing} solid ${interactionVars.focusRing}` },
     borderRadius: scale.radiusDefault,
   },
   summaryTouch: { minHeight: 44, boxSizing: 'border-box', paddingBlock: 14 },
@@ -93,7 +93,7 @@ const styles = stylex.create({
   note: { margin: 0, marginTop: s.xs2, fontSize: t.denseSize, lineHeight: t.metaLeading, color: c.fgSoft, overflowWrap: 'anywhere' },
   noteLead: { fontWeight: t.weightMedium, color: c.fg },
   fold: { minWidth: 0 },
-  foldSummary: { display: 'flex', alignItems: 'flex-start', gap: s.sm, minHeight: g.controlSm, boxSizing: 'border-box', paddingBlock: s.xs, marginInline: `calc(-1 * ${s.xs})`, paddingInline: s.xs, borderRadius: r.sm, color: c.fgSoft, cursor: 'pointer', listStyle: 'none', outline: 'none', ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outline: `${g.focusRing} solid ${c.primary}` }, '::-webkit-details-marker': { display: 'none' } },
+  foldSummary: { display: 'flex', alignItems: 'flex-start', gap: s.sm, minHeight: g.controlSm, boxSizing: 'border-box', paddingBlock: s.xs, marginInline: `calc(-1 * ${s.xs})`, paddingInline: s.xs, borderRadius: r.sm, color: c.fgSoft, cursor: 'pointer', listStyle: 'none', outline: 'none', ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset }, '::-webkit-details-marker': { display: 'none' } },
   foldTouch: { minHeight: g.touchTarget, alignItems: 'center' },
   foldChevron: { display: 'inline-flex', alignItems: 'center', height: t.metaLeading, flexShrink: 0, color: c.fgMuted },
   foldLabel: { flexGrow: 1, minWidth: 0, overflowWrap: 'anywhere' },

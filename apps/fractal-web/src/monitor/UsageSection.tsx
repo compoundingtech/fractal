@@ -8,7 +8,7 @@ import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { ResizableSplit } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Shell.tsx'
-import { colorVars as c, geometryNumbers, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, geometryNumbers, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t, interactionVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource, useNow } from '../data/react.tsx'
 import { usageSection } from '../state/cells/lists.ts'
 import { quotaStateAtom } from './state.ts'
@@ -201,18 +201,18 @@ const fills: Readonly<Record<UsageLevel | 'old', stylex.StyleXStyles>> = stylex.
 const styles = stylex.create({
   section: { position: 'relative', flexShrink: 0, display: 'flex', flexDirection: 'column', minHeight: 0, maxHeight: '60%', borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: c.borderStrong, backgroundColor: c.sidebar, color: c.fg, fontFamily: t.fontSans },
   header: { display: 'flex', alignItems: 'center', gap: s.xs, flexShrink: 0, paddingInlineEnd: s.xs },
-  trigger: { flexGrow: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: s.sm, minHeight: g.controlLg, paddingInlineStart: s.md, paddingInlineEnd: s.xs, borderWidth: 0, borderRadius: r.sm, backgroundColor: 'transparent', color: c.fg, fontFamily: 'inherit', fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'start', cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `${g.focusRing} solid ${c.primary}`, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  trigger: { flexGrow: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: s.sm, minHeight: g.controlLg, paddingInlineStart: s.md, paddingInlineEnd: s.xs, borderWidth: 0, borderRadius: r.sm, backgroundColor: 'transparent', color: c.fg, fontFamily: 'inherit', fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'start', cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
   touch: { minHeight: g.touchTarget },
   chevron: { display: 'inline-flex', flexShrink: 0, color: c.sidebarFgMuted, transitionProperty: 'transform', transitionDuration: '150ms', '@media (prefers-reduced-motion: reduce)': { transitionDuration: '0s' } },
   chevronOpen: { transform: 'rotate(90deg)' },
   title: { flexShrink: 0, fontWeight: t.weightMedium },
   quiet: { flexGrow: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: c.sidebarFgMuted },
   percent: { flexShrink: 0, fontSize: t.metaSize, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', textAlign: 'end' },
-  panel: { minHeight: 0, overflowY: 'auto', scrollbarWidth: 'thin' },
+  panel: { minHeight: 0, overflowY: 'auto', scrollbarWidth: 'thin', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
   panelNarrow: { maxBlockSize: '50dvh' },
   list: { margin: 0, padding: 0, paddingBlockEnd: s.xs, listStyle: 'none' },
   // Two lines at 256px: name and percentage, then window, meter and reset. Grid keeps every meter on one column.
-  row: { inlineSize: '100%', display: 'grid', gridTemplateColumns: '3ch minmax(0, 1fr) auto', columnGap: s.sm, rowGap: s.xs2, alignItems: 'center', paddingBlock: s.xs, paddingInline: s.md, borderWidth: 0, backgroundColor: 'transparent', color: c.fg, fontFamily: 'inherit', fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'start', cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `${g.focusRing} solid ${c.primary}`, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  row: { inlineSize: '100%', display: 'grid', gridTemplateColumns: '3ch minmax(0, 1fr) auto', columnGap: s.sm, rowGap: s.xs2, alignItems: 'center', paddingBlock: s.xs, paddingInline: s.md, borderWidth: 0, backgroundColor: 'transparent', color: c.fg, fontFamily: 'inherit', fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'start', cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
   rowName: { gridColumn: '1 / 3', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   rowWindow: { color: c.sidebarFgMuted, fontSize: t.denseSize, whiteSpace: 'nowrap' },
   rowReset: { color: c.sidebarFgMuted, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', textAlign: 'end' },

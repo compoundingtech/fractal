@@ -9,6 +9,7 @@ import { usePortalContainerRegistration } from '../../../../packages/fractal-ui/
 import { DiagnosticsBoundary } from './DiagnosticsBoundary.tsx'
 import { PluginProviders } from '../plugins/index.tsx'
 import { pageGlassGateway } from '../workspace/glassSync.ts'
+import { SkipLink } from './SkipLink.tsx'
 
 // Same-origin daemon reads with the browser's own credentials, as every other client read.
 const pluginFetch: typeof fetch = (input, init) => fetch(input, init)
@@ -34,6 +35,7 @@ export const App = () => {
   return (
     <I18nProvider locale="en-US">
       <UNSAFE_PortalProvider getContainer={getContainer}>
+        <SkipLink />
         {Diagnostics !== undefined && (
           <DiagnosticsBoundary>
             <React.Suspense fallback={null}>

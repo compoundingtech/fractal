@@ -22,7 +22,7 @@ import { mergeProps, mergeRefs, useDrop, type DropItem } from 'react-aria'
 import { Tab, TabList, TabPanel, Tabs, type Key } from 'react-aria-components'
 import { HoverCardSurface, useHoverCardIntent } from '../../../../packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx'
 import { ThemePortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/ThemePortal.tsx'
-import { interactionVars as interaction } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { interactionVars as interaction, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 import { Menu, MenuItem, MenuPopover, MenuTrigger } from '../ui-compat/components.tsx'
 import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
@@ -193,7 +193,7 @@ const styles = stylex.create({
     outlineStyle: 'none',
   },
   // The shared focus ring, on keyboard focus only: inside the tab, so the strip's clipping never cuts it.
-  focusVisible: { outlineWidth: '2px', outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: '-2px' },
+  focusVisible: { outlineWidth: geometryVars.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: geometryVars.focusInset },
   tabClassic: {
     borderRightWidth: '1px',
     borderRightStyle: 'solid',
@@ -264,7 +264,6 @@ const styles = stylex.create({
     fontWeight: 500,
     color: tokens['--ds-gray-900'],
   },
-  liveRing: { boxShadow: `0 0 0 2px ${tokens['--ds-green-300']}` },
   title: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   // The title and its selected-weight twin share one grid cell, so a tab is as wide selected as not and
   // switching tabs changes only colour and the accent line, never the strip's geometry.
@@ -777,7 +776,7 @@ const TabItem = ({
             <span {...stylex.props(styles.attentionDot)} />
           ) : null}
           {vertical && tab.status === 'live' && tab.attention !== true ? (
-            <span {...stylex.props(styles.live, styles.liveRing)} />
+            <span {...stylex.props(styles.live)} />
           ) : null}
           <span
             aria-hidden="true"

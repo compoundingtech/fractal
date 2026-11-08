@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Heading, VisuallyHidden } from 'react-aria-components'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../composition-tokens.stylex'
 import { tokenizeDeclaration, type DeclarationLanguage, type DeclarationTokenKind } from './declaration-tint'
 
 export type { DeclarationLanguage } from './declaration-tint'
@@ -83,13 +83,13 @@ const styles = stylex.create({
   header: { display: 'flex', alignItems: 'center', gap: s.md, minHeight: g.band, paddingInline: s.lg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   title: { flexGrow: 1, minWidth: 0, margin: 0, overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightSemibold },
   language: { flexShrink: 0, fontFamily: t.fontMono, fontSize: t.metaSize, color: ink.fgMuted },
-  button: { flexShrink: 0, minHeight: g.controlSm, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: surface.transparent, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset }, ':disabled': { cursor: 'default', color: ink.fgMuted } },
+  button: { flexShrink: 0, minHeight: g.controlSm, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: surface.transparent, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset }, ':disabled': { cursor: 'default', color: ink.fgMuted } },
   source: { margin: 0, paddingInline: s.lg, paddingBlockStart: s.md, color: ink.fgMuted, fontVariantNumeric: 'tabular-nums', overflowWrap: 'anywhere' },
   body: { display: 'flex', flexDirection: 'column', flexGrow: 1, minHeight: 0, padding: s.lg },
   notice: { margin: 0, color: ink.fgMuted },
   failed: { color: status.dangerFg },
   copyFailed: { display: 'block', paddingInline: s.lg, paddingBlockEnd: s.md, color: status.dangerFg },
-  scroller: { flexGrow: 1, minHeight: 0, overflow: 'auto', backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  scroller: { flexGrow: 1, minHeight: 0, overflow: 'auto', backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
   pre: { display: 'grid', gridTemplateColumns: 'max-content max-content', width: 'max-content', minWidth: '100%', margin: 0, paddingBlock: s.md, fontFamily: t.fontMono, fontSize: t.codeSize, lineHeight: t.uiLeading, color: ink.fgMuted },
   line: { display: 'contents' },
   lineNumber: { position: 'sticky', left: 0, paddingInlineStart: s.lg, paddingInlineEnd: s.lg, textAlign: 'right', color: ink.fgMuted, backgroundColor: surface.codeBg, fontVariantNumeric: 'tabular-nums', userSelect: 'none' },

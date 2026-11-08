@@ -228,7 +228,7 @@ const styles = stylex.create({
     maxWidth: { default: `min(${g.attachmentMax}, 75%)`, '@media (min-width: 600px)': `min(${g.attachmentMax}, 100%)` },
     padding: s.md, borderRadius: r.sm, backgroundColor: surface.rowActive, scrollSnapAlign: 'start',
   },
-  failed: { outlineWidth: g.hairline, outlineStyle: 'solid', outlineColor: tone.dangerFg, outlineOffset: `calc(${g.hairline} * -1)` },
+  failed: { backgroundColor: `color-mix(in srgb, ${tone.dangerFg} 12%, ${surface.rowActive})` },
   // Inner radius = tile radius − padding, floored at 4px; the inset hairline separates white or black edges from the tile.
   image: { width: g.band, height: g.band, flexShrink: 0, objectFit: 'cover', borderRadius: r.keyboard, outlineWidth: g.hairline, outlineStyle: 'solid', outlineColor: border.rail, outlineOffset: `calc(${g.hairline} * -1)` },
   text: { display: 'flex', flexDirection: 'column', flex: '1 1 auto', minWidth: 0, marginInlineEnd: s.xs },

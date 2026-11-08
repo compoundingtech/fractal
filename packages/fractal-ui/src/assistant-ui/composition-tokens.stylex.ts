@@ -42,21 +42,14 @@ export const accentVars = stylex.defineVars({
 
 /** Shared interaction ink; geometry remains in the fixed scale. */
 export const interactionVars = stylex.defineVars({
-  focusRing: accentVars.primary,
+  /** Keyboard focus ink: a subdued accent, at least 3:1 on every surface and focus fill. */
+  focusRing: '#5f7cc2',
+  /** Soft fill under the inset ring on rows and menu items, where an outer ring would clip. */
+  focusFill: 'rgba(255, 255, 255, 0.05)',
   composerFocusBorder: 'rgba(52, 107, 241, 0.4)',
   wash: 'rgba(245, 245, 245, 0.06)',
 })
 
-// LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback — DELETE at contraction — https://www.notion.so/3f7e3d41f4a381839fa5f7b257ba8f3c
-/**
- * Literal-name alias of `interactionVars.focusRing` for the global fallback ring
- * in `tokens.css`. Themes that override `interactionVars` also override this
- * alias so it resolves at the themed element.
- */
-export const focusRingBridgeVars = stylex.defineVars({
-  '--fractal-focus-ring': interactionVars.focusRing,
-})
-// LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback
 
 export const statusVars = stylex.defineVars({
   running: '#3b82f6',
@@ -134,7 +127,7 @@ export const geometryVars = stylex.defineVars({
   tabMax: '144px', crumbMax: '160px',
   editorMin: '78px', editorMax: '208px', userClamp: '176px', previewMax: '256px',
   gutter40: '40px', icon: '16px', status: '14px', statusSm: '12px', statusPip: '6px', stop: '12px', glyphRing: '11px',
-  sidebarRow: `${sidebarRowSize}px`, sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
+  sidebarRow: `${sidebarRowSize}px`, sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '1px', blur: '16px',
   sidebarMetric: '5ch',
   /** Work rows: disclosure slot · glyph slot · title · one right-aligned metadata column (status word, duration). */
   workRowColumns: '16px 16px minmax(0, 1fr) minmax(80px, auto)',
@@ -143,7 +136,7 @@ export const geometryVars = stylex.defineVars({
   /** One nesting step: a 16px slot plus the 6px gutter; the rail sits on the slot centre. */
   textColumn: '22px', railInset: '7.5px',
   drawerMax: '600px', rowInset: '10px', scrollbar: '6px', caret: '1.5px',
-  focusOffset: '1px', separatorHitSlop: '3px', specimenMax: '1400px', workshopMax: '1500px',
+  focusOffset: '2px', focusInset: '-1px', separatorHitSlop: '3px', specimenMax: '1400px', workshopMax: '1500px',
   specimenAside: '340px', specimenSidebar: '250px', commandMaxHeight: 'min(28rem, 60vh)',
   modalMax: '448px', tooltipMax: '320px', descriptionColumns: 'minmax(90px, auto) minmax(0, 1fr)',
   /** Fit-within box for a sent image in the transcript; it opens full size on press. */

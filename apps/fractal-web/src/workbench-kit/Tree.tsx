@@ -13,7 +13,7 @@ import {
 } from 'react-aria-components'
 
 import { ChevronRightIcon } from './icons.tsx'
-import { interactionVars, surfaceVars, textVars, radiusVars, spaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { interactionVars, surfaceVars, textVars, radiusVars, spaceVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const styles = stylex.create({
   tree: {
@@ -41,7 +41,7 @@ const styles = stylex.create({
   },
   rowHovered: { backgroundColor: surfaceVars.message },
   rowSelected: { backgroundColor: surfaceVars.message },
-  rowFocusVisible: { boxShadow: `inset 0 0 0 2px ${interactionVars.focusRing}` },
+  rowFocusVisible: { boxShadow: `inset 0 0 0 ${geometryVars.focusRing} ${interactionVars.focusRing}` },
   indent: (level: number) => ({ paddingInlineStart: `${(level - 1) * 12 + 4}px` }),
   chevron: {
     display: 'inline-flex',

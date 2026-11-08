@@ -11,7 +11,7 @@ import type { SyncStatus } from '../sync-presentation/sync-status'
 import { canRetrySyncFailure, syncFailureRecovery } from '../sync-presentation/sync-line'
 import { StatusGlyphV1 } from '../taste/StatusGlyphV1'
 import { Icon } from '../composition/Icons'
-import { surfaceVars as sf, textVars as tx, borderVars as bd, accentVars as ac, radiusVars as r, spaceVars as s, typeVars as t, geometryVars as g, geometryNumbers as geometry } from '../composition-tokens.stylex'
+import { surfaceVars as sf, textVars as tx, borderVars as bd, accentVars as ac, radiusVars as r, spaceVars as s, typeVars as t, geometryVars as g, geometryNumbers as geometry, interactionVars } from '../composition-tokens.stylex'
 import { DetailsInlineReason } from './DetailsUnavailable'
 import { DetailsReadFailureLine, DetailsSpendReadLine } from './DetailsReadState'
 import { detailsReasonText } from './trace-reasons'
@@ -245,13 +245,13 @@ const styles=stylex.create({
   bandActions:{display:'inline-flex',alignItems:'center',gap:s.xs2,minWidth:0},
   name:{fontSize:t.bodySize,fontWeight:t.weightMedium},
   shortLabel:{flexShrink:0,color:tx.fgMuted},
-  durationLabel:{maxWidth:'var(--details-label-max-width, 45%)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',padding:0,borderWidth:0,backgroundColor:sf.transparent,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading,textAlign:'left',cursor:'help',':focus-visible':{outline:`2px solid ${ac.primary}`}},
-  overviewValue:{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',padding:0,borderWidth:0,backgroundColor:sf.transparent,color:tx.fgMuted,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading,textAlign:'left',cursor:'help',':focus-visible':{outline:`2px solid ${ac.primary}`}},
+  durationLabel:{maxWidth:'var(--details-label-max-width, 45%)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',padding:0,borderWidth:0,backgroundColor:sf.transparent,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading,textAlign:'left',cursor:'help',':focus-visible':{outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset }},
+  overviewValue:{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',padding:0,borderWidth:0,backgroundColor:sf.transparent,color:tx.fgMuted,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading,textAlign:'left',cursor:'help',':focus-visible':{outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset }},
   // Known identity while pending keeps the settled one-line truncation, so the footprint does not reflow when values arrive.
   pendingIdentity:{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'},
   overviewTooltip:{maxWidth:g.tooltipMax,padding:s.md,backgroundColor:sf.raised,color:tx.fg,borderRadius:r.sm,borderWidth:g.hairline,borderStyle:'solid',borderColor:bd.borderStrong,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading},
   tooltipDetail:{display:'block',marginTop:s.xs,color:tx.fgMuted},
-  iconButton:{display:'inline-flex',alignItems:'center',justifyContent:'center',flexShrink:0,width:g.controlSm,height:g.controlSm,padding:s.zero,borderWidth:0,borderRadius:r.sm,backgroundColor:sf.transparent,color:tx.fgMuted,cursor:'pointer',':hover':{backgroundColor:sf.rowHover,color:tx.fg},':focus-visible':{outline:`2px solid ${ac.primary}`}},
+  iconButton:{display:'inline-flex',alignItems:'center',justifyContent:'center',flexShrink:0,width:g.controlSm,height:g.controlSm,padding:s.zero,borderWidth:0,borderRadius:r.sm,backgroundColor:sf.transparent,color:tx.fgMuted,cursor:'pointer',':hover':{backgroundColor:sf.rowHover,color:tx.fg},':focus-visible':{outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset }},
   iconSlot:{flexShrink:0,width:g.controlSm,height:g.controlSm},
   // Phone hosts (NarrowLayoutContext): 44px touch targets; the reserved gear slot keeps the same footprint.
   touchSquare:{width:g.touchTarget,height:g.touchTarget},
@@ -264,9 +264,9 @@ const styles=stylex.create({
   hiddenPending:{visibility:'hidden',opacity:0,pointerEvents:'none'},
   section:{borderBottomWidth:g.hairline,borderBottomStyle:'solid',borderBottomColor:bd.border,padding:s.md},
   sectionHeader:{display:'flex',alignItems:'center',justifyContent:'space-between',gap:s.md},
-  sectionTitle:{display:'flex',alignItems:'center',gap:s.xs,flex:1,minHeight:g.controlSm,padding:s.zero,borderWidth:0,backgroundColor:sf.transparent,color:tx.fg,fontFamily:t.fontSans,fontSize:t.metaSize,fontWeight:t.weightSemibold,textAlign:'left',cursor:'pointer',':focus-visible':{outline:`2px solid ${ac.primary}`}},
+  sectionTitle:{display:'flex',alignItems:'center',gap:s.xs,flex:1,minHeight:g.controlSm,padding:s.zero,borderWidth:0,backgroundColor:sf.transparent,color:tx.fg,fontFamily:t.fontSans,fontSize:t.metaSize,fontWeight:t.weightSemibold,textAlign:'left',cursor:'pointer',':focus-visible':{outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset }},
   sectionSettings:{display:'flex',flexDirection:'column',gap:s.sm,padding:s.md,outline:'none',fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading},
-  sectionOption:{display:'inline-flex',alignItems:'center',gap:s.xs,color:tx.fgMuted,cursor:'pointer',':focus-within':{outline:`2px solid ${ac.primary}`}},
+  sectionOption:{display:'inline-flex',alignItems:'center',gap:s.xs,color:tx.fgMuted,cursor:'pointer',':has(:focus-visible)':{outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset}},
   checkBox:{display:'inline-flex',alignItems:'center',justifyContent:'center',width:g.icon,height:g.icon,borderWidth:g.hairline,borderStyle:'solid',borderColor:bd.borderStrong},
   overview:{display:'flex',flexDirection:'column',gap:s.xs,paddingBlock:s.sm,minWidth:0},
   line:{display:'flex',alignItems:'center',gap:s.xs,color:tx.fgMuted,minWidth:0,whiteSpace:'nowrap',overflow:'hidden'},
@@ -281,10 +281,10 @@ const styles=stylex.create({
   errorText:{margin:s.zero,color:tx.fgMuted,fontSize:t.metaSize,lineHeight:t.metaLeading,overflowWrap:'normal'},
   errorHeading:{margin:s.zero,color:tx.fg,fontSize:t.metaSize,lineHeight:t.metaLeading,fontWeight:t.weightSemibold},
   // The clamped cause is a focusable trigger; the kit tooltip discloses the full host cause to pointer and keyboard.
-  errorCause:{display:'block',maxWidth:'100%',minWidth:0,padding:0,borderWidth:0,backgroundColor:sf.transparent,fontFamily:t.fontSans,textAlign:'left',cursor:'help',':focus-visible':{outline:`2px solid ${ac.primary}`}},
+  errorCause:{display:'block',maxWidth:'100%',minWidth:0,padding:0,borderWidth:0,backgroundColor:sf.transparent,fontFamily:t.fontSans,textAlign:'left',cursor:'help',':focus-visible':{outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset }},
   errorCauseLines:{display:'-webkit-box',WebkitBoxOrient:'vertical',WebkitLineClamp:2,overflow:'hidden'},
   retrySlot:{minHeight:g.controlMd},
-  retryButton:{display:'inline-flex',alignItems:'center',justifyContent:'center',minHeight:g.controlMd,paddingInline:s.md,borderWidth:g.hairline,borderStyle:'solid',borderColor:ac.primary,borderRadius:r.control,backgroundColor:ac.primary,color:ac.onPrimary,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading,cursor:'pointer',':focus-visible':{outline:`2px solid ${ac.primary}`,outlineOffset:g.focusOffset}},
+  retryButton:{display:'inline-flex',alignItems:'center',justifyContent:'center',minHeight:g.controlMd,paddingInline:s.md,borderWidth:g.hairline,borderStyle:'solid',borderColor:ac.primary,borderRadius:r.control,backgroundColor:ac.primary,color:ac.onPrimary,fontFamily:t.fontSans,fontSize:t.metaSize,lineHeight:t.metaLeading,cursor:'pointer',':focus-visible':{outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing,outlineOffset: g.focusOffset}},
   pendingText:{color:'transparent',backgroundImage:`linear-gradient(${bd.borderStrong}, ${bd.borderStrong})`,backgroundSize:`100% ${s.md}`,backgroundPosition:'center',backgroundRepeat:'no-repeat',boxDecorationBreak:'clone'},
 })
 const meterStyles=stylex.create({track:{height:g.progressSm,width:'100%',backgroundColor:sf.controlFill},fill:(percentage:number)=>({height:'100%',width:`${percentage}%`,backgroundColor:ac.primary})})

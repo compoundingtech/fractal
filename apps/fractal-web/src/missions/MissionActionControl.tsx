@@ -3,7 +3,7 @@ import * as React from 'react'
 import * as Aria from 'react-aria-components'
 
 import { LiveRing } from '../../../../packages/fractal-ui/src/assistant-ui/composition/LiveRing.tsx'
-import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, interactionVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { missionActionConsequence, missionActionLabel, type MissionActionOffer, type MissionActionPort } from './missionActions.ts'
 
 // One offered mission action as a control: a press (or, for offers Fractal marks `confirm`, a press and then a second,
@@ -114,7 +114,7 @@ const styles = stylex.create({
     display: 'inline-flex', alignItems: 'center', gap: s.xs, height: g.controlSm, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control,
     backgroundColor: 'transparent', color: ink.fg, fontFamily: 'inherit', fontSize: '12px', whiteSpace: 'nowrap',
     cursor: { default: 'pointer', ':is([data-disabled])': 'not-allowed' }, opacity: { default: 1, ':is([data-disabled])': 0.5 },
-    ':hover': { backgroundColor: surface.rowHover }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted },
+    ':hover': { backgroundColor: surface.rowHover }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing },
   },
   primary: { borderColor: tone.attention, backgroundColor: tone.attention, color: '#1a1205', ':hover': { backgroundColor: tone.attention } },
   danger: { borderColor: tone.dangerFg, backgroundColor: tone.dangerFg, color: '#1a0505', ':hover': { backgroundColor: tone.dangerFg } },

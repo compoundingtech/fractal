@@ -14,7 +14,7 @@ import * as stylex from '@stylexjs/stylex'
 import { VisuallyHidden } from 'react-aria-components'
 import { LiveRing } from '../composition/LiveRing'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
-import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../composition-tokens.stylex'
 import type { MissionEta } from '../MissionEta'
 import { MissionProgressMark } from '../sidebar/SidebarMissionLine'
 import type { SidebarMissionProgress } from '../sidebar/model'
@@ -130,7 +130,7 @@ export function MissionGroupHeader({ label, count, tone: state, collapsed, onTog
 }
 
 const styles = stylex.create({
-  row: { display: 'grid', gridTemplateRows: `${g.controlSm} ${g.controlSm}`, alignContent: 'center', height: g.sidebarRow, boxSizing: 'border-box', minWidth: 0, width: '100%', paddingInline: s.md, color: ink.fgSoft, fontFamily: t.fontSans, cursor: 'pointer', outlineStyle: 'none', ':hover': { backgroundColor: surface.rowHover }, ':is([data-focus-visible],:focus-visible)': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  row: { display: 'grid', gridTemplateRows: `${g.controlSm} ${g.controlSm}`, alignContent: 'center', height: g.sidebarRow, boxSizing: 'border-box', minWidth: 0, width: '100%', paddingInline: s.md, color: ink.fgSoft, fontFamily: t.fontSans, cursor: 'pointer', outlineStyle: 'none', ':hover': { backgroundColor: surface.rowHover }, ':is([data-focus-visible],:focus-visible)': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
   rowTouch: { minHeight: g.touchTarget },
   active: { backgroundColor: surface.rowActive, ':hover': { backgroundColor: surface.rowActive } },
   muted: { color: ink.fgMuted },
@@ -150,7 +150,7 @@ const styles = stylex.create({
   stepYou: { color: tone.attention },
   agents: { flex: '0 1000 auto', minWidth: 0, marginInlineStart: 'auto', overflow: 'hidden', textOverflow: 'ellipsis', color: ink.fgMuted },
   group: { display: 'flex', alignItems: 'center', gap: s.xs, width: '100%', boxSizing: 'border-box', height: g.controlMd, margin: 0, paddingInline: s.md, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.denseSize, fontWeight: 600, letterSpacing: '0.02em', textAlign: 'start' },
-  groupButton: { cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  groupButton: { cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
   chevron: { display: 'inline-block', width: '10px', transitionProperty: 'transform', transitionDuration: '120ms' },
   chevronCollapsed: { transform: 'rotate(-90deg)' },
   groupLabel: { flex: '0 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },

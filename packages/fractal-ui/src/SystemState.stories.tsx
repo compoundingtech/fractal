@@ -13,7 +13,7 @@ import { ConnectionStatus, SystemNotice, type ConnectionState } from './assistan
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { darkTheme, liveAccentTheme } from './assistant-ui/embrace-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
-import { accentVars as accent, borderVars as border, radiusVars as r, surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t, geometryVars as g } from './assistant-ui/composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, radiusVars as r, surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t, geometryVars as g, interactionVars } from './assistant-ui/composition-tokens.stylex'
 
 type WireAgent = WireSlice<'roster'>['state']['agents'][number]
 const agentStatus = (state: WireAgent['state']): AgentStatus => {
@@ -300,5 +300,5 @@ const styles = stylex.create({
   turnWho: { fontSize: t.metaSize, fontWeight: t.weightMedium, color: ink.fgMuted },
   turnText: { margin: 0, fontSize: t.bodySize, lineHeight: t.bodyLeading },
   harness: { display: 'flex', gap: s.md, padding: s.md, flexShrink: 0, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border },
-  harnessButton: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: surface.controlFill, color: ink.fg, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  harnessButton: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: surface.controlFill, color: ink.fg, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } },
 })
