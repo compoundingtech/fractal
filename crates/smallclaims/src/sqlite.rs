@@ -1,7 +1,9 @@
 //! The store's SQLite connections: one writer thread that batches writes, and a pool of read
 //! connections that a thread can pin to one snapshot.
 
+use std::any::{Any, TypeId};
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -1305,7 +1307,13 @@ thread_local! {
     static REQUEST_READER: RefCell<Vec<RequestLoan>> = const { RefCell::new(Vec::new()) };
     /// The snapshot pins this thread holds, innermost last, including pins of other stores:
     /// the single authority for pin membership and reuse.
-    static PINNED_STACK: RefCell<Vec<(usize, Rc<ReadConnection>)>> = const { RefCell::new(Vec::new()) };
+    static PINNED_STACK: RefCell<Vec<SnapshotPin>> = const { RefCell::new(Vec::new()) };
+}
+
+struct SnapshotPin {
+    pool: usize,
+    connection: Rc<ReadConnection>,
+    memo: RefCell<HashMap<(TypeId, u64), Rc<dyn Any>>>,
 }
 
 struct RequestLoan {
@@ -1340,21 +1348,25 @@ pub(crate) fn pinned_reader_for(pool: usize) -> Option<Rc<ReadConnection>> {
             .borrow()
             .iter()
             .rev()
-            .find(|(key, _)| *key == pool)
-            .map(|(_, connection)| connection.clone())
+            .find(|pin| pin.pool == pool)
+            .map(|pin| pin.connection.clone())
     })
 }
 
 /// Register a snapshot pin once its transaction has begun.
 pub(crate) fn push_pinned_reader(pool: usize, connection: Rc<ReadConnection>) {
-    PINNED_STACK.with(|stack| stack.borrow_mut().push((pool, connection)));
+    PINNED_STACK.with(|stack| stack.borrow_mut().push(SnapshotPin {
+        pool,
+        connection,
+        memo: RefCell::new(HashMap::new()),
+    }));
 }
 
 /// Unregister a snapshot pin, leaving any outer or other-store pin below it.
 fn pop_pinned_reader(pool: usize) {
     PINNED_STACK.with(|stack| {
         let popped = stack.borrow_mut().pop();
-        debug_assert_eq!(popped.map(|(key, _)| key), Some(pool));
+        debug_assert_eq!(popped.map(|pin| pin.pool), Some(pool));
     });
 }
 
@@ -1591,6 +1603,34 @@ impl ReadPool {
     /// a cached read is valid only while this pool's own pin is registered.
     pub fn has_pinned_reader(&self) -> bool {
         pinned_reader_for(self.key()).is_some()
+    }
+
+    /// Memoize a derived read at a logical cut only within this thread's pinned SQLite
+    /// snapshot. Entries die when the pin is popped, even if its connection is pooled and
+    /// a later snapshot reads the same cut after repair. Never consults request-only loans.
+    pub fn pinned_memo<T: 'static>(
+        &self,
+        cut: u64,
+        build: impl FnOnce() -> Result<T>,
+    ) -> Result<Rc<T>> {
+        let key = (TypeId::of::<T>(), cut);
+        let cached = PINNED_STACK.with(|stack| {
+            let stack = stack.borrow();
+            let pin = stack.iter().rev().find(|pin| pin.pool == self.key());
+            pin.and_then(|pin| pin.memo.borrow().get(&key).cloned())
+        });
+        if let Some(cached) = cached {
+            return Ok(cached.downcast::<T>().unwrap_or_else(|_| unreachable!("snapshot memo type matches its key")));
+        }
+        anyhow::ensure!(self.has_pinned_reader(), "snapshot memo requires a pinned read");
+        let value = Rc::new(build()?);
+        PINNED_STACK.with(|stack| {
+            let stack = stack.borrow();
+            let pin = stack.iter().rev().find(|pin| pin.pool == self.key())
+                .expect("the pinned read remains registered during its memo build");
+            pin.memo.borrow_mut().insert(key, value.clone());
+        });
+        Ok(value)
     }
 
     /// Whether this thread already holds this pool's request loan or a pinned snapshot,
