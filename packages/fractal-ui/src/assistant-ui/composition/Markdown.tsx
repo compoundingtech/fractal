@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Link, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
-import type { Components, ExtraProps } from 'react-markdown'
+import type { Components, ExtraProps, Options as MarkdownOptions } from 'react-markdown'
 import type { Root } from 'hast'
 import type * as Highlights from '@pierre/highlights'
 import remarkGfm from 'remark-gfm'
@@ -12,7 +12,10 @@ import { Tooltip as CopyTooltip } from './Controls'
 import { Icon } from './Icons'
 import { useCopyFeedback } from './useCopyFeedback'
 import { isSupportedFenceLanguage } from './pierre-languages.generated'
-import { remarkHardBreaks, remarkVisibleHtml, splitMarkdownBlocks } from './markdown-source'
+import { limitNesting, remarkHardBreaks, splitMarkdownBlocks } from './markdown-source'
+import { remarkHtmlPolicy, safeLinkHref } from './markdown-html-policy'
+import { loadPulldown, pulldownReady, remarkPulldown } from './markdown-pulldown'
+import { markdownSource, type MarkdownBlock, type MarkdownInline } from './markdown-text'
 
 export interface InlineResource { readonly path: string; readonly added: number; readonly removed: number; readonly preview?: string }
 export type InlineReferenceRenderer = (path: string) => React.ReactNode | undefined
@@ -32,10 +35,14 @@ export const MarkdownImagePolicy = React.createContext<MarkdownImageOptions>(NO_
  * `muted` sets reasoning-style prose in the themed muted ink; strong text then stays muted, as it does inside quotes.
  * `hardBreaks` keeps each line break, for text written as lines (prompts) rather than paragraphs.
  */
-export interface MarkdownProps { text: string; streaming?: boolean; hardBreaks?: boolean; tone?: 'default' | 'muted' | 'foreground'; resources?: readonly InlineResource[]; onOpenResource?: (path?: string) => void; renderInlineReference?: InlineReferenceRenderer; resolveImage?: MarkdownImageResolver; onLoadImage?: MarkdownImageOpener }
+export interface MarkdownProps { text: MarkdownBlock; streaming?: boolean; hardBreaks?: boolean; tone?: 'default' | 'muted' | 'foreground'; resources?: readonly InlineResource[]; onOpenResource?: (path?: string) => void; renderInlineReference?: InlineReferenceRenderer; resolveImage?: MarkdownImageResolver; onLoadImage?: MarkdownImageOpener }
 const EMPTY_RESOURCES: readonly InlineResource[] = []
-const REMARK_PLUGINS = [remarkGfm, remarkVisibleHtml]
-const REMARK_PLUGINS_HARD_BREAKS = [remarkGfm, remarkVisibleHtml, remarkHardBreaks]
+const REMARK_PLUGINS = [remarkGfm, remarkHtmlPolicy]
+const REMARK_PLUGINS_HARD_BREAKS = [remarkGfm, remarkHtmlPolicy, remarkHardBreaks]
+// pulldown-cmark replaces only the parse step; GFM tables, task lists, strikethrough and footnotes are its own options.
+type RemarkPlugins = NonNullable<MarkdownOptions['remarkPlugins']>
+const PULLDOWN_PLUGINS = [remarkPulldown, remarkHtmlPolicy] as RemarkPlugins
+const PULLDOWN_PLUGINS_HARD_BREAKS = [remarkPulldown, remarkHtmlPolicy, remarkHardBreaks] as RemarkPlugins
 const STREAMING_PLUGINS = [markStreamingTail]
 type ReferenceOptions = Omit<MarkdownProps, 'text' | 'streaming' | 'tone' | 'hardBreaks'>
 const EMPTY_REFERENCES: ReferenceOptions = {}
@@ -59,17 +66,51 @@ function markStreamingTail() {
   }
 }
 /** Policy/reference context can change without invalidating the Markdown parser. */
-const ParsedMarkdown = React.memo(function ParsedMarkdown({ source, streaming, hardBreaks }: { readonly source: string; readonly streaming: boolean; readonly hardBreaks: boolean }) {
-  return <ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={hardBreaks ? REMARK_PLUGINS_HARD_BREAKS : REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown>
+/**
+ * Emphasis, strikethrough and bracket delimiters one block may hold outside code before it shows as text. remark-gfm
+ * overflows its stack between about 4,000 and 6,000 nested delimiters, and nested images parse in quadratic time, so a
+ * bracket counts twice (at most 1,024 per block); code (fences and inline spans) never counts.
+ */
+const DELIMITER_LIMIT = 2048
+const PlainBlock = ({ source }: { readonly source: string }) => <p {...stylex.props(styles.paragraph, styles.prose, styles.plainBlock)}>{source}</p>
+/** A block the parser cannot handle shows as its text, never as a broken transcript. */
+class BlockFallback extends React.Component<{ readonly source: string; readonly children: React.ReactNode }, { readonly failed: boolean }> {
+  override state = { failed: false }
+  static getDerivedStateFromError() { return { failed: true } }
+  override componentDidUpdate(previous: { readonly source: string }) { if (previous.source !== this.props.source && this.state.failed) this.setState({ failed: false }) }
+  override render() { return this.state.failed ? <PlainBlock source={this.props.source} /> : this.props.children }
+}
+function delimiters(source: string): number {
+  let count = 0
+  let fence: string | undefined
+  for (const line of source.split('\n')) {
+    const opening = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line)
+    const marker = opening?.[1]
+    if (fence !== undefined) { if (marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length && line.trim() === marker) fence = undefined; continue }
+    // A backtick fence's info string cannot hold a backtick: such a line is prose, and its delimiters count.
+    if (marker !== undefined && !(marker[0] === '`' && opening![2]!.includes('`'))) { fence = marker; continue }
+    const prose = line.replace(/(`+)[^`]*?\1/g, '')
+    for (let index = 0; index < prose.length; index++) { const code = prose.charCodeAt(index); if (code === 42 || code === 95 || code === 126) count++; else if (code === 91) count += 2 }
+  }
+  return count
+}
+const ParsedMarkdown = React.memo(function ParsedMarkdown({ source, streaming, hardBreaks, pulldown }: { readonly source: string; readonly streaming: boolean; readonly hardBreaks: boolean; readonly pulldown: boolean }) {
+  if (delimiters(source) > DELIMITER_LIMIT) return <PlainBlock source={source} />
+  return <BlockFallback source={source}><ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={pulldown ? (hardBreaks ? PULLDOWN_PLUGINS_HARD_BREAKS : PULLDOWN_PLUGINS) : hardBreaks ? REMARK_PLUGINS_HARD_BREAKS : REMARK_PLUGINS} rehypePlugins={streaming ? STREAMING_PLUGINS : undefined} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown></BlockFallback>
 })
-const markdownUrlTransform = (url: string, key: string) => key === 'src' ? url : defaultUrlTransform(url)
+/** Images keep their source for the consent-gated placeholder; a link opens only an http(s) URL. */
+const markdownUrlTransform = (url: string, key: string) => key === 'src' ? url : key === 'href' ? safeLinkHref(url) ?? '' : defaultUrlTransform(url)
 
-export const Markdown = React.memo(function Markdown({ text, streaming = false, hardBreaks = false, tone = 'default', resources = EMPTY_RESOURCES, onOpenResource, renderInlineReference, resolveImage, onLoadImage }: MarkdownProps) {
+export const Markdown = React.memo(function Markdown({ text: markdown, streaming = false, hardBreaks = false, tone = 'default', resources = EMPTY_RESOURCES, onOpenResource, renderInlineReference, resolveImage, onLoadImage }: MarkdownProps) {
   const inherited = React.useContext(MarkdownImagePolicy)
   const references = React.useMemo(() => ({ resources, onOpenResource, renderInlineReference: renderInlineReference ?? inherited.renderInlineReference, resolveImage: resolveImage ?? inherited.resolveImage, onLoadImage: onLoadImage ?? inherited.onLoadImage }), [resources, onOpenResource, renderInlineReference, resolveImage, onLoadImage, inherited])
+  const text = React.useMemo(() => limitNesting(markdownSource(markdown)), [markdown])
   const blocks = React.useMemo(() => splitMarkdownBlocks(text), [text])
+  // One parser for this mount's life: the WebAssembly one only once it is ready, so nothing re-renders when it arrives.
+  const [pulldown] = React.useState(pulldownReady)
+  React.useEffect(() => { void loadPulldown() }, [])
   const tail = blocks.length - 1
-  return <ReferenceContext.Provider value={references}><MutedTone.Provider value={tone === 'muted'}><div data-testid="markdown" data-tone={tone} {...stylex.props(styles.markdown, tone === 'muted' && styles.muted, tone === 'foreground' && styles.foreground)}>{/* Settled blocks keep their parse while the tail grows; only the tail is completed and parsed again. */}{blocks.map((block, index) => <ParsedMarkdown key={index} source={streaming && index === tail ? completeStreamingTail(block) : block} streaming={streaming && index === tail} hardBreaks={hardBreaks} />)}</div></MutedTone.Provider></ReferenceContext.Provider>
+  return <ReferenceContext.Provider value={references}><MutedTone.Provider value={tone === 'muted'}><div data-testid="markdown" data-tone={tone} data-parser={pulldown ? 'pulldown' : 'remark'} {...stylex.props(styles.markdown, tone === 'muted' && styles.muted, tone === 'foreground' && styles.foreground)}>{/* Settled blocks keep their parse while the tail grows; only the tail is completed and parsed again. */}{blocks.map((block, index) => <ParsedMarkdown key={index} source={streaming && index === tail ? completeStreamingTail(block) : block} streaming={streaming && index === tail} hardBreaks={hardBreaks} pulldown={pulldown} />)}</div></MutedTone.Provider></ReferenceContext.Provider>
 })
 
 function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
@@ -86,6 +127,7 @@ function DeferredImage({ src = '', alt = '' }: React.ComponentProps<'img'>) {
 }
 
 function MarkdownLink({ children, href, title, node }: React.ComponentProps<'a'> & ExtraProps) {
+  if (href === undefined || href === '') return <>{children}</>
   const { resolveImage, onLoadImage } = React.useContext(ReferenceContext)
   const imageLink = node?.children.some(child => child.type === 'element' && child.tagName === 'img') ?? false
   const link = <Link href={href} target="_blank" rel="noopener noreferrer" render={props => <a {...props as React.ComponentPropsWithRef<'a'>} title={title} />} {...stylex.props(styles.link)}>{imageLink ? 'Open link' : children}</Link>
@@ -104,11 +146,14 @@ function renderReference(path: string, options: ReferenceOptions): React.ReactNo
   return resource === undefined ? undefined : <ResourceChip resource={resource} onOpen={options.onOpenResource} />
 }
 
+const REFERENCE_SCAN_MAX = 4096
 /** Only text leaves are substituted: parsed emphasis, links, and list structure stay intact. */
 function InlineText({ children }: { children: React.ReactNode }) {
   const references = React.useContext(ReferenceContext)
   return React.Children.map(children, child => {
-    if (typeof child !== 'string') return child
+    // Paths are looked up only when a host renders references, and only in runs short enough that the path pattern's
+    // backtracking stays cheap (a 32k-character run of `a/` took seconds).
+    if (typeof child !== 'string' || child.length > REFERENCE_SCAN_MAX || (references.renderInlineReference === undefined && (references.resources?.length ?? 0) === 0)) return child
     return child.split(/(\b(?:[\w.-]+\/)+[\w.-]+\.[\w]+\b)/g).map((part, index) => {
       const rendered = renderReference(part, references)
       return <React.Fragment key={index}>{rendered === undefined ? part : rendered}</React.Fragment>
@@ -252,6 +297,9 @@ function MarkdownList({ ordered, start, children }: { readonly ordered: boolean;
 const MARKDOWN_COMPONENTS: Components = {
   h1: heading('h1'), h2: heading('h2'), h3: heading('h3'), h4: heading('h4'), h5: heading('h5'), h6: heading('h6'),
   p: Paragraph,
+  details: ({ children, open }) => <details open={open} {...stylex.props(styles.details)}>{children}</details>,
+  summary: ({ children }) => <summary {...stylex.props(styles.summary)}>{children}</summary>,
+  kbd: ({ children }) => <kbd {...stylex.props(styles.inlineCode)}>{children}</kbd>,
   span: ({ children, node }) => <span data-streaming-tail={node?.properties['data-streaming-tail'] || undefined} aria-hidden={node?.properties['aria-hidden'] === true || undefined} {...stylex.props(node?.properties['data-streaming-tail'] === true && styles.streamingTail)}>{children}</span>,
   strong: MarkdownStrong,
   em: ({ children }) => <em {...stylex.props(styles.emphasis)}><InlineText>{children}</InlineText></em>,
@@ -264,8 +312,8 @@ const MARKDOWN_COMPONENTS: Components = {
   pre: CodeFence,
   blockquote: MarkdownQuote,
   table: ({ children }) => <div role="region" aria-label="Markdown table" tabIndex={0} {...stylex.props(styles.tableScroll)}><table {...stylex.props(styles.table)}>{children}</table></div>,
-  th: ({ children, style }) => <th {...stylex.props(styles.cell, styles.tableHeading, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></th>,
-  td: ({ children, style }) => <td {...stylex.props(styles.cell, style?.textAlign === 'center' ? styles.alignCenter : style?.textAlign === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></td>,
+  th: ({ children, style, align, colSpan, rowSpan }) => <th colSpan={colSpan} rowSpan={rowSpan} {...stylex.props(styles.cell, styles.tableHeading, (style?.textAlign ?? align) === 'center' ? styles.alignCenter : (style?.textAlign ?? align) === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></th>,
+  td: ({ children, style, align, colSpan, rowSpan }) => <td colSpan={colSpan} rowSpan={rowSpan} {...stylex.props(styles.cell, (style?.textAlign ?? align) === 'center' ? styles.alignCenter : (style?.textAlign ?? align) === 'right' ? styles.alignRight : styles.alignLeft)}><InlineText>{children}</InlineText></td>,
 }
 const INLINE_ELEMENTS = ['strong', 'em', 'del', 'code', 'a', 'img', 'x-text']
 /** Wraps each run of prose (not code) so a host can render it, for example to quiet ids and paths. */
@@ -282,7 +330,7 @@ const INLINE_BASE: Components = { strong: MARKDOWN_COMPONENTS.strong, em: MARKDO
 const INLINE_COMPONENTS: Components = { ...INLINE_BASE, a: ({ children }) => <>{children}</> }
 const INLINE_ANCHOR_COMPONENTS: Components = { ...INLINE_BASE, a: MarkdownLink }
 export interface InlineMarkdownProps {
-  readonly text: string
+  readonly text: MarkdownInline
   /** `label` (default) draws a link as its words, legal inside buttons and rows. `anchor` is for where no ancestor is interactive. */
   readonly links?: 'label' | 'anchor'
   /** The text was cut to a length: close whatever the cut left open. */
@@ -291,8 +339,8 @@ export interface InlineMarkdownProps {
   readonly renderText?: (text: string) => React.ReactNode
 }
 /** One line of text as phrasing content, with no wrapper element, so it fits headings, table cells and clamped rows. Block syntax keeps its words only. */
-export const InlineMarkdown = React.memo(function InlineMarkdown({ text, links = 'label', clipped = false, renderText }: InlineMarkdownProps) {
-  const line = text.replace(/\s*\n\s*/g, ' ')
+export const InlineMarkdown = React.memo(function InlineMarkdown({ text: markdown, links = 'label', clipped = false, renderText }: InlineMarkdownProps) {
+  const line = limitNesting(markdownSource(markdown)).replace(/\s*\n\s*/g, ' ')
   const base = links === 'anchor' ? INLINE_ANCHOR_COMPONENTS : INLINE_COMPONENTS
   const components = React.useMemo(() => renderText === undefined ? base : { ...base, 'x-text': ({ children }: { readonly children?: React.ReactNode }) => <>{renderText(String(children ?? ''))}</> } as Components, [base, renderText])
   return <ReactMarkdown skipHtml urlTransform={markdownUrlTransform} remarkPlugins={REMARK_PLUGINS} rehypePlugins={renderText === undefined ? undefined : TEXT_RUN_PLUGINS} allowedElements={INLINE_ELEMENTS} unwrapDisallowed components={components}>{clipped ? completeStreamingTail(line) : line}</ReactMarkdown>
@@ -436,6 +484,9 @@ const styles = stylex.create({
   codeText: { fontFamily: t.fontMono, fontSize: t.metaSize, lineHeight: t.codeLeading, color: textColor.fgSoft },
   paragraph: { margin: 0, fontSize: t.bodySize, lineHeight: t.bodyLeading, color: 'inherit', overflowWrap: 'anywhere' },
   streamingTail: { '::after': { content: '""', display: 'inline-block', width: g.caret, height: t.bodySize, marginInlineStart: s.xs, verticalAlign: 'text-bottom', backgroundColor: textColor.fgMuted } },
+  plainBlock: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },
+  details: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
+  summary: { cursor: 'pointer', color: textColor.fg, fontWeight: t.weightMedium, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   inlineCode: { fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.codeBg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.sm, paddingInline: s.xs },
   link: { color: status.runningFg, textDecorationLine: 'none', ':hover': { textDecorationLine: 'underline' }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   resource: { display: 'inline', fontFamily: t.fontMono, fontSize: t.metaSize, color: textColor.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, paddingInline: s.xs, paddingBlock: 0, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.hairline } }, hoverCard: { maxWidth: g.tooltipMax, padding: s.lg, borderRadius: r.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, backgroundColor: surface.raised, color: textColor.fg, fontSize: t.metaSize, lineHeight: t.metaLeading }, resourceTitle: { display: 'flex', alignItems: 'center', gap: s.md, fontFamily: t.fontMono }, added: { color: textColor.fgMuted }, removed: { color: textColor.fgMuted }, preview: { margin: 0, marginTop: s.md, fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: t.metaLeading, color: textColor.fgMuted, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' },

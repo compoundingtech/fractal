@@ -1,3 +1,4 @@
+import { markdownBlock } from '@fractal/client/markdown'
 import { scenarioDomainFixture } from '../domain-fixture.ts'
 import { child } from '../kit/context.ts'
 import { terminalRun } from '../kit/factories/terminalRun.ts'
@@ -50,8 +51,8 @@ export const unicode: WorldDefinition = {
       ...base,
       roster: { ...base.roster, timeline: [] },
       attention: { ...base.attention, state: {
-        attention: base.attention.state.attention.map((card) => ({ ...card, title: UNICODE_TEXT, detail: UNICODE_TEXT })),
-        messages: base.attention.state.messages.map((message) => ({ ...message, title: UNICODE_TEXT, content: UNICODE_TEXT })),
+        attention: base.attention.state.attention.map((card) => ({ ...card, title: UNICODE_TEXT, detail: markdownBlock(UNICODE_TEXT) })),
+        messages: base.attention.state.messages.map((message) => ({ ...message, title: UNICODE_TEXT, content: markdownBlock(UNICODE_TEXT) })),
       }, timeline: [] },
       conversation,
       terminal: { ...base.terminal, state: { terminals: [terminalRecord(ctx, member, run, -10_000)] }, timeline: [] },

@@ -1,0 +1,32 @@
+{
+  "sha256": "4b64c75c4c538acb9900ffa5956e3a55459917f2f2944bf01f2867bf33350f13",
+  "bytes": 222758,
+  "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+  "crates": [
+    {
+      "name": "bitflags",
+      "version": "2.13.2",
+      "license": "MIT OR Apache-2.0"
+    },
+    {
+      "name": "fractal-markdown-wasm",
+      "version": "0.0.0",
+      "license": "repository license"
+    },
+    {
+      "name": "memchr",
+      "version": "2.8.3",
+      "license": "Unlicense OR MIT"
+    },
+    {
+      "name": "pulldown-cmark",
+      "version": "0.13.5",
+      "license": "MIT"
+    },
+    {
+      "name": "unicase",
+      "version": "2.10.0",
+      "license": "MIT OR Apache-2.0"
+    }
+  ]
+}

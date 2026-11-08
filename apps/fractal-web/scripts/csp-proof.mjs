@@ -78,6 +78,8 @@ const prove = async (url, enforced, mode) => {
     const errors = []
     testPage.on('pageerror', (error) => errors.push(String(error)))
     await testPage.addInitScript(() => {
+      // Development serves hundreds of modules; keep every resource entry, not the default 250.
+      performance.setResourceTimingBufferSize(100000)
       globalThis.__cspProofViolations = []
       globalThis.__cspProofImageOpens = []
       globalThis.__cspHighlighting = {}
@@ -130,6 +132,11 @@ const prove = async (url, enforced, mode) => {
     const placeholder = testPage.getByTestId('deferred-image')
     await placeholder.waitFor({ timeout: 60000 })
     await testPage.locator('[data-syntax-token="keyword"]').first().waitFor({ timeout: 60000 })
+    // The Markdown parser's WebAssembly module loads after the first Markdown mounts, under the same policy.
+    const pulldownAsset = await (await testPage.waitForFunction(() => {
+      const entry = performance.getEntriesByType('resource').find((resource) => /markdown-pulldown\.generated[^/]*\.wasm/.test(resource.name))
+      return entry === undefined ? false : { name: entry.name, status: entry.responseStatus }
+    }, undefined, { timeout: 60000 })).jsonValue()
     const hostShown = (await placeholder.textContent()).includes('example.invalid')
     const remoteImagesBefore = await testPage.locator('img[src="' + remote + '"]').count()
     await placeholder.getByRole('button', { name: 'Open image · example.invalid', exact: true }).click()
@@ -150,7 +157,7 @@ const prove = async (url, enforced, mode) => {
     const violations = await testPage.evaluate(() => [...globalThis.__cspProofViolations])
     const result = { mode: ${JSON.stringify(mode)}, enforced: ${enforced}, rendered: true,
       policy: response.headers()['content-security-policy'] ?? null, highlighting: await testPage.evaluate(() => globalThis.__cspHighlighting),
-      imageBinding, imageAttempts, bootViolations, violations, errors }
+      imageBinding, imageAttempts, bootViolations, violations, errors, pulldownAsset }
     await testPage.close()
     return 'CSP_PROOF ' + JSON.stringify(result)
   }`])
@@ -160,6 +167,7 @@ const prove = async (url, enforced, mode) => {
   const result = JSON.parse(JSON.parse(quoted).slice('CSP_PROOF '.length))
   console.log(JSON.stringify(result))
   assert.equal(result.rendered, true, 'the real app must render')
+  assert.deepEqual([result.pulldownAsset.status, /markdown-pulldown\.generated.*\.wasm/.test(result.pulldownAsset.name)], [200, true], `the Markdown parser module must load: ${JSON.stringify(result.pulldownAsset)}`)
   assert.deepEqual(result.errors, [], 'app must boot without runtime errors')
   assert.deepEqual(result.bootViolations, [], 'app must boot without CSP violations')
   assert.deepEqual(result.imageBinding, {

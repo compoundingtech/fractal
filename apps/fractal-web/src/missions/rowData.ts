@@ -2,6 +2,8 @@ import type { MissionRowAgent, MissionRowData, MissionRowTone } from '@fractal/u
 import type { SidebarOtherMission } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { DateTime } from 'effect'
 
+import { markdownPlainText } from '../../../../packages/fractal-ui/src/assistant-ui/composition/markdown-source.ts'
+
 import type { MissionsListView } from '../state/cells/lists.ts'
 import { missionWord, MISSION_WORDS, type MissionWord } from './missionWords.ts'
 import { foldedInSidebar, isAdHocWork, missionEta, missionNeedsYou, missionReaderTitle, type MissionPresentation } from './presentation.ts'
@@ -55,7 +57,7 @@ export const missionNowText = (presentation: MissionPresentation): string | unde
     const stuck = steps.find(step => step.id === presentation.stuck!.step)
     if (stuck !== undefined) return presentation.word === 'failed' || stuck.word === 'failed' ? `Failed: ${stuck.title}` : stuck.note ?? `Stuck: ${stuck.title}`
   }
-  if (presentation.last_progress !== null && presentation.last_progress !== '') return presentation.last_progress
+  if (presentation.last_progress !== null && presentation.last_progress !== '') return markdownPlainText(presentation.last_progress)
   const working = steps.find(step => step.word === 'working')
   if (working !== undefined) return working.title
   const next = steps.find(step => step.word === 'ready' || step.word === 'waiting' || step.word === 'pending')

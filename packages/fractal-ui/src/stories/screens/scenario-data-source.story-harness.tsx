@@ -1,3 +1,4 @@
+import { optionalSource } from '@fractal/client/markdown'
 import { Agent, Attention, Mission, TerminalScreen, TimelineEntry, decodeUnknownSync } from '@fractal/client/schema'
 import { useScenarioNow, useScenarioSlice, type WireSlice } from '@fractal/scenarios/react'
 import type { SliceKind } from '@fractal/scenarios'
@@ -135,7 +136,7 @@ const screenWorld = ({ roster, details, attention, conversation, terminal, sync,
     agentRef: primary?.id ?? '',
     agentName: primary?.name ?? '',
     shownAgent: rosterFeed._tag === 'Observed' ? primary?.name ?? '' : '',
-    evidence: primaryPage?._tag === 'Observed' && evidence?.type === 'content' && typeof evidence.body.text === 'string' ? evidence.body.text.slice(0, 16) : '',
+    evidence: primaryPage?._tag === 'Observed' && evidence?.type === 'content' ? optionalSource(evidence.body.text)?.slice(0, 16) ?? '' : '',
   }
 }
 
