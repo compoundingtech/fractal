@@ -29,7 +29,7 @@ impl Store {
             fleet_id: fleet_meta(&connection, "fleet_id")?,
             fleet_anchor: fleet_meta(&connection, "fleet_anchor_key")?,
             graph_digest: projection_digest::root(&digests),
-            log_digest: log_digest(self)?,
+            log_digest: log_digest_with_quarantine(self, !self.quarantined_operation_history()?.is_empty())?,
             tables: digests
                 .into_iter()
                 .map(|(name, digest)| {
@@ -179,6 +179,7 @@ impl Store {
         }
         let mut hash = Sha256::new();
         write_record(output, &mut hash, &Record::Header(header.clone()))?;
+        let quarantined = self.quarantined_operation_history()?;
         let mut after = (String::new(), 0_u64, String::new());
         let mut count = 0;
         loop {
@@ -186,10 +187,10 @@ impl Store {
             let identities = connection
                 .prepare_cached(
                     "SELECT writer,sequence,envelope_hash FROM replica_envelopes
-                         WHERE (writer,sequence,envelope_hash)>(?1,?2,?3) AND batch_id IS NOT NULL
+                         WHERE (writer,sequence,envelope_hash)>(?1,?2,?3) AND (batch_id IS NOT NULL OR ?5)
                          ORDER BY writer,sequence,envelope_hash LIMIT ?4",
                 )?
-                .query_map(params![after.0, after.1, after.2, PAGE], |r| {
+                .query_map(params![after.0, after.1, after.2, PAGE, !quarantined.is_empty()], |r| {
                     Ok(ReplicaEnvelopeId {
                         writer: r.get(0)?,
                         sequence: r.get(1)?,
@@ -283,7 +284,7 @@ impl Store {
                 )?;
             }
         }
-        self.check_backup_chains(&self.quarantined_operation_history()?)?;
+        self.check_backup_chains(&quarantined)?;
         serde_json::to_writer(
             &mut *output,
             &Record::End {
@@ -610,6 +611,11 @@ impl Store {
 /// The digest of a store's complete admitted envelope log, certified tombstones included: the
 /// graph's `log_digest`, and each shard's in the same form.
 pub(super) fn log_digest(store: &GraphStore) -> Result<String> {
+    log_digest_with_quarantine(store, false)
+}
+
+// Only the archive adapter calls this with true, after validating every held envelope.
+fn log_digest_with_quarantine(store: &GraphStore, include_quarantined: bool) -> Result<String> {
     let connection = store.readers.get();
     let mut hash = Sha256::new();
     hash.update(INVENTORY_DIGEST_DOMAIN);
@@ -617,14 +623,14 @@ pub(super) fn log_digest(store: &GraphStore) -> Result<String> {
     loop {
         // Both index seeks are bounded before the UNION sorts at most two pages.
         let identities = connection.prepare_cached(
-            /* sqlite-large-value: allow-for-now lv-haea4d31a22af owner=fractal_store::store::backup TODO=trace-statement-and-value-representation */ "WITH live AS (SELECT writer,sequence,envelope_hash FROM replica_envelopes
-               WHERE (writer,sequence,envelope_hash)>(?1,?2,?3) AND batch_id IS NOT NULL
+            /* sqlite-large-value: allow-for-now lv-h756acba9d94c owner=fractal_store::store::backup TODO=trace-statement-and-value-representation */ "WITH live AS (SELECT writer,sequence,envelope_hash FROM replica_envelopes
+               WHERE (writer,sequence,envelope_hash)>(?1,?2,?3) AND (batch_id IS NOT NULL OR ?5)
                ORDER BY writer,sequence,envelope_hash LIMIT ?4),
              dropped AS (SELECT writer,sequence,envelope_hash FROM checkpoint_envelopes
                WHERE (writer,sequence,envelope_hash)>(?1,?2,?3)
                ORDER BY writer,sequence,envelope_hash LIMIT ?4)
              SELECT * FROM live UNION SELECT * FROM dropped ORDER BY writer,sequence,envelope_hash LIMIT ?4"
-        )?.query_map(params![after.0,after.1,after.2,PAGE], |r| Ok(ReplicaEnvelopeId {
+        )?.query_map(params![after.0,after.1,after.2,PAGE,include_quarantined], |r| Ok(ReplicaEnvelopeId {
             writer:r.get(0)?,sequence:r.get(1)?,hash:r.get(2)?,
         }))?.collect::<rusqlite::Result<Vec<_>>>()?;
         if identities.is_empty() {
@@ -711,6 +717,11 @@ mod tests {
                 assert_eq!(restored.claim_by_id(&operation.id).unwrap().is_some(), keyed);
             }
             assert!(!restored.claims_for_kind_at("daemon.diagnostic", None, true, 10).unwrap().claims.is_empty());
+            let retained_archive = root.path().join("retained.backup");
+            archive(&restored, &retained_archive);
+            let retained = backup::restore(&retained_archive, &root.path().join("retained.db"), root.path()).unwrap();
+            assert_eq!(retained.operation_envelopes_quarantined, report.operation_envelopes_quarantined);
+            assert_eq!(retained.log_digest, report.log_digest);
         }
     }
 
