@@ -6665,6 +6665,7 @@ async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_r
     let before = listed(&o).await;
     assert_eq!(state(&before), ["read", "sent", "sent"]);
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgrade in place: the release's claims read the same; marks count beside them.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -6710,22 +6711,25 @@ async fn previous_release_reads_beside_message_marks_across_upgrade_backup_and_r
 
     // Roll back: the release runs on this store. One that reads marks sees the marked message as
     // read; an older one reads its own claims only, and sees it as sent, as the release note says.
-    o.stop();
-    o.binary = old;
-    o.start().await;
-    let marked = if release_reads_marks { "read" } else { "sent" };
-    assert_eq!(state(&listed(&o).await), ["read", marked, "sent"]);
-    read(&o, &third, "rolled-back-read").await;
-    let fourth = send(&o, "rolled-back-send").await;
-    assert_eq!(state(&listed(&o).await), ["read", marked, "read", "sent"]);
+    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
+    let rollback = restored.as_ref().unwrap_or(&o);
+    let marked = if restored.is_none() && release_reads_marks { "read" } else { "sent" };
+    assert_eq!(state(&listed(rollback).await), ["read", marked, "sent"]);
+    read(rollback, &third, "rolled-back-read").await;
+    let fourth = send(rollback, "rolled-back-send").await;
+    assert_eq!(state(&listed(rollback).await), ["read", marked, "read", "sent"]);
 
     // Upgrade again: the mark still counts beside every claim either build wrote.
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
     let after = listed(&o).await;
-    assert_eq!(state(&after), ["read", "read", "read", "sent"]);
-    assert_eq!(after.last().map(|(subject, _)| subject.clone()), Some(fourth));
+    if restored.is_some() {
+        assert_eq!(state(&after), ["read", "read", "sent"]);
+    } else {
+        assert_eq!(state(&after), ["read", "read", "read", "sent"]);
+        assert_eq!(after.last().map(|(subject, _)| subject.clone()), Some(fourth));
+    }
 }
 
 /// Each record of the archive at `path`, as JSON.
@@ -7276,6 +7280,7 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
     assert_eq!(claimed, if release_staged_reads { 0 } else if release_marks { 2 } else { 3 });
     let release_reads_marks = reads_seat_freshness(&o).await;
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgraded in place, alone: marks are on at once.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -7334,11 +7339,12 @@ async fn previous_release_upgrades_in_place_to_marks_for_its_seats_with_mail_mid
     // Rolled back. A release that reads marks reads every message as this build left it, in the
     // reads the mailbox offers from too, so a restart offers nothing again; an older release reads
     // its own claims only.
-    o.stop();
-    o.binary = old;
-    o.start().await;
-    let rolled_back = [status(&o, &delivered).await, status(&o, &staged).await, status(&o, &unsent).await];
-    if release_marks {
+    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
+    let rollback = restored.as_ref().unwrap_or(&o);
+    let rolled_back = [status(rollback, &delivered).await, status(rollback, &staged).await, status(rollback, &unsent).await];
+    if restored.is_some() {
+        assert_eq!(rolled_back, ["delivered", "staged", "sent"]);
+    } else if release_marks {
         assert_eq!(rolled_back, upgraded, "rolled back to a release that reads staging marks, mail went back");
         assert_eq!(listed(&o).await, before_rollback, "rolled back, the mailbox's reads changed");
     } else if release_reads_marks {
@@ -7732,6 +7738,10 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     }
     assert_eq!(lifecycle(&h, &before, "delivered").await.starts_with("offset-receipt/"), release_marks);
 
+    wait_until("the previous reader holds the original mail before backup", 90, || async {
+        graph_sent_claims(&o, &before).await == 1
+    }).await;
+    let recovery = previous_release_archive(&o, root.path());
     // Both upgrade: marks turn on, and the host's read is a mark that `o` reads from `h`.
     for node in [&mut o, &mut h] {
         node.stop();
@@ -7804,9 +7814,17 @@ async fn previous_release_fleet_upgrades_to_marks_and_one_member_rolls_back() {
     .await;
 
     // `o` rolls back: the host stops recording marks, and its next lifecycle write is a claim.
-    o.stop();
-    o.binary = old.clone();
-    o.start().await;
+    if let Some(restored) = previous_release_rollback(&mut o, &old, &recovery).await {
+        assert!(view(&restored, &before).await.is_some(), "recovery lost the release's mail");
+        assert!(view(&restored, &winner).await.is_none(), "recovery contains post-upgrade mail");
+        o.binary = PathBuf::from(st3());
+        o.start().await;
+        wait_until("the current member still reads the host's marks after reopening", 90, || async {
+            view(&o, &marked).await.is_some_and(|mail| mail["status"] == "read")
+                && view(&o, &staged).await.is_some_and(|mail| mail["status"] == "staged")
+        }).await;
+        return;
+    }
     // The release never reads the kept close: its table and trigger are inert, and it lists the
     // reminders from its own records.
     let listed: Value = o.client().get("/v1/client/messages?limit=200&history=true").await.unwrap();
@@ -8173,6 +8191,7 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
     let mut before = listed(&o).await;
     assert_eq!(before, [(first, "read".to_owned()), (second, "sent".to_owned())]);
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgrade in place: the mail reads the same, and the outbox is there and empty.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -8197,25 +8216,29 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
     o.stop();
     let left = "message/0000000000000e01";
     leave_in_outbox(&o, left, "agent/fleet-sender", 0);
-    o.start().await;
-    let mut rolled_back = before.clone();
-    if release_drains_outbox {
-        // The drain appends to the shard before it deletes the row. Alone, the release seals that
-        // batch only when something asks (a checkpoint, a peer, a leave), so count the claim itself.
-        wait_until("the baseline drains its outbox", 60, || async { outbox(&o).is_empty() }).await;
-        assert_eq!(shard_file_claims(&o, left), 1, "the release drained the queued item to its shard");
-        assert_eq!(graph_messages(&o, left).await, 0, "the release drained the queued item to its shard, not the graph");
-        rolled_back.push((left.to_owned(), "sent".to_owned()));
+    if let Some(restored) = previous_release_rollback(&mut o, &old, &recovery).await {
+        assert_eq!(listed(&restored).await, before, "recovery changed the old reader's mail");
+        assert_eq!(outbox(&o), [left], "the refused downgrade changed the pending outbox");
+    } else {
+        let mut rolled_back = before.clone();
+        if release_drains_outbox {
+            // The drain appends to the shard before it deletes the row. Alone, the release seals that
+            // batch only when something asks (a checkpoint, a peer, a leave), so count the claim itself.
+            wait_until("the baseline drains its outbox", 60, || async { outbox(&o).is_empty() }).await;
+            assert_eq!(shard_file_claims(&o, left), 1, "the release drained the queued item to its shard");
+            assert_eq!(graph_messages(&o, left).await, 0, "the release drained the queued item to its shard, not the graph");
+            rolled_back.push((left.to_owned(), "sent".to_owned()));
+        }
+        assert_eq!(listed(&o).await, rolled_back, "rollback changed the mail");
+        let third = send(&o, "rolled-back").await;
+        before.push((third, "sent".to_owned()));
+        rolled_back = before.clone();
+        if release_drains_outbox {
+            rolled_back.push((left.to_owned(), "sent".to_owned()));
+        }
+        assert_eq!(listed(&o).await, rolled_back);
+        assert_eq!(outbox(&o), if release_drains_outbox { Vec::<String>::new() } else { vec![left.to_owned()] });
     }
-    assert_eq!(listed(&o).await, rolled_back, "rollback changed the mail");
-    let third = send(&o, "rolled-back").await;
-    before.push((third, "sent".to_owned()));
-    rolled_back = before.clone();
-    if release_drains_outbox {
-        rolled_back.push((left.to_owned(), "sent".to_owned()));
-    }
-    assert_eq!(listed(&o).await, rolled_back);
-    assert_eq!(outbox(&o), if release_drains_outbox { Vec::<String>::new() } else { vec![left.to_owned()] });
 
     // Upgrade again: the left message drains to the shard, once, and follows the graph's mail.
     o.stop();
@@ -8489,6 +8512,7 @@ async fn previous_release_beside_members_that_count_stream_mail_alike() {
         assert_eq!(status["invalid_records"], 0, "{}: {status}", node.name);
     }
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgraded in place, the release's member counts the stream mail it already held.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -8496,16 +8520,19 @@ async fn previous_release_beside_members_that_count_stream_mail_alike() {
     wait_until("the upgraded member mirrors what its shard held", 60, || async { agent_mail_counted(&o).await == 3 }).await;
 
     // Rolled back, it keeps those counts and counts nothing new; upgraded again it catches up.
-    o.stop();
-    o.binary = old;
-    o.start().await;
+    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
+    if let Some(restored) = &restored {
+        assert_eq!(agent_mail_counted(restored).await, release_counts);
+    }
     let late = "message/0000000000000c04";
     assert!(append_keyed_stream_item(&b, late, "agent/fleet-other", late).await);
-    wait_until("the rolled-back member holds the late item", 90, || async { shard_file_claims(&o, late) == 1 }).await;
+    if restored.is_none() {
+        wait_until("the rolled-back member holds the late item", 90, || async { shard_file_claims(&o, late) == 1 }).await;
+        assert_eq!(agent_mail_counted(&o).await, if release_mirrors { 4 } else { 3 });
+    }
     for node in [&a, &b] {
         wait_until("each member of this build counts the late item", 60, || async { agent_mail_counted(node).await == 4 }).await;
     }
-    assert_eq!(agent_mail_counted(&o).await, if release_mirrors { 4 } else { 3 });
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
@@ -8631,6 +8658,8 @@ async fn previous_release_beside_members_that_list_stream_mail_to_the_phone() {
     );
     assert!(client_listed(&b, false, 200).await.iter().any(|subject| subject == closed), "b keeps its own lifecycle");
 
+    let pre_upgrade = client_listed(&o, false, 200).await;
+    let recovery = previous_release_archive(&o, root.path());
     // Upgraded in place, the release's member lists the stream mail it already held.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -8641,12 +8670,15 @@ async fn previous_release_beside_members_that_list_stream_mail_to_the_phone() {
     .await;
 
     // Rolled back, then upgraded again, it lists what arrived meanwhile as well.
-    o.stop();
-    o.binary = old;
-    o.start().await;
+    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
+    if let Some(restored) = &restored {
+        assert_eq!(client_listed(restored, false, 200).await, pre_upgrade);
+    }
     let late = "message/0000000000000d03";
     assert!(append_keyed_stream_item(&b, late, "agent/fleet-reader", late).await);
-    wait_until("the rolled-back member holds the late item", 90, || async { shard_file_claims(&o, late) == 1 }).await;
+    if restored.is_none() {
+        wait_until("the rolled-back member holds the late item", 90, || async { shard_file_claims(&o, late) == 1 }).await;
+    }
     o.stop();
     o.binary = PathBuf::from(st3());
     o.start().await;
@@ -8768,6 +8800,7 @@ async fn previous_release_beside_members_that_send_each_message_once_across_stor
     }
     assert_eq!(claim["subject"], legacy);
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgraded in place, the release's member advertises its inbox; rolled back, it stops.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -8776,10 +8809,13 @@ async fn previous_release_beside_members_that_send_each_message_once_across_stor
         newest_start_advertises(&a, "o", "messages_stream_inbox").await
     })
     .await;
-    o.stop();
-    o.binary = old;
-    o.start().await;
-    if !release_inbox {
+    if let Some(restored) = previous_release_rollback(&mut o, &old, &recovery).await {
+        assert_eq!(graph_sent_claims(&restored, legacy).await, 1);
+        assert_eq!(graph_sent_claims(&restored, streamed).await, 0);
+        o.binary = PathBuf::from(st3());
+        o.start().await;
+        assert!(newest_start_advertises(&o, "o", "messages_stream_inbox").await);
+    } else if !release_inbox {
         wait_until("the rolled-back member's start no longer advertises it", 90, || async {
             !newest_start_advertises(&a, "o", "messages_stream_inbox").await
         })
@@ -8899,6 +8935,7 @@ async fn previous_release_beside_members_that_route_mail_by_the_recipients_host(
         .await;
     }
 
+    let recovery = previous_release_archive(&o, root.path());
     // Upgraded in place, the release routes its sends too.
     o.stop();
     o.binary = PathBuf::from(st3());
@@ -8910,16 +8947,20 @@ async fn previous_release_beside_members_that_route_mail_by_the_recipients_host(
     let upgraded = agent_send(&o, b_seat, "route-from-upgraded-o").await;
     assert!(upgraded["created_index"].as_u64().unwrap() > base, "{upgraded}");
     // Rolled back, its sends are graph claims again, and it lists what it holds.
-    o.stop();
-    o.binary = old;
-    o.start().await;
-    let rolled_back = agent_send(&o, b_seat, "route-from-rolled-back-o").await;
+    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
+    let rollback = restored.as_ref().unwrap_or(&o);
+    let rolled_back = agent_send(rollback, b_seat, "route-from-rolled-back-o").await;
     assert!(rolled_back["created_index"].as_u64().unwrap() < base, "{rolled_back}");
     if release_inbox {
         wait_until("the rolled-back member still lists the stream mail it holds", 60, || async {
-            client_listed(&o, false, 200).await.contains(&to_o_subject)
+            client_listed(rollback, false, 200).await.contains(&to_o_subject)
         })
         .await;
+    }
+    if restored.is_some() {
+        o.binary = PathBuf::from(st3());
+        o.start().await;
+        assert_eq!(held(&o, upgraded["subject"].as_str().unwrap()).await, (0, 1));
     }
     for node in [&a, &b, &o] {
         let status = node.st_json(&["replication", "status"]);
