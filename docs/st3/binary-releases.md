@@ -205,8 +205,9 @@ After a `main` run of **Fractal tag release** passes every job, its last job (`r
 moves one GitHub pre-release, tagged `edge`, to that commit. It is a single release that is updated, not
 one release per commit. It builds nothing: it takes the run's `fractal-release` artifact, re-checks the
 checksums and the source recorded in each archive, uploads source-qualified staging copies, and moves
-the tag before replacing the fixed-name archives and `.sha256` files, then `SHA256SUMS`, then
-`RELEASE.json` alone as the final source commit marker (separate sequential uploads).
+the tag before replacing the fixed-name archives and `.sha256` files one file at a time, then
+`SHA256SUMS`, then `RELEASE.json` alone as the source commit marker. A multi-file `gh release upload`
+can upload concurrently; separate commands enforce alias and sidecar ordering.
 It then removes stale assets and rewrites the notes, which give the exact source commit, a link to the run,
 and the merged pull request titles since the previous edge (at most 30).
 Archives carry no tag in `BUILD.json`; `source` identifies the commit.
@@ -215,12 +216,15 @@ Archives carry no tag in `BUILD.json`; `source` identifies the commit.
   daily release, `latest/download` and the default installer ignore it.
 - Edge has no upgrade-impact section. Read the changes since the previous edge before installing it on a
   store that holds work, and take a [claim backup](backups.md) first.
-- A run older than either the edge tag or the source in `RELEASE.json` changes nothing. An equal-source
-  run changes nothing when both agree; when they differ it repairs the split. Runs share the release
-  mutation lock. A failed tag move preserves the previous fixed-name assets and manifest.
+- The candidate must descend from (or equal) both the edge tag and `RELEASE.json` source; newer or
+  divergent published sources refuse publication. Needed history is fetched explicitly; fetch and
+  ancestry lookup errors fail closed. Equal-source runs verify assets and notes, repair unfinished
+  cleanup/notes, and otherwise change nothing. Runs share the release mutation lock.
+  A failed tag move preserves the previous fixed-name assets and manifest.
 - Between the tag move and alias replacement, installers briefly receive the previous binaries.
-  During replacement a download can pair a new archive with an old checksum; the installer fails
-  closed on the mismatch, so retry after a minute. An interrupted replacement converges on the next run.
+  The installer verifies each archive's `.sha256` sidecar, not `SHA256SUMS`: a consistent new pair
+  can install before `SHA256SUMS` is replaced. A mismatched pair fails closed; retry after a minute.
+  An interrupted replacement or finalization converges on the next run.
 - The `edge` tag is excluded from the tag trigger, and a tag moved with the workflow's token starts no workflow.
 - `scripts/release-fractal-edge --dry-run --source SHA --dist DIRECTORY` verifies a downloaded artifact
   and prints the notes without publishing.

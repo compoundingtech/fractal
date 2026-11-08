@@ -8,8 +8,8 @@ Needs contents: write.
 There is one release, tagged `edge`, never one per commit. Each call replaces its assets with the
 archives, checksums and RELEASE.json of SOURCE, rewrites its notes with the commits since the
 previous edge, and moves the tag to SOURCE. It is a pre-release, so `latest` and the daily
-versioned release (which reads the latest release) ignore it. A run older than either the
-current edge tag or manifest changes nothing; an equal-source run repairs only a split state.
+versioned release (which reads the latest release) ignore it. Publication only moves forward from
+both the current tag and manifest; equal-source retries finish interrupted cleanup and notes.
 """
 import argparse
 import json
@@ -46,7 +46,10 @@ def gh(*args, **options):
 
 
 def is_ancestor(repo, older, newer):
-    return run('git', 'merge-base', '--is-ancestor', older, newer, cwd=repo, check=False).returncode == 0
+    result = run('git', 'merge-base', '--is-ancestor', older, newer, cwd=repo, check=False)
+    if result.returncode not in (0, 1):
+        raise SystemExit('release-fractal-edge: ancestry lookup failed; refusing publication')
+    return result.returncode == 0
 
 
 def changelog(repo, previous, source):
@@ -120,12 +123,10 @@ def manifest_source(repository, assets):
 
 
 def stale(repo, source, tag, manifest):
-    # Equal-source retries must repair a partial publication, including the historical
-    # manifest-ahead-of-tag split. A complete equal-source publication is a no-op.
-    if tag == manifest == source:
-        return True
-    return any(value and value != source and is_ancestor(repo, source, value)
-               for value in (tag, manifest))
+    revisions = sorted({value for value in (source, tag, manifest) if value})
+    shallow = run('git', 'rev-parse', '--is-shallow-repository', cwd=repo).stdout.strip() == 'true'
+    run('git', 'fetch', '--no-tags', *(['--unshallow'] if shallow else []), 'origin', *revisions, cwd=repo)
+    return any(value and not is_ancestor(repo, value, source) for value in (tag, manifest))
 
 
 def main():
@@ -150,9 +151,21 @@ def main():
     previous = tag_commit(repository)
     published_source = manifest_source(repository, existing)
     if stale(repo, args.source, previous, published_source):
-        say(f'edge already has the same or newer source (tag {previous}, manifest {published_source}); leaving it unchanged')
+        say(f'edge has a newer or divergent source (tag {previous}, manifest {published_source}); leaving it unchanged')
         return 0
     body = notes(args.source, previous, repo, args.run_url)
+    title = f'Fractal edge ({args.source[:9]})'
+    complete_source = previous == published_source == args.source
+    if complete_source:
+        metadata = json.loads(gh('release', 'view', TAG, '--repo', repository,
+                                 '--json', 'body,name,isPrerelease').stdout)
+        notes_complete = (metadata['name'] == title and metadata['isPrerelease']
+                          and f'Exact source: `{args.source}`.' in metadata['body'])
+        if notes_complete:
+            body = metadata['body']
+            if existing == set(names):
+                say(f'{TAG} already verified at {args.source}; leaving it unchanged')
+                return 0
     if args.dry_run:
         print(body)
         say(f'dry run: would publish {len(names)} assets as {TAG} at {args.source}')
@@ -161,7 +174,6 @@ def main():
     notes_file = pathlib.Path(tempfile.mkdtemp(prefix='fractal-edge-')) / 'NOTES.md'
     notes_file.write_text(body)
     files = [str(dist / n) for n in names]
-    title = f'Fractal edge ({args.source[:9]})'
     if existing is None:
         # A create that timed out may still have made the release, with some of its assets.
         gh('release', 'create', TAG, '--repo', repository, '--target', args.source, '--prerelease',
@@ -172,7 +184,7 @@ def main():
         lacking = [str(dist / n) for n in names if n not in present]
         if lacking:
             gh('release', 'upload', TAG, '--repo', repository, '--clobber', *lacking)
-    else:
+    elif not complete_source:
         # Existing installers require fixed archive names. Stage immutable copies without
         # touching those aliases or the manifest until the tag update has succeeded.
         with tempfile.TemporaryDirectory(prefix='fractal-edge-assets-') as directory:
@@ -187,8 +199,9 @@ def main():
         if tag_commit(repository) != args.source:
             gh('api', '--method', 'PATCH', f'repos/{repository}/git/refs/tags/{TAG}',
                '-f', f'sha={args.source}', '-F', 'force=true', done=lambda: tag_commit(repository) == args.source)
-        aliases = [str(dist / n) for n in names if n not in ('SHA256SUMS', 'RELEASE.json')]
-        gh('release', 'upload', TAG, '--repo', repository, '--clobber', *aliases)
+        for name in names:
+            if name not in ('SHA256SUMS', 'RELEASE.json'):
+                gh('release', 'upload', TAG, '--repo', repository, '--clobber', str(dist / name))
         gh('release', 'upload', TAG, '--repo', repository, '--clobber', str(dist / 'SHA256SUMS'))
         # gh may upload multiple files concurrently: publish the manifest alone, last,
         # so it cannot declare a complete source while fixed aliases are still uploading.

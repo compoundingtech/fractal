@@ -38,7 +38,9 @@ for failure in state.get('fail', []):
         break
 if args[:2] == ['release', 'view']:
     if state['release'] is None: fail('release not found')
-    print(json.dumps({'assets': [{'name': n} for n in state['release']['assets']]}))
+    print(json.dumps({'assets': [{'name': n} for n in state['release']['assets']],
+                      'body': state['release']['notes'], 'name': state['release']['title'],
+                      'isPrerelease': state['release']['prerelease']}))
 elif args[:2] == ['release', 'download']:
     print(state['release']['assets']['RELEASE.json'])
 elif args[:2] == ['release', 'create']:
@@ -131,10 +133,17 @@ with tempfile.TemporaryDirectory() as temporary:
         sh('git', 'add', '.', cwd=checkout)
         sh('git', 'commit', '-q', '-m', subject, cwd=checkout)
         commits.append(sh('git', 'rev-parse', 'HEAD', cwd=checkout))
+    sh('git', 'remote', 'add', 'origin', str(checkout), cwd=checkout)
+    tree = sh('git', 'rev-parse', 'HEAD^{tree}', cwd=checkout)
+    divergent = sh('git', 'commit-tree', tree, '-m', 'divergent root', cwd=checkout)
     tools = root / 'tools'
     tools.mkdir()
     (tools / 'gh').write_text(FAKE_GH)
     (tools / 'gh').chmod(0o755)
+    (tools / 'git').write_text('#!/usr/bin/env python3\nimport os, sys\n'
+                              'if os.environ.get("FAKE_ANCESTRY_ERROR") and sys.argv[1] == "merge-base": sys.exit(128)\n'
+                              f'os.execv({shutil.which("git")!r}, ["git", *sys.argv[1:]])\n')
+    (tools / 'git').chmod(0o755)
     state = root / 'state.json'
     state.write_text(json.dumps({'release': None, 'tag': None, 'calls': []}))
     env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}', FAKE_GH_STATE=str(state), GH_REPO='example/project',
@@ -180,9 +189,10 @@ with tempfile.TemporaryDirectory() as temporary:
     uploads = [(index, [Path(path).name for path in call[call.index('--clobber') + 1:]])
                for index, call in enumerate(updates) if call[:2] == ['release', 'upload']]
     patch = next(index for index, call in enumerate(updates) if 'PATCH' in call)
-    assert len(uploads) == 4 and uploads[0][0] < patch < uploads[1][0], uploads
-    assert uploads[2][1] == ['SHA256SUMS'] and uploads[3][1] == ['RELEASE.json'], uploads
-    assert set(uploads[1][1]) == set(first['release']['assets']) - {'SHA256SUMS', 'RELEASE.json'}, uploads
+    assert len(uploads) == 11 and uploads[0][0] < patch < uploads[1][0], uploads
+    assert uploads[-2][1] == ['SHA256SUMS'] and uploads[-1][1] == ['RELEASE.json'], uploads
+    assert all(len(files) == 1 for _, files in uploads[1:]), uploads
+    assert {files[0] for _, files in uploads[1:-2]} == set(first['release']['assets']) - {'SHA256SUMS', 'RELEASE.json'}, uploads
     print('passed: test_manifest_uploaded_alone_after_all_aliases_and_checksums')
 
     # Rerunning the same commit is harmless; a run for an older commit changes nothing at all.
@@ -294,6 +304,39 @@ with tempfile.TemporaryDirectory() as temporary:
     done = publish(commits[2], 'tag-ahead-repair')
     assert done.returncode == 0 and complete(), (done, current())
     print('passed: test_tag_ahead_equal_source_retry_converges')
+
+    for operation, label in (('delete-asset', 'after_manifest_before_cleanup'),
+                             ('edit', 'after_cleanup_before_notes')):
+        done = from_scratch((['release', operation], False, 1, 'HTTP 422: interrupted finalization'),
+                            release=first['release'], tag=commits[0])
+        assert done.returncode != 0 and current()['tag'] == commits[2], (done, current())
+        assert json.loads(current()['release']['assets']['RELEASE.json'])['source'] == commits[2]
+        done = publish(commits[2], label)
+        assert done.returncode == 0 and complete(), (done, current())
+        assert f'Exact source: `{commits[2]}`.' in current()['release']['notes']
+        verified = current()['release']
+        done = publish(commits[2], label + '-verified')
+        assert done.returncode == 0 and current()['release'] == verified
+        print('passed: test_equal_source_repairs_' + label)
+
+    state.write_text(json.dumps({'release': first['release'], 'tag': commits[0], 'calls': []}))
+    done = publish(divergent, 'divergent')
+    assert done.returncode == 0 and 'divergent' in done.stdout
+    assert current()['release'] == first['release'] and current()['tag'] == commits[0]
+    print('passed: test_divergent_source_refused')
+    env['FAKE_ANCESTRY_ERROR'] = '1'
+    done = publish(commits[2], 'lookup-error')
+    del env['FAKE_ANCESTRY_ERROR']
+    assert done.returncode != 0 and 'ancestry lookup failed' in done.stderr, done
+    assert current()['release'] == first['release'] and current()['tag'] == commits[0]
+    print('passed: test_ancestry_lookup_error_refused')
+    absent = json.loads(json.dumps(first['release']))
+    absent['assets']['RELEASE.json'] = json.dumps({'source': 'a' * 40})
+    state.write_text(json.dumps({'release': absent, 'tag': commits[0], 'calls': []}))
+    done = publish(commits[2], 'fetch-error')
+    assert done.returncode != 0 and 'fetch' in done.stderr, done
+    assert current()['release'] == absent and current()['tag'] == commits[0]
+    print('passed: test_missing_history_fetch_failure_refused')
     # Anything but a 5xx or a timeout fails at once.
     done = from_scratch((['release', 'edit'], False, 1, 'HTTP 422: Validation Failed'))
     assert done.returncode != 0 and calls(['release', 'edit']) == 1 and '422' in done.stderr, (done, current())
