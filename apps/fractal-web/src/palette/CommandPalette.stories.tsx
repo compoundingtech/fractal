@@ -82,6 +82,7 @@ const Harness = ({ scheme, phone = false, recent = [] }: HarnessProps) => {
 }
 
 const meta = {
+  excludeStories: ['scenarioExemptions'],
   title: 'Workspace/Command palette',
   component: Harness,
   parameters: {
@@ -92,6 +93,20 @@ const meta = {
   args: { scheme: 'dark' },
 } satisfies Meta<typeof Harness>
 export default meta
+
+// Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
+export const scenarioExemptions: readonly string[] = [
+  'Empty:contract-fixture',
+  'EmptyLight:contract-fixture',
+  'LiveFixtures:contract-fixture',
+  'Naming:contract-fixture',
+  'Phone:contract-fixture',
+  'PhoneLight:contract-fixture',
+  'SaidInConversations:contract-fixture',
+  'Scoping:contract-fixture',
+  'Targets:contract-fixture',
+  'Typing:contract-fixture',
+]
 type Story = StoryObj<typeof meta>
 
 const body = () => within(document.body)
