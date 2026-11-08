@@ -33,6 +33,7 @@ async fn fixture() -> (tempfile::TempDir, AppState, ClientSession) {
     let mut state = super::tests::test_state_named(root.path(), "browser-issuer");
     state.owning_person = Some("person/operator".into());
     state.browser_pairing_login = Some("owner@example.test".into());
+    state.store.set_ask_deadlines(true);
     let session = paired_device(&state, ALL_SCOPES, "owner-phone").await;
     (root, state, session)
 }
@@ -245,6 +246,7 @@ async fn browser_pairing_authorizes_only_the_exact_browser_to_send_thread_messag
     let mut state = super::tests::test_state_named(root.path(), "browser-thread-issuer");
     state.owning_person = Some("person/operator".into());
     state.browser_pairing_login = Some("owner@example.test".into());
+    state.store.set_ask_deadlines(true);
     state.store.configure_thread_write_rollout([]);
     state.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
     let owner = paired_device(&state, ALL_SCOPES, "owner-phone").await;
