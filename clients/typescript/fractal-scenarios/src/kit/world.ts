@@ -6,6 +6,7 @@ import { missionDetails } from './missionDetails.ts'
 import { fork, rngFromSeed } from './rng.ts'
 import type { RecordedTransport } from './recording.ts'
 import { SLICE_KINDS, type AnySlice, type Slice, type SliceKind, type TimelineEvent } from './slice.ts'
+import { withTerminalRuntimes } from './terminalRuntimes.ts'
 import { timeContext } from './time.ts'
 
 export type Slices = { readonly [K in SliceKind]: Slice<K> }
@@ -142,7 +143,11 @@ export const buildWorld = (definition: WorldDefinition, generic: VariantTable, n
       variants[kind] = choice === 'default' ? 'default' : name
     }
   }
-  const selected = slices as unknown as Slices
+  const built = slices as unknown as Slices
+  // Recorded and caller-supplied rosters keep exactly what they say.
+  const selected: Slices = built.roster.source._tag === 'recorded' || variants.roster === 'custom'
+    ? built
+    : { ...built, roster: withTerminalRuntimes(built.roster, built.terminal) }
   const world: World = {
     id: definition.id,
     title: definition.title,
