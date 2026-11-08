@@ -79,8 +79,14 @@ try {
     await afterPaint(); await afterPaint()
     facts.split = panes().map(node => node.getBoundingClientRect().width)
     expect(panes().every(node => asideOf(node) === null), 'a half-width pane shows its aside by default')
-    // Opening one pane's panel opens only that one, on the kind's remembered tab.
+    // The new pane is focused and empty: open the other agent there. An empty pane has no panel and no toggle.
     const second = panes()[1]!
+    expect(toggleOf(second) === null || second.querySelector('[data-pane-slot-content] [data-workspace-empty]') === null, 'an empty pane offers a panel toggle')
+    window.history.pushState(null, '', `/w/${agents[1]!.id}`)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    await until(() => toggleOf(panes()[1]!) !== null, 'the second pane panel toggle')
+    expect(asideOf(panes()[1]!) === null, 'a half-width pane shows its aside by default')
+    // Opening one pane's panel opens only that one, on the kind's remembered tab.
     press(toggleOf(second), 'second pane toggle')
     await until(() => asideOf(second) !== null, 'the second pane aside')
     expect(asideOf(panes()[0]!) === null, 'opening one pane opened another')
