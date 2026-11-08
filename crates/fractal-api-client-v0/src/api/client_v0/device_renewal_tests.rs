@@ -102,3 +102,65 @@ async fn renewal_refuses_explicitly_withdrawn_source_and_bad_pending_proof() {
     let request=serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"device_public_key":old.public(),"timestamp_unix_ms":client_now_ms(),"signature":"invalid"})).unwrap();
     assert!(pending(State(state),Json(request)).await.is_err());
 }
+
+#[tokio::test]
+async fn renewal_signatures_cover_every_offer_field_and_candidate() {
+    let (_root,state,old,source)=fixture();
+    staged(&state,&source).await;
+    let offered=poll(&state,&old).await.unwrap().0;
+    let offer=&offered["renewals"][0];
+    let stage=matching_claims(&state,STAGED,"old_public_key",old.public()).unwrap().remove(0);
+    let candidate=MemberKey::generate().unwrap().0;
+    let nonce=offer["nonce"].as_str().unwrap();
+    let expiry=offer["expires_at_unix_ms"].as_u64().unwrap();
+    let bytes=approval_bytes(&stage,nonce,expiry,candidate.public()).unwrap();
+    let signature=old.sign(&bytes);
+    assert!(smallclaims::principal::verify_key_signature(old.public(),&bytes,&signature));
+    for name in ["renewal_id","migration_epoch","issuer_member","person_id","scopes","old_public_key"] {
+        let mut changed=stage.clone();
+        changed.body["fields"][name]=if name=="scopes" { json!(["control.messages"]) } else { json!("changed") };
+        assert!(!smallclaims::principal::verify_key_signature(old.public(),&approval_bytes(&changed,nonce,expiry,candidate.public()).unwrap(),&signature),"{name}");
+    }
+    for bytes in [
+        approval_bytes(&stage,"different",expiry,candidate.public()).unwrap(),
+        approval_bytes(&stage,nonce,expiry+1,candidate.public()).unwrap(),
+        approval_bytes(&stage,nonce,expiry,old.public()).unwrap(),
+    ] {
+        assert!(!smallclaims::principal::verify_key_signature(old.public(),&bytes,&signature));
+    }
+}
+
+#[tokio::test]
+async fn renewal_gateway_routes_accept_key_proofs_without_reviving_old_bearer() {
+    use axum::body::{Body,to_bytes};
+    use axum::http::Request;
+    use tower::ServiceExt as _;
+    let (_root,state,old,source)=fixture();
+    staged(&state,&source).await;
+    let app=crate::api::fabric_router(state.clone());
+    let timestamp=client_now_ms() as u64;
+    let proof=format!("fractal-device-renewal-pending-v1\n{}",json!([old.public(),timestamp]));
+    let response=app.clone().oneshot(Request::builder().method("POST")
+        .uri("/v1/client/pairings/renewals/pending").header("Content-Type","application/json")
+        .body(Body::from(json!({"api_version":CLIENT_API_VERSION,"device_public_key":old.public(),"timestamp_unix_ms":timestamp,"signature":old.sign(proof.as_bytes())}).to_string())).unwrap()).await.unwrap();
+    let status=response.status();
+    let body:Value=serde_json::from_slice(&to_bytes(response.into_body(),1_048_576).await.unwrap()).unwrap();
+    assert_eq!(status,StatusCode::OK,"{body}");
+    let offer=&body["value"]["renewals"][0];
+    let candidate=MemberKey::generate().unwrap().0;
+    let request=approval(offer,&old,&candidate);
+    let response=app.clone().oneshot(Request::builder().method("POST")
+        .uri("/v1/client/pairings/renewals/complete").header("Content-Type","application/json")
+        .body(Body::from(json!({"api_version":request.api_version,"renewal_id":request.renewal_id,"device_public_key":request.device_public_key,"candidate_public_key":request.candidate_public_key,"key_storage":request.key_storage,"nonce":request.nonce,"expires_at_unix_ms":request.expires_at_unix_ms,"old_signature":request.old_signature,"candidate_signature":request.candidate_signature}).to_string())).unwrap()).await.unwrap();
+    let status=response.status();
+    let body:Value=serde_json::from_slice(&to_bytes(response.into_body(),1_048_576).await.unwrap()).unwrap();
+    assert_eq!(status,StatusCode::OK,"{body}");
+    assert_eq!(body["value"]["scopes"],json!(["read.projections"]));
+    let response=app.clone().oneshot(Request::builder().uri("/v1/client/resources")
+        .header("Authorization","Bearer old-bearer").body(Body::empty()).unwrap()).await.unwrap();
+    assert!(!response.status().is_success());
+    let response=app.oneshot(Request::builder().method("POST")
+        .uri("/v1/client/pairings/renewals/stage").header("Content-Type","application/json")
+        .body(Body::from("{}")).unwrap()).await.unwrap();
+    assert!(!response.status().is_success());
+}

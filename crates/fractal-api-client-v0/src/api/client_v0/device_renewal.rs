@@ -54,33 +54,43 @@ fn fresh_id() -> Result<String, ApiError> {
     getrandom::fill(&mut bytes).map_err(ApiError::internal)?;
     Ok(hex::encode(bytes))
 }
-fn claims(state: &AppState, kind: &str) -> Result<Vec<ClaimRecord>, ApiError> {
-    Ok(state.store.claims_for_kind_at(kind, None, true, 10_000).map_err(ApiError::internal)?.claims)
+fn matching_claims(state: &AppState, kind: &str, name: &str, value: &str) -> Result<Vec<ClaimRecord>, ApiError> {
+    let ids = {
+        let connection = state.store.readers.get();
+        let mut statement = connection.prepare("SELECT id FROM claims WHERE kind=?1 AND origin=?2 AND json_extract(body,?3)=?4 ORDER BY store_index DESC").map_err(ApiError::internal)?;
+        let rows = statement.query_map(rusqlite::params![kind, state.store.origin(), format!("$.fields.{name}"), value], |row| row.get::<_, String>(0))
+            .map_err(ApiError::internal)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(ApiError::internal)?
+    };
+    ids.into_iter().map(|id| state.store.claim_by_id(&id).map_err(ApiError::internal)?
+        .ok_or_else(|| ApiError::internal("renewal record unavailable"))).collect()
 }
-fn local_record(state: &AppState, claim: &ClaimRecord) -> bool {
-    claim.origin == state.store.origin()
-        && fractal_store::trusted_pairing_fields(claim.actor.as_deref(), &claim.body["fields"])
+fn local_record(state: &AppState, claim: &ClaimRecord) -> Result<bool, ApiError> {
+    Ok(claim.origin == state.store.origin()
+        && state.store.client_operation_is_trusted(claim).map_err(ApiError::internal)?)
 }
 fn record(state: &AppState, subject: &str, kind: &str) -> Result<Option<ClaimRecord>, ApiError> {
-    Ok(state.store.claims_for_subject_kind_at(subject, kind, None, true, 1)
-        .map_err(ApiError::internal)?.claims.into_iter().find(|claim| local_record(state, claim)))
+    let claim = state.store.claims_for_subject_kind_at(subject, kind, None, true, 1)
+        .map_err(ApiError::internal)?.claims.into_iter().next();
+    match claim {
+        Some(claim) if local_record(state, &claim)? => Ok(Some(claim)),
+        _ => Ok(None),
+    }
 }
 fn append(state: &AppState, subject: String, kind: &str, person: &str, mut fields: BTreeMap<String, Value>, expected: Option<String>, evidence: Vec<String>) -> Result<ClaimRecord, ApiError> {
-    fields.insert("pairing_operation_version".into(), json!(1));
     fields.insert("person_id".into(), json!(person));
-    state.store.append_claim(&ClaimInput {
+    state.store.append_client_operation_claim(&ClaimInput {
         subject, kind: kind.into(), actor: Some(person.into()), fields, evidence,
         expected_subject: expected.map(Some), idempotency_key: None,
     }).map_err(ApiError::bad)
 }
 fn not_revoked(state: &AppState, source: &ClaimRecord) -> Result<(), ApiError> {
     let device = text(source, "device_id")?;
-    if claims(state, "custom.client.pairing-revoked")?.iter().any(|claim| {
-        claim.subject == source.subject
-            || field(claim, "device_id").as_str() == Some(device)
-    }) {
-        return Err(forbidden("the source device was withdrawn"));
-    }
+    let withdrawn: bool = state.store.readers.get().query_row(
+        "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.client.pairing-revoked' AND (subject=?1 OR json_extract(body,'$.fields.device_id')=?2))",
+        rusqlite::params![source.subject, device], |row| row.get(0),
+    ).map_err(ApiError::internal)?;
+    if withdrawn { return Err(forbidden("the source device was withdrawn")); }
     let person = text(source, "person_id")?;
     let key = text(source, "device_public_key")?;
     let revoked: bool = state.store.readers.get().query_row(
@@ -128,10 +138,8 @@ pub async fn stage(State(state): State<AppState>, Extension(session): Extension<
         || !(1..=168).contains(&request.expires_in_hours)
         || request.allow_digest.len() != 64 || !request.allow_digest.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     { return Err(validation("renewal requires an epoch, audited grant digest, and expiry of 1 to 168 hours")); }
-    let source = claims(&state, "custom.client.pairing-completed")?.into_iter().find(|claim| {
-        claim.origin == state.store.origin()
-            && field(claim, "device_id").as_str() == Some(request.device_id.as_str())
-            && serde_json::to_string(&claim.body).ok().is_some_and(|body| credential_digest(&body) == request.allow_digest)
+    let source = matching_claims(&state, "custom.client.pairing-completed", "device_id", &request.device_id)?.into_iter().find(|claim| {
+        serde_json::to_string(&claim.body).ok().is_some_and(|body| credential_digest(&body) == request.allow_digest)
     }).ok_or_else(|| forbidden("no device grant matches the explicitly allowed digest"))?;
     if text(&source, "person_id")? != session.authority_actor { return Err(forbidden("the source device belongs to another person")); }
     not_revoked(&state, &source)?;
@@ -175,8 +183,8 @@ pub async fn pending(State(state): State<AppState>, Json(request): Json<Pending>
         || !smallclaims::principal::verify_key_signature(&request.device_public_key, proof.as_bytes(), &request.signature)
     { return Err(forbidden("the renewal key proof is invalid")); }
     let mut renewals = Vec::new();
-    for stage in claims(&state, STAGED)? {
-        if !local_record(&state, &stage) || field(&stage,"old_public_key").as_str() != Some(request.device_public_key.as_str())
+    for stage in matching_claims(&state, STAGED, "old_public_key", &request.device_public_key)? {
+        if !local_record(&state, &stage)? || field(&stage,"old_public_key").as_str() != Some(request.device_public_key.as_str())
             || field(&stage,"expires_at_unix_ms").as_u64().is_none_or(|expiry| u128::from(expiry) <= now)
             || record(&state, &stage.subject, CONSUMED)?.is_some()
         { continue; }
@@ -194,7 +202,7 @@ pub async fn pending(State(state): State<AppState>, Json(request): Json<Pending>
     Ok(Json(json!({"kind":"device-renewals","renewals":renewals})))
 }
 
-pub async fn complete(State(state): State<AppState>, Extension(session): Extension<ClientSession>, Json(request): Json<Complete>) -> Result<Json<Value>, ApiError> {
+pub async fn complete(State(state): State<AppState>, Extension(_session): Extension<ClientSession>, Json(request): Json<Complete>) -> Result<Json<Value>, ApiError> {
     version(&request.api_version)?;
     if request.device_public_key.len() > 160 || request.candidate_public_key.len() > 160
         || request.old_signature.len() > 256 || request.candidate_signature.len() > 256
@@ -226,24 +234,66 @@ pub async fn complete(State(state): State<AppState>, Extension(session): Extensi
         || !smallclaims::principal::verify_key_signature(&request.candidate_public_key, &bytes, &request.candidate_signature)
     { return Err(forbidden("the renewal approval does not match its keys and offer")); }
     let person = text(&stage,"person_id")?;
-    append(&state, subject, CONSUMED, person, BTreeMap::from([
-        ("renewal_id".into(),json!(request.renewal_id)),("old_public_key".into(),json!(request.device_public_key)),
-        ("candidate_key_digest".into(),json!(credential_digest(&request.candidate_public_key))),
-        ("issuer_member".into(),json!(state.node)),("approved_at_unix_ms".into(),json!(now)),
-    ]), Some(stage.id.clone()), vec![stage.id.clone(),challenge.id])?;
-    let pairing = fresh_id()?;
-    let code = fresh_id()?;
+    let candidate = &request.candidate_public_key;
+    let scopes = field(&stage, "scopes").clone();
+    let signs = scopes.as_array().is_some_and(|values| values.contains(&json!("control.messages")));
+    let mut prepared = None;
+    let enrollment = if signs {
+        let revoked: bool = state.store.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='principal.key-revoked' AND json_extract(body,'$.fields.key')=?2)",
+            rusqlite::params![person, candidate], |row| row.get(0),
+        ).map_err(ApiError::internal)?;
+        if revoked { return Err(forbidden("the replacement key was withdrawn")); }
+        let chain = state.store.enroll_device_key(person, candidate, "Renewed device (secure enclave)").map_err(ApiError::bad)?;
+        prepared = Some(PreparedDeviceGrant { state: &state, person, key: candidate, accepted: false });
+        state.store.seal_local_batches().map_err(ApiError::internal)?;
+        let proofs = signature_grant_proofs(&state, &chain)?.ok_or_else(|| forbidden("the member cannot prove the replacement grants"))?;
+        fractal_client::device::verify_device_key_proofs(person, &chain, &proofs, candidate).map_err(ApiError::internal)?;
+        Some((chain, proofs))
+    } else { None };
+    let root = if enrollment.is_none() { pairing_root_proof(&state, person)? } else { None };
+    let credential = fresh_id()?;
+    let device_hash = credential_digest(candidate);
+    let device_id = format!("device/{}", &device_hash[..24]);
+    let actor = format!("{person}/session/{}", &device_hash[..16]);
+    let expires = now + 30 * DAY_MS;
+    let consumed = ClaimInput {
+        subject, kind: CONSUMED.into(), actor: Some(person.into()),
+        fields: BTreeMap::from([
+            ("person_id".into(),json!(person)),("renewal_id".into(),json!(request.renewal_id)),
+            ("old_public_key".into(),json!(request.device_public_key)),
+            ("candidate_key_digest".into(),json!(device_hash)),
+            ("issuer_member".into(),json!(state.node)),("approved_at_unix_ms".into(),json!(now)),
+        ]), evidence: vec![stage.id.clone(),challenge.id.clone()], expected_subject: Some(Some(stage.id.clone())), idempotency_key: None,
+    };
     let mut fields = BTreeMap::from([
-        ("pairing_id".into(),json!(format!("pairing/{pairing}"))),
-        ("device_name".into(),json!("Renewed device")),("scopes".into(),field(&stage,"scopes").clone()),
-        ("code_hash".into(),json!(credential_digest(&code))), ("expires_at_unix_ms".into(),json!(now+300_000)),
+        ("person_id".into(),json!(person)),("pairing_id".into(),json!(format!("pairing/{}",fresh_id()?))),
+        ("device_id".into(),json!(device_id)),("session_actor".into(),json!(actor)),
+        ("delegated_by".into(),json!(person)),("credential_hash".into(),json!(credential_digest(&credential))),
+        ("device_public_key".into(),json!(candidate)),("scopes".into(),scopes.clone()),
+        ("delegated_scopes".into(),scopes.clone()),("expires_at_unix_ms".into(),json!(expires)),
     ]);
-    if field(&historical,"fabric_node_id").is_string() { fields.insert("fabric_gateway".into(),json!(true)); }
-    append(&state,format!("custom/client/pairing-{pairing}"),"custom.client.pairing-begun",person,fields,None,vec![stage.id])?;
-    pairing_complete(State(state),Extension(session),AxumPath(pairing),Json(PairingComplete {
-        api_version: request.api_version, code, device_public_key: request.candidate_public_key,
-        key_storage: Some(request.key_storage),fabric_node_id:field(&historical,"fabric_node_id").as_str().map(str::to_owned),
-    })).await
+    if let Some(node) = field(&historical,"fabric_node_id").as_str() {
+        fields.insert("fabric_node_id".into(),json!(node));
+    }
+    let replacement = ClaimInput {
+        subject: format!("custom/client/pairing-{}",fresh_id()?), kind: "custom.client.pairing-completed".into(),
+        actor: Some(person.into()), fields, evidence: vec![stage.id.clone()],
+        expected_subject: None, idempotency_key: None,
+    };
+    state.store.commit_device_renewal(&stage, &historical, &challenge, &consumed, &replacement).map_err(ApiError::internal)?;
+    if let Some(guard) = &mut prepared { guard.accepted = true; }
+    signal_changed(&state);
+    let mut result = json!({"kind":"paired-session","device_id":device_id,"person_id":person,"session_actor":actor,"credential":credential,"scopes":scopes,"expires_at":client_timestamp(expires)});
+    if let Some((chain, proofs)) = enrollment {
+        result["device_key_chain"] = json!(chain);
+        result["device_key_proofs"] = json!(proofs);
+    }
+    if let Some(root) = root { result["person_root_key_proof"] = root; }
+    if let Some(node) = field(&historical,"fabric_node_id").as_str() {
+        result["fabric_grant"] = crate::fabric_gateway::grant(&state.state_dir,node).await.to_json();
+    }
+    Ok(Json(result))
 }
 static RENEWAL_COMPLETIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
