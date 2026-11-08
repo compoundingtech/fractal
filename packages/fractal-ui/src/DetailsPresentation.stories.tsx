@@ -707,7 +707,8 @@ async function checkPlainCopy(root:HTMLElement,targets:readonly HTMLElement[]){
   for(const target of targets){const allowed=root.ownerDocument.createElement('span');allowed.textContent=` ${allowedMatched}.`;target.append(allowed);try{assertPlainCopy(root)}finally{allowed.remove()}}
   assertPlainCopy(root)
 }
-const productionTail=`${tailPrefix}Workspace, Subagents, Declared bindings, Missions, Pull requests, CI runs, Reviews, Files touched, History.`
+// Reviews and Declared bindings live in the Resources tab and Missions in the agent's mission rows, so Details never names them.
+const productionTail=`${tailPrefix}Workspace, Subagents, Pull requests, CI runs, Files touched, History.`
 const identityGap='Production phone identity paints a missing fact, a dangling separator or a redundant empty mission'
 /** Identity and meta carry only known facts; `Mission none` paints only when it is the sole Overview fact. */
 function assertProductionIdentity(root:HTMLElement){
