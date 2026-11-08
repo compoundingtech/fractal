@@ -321,8 +321,10 @@ must be a string; malformed values never fall back to another identity. Every gu
 is validated before dependency resolution, including guards after an inactive predicate.
 A guard is active when its option strings intersect the referenced question's effective
 selection; it does not search every imported tree for a matching number. A missing effective
-answer or a withdrawn dependency leaves the guard inactive. Malformed guards are defects
-rather than guessed cross-tree links. Inactive guarded requests are `moot`. A parent-linked reframe suppresses its
+answer, an omitted optional response selection, or a withdrawn dependency leaves the guard
+inactive without a defect. Malformed guard predicates remain defects rather than guessed
+cross-tree links. Defects disqualify approval only for their affected requests, not unrelated
+person-answered requests. Inactive guarded requests are `moot`. A parent-linked reframe suppresses its
 parent only while the child's guards are active; an inactive branch cannot erase a pending
 parent. An active child still suppresses its parent when the child itself has been withdrawn.
 Guard evaluation uses an explicit traversal stack rather than recursive calls, so deep

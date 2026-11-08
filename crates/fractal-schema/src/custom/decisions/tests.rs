@@ -20,6 +20,47 @@ fn guard_on_off_and_assumptions_stay_open() {
         assert_eq!(folded.requests[1].status, expected);
     }
 }
+
+#[test]
+fn optional_response_selection_does_not_defect_or_block_independent_approval() {
+    for kind in ["assumed", "recorded"] {
+        let claims = vec![request("r1", 1),
+            claim("response", kind, 4, json!({"request":"r1","recorder":"agent/owner",
+                "responder":"original spelling","quote":"free text","rationale":"proceed"})),
+            claim("r2", "requested", 2, json!({"q":2,"applies_when":[{"q":1,"selection":["yes"]}]})),
+            request("independent", 3),
+            claim("approved", "answered", 5, json!({"request":"independent","selection":["yes"]}))];
+        let folded = result(&claims);
+        assert!(folded.defects.is_empty(), "{kind}: {:?}", folded.defects);
+        assert_eq!(folded.requests[1].status, Status::Moot);
+        assert!(folded.requests[2].approval_gate);
+    }
+}
+
+#[test]
+fn response_defects_only_disqualify_the_affected_request() {
+    for defect in ["fork", "provenance", "duplicate"] {
+        let mut claims = vec![request("bad", 1),
+            claim("bad-answer", "answered", 4, json!({"request":"bad","selection":["yes"]})),
+            request("independent", 2),
+            claim("approved", "answered", 5, json!({"request":"independent","selection":["yes"]}))];
+        match defect {
+            "fork" => {
+                for id in ["first", "second"] {
+                    claims.push(claim(id, "answered", 6,
+                        json!({"request":"bad","selection":["yes"],"supersedes":"bad-answer"})));
+                }
+            }
+            "provenance" => claims.push(claim("invalid", "provenance", 6,
+                json!({"target":"bad","written_ms":{"unknown":"not damaged"}}))),
+            _ => claims.push(request("duplicate", 1)),
+        }
+        let folded = result(&claims);
+        assert!(!folded.defects.is_empty(), "{defect}");
+        assert!(!folded.requests[0].approval_gate, "{defect}");
+        assert!(folded.requests[1].approval_gate, "{defect}");
+    }
+}
 #[test]
 fn parent_linked_reframe_withdrawn_and_ask_links() {
     let claims = vec![request("r1",1), claim("r2","requested",2,json!({"q":2,"parent":"r1"})),
@@ -217,7 +258,8 @@ fn nonstring_guard_scope_and_decision_are_defects_not_fallbacks() {
             let folded = result(&claims);
             assert!(folded.defects.iter().any(|d| d == "invalid guards: r2"), "{field}");
             assert_eq!(folded.requests[1].status, Status::Moot, "{field}");
-            assert!(folded.requests.iter().all(|r| !r.approval_gate), "{field}");
+            assert!(folded.requests[0].approval_gate, "{field}");
+            assert!(!folded.requests[1].approval_gate, "{field}");
         }
     }
 }
@@ -246,7 +288,8 @@ fn malformed_guards_are_validated_before_short_circuit_or_dependency_resolution(
             let folded = result(&claims);
             assert!(folded.defects.iter().any(|d| d == "invalid guards: r2"), "{guard}");
             assert_eq!(folded.requests[1].status, Status::Moot);
-            assert!(folded.requests.iter().all(|r| !r.approval_gate));
+            assert!(folded.requests[0].approval_gate);
+            assert!(!folded.requests[1].approval_gate);
         }
     }
     // Even the first guard's malformed selection is detected with no answer to read.

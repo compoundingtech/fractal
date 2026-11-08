@@ -78,23 +78,30 @@ pub fn approval_gate(answer: &Claim, claims: &[Claim]) -> bool {
 pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a> {
     let requests: Vec<_> = claims.iter().filter(|c| c.is("requested")).collect();
     let mut defects = Vec::new();
+    let mut invalid_requests = BTreeSet::new();
     let mut source_times = BTreeMap::new();
     for p in claims.iter().filter(|claim| claim.is("provenance")) {
         match provenance_time(p, claims) {
             Ok(Some(time)) => { source_times.insert(p.id.as_str(), time); }
             Ok(None) => {}
-            Err(reason) => defects.push(format!("invalid provenance time: {}: {reason}", p.id)),
+            Err(reason) => {
+                defects.push(format!("invalid provenance time: {}: {reason}", p.id));
+                if let Some(target) = claims.iter().find(|c| Some(c.id.as_str()) == p.text("target")) {
+                    invalid_requests.insert(target.text("request").unwrap_or(&target.id));
+                }
+            }
         }
     }
     let provenance: BTreeMap<_, _> = claims.iter().filter(|c| c.is("provenance"))
         .filter_map(|c| c.text("target").map(|target| (target, c))).collect();
     let scope = |c: &'a Claim| provenance.get(c.id.as_str())
         .and_then(|p| p.text("source_scope")).unwrap_or(subject);
-    let mut keys = BTreeSet::new();
+    let mut keys = BTreeMap::new();
     for request in &requests {
         if let Some(q) = request.fields.get("q").and_then(Value::as_i64)
-            && !keys.insert((scope(request), q)) {
+            && let Some(previous) = keys.insert((scope(request), q), request.id.as_str()) {
             defects.push(format!("duplicate request key: {}:{q}", scope(request)));
+            invalid_requests.extend([previous, request.id.as_str()]);
         }
     }
     let latest = |request: &Claim, kind: &str| claims.iter()
@@ -103,6 +110,7 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
     let mut answers = BTreeMap::new();
     let mut assumptions = BTreeMap::new();
     for request in &requests {
+        let prior_defects = defects.len();
         for assumption in [false, true] {
         let candidates: Vec<_> = claims.iter().filter(|c|
             (if assumption { c.is("assumed") } else { c.is("answered") || c.is("recorded") })
@@ -155,6 +163,7 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
         if assumption { assumptions.insert(request.id.as_str(), chosen); }
         else { answers.insert(request.id.as_str(), chosen); }
         }
+        if defects.len() != prior_defects { invalid_requests.insert(request.id.as_str()); }
     }
     // Validate every guard before resolving any dependencies, even when an earlier
     // predicate is false. Malformed evidence must never become approval eligible.
@@ -216,7 +225,7 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
                                 && c.text("request") == Some(&dependency.id));
                             if *active && !withdrawn && guard.get("option").is_none()
                                 && answer.is_some_and(|answer|
-                                    !answer.fields.get("selection").is_some_and(Value::is_array)) {
+                                    answer.fields.get("selection").is_some_and(|value| !value.is_array())) {
                                 self.defects.push(format!("invalid guard selection: {}", request.id));
                             }
                             let matches = *active && !withdrawn
@@ -258,7 +267,7 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
         scopes: requests.iter().map(|r| (r.id.as_str(), scope(r))).collect(),
         active: BTreeMap::new(), invalid: invalid_guards, defects: Vec::new() };
     for request in &requests { guards.evaluate(request); }
-    let mut output: Vec<_> = requests.iter().map(|request| {
+    let output = requests.iter().map(|request| {
         let answer = answers[request.id.as_str()];
         let assumed = assumptions[request.id.as_str()].is_some();
         let status = if !guards.active[request.id.as_str()] { Status::Moot }
@@ -268,15 +277,13 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
         let open = status == Status::Pending;
         let ask_links: Vec<_> = claims.iter().filter(|c| c.is("ask_linked") && c.text("request") == Some(&request.id)).map(|c| &c.fields).collect();
         Request { request: &request.id, source_scope: scope(request), q: request.fields.get("q").and_then(Value::as_i64),
-            approval_gate: status == Status::Answered && answer.is_some_and(|a| approval_gate(a, claims)),
+            approval_gate: !invalid_requests.contains(request.id.as_str())
+                && status == Status::Answered && answer.is_some_and(|a| approval_gate(a, claims)),
             status, assumed, open, answer: answer.map(|a| a.id.as_str()),
             needs_ask: open && ask_links.is_empty()
                 && !subject.starts_with("custom/decision/tree/v2/legacy/"), ask_links }
     }).collect();
     defects.extend(guards.defects);
-    if !defects.is_empty() {
-        for request in &mut output { request.approval_gate = false; }
-    }
     Fold { basis, requests: output, defects }
 }
 
