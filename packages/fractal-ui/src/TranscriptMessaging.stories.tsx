@@ -59,7 +59,7 @@ const items: readonly ConversationItem[] = [
   notice('v5/irc', '10:41', 'irc', 'reviewer → harbor-sdk', 'I found no caller that needs the old fallback.', { _tag: 'Irc', from: 'reviewer', to: 'harbor-sdk', payload: 'I found no caller that needs the old fallback.', raw: '' }),
   notice('v5/keycheck', '10:42', 'subagent-result', 'KeyCheck · completed · 1m45s', 'No actionable defects found. Not a release approval.', { _tag: 'SubagentResult', taskId: 'KeyCheck', agent: 'reviewer', status: 'completed', duration: '1m45s', payload: '{"summary":"No actionable defects found."}', raw: '' }),
   notice('v5/job42', '10:42', 'background-job', 'Background job 42 failed', 'Browser launch failed before checks could run.', { _tag: 'BackgroundJob', jobId: 'job_42', label: 'Background job 42', state: 'failed', duration: '47s', payload: 'Browser launch failed before checks could run.\n\nexit 1', raw: '' }),
-  notice('v5/audit', '10:43', 'subagent-result', 'ManifestAudit · timed out · 10m00s', 'Stopped after 10m without a verdict.', { _tag: 'SubagentResult', taskId: 'ManifestAudit', agent: 'task', status: 'failed (timed out)', duration: '10m00s', error: 'Stopped after 10m without a verdict.', payload: 'Stopped after 10m without a verdict.', raw: '' }),
+  notice('v5/audit', '10:43', 'subagent-result', 'ManifestAudit · failed · 10m00s', 'Stopped after 10m without a verdict.', { _tag: 'SubagentResult', taskId: 'ManifestAudit', agent: 'task', status: 'failed (exit 124)', duration: '10m00s', abortReason: 'Timed out after 10m', error: 'Stopped after 10m without a verdict.', payload: 'Stopped after 10m without a verdict.', raw: '' }),
   notice('v5/compaction', '10:43', 'compaction', 'Context compacted', 'Automatic · 4 sections', { _tag: 'Compaction', payload: '## Goal\nRotate the reader keys.', raw: '' }),
   prose('v5/prose-3', '10:44', 'Two items still wait on others: the Keysmith brief and the box3 confirmation.'),
 ]
@@ -108,7 +108,7 @@ const play: Story['play'] = async ({ canvasElement, args }) => {
   for (const id of ['v5/keycheck', 'v5/job42', 'v5/audit']) await expect(card(canvasElement, id)).toHaveAttribute('data-testid', 'message-row')
   await expect(within(card(canvasElement, 'v5/job42')).queryByTestId('message-kind')).toBeNull()
   await expect(within(card(canvasElement, 'v5/keycheck')).getByTestId('message-kind')).toHaveTextContent('Subagent')
-  await expect(card(canvasElement, 'v5/compaction')).toHaveAttribute('data-testid', 'harness-notice')
+  await expect(card(canvasElement, 'v5/compaction').querySelector('[data-testid=harness-notice]')).not.toBeNull()
   await expect(within(card(canvasElement, 'v5/prose')).queryByTestId('message-sender')).toBeNull()
   // Failures and timeouts: red edge and red status word, never a red fill.
   for (const id of ['v5/job42', 'v5/audit']) {

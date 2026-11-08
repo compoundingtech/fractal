@@ -36,7 +36,7 @@ export interface MessageParticipants {
 /** How a message-like item is drawn: a person's or agent's card, a machine result's row, or neither (regular output). */
 export type MessageShape =
   | { readonly _tag: 'Card'; readonly participants: MessageParticipants; readonly kindWord?: string; readonly subject?: string; readonly text?: string; readonly attachments?: readonly Attachment[] }
-  | { readonly _tag: 'Row'; readonly participants: MessageParticipants; readonly kindWord: string; readonly statusWord: string; readonly failed: boolean; readonly excerpt: string; readonly icon?: IconName; readonly notice: HarnessNotice }
+  | { readonly _tag: 'Row'; readonly participants: MessageParticipants; readonly kindWord: string; readonly statusWord?: string; readonly failed: boolean; readonly excerpt: string; readonly icon?: IconName; /** What Read names: a result, or a machine's message. */ readonly noun: 'result' | 'message'; readonly notice: HarnessNotice }
 
 const fallbackFrom = (item: MessageItem): MessageParticipant => {
   const writer = item.author ?? item.from
@@ -58,10 +58,12 @@ export function messageShape(item: ConversationItem, hostParticipants: MessagePa
   switch (notice._tag) {
     case 'Interjection': return { _tag: 'Card', participants: { from: { label: notice.from, kind: 'person' }, ...to(notice.to), involvesPerson: true }, kindWord: 'Interjection', text: notice.payload }
     case 'Irc': return { _tag: 'Card', participants: { from: { label: notice.from, kind: 'agent' }, ...to(notice.to), involvesPerson: false }, kindWord: 'IRC', text: notice.payload }
-    case 'Delivery': return { _tag: 'Card', participants: { from: { label: notice.from, kind: 'agent' }, ...to(notice.to), involvesPerson: false }, ...(notice.subject === undefined ? {} : { subject: notice.subject }), text: notice.payload }
-    case 'SubagentResult': return { _tag: 'Row', participants: { from: { label: notice.taskId, kind: 'subagent' }, involvesPerson: false }, kindWord: 'Subagent', statusWord: notice.status, failed: harnessOutcomeTone(notice) === 'failed', excerpt: item.text, notice }
-    case 'BackgroundJob': return { _tag: 'Row', participants: { from: { label: notice.label ?? item.title, kind: 'machine' }, involvesPerson: false }, kindWord: 'Background job', statusWord: backgroundJobStateLabel(notice.state), failed: harnessOutcomeTone(notice) === 'failed', excerpt: item.text, icon: 'clock', notice }
-    case 'BackgroundJobGroup': return { _tag: 'Row', participants: { from: { label: item.title, kind: 'machine' }, involvesPerson: false }, kindWord: 'Background jobs', statusWord: backgroundJobStateLabel(backgroundJobGroupLead(notice.outcomes)), failed: harnessOutcomeTone(notice) === 'failed', excerpt: item.text, icon: 'clock', notice }
+    // Fractal's own mail (a wake, a restart handoff) is a machine's message: a row.
+    case 'Delivery': if (item.sender?.kind === 'system') return { _tag: 'Row', participants: { from: { label: notice.from, kind: 'machine' }, ...to(notice.to), involvesPerson: false }, kindWord: 'Wake', failed: false, excerpt: item.title, noun: 'message', notice }
+      return { _tag: 'Card', participants: { from: { label: notice.from, kind: 'agent' }, ...to(notice.to), involvesPerson: false }, ...(notice.subject === undefined ? {} : { subject: notice.subject }), text: notice.payload }
+    case 'SubagentResult': return { _tag: 'Row', participants: { from: { label: notice.taskId, kind: 'subagent' }, involvesPerson: false }, kindWord: 'Subagent', statusWord: notice.status, failed: harnessOutcomeTone(notice) === 'failed', excerpt: item.text, noun: 'result', notice }
+    case 'BackgroundJob': return { _tag: 'Row', participants: { from: { label: notice.label ?? item.title, kind: 'machine' }, involvesPerson: false }, kindWord: 'Background job', statusWord: backgroundJobStateLabel(notice.state), failed: harnessOutcomeTone(notice) === 'failed', excerpt: item.text, icon: 'clock', noun: 'result', notice }
+    case 'BackgroundJobGroup': return { _tag: 'Row', participants: { from: { label: item.title, kind: 'machine' }, involvesPerson: false }, kindWord: 'Background jobs', statusWord: backgroundJobStateLabel(backgroundJobGroupLead(notice.outcomes)), failed: harnessOutcomeTone(notice) === 'failed', excerpt: item.text, icon: 'clock', noun: 'result', notice }
     default: return undefined
   }
 }
@@ -154,9 +156,9 @@ export function MessageRow({ item, shape, layout = noLayout }: { readonly item: 
   return <MessagePrimitive.Root {...hover} data-testid="message-row" data-item-id={item.id} data-item-kind={item._tag} data-failed={shape.failed || undefined} {...stylex.props(styles.row, shape.failed && styles.rowFailed)}>
     <Disclosure isExpanded={expanded} onExpandedChange={setExpanded}>
       <MessageHead shape={shape} layout={layout} at={item.at} hovered={hovered} trailing={<>
-        <span data-testid="message-status" {...stylex.props(styles.statusWord, shape.failed && styles.statusFailed)}>{shape.failed && <Icon name="x" size={12} />}{shape.statusWord}</span>
+        {shape.statusWord !== undefined && <span data-testid="message-status" {...stylex.props(styles.statusWord, shape.failed && styles.statusFailed)}>{shape.failed && <Icon name="x" size={12} />}{shape.statusWord}</span>}
         <span data-testid="message-excerpt" {...stylex.props(styles.excerpt)}>{shape.excerpt}</span>
-        <Button slot="trigger" aria-label={expanded ? 'Hide result' : 'Read result'} data-testid="message-row-trigger" {...stylex.props(styles.rowTrigger)}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={12} /></Button>
+        <Button slot="trigger" aria-label={`${expanded ? 'Hide' : 'Read'} ${shape.noun}`} data-testid="message-row-trigger" {...stylex.props(styles.rowTrigger)}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={12} /></Button>
       </>} />
       <DisclosurePanel><div {...stylex.props(styles.rowPanel)}><HarnessNoticeDetail notice={shape.notice} /></div></DisclosurePanel>
     </Disclosure>
@@ -181,9 +183,10 @@ const styles = stylex.create({
   head: { display: 'flex', alignItems: 'center', gap: s.md, minWidth: 0, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   names: { display: 'flex', alignItems: 'baseline', minWidth: 0, flex: '1 1 auto', overflow: 'hidden', whiteSpace: 'nowrap' },
   name: { minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis', color: ink.fg, fontWeight: t.weightMedium },
-  recipient: { minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis' },
-  meta: { flexShrink: 0 },
-  subject: { minWidth: 0, flexShrink: 2, overflow: 'hidden', textOverflow: 'ellipsis' },
+  // 'pre' keeps the leading space a flex item would otherwise drop.
+  recipient: { whiteSpace: 'pre', minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis' },
+  meta: { whiteSpace: 'pre', flexShrink: 0 },
+  subject: { whiteSpace: 'pre', minWidth: 0, flexShrink: 2, overflow: 'hidden', textOverflow: 'ellipsis' },
   time: { flexShrink: 0, marginInlineStart: 'auto', fontVariantNumeric: 'tabular-nums' },
   // Same-minute times wait for hover or focus on their message.
   timeHidden: { opacity: 0 },

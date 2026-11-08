@@ -355,7 +355,8 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, 
     const shape = stranded?.has(item.id) === true ? undefined : messageShape(item, turn.participants?.[item.id])
     if (shape === undefined) return undefined
     const { from, to } = shape.participants
-    return { id: item.id, sender: from.ref ?? from.label, ...(to === undefined ? {} : { recipient: to.ref ?? to.label }), at: item.at, failed: shape._tag === 'Row' && shape.failed }
+    // Rows never stack: each machine result keeps its own line.
+    return { id: item.id, ...(shape._tag === 'Card' ? { sender: from.ref ?? from.label } : {}), ...(to === undefined ? {} : { recipient: to.ref ?? to.label }), at: item.at, failed: shape._tag === 'Row' && shape.failed }
   }), { self: [self?.ref, self?.label].filter(key => key !== undefined), ...(Number.isFinite(started) ? { shownAt: started } : {}) })
   const renderItem = (item: ConversationItem, continuation = false, runText?: string) => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <MailNames.Provider key={item.id} value={turn.participants?.[item.id]}><SenderCaption.Provider value={turn.senderCaptions?.[item.id]}><RunContinuation.Provider value={continuation}><RunCopyText.Provider value={runText}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></RunCopyText.Provider></RunContinuation.Provider></SenderCaption.Provider></MailNames.Provider>
   // A shown block continues a prose run when it and the block before it are the same sender's adopted prose.

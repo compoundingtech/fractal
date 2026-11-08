@@ -175,9 +175,11 @@ export const HarnessEvents: Story = {
     // People and agents write cards, machine results are rows, everything else stays a quiet notice row.
     const entries = () => [...canvasElement.querySelectorAll<HTMLElement>('[data-testid=harness-notice], [data-testid=message-card], [data-testid=message-row]')]
     await canvas.findAllByTestId('message-card')
-    await expect(entries().map(entry => entry.dataset.itemId)).toEqual(harnessWeightExamples.slice(-6).map(item => item.id))
-    await userEvent.click(canvas.getByRole('button', { name: 'Show all messages' }))
-    await waitFor(() => expect(canvas.getByTestId('transcript-history-controls')).toHaveAttribute('data-state', 'complete'))
+    // The initial window is the newest rows; how many fill the viewport depends on its height.
+    await expect(entries().map(entry => entry.dataset.itemId)).toEqual(harnessWeightExamples.slice(-entries().length).map(item => item.id))
+    const showAll = canvas.queryByRole('button', { name: 'Show all messages' })
+    if (showAll !== null) await userEvent.click(showAll)
+    await waitFor(() => expect(entries()).toHaveLength(harnessWeightExamples.length))
     await expect(entries().map(entry => entry.dataset.itemId)).toEqual(harnessWeightExamples.map(item => item.id))
     await expect(entries().map(entry => entry.dataset.testid)).toEqual(['harness-notice', 'message-card', 'message-row', 'message-row', 'message-row', 'message-row', 'message-card', 'message-card', 'harness-notice'])
     for (const notice of canvas.getAllByTestId('harness-notice')) await expect(notice).toHaveAttribute('data-harness-weight', 'row')
@@ -195,8 +197,9 @@ export const StrandedHarnessEvents: Story = {
   // Items the runtime never adopted keep the notice row: they have no message runtime to draw a card in.
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    await expect(await canvas.findAllByTestId('harness-notice')).toHaveLength(6)
-    await userEvent.click(canvas.getByRole('button', { name: 'Show all messages' }))
+    await canvas.findAllByTestId('harness-notice')
+    const showAll = canvas.queryByRole('button', { name: 'Show all messages' })
+    if (showAll !== null) await userEvent.click(showAll)
     await waitFor(() => expect(canvas.getAllByTestId('harness-notice').map(notice => notice.dataset.itemId)).toEqual(harnessWeightExamples.map(item => item.id)))
     const failed = canvas.getAllByTestId('harness-notice').find(notice => notice.dataset.itemId === 'weight/failed-job')!
     await expect(within(failed).getByTestId('harness-kind')).toHaveTextContent('failed')

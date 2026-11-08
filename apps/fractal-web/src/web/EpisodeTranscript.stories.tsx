@@ -63,7 +63,7 @@ const assertEpisodes: NonNullable<Story['play']> = async ({ canvasElement }) => 
   await expect(people[1]).toHaveTextContent('Also bump the lockfile.')
   await expect(within(people[1]!).getByTestId('user-redelivered')).toHaveTextContent('Delivered to the agent 2 times')
   // A wake's whole body is behind Read message, as Markdown.
-  const wake = canvas.getAllByTestId('harness-notice')[0]!
+  const wake = canvas.getAllByTestId('message-row')[0]!
   await userEvent.click(within(wake).getByRole('button', { name: 'Read message' }))
   await expect(within(wake).getByTestId('harness-payload')).toHaveTextContent('Wake: automatic attempt 1 (ready)')
   // One card per message: sender, subject, then body; unresolved refs read as their last segment. Mail to this
@@ -79,8 +79,12 @@ const assertEpisodes: NonNullable<Story['play']> = async ({ canvasElement }) => 
   // Trigger, work, outcome: one timestamp per episode, and a day line where the day changes.
   const turns = canvas.getAllByTestId('transcript-turn')
   await expect(turns).toHaveLength(5)
-  for (const turn of turns) await expect(within(turn).getAllByTestId('turn-time')).toHaveLength(1)
-  await expect(canvas.queryAllByTestId('message-time')).toHaveLength(0)
+  // A message head shows its own time only when the minute differs from the episode's; otherwise it waits for hover.
+  for (const turn of turns) {
+    await expect(within(turn).getAllByTestId('turn-time')).toHaveLength(1)
+    const episode = within(turn).getByTestId('turn-time').textContent
+    for (const time of within(turn).queryAllByTestId('message-time')) if (time.textContent === episode) await expect(time).toHaveAttribute('data-time-visible', 'false')
+  }
   await expect(canvas.getAllByTestId('transcript-day')).toHaveLength(1)
 }
 export const Dark: Story = { play: assertEpisodes }
