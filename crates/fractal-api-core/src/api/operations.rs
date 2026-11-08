@@ -513,6 +513,7 @@ pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
     let dir = crate::slo_history::dir(&state.state_dir);
     let rows = blocking_store(move || {
         let mut rows = slo_rows(&store)?;
+        rows.extend(crate::readiness_slo::current(&store));
         add_budget_forecasts(&mut rows, &dir, client_now_ms() as u64);
         add_tones(&mut rows);
         Ok(rows)
@@ -709,16 +710,11 @@ pub async fn status(
                 ).with_detail("reason", "notices-unavailable")));
             }
             let mut status = store.status_harness_only(subject)?;
-            crate::store::redact_generic_status_message_relations(&mut status);
+            crate::store::hide_thread_messages_from_generic_status(&mut status);
             status
         } else if query.summary && !query.history && query.owner_run.is_none()
             && let Some(subject) = subject.as_deref().filter(|subject| subject.starts_with("agent/"))
         {
-            if !store.generic_status_subject_visible_at(subject, query.at_index.map_or_else(|| store.index(), Ok)?)? {
-                return Err(anyhow::Error::new(FractalError::new(
-                    "notices-unavailable", "reserved notice facts are unavailable through generic status",
-                ).with_detail("reason", "notices-unavailable")));
-            }
             store.status_summary_at(subject, query.at_index)?
         } else {
             store.status_for_generic_reads(

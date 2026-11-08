@@ -9,9 +9,28 @@ fn message_party_identity(store: &Store, party: &str) -> Result<String, ApiError
     ).map_err(ApiError::bad)
 }
 
+fn bound_recipient(bound: &Option<Extension<BoundAgent>>) -> Option<&str> {
+    bound.as_ref().map(|Extension(agent)| agent.0.as_str())
+}
+
+fn private_mail_filtered(
+    store: &Store,
+    messages: Vec<MessageView>,
+    bound: Option<&str>,
+) -> anyhow::Result<Vec<MessageView>> {
+    let mut visible = Vec::with_capacity(messages.len());
+    for message in messages {
+        if records::raw_message_visible(store, &message, bound)? {
+            visible.push(message);
+        }
+    }
+    Ok(visible)
+}
+
 pub async fn message_delivery(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
+    bound: Option<Extension<BoundAgent>>,
 ) -> Result<Json<Value>, ApiError> {
     let subject = if subject.starts_with("message/") {
         subject
@@ -21,9 +40,7 @@ pub async fn message_delivery(
     let (message, sent_at, host) = {
         let (state, subject) = (state.clone(), subject.clone());
         blocking_api(move || {
-            let message = state
-                .store
-                .message(&subject)
+            let message = records::exact_message(&state.store, &subject, None, bound_recipient(&bound))
                 .map_err(ApiError::internal)?
                 .ok_or_else(|| {
                     ApiError::not_found(format!("message `{subject}` does not exist"))
@@ -78,6 +95,7 @@ pub struct MessageKeyQuery {
 pub async fn message_by_key(
     State(state): State<AppState>,
     Query(query): Query<MessageKeyQuery>,
+    bound: Option<Extension<BoundAgent>>,
 ) -> Result<Json<MessageSendReceipt>, ApiError> {
     let reads = state.clone();
     let mut receipt = blocking_api(move || {
@@ -93,9 +111,7 @@ pub async fn message_by_key(
             .map_err(ApiError::internal)?
             .filter(|claim| claim.kind == "message.sent")
             .ok_or_else(not_sent)?;
-        let message = state
-            .store
-            .message(&claim.subject)
+        let message = records::exact_message(&state.store, &claim.subject, None, bound_recipient(&bound))
             .map_err(ApiError::internal)?
             .ok_or_else(not_sent)?;
         let requested_recipient = message.to.clone();
@@ -318,6 +334,7 @@ pub async fn list_messages_page(
     State(state): State<AppState>,
     Query(query): Query<MessagesPageQuery>,
     peer: Option<Extension<NativeDeliveryPeer>>,
+    bound: Option<Extension<BoundAgent>>,
 ) -> Result<Json<MessagePage>, ApiError> {
     let limit = query.limit.unwrap_or(100).clamp(1, 200);
     let peer = peer.map(|Extension(mut peer)| {
@@ -391,7 +408,7 @@ pub async fn list_messages_page(
     let include_closed = query.include_closed;
     let (mut items, next_after) = blocking_store(move || {
         let filtered = from.is_some() || subject.is_some() || subject_prefix.is_some();
-        let (mut items, next_after) = if filtered {
+        let (items, next_after) = if filtered {
             store.messages_page_filtered(
                 to.as_deref(),
                 from.as_deref(),
@@ -407,8 +424,12 @@ pub async fn list_messages_page(
         } else {
             store.messages_page(to.as_deref(), query.include_closed, after, through, limit)?
         };
+        let mut items = private_mail_filtered(&store, items, bound_recipient(&bound))?;
         mailbox::hold_pre_boot_mail(
             &store, peer.as_ref().map(|peer| &peer.0), to.as_deref(), &mut items,
+        )?;
+        mailbox::attach_polled_thread_context(
+            &store, native, bound_recipient(&bound), to.as_deref(), &mut items,
         )?;
         Ok((items, next_after))
     })
@@ -457,6 +478,7 @@ pub async fn list_messages(
     State(state): State<AppState>,
     Query(query): Query<MessagesQuery>,
     peer: Option<Extension<NativeDeliveryPeer>>,
+    bound: Option<Extension<BoundAgent>>,
 ) -> Result<Json<Vec<MessageView>>, ApiError> {
     let recipient = query.to.as_deref().map(|party| message_party_identity(&state.store, party)).transpose()?;
     let peer = peer.map(|Extension(mut peer)| {
@@ -475,11 +497,12 @@ pub async fn list_messages(
             .is_some_and(|peer| recipient.as_deref() == Some(peer.0.agent.as_str()));
     let include_closed = query.include_closed;
     let mut messages = blocking_store(move || {
-        let mut messages = if native {
+        let messages = if native {
             store.messages_for_delivery_through(recipient.as_deref().unwrap(), store.index()?)?
         } else {
             store.messages(recipient.as_deref(), query.include_closed)?
         };
+        let mut messages = private_mail_filtered(&store, messages, bound_recipient(&bound))?;
         mailbox::hold_pre_boot_mail(
             &store, peer.as_ref().map(|peer| &peer.0), recipient.as_deref(), &mut messages,
         )?;
@@ -499,6 +522,7 @@ pub async fn list_messages(
 pub async fn read_message(
     State(state): State<AppState>,
     AxumPath(subject): AxumPath<String>,
+    bound: Option<Extension<BoundAgent>>,
 ) -> Result<Json<MessageRead>, ApiError> {
     let subject = if subject.starts_with("message/") {
         subject
@@ -507,7 +531,9 @@ pub async fn read_message(
     };
     let store = state.store.clone();
     let lookup = subject.clone();
-    let mut message = blocking_store(move || store.message(&lookup))
+    let mut message = blocking_store(move || records::exact_message(
+        &store, &lookup, None, bound_recipient(&bound),
+    ))
         .await?
         .ok_or_else(|| ApiError::not_found(format!("message `{subject}` does not exist")))?;
     // The recipient's host keeps how far it got.

@@ -1285,6 +1285,26 @@ licenses and `genie --check`; its key is still the whole tree and its run is abo
 (`scripts/ci-parallel-tests`, `GENIE_FRESHNESS_JOBS`, default 6). The new check has a gate job, a workflow job, a lane, a `scripts/fractal-test` entry and the
 same levels as `genie-freshness`; it is **not a required context of its own** (a head from before the check existed has no run of it, and a required context would block every such head): the `linux-gate` job, which every head reports and which always waits for the long stages, needs it and fails the gate when it failed or was cancelled (`skipped` counts only when its own gate decided to skip), so new heads enforce it and old heads are unaffected.
 
+Daily iOS delivery's Python integration suite also runs in this sparse lane.
+`scripts/ios-release-delivery-test` executes
+`apps/ios/scripts/test_release_delivery.py` unchanged; its two declared app inputs
+are that suite and `apps/ios/scripts/release_delivery.py`. It uses real temporary
+Git repositories and executable tool fixtures, not Apple tools or a device.
+The entrypoint is first in the six-process parallel pool so its runtime overlaps
+the other self-tests instead of adding a serial tail. There is no per-suite
+timeout in `parallel_tests`; the hosted `ci-script-tests` job has a 20-minute
+budget including setup. Hosted Ubuntu runners use ordinary Git, not the local
+agent push wrapper, so this lane does not rename fixture branches or use an adapter.
+
+The devnet helper Python suites run via
+`TMPDIR=/tmp python3 -m unittest discover -s apps/fractal-web/scripts/devnet -p '*_test.py'`
+in the same hosted lane. The entire devnet script directory is declared in the
+sparse projection, evidence inputs and lane definition, covering helper imports
+and future discovered suites. The five pinned bubblewrap isolation smoke tests
+remain opt-in (`candidate_sandbox_test.py --real`); discovery runs their unit coverage.
+The short temporary root keeps Unix socket fixtures within the platform's path
+limit even when `nix develop` provides a longer `TMPDIR`.
+
 `isolation-vm` and `mail-redelivery-canaries` had entries of their own with the same list until 2026-10-23, when they moved to the daily
 run; they have no policy entry now, so nothing on a pull request or in the queue waits on them.
 

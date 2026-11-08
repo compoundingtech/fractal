@@ -52,6 +52,8 @@ pub fn fractal_message_reference(msg: &Message) -> Option<&str> {
 /// The st3 bridge records the graph recipient and the SHA-256 of the exact graph body on each
 /// projected inbox file, because the inbox round trip may add a trailing newline to the body.
 pub const FRACTAL_TO_TAG: &str = "st3-to:";
+/// A trusted topic context carried between the seat delivery client and its file-backed driver.
+pub const FRACTAL_DELIVERY_THREAD_TAG: &str = "st3-delivery-thread:";
 pub const FRACTAL_SHA256_TAG: &str = "st3-sha256:";
 /// One tag per attachment on a projected message: [`AttachmentNotice`] as percent-escaped JSON.
 pub const FRACTAL_ATTACHMENT_TAG: &str = "st3-attachment:";
@@ -71,6 +73,7 @@ fn fractal_tag<'a>(msg: &'a Message, prefix: &str) -> Option<&'a str> {
         "st3-message:" => "fractal-message:",
         FRACTAL_TO_TAG => "fractal-to:",
         FRACTAL_SHA256_TAG => "fractal-sha256:",
+        FRACTAL_DELIVERY_THREAD_TAG => FRACTAL_DELIVERY_THREAD_TAG,
         _ => return None,
     };
     let prefix = fractal_tag_family(&msg.tags, prefix, renamed);
@@ -94,7 +97,13 @@ fn fractal_body_preview(body: &str) -> (String, bool) {
 
 /// The plain ST3 notice. Claude receives it inside its own channel tag.
 /// The graph remains the source of the complete message when the preview is bounded.
-pub fn fractal_ping_text(reference: &str, from: &str, subject: Option<&str>, body: &str) -> String {
+pub fn fractal_ping_text(
+    reference: &str,
+    from: &str,
+    subject: Option<&str>,
+    body: &str,
+    delivery_thread: Option<&str>,
+) -> String {
     let person_message = from.starts_with("person/");
     let from = normalize_field(Some(from), "unknown", SENDER_MAX_CHARS);
     let subject = normalize_field(subject, "(no subject)", SUBJECT_MAX_CHARS);
@@ -108,8 +117,7 @@ pub fn fractal_ping_text(reference: &str, from: &str, subject: Option<&str>, bod
         format!("{header}\n\n{preview}")
     };
     if person_message {
-        notice.push('\n');
-        notice.push_str(PERSON_REPLY_INSTRUCTION);
+        append_reply_instruction(&mut notice, reference, delivery_thread);
     }
     notice
 }
@@ -194,6 +202,7 @@ pub struct AssistantMessageMetadata<'a> {
 pub struct NotificationMetadata<'a> {
     pub attachments: &'a [AttachmentNotice],
     pub assistant: Option<&'a AssistantMessageMetadata<'a>>,
+    pub delivery_thread: Option<&'a str>,
 }
 
 /// The attachment envelope for an ordinary message, without assistant metadata.
@@ -208,7 +217,7 @@ pub fn fractal_notification_with_attachments(
 ) -> String {
     fractal_notification_with_metadata(
         reference, from, to, subject, body, body_sha256,
-        NotificationMetadata { attachments, assistant: None },
+        NotificationMetadata { attachments, assistant: None, delivery_thread: None },
     )
 }
 
@@ -224,7 +233,7 @@ pub fn fractal_notification_with_metadata(
     body_sha256: &str,
     metadata: NotificationMetadata<'_>,
 ) -> String {
-    let NotificationMetadata { attachments, assistant } = metadata;
+    let NotificationMetadata { attachments, assistant, delivery_thread } = metadata;
     let person_message = assistant.is_none() && from.starts_with("person/");
     let graph = normalize_field(Some(reference), "message/unknown", ADDRESS_MAX_CHARS);
     let id = graph.strip_prefix("message/").unwrap_or(&graph);
@@ -284,10 +293,27 @@ pub fn fractal_notification_with_metadata(
         envelope.push_str("\n[preview truncated; read the full message in st3]");
     }
     if person_message {
-        envelope.push('\n');
-        envelope.push_str(PERSON_REPLY_INSTRUCTION);
+        append_reply_instruction(&mut envelope, reference, delivery_thread);
     }
     envelope
+}
+
+fn append_reply_instruction(output: &mut String, reference: &str, delivery_thread: Option<&str>) {
+    output.push('\n');
+    if let Some(thread) = delivery_thread {
+        let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
+        output.push_str(&format!(
+            "Reply in this topic with `fractal conversations reply-in-thread {} --quote {} --body TEXT`. Any new question or decision goes through a native work ask.",
+            quote(thread),
+            quote(reference),
+        ));
+    } else {
+        output.push_str(PERSON_REPLY_INSTRUCTION);
+    }
+}
+
+pub(crate) fn fractal_delivery_thread(msg: &Message) -> Option<&str> {
+    fractal_tag(msg, FRACTAL_DELIVERY_THREAD_TAG)
 }
 
 /// Annotate a dictated or silent delivery without changing the durable message or its body digest.
@@ -458,14 +484,18 @@ fn poke_text_with_resolver(
             .filter_map(|tag| AttachmentNotice::from_tag(tag))
             .collect();
         return with_tag_notices(
-            fractal_notification_with_attachments(
+            fractal_notification_with_metadata(
                 reference,
                 msg.from.as_deref().unwrap_or_default(),
                 fractal_tag(msg, FRACTAL_TO_TAG).unwrap_or(recipient),
                 msg.subject.as_deref(),
                 &msg.body,
                 &sha256,
-                &attachments,
+                NotificationMetadata {
+                    attachments: &attachments,
+                    assistant: None,
+                    delivery_thread: fractal_delivery_thread(msg),
+                },
             ),
             &msg.tags,
         );

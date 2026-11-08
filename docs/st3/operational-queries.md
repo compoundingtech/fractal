@@ -1,5 +1,23 @@
 # Operational queries
 
+## Single-subject status reads
+
+`GET /v1/status?subject=SUBJECT` and the CLI's shared single-subject status helper retain
+the full canonical claim ID vector. Subject `show`, `inspect`, and successful non-verdict
+`trace wait` output therefore retain claim provenance; `claims=[]` still proves an empty
+history, not a skipped reduction. Bounded `recent_claims` reads are unchanged. There is no
+`omit_claims` HTTP mode.
+
+Owned-set preview and resource/member reads use an internal `Fields` reduction instead.
+It skips claim IDs, counts and session boundaries, then returns only actual state across
+the store boundary. No `SubjectStatus` or unenumerated `claims=[]` is serialized on that path;
+owned-set wire shapes remain unchanged. This avoids provenance work under those snapshots,
+but actual-state and harness folding can still depend on history.
+A desired-only caller should use `GET /v1/desired/SUBJECT`,
+which reads the desired record without reducing actual state or claims.
+
+## Published operational lists
+
 Mission lists page mission IDs and return compact cards with at most three recent runs and
 twenty step previews per run. Progress counts cover every step; a larger total signals an
 incomplete step preview.

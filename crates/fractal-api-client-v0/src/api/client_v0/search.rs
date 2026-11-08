@@ -46,6 +46,9 @@ struct IndexState {
     checked: Instant,
     refreshing: bool,
     error: Option<String>,
+    refresh_completed: tokio::sync::watch::Sender<bool>,
+    #[cfg(any(test, feature = "test-support"))]
+    local_conversations: usize,
 }
 
 type HeldIndex = Arc<Mutex<IndexState>>;
@@ -101,9 +104,36 @@ fn index_for(
         checked: Instant::now(),
         refreshing: false,
         error: None,
+        refresh_completed: tokio::sync::watch::channel(false).0,
+        #[cfg(any(test, feature = "test-support"))]
+        local_conversations: 0,
     }));
     indexes.insert(key, index.clone());
     Ok(index)
+}
+
+async fn wait_for_refresh(held: &HeldIndex) {
+    let mut completed = held.lock().unwrap().refresh_completed.subscribe();
+    completed.wait_for(|completed| *completed).await
+        .expect("the held search index retains its completion sender");
+}
+
+/// Await the native person's already-started index worker, including its error, without
+/// another HTTP request. Returns indexed text bytes and owner-local conversation count.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn wait_native_index_for_test(
+    store: &Arc<Store>, person: &str,
+) -> anyhow::Result<(usize, usize)> {
+    let key = (Arc::as_ptr(store) as usize, person.to_owned(), false, None);
+    let held = INDEXES.lock().unwrap().get(&key).cloned()
+        .ok_or_else(|| anyhow::anyhow!("the person's native search index has not started"))?;
+    wait_for_refresh(&held).await;
+    let index = held.lock().unwrap();
+    if let Some(error) = &index.error {
+        anyhow::bail!("conversation search index build failed: {error}");
+    }
+    anyhow::ensure!(index.indexed_at.is_some(), "search worker completed without an index");
+    Ok((index.sizes.values().map(|(bytes, _)| bytes).sum(), index.local_conversations))
 }
 
 fn searchable_text(value: &Value, output: &mut String) {
@@ -199,12 +229,11 @@ fn inventory(
             if message.from != session.authority_actor && message.to != session.authority_actor {
                 continue;
             }
-            let claim = state
-                .store
-                .claims_for(&message.subject, Some("message.sent"))?
-                .into_iter()
-                .min_by_key(|claim| claim.store_index);
-            let Some(claim) = claim else {
+            let claims = state.store.claims_for(&message.subject, Some("message.sent"))?;
+            if claims.iter().any(|claim| fractal_schema::threads::message_has_relation(&claim.body)) {
+                continue;
+            }
+            let Some(claim) = claims.into_iter().min_by_key(|claim| claim.store_index) else {
                 continue;
             };
             let agent = [&message.from, &message.to]
@@ -353,7 +382,7 @@ fn local_pages(
     let mut incomplete = Vec::new();
     let mut unavailable = false;
     loop {
-        let page = match timeline_value(&state, &snapshot, &session, &id, &query) {
+        let page = match timeline_value_for_subject(&state, &snapshot, &session, &id, &query, &owner) {
             Ok(Json(page)) => page,
             Err(error) => {
                 incomplete.push(format!("{id}: {}: {}", error.code, error.message));
@@ -428,9 +457,12 @@ fn refresh(
         old,
     } = runtime
         .block_on(crate::api::read_deadline::store_read(&admission_store, move || {
-            inventory(inventory_state, inventory_session, old, old_sizes)
+            let store = inventory_state.store.clone();
+            store.read_snapshot(|_| inventory(inventory_state, inventory_session, old, old_sizes))
         }))
         .map_err(anyhow::Error::from)??;
+    #[cfg(any(test, feature = "test-support"))]
+    let local_conversations = sources.iter().filter(|source| source.remote.is_none()).count();
     for source in sources {
         let Source { id, owner, remote, stamp_unchanged, old_size } = source;
         // Original per-source order: exhausted check, unchanged-skip, then fetch with
@@ -525,7 +557,8 @@ fn refresh(
             let fetch_slots = start_slots;
             let (fetched, used, notes, failed) = runtime
                 .block_on(crate::api::read_deadline::store_read(&admission_store, move || {
-                    local_pages(
+                    let store = local_state.store.clone();
+                    store.read_snapshot(|_| Ok(local_pages(
                         local_state,
                         local_snapshot,
                         local_session,
@@ -533,9 +566,9 @@ fn refresh(
                         local_owner,
                         (fetch_budget, fetch_slots),
                         assistant_text_only,
-                    )
+                    )))
                 }))
-                .map_err(anyhow::Error::from)?;
+                .map_err(anyhow::Error::from)??;
             entries = fetched;
             incomplete.extend(notes);
             unavailable = failed;
@@ -582,6 +615,10 @@ fn refresh(
     index.stamps = stamps;
     index.sizes = sizes;
     index.incomplete = incomplete;
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        index.local_conversations = local_conversations;
+    }
     index.indexed_at = Some(client_timestamp(client_now_ms()));
     Ok(())
 }
@@ -672,6 +709,7 @@ pub async fn search(
             && let Ok(permit) = REFRESHERS.try_acquire()
         {
             index.refreshing = true;
+            index.refresh_completed.send_replace(false);
             let state = state.clone();
             let session = session.clone();
             let held = held.clone();
@@ -684,14 +722,14 @@ pub async fn search(
                 index.refreshing = false;
                 index.checked = Instant::now();
                 index.error = result.err().map(|error| error.to_string());
+                index.refresh_completed.send_replace(true);
             });
         }
     }
     // The first lookup gives a small inventory time to become ready. Large inventories
     // continue in the background; a retry uses that work instead of starting another scan.
-    let start = Instant::now();
-    while held.lock().unwrap().indexed_at.is_none() && start.elapsed() < Duration::from_secs(2) {
-        tokio::time::sleep(Duration::from_millis(25)).await;
+    if held.lock().unwrap().indexed_at.is_none() {
+        let _ = tokio::time::timeout(Duration::from_secs(2), wait_for_refresh(&held)).await;
     }
     crate::api::read_deadline::spawn_blocking(move || search_page(&state, &query, cursor, held, binding, limit))
         .await
@@ -957,6 +995,40 @@ mod tests {
             Some(native["page"]["next_cursor"].as_str().unwrap().to_owned()), 1,
             "grant-a-policy-1").await.unwrap_err();
         assert_eq!(error.code, "validation-failed");
+    }
+
+    #[tokio::test]
+    async fn ordinary_search_leaves_thread_mail_in_its_thread() {
+        use crate::store::thread_metadata::{Edit, PersonAuthority, apply};
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::api::tests_shared::state(root.path());
+        let person = "person/alex";
+        let agent = "agent/sender";
+        let thread = "thread/private-search";
+        state.store.configure_thread_write_rollout([]);
+        apply(&state.store, person, thread, "create-private-search", Edit::Create {
+            agent, title: "Search test",
+        }).unwrap();
+        crate::store::thread_delivery::append_reply(
+            &state.store,
+            &ClaimInput {
+                subject: "message/thread-search".into(), kind: "message.sent".into(), actor: Some(person.into()),
+                fields: serde_json::from_value(json!({
+                    "from": person, "to": agent, "content": "orchid private thread", "status": "sent",
+                    "thread_id": thread,
+                })).unwrap(),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: Some("send-private-search".into()),
+            },
+            PersonAuthority::TrustedLocal,
+            None,
+        ).unwrap();
+        claim(&state, "message/ordinary-search", "message.sent",
+            json!({"from":person, "to":agent, "content":"orchid ordinary mail"}));
+        let native = read(&state, person, query("orchid", 200)).await.unwrap();
+        let items = native["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1, "{native}");
+        assert_eq!(items[0]["entry_id"], "message/ordinary-search");
+        assert!(!native.to_string().contains("private thread"));
     }
 
     #[tokio::test]

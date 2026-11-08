@@ -8315,9 +8315,7 @@ impl Store {
                         break;
                     }
                     let prepared = prepared_envelope::prepare_envelope(
-                        envelope,
-                        &*self.runtime,
-                        Some(row.clone()),
+                        envelope, &*self.runtime, Some(row.clone()),
                     );
                     prepared_bytes += prepared.bytes;
                     outcome.verify += prepared.verify;

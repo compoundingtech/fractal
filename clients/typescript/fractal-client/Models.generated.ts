@@ -36,6 +36,7 @@ export type ActionCommon = {
   | "review.request-changes"
   | "message.send"
   | "message.read"
+  | "thread.read"
   | "message.close"
   | "launch.create"
   | "launch.revise"
@@ -894,7 +895,7 @@ export type AssistantPairingBegin = {
   scopes: Array<AssistantScope>;
 };
 
-export type AssistantPrincipal = "assistant/chatgpt";
+export type AssistantPrincipal = "assistant/chatgpt" | "assistant/mcp";
 
 export type AssistantProjection = 
   "summary"
@@ -1059,6 +1060,7 @@ export type Attention = ResourceHeader & {
   step_run_id?: Id;
   target_states?: Array<AttentionTargetState>;
   targets?: Array<Id>;
+  thread_unread?: boolean;
   title: string;
   update?: PersonUpdate;
   variant_id?: Id;
@@ -1345,21 +1347,28 @@ export type ClientDiagnosticsBatch = {
   version: 1;
 };
 
-export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; agent?: never; capability?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
+export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; agent?: never; attention_thread_hints?: never; capability?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
   collection: "thread-timeline";
   id: string;
   kind: "subscribe";
   limit?: number;
   subject: string;
   trace?: SubscribeTraceContext;
-} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; status?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
+} & { actor?: never; agent?: never; agents_publication_version?: never; attention_thread_hints?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; status?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
   collection: "threads";
   id: string;
   kind: "subscribe";
   limit?: number;
   thread_context: ThreadCollectionContext;
   trace?: SubscribeTraceContext;
-} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
+} & { actor?: never; agent?: never; agents_publication_version?: never; attention_thread_hints?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
+  collection: "threads";
+  id: string;
+  kind: "subscribe";
+  limit?: number;
+  subject: string;
+  trace?: SubscribeTraceContext;
+} & { actor?: never; agent?: never; agents_publication_version?: never; attention_thread_hints?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; status?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
   actor?: string | null;
   collection: "commands";
   id: string;
@@ -1367,7 +1376,7 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   limit?: number;
   status?: string | null;
   trace?: SubscribeTraceContext;
-} & { agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; subject?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
+} & { agent?: never; agents_publication_version?: never; attention_thread_hints?: never; capability?: never; conversation?: never; incarnation?: never; person?: never; since_ms?: never; subject?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
   actor?: null;
   collection: "clients" | "usage" | "machines" | "devices" | "sessions" | "terminals";
   id: string;
@@ -1378,8 +1387,9 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   status?: null;
   trace?: SubscribeTraceContext;
   until_ms?: number;
-} & { agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; subject?: never; terminal?: never; thread_context?: never; }) | ({
+} & { agent?: never; agents_publication_version?: never; attention_thread_hints?: never; capability?: never; conversation?: never; incarnation?: never; subject?: never; terminal?: never; thread_context?: never; }) | ({
   actor?: string | null;
+  attention_thread_hints?: boolean;
   collection: "missions" | "attention" | "work" | "glasses" | "summary";
   id: string;
   kind: "subscribe";
@@ -1397,7 +1407,7 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   person?: string | null;
   status?: string | null;
   trace?: SubscribeTraceContext;
-} & { agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; subject?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
+} & { agents_publication_version?: never; attention_thread_hints?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; subject?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
   collection: "arrangements";
   id: string;
   kind: "subscribe";
@@ -1405,14 +1415,14 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   person: ArrangementPerson;
   subject?: ArrangementId;
   trace?: SubscribeTraceContext;
-} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
+} & { actor?: never; agent?: never; agents_publication_version?: never; attention_thread_hints?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
   collection: "ordered-memberships";
   id: string;
   kind: "subscribe";
   limit?: number;
   person: ArrangementPerson;
   subject: ArrangementId;
-} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; thread_context?: never; trace?: never; until_ms?: never; }) | ({
+} & { actor?: never; agent?: never; agents_publication_version?: never; attention_thread_hints?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; thread_context?: never; trace?: never; until_ms?: never; }) | ({
   capability: string;
   collection: "terminal";
   id: string;
@@ -1420,16 +1430,16 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   kind: "subscribe";
   terminal: Id;
   trace?: SubscribeTraceContext;
-} & { actor?: never; agent?: never; agents_publication_version?: never; conversation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; thread_context?: never; until_ms?: never; }) | ({
+} & { actor?: never; agent?: never; agents_publication_version?: never; attention_thread_hints?: never; conversation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; thread_context?: never; until_ms?: never; }) | ({
   collection: "conversation";
   conversation: Id;
   id: string;
   kind: "subscribe";
   trace?: SubscribeTraceContext;
-} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
+} & { actor?: never; agent?: never; agents_publication_version?: never; attention_thread_hints?: never; capability?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; thread_context?: never; until_ms?: never; }) | ({
   id: string;
   kind: "unsubscribe";
-} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; collection?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; thread_context?: never; trace?: never; until_ms?: never; }));
+} & { actor?: never; agent?: never; agents_publication_version?: never; attention_thread_hints?: never; capability?: never; collection?: never; conversation?: never; incarnation?: never; limit?: never; person?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; thread_context?: never; trace?: never; until_ms?: never; }));
 
 export type CollectionFrame = ((AgentsSnapshotChunk & { base_revision?: never; code?: never; header?: never; membership?: never; message?: never; older_cursor?: never; removes?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; upserts?: never; value?: never; }) | (AgentsChanges & { chunk_count?: never; chunk_index?: never; code?: never; header?: never; items?: never; membership?: never; message?: never; older_cursor?: never; replace?: never; retryable?: never; session_id?: never; sync?: never; value?: never; }) | ({
   collection: "thread-timeline";
@@ -1910,6 +1920,7 @@ export type ErrorCode = (
   | "idempotency-conflict"
   | "legacy-action-receipt-untrusted"
   | "issuer-required"
+  | "pairing-origin-required"
   | "suspend-authored-session-selection"
   | "stale-fence"
   | "cursor-gap"
@@ -3395,7 +3406,7 @@ export type ScgReadAuthorizationPayload = {
   execution_id: string;
   expires_at_unix_ms: number;
   grant_id: Id;
-  identity: "chatgpt";
+  identity: "chatgpt" | "mcp";
   issuer: PersonId;
   key_id: string;
   max_response_bytes: AssistantResponseBytes;
@@ -3835,6 +3846,12 @@ export type ThreadMessageEvent = {
   id: Id;
   kind: "message";
   thread_quote_id: (Id | null);
+};
+
+export type ThreadReadParameters = {
+  seen_message_ids: Array<string>;
+  target_id: string;
+  through_message_id: string | null;
 };
 
 export type ThreadRenameParameters = {
@@ -4776,6 +4793,7 @@ export type ActionRequest =
   terminal_id: Id;
 }; fence: Fence & Required<Pick<Fence, 'runtime_incarnation' | 'terminal_sequence'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.close'; parameters: ThreadTargetParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.read'; parameters: ThreadReadParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.rename'; parameters: ThreadRenameParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.reopen'; parameters: ThreadTargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'thread.reply'; parameters: ThreadReplyParameters; fence: Fence }) |

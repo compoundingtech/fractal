@@ -105,6 +105,19 @@ pub fn attach_ask(
         Ok(())
     };
     let admission = |connection: &Connection| {
+        // The operation digest predates this guard. Preserve existing retry receipts
+        // and check link uniqueness inside the serialized new-write path.
+        let linked: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='thread.ask-linked')",
+            [&input.subject],
+            |row| row.get(0),
+        ).map_err(internal)?;
+        if linked {
+            return Err(FractalError::new(
+                "thread-ask-already-linked",
+                "this ask episode already has a thread link",
+            ));
+        }
         if !person_work::current(connection, &ask_claim(connection)?, now_ms()).map_err(internal)? {
             return Err(unavailable());
         }

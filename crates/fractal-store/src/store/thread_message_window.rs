@@ -34,6 +34,38 @@ pub(super) fn message_summary(
     thread: &str,
     creation: &ClaimRecord,
 ) -> Result<(u64, bool), FractalError> {
+    thread_message_activity(
+        connection, person, agent, thread, creation,
+        "SELECT count(*), coalesce(max(unread), 0) FROM qualified",
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+}
+
+/// Same message membership and receipts as the thread summary. An Inbox badge
+/// can stop at the first unread reply without counting the rest of the history.
+pub(super) fn message_unread(
+    connection: &Connection,
+    person: &str,
+    agent: &str,
+    thread: &str,
+    creation: &ClaimRecord,
+) -> Result<bool, FractalError> {
+    thread_message_activity(
+        connection, person, agent, thread, creation,
+        "SELECT EXISTS(SELECT 1 FROM qualified WHERE unread)",
+        |row| row.get(0),
+    )
+}
+
+fn thread_message_activity<T>(
+    connection: &Connection,
+    person: &str,
+    agent: &str,
+    thread: &str,
+    creation: &ClaimRecord,
+    select: &str,
+    decode: impl FnOnce(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+) -> Result<T, FractalError> {
     let person = identities::resolve_reference_conn(connection, person)?;
     let agent = identities::resolve_reference_conn(connection, agent)?;
     let first = creation.body["fields"]["first_message"].as_str();
@@ -58,21 +90,23 @@ pub(super) fn message_summary(
             LEFT JOIN identity_names actor ON actor.name=messages.actor
             LEFT JOIN identity_names sender ON sender.name=json_extract(messages.body, '$.fields.from')
             LEFT JOIN identity_names recipient ON recipient.name=json_extract(messages.body, '$.fields.to')
+        ), qualified AS (
+            SELECT recipient_id=?4 AND NOT EXISTS (
+                SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+                WHERE claims.subject=participants.subject
+                  AND ((claims.kind='message.read' AND claims.actor=?4) OR claims.kind='message.closed')
+                  AND {UNREPAIRED_CLAIM}
+            ) AS unread
+            FROM participants
+            WHERE actor_id=sender_id AND ((sender_id=?4 AND recipient_id=?5) OR (sender_id=?5 AND recipient_id=?4))
         )
-        SELECT count(*), coalesce(max(recipient_id=?4 AND NOT EXISTS (
-            SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
-            WHERE claims.subject=participants.subject
-              AND ((claims.kind='message.read' AND claims.actor=?4) OR claims.kind='message.closed')
-              AND {UNREPAIRED_CLAIM}
-        )), 0)
-        FROM participants
-        WHERE actor_id=sender_id AND ((sender_id=?4 AND recipient_id=?5) OR (sender_id=?5 AND recipient_id=?4))",
+        {select}",
     ));
     connection
         .query_row(
             &sql,
             params![thread, first, creation.batch_id, person, agent],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            decode,
         )
         .map_err(internal)
 }
@@ -80,6 +114,95 @@ pub(super) fn message_summary(
 const ACTIVE_MESSAGE: &str = "EXISTS (SELECT 1 FROM operations
   WHERE operations.id=json_extract(claims.body, '$._operation.id')
     AND operations.canonical_claim_id=claims.id AND operations.state='active')";
+
+/// Acknowledge only exact rendered message identities. No time or replication frontier
+/// is advanced, so a later arrival stays unread even if it sorts before the anchor.
+pub fn mark_read(
+    store: &Store,
+    authority: PersonAuthority<'_>,
+    person: &str,
+    thread: &str,
+    through: Option<&str>,
+    seen: &[String],
+) -> Result<(Vec<String>, bool), FractalError> {
+    let invalid = || FractalError::new("invalid-thread-read", "expected up to 50 distinct message IDs and their newest anchor");
+    let valid_id = |id: &str| id.starts_with("message/") && (9..=512).contains(&id.len());
+    if seen.len() > 50 {
+        return Err(invalid());
+    }
+    let unique = seen.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    if unique.len() != seen.len()
+        || !unique.iter().all(|id| valid_id(id))
+        || through.map_or(!seen.is_empty(), |anchor| !unique.contains(anchor))
+    {
+        return Err(invalid());
+    }
+
+    if !seen.is_empty() {
+        store.graph.ensure_principal_key(person)?;
+    }
+    store.connection.batched(|tx| {
+        authority.check(tx, person)?;
+        store.thread_write_rollout(tx)?;
+        let creation = owned_creation(tx, thread, person, false)
+            .map_err(|_| unavailable())?.ok_or_else(unavailable)?;
+        let agent = creation.body["fields"]["agent"].as_str().ok_or_else(unavailable)?;
+        let person = identities::resolve_reference_conn(tx, person)?;
+        let agent = identities::resolve_reference_conn(tx, agent)?;
+        let first = creation.body["fields"]["first_message"].as_str();
+        let through_index = current_index(tx).map_err(internal)?;
+        let sql = canonical_sql(&format!(
+            "SELECT {CLAIM_COLUMNS} FROM claims
+             WHERE claims.subject=?1 AND claims.kind='message.sent'
+               AND {ACTIVE_MESSAGE} AND {UNREPAIRED_CLAIM}
+             ORDER BY CANONICAL_DESC(claims) LIMIT 1"
+        ));
+        let mut select = tx.prepare_cached(&sql).map_err(internal)?;
+        let mut newest = None;
+        let mut incoming = Vec::new();
+        for subject in seen {
+            let claim = select.query_row([subject], claim_from_row).optional().map_err(internal)?
+                .filter(|claim| member(claim, thread, first, &creation.batch_id, through_index))
+                .ok_or_else(unavailable)?;
+            let actor = message_actor(tx, &claim, &person, &agent)?;
+            let key = smallclaims::store::canonical::claim_key(tx, &claim.id).map_err(internal)?;
+            if newest.as_ref().is_none_or(|(newest, _)| &key > newest) {
+                newest = Some((key, subject.as_str()));
+            }
+            if actor == agent {
+                incoming.push(subject.clone());
+            }
+        }
+        if newest.map(|(_, id)| id) != through {
+            return Err(invalid());
+        }
+
+        // Every member was authorized above. A fixed per-person/per-message operation key
+        // makes a retried or concurrent acknowledgement converge across serving members.
+        let mut batch = None;
+        for subject in &incoming {
+            let settled: bool = tx.query_row(
+                &format!("SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+                 WHERE claims.subject=?1
+                   AND ((claims.kind='message.read' AND claims.actor=?2) OR claims.kind='message.closed')
+                   AND {UNREPAIRED_CLAIM})"),
+                params![subject, person], |row| row.get(0),
+            ).map_err(internal)?;
+            if settled {
+                continue;
+            }
+            let mut body = json!({"fields":{"status":"read"},"evidence":[]});
+            let key = canonical_hash(&("thread-read-v1", &person, subject)).map_err(internal)?;
+            smallclaims::store::idempotency::attach(&mut body, &key).map_err(internal)?;
+            let mark = append_claim_tx(
+                tx, &store.origin, subject, "message.read", Some(&person), &body, &[], batch.as_deref(),
+            ).map_err(claim_append_error)?;
+            register_operation_tx(tx, &mark).map_err(internal)?;
+            batch = Some(mark.batch_id);
+        }
+        Ok((incoming, batch.is_some()))
+    }).map_err(internal)?
+}
 
 /// Newest-first page over admitted messages and lifecycle events. The caller authenticates the person.
 pub fn mixed_timeline(
@@ -156,24 +279,28 @@ fn read(
     );
     let sql = canonical_sql(&format!(
         "WITH explicit AS (
-            SELECT {CLAIM_COLUMNS}
+            SELECT {CLAIM_COLUMNS}, 'active' AS operation_state
             FROM claims INDEXED BY claims_thread_message_accepted_index
             WHERE claims.kind='message.sent' AND json_extract(claims.body, '$.fields.thread_id')=?1
               AND json_extract(claims.body, '$.fields.thread_id') IS NOT NULL
               {selection} AND {UNREPAIRED_CLAIM} {cursor_range}
             ORDER BY CANONICAL_DESC(claims) LIMIT ?7
          ), legacy AS (
-            SELECT {CLAIM_COLUMNS} FROM claims
+            SELECT {CLAIM_COLUMNS}, 'active' AS operation_state FROM claims
             WHERE claims.subject=?2 AND claims.batch_id=?3 AND claims.kind='message.sent'
               AND json_extract(claims.body, '$.fields.thread_id') IS NULL
               {selection} AND {UNREPAIRED_CLAIM} {cursor_range}
          ), lifecycle AS (
-            SELECT {CLAIM_COLUMNS} FROM claims INDEXED BY claims_subject_accepted_index
+            SELECT {CLAIM_COLUMNS}, operations.state AS operation_state
+            FROM claims INDEXED BY claims_subject_accepted_index
+            JOIN operations ON operations.id=json_extract(claims.body, '$._operation.id')
             WHERE claims.subject=?1 AND claims.kind IN ('thread.title-set', 'thread.state-set')
-              {selection} AND {UNREPAIRED_CLAIM} {cursor_range}
+              AND claims.store_index <= ?4
+              AND (operations.state='conflict' OR operations.canonical_claim_id=claims.id)
+              AND {UNREPAIRED_CLAIM} {cursor_range}
             ORDER BY CANONICAL_DESC(claims) LIMIT ?7
          )
-         SELECT {CLAIM_COLUMNS}
+         SELECT {CLAIM_COLUMNS}, operation_state
          FROM (SELECT * FROM explicit UNION ALL SELECT * FROM legacy UNION ALL SELECT * FROM lifecycle) claims
          ORDER BY CANONICAL_DESC(claims) LIMIT ?7"
     ));
@@ -192,17 +319,23 @@ fn read(
                     .map(|claim| claim.accepted_at_unix_ms.to_string()),
                 limit + 1,
             ],
-            claim_from_row,
+            |row| Ok((claim_from_row(row)?, row.get::<_, String>(10)?)),
         )
         .map_err(internal)?;
     let mut items = Vec::new();
     let mut last = None;
     let mut has_more = false;
     for row in rows {
-        let claim = row.map_err(internal)?;
+        let (claim, operation_state) = row.map_err(internal)?;
         if items.len() == limit {
             has_more = true;
             break;
+        }
+        if operation_state == "conflict" {
+            return Err(FractalError::new(
+                "idempotency-conflict",
+                "a thread metadata operation has conflicting requests",
+            ));
         }
         if lifecycle(&claim, thread) {
             last = Some(claim.id.clone());
@@ -291,5 +424,69 @@ fn message_actor(
         Ok(actor)
     } else {
         Err(unavailable())
+    }
+}
+
+#[cfg(test)]
+mod read_progress_tests {
+    use super::*;
+
+    #[test]
+    fn exact_thread_reads_replicate_without_clearing_late_older_mail() {
+        let left = Store::open_memory("thread-read-left").unwrap();
+        let right = Store::open_memory("thread-read-right").unwrap();
+        for store in [&left, &right] {
+            store.configure_thread_write_rollout([]);
+            store.append_claim(&ClaimInput {
+                subject: format!("daemon/{}", store.origin()), kind: "daemon.started".into(),
+                actor: None, fields: serde_json::from_value(json!({
+                    "status":"running", "features":{"thread_read_privacy":2}
+                })).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let owner = "person/example";
+        let agent = "agent/example";
+        let thread = "thread/read-test";
+        let (created, _) = apply(&left, owner, thread, "create-read-test", Edit::Create {
+            agent, title: "Review",
+        }).unwrap();
+        let replicate = |source: &Store, target: &Store| {
+            target.import_replication(source.origin(), &source.export_replication(0).unwrap()).unwrap();
+        };
+        replicate(&left, &right);
+        let message = |store: &Store, id: &str| {
+            super::super::thread_delivery::append_reply(store, &ClaimInput {
+                subject:id.into(), kind:"message.sent".into(), actor:Some(agent.into()),
+                fields:serde_json::from_value(json!({
+                    "from":agent,"to":owner,"content":"Reply","status":"sent","thread_id":thread,
+                })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:Some(id.into()),
+            }, PersonAuthority::TrustedLocal, None).unwrap().0
+        };
+        let late = message(&right, "message/older-late");
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        let anchor = message(&left, "message/shown-anchor");
+        assert!(late.accepted_at_unix_ms < anchor.accepted_at_unix_ms);
+        let (closed, _) = apply(&left, owner, thread, "close-read-test", Edit::Close {
+            revision: &created.id,
+        }).unwrap();
+        let seen = vec![anchor.subject.clone()];
+        assert_eq!(mark_read(&left, PersonAuthority::TrustedLocal, owner, thread, None, &[]).unwrap(), (vec![], false));
+        assert_eq!(mark_read(&left, PersonAuthority::TrustedLocal, "person/other", thread, None, &[]).unwrap_err().code, "thread-unavailable");
+        let invalid = vec![anchor.subject.clone(), "message/unknown".into()];
+        assert_eq!(mark_read(&left, PersonAuthority::TrustedLocal, owner, thread, Some(&anchor.subject), &invalid).unwrap_err().code, "thread-unavailable");
+        assert!(summary(&left, owner, thread).unwrap().unread);
+        assert_eq!(mark_read(&left, PersonAuthority::TrustedLocal, owner, thread, Some(&anchor.subject), &seen).unwrap(), (seen.clone(), true));
+        assert_eq!(mark_read(&left, PersonAuthority::TrustedLocal, owner, thread, Some(&anchor.subject), &seen).unwrap(), (seen, false));
+        assert!(!summary(&left, owner, thread).unwrap().unread);
+        replicate(&right, &left);
+        replicate(&left, &right);
+        for store in [&left, &right] {
+            let summary = summary(store, owner, thread).unwrap();
+            assert!(summary.unread);
+            assert_eq!(summary.state, "closed");
+            assert_eq!(summary.revision, closed.id);
+            assert_eq!(store.claims_for(&anchor.subject, Some("message.read")).unwrap().len(), 1);
+            assert!(store.claims_for(&late.subject, Some("message.read")).unwrap().is_empty());
+        }
     }
 }

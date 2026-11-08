@@ -13317,6 +13317,33 @@ fn thread_lifecycle_projection_selects_the_same_receipt_across_members() {
 }
 
 #[test]
+fn thread_mixed_timeline_preserves_the_selected_lifecycle_conflict() {
+    use thread_metadata::{Edit, apply, history, mixed_timeline};
+
+    let left = Store::open_memory("thread-mixed-left").unwrap();
+    let right = Store::open_memory("thread-mixed-right").unwrap();
+    let owner = "person/example";
+    let thread = "thread/review";
+    let (created, _) = apply(
+        &left, owner, thread, "create-mixed",
+        Edit::Create { agent: "agent/example", title: "Review" },
+    ).unwrap();
+    right.import_replication(left.origin(), &left.export_replication(0).unwrap()).unwrap();
+    for (store, title) in [(&left, "Left title"), (&right, "Right title")] {
+        apply(store, owner, thread, "same-rename-key", Edit::Rename {
+            title, title_revision: &created.id, revision: &created.id,
+        }).unwrap();
+    }
+    left.import_replication(right.origin(), &right.export_replication(0).unwrap()).unwrap();
+    assert_eq!(history(&left, owner, thread, None, 20).err().unwrap().code, "idempotency-conflict");
+    assert_eq!(mixed_timeline(&left, owner, thread, None, 20).err().unwrap().code, "idempotency-conflict");
+    assert_eq!(
+        mixed_timeline(&left, "person/outsider", thread, None, 20).err().unwrap().code,
+        "thread-unavailable",
+    );
+}
+
+#[test]
 fn thread_pairing_revocation_precedes_receipt_recovery() {
     use thread_metadata::{Edit, PersonAuthority, apply, apply_as};
 

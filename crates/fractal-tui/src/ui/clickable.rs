@@ -51,6 +51,7 @@ impl Ui {
             Hit::ResourceAdd(_) => "find a resource to add".into(),
             Hit::ResourceFolderMenu(_) => "rename or delete folder".into(),
             Hit::ResourceFolderDrag(_) => "drag to reorder folder".into(),
+            Hit::SidebarToggle => "show/hide sidebar · Ctrl+S".into(),
             Hit::SidebarRow(_) => "open item in tab".into(),
             Hit::SidebarSection(_) => format!("show {label}"),
             Hit::Usage => "show/hide Usage".into(),

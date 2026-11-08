@@ -30,7 +30,7 @@ import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import type { TextItem } from '../conversation/model.ts'
 import { undeclared } from '../monitor/source.ts'
 import { gatewayResources } from '../resources/agent/source.ts'
-import { instrumentFetch } from '../telemetry/transport.ts'
+import { instrumentFetch, recordSocketState } from '../telemetry/transport.ts'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { getDebug } from '../telemetry/measurement/index.ts'
 import { unavailableTerminalHistory } from '../terminal/historySource.ts'
@@ -44,7 +44,9 @@ import { gatewayAttachments, gatewayMessageSend } from './attachmentPort.ts'
 import { gatewayContentSearch } from './contentSearchPort.ts'
 import { makeFrameIngest } from './frameIngest.ts'
 import { nativeAgentFetch } from './nativeAgentFetch.ts'
+import { readAuthorization } from './source.ts'
 import { BrowserFractalPlatform } from './sdk-browser/platform.ts'
+import { browserPtySocket, browserSocket } from './sdk-browser/trace.ts'
 import { mergeOutboxItems } from './outbox.ts'
 import {
   initialFeedSync,
@@ -152,14 +154,32 @@ export const liveSource = ({
   readonly sessionTraceLayer?: Layer.Layer<SessionTraceProvider> | undefined
 }): LiveSource => {
   const { baseUrl } = options
+  const clientName = options.client
   const origin = typeof location === 'undefined' ? new URL(baseUrl).origin : location.origin
+  const transportFetch = options.fetch ?? globalThis.fetch.bind(globalThis)
   const fetch = instrumentFetch({
-    fetchImpl: nativeAgentFetch({ origin, fetchImpl: options.fetch ?? globalThis.fetch.bind(globalThis) }),
+    fetchImpl: nativeAgentFetch({ origin, fetchImpl: async (input, init) => {
+      const response = await transportFetch(input, init)
+      const url = new URL(input instanceof Request ? input.url : String(input), baseUrl)
+      const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
+      if (method.toUpperCase() === 'GET' && url.origin === new URL(baseUrl).origin && url.pathname.startsWith('/v1/client/') &&
+        response.status === 403) {
+        const body: unknown = await response.clone().json().catch(() => undefined)
+        if (readAuthorization({ status: response.status, response: body }) === 'unauthorized') {
+          credentialExpired = true
+          readRejection = 'Browser credential expired or revoked'
+          registry.set(readRefusal, readRejection)
+          for (const deny of deniedReaders) deny(readRejection)
+        }
+      }
+      return response
+    } }),
     origin,
     traceContext: options.traceContext,
   })
   const deniedReaders = new Set<(message: string) => void>()
   let readRejection: string | undefined
+  let credentialExpired = false
   let connectionAttempt = 1
   const noGrants: Grants = {
     actions: 'ungranted',
@@ -180,9 +200,10 @@ export const liveSource = ({
   setDebug('Wf.freshnessConsumers', 0)
   const client = new FractalClient({
     baseUrl,
+    ...(options.client === undefined ? {} : { client: options.client }),
     // Remove the browser receiver workaround after Fractal #1040 / #1247 lands.
     fetchImpl: fetch,
-    ...(options.socket === undefined ? {} : { socket: options.socket }),
+    socket: options.socket ?? browserSocket,
   })
   const registry = AtomRegistry.make()
   const readRefusal = Atom.keepAlive(Atom.make<string | undefined>(undefined))
@@ -194,16 +215,17 @@ export const liveSource = ({
   const resources = gatewayResources({
     baseUrl,
     fetchImpl: fetch,
+    ...(options.client === undefined ? {} : { client: options.client }),
   })
   const subjectReads = gatewaySubjectReads({
-    options: { baseUrl, fetchImpl: fetch },
+    options: { baseUrl, fetchImpl: fetch, ...(options.client === undefined ? {} : { client: options.client }) },
     resource: subjectReaderFromAtom({ feed: resources.byId, registry }),
     discovery: client,
     registry,
   })
-  const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
+  const nativeDetails = gatewayNativeDetails({ options: { baseUrl, fetchImpl: fetch, ...(options.client === undefined ? {} : { client: options.client }) }, discovery: client, registry, now: () => registry.get(wallClock) })
   const followInterests = new Map<string, () => boolean>()
-  const objectives = gatewayObjectives({ options: { baseUrl, fetchImpl: fetch }, discovery: client, registry, now: () => registry.get(wallClock) })
+  const objectives = gatewayObjectives({ options: { baseUrl, fetchImpl: fetch, ...(options.client === undefined ? {} : { client: options.client }) }, discovery: client, registry, now: () => registry.get(wallClock) })
   const runtime = ManagedRuntime.make(
     FractalLive({
       ...options,
@@ -231,6 +253,7 @@ export const liveSource = ({
             }
             if (event.state._tag === 'Reconnecting') connectionAttempt = event.state.attempt
             setDebug('Wf.socketLive', event.state._tag === 'Live' ? 1 : 0)
+            recordSocketState(event.state)
             if (event.state._tag === 'Rejected') {
               readRejection = event.state.message
               registry.set(readRefusal, event.state.message)
@@ -653,7 +676,7 @@ export const liveSource = ({
       // Snapshot-only readers have no follow controller, but still lose read authority on rejection.
       const loss = get(networkLoss)
       const refusal = get(readRefusal)
-      if (refusal !== undefined) return unavailable({ reason: 'ungranted', detail: refusal, ...(telemetryKind === 'terminal' ? { retryable: false } : {}) })
+      if (refusal !== undefined) return unavailable({ reason: credentialExpired ? 'unauthorized' : 'ungranted', detail: refusal, ...(telemetryKind === 'terminal' ? { retryable: false } : {}) })
       return loss !== undefined && latest._tag === 'Observed' ? { ...latest, freshness: 'stale' as const } : latest
     })
     retained = {
@@ -731,6 +754,8 @@ export const liveSource = ({
   const rosterDecode = rosterEvidence.atom
   const missionsEvidence = decodeEvidence<Mission>()
   const missionsDecode = missionsEvidence.atom
+  const attentionEvidence = decodeEvidence<Attention>()
+  const attentionDecode = attentionEvidence.atom
   const agentsRetained = retain<readonly DecodedAgent[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'agents', limit: 100 }),
     initialRead: (fractal) => fractal.readAgents.pipe(
@@ -774,18 +799,18 @@ export const liveSource = ({
   const missions = missionsRetained.atom
   const attentionRetained = retain<readonly Attention[], Extract<FollowSpec, { _tag: 'Window' }>>({
     resolve: () => Effect.succeed({ _tag: 'Window', collection: 'attention', limit: 100 }),
+    prepareObservation: attentionEvidence.prepareObservation,
+    onCommit: attentionEvidence.onCommit,
+    observedFreshness: attentionEvidence.observedFreshness,
     follow: ({ fractal, spec }) =>
       fractal.followWindow(spec).pipe(
-        Stream.map((event) =>
-          event._tag === 'Observed'
-            ? {
-                _tag: 'Observed' as const,
-                value: event.value.items.filter(
-                  (row): row is Attention => row.kind === 'attention',
-                ),
-              }
-            : event,
-        ),
+        Stream.map((event) => {
+          if (event._tag !== 'Observed') return event
+          const { items, undecodable, decodeStale } = event.value
+          const value = items.filter((row): row is Attention => row.kind === 'attention')
+          attentionEvidence.record(value, { undecodable, decodeStale })
+          return { _tag: 'Observed' as const, value }
+        }),
       ),
   })
   const attention = attentionRetained.atom
@@ -1257,6 +1282,7 @@ export const liveSource = ({
       missions,
       missionsDecode,
       attention,
+      attentionDecode,
       conversation,
       conversationInterest: (ref) => retainConversation(ref).interest,
       prefetchConversation: (ref) => {
@@ -1287,13 +1313,21 @@ export const liveSource = ({
       // capability subprotocol on the WebSocket upgrade.
       terminalRaw: {
         open: (options) => loadPty.pipe(
-          Effect.flatMap(({ openPtySession }) => openPtySession({ ...options, baseUrl, fetch })),
+          Effect.flatMap(({ openPtySession }) => openPtySession({
+            ...options, baseUrl,
+            fetch: (input, init) => {
+              const headers = new Headers(init?.headers)
+              if (clientName !== undefined) headers.set('x-st3-client', clientName)
+              return fetch(input, { ...init, headers })
+            },
+            socket: browserPtySocket(clientName),
+          })),
         ),
       },
       // Grants gate arming in the view and every post; the gateway still refuses a revoked grant.
       terminalInput: gatewayTerminalInput({
         // Same configuration as `client`; the session's transport admits each post at the fetch.
-        connect: (fetchImpl) => new FractalClient({ baseUrl, fetchImpl }),
+        connect: (fetchImpl) => new FractalClient({ baseUrl, fetchImpl, ...(options.client === undefined ? {} : { client: options.client }) }),
         transport: fetch,
         snapshot: async () => {
           const current = await messageSnapshot()

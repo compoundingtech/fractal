@@ -136,6 +136,7 @@ pub enum ErrorCode {
     IdempotencyConflict,
     LegacyActionReceiptUntrusted,
     IssuerRequired,
+    PairingOriginRequired,
     SuspendAuthoredSessionSelection,
     StaleFence,
     CursorGap,
@@ -555,6 +556,9 @@ pub struct Attention {
     /// Whether this item blocks or waits on its person's answer; absent on older daemons.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alert: Option<bool>,
+    /// An unread incoming reply in an owned thread for this exact ask episode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_unread: Option<bool>,
     /// The agent whose conversation this item belongs to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
@@ -3407,6 +3411,8 @@ pub enum ActionType {
     MessageSend,
     #[serde(rename = "message.read")]
     MessageRead,
+    #[serde(rename = "thread.read")]
+    ThreadRead,
     #[serde(rename = "message.close")]
     MessageClose,
     #[serde(rename = "launch.create")]
@@ -4221,6 +4227,20 @@ impl ActionRequest {
             &parameters,
         )
     }
+    pub fn thread_read(
+        id: impl Into<String>,
+        idempotency_key: impl Into<String>,
+        fence: Fence,
+        parameters: ThreadReadParameters,
+    ) -> Result<Self, serde_json::Error> {
+        Self::new(
+            id,
+            ActionType::ThreadRead,
+            idempotency_key,
+            fence,
+            &parameters,
+        )
+    }
     pub fn thread_rename(
         id: impl Into<String>,
         idempotency_key: impl Into<String>,
@@ -4427,6 +4447,13 @@ impl ActionRequest {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadReadParameters {
+    pub target_id: String,
+    pub through_message_id: Option<String>,
+    pub seen_message_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct PersonAskParameters {
     pub person_id: String,
@@ -4559,7 +4586,7 @@ pub struct PersonAnswerRecord {
     pub ask: String,
     pub status: String,
     pub summary: String,
-    /// The answering principal, including `assistant/chatgpt` for assistant responses.
+    /// The answering principal, including `assistant/chatgpt` or `assistant/mcp`.
     pub respondent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub acted_for: Option<String>,
@@ -5246,6 +5273,16 @@ pub struct PersonPairedSession {
 pub enum AssistantPrincipal {
     #[serde(rename = "assistant/chatgpt")]
     Chatgpt,
+    #[serde(rename = "assistant/mcp")]
+    Mcp,
+}
+impl AssistantPrincipal {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Chatgpt => "assistant/chatgpt",
+            Self::Mcp => "assistant/mcp",
+        }
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum AssistantSenderClass {
@@ -5467,6 +5504,8 @@ pub enum AssistantProjection {
 pub enum ScgReadIdentity {
     #[serde(rename = "chatgpt")]
     Chatgpt,
+    #[serde(rename = "mcp")]
+    Mcp,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

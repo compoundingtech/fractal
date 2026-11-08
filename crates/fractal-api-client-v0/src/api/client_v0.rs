@@ -552,13 +552,16 @@ async fn collection_items_with_windows(
     if request.status.is_some() && request.collection != "agents" {
         return Err(validation("status filters are supported for agents only"));
     }
-    if request.subject.is_some() && !matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "thread-timeline") {
+    if request.subject.is_some() && !matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "threads" | "thread-timeline") {
         return Err(validation("this collection does not accept a subject filter"));
     }
     if request.collection == "ordered-memberships" && request.subject.is_none() {
         return Err(validation("ordered memberships require an arrangement subject"));
     }
     validate_agent_selector(&request.collection, request.agent.as_deref())?;
+    if request.attention_thread_hints && request.collection != "attention" {
+        return Err(validation("thread hints are supported for attention only"));
+    }
     let limit = request.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS);
     if !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&limit) {
         return Err(validation("collection limit must be 1 through 200"));
@@ -574,7 +577,7 @@ async fn collection_items_with_windows(
     // Arrangement ownership and paired-window authority both read the store. Admit this
     // preliminary physical read with the same bare waits as the eventual window query.
     let current = if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships")
-        || (windows.is_some() && session.transport != "unix")
+        || (windows.is_some() && !session.is_unpaired_unix())
     {
         Some(if state.store.readers.has_request_reader() {
             revalidate_session(state, session)?
@@ -677,7 +680,7 @@ async fn collection_items_with_windows(
                 let now = client_now_ms();
                 // Recheck paired grants, including expiry and changed scopes, before any reuse.
                 let (current, person) = match (|| {
-                    let current = if session.transport == "unix" {
+                    let current = if session.is_unpaired_unix() {
                         session.clone()
                     } else {
                         revalidate_session(&state, &session)?
@@ -1023,6 +1026,9 @@ async fn collection_items_with_windows(
                     has_more |= items.len() > limit;
                     items.truncate(limit);
                 }
+                if collection == "attention" && request.attention_thread_hints {
+                    overlay_attention_thread_unread(&store, &current, &mut items)?;
+                }
                 if collection == "agents" {
                     // The window's shared rows are in hand; each reader's live overlay runs
                     // beside the others instead of behind them.
@@ -1070,6 +1076,25 @@ async fn collection_items_with_windows(
         items.truncate(end);
     }
     Ok((snapshot, items, has_more, owner_revision))
+}
+
+/// Overlay only the visible owner window. Shared attention rows remain undecorated.
+fn overlay_attention_thread_unread(
+    store: &Store,
+    session: &ClientSession,
+    items: &mut [Value],
+) -> anyhow::Result<()> {
+    let Ok(person) = thread_access::read_person(session) else { return Ok(()) };
+    let (positions, asks): (Vec<_>, Vec<_>) = items.iter().enumerate().filter_map(|(position, item)| {
+        if item["attention_kind"] != "person-step" || item["person_id"] != person {
+            return None;
+        }
+        Some((position, (item["source_id"].as_str()?, item["episode"].as_str()?)))
+    }).unzip();
+    for position in crate::store::thread_metadata::unread_ask_positions(store, person, &asks)? {
+        items[positions[position]]["thread_unread"] = json!(true);
+    }
+    Ok(())
 }
 
 /// Membership and display order come from the existing shallow page refs. The next
@@ -2446,7 +2471,10 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 }
                 let followed = |s: &CollectionSubscription| s.ivm.is_none() && s.request.agents_publication_version.is_none()
                     && !state.store.collection_view_published(&s.request.collection);
-                if !subscriptions.values().any(followed) {
+                let follows_thread_hints = |s: &CollectionSubscription| s.ivm.is_none()
+                    && s.request.collection == "attention" && s.request.attention_thread_hints
+                    && thread_access::read_person(&session).is_ok();
+                if !subscriptions.values().any(|s| followed(s) || follows_thread_hints(s)) {
                     weighed = index;
                     continue;
                 }
@@ -2461,12 +2489,15 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     };
                     match revisions {
                         Ok(revisions) => {
-                            affected.extend(subscriptions.iter().filter(|(_, s)| followed(s)
-                                && collection_windows::Windows::changed(&s.request.collection, &window_revisions, &revisions))
-                                .map(|(id, _)| id.clone()));
+                            let hints_changed = collection_windows::Windows::changed(
+                                collection_windows::ATTENTION_THREAD_HINTS, &window_revisions, &revisions,
+                            );
+                            affected.extend(subscriptions.iter().filter(|(_, s)| (
+                                followed(s) && collection_windows::Windows::changed(&s.request.collection, &window_revisions, &revisions)
+                            ) || (hints_changed && follows_thread_hints(s))).map(|(id, _)| id.clone()));
                             window_revisions = revisions;
                         }
-                        Err(_) => affected.extend(subscriptions.iter().filter(|(_, s)| followed(s)).map(|(id, _)| id.clone())),
+                        Err(_) => affected.extend(subscriptions.iter().filter(|(_, s)| followed(s) || follows_thread_hints(s)).map(|(id, _)| id.clone())),
                     }
                     weighed = index;
                 } else if index > weighed {
@@ -2474,7 +2505,9 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     let glasses_changed = subscriptions.values().any(|s| s.request.collection == "glasses") && state.store.glasses_changed(weighed, index).unwrap_or(true);
                     let arrangements_changed = subscriptions.values().any(|s| s.request.collection == "arrangements") && state.store.arrangements_changed(weighed, index).unwrap_or(true);
                     let memberships_changed = subscriptions.values().any(|s| s.request.collection == "ordered-memberships") && state.store.ordered_memberships_changed(weighed, index).unwrap_or(true);
-                    affected.extend(subscriptions.iter().filter(|(_, s)| followed(s) && (
+                    let hints_changed = subscriptions.values().any(follows_thread_hints)
+                        && crate::store::thread_metadata::attention_unread_changed(&state.store, weighed, index).unwrap_or(true);
+                    affected.extend(subscriptions.iter().filter(|(_, s)| (hints_changed && follows_thread_hints(s)) || followed(s) && (
                         (glasses_changed && s.request.collection == "glasses")
                         || (arrangements_changed && s.request.collection == "arrangements")
                         || (memberships_changed && s.request.collection == "ordered-memberships")
@@ -2586,7 +2619,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 // Grace periods, leases and queue deadlines pass without a claim, and so does a
                 // paired grant's expiry. Stable rows remain reusable; authority and local
                 // overlays are rechecked on reads.
-                let paired = session.transport != "unix";
+                let paired = !session.is_unpaired_unix();
                 refresh.extend(subscriptions.iter().filter(|(_, s)| s.ivm.is_none()
                     && (paired && !inventory::is_inventory(&s.request.collection) || collection_follows_clock(&s.request.collection)))
                     .map(|(id, _)| id.clone()));
@@ -4971,6 +5004,9 @@ fn conversation_read_now_unbounded(
             {
                 continue;
             }
+            if records::private_thread_claim(&claim) {
+                continue;
+            }
             let fields = claim.body.get("fields").unwrap_or(&claim.body);
             if fields.get("session_id").and_then(Value::as_str)
                 .is_none_or(|message_session| message_session == session_id) {
@@ -5862,6 +5898,14 @@ pub async fn pairing_complete(
                 == Some(pairing_id.as_str())
         })
         .ok_or_else(|| ApiError::not_found(format!("pairing `{pairing_id}` does not exist")))?;
+    if begun.origin != state.store.origin() {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "pairing-origin-required".into(),
+            message: "complete pairing on the member that began it".into(),
+            details: Box::default(),
+        });
+    }
     let used = !state
         .store
         .claims_for_subject_kind_at(&subject, "custom.client.pairing-completed", None, true, 1)
@@ -8240,8 +8284,8 @@ async fn dispatch_action(
                 MessageSendRequest {
                     idempotency_key: request.idempotency_key.clone(),
                     // Owner authority permits the operation, but is never the assistant's sender.
-                    from: if session.assistant_write.is_some() {
-                        assistant::PRINCIPAL.into()
+                    from: if let Some(authorization) = session.assistant_write.as_ref() {
+                        authorization.principal().into()
                     } else {
                         authority_actor.clone()
                     },
@@ -9388,6 +9432,9 @@ async fn action_inner(
     }
     if matches!(request.action_type.as_str(), "thread.start" | "thread.reply") {
         return threads::message_action(state, session, request).await;
+    }
+    if request.action_type == "thread.read" {
+        return threads::read_action(state, session, request).await;
     }
     if request.action_type == "thread.link-ask" {
         return threads::link_ask_action(state, session, request).await;
@@ -20076,11 +20123,240 @@ mission "example/zero-run" state="ready" {
         ];
         let snapshot = new_client_snapshot(&state);
         let managed = super::super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id).unwrap();
-        let mut native = native_session_messages(&state, &snapshot, &session, &session_id, managed.as_ref()).unwrap();
+        let mut native = native_session_messages(&state, &snapshot, &session, &session_id, managed.as_ref()).unwrap().items;
         native.reverse();
         assert_eq!(named(&native), expected, "native: {native:?}");
         let (_, stored) = conversation_open_local(&state, &session, &session_id, 200).unwrap();
         assert_eq!(named(stored["items"].as_array().unwrap()), expected, "stored: {stored}");
+    }
+
+    #[tokio::test]
+    async fn private_thread_messages_stay_out_of_the_shared_agent_conversation() {
+        use crate::store::{thread_delivery, thread_metadata::{self, Edit, PersonAuthority}};
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "thread-conversation-privacy");
+        let agent = "agent/privacy";
+        let person = "person/alex";
+        let other = "person/blair";
+        let incarnation = "private-conversation-one";
+        let session_id = managed_session_id(agent, incarnation);
+        state.store.configure_thread_write_rollout([]);
+        let intent = crate::graph::parse_intent(
+            "version 2\nagent \"privacy\" { workspace \"/tmp\"; command \"true\"; }",
+            state.store.origin(),
+        ).unwrap();
+        state.store.apply_internal(&intent, "declare-private-test-agent").unwrap();
+        state.store.append_claim(&ClaimInput {
+            subject: agent.into(),
+            kind: "runtime.observed".into(),
+            actor: Some(agent.into()),
+            fields: BTreeMap::from([
+                ("status".into(), json!("running")),
+                ("runtime_id".into(), json!("privacy-runtime")),
+                ("incarnation_id".into(), json!(incarnation)),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+
+        let app = crate::api::router(state.clone());
+        let get = |actor: &str, uri: &str, negotiated: bool| {
+            let mut request = Request::builder().uri(uri).header(LOCAL_PERSON_HEADER, actor);
+            if negotiated {
+                request = request.header("x-st3-features", "conversation-blocks.v1");
+            }
+            let app = app.clone();
+            async move {
+                let response = app.oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+                (status, serde_json::from_slice::<Value>(&body).unwrap())
+            }
+        };
+        let timeline = "/v1/client/sessions/agent%2Fprivacy/timeline?limit=40";
+        let changes = "/v1/client/conversations/agent%2Fprivacy/changes";
+        let mut cursors = Vec::new();
+        for actor in [person, other] {
+            let (status, initial) = get(actor, changes, true).await;
+            assert_eq!(status, StatusCode::OK, "{initial}");
+            cursors.push((actor, initial["value"]["next_cursor"].as_str().unwrap().to_owned()));
+        }
+        let before_message = new_client_snapshot(&state);
+        let thread = "thread/private-case";
+        thread_metadata::apply(&state.store, person, thread, "create", Edit::Create {
+            agent, title: "Private question",
+        }).unwrap();
+        let hidden = "Private thread marker 47e2d";
+        let message = "message/private-case";
+        thread_delivery::append_reply(
+            &state.store,
+            &ClaimInput {
+                subject: message.into(),
+                kind: "message.sent".into(),
+                actor: Some(person.into()),
+                fields: BTreeMap::from([
+                    ("from".into(), json!(person)),
+                    ("to".into(), json!(agent)),
+                    ("content".into(), json!(hidden)),
+                    ("status".into(), json!("sent")),
+                    ("thread_id".into(), json!(thread)),
+                ]),
+                evidence: Vec::new(), expected_subject: None,
+                idempotency_key: Some("private-case-message".into()),
+            },
+            PersonAuthority::TrustedLocal,
+            None,
+        ).unwrap();
+        let ordinary = "Ordinary conversation control 390f";
+        state.store.append_claim(&ClaimInput {
+            subject: "message/ordinary-control".into(),
+            kind: "message.sent".into(),
+            actor: Some(person.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(person)),
+                ("to".into(), json!(agent)),
+                ("content".into(), json!(ordinary)),
+                ("status".into(), json!("sent")),
+                ("session_id".into(), json!(session_id)),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+
+        for (actor, cursor) in cursors {
+            for negotiated in [false, true] {
+                let (status, page) = get(actor, timeline, negotiated).await;
+                assert_eq!(status, StatusCode::OK, "{page}");
+                assert!(page.to_string().contains(ordinary), "{page}");
+                assert!(!page.to_string().contains(hidden), "{page}");
+                assert!(!page.to_string().contains(message), "{page}");
+                let (status, delta) = get(actor, &format!("{changes}?after={cursor}"), negotiated).await;
+                assert_eq!(status, StatusCode::OK, "{delta}");
+                assert!(delta.to_string().contains(ordinary), "{delta}");
+                assert!(!delta.to_string().contains(hidden), "{delta}");
+                assert!(!delta.to_string().contains(message), "{delta}");
+            }
+        }
+
+        let (_, own) = get(person, "/v1/client/threads/private-case/timeline", true).await;
+        assert!(own.to_string().contains(hidden), "{own}");
+        let (status, foreign) = get(other, "/v1/client/threads/private-case/timeline", true).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{foreign}");
+        assert!(!foreign.to_string().contains(hidden));
+
+        // A canonical Codex delivery echo must also disappear before native paging. Keep
+        // an unrelated user turn even when its text resembles the private message.
+        let echo_id = fractal_drivers::codex_app_server::stable_client_user_message_id(agent, "paging-test", message);
+        let path = root.path().join("private-echo.jsonl");
+        std::fs::write(&path, format!("{}{}", codex_line(hidden, "user", Some(&echo_id), 1),
+            codex_line("Ordinary terminal control", "user", None, 2))).unwrap();
+        let source = page_test_source(&path, &session_id);
+        let snapshot = new_client_snapshot(&state);
+        let viewer = ClientSession::local(Some(other)).unwrap();
+        let managed = super::super::managed_session_owner_at(
+            &state.store, snapshot.store_index, &session_id,
+        ).unwrap();
+        for snapshot in [&before_message, &snapshot] {
+            let (Json(native), _, _) = native_slice_page_at_generation(
+                &state, snapshot, &viewer, &session_id,
+                &ClientListQuery { limit: Some(40), ..Default::default() },
+                &source, managed.as_ref(),
+            ).unwrap();
+            assert!(native.to_string().contains("Ordinary terminal control"), "{native}");
+            assert!(!native.to_string().contains(hidden), "{native}");
+
+            let opencode = |subject: &str| fractal_drivers::opencode_session::stable_message_id(
+                "privacy", "ses_privacy", subject,
+            );
+            let native = |id: &str, sequence: u64, text: &str, correlation: Value| json!({
+                "id":id,"sequence":sequence,"revision":1,"timestamp":"2099-01-01T00:00:00Z",
+                "role":"user","type":"content","final":true,"body":{"text":text},
+                "_delivery_correlation":correlation,
+            });
+            let items = vec![
+                native("native/omp-private", 1, hidden, json!({"kind":"topic-message","id":message})),
+                native("native/opencode-private", 2, hidden,
+                    json!({"kind":"opencode","id":opencode(message),"thread_id":"ses_privacy"})),
+                native("native/omp-ordinary", 3, "Ordinary Pi echo",
+                    json!({"kind":"topic-message","id":"message/ordinary-control"})),
+                native("native/opencode-ordinary", 4, "Ordinary OpenCode echo",
+                    json!({"kind":"opencode","id":opencode("message/ordinary-control"),"thread_id":"ses_privacy"})),
+            ];
+            let Json(native) = native_timeline_page(
+                &state, snapshot, &viewer, &session_id,
+                &ClientListQuery { limit: Some(40), ..Default::default() },
+                items, managed.as_ref(),
+            ).unwrap();
+            assert!(!native.to_string().contains(hidden), "{native}");
+            assert!(native.to_string().contains("Ordinary Pi echo"), "{native}");
+            assert!(native.to_string().contains("Ordinary OpenCode echo"), "{native}");
+        }
+    }
+
+    #[tokio::test]
+    async fn bound_native_session_cannot_be_read_through_an_external_alias() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = test_state_named(root.path(), "external-alias-boundary");
+        let home = root.path().join("home");
+        let folder = home.join(".codex/sessions/2026/10/02");
+        std::fs::create_dir_all(&folder).unwrap();
+        for (id, content) in [("bound-native", "Bound transcript"), ("independent-native", "Independent transcript")] {
+            std::fs::write(folder.join(format!("{id}.jsonl")), format!("{}\n{}",
+                json!({"type":"session_meta", "timestamp":"2026-10-02T10:00:00Z", "payload":{"id":id, "cwd":"/tmp"}}),
+                codex_line(content, "user", None, 1),
+            )).unwrap();
+        }
+        state.native_session_home = Some(home.clone());
+        let sessions = crate::external_sessions::discover_fresh(Some(&home), true).unwrap().sessions;
+        let alias = |native_id: &str| sessions.iter().find(|session| session.native_id == native_id).unwrap().id.clone();
+        let bound = alias("bound-native");
+        let independent = alias("independent-native");
+        let app = crate::api::router(state.clone());
+        let get = |route: String| {
+            let request = Request::builder()
+                .uri(route)
+                .header(LOCAL_PERSON_HEADER, "person/other")
+                .header("x-st3-features", "conversation-blocks.v1")
+                .body(Body::empty()).unwrap();
+            let app = app.clone();
+            async move {
+                let response = app.oneshot(request).await.unwrap();
+                let status = response.status();
+                let body = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+                (status, String::from_utf8(body.to_vec()).unwrap())
+            }
+        };
+        let timeline = |session: &str| format!("/v1/client/sessions/{}/timeline", session.replace('/', "%2F"));
+        let source = sessions.iter().find(|session| session.id == bound).unwrap();
+        let item = crate::external_sessions::normalized_timeline(source).unwrap()
+            .into_iter().find(|item| item["type"] == "content").unwrap();
+        let reference = conversation_blocks::reference(
+            source, &conversation_blocks::basis(source).unwrap(), &bound, &item, "/body",
+        );
+        let chunk = format!("/v1/client/conversations/{}/content/{reference}/chunk",
+            bound.trim_start_matches("session/"));
+        let (status, before) = get(timeline(&bound)).await;
+        assert_eq!(status, StatusCode::OK, "{before}");
+        assert!(before.contains("Bound transcript"), "{before}");
+        let (status, before_chunk) = get(chunk.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{before_chunk}");
+        state.store.append_claim(&ClaimInput {
+            subject: "agent/bound".into(),
+            kind: "harness.session-file".into(),
+            actor: Some("agent/bound".into()),
+            fields: BTreeMap::from([
+                ("agent".into(), json!("agent/bound")),
+                ("session_id".into(), json!("bound-native")),
+                ("harness".into(), json!("codex")),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let (status, denied) = get(timeline(&bound)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{denied}");
+        assert!(!denied.contains("Bound transcript"), "{denied}");
+        let (status, denied_chunk) = get(chunk).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{denied_chunk}");
+        let (status, allowed) = get(timeline(&independent)).await;
+        assert_eq!(status, StatusCode::OK, "{allowed}");
+        assert!(allowed.contains("Independent transcript"), "{allowed}");
     }
 
     #[test]
@@ -20135,7 +20411,7 @@ mission "example/zero-run" state="ready" {
         let session = ClientSession::local(Some("person/alex")).unwrap();
         let native = conversation_blocks::read(&source, &session, &session_id).unwrap();
         let managed = super::super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id).unwrap();
-        let messages = native_session_messages(&state, &snapshot, &session, &session_id, managed.as_ref()).unwrap();
+        let messages = native_session_messages(&state, &snapshot, &session, &session_id, managed.as_ref()).unwrap().items;
         assert_eq!(native[0]["sequence"], messages[1]["sequence"]);
         assert_eq!(native[0]["timestamp"], messages[1]["timestamp"]);
         let expected = vec![messages[0].clone(), native[1].clone(),

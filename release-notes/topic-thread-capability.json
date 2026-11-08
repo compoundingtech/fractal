@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Advertise complete thread capabilities only for eligible connections",
+  "replay": { "status": "none", "detail": "Capability discovery does not change any stored claim." },
+  "schema": { "status": "none", "detail": "No storage schema change." },
+  "rules": { "status": "none", "detail": "No checkpoint or retention rule change." },
+  "compatibility": { "status": "changed", "detail": "Reader version 2 attests to the private serving guards. Clients discover thread support and individual actions only after the explicit writer rollout, current peer versions, and session authority allow them." },
+  "downtime": { "status": "none", "detail": "No additional downtime from discovery." },
+  "manual": { "status": "none", "detail": "The existing explicit writer rollout remains in effect." },
+  "recovery": { "status": "none", "detail": "Capability discovery is derived and requires no recovery step." }
+}

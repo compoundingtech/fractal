@@ -1,6 +1,7 @@
 //! Transport-free sidebar projection and planning over shared schema inputs.
 //! Hosts supply authoritative resolved maps; this crate performs no I/O.
 
+pub mod cache;
 #[cfg(feature = "client")]
 pub mod client;
 pub mod edits;
