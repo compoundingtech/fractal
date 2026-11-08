@@ -8,14 +8,35 @@ import { colorVars as c, geometryVars as g, spaceVars as s, typeVars as t, inter
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
 import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
-import { useAttentionDecode, useNow } from '../data/react.tsx'
+import { useAttentionDecode, useFleet, useMissions, useNow } from '../data/react.tsx'
+import { sidebarRow } from './sidebarRow.ts'
+import { missionDisplayTitle } from '../missions/missionTitle.ts'
 import { credentialExpiredMessage, decodedRoster, type Feed, type RosterDecode } from '../data/source.ts'
 import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
+import { SidebarStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarStatus.tsx'
+import { isAdHocMissionSlug, statuses, type AgentStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
+import { HoverCardSurface, useHoverCardIntent } from '../../../../packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx'
+import { useEntityCard } from '../../../../packages/fractal-ui/src/assistant-ui/entity/EntityHoverCard.tsx'
+import type { EntityRef } from '../../../../packages/fractal-ui/src/assistant-ui/entity/entity.ts'
 import { DecodeNotice } from './LiveRoster.tsx'
 
 // The sidebar's Alerts tab: every open alert across conversations in Fractal's tier order, one SR-2 row
 // each, opened in the main area. It reads the attention collection the conversation cards read, so the tab
 // marker, this list and each conversation agree.
+
+/** What the host knows about the agents and missions an alert names; anything it does not know is left out, never guessed. */
+export interface AlertContext {
+  readonly agent?: (ref: string) => { readonly name: string; readonly status: AgentStatus; readonly needsYou?: boolean } | undefined
+  readonly missionTitle?: (id: string) => string | undefined
+}
+const noContext: AlertContext = {}
+/** A mission's readable name: the host's title, else a named slug; a content hash is never shown. */
+const missionName = (id: string, context: AlertContext): string | undefined => {
+  const title = context.missionTitle?.(id)
+  if (title !== undefined) return title
+  const slug = id.split('/').at(-1) ?? id
+  return isAdHocMissionSlug(slug) ? undefined : slug
+}
 
 const GLYPH_WORDS: Record<AlertsTabRow['glyph'], string> = { '?': 'asks a question', '◆': 'needs you', '!': 'fault' }
 
@@ -24,16 +45,29 @@ export const AlertsTab = ({ onOpen, selected, onSelect }: {
   readonly onOpen: (ref: string) => void
   readonly selected?: string
   readonly onSelect?: (id: string) => void
-}): React.ReactNode => (
-  <AlertsList feed={useVisibleAttention()} decode={useAttentionDecode()} now={useNow()} onOpen={onOpen} {...(selected === undefined ? {} : { selected })} {...(onSelect === undefined ? {} : { onSelect })} />
-)
+}): React.ReactNode => {
+  const fleet = useFleet()
+  const missions = useMissions()
+  const context = React.useMemo((): AlertContext => {
+    const agents = new Map(fleet._tag === 'Observed' ? fleet.value.agents.map(agent => [agent.ref, agent] as const) : [])
+    const titles = new Map<string, string>(missions._tag === 'Observed' ? missions.value.map(view => [view.mission.id, view.mission.title] as const) : [])
+    return {
+      // The row's own glyph already says it needs you; the agent's mark says what the agent is doing (red only if it failed).
+      agent: ref => { const agent = agents.get(ref); return agent === undefined ? undefined : { name: agent.name, status: sidebarRow({ agent, stale: false }).status } },
+      missionTitle: id => { const title = titles.get(id); return title === undefined ? undefined : missionDisplayTitle({ title, work: undefined }) },
+    }
+  }, [fleet, missions])
+  return <AlertsList feed={useVisibleAttention()} decode={useAttentionDecode()} now={useNow()} onOpen={onOpen} context={context} {...(selected === undefined ? {} : { selected })} {...(onSelect === undefined ? {} : { onSelect })} />
+}
 
 /**
  * The list itself, from a feed: waiting, unavailable, stale and empty each say so; unknown is never shown as none.
  * It is its own bounded scroll region, so it fills a `minHeight: 0` column and every row stays reachable.
  */
-export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected, onSelect }: {
+export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected, onSelect, context = noContext }: {
   readonly feed: Feed<readonly Native.Attention[]>
+  /** Names and status for the agents and missions the alerts point at. */
+  readonly context?: AlertContext
   readonly decode?: RosterDecode
   readonly now: number
   /** Opens an agent conversation or a mission by ref. */
@@ -115,6 +149,7 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected
                     onSelect={() => onSelect?.(row.id)}
                     onFocusWithin={() => { focused.current = row.id }}
                     onOpen={onOpen}
+                    context={context}
                   />
                 ))}
               </ul>
@@ -125,8 +160,9 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, selected
   )
 }
 
-const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen }: {
+const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen, context }: {
   readonly row: AlertsTabRow
+  readonly context: AlertContext
   readonly selected: boolean
   readonly onSelect: () => void
   /** Focus arrived in this row, including its menu, which React bubbles here from the popover. */
@@ -135,6 +171,10 @@ const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen }: {
 }): React.ReactNode => {
   const touch = React.useContext(NarrowLayoutContext)
   const [menu, setMenu] = React.useState(false)
+  const agent = row.agent === undefined ? undefined : context.agent?.(row.agent)
+  const agentName = agent?.name ?? row.agentLabel
+  const mission = row.mission === undefined ? undefined : missionName(row.mission, context)
+  const said = [agentName === undefined ? undefined : `from ${agentName}`, mission === undefined ? undefined : `mission ${mission}`, row.step === undefined ? undefined : `step ${row.step}`].filter(Boolean).join(', ')
   return (
     <li
       data-alert-id={row.id}
@@ -146,7 +186,7 @@ const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen }: {
         <Aria.Button
           data-alert-open=""
           aria-current={selected ? 'true' : undefined}
-          aria-label={`${row.title}, ${row.age}${row.line2 === '' ? '' : `, ${row.line2}`}, ${GLYPH_WORDS[row.glyph]}`}
+          aria-label={`${row.title}, ${row.age}${said === '' ? '' : `, ${said}`}${row.line2 === '' ? '' : `, ${row.line2}`}, ${GLYPH_WORDS[row.glyph]}`}
           onPress={onSelect}
           onKeyDown={(event) => {
             if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) setMenu(true)
@@ -159,7 +199,20 @@ const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen }: {
             <span {...stylex.props(styles.title)}>{row.title}</span>{' '}
             <span {...stylex.props(styles.metric)}>{row.age}</span>
           </span>
-          {row.line2 === '' ? null : <>{' '}<span {...stylex.props(styles.meta)}>{row.line2}</span></>}
+          {agentName === undefined && mission === undefined && row.step === undefined && row.line2 === '' ? null : <>{' '}
+            <span data-alert-context="" {...stylex.props(styles.meta, styles.context)}>
+              {agentName === undefined ? null : <HoverTarget entity={row.agent === undefined ? undefined : { kind: 'agent', id: row.agent }} style={[styles.agent, mission === undefined && row.step === undefined ? styles.agentAlone : styles.agentShared]}>
+                {agent === undefined ? null : <span {...stylex.props(styles.mark)}><SidebarStatus status={agent.status} statusLabel={statuses[agent.status].label} variant="Marks" needsYou={agent.needsYou === true} freshness="live" iconOnly decorative /></span>}<span data-alert-agent="" {...stylex.props(styles.ellipsis)}>{agentName}</span>
+              </HoverTarget>}
+              {mission === undefined && row.step === undefined ? null : <>
+                {agentName === undefined ? null : <span aria-hidden="true" {...stylex.props(styles.sep)}>·</span>}
+                <HoverTarget entity={row.mission === undefined ? undefined : { kind: 'mission', id: row.mission }} style={styles.missionPart}>
+                  <span {...stylex.props(styles.ellipsis)}>{mission === undefined ? null : <span data-alert-mission="">{mission}</span>}{mission !== undefined && row.step !== undefined ? <span aria-hidden="true" {...stylex.props(styles.sep)}>›</span> : null}{row.step === undefined ? null : <span data-alert-step="">{row.step}</span>}</span>
+                </HoverTarget>
+              </>}
+              {row.line2 === '' ? null : <><span aria-hidden="true" {...stylex.props(styles.sep)}>·</span><span {...stylex.props(styles.ellipsis)}>{row.line2}</span></>}
+            </span>
+          </>}
         </Aria.Button>
         <Aria.MenuTrigger isOpen={menu} onOpenChange={setMenu}>
           <Aria.Button aria-label={`Actions for ${row.title}`} {...stylex.props(styles.more, touch && styles.touch)}>⋯</Aria.Button>
@@ -181,6 +234,22 @@ const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen }: {
   )
 }
 
+/**
+ * A pointer-only hover target inside the row's one button: it shows the entity's shared card after the hover intent, and
+ * adds no focus stop (the row's name already says who asked and which mission and step, and its menu opens either).
+ */
+const HoverTarget = ({ entity: given, style, children }: { readonly entity: EntityRef | undefined; readonly style: stylex.StyleXStyles | readonly stylex.StyleXStyles[]; readonly children: React.ReactNode }) => {
+  const anchor = React.useRef<HTMLSpanElement>(null)
+  const intent = useHoverCardIntent()
+  // No source knows the entity (a host without cards): no surface at all, never an empty frame.
+  const card = useEntityCard(given ?? { kind: 'agent', id: '' })
+  const entity = given === undefined || card === null ? undefined : given
+  return <span ref={anchor} data-hover-target={entity?.kind} onPointerEnter={entity === undefined ? undefined : () => intent.intend(true)} onPointerLeave={entity === undefined ? undefined : () => intent.intend(false)} {...stylex.props(style)}>
+    {children}
+    {entity !== undefined && <HoverCardSurface triggerRef={anchor} isOpen={intent.isOpen} onOpenChange={intent.setOpen} placement="right top">{card}</HoverCardSurface>}
+  </span>
+}
+
 const focus = { ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } }
 const styles = stylex.create({
   // Fills a column parent and scrolls itself; minHeight 0 lets a `minHeight: 0` flex parent bound it instead of growing.
@@ -196,6 +265,16 @@ const styles = stylex.create({
   fault: { color: c.danger },
   title: { flexGrow: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   metric: { flexShrink: 0, color: c.fgSoft, fontSize: t.metaSize, fontVariantNumeric: 'tabular-nums' },
+  // One line: the agent keeps its name up to 45%, the mission and step take the rest, and both truncate.
+  context: { display: 'flex', alignItems: 'center', minWidth: 0 },
+  agent: { display: 'inline-flex', alignItems: 'center', flex: '0 1 auto', minWidth: 0, overflow: 'hidden' },
+  // Beside a mission the agent keeps at most half the line, so the mission always shows; alone it takes the line.
+  agentShared: { maxWidth: '50%' },
+  agentAlone: { maxWidth: '100%' },
+  mark: { display: 'inline-flex', marginInlineEnd: s.xs, verticalAlign: 'middle' },
+  missionPart: { display: 'inline-flex', flex: '1 1 0', minWidth: 0, overflow: 'hidden' },
+  ellipsis: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  sep: { flexShrink: 0, paddingInline: s.xs, color: c.fgSoft },
   meta: { paddingInlineStart: `calc(${g.iconSm} + ${s.sm})`, color: c.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   more: { flexShrink: 0, width: 24, borderWidth: 0, borderRadius: 4, backgroundColor: 'transparent', color: c.fgSoft, cursor: 'pointer', ':hover': { color: c.fg }, ...focus },
   touch: { minHeight: g.touchTarget, minWidth: g.touchTarget },

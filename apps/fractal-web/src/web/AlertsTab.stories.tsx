@@ -12,11 +12,25 @@ import { colorVars as c, geometryVars as g, typeVars as t } from '../../../../pa
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { observed, unavailable, waiting, type Feed } from '../data/source.ts'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
-import { AlertsList } from './AlertsTab.tsx'
+import { AlertsList, type AlertContext } from './AlertsTab.tsx'
+import { EntityCardSource, type EntityCardResolver } from '../../../../packages/fractal-ui/src/assistant-ui/entity/EntityHoverCard.tsx'
+import { EntityCard, EntityCardHeader } from '../../../../packages/fractal-ui/src/assistant-ui/entity/EntityCard.tsx'
 
 const decode = Native.decodeUnknownSync(Native.Attention)
 
 type Args = { readonly scheme: 'dark' | 'light'; readonly feed: 'served' | 'waiting' | 'ungranted' | 'stale'; readonly attention?: string; readonly bounded?: boolean; readonly rejected?: boolean }
+
+/**
+ * What the workspace knows about the cast, here from the cards themselves: each asking agent by its ref's last segment,
+ * working, plus one mission title. The live tab reads names and status from the roster and titles from the missions feed.
+ */
+const fixtureName = (ref: string) => (ref.split('/').at(-1) ?? ref).replace(/^\w/u, letter => letter.toUpperCase())
+const storyContext: AlertContext = {
+  agent: ref => ({ name: `Atlas ${fixtureName(ref)}`, status: 'working' }),
+  missionTitle: id => id.endsWith('load-user-rename') ? 'Rename fetchUser to loadUser' : undefined,
+}
+/** The shared hover cards: the workspace's resolver, reduced to a header so the story shows where they open. */
+const storyCards: EntityCardResolver = entity => <EntityCard entity={entity}><EntityCardHeader title={entity.kind === 'agent' ? `Atlas ${fixtureName(entity.id)}` : 'Rename fetchUser to loadUser'} kind={entity.kind === 'mission' ? 'Mission' : undefined} /></EntityCard>
 
 /** The bounded sidebar's height: shorter than the slice's four 48px rows, as a workspace column is shorter than a long feed. */
 const BOUNDED_HEIGHT = 160
@@ -39,13 +53,13 @@ const AlertsTabStory = ({ scheme, feed: state, bounded = false, rejected = false
     { _tag: 'Rejected' as const, id: 'attention/other', path: 'title', reason: 'Expected a string' },
   ] } : undefined
   return (
-    <NarrowLayoutContext.Provider value={window.innerWidth < 900}>
+    <EntityCardSource resolve={storyCards}><NarrowLayoutContext.Provider value={window.innerWidth < 900}>
       <main data-scheme={scheme} {...stylex.props(styles.canvas, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
         <aside aria-label="Alerts sidebar" data-sidebar-host {...stylex.props(styles.sidebar, bounded && styles.bounded)}>
           {/* Bounded, the list sits where the workspace puts it: in a `minHeight: 0` column panel that clips its overflow. */}
           {bounded
-            ? <div {...stylex.props(styles.panel)}><AlertsList feed={feed} decode={evidence} now={now} onOpen={setOpened} {...(selected === undefined ? {} : { selected })} onSelect={setSelected} /></div>
-            : <AlertsList feed={feed} decode={evidence} now={now} onOpen={setOpened} {...(selected === undefined ? {} : { selected })} onSelect={setSelected} />}
+            ? <div {...stylex.props(styles.panel)}><AlertsList feed={feed} decode={evidence} now={now} onOpen={setOpened} context={storyContext} {...(selected === undefined ? {} : { selected })} onSelect={setSelected} /></div>
+            : <AlertsList feed={feed} decode={evidence} now={now} onOpen={setOpened} context={storyContext} {...(selected === undefined ? {} : { selected })} onSelect={setSelected} />}
         </aside>
         {!slice.loading && (state === 'served' || state === 'stale') && slice.state.messages.length > 0 && <section aria-label="Scenario fixture context" {...stylex.props(styles.fixtureContext)}>
           <h2>Scenario fixture context</h2>
@@ -54,7 +68,7 @@ const AlertsTabStory = ({ scheme, feed: state, bounded = false, rejected = false
         </section>}
         <output data-testid="alerts-opened">{opened}</output>
       </main>
-    </NarrowLayoutContext.Provider>
+    </NarrowLayoutContext.Provider></EntityCardSource>
   )
 }
 
@@ -112,6 +126,31 @@ const servedPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   await expect(canvas.getByTestId('alerts-opened').textContent).not.toBe('')
   await expect(canvas.getByTestId('alerts-opened').textContent).not.toMatch(/^agent\//)
 
+  // Context: each requested card names its asking agent with a status mark; the card holding the mission names it (and its
+  // step when served), all on line 2 inside the 256px row, and the row's name says them too.
+  for (const row of needsYou) {
+    await expect(row.querySelector('[data-alert-agent]')?.textContent).toMatch(/^Atlas /)
+    await expect(row.querySelector('[data-alert-context] [data-mark="working"]')).not.toBeNull()
+    const name = row.querySelector<HTMLElement>('[data-alert-agent]')!
+    if (row !== holder) await expect(name.scrollWidth).toBeLessThanOrEqual(name.clientWidth + 0.5)
+    const context = row.querySelector<HTMLElement>('[data-alert-context]')!
+    await expect(context.getBoundingClientRect().right).toBeLessThanOrEqual(rowButton(row).getBoundingClientRect().right + 0.5)
+    await expect(context.scrollHeight).toBeLessThanOrEqual(context.clientHeight + 1)
+  }
+  await expect(holder.querySelector('[data-alert-mission]')).toHaveTextContent('Rename fetchUser to loadUser')
+  await expect(rowButton(holder)).toHaveAccessibleName(/, from Atlas \w+, mission Rename fetchUser to loadUser/)
+  await expect(question.querySelector('[data-alert-mission]')).toBeNull()
+  await expect(list.textContent).not.toMatch(/[0-9a-f]{16,}/)
+  // Pointer rest on the agent or the mission opens its shared card (desktop; touch layouts show no hover cards).
+  if (!narrow) {
+    await userEvent.hover(holder.querySelector('[data-alert-agent]')!)
+    await waitFor(() => expect(document.querySelector('[data-hover-card] [data-entity-card="agent"]')).not.toBeNull())
+    await userEvent.unhover(holder.querySelector('[data-alert-agent]')!)
+    await userEvent.hover(holder.querySelector('[data-alert-mission]')!)
+    await waitFor(() => expect(document.querySelector('[data-hover-card] [data-entity-card="mission"]')).not.toBeNull())
+    await userEvent.unhover(holder.querySelector('[data-alert-mission]')!)
+  }
+
   // Enter opens the alert in the main area, and the row says it is the one shown.
   const button = rowButton(holder)
   button.focus()
@@ -159,7 +198,7 @@ const meta = {
   parameters: {
     layout: 'fullscreen',
     scenario: { _tag: 'slices', slices: ['attention'], world: 'fleet-mid-refactor' },
-    docs: { description: { component: 'Every open alert as an SR-2 row: glyph (? harness question, ◆ needs you, ! fault), title, wait age; line 2 shows only served facts (raised by, the step it holds, a self-resolve countdown when deadline and default answer are both served). Enter opens the alert in the main area and the row carries aria-current. The ⋯ menu (also right click, Shift+F10, ContextMenu) offers Answer and, only when served, Open conversation and Open mission. The list scrolls itself inside a bounded sidebar. When an answered alert leaves the feed while focus was in its row, focus moves to the next row, else the previous one, else the empty state. Waiting, refused and stale feeds say so; an empty feed says nothing needs you. Served mailbox messages from the same slice appear separately as explicitly labeled fixture context, never as Alerts rows. Waiting and Ungranted hold the source feed boundary constant regardless of the selected attention data; their slice invariants document that contract while retaining the observed slice read.' } },
+    docs: { description: { component: 'Every open alert as an SR-2 row: glyph (? harness question, ◆ needs you, ! fault), title, wait age; line 2 shows the asking agent with its status mark, then the mission and step it holds, only from served facts (raised by, the step it holds, a self-resolve countdown when deadline and default answer are both served). Enter opens the alert in the main area and the row carries aria-current. The ⋯ menu (also right click, Shift+F10, ContextMenu) offers Answer and, only when served, Open conversation and Open mission. The list scrolls itself inside a bounded sidebar. When an answered alert leaves the feed while focus was in its row, focus moves to the next row, else the previous one, else the empty state. Waiting, refused and stale feeds say so; an empty feed says nothing needs you. Served mailbox messages from the same slice appear separately as explicitly labeled fixture context, never as Alerts rows. Waiting and Ungranted hold the source feed boundary constant regardless of the selected attention data; their slice invariants document that contract while retaining the observed slice read.' } },
   },
   args: { scheme: 'dark', feed: 'served', attention: 'sidebar-tabs' },
   argTypes: { ...scenarioArgTypes(['attention']), scheme: { options: ['dark', 'light'], control: 'radio' }, feed: { options: ['served', 'waiting', 'ungranted', 'stale'], control: 'radio' } },
@@ -168,6 +207,7 @@ export default meta
 
 type Story = StoryObj<Args>
 export const Served: Story = { tags: ['critical', 'both-widths'], name: 'Served · rows, menu and open', play: servedPlay }
+export const ServedLight: Story = { args: { scheme: 'light' }, name: 'Served · rows, menu and open · light', play: servedPlay }
 /** A sidebar shorter than the feed: the list is its own bounded scroll region inside a `minHeight: 0` panel. */
 export const BoundedScroll: Story = { tags: ['critical', 'both-widths'], args: { bounded: true }, name: 'Bounded · scrolls in a short sidebar', play: boundedPlay }
 

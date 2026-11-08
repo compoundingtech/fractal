@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Attention, decodeUnknownSync } from '@fractal/client/schema'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
-vi.mock('../data/react.tsx', () => ({ useAttention: vi.fn(), useAttentionDecode: vi.fn(), useDataSource: vi.fn(), useNow: vi.fn() }))
+vi.mock('../data/react.tsx', () => ({ useAttention: vi.fn(), useAttentionDecode: vi.fn(), useDataSource: vi.fn(), useNow: vi.fn(), useFleet: vi.fn(), useMissions: vi.fn() }))
 
 import { credentialExpiredMessage, observed, unavailable } from '../data/source.ts'
 import { AlertsList } from './AlertsTab.tsx'
@@ -181,5 +181,39 @@ describe('AlertsList decode notice', () => {
     expect(host.querySelector('[data-wf-attention-decode]')).toBeNull()
     expect(host.textContent).not.toContain('attention/broken')
     expect(host.querySelector('[role="alert"]')?.textContent).toBe('Read access to alerts has not been granted.')
+  })
+})
+
+describe('AlertsList context', () => {
+  const askedFields = {
+    id: 'attention/rename', kind: 'attention', revision: 'r1', attention_kind: 'agent-request', title: 'Review the loadUser rename', detail: '', priority: 'high', state: 'open', alert: true,
+    person_id: 'person/avery', source_id: 'agent/example/reviewer', requester_id: 'agent/example/reviewer', mission_id: 'mission/example/load-user-rename',
+    blocked: { step: 'review-rename', goal: 'Review the rename', step_run_id: 'step-run/rename/review', attempt: 0 },
+    requested_at: '2026-11-01T11:00:00Z', updated_at: '2026-11-01T11:00:00Z', actions: ['custom.reply'],
+    presentation: { tier: 'stopped', kind: 'request', agent: null, raised_by: { id: 'agent/example/reviewer', label: 'Reviewer' }, waiting: null },
+  } as const
+  const asked = decodeUnknownSync(Attention)(askedFields)
+  const { blocked: _blocked, ...unblocked } = askedFields
+  const hashed = decodeUnknownSync(Attention)({ ...unblocked, id: 'attention/adhoc', mission_id: 'mission/person-ask/d45524b5ff5388299cd145fd8bef8c7e', requester_id: 'agent/example/unknown', presentation: { tier: 'stopped', kind: 'request', agent: null, raised_by: null, waiting: null } })
+  const render = () => act(async () => root.render(<AlertsList feed={observed({ value: [asked, hashed] })} now={now} onOpen={() => {}}
+    context={{ agent: ref => ref === 'agent/example/reviewer' ? { name: 'Atlas Reviewer', status: 'working' } : undefined, missionTitle: id => id.endsWith('load-user-rename') ? 'Rename fetchUser to loadUser' : undefined }} />))
+
+  it('shows the asking agent with its status mark, then the mission and step', async () => {
+    await render()
+    const line = row(asked)!.querySelector<HTMLElement>('[data-alert-context]')!
+    expect(line.querySelector('[data-alert-agent]')!.textContent).toBe('Atlas Reviewer')
+    // The row's glyph carries the ask; the agent's own mark stays its neutral state, so amber is not doubled.
+    expect(line.querySelector('[data-mark="working"]')).not.toBeNull()
+    expect(line.querySelector('[data-mark="needs-you"]')).toBeNull()
+    expect(line.querySelector('[data-alert-mission]')!.textContent).toBe('Rename fetchUser to loadUser')
+    expect(line.querySelector('[data-alert-step]')!.textContent).toBe('review-rename')
+    expect(rowButton(asked).getAttribute('aria-label')).toContain('from Atlas Reviewer, mission Rename fetchUser to loadUser, step review-rename')
+  })
+  it('falls back to the served label, and never shows a hashed mission id', async () => {
+    await render()
+    const line = row(hashed)!.querySelector<HTMLElement>('[data-alert-context]')
+    expect(row(hashed)!.textContent).not.toMatch(/[0-9a-f]{16,}/)
+    expect(line?.querySelector('[data-alert-mission]')?.textContent ?? '').not.toMatch(/[0-9a-f]{16,}/)
+    expect(rowButton(hashed).getAttribute('aria-label')).not.toMatch(/[0-9a-f]{16,}/)
   })
 })
