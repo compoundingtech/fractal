@@ -2448,7 +2448,7 @@ mission "release-report" state="ready" {
     let shown = value(&run_cli(&socket, &["work", "show", &subject]).await);
     assert_eq!(
         shown["value"]["person_answers"][0]["answer"],
-        serde_json::json!({"type": "update", "outcome": "read"})
+        serde_json::json!({"type": "update", "outcome": "read", "choices": []})
     );
     server.abort();
 }

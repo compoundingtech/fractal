@@ -402,7 +402,7 @@ async fn direct_answer_executes_without_approval_with_provenance_and_rejects_sta
     assert!(result["value"].get("approval_id").is_none(), "{result}");
     let durable = h.state.store.step_run(&ask).unwrap().unwrap();
     assert_eq!(durable.person_answers.len(), 1);
-    assert_eq!(durable.person_answers[0].answer.as_ref().unwrap()["id"], "yes");
+    assert_eq!(durable.person_answers[0].answer.as_ref().unwrap()["choices"][0]["id"], "yes");
     assert_eq!(durable.person_answers[0].respondent, "assistant/chatgpt");
     assert_eq!(durable.person_answers[0].assistant_owner.as_deref(), Some(OWNER));
     assert_eq!(durable.person_answers[0].assistant_session_actor.as_deref(), Some(paired.session_actor.as_str()));
