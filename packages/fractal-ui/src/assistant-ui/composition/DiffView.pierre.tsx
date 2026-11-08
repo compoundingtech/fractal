@@ -24,6 +24,9 @@ registerTheme()
 /** Inside the shadow root: the header reads the kit's sans stack; the host paints the shared focus ring. */
 const unsafeCSS = `
 :host { background: transparent; }
+/* Word changes: a light wash plus an underline in the change ink, so muted syntax keeps 4.5:1. */
+[data-line-type='change-addition'] [data-diff-span] { text-decoration: underline 1px var(--fractal-diff-addition); text-underline-offset: 3px; }
+[data-line-type='change-deletion'] [data-diff-span] { text-decoration: underline 1px var(--fractal-diff-deletion); text-underline-offset: 3px; }
 `
 
 export interface PierrePatchProps {
