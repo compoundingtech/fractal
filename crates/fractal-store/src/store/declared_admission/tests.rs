@@ -206,14 +206,23 @@ fn direct_declaration_claims_persist_metadata_with_complete_fleet_evidence() {
         assert_eq!(persisted.subject, subject);
         assert_eq!(persisted.kind, kind);
         assert_eq!(persisted.body, body);
+        if kind == "intent.desired" {
+            let desired: DesiredSubject = serde_json::from_value(persisted.body).unwrap();
+            assert_eq!(desired.member.unwrap().declared_lane, Some(crate::model::DeclaredLane::Check));
+        } else {
+            let mission: MissionSpec = serde_json::from_value(persisted.body).unwrap();
+            assert_eq!(mission.declared_priority, Some(crate::model::DeclaredPriority::Normal));
+        }
     }
-    let (desired, _) = store.desired_subject_with_writer("agent/example/new").unwrap().unwrap();
+    // Raw append stores the declaration log. Replication selects domain projections.
+    sync(&store, &peer);
+    let (desired, _) = peer.desired_subject_with_writer("agent/example/new").unwrap().unwrap();
     assert_eq!(
         desired.member.unwrap().declared_lane,
         Some(crate::model::DeclaredLane::Check),
     );
     assert_eq!(
-        store.mission_spec("new", None).unwrap().unwrap().declared_priority,
+        peer.mission_spec("new", None).unwrap().unwrap().declared_priority,
         Some(crate::model::DeclaredPriority::Normal),
     );
 }
