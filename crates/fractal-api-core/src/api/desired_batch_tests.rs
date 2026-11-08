@@ -189,6 +189,88 @@ async fn desired_cursor_rejects_changed_cut_instead_of_restarting() {
     assert!(error.get("value").is_none(), "{error}");
 }
 
+async fn assert_desired_cursor_expires_after_backlog_projection(kind: &str) {
+    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let source = Store::open_memory("desired-cursor-source").unwrap();
+    source.bind_fleet(FLEET).unwrap();
+    state.store.bind_fleet(FLEET).unwrap();
+    source.set_write_clock_at(1_700_000_000_000).unwrap();
+    let declaration = |name: &str| match kind {
+        "agent" => format!(
+            "agent \"projection/{name}\" {{ command \"true\"; workspace \".\"; restart \"never\"; }}\n",
+        ),
+        "mission" => format!(
+            "mission \"projection/{name}\" state=\"ready\" {{\n goal \"Cursor projection fence.\"\n step \"work\" {{ agentless }}\n}}\n",
+        ),
+        _ => unreachable!("only desired and mission projection families are exercised"),
+    };
+    let mut kdl = String::from("version 2\n");
+    for name in ["0000", "0001", "0002"] {
+        kdl.push_str(&declaration(name));
+    }
+    let intent = parse_intent(&kdl, source.origin()).unwrap();
+    source.apply_internal(&intent, "desired-cursor-initial").unwrap();
+    let exchange = source.export_replication_exchange(
+        FLEET, &state.store.replication_inventory().unwrap(),
+    ).unwrap();
+    state.store.receive_replication_exchange(source.origin(), FLEET, &exchange).unwrap();
+    let admission = state.store.validate_replication_backlog().unwrap();
+    assert_eq!((admission.invalid, admission.unknown), (0, 0));
+    assert!(state.store.project_replication_backlog().unwrap());
+    let published = state.store.index().unwrap();
+
+    source.set_write_clock_at(1_700_000_001_000).unwrap();
+    let kdl = format!("version 2\n{}", declaration("0003"));
+    let intent = parse_intent(&kdl, source.origin()).unwrap();
+    source.apply_internal(&intent, "desired-cursor-backlog").unwrap();
+    let exchange = source.export_replication_exchange(
+        FLEET, &state.store.replication_inventory().unwrap(),
+    ).unwrap();
+    state.store.receive_replication_exchange(source.origin(), FLEET, &exchange).unwrap();
+    let admission = state.store.validate_replication_backlog().unwrap();
+    assert_eq!((admission.invalid, admission.unknown), (0, 0));
+    let admitted = state.store.index().unwrap();
+    assert!(admitted > published);
+    let app = router(state.clone());
+    let base = format!("/v1/desired?kind={kind}");
+    let (status, before) = get_request(app.clone(), &base).await;
+    assert_eq!(status, StatusCode::OK, "{before}");
+    assert_eq!(before["items"].as_array().unwrap().len(), 3);
+    let (status, first) = get_request(app.clone(), &format!("{base}&limit=1")).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["store_index"], admitted);
+    let cursor = first["next_cursor"].as_str().unwrap();
+
+    // Exercise the real projection writer, not a synthetic health-row mutation.
+    smallclaims::store::FULL_REPLAYS.with(|count| count.set(0));
+    assert!(state.store.project_replication_backlog().unwrap());
+    assert_eq!(smallclaims::store::FULL_REPLAYS.with(std::cell::Cell::get), 0,
+        "the regression must exercise incremental projection, not replay");
+    assert_eq!(state.store.index().unwrap(), admitted, "projection appends no claims");
+    let (status, after) = get_request(app.clone(), &base).await;
+    assert_eq!(status, StatusCode::OK, "{after}");
+    assert_eq!(after["store_index"], admitted);
+    assert_eq!(after["items"].as_array().unwrap().len(), 4,
+        "projection must actually change the selected {kind} declarations");
+    let (status, error) = get_request(
+        app, &format!("{base}&limit=1&cursor={}", urlencoding::encode(cursor)),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{error}");
+    assert_eq!(error["code"], "desired-cursor-expired", "{error}");
+}
+
+#[tokio::test]
+async fn desired_cursor_expires_when_desired_backlog_projects_without_appending_claims() {
+    assert_desired_cursor_expires_after_backlog_projection("agent").await;
+}
+
+#[tokio::test]
+async fn desired_cursor_expires_when_mission_backlog_projects_without_appending_claims() {
+    assert_desired_cursor_expires_after_backlog_projection("mission").await;
+}
+
 #[tokio::test]
 async fn desired_cursor_rejects_changed_subjects_kind_limit_and_store_origin() {
     let root = tempfile::tempdir().unwrap();

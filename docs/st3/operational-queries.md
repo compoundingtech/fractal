@@ -16,11 +16,14 @@ flattened `DesiredSubject` entries plus `desired_token` and optional extensible 
 `next_cursor` is an opaque string or `null`, and `store_index` is a `u64`.
 All sources for a page are read in one store snapshot.
 
-The cursor binds the store origin, pinned read cut, selection filters, limit and last
-subject. Continue with unchanged subjects, kind and limit. Each continuation validates
-that the store is still at the pinned cut; a changed cut returns typed
-`desired-cursor-expired`, never a silent restart or retry. No historical snapshot or
-pagination cache is retained. The CLI follows every cursor with limit 1,000 and unchanged
+The cursor binds the store origin, pinned claim read cut, shared graph projection progress,
+selection filters, limit and last subject. The graph projection frontier covers both selected
+desired declarations and mission definitions; backlog projection can advance it without
+appending a claim or changing `store_index`. Continue with unchanged subjects, kind and limit.
+Each continuation validates the claim cut and graph projection health/frontier in the same
+pinned snapshot; a change to either returns typed `desired-cursor-expired`, never a silent
+restart or retry. No historical snapshot or pagination cache is retained. The CLI follows
+every cursor with limit 1,000 and unchanged
 filters, then prints one final JSON array. Any page failure, including cursor invalidation,
 fails the command without partial stdout.
 

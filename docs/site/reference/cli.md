@@ -73,9 +73,12 @@ flattens `DesiredSubject` (`subject`, `kind`, `desired`, `member`, and ownership
 alongside `desired_token` (a selected declaration claim ID or `null`) and optional
 `actual` (an extensible JSON summary). This is not a client-v0 envelope.
 
-An opaque cursor binds the store origin, pinned read cut, selection filters, page limit
-and last subject. Continuations must keep the same subjects, kind and limit, and the
-store must still be at that cut; a changed cut returns typed `desired-cursor-expired`.
+An opaque cursor binds the store origin, pinned claim read cut, shared graph projection
+progress, selection filters, page limit and last subject. Continuations must keep the same
+subjects, kind and limit. Both the claim cut and graph projection health/frontier must remain
+unchanged; otherwise the API returns typed `desired-cursor-expired`. This frontier covers
+selected desired declarations and mission definitions, including backlog projection that
+changes these tables without appending claims or advancing `store_index`.
 There is no historical snapshot or pagination cache, silent restart or automatic retry.
 The CLI uses limit 1,000 throughout, collects every page and prints one final JSON array
 only after all reads succeed. Cursor invalidation fails the command without partial stdout.

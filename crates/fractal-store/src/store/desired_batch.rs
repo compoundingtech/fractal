@@ -1,6 +1,7 @@
 //! Bounded desired declarations and comparison summaries at one reader cut.
 use super::*;
 use base64::Engine as _;
+use super::desired_progress::{desired_projection_progress, DesiredProjectionProgress};
 
 pub const DESIRED_BATCH_LIMIT: usize = 1000;
 
@@ -35,6 +36,7 @@ pub struct DesiredBatchPage {
 struct DesiredCursor {
     origin: String,
     cut: u64,
+    progress: DesiredProjectionProgress,
     subjects: Vec<String>,
     kind: Option<String>,
     limit: usize,
@@ -65,34 +67,46 @@ impl Store {
         subjects.sort();
         subjects.dedup();
         let cursor = request.cursor.as_deref().map(decode_cursor).transpose()?;
-        // The projection tables represent the current cut, not historical rows. A changed
-        // cut invalidates continuation instead of mixing pages or retaining a new cache.
+        // Projection tables can advance without a claim append. Fence both the claim
+        // cut and the shared desired/mission projection frontier inside this snapshot.
         self.read_snapshot(|cut| {
+            let connection = self.readers.get();
+            let progress = desired_projection_progress(&connection)?;
             if let Some(cursor) = &cursor {
                 if cursor.origin != self.origin() || cursor.subjects != subjects
                     || cursor.kind != request.kind || cursor.limit != limit {
                     return Err(FractalError::new("invalid-desired-cursor", "cursor does not match this desired selection").into());
                 }
-                if cursor.cut != cut {
+                if cursor.cut != cut || cursor.progress != progress {
                     return Err(FractalError::new("desired-cursor-expired", "the store changed since the desired page was read")
                         .with_detail("store_index", cut).into());
                 }
             }
             let after = cursor.as_ref().map_or("", |cursor| cursor.after.as_str());
             smallclaims::touched::note_read(|| "kind:intent.desired".to_owned());
-            let connection = self.readers.get();
-            let mut query = if subjects.is_empty() {
-                connection.prepare_cached(
+            // Reuse the reader pinned by read_snapshot for every projection read.
+            let mut query = match (subjects.is_empty(), request.kind.is_some()) {
+                (true, false) => connection.prepare_cached(
                     "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
-                     FROM desired WHERE ?1='[]' AND (?2 IS NULL OR kind=?2)
+                     FROM desired WHERE ?1='[]' AND ?2 IS NULL
                      AND subject>?3 ORDER BY subject LIMIT ?4",
-                )?
-            } else {
-                connection.prepare_cached(
+                )?,
+                (true, true) => connection.prepare_cached(
+                    "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
+                     FROM desired INDEXED BY desired_kind_subject_index
+                     WHERE ?1='[]' AND kind=?2 AND subject>?3 ORDER BY subject LIMIT ?4",
+                )?,
+                (false, false) => connection.prepare_cached(
                     "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
                      FROM desired WHERE subject IN (SELECT value FROM json_each(?1))
-                     AND (?2 IS NULL OR kind=?2) AND subject>?3 ORDER BY subject LIMIT ?4",
-                )?
+                     AND ?2 IS NULL AND subject>?3 ORDER BY subject LIMIT ?4",
+                )?,
+                (false, true) => connection.prepare_cached(
+                    "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
+                     FROM desired INDEXED BY desired_kind_subject_index
+                     WHERE subject IN (SELECT value FROM json_each(?1))
+                     AND kind=?2 AND subject>?3 ORDER BY subject LIMIT ?4",
+                )?,
             };
             let mut desired = query.query_map(
                 params![serde_json::to_string(&subjects)?, request.kind, after, limit + 1], desired_from_row,
@@ -132,7 +146,7 @@ impl Store {
             desired.truncate(limit);
             let next_cursor = if has_more {
                 let cursor = DesiredCursor {
-                    origin: self.origin().into(), cut, subjects: subjects.clone(), kind: request.kind.clone(),
+                    origin: self.origin().into(), cut, progress, subjects: subjects.clone(), kind: request.kind.clone(),
                     limit, after: desired.last().expect("nonempty bounded page").subject.clone(),
                 };
                 Some(format!("desired/v1/{}", base64::engine::general_purpose::URL_SAFE_NO_PAD
