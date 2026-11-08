@@ -35,6 +35,10 @@ export interface UsePaletteOptions<A> {
   /** Ids most recent first: an item's recency is its place here. */
   readonly recent?: readonly string[] | undefined
   readonly 'aria-label'?: string | undefined
+  /** The section the palette opens scoped to, as if jumped to with Alt+digit (Escape leaves it). */
+  readonly initialSection?: string | undefined
+  /** The row chosen when it first appears, such as the next space for a space switcher. */
+  readonly initialSelected?: string | undefined
 }
 
 export interface PaletteState<A> {
@@ -48,6 +52,8 @@ export interface PaletteState<A> {
   readonly loading: boolean
   /** The section the query is scoped to, by prefix or by Alt+digit. */
   readonly section: string | undefined
+  /** Moves the selection by `by` rows, wrapping, as the arrow keys do; for host keys such as Alt+G. */
+  readonly move: (by: number) => void
   readonly getInputProps: () => React.InputHTMLAttributes<HTMLInputElement> & { readonly ref: React.RefObject<HTMLInputElement | null> }
   readonly getListProps: () => React.HTMLAttributes<HTMLElement>
   readonly getSectionProps: (section: PaletteSection) => React.HTMLAttributes<HTMLElement> & { readonly 'data-section': string }
@@ -107,7 +113,7 @@ export const usePalette = <A,>(options: UsePaletteOptions<A>): PaletteState<A> =
     onModeChange?.(next)
   }
   const [query, setQueryState] = React.useState(mode._tag === 'Naming' ? mode.initial : '')
-  const [jumped, setJumped] = React.useState<string | undefined>(undefined)
+  const [jumped, setJumped] = React.useState<string | undefined>(options.initialSection)
   const [selectedIndex, setSelectedIndex] = React.useState(0)
   const input = React.useRef<HTMLInputElement>(null)
   const listId = React.useId()
@@ -127,7 +133,20 @@ export const usePalette = <A,>(options: UsePaletteOptions<A>): PaletteState<A> =
     { query: parsed.text, sections, section, ranker, typedOrder, emptyOrder, leads, cap },
   ), [naming, items, order, parsed.text, sections, section, ranker, typedOrder, emptyOrder, leads, cap])
   const results = React.useMemo(() => flatten(groups), [groups])
+  // The initial row is chosen once, the first time the results hold it.
+  const pendingInitial = React.useRef(options.initialSelected)
+  React.useLayoutEffect(() => {
+    if (pendingInitial.current === undefined) return
+    const index = results.findIndex(item => item.id === pendingInitial.current)
+    if (index === -1) return
+    pendingInitial.current = undefined
+    setSelectedIndex(index)
+  }, [results])
   const selected = results[Math.min(selectedIndex, results.length - 1)]
+  const move = (by: number) => {
+    if (results.length === 0) return
+    setSelectedIndex(index => ((Math.min(index, results.length - 1) + by) % results.length + results.length) % results.length)
+  }
   const setQuery = (next: string) => {
     setQueryState(next)
     setSelectedIndex(0)
@@ -175,6 +194,7 @@ export const usePalette = <A,>(options: UsePaletteOptions<A>): PaletteState<A> =
     selected,
     loading,
     section,
+    move,
     getInputProps: () => ({
       ref: input,
       value: query,

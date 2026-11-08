@@ -53,12 +53,22 @@ interface HarnessProps {
   readonly recent?: readonly string[]
   /** How many agents the roster holds beyond the fixed three. */
   readonly extraAgents?: number
+  /** Further spaces after Main. */
+  readonly spaces?: readonly string[]
+  readonly section?: string
+  readonly select?: 'next-space'
 }
 
 /** A palette over a real workspace transition; the readout below shows what it dispatched. */
 const noRecent: readonly string[] = []
-const Harness = ({ scheme, phone = false, recent = noRecent, extraAgents = 0 }: HarnessProps) => {
-  const [state, setState] = React.useState(initial)
+const noSpaces: readonly string[] = []
+const Harness = ({ scheme, phone = false, recent = noRecent, extraAgents = 0, spaces = noSpaces, section, select }: HarnessProps) => {
+  // Further spaces are made, then Main is shown again.
+  const [state, setState] = React.useState(() => {
+    const first = initial()
+    const made = spaces.reduce((current, name) => transition(current, { _tag: 'SpaceNew', name }, config), first)
+    return transition(made, { _tag: 'SpaceSwitch', space: first.current }, config)
+  })
   const [ran, setRan] = React.useState<string | undefined>(undefined)
   const [recentStore] = React.useState(() => memoryRecentStore(recent))
   const roster = React.useMemo((): PaletteWorld => extraAgents === 0 ? world : {
@@ -84,7 +94,7 @@ const Harness = ({ scheme, phone = false, recent = noRecent, extraAgents = 0 }: 
       {panesOf(space.layout).map((pane, index) => <div key={pane.id} data-testid={`pane-${index}`}>{pane.tabs.map(tab => `${tab.ref}${tab.id === pane.active ? '*' : ''}`).join(' | ')}</div>)}
       {ran !== undefined && <div data-testid="ran">{ran}</div>}
     </section>
-    <CommandPalette {...palette} state={state} dispatch={dispatch} world={roster} commands={commands} search={said} recentStore={recentStore} phone={phone} />
+    <CommandPalette {...palette} state={state} dispatch={dispatch} world={roster} commands={commands} search={said} recentStore={recentStore} phone={phone} section={section} select={select} />
   </main>
 }
 
@@ -113,6 +123,7 @@ export const scenarioExemptions: readonly string[] = [
   'Phone:contract-fixture',
   'PhoneLight:contract-fixture',
   'SaidInConversations:contract-fixture',
+  'SpaceSwitcher:contract-fixture',
   'Scoping:contract-fixture',
   'Targets:contract-fixture',
   'Typing:contract-fixture',
@@ -194,6 +205,22 @@ export const LongSection: Story = {
     await expect(input).toHaveAttribute('aria-activedescendant', last.id)
     const list = within(dialog).getByRole('listbox').getBoundingClientRect(), row = last.getBoundingClientRect()
     await expect(row.top >= list.top - 1 && row.bottom <= list.bottom + 1).toBe(true)
+  },
+}
+
+/** Alt+G, as the TUI's Ctrl+G: the spaces, the next one chosen; Alt+G again moves on, and Enter switches. */
+export const SpaceSwitcher: Story = {
+  args: { spaces: ['Review', 'Release'], section: 'spaces', select: 'next-space' },
+  play: async ({ canvasElement }) => {
+    const { dialog } = await openPalette(canvasElement)
+    await waitFor(() => expect(sectionsOf(dialog)).toEqual(['Spaces']))
+    const chosen = () => dialog.querySelector('[role="option"][aria-selected="true"]')?.textContent ?? ''
+    await waitFor(() => expect(chosen()).toContain('Review'))
+    await userEvent.keyboard('{Alt>}g{/Alt}')
+    await expect(chosen()).toContain('Release')
+    await userEvent.keyboard('{Enter}')
+    await closed()
+    await expect(within(canvasElement).getByTestId('space')).toHaveTextContent('Release (3 spaces)')
   },
 }
 
