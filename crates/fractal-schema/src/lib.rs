@@ -4915,10 +4915,12 @@ mod tests {
 
     #[test]
     fn assistant_principal_registry_digest_transition() {
-        // Reconstruct the registry at the principal transition, before usage observations.
+        // Reconstruct the principal-transition registry, before later additive claim families.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
+        current.claims.remove(read_positions::KIND).unwrap();
+        current.subjects.remove(read_positions::FAMILY).unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
