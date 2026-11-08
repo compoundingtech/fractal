@@ -8,8 +8,8 @@ Needs contents: write.
 There is one release, tagged `edge`, never one per commit. Each call replaces its assets with the
 archives, checksums and RELEASE.json of SOURCE, rewrites its notes with the commits since the
 previous edge, and moves the tag to SOURCE. It is a pre-release, so `latest` and the daily
-versioned release (which reads the latest release) ignore it. A run for a commit older than the
-current edge changes nothing, so slow runs cannot move edge backwards.
+versioned release (which reads the latest release) ignore it. A run older than either the
+current edge tag or manifest changes nothing; an equal-source run repairs only a split state.
 """
 import argparse
 import json
@@ -43,10 +43,6 @@ def gh(*args, **options):
     """A GitHub call that survives a 5xx or a timeout (scripts/release_gh.py)."""
     return gh_call(*args, step='release-fractal-edge', **options)
 
-
-def current_edge(repo):
-    done = run('git', 'rev-parse', '-q', '--verify', f'refs/tags/{TAG}^{{commit}}', cwd=repo, check=False)
-    return done.stdout.strip() or None
 
 
 def is_ancestor(repo, older, newer):
@@ -113,6 +109,25 @@ def tag_commit(repository):
     return json.loads(gh('api', f'repos/{repository}/git/tags/{ref["sha"]}').stdout)['object']['sha']
 
 
+def manifest_source(repository, assets):
+    if not assets or 'RELEASE.json' not in assets:
+        return None
+    done = gh('release', 'download', TAG, '--repo', repository, '--pattern', 'RELEASE.json', '--output', '-')
+    source = json.loads(done.stdout)['source']
+    if not SHA.fullmatch(source):
+        raise SystemExit('release-fractal-edge: invalid source in edge RELEASE.json')
+    return source
+
+
+def stale(repo, source, tag, manifest):
+    # Equal-source retries must repair a partial publication, including the historical
+    # manifest-ahead-of-tag split. A complete equal-source publication is a no-op.
+    if tag == manifest == source:
+        return True
+    return any(value and value != source and is_ancestor(repo, source, value)
+               for value in (tag, manifest))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--source', required=True)
@@ -131,9 +146,11 @@ def main():
     run('sha256sum', '--check', 'SHA256SUMS', cwd=dist)
     say(run('python3', str(repo / 'scripts/release-fractal-manifest.py'), args.source, cwd=dist).stdout.strip())
 
-    previous = current_edge(repo)
-    if previous and previous != args.source and is_ancestor(repo, args.source, previous):
-        say(f'edge already has the newer {previous}; leaving it unchanged')
+    existing = release_assets(repository)
+    previous = tag_commit(repository)
+    published_source = manifest_source(repository, existing)
+    if stale(repo, args.source, previous, published_source):
+        say(f'edge already has the same or newer source (tag {previous}, manifest {published_source}); leaving it unchanged')
         return 0
     body = notes(args.source, previous, repo, args.run_url)
     if args.dry_run:
@@ -145,7 +162,6 @@ def main():
     notes_file.write_text(body)
     files = [str(dist / n) for n in names]
     title = f'Fractal edge ({args.source[:9]})'
-    existing = release_assets(repository)
     if existing is None:
         # A create that timed out may still have made the release, with some of its assets.
         gh('release', 'create', TAG, '--repo', repository, '--target', args.source, '--prerelease',
@@ -157,20 +173,31 @@ def main():
         if lacking:
             gh('release', 'upload', TAG, '--repo', repository, '--clobber', *lacking)
     else:
-        # Same names replace in place; anything else is a leftover of an older build.
+        # Existing installers require fixed archive names. Stage immutable copies without
+        # touching those aliases or the manifest until the tag update has succeeded.
+        with tempfile.TemporaryDirectory(prefix='fractal-edge-assets-') as directory:
+            staged = []
+            for name in names:
+                if name in ('RELEASE.json', 'SHA256SUMS'):
+                    continue
+                path = pathlib.Path(directory) / f'{args.source}-{name}'
+                path.symlink_to(dist / name)
+                staged.append(str(path))
+            gh('release', 'upload', TAG, '--repo', repository, '--clobber', *staged)
+        if tag_commit(repository) != args.source:
+            gh('api', '--method', 'PATCH', f'repos/{repository}/git/refs/tags/{TAG}',
+               '-f', f'sha={args.source}', '-F', 'force=true', done=lambda: tag_commit(repository) == args.source)
         gh('release', 'upload', TAG, '--repo', repository, '--clobber', *files)
-        for stale in sorted(existing - set(names)):
-            gh('release', 'delete-asset', TAG, stale, '--repo', repository, '--yes',
-               done=lambda stale=stale: stale not in (release_assets(repository) or set()))
-    if tag_commit(repository) != args.source:
-        gh('api', '--method', 'PATCH', f'repos/{repository}/git/refs/tags/{TAG}',
-           '-f', f'sha={args.source}', '-F', 'force=true', done=lambda: tag_commit(repository) == args.source)
+    for leftover in sorted((release_assets(repository) or set()) - set(names)):
+        gh('release', 'delete-asset', TAG, leftover, '--repo', repository, '--yes',
+           done=lambda leftover=leftover: leftover not in (release_assets(repository) or set()))
     gh('release', 'edit', TAG, '--repo', repository, '--prerelease', '--latest=false', '--title', title,
        '--notes-file', str(notes_file))
 
     final = tag_commit(repository)
     published = release_assets(repository)
-    if final != args.source or published != set(names):
+    final_source = manifest_source(repository, published)
+    if final != args.source or published != set(names) or final_source != args.source:
         raise SystemExit(f'release-fractal-edge: {TAG} is at {final} with assets {sorted(published or [])}, '
                          f'expected {args.source} with {names}')
     say(f'{TAG} now at {args.source} with {len(names)} assets')

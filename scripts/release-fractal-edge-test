@@ -39,16 +39,18 @@ for failure in state.get('fail', []):
 if args[:2] == ['release', 'view']:
     if state['release'] is None: fail('release not found')
     print(json.dumps({'assets': [{'name': n} for n in state['release']['assets']]}))
+elif args[:2] == ['release', 'download']:
+    print(state['release']['assets']['RELEASE.json'])
 elif args[:2] == ['release', 'create']:
     if state['release'] is not None: fail('release already exists')
     files = [a for a in args[args.index('--notes-file') + 2:] if not a.startswith('--')]
-    state['release'] = {'assets': {pathlib.Path(f).name: pathlib.Path(f).read_text(errors='replace')[:20] for f in files},
+    state['release'] = {'assets': {pathlib.Path(f).name: pathlib.Path(f).read_text(errors='replace') for f in files},
                         'prerelease': '--prerelease' in args, 'latest': option('--latest=false') is None and '--latest=false' not in args,
                         'notes': pathlib.Path(option('--notes-file')).read_text(), 'title': option('--title')}
     state['tag'] = option('--target')
 elif args[:2] == ['release', 'upload']:
     files = [a for a in args[args.index('--clobber') + 1:]]
-    for f in files: state['release']['assets'][pathlib.Path(f).name] = pathlib.Path(f).read_text(errors='replace')[:20]
+    for f in files: state['release']['assets'][pathlib.Path(f).name] = pathlib.Path(f).read_text(errors='replace')
 elif args[:2] == ['release', 'delete-asset']:
     del state['release']['assets'][args[3]]
 elif args[:2] == ['release', 'edit']:
@@ -184,15 +186,12 @@ with tempfile.TemporaryDirectory() as temporary:
     assert done.returncode == 0 and 'newer' in done.stdout, done
     after = current()
     assert after['tag'] == commits[2] and after['release']['notes'] == before['release']['notes'], after
-    assert after['calls'] == before['calls'], 'an older commit must not touch the release'
+    assert all(call[:2] in (['release', 'view'], ['release', 'download']) or
+               (call[0] == 'api' and 'PATCH' not in call)
+               for call in after['calls'][len(before['calls']):]), 'an older commit must not mutate the release'
 
-    # An asset from an older layout is removed, so the release matches this run exactly.
-    stale = current()
-    stale['release']['assets']['smalltalk-old-target.tar.gz'] = 'old'
-    state.write_text(json.dumps(stale))
-    checkout_tags()
-    assert publish(commits[2], 'three-stale').returncode == 0
-    assert 'smalltalk-old-target.tar.gz' not in current()['release']['assets']
+    # Equal-source reruns do not mutate even leftover assets.
+    assert before['release'] == after['release']
 
     # Corrupt or mismatched archives are refused before gh is called.
     calls = len(current()['calls'])
@@ -222,10 +221,15 @@ with tempfile.TemporaryDirectory() as temporary:
                           cwd=checkout, env=env, text=True, capture_output=True)
     assert done.returncode != 0 and len(current()['calls']) == calls, done
 
-    # A dry run prints the notes and publishes nothing.
+    # A dry run for a newer source prints the notes but performs only reads.
+    dry_state = current()
+    dry_state['tag'] = commits[0]
+    dry_state['release']['assets']['RELEASE.json'] = json.dumps({'source': commits[0]})
+    state.write_text(json.dumps(dry_state))
     checkout_tags()
     done = publish(commits[2], 'dry', '--dry-run')
-    assert done.returncode == 0 and 'dry run' in done.stdout and len(current()['calls']) == calls, done
+    assert done.returncode == 0 and 'dry run' in done.stdout, done
+    assert current()['release'] == dry_state['release'] and current()['tag'] == commits[0]
 
     # GitHub answers 504 or times out now and then (#4606). Each case starts from no edge release.
     timeout = 'HTTP 504: We couldn\'t respond to your request in time. (https://api.github.com/repos/example/project/releases)'
@@ -254,6 +258,34 @@ with tempfile.TemporaryDirectory() as temporary:
     older = {'assets': {}, 'prerelease': True, 'latest': False, 'notes': '', 'title': 'older'}
     done = from_scratch((['api', '--method', 'PATCH'], True, 1, timeout), release=older, tag=commits[1])
     assert done.returncode == 0 and complete() and calls(['api', '--method', 'PATCH']) == 1, (done, current())
+    # A newer manifest fences out a stale run even when the edge tag is older.
+    split = json.loads(json.dumps(first['release']))
+    split['assets']['RELEASE.json'] = json.dumps({'source': commits[2]})
+    done = from_scratch(release=split, tag=commits[0])
+    assert done.returncode == 0 and complete(), (done, current())
+    print('passed: test_split_state_converges_at_equal_manifest_source')
+    state.write_text(json.dumps({'release': split, 'tag': commits[0], 'calls': []}))
+    done = publish(commits[1], 'split-stale')
+    assert done.returncode == 0 and current()['release'] == split and current()['tag'] == commits[0], (done, current())
+    assert not any('PATCH' in call or call[:2] == ['release', 'upload'] for call in current()['calls'])
+    print('passed: test_stale_rerun_refused_by_newer_manifest')
+
+    # A failed PATCH can add staging assets, but never changes old aliases or manifest.
+    done = from_scratch((['api', '--method', 'PATCH'], False, 99, timeout),
+                        release=first['release'], tag=commits[0])
+    assert done.returncode != 0 and current()['tag'] == commits[0], (done, current())
+    for name, value in first['release']['assets'].items():
+        assert current()['release']['assets'][name] == value, name
+    assert json.loads(current()['release']['assets']['RELEASE.json'])['source'] == current()['tag']
+    print('passed: test_tag_move_failure_preserves_manifest_and_aliases')
+    # A real interruption after the tag moves leaves the old manifest, then repairs.
+    done = from_scratch((['api', '--method', 'PATCH'], True, 1, 'HTTP 422: interrupted after tag move'),
+                        release=first['release'], tag=commits[0])
+    assert done.returncode != 0 and current()['tag'] == commits[2], (done, current())
+    assert current()['release']['assets']['RELEASE.json'] == first['release']['assets']['RELEASE.json']
+    done = publish(commits[2], 'tag-ahead-repair')
+    assert done.returncode == 0 and complete(), (done, current())
+    print('passed: test_tag_ahead_equal_source_retry_converges')
     # Anything but a 5xx or a timeout fails at once.
     done = from_scratch((['release', 'edit'], False, 1, 'HTTP 422: Validation Failed'))
     assert done.returncode != 0 and calls(['release', 'edit']) == 1 and '422' in done.stderr, (done, current())
