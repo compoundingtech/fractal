@@ -30,6 +30,15 @@ pub enum WorkerIngressGenerationCheck {
     Enforce,
 }
 
+/// Temporary migration allowance for one exact existing pairing completion.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyPairingAllowance {
+    pub completion_id: String,
+    pub record_hash: String,
+    pub until_unix_ms: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -70,6 +79,12 @@ pub struct Config {
     pub lanes: Option<Lanes>,
     /// The concrete person represented by trusted local product commands.
     pub person: Option<String>,
+    /// Tailnet login admitted for browser pairing; absent disables browser pairing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_pairing_login: Option<String>,
+    /// Operator-selected existing pairings; each allowance has a fixed maximum deadline.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pairing_legacy_allowances: Vec<LegacyPairingAllowance>,
     pub fleet_id: Option<String>,
     pub shared_secret_file: Option<PathBuf>,
     pub state_dir: PathBuf,
@@ -724,6 +739,8 @@ impl Default for Config {
             seat_admission: None,
             lanes: None,
             person: None,
+            browser_pairing_login: None,
+            pairing_legacy_allowances: Vec::new(),
             fleet_id: None,
             shared_secret_file: None,
             state_dir,

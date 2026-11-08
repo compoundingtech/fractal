@@ -37,6 +37,9 @@ pub use fractal_api_core::api::client_v0::{authenticate, bound_mission_cards, ca
 pub use fractal_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
 pub mod arrangements;
 pub mod assistant;
+pub mod browser_pairing;
+#[cfg(test)]
+mod browser_pairing_tests;
 pub mod collection_ivm;
 pub mod collection_windows;
 pub mod conversation_blocks;
@@ -194,6 +197,9 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/missions-rich", get(assistant::read_projection))
         .route("/v1/client/assistant/agents-rich", get(assistant::read_projection))
         .route("/v1/client/pairings", post(pairing_begin))
+        .route("/v1/client/pairing/browser-requests", post(browser_pairing::begin))
+        .route("/v1/client/pairing/browser-requests/{id}/redeem", post(browser_pairing::redeem))
+        .route("/v1/client/pairing/browser-requests/revoke-current", post(browser_pairing::revoke_current))
         .route("/v1/client/assistant/grants/{id}", get(assistant::inspect))
         .route("/v1/client/assistant/grants/{id}/revoke", post(assistant::revoke))
         .route("/v1/client/assistant/grants/{id}/read-trust", post(assistant::pin_read_trust))
@@ -5636,6 +5642,7 @@ pub async fn pairing_begin(
         }
     };
     let mut begun_fields = BTreeMap::from([
+        (fractal_store::PAIRING_OPERATION_VERSION.into(), json!(1)),
         ("pairing_id".into(), Value::String(pairing_id.clone())),
         ("device_name".into(), Value::String(request.device_name)),
         ("person_id".into(), Value::String(person_id.clone())),
@@ -5850,6 +5857,13 @@ pub async fn pairing_complete(
                 == Some(pairing_id.as_str())
         })
         .ok_or_else(|| ApiError::not_found(format!("pairing `{pairing_id}` does not exist")))?;
+    if begun.body["fields"]["browser_request"] == true
+        && (browser_pairing::approval(&state, &begun)? != "approved"
+            || request.device_public_key != format!("browser:{id}")
+            || request.fabric_node_id.is_some())
+    {
+        return Err(forbidden("browser pairing requires its owner's approved request"));
+    }
     if begun.origin != state.store.origin() {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
@@ -5857,6 +5871,9 @@ pub async fn pairing_complete(
             message: "complete pairing on the member that began it".into(),
             details: Box::default(),
         });
+    }
+    if !fractal_store::trusted_pairing_fields(begun.actor.as_deref(), &begun.body["fields"]) {
+        return Err(forbidden("the pairing challenge requires a new pairing"));
     }
     let used = !state
         .store
@@ -5902,8 +5919,7 @@ pub async fn pairing_complete(
         .to_owned();
     let session_actor = format!("{person_id}/session/{actor_suffix}");
     let expires_at = client_now_ms() + 30 * 24 * 60 * 60 * 1_000;
-    // The concrete scope list was sealed into the authenticated local begin
-    // claim. Legacy pending challenges retain their original limited grant.
+    // The concrete scope list was sealed into the authenticated local begin claim.
     let scopes = match begun.body.pointer("/fields/scopes") {
         Some(Value::Array(values)) => values
             .iter()
@@ -5974,6 +5990,7 @@ pub async fn pairing_complete(
         None
     };
     let mut fields = BTreeMap::from([
+            (fractal_store::PAIRING_OPERATION_VERSION.into(), json!(1)),
             ("pairing_id".into(), Value::String(pairing_id)),
             ("device_id".into(), Value::String(device_id.clone())),
             ("session_actor".into(), Value::String(session_actor.clone())),
@@ -6598,6 +6615,17 @@ fn terminal_attachment_subject(id: &str) -> Result<String, ApiError> {
         .ok_or_else(|| validation("the terminal attachment ID is invalid"))
 }
 
+fn trusted_terminal_attachment(claim: &ClaimRecord, session: &ClientSession) -> bool {
+    let actor = if session.authority_actor.starts_with("person/")
+        || session.authority_actor.starts_with("agent/") {
+        session.authority_actor.as_str()
+    } else {
+        "requester"
+    };
+    claim.actor.as_deref() == Some(actor)
+        && claim.body.pointer("/fields/terminal_operation_version").and_then(Value::as_u64) == Some(1)
+}
+
 fn terminal_attachment_id(session: &ClientSession, request: &ActionRequest) -> String {
     let stable = hex::encode(Sha256::digest(
         format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
@@ -6623,6 +6651,9 @@ fn existing_terminal_attachment(
     else {
         return Ok(None);
     };
+    if !trusted_terminal_attachment(attached, session) {
+        return Err(forbidden("the terminal attachment requires a new attach operation"));
+    }
     let old_digest = attached
         .body
         .pointer("/fields/request_digest")
@@ -6740,6 +6771,9 @@ fn terminal_attachment_response(
         .iter()
         .find(|claim| claim.kind == "custom.client.terminal-attached")
         .ok_or_else(|| ApiError::internal("the terminal attachment claim is missing"))?;
+    if !trusted_terminal_attachment(attached, session) {
+        return Err(forbidden("the terminal attachment requires a new attach operation"));
+    }
     if attached.origin != state.store.origin() {
         return Err(forbidden(
             "the terminal attachment belongs to another gateway",
@@ -6765,6 +6799,9 @@ fn terminal_attachment_response(
     let latest = claims
         .last()
         .ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
+    if !trusted_terminal_attachment(latest, session) {
+        return Err(forbidden("the terminal attachment requires a new attach operation"));
+    }
     let expires = field("expires_at_unix_ms")
         .and_then(Value::as_u64)
         .map(u128::from)
@@ -6848,6 +6885,7 @@ fn create_terminal_attachment(
         kind: "custom.client.terminal-attached".into(),
         actor: Some(session_claim_actor(session)),
         fields: BTreeMap::from([
+            ("terminal_operation_version".into(), json!(1)),
             ("attachment_id".into(), Value::String(attachment_id.clone())),
             ("terminal_id".into(), Value::String(terminal_id.clone())),
             (
@@ -6933,6 +6971,7 @@ fn consume_terminal_attachment_mode(
         remote_terminal_live_session(state, &terminal_subject(terminal_id), incarnation)
     }).transpose()?;
     let valid = is_current
+        && trusted_terminal_attachment(&attached, session)
         && attached.origin == state.store.origin()
         && field("session_actor").and_then(Value::as_str) == Some(session.actor.as_str())
         && field("raw_mode").and_then(Value::as_str) == raw_mode
@@ -6975,12 +7014,15 @@ fn consume_terminal_attachment_mode(
             subject: attached.subject.clone(),
             kind: "custom.client.terminal-consumed".into(),
             actor: Some(session_claim_actor(session)),
-            fields: BTreeMap::from([(
-                "attachment_id".into(),
-                field("attachment_id")
-                    .cloned()
-                    .ok_or_else(|| ApiError::internal("terminal attachment ID is missing"))?,
-            )]),
+            fields: BTreeMap::from([
+                ("terminal_operation_version".into(), json!(1)),
+                (
+                    "attachment_id".into(),
+                    field("attachment_id")
+                        .cloned()
+                        .ok_or_else(|| ApiError::internal("terminal attachment ID is missing"))?,
+                ),
+            ]),
             evidence: vec![attached.id.clone()],
             expected_subject: Some(Some(attached.id.clone())),
             idempotency_key: None,
@@ -7009,6 +7051,9 @@ fn detach_terminal_attachment(
                 "terminal attachment `{attachment_id}` does not exist"
             ))
         })?;
+    if !trusted_terminal_attachment(attached, session) {
+        return Err(forbidden("the terminal attachment requires a new attach operation"));
+    }
     if attached.origin != state.store.origin() {
         return Err(forbidden(
             "the terminal attachment belongs to another gateway",
@@ -7033,6 +7078,9 @@ fn detach_terminal_attachment(
     let latest = claims
         .last()
         .ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
+    if !trusted_terminal_attachment(latest, session) {
+        return Err(forbidden("the terminal attachment requires a new attach operation"));
+    }
     if latest.kind == "custom.client.terminal-detached" {
         return Ok(attachment_id);
     }
@@ -7042,10 +7090,10 @@ fn detach_terminal_attachment(
             subject,
             kind: "custom.client.terminal-detached".into(),
             actor: Some(session_claim_actor(session)),
-            fields: BTreeMap::from([(
-                "attachment_id".into(),
-                Value::String(attachment_id.clone()),
-            )]),
+            fields: BTreeMap::from([
+                ("terminal_operation_version".into(), json!(1)),
+                ("attachment_id".into(), Value::String(attachment_id.clone())),
+            ]),
             evidence: vec![latest.id.clone()],
             expected_subject: Some(Some(latest.id.clone())),
             idempotency_key: None,
@@ -8172,7 +8220,7 @@ async fn dispatch_action(
             let target = parameter_string(p, "target_id")?;
             let result = state
                 .store
-                .finish_person_step_authorized(
+                .finish_person_step_kind(
                     &PersonStepResponse {
                         delegation: None,
                         subject: target,
@@ -8206,6 +8254,8 @@ async fn dispatch_action(
                     },
                     action == "work.cancel-ask",
                     session.assistant_write.as_ref(),
+                    false,
+                    session.pairing_grant.as_deref().filter(|_| !session.local_peer).map(|grant| (grant, session.actor.as_str())),
                 )
                 .map_err(|error| {
                     if error.code == "forbidden" {
@@ -11486,6 +11536,7 @@ mission "differential" state="ready" {
                 subject: "custom/client/admission-preparation".into(),
                 kind: "custom.client.pairing-completed".into(), actor: Some("person/ada".into()),
                 fields: serde_json::from_value(json!({
+                    "pairing_operation_version":1,
                     "session_actor":"client/admission-preparation", "person_id":"person/ada",
                     "credential_hash":"test-not-a-secret", "expires_at_unix_ms":u64::MAX,
                     "scopes":["read.projections","read.arrangements"],
@@ -13289,6 +13340,45 @@ mission "differential" state="ready" {
         }
     }
 
+    #[tokio::test]
+    async fn pairing_operations_issue_authenticated_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let app = super::super::router(state.clone());
+        let response = app.clone().oneshot(Request::builder()
+            .method("POST").uri("/v1/client/pairings")
+            .header(LOCAL_PERSON_HEADER, "person/ada")
+            .header("Content-Type", "application/json")
+            .body(Body::from(json!({
+                "api_version": CLIENT_API_VERSION, "device_name": "Test phone",
+                "person_id": "person/ada", "scopes": ["read.projections"]
+            }).to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        let begun: Value = serde_json::from_slice(&bytes).unwrap();
+        let challenge = &begun["value"];
+        let id = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
+        let response = app.oneshot(Request::builder()
+            .method("POST").uri(format!("/v1/client/pairings/{id}/complete"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(json!({
+                "api_version": CLIENT_API_VERSION, "code": challenge["code"],
+                "device_public_key": "test-device-public-key-with-at-least-32-characters"
+            }).to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        let completed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, StatusCode::OK, "{completed}");
+        let credential = completed["value"]["credential"].as_str().unwrap();
+        let request = Request::builder().uri("/v1/client/agents")
+            .header(AUTHORIZATION, format!("Bearer {credential}"))
+            .body(Body::empty()).unwrap();
+        let session = authenticate(&state, &request, "fabric-loopback").unwrap();
+        assert_eq!(session.authority_actor, "person/ada");
+        assert!(session.allows("read.projections"));
+        assert!(revalidate_session(&state, &session).is_ok());
+    }
+
     #[test]
     fn a_timeline_page_stays_under_its_byte_budget_and_keeps_the_newest_entries() {
         let entry = |size: usize| (json!({"body": "x".repeat(size)}), ());
@@ -13632,6 +13722,7 @@ mission "differential" state="ready" {
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/ada".into()),
                 fields: BTreeMap::from([
+                    ("pairing_operation_version".into(), json!(1)),
                     ("credential_hash".into(), json!(credential_digest(credential))),
                     ("session_actor".into(), json!("client/resources-reader")),
                     ("person_id".into(), json!("person/ada")),
@@ -13723,6 +13814,7 @@ mission "differential" state="ready" {
         AppState {
             seat_admission: Default::default(),
             owning_person: Some("person/operator".into()),
+            browser_pairing_login: None,
             store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
@@ -16088,7 +16180,7 @@ subscription "watch/source" {
     }
 
     #[test]
-    fn legacy_terminal_attachment_replay_conflicts_without_execution() {
+    fn unmarked_terminal_attachment_requires_a_new_attach_operation() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let session = ClientSession::local(Some("person/alex")).unwrap();
@@ -16116,8 +16208,9 @@ subscription "watch/source" {
         let before = state.store.status(None).unwrap().store_index;
         let error = existing_terminal_attachment(&state, &session, &request, &current_digest)
             .unwrap_err();
-        assert_eq!(error.status, StatusCode::CONFLICT);
-        assert_eq!(error.code, "idempotency-conflict");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(error.code, "forbidden");
+        assert!(terminal_attachment_response(&state, &session, &attachment_id).is_err());
         assert_eq!(state.store.status(None).unwrap().store_index, before);
     }
 
@@ -16198,6 +16291,73 @@ subscription "watch/source" {
     }
 
     #[test]
+    fn temporary_pairing_allowance_preserves_scope_expiry_and_revocation() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let cap = fractal_store::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS;
+        let now = cap - 60_000;
+        let claim = state.store.append_claim(&ClaimInput {
+            subject:"custom/client/pairing-existing".into(), kind:"custom.client.pairing-completed".into(),
+            actor:Some("person/alex".into()),
+            fields:serde_json::from_value(json!({
+                "credential_hash":"existing-test-digest", "session_actor":"client/existing",
+                "person_id":"person/alex", "scopes":["read.projections"],
+                "expires_at_unix_ms":cap + 60_000
+            })).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());
+        state.store.configure_pairing_legacy_allowances(&[crate::config::LegacyPairingAllowance {
+            completion_id:claim.id.clone(),
+            record_hash:fractal_store::pairing::record_hash(
+                &claim.origin, claim.actor.as_deref(), &claim.body["fields"],
+            ).unwrap(),
+            until_unix_ms:(cap + 60_000) as u64,
+        }]).unwrap();
+        let session = paired_client_session_at(&state, &claim, "fabric-loopback", false, now).unwrap();
+        assert!(session.allows("read.projections"));
+        assert!(!session.allows("terminal.control"));
+        assert_eq!(session.grant_expires_at, Some(cap + 60_000));
+        assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, cap).is_err());
+        let mut changed = claim.clone();
+        changed.body["fields"]["scopes"] = json!(ALL_SCOPES);
+        assert!(paired_client_session_at(&state, &changed, "fabric-loopback", false, now).is_err());
+        state.store.append_claim(&ClaimInput {
+            subject:claim.subject.clone(), kind:"custom.client.pairing-revoked".into(),
+            actor:Some("person/alex".into()), fields:BTreeMap::new(),
+            evidence:vec![claim.id.clone()], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());
+    }
+
+    #[test]
+    fn unmarked_pairing_records_require_a_new_pairing() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for actor in [Some("agent/example"), Some("person/alex"), None] {
+            let credential = format!("legacy-{actor:?}");
+            // Retained records use the same internal append seam as historical admission.
+            state.store.append_claim(&ClaimInput {
+                subject: format!("custom/client/legacy-{}", credential_digest(&credential)),
+                kind: "custom.client.pairing-completed".into(),
+                actor: actor.map(str::to_owned),
+                fields: BTreeMap::from([
+                    ("credential_hash".into(), json!(credential_digest(&credential))),
+                    ("person_id".into(), json!("person/alex")),
+                    ("session_actor".into(), json!("client/legacy-session")),
+                    ("scopes".into(), json!(["read.projections"])),
+                    ("expires_at_unix_ms".into(), json!(client_now_ms() as u64 + 60_000)),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let request = Request::builder().uri("/v1/client/agents")
+                .header(AUTHORIZATION, format!("Bearer {credential}"))
+                .body(Body::empty()).unwrap();
+            assert!(authenticate(&state, &request, "fabric-loopback").is_err());
+        }
+    }
+
+    #[test]
     fn paired_authentication_uses_pairing_claims_and_honors_revocation() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -16210,6 +16370,7 @@ subscription "watch/source" {
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/alex".into()),
                 fields: BTreeMap::from([
+                    (fractal_store::PAIRING_OPERATION_VERSION.into(), json!(1)),
                     (
                         "credential_hash".into(),
                         Value::String(credential_digest(credential)),
@@ -23149,6 +23310,7 @@ mission "example/zero-run" state="ready" {
             .collect::<Vec<_>>();
         assert_eq!(lifecycle.len(), 2);
         for claim in lifecycle {
+            assert!(trusted_terminal_attachment(&claim, &session));
             let projected = safe_event_projection(
                 &restarted,
                 &EventRecord {
@@ -23600,6 +23762,53 @@ mission "example/zero-run" state="ready" {
         }
     }
 
+    #[tokio::test]
+    async fn terminal_operations_mark_attach_consume_and_detach_records() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        state.store.append_claim(&ClaimInput {
+            subject: "agent/terminal-owner".into(), kind: "runtime.observed".into(),
+            actor: Some("agent/terminal-owner".into()),
+            fields: serde_json::from_value(json!({
+                "runtime_id":"terminal-runtime", "incarnation_id":"terminal-runtime:i1",
+                "status":"running", "terminal":true
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let Json(attachment) = raw_terminal::attachment(
+            State(state.clone()), Extension(session.clone()), AxumPath("agent/terminal-owner".into()),
+            Json(serde_json::from_value(json!({
+                "runtime_incarnation":"terminal-runtime:i1", "mode":"attach"
+            })).unwrap()),
+        ).await.unwrap();
+        let capability = attachment["stream_capability"].as_str().unwrap();
+        let attached = state.store.claims_for_kind_at(
+            "custom.client.terminal-attached", None, true, 1,
+        ).unwrap().claims.remove(0);
+        assert!(trusted_terminal_attachment(&attached, &session));
+        consume_terminal_attachment_mode(
+            &state, &session, "terminal/agent/terminal-owner", "terminal-runtime:i1",
+            Some(capability), Some("attach"),
+        ).unwrap();
+        assert!(consume_terminal_attachment_mode(
+            &state, &session, "terminal/agent/terminal-owner", "terminal-runtime:i1",
+            Some(capability), Some("attach"),
+        ).is_err());
+        let attachment_id = attached.body["fields"]["attachment_id"].as_str().unwrap();
+        detach_terminal_attachment(&state, &session, &ActionRequest {
+            api_version: CLIENT_API_VERSION.into(), id:"action/detach-marked".into(),
+            action_type:"terminal.detach".into(), idempotency_key:"detach-marked".into(),
+            fence: Fence { runtime_incarnation:Some("terminal-runtime:i1".into()), ..Fence::default() },
+            parameters:json!({"target_id":attachment_id}),
+        }).unwrap();
+        let claims = state.store.claims_for(&attached.subject, None).unwrap();
+        assert_eq!(claims.len(), 3);
+        assert!(claims.iter().all(|claim| trusted_terminal_attachment(claim, &session)));
+        assert_eq!(claims[1].kind, "custom.client.terminal-consumed");
+        assert_eq!(claims[2].kind, "custom.client.terminal-detached");
+    }
+
     #[test]
     fn raw_capability_refuses_changed_selected_owner_or_runtime() {
         for (bound_owner, bound_runtime) in [("host/another-owner", "r"), ("host/matrix-owner", "old")] {
@@ -23628,6 +23837,7 @@ mission "example/zero-run" state="ready" {
                 kind: "custom.client.terminal-attached".into(),
                 actor: Some(session_claim_actor(&session)),
                 fields: serde_json::from_value(json!({
+                    "terminal_operation_version":1,
                     "attachment_id":"terminal-attachment/matrix", "terminal_id":"terminal/agent/fence-matrix",
                     "runtime_incarnation":"i", "runtime_id":bound_runtime, "owner_host_id":bound_owner,
                     "session_actor":session.actor, "person_id":session.authority_actor, "raw_mode":"peek",

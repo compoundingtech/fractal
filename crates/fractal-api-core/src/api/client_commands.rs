@@ -325,6 +325,7 @@ mod tests {
     fn report_enforces_terminal_retention_before_original_deadline_cleanup() {
         let root = tempfile::tempdir().unwrap();
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             store: Arc::new(Store::open(&root.path().join("graph.db"), "report-retention").unwrap()),
             notify: Arc::new(Notify::new()), event_notify: watch::channel(0u64).0,
@@ -339,6 +340,7 @@ mod tests {
         let claim = state.store.append_claim(&ClaimInput {
             subject: "custom/client/retention-test".into(), kind: "custom.client.pairing-completed".into(), actor: Some("person/ada".into()),
             fields: serde_json::from_value(json!({"session_actor":"client/retention-phone","person_id":"person/ada",
+                "pairing_operation_version":1,
                 "device_id":"device/test","scopes":["read.projections"],"expires_at_unix_ms":(now + 600_000) as u64})).unwrap(),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();

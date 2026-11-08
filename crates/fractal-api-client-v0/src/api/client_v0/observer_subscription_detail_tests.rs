@@ -280,6 +280,7 @@ async fn detail_router_preserves_ids_kinds_stops_and_actor_scope() {
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/ada".into()),
                 fields: BTreeMap::from([
+                    ("pairing_operation_version".into(), json!(1)),
                     (
                         "credential_hash".into(),
                         json!(credential_digest(&credential)),

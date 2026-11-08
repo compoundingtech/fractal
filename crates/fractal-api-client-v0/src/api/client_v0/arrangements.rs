@@ -806,6 +806,7 @@ mod tests {
             expected_subject:None, idempotency_key:None,
         }).unwrap();
         let paired = append("custom.client.pairing-completed", json!({
+            "pairing_operation_version":1,
             "session_actor":"client/device-arrangement-test", "person_id":"person/ada",
             "credential_hash":"test-not-a-secret", "expires_at_unix_ms":u64::MAX,
             "scopes":["read.projections","read.arrangements"]
@@ -1038,6 +1039,7 @@ mod tests {
     fn membership_repair_state(node: &str) -> AppState {
         let root = std::path::PathBuf::from("/unused-membership-repair");
         AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             store: Arc::new(Store::open_memory(node).unwrap()),
             notify: Arc::new(Notify::new()),

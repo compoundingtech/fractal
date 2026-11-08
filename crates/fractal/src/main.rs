@@ -6982,6 +6982,7 @@ fn open_daemon_store(
         Some(admitted) => Store::open_admitted(admitted.clone(), &config.node)?,
         None => Store::open(&config.store_path(), &config.node)?,
     };
+    store.configure_pairing_legacy_allowances(&config.pairing_legacy_allowances)?;
     store.set_usage_limits_writers(config.usage_limits.as_ref().map(|usage| usage.writers.clone()).unwrap_or_default())?;
     if let Some(person) = &config.person {
         let _ = store.question_principal_default.set(person.clone());
@@ -7477,6 +7478,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     store.install_git_change_registry(Arc::new(fractal_daemon::changes::service::Registry::new(&config.changes, &config.node)?))?;
     let state = AppState {
         owning_person: config.person.clone(),
+        browser_pairing_login: config.browser_pairing_login.clone(),
         store: store.clone(),
         seat_admission: Arc::default(),
         notify: notify.clone(),

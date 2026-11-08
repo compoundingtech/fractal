@@ -16,6 +16,7 @@ mod tests {
     fn fixture() -> (tempfile::TempDir, AppState, ClientSession) {
         let root = tempfile::tempdir().unwrap();
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: Arc::new(Store::open_memory("lease-owner").unwrap()),
@@ -47,13 +48,16 @@ mod tests {
         )
     }
 
-    fn claim(state: &AppState, subject: &str, kind: &str, fields: Value) {
+    fn claim(state: &AppState, subject: &str, kind: &str, mut fields: Value) {
+        if kind == "custom.client.pairing-completed" {
+            fields["pairing_operation_version"] = json!(1);
+        }
         state
             .store
             .append_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: kind.into(),
-                actor: None,
+                actor: fields.get("person_id").and_then(Value::as_str).map(str::to_owned),
                 fields: fields
                     .as_object()
                     .unwrap()
@@ -373,7 +377,7 @@ mod tests {
         let mut binding = local.binding.clone();
         binding.actor = "client/original".into();
         binding.grant_subject = Some("custom/client/original".into());
-        let grant = json!({"fields":{"session_actor":"client/original","person_id":"person/alex","scopes":["terminal.read"],"expires_at_unix_ms":client_now_ms()+600_000}});
+        let grant = json!({"fields":{"pairing_operation_version":1,"session_actor":"client/original","person_id":"person/alex","scopes":["terminal.read"],"expires_at_unix_ms":client_now_ms()+600_000}});
         binding.grant_digest = Some(credential_digest(&serde_json::to_string(&grant).unwrap()));
         let forwarded = Lease::register(
             &state,
