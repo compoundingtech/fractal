@@ -3262,7 +3262,7 @@ fn spawn_controlled_app_server(
     socket_path: &Path,
     log: &File,
 ) -> Result<OwnedProcessGroup> {
-    let mut command = Command::new(codex);
+    let mut command = crate::managed_launch::provider_command(codex);
     command
         .args(args)
         .stdin(Stdio::null())
@@ -3277,7 +3277,7 @@ fn spawn_controlled_app_server(
 const CONTROLLED_TUI_OVERRIDES: [&str; 2] = ["-c", "check_for_update_on_startup=false"];
 
 fn controlled_tui_command(codex: &str, args: &[String]) -> Command {
-    let mut command = Command::new(codex);
+    let mut command = crate::managed_launch::provider_command(codex);
     command.args(CONTROLLED_TUI_OVERRIDES).args(args);
     command
 }
@@ -4416,7 +4416,7 @@ fn preflight_hook_trust(
     diagnostics: &mut WrapperDiagnostics,
 ) -> Result<Option<HookTrustProjection>> {
     diagnostics.record("hookTrustPreflightStarting", json!({}))?;
-    let mut server_command = Command::new(codex);
+    let mut server_command = crate::managed_launch::provider_command(codex);
     server_command
         .args(server_args)
         .stdin(Stdio::null())
