@@ -59,9 +59,7 @@ fn claims(state: &AppState, kind: &str) -> Result<Vec<ClaimRecord>, ApiError> {
 }
 fn local_record(state: &AppState, claim: &ClaimRecord) -> bool {
     claim.origin == state.store.origin()
-        && field(claim, "pairing_operation_version").as_u64() == Some(1)
-        && claim.actor.as_deref() == field(claim, "person_id").as_str()
-        && claim.actor.as_deref().is_some_and(|actor| actor.starts_with("person/") && actor.matches('/').count() == 1)
+        && fractal_store::trusted_pairing_fields(claim.actor.as_deref(), &claim.body["fields"])
 }
 fn record(state: &AppState, subject: &str, kind: &str) -> Result<Option<ClaimRecord>, ApiError> {
     Ok(state.store.claims_for_subject_kind_at(subject, kind, None, true, 1)
