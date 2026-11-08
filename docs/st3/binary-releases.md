@@ -219,9 +219,14 @@ Archives carry no tag in `BUILD.json`; `source` identifies the commit.
 - The candidate must descend from (or equal) both the edge tag and `RELEASE.json` source; newer or
   divergent published sources refuse publication. Needed history is fetched explicitly; fetch and
   ancestry lookup errors fail closed. Equal-source runs compare every fixed asset's digest with its
-  source-qualified staged copy (restaging missing copies from validated dist), repair missing or
-  incorrect assets in the same order, and finish cleanup/notes. Source markers alone never skip
-  byte verification. Runs share the release mutation lock.
+  source-qualified staged copy, repair missing or incorrect assets in the same order, and finish
+  cleanup/notes. Source markers alone never skip byte verification. Runs share the release mutation lock.
+  Staging is one build unit: a source-qualified `STAGING-LEDGER.sha256` hashes every staged archive,
+  sidecar, public `SHA256SUMS`, and `RELEASE.json`. It is distinct from the installer's public
+  `SHA256SUMS` and uploads alone, last among staged files, as their commit marker. A complete set
+  matching its ledger is retained even if a same-source rerun has different build bytes. A missing
+  or invalid ledger, missing staged file, or digest mismatch restages the whole unit from validated
+  dist before moving the tag or repairing aliases; partial builds are never mixed.
   A failed tag move preserves the previous fixed-name assets and manifest.
 - Between the tag move and alias replacement, installers briefly receive the previous binaries.
   The installer verifies each archive's `.sha256` sidecar, not `SHA256SUMS`: a consistent new pair

@@ -199,10 +199,12 @@ with tempfile.TemporaryDirectory() as temporary:
     uploads = [(index, [Path(path).name for path in call[call.index('--clobber') + 1:]])
                for index, call in enumerate(updates) if call[:2] == ['release', 'upload']]
     patch = next(index for index, call in enumerate(updates) if 'PATCH' in call)
-    assert len(uploads) == 11 and uploads[0][0] < patch < uploads[1][0], uploads
+    assert len(uploads) == 12 and uploads[0][0] < uploads[1][0] < patch < uploads[2][0], uploads
+    assert uploads[1][1] == [commits[2] + '-STAGING-LEDGER.sha256'], uploads
     assert uploads[-2][1] == ['SHA256SUMS'] and uploads[-1][1] == ['RELEASE.json'], uploads
     assert all(len(files) == 1 for _, files in uploads[1:]), uploads
-    assert {files[0] for _, files in uploads[1:-2]} == set(first['release']['assets']) - {'SHA256SUMS', 'RELEASE.json'}, uploads
+    assert {files[0] for _, files in uploads[2:-2]} == set(first['release']['assets']) - {'SHA256SUMS', 'RELEASE.json'}, uploads
+    print('passed: test_staging_ledger_uploaded_alone_after_complete_set_before_tag')
     print('passed: test_manifest_uploaded_alone_after_all_aliases_and_checksums')
 
     # Rerunning the same commit is harmless; a run for an older commit changes nothing at all.
@@ -345,7 +347,7 @@ with tempfile.TemporaryDirectory() as temporary:
         assert done.returncode != 0 and current()['tag'] == commits[2], (done, current())
         assert name not in current()['release']['assets']
         expected = {asset: value for asset, value in current()['release']['assets'].items()
-                    if asset.startswith(commits[2] + '-')}
+                    if asset.startswith(commits[2] + '-') and not asset.endswith('STAGING-LEDGER.sha256')}
         done = publish(commits[2], 'split-repair-' + label)
         assert done.returncode == 0 and complete(), (done, current())
         for staged_name, value in expected.items():
@@ -363,6 +365,36 @@ with tempfile.TemporaryDirectory() as temporary:
     assert current()['release']['assets'][f'fractal-{TARGETS[0]}.tar.gz'] != 'corrupt'
     assert current()['release']['assets']['SHA256SUMS'] != 'corrupt'
     print('passed: test_equal_source_restages_and_repairs_wrong_digest')
+
+    for damage in ('missing-file', 'wrong-digest', 'missing-ledger', 'invalid-ledger'):
+        # Build A staged successfully, but its unit is now partial or corrupt.
+        # Build B has the same source and deliberately different archive bytes.
+        done = from_scratch((['api', '--method', 'PATCH'], False, 99, timeout),
+                            release=first['release'], tag=commits[0])
+        assert done.returncode != 0
+        partial = current()
+        partial['fail'] = []
+        assets = partial['release']['assets']
+        staged_archive = commits[2] + f'-fractal-{TARGETS[0]}.tar.gz'
+        ledger = commits[2] + '-STAGING-LEDGER.sha256'
+        if damage == 'missing-file':
+            del assets[staged_archive]
+        elif damage == 'wrong-digest':
+            assets[staged_archive] = 'corrupt A'
+        elif damage == 'missing-ledger':
+            del assets[ledger]
+        else:
+            assets[ledger] = 'invalid ledger'
+        state.write_text(json.dumps(partial))
+        marker = 'whole-build-b-' + damage
+        done = publish(commits[2], marker)
+        assert done.returncode == 0 and complete(), (done, current())
+        for name, value in current()['release']['assets'].items():
+            assert value.encode('latin1') == (root / f'dist-{marker}' / name).read_bytes(), name
+        for line in current()['release']['assets']['SHA256SUMS'].splitlines():
+            digest, name = line.split('  ', 1)
+            assert hashlib.sha256(current()['release']['assets'][name].encode('latin1')).hexdigest() == digest
+        print('passed: test_same_source_build_b_replaces_whole_' + damage + '_staging')
 
     state.write_text(json.dumps({'release': first['release'], 'tag': commits[0], 'calls': []}))
     done = publish(divergent, 'divergent')

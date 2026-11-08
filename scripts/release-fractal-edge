@@ -136,24 +136,54 @@ def download_asset(repository, name, path):
     return hashlib.sha256(path.read_bytes()).digest()
 
 
+def ledger_entries(path, names):
+    try:
+        entries = {}
+        for line in path.read_text().splitlines():
+            digest, name = line.split('  ', 1)
+            if name in entries or not re.fullmatch(r'[0-9a-f]{64}', digest):
+                return None
+            entries[name] = bytes.fromhex(digest)
+        return entries if set(entries) == set(names) else None
+    except (UnicodeError, ValueError):
+        return None
+
+
 def publish_existing(repository, dist, names, source, existing):
     # Source markers alone do not prove aliases survived an interrupted clobber.
     # Keep staged bytes until every fixed asset has been compared and repaired.
     with tempfile.TemporaryDirectory(prefix='fractal-edge-assets-') as directory:
         root = pathlib.Path(directory)
-        expected, staged, restage = {}, {}, []
-        for name in names:
-            staged_name = f'{source}-{name}'
-            path = root / staged_name
-            if staged_name in existing:
-                expected[name] = download_asset(repository, staged_name, path)
-            else:
+        staged = {name: root / f'{source}-{name}' for name in names}
+        ledger = root / f'{source}-STAGING-LEDGER.sha256'
+        complete = ledger.name in existing and all(path.name in existing for path in staged.values())
+        expected = None
+        if complete:
+            download_asset(repository, ledger.name, ledger)
+            expected = ledger_entries(ledger, names)
+            if expected is not None:
+                for name, path in staged.items():
+                    if download_asset(repository, path.name, path) != expected[name]:
+                        expected = None
+                        break
+        if expected is None:
+            # A partial or corrupt set cannot be mixed with a different build of this
+            # same source. Replace the entire unit from the already validated dist.
+            expected = {}
+            for name, path in staged.items():
+                if path.exists():
+                    path.unlink()
                 path.symlink_to(dist / name)
                 expected[name] = hashlib.sha256(path.read_bytes()).digest()
-                restage.append(str(path))
-            staged[name] = path
-        if restage:
-            gh('release', 'upload', TAG, '--repo', repository, '--clobber', *restage)
+            gh('release', 'upload', TAG, '--repo', repository, '--clobber',
+               *(str(path) for path in staged.values()))
+            ledger.write_text(''.join(f'{expected[name].hex()}  {name}\n' for name in names))
+            # This distinct ledger, not public SHA256SUMS, commits the complete staged
+            # unit and is always uploaded alone after every staged payload has landed.
+            gh('release', 'upload', TAG, '--repo', repository, '--clobber', str(ledger))
+            for name, path in staged.items():
+                if download_asset(repository, path.name, root / f'checked-{name}') != expected[name]:
+                    raise SystemExit(f'release-fractal-edge: staged asset verification failed for {name}')
         if tag_commit(repository) != source:
             gh('api', '--method', 'PATCH', f'repos/{repository}/git/refs/tags/{TAG}',
                '-f', f'sha={source}', '-F', 'force=true', done=lambda: tag_commit(repository) == source)
