@@ -14,8 +14,8 @@
     "detail": "No rules changes."
   },
   "compatibility": {
-    "status": "none",
-    "detail": "Web and fractal-ui rendering only; no runtime, wire or stored format changes. fractal-ui IconName gains 'more' (additive)."
+    "status": "changed",
+    "detail": "Breaking for @fractal/ui consumers: the exported Icon (CompositionIcon from @fractal/ui/assistant-ui) no longer accepts the 'spinner' name or the `spinning` prop; every in-progress state draws LiveRing instead. A TypeScript caller using either stops compiling, and a JavaScript caller asking for 'spinner' renders an empty icon. No caller in this repository uses them after this change. IconName gains 'more' (additive). No runtime, wire or stored format changes. The owner approved this breaking removal at high risk (2026-11-08)."
   },
   "downtime": {
     "status": "none",
