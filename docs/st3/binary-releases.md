@@ -283,7 +283,7 @@ explicit `tag`, full `sha`, and successful `run`; it never builds a replacement.
 The response status, date and request ID are logged without request credentials.
 An ambiguous create is reconciled by paginated authenticated release listing and
 release-ID reads, not another POST or deletion. Recovery requires an absent tag,
-an exact target SHA and candidate marker, and matching draft flags. Original
+the exact `Fractal <tag>` name, target SHA and candidate marker, and matching draft flags. Original
 assets are uploaded only after reconciliation, checked against their SHA-256
 digests, and the notes are updated while retaining draft state. Existing exact
 drafts are adopted; conflicting or incomplete evidence stops without deleting

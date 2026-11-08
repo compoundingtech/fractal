@@ -43,6 +43,7 @@ def create_verified_draft(repository, tag, sha, marker, notes, assets, *, call, 
 
     def matching(row):
         return (row.get('tag_name') == tag and row.get('target_commitish') == sha
+                and row.get('name') == f'Fractal {tag}'
                 and row.get('draft') is True and row.get('prerelease') is False
                 and row.get('body') in (body, notes_body))
 
