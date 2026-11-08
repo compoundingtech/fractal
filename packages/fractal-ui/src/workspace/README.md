@@ -104,7 +104,7 @@ Each `SpaceSync` is an external store that keeps spaces as whole bodies. The sto
 The palette core:
 
 - `parseQuery` scopes a query to a section by its prefix character, such as `>` or `@`.
-- `rank` orders results by section, then match, then recency. A typed query can rank sections in their own order (`typedOrder`, the TUI's `RANK`), and `leads` lifts a section whose row the query names as it begins, such as a command. It uses `fuzzyWords`, ported from the TUI: a substring or word-start match, with multi-word queries matching word by word.
+- `rank` orders results by section, then match, then recency. The empty and the typed list can each have their own section order (`emptyOrder`, `typedOrder`: the TUI's `RANK`) while Alt+digit keeps `sections`, and `leads` lifts a section whose row the query names as it begins, such as a command. It uses `fuzzyWords`, ported from the TUI: a substring or word-start match, with multi-word queries matching word by word.
 - `targetFromEvent` maps Enter to here, Mod+Enter to a new tab, Alt+Enter to a split right and Alt+Shift+Enter to a split below.
 
 `usePalette` adds the rest:

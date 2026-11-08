@@ -27,6 +27,8 @@ export interface UsePaletteOptions<A> {
   readonly ranker?: Ranker | undefined
   /** Section ids in the order a typed query ranks them; `sections` stays the order of the empty list and of Alt+digit. */
   readonly typedOrder?: readonly string[] | undefined
+  /** Section ids in the order the empty query lists them. */
+  readonly emptyOrder?: readonly string[] | undefined
   readonly leads?: Leads<A> | undefined
   /** Ids most recent first: an item's recency is its place here. */
   readonly recent?: readonly string[] | undefined
@@ -95,7 +97,7 @@ const useSourceItems = <A,>(sources: readonly PaletteSource<A>[], query: string)
  * tab, Alt+Enter in a split right, Alt+Shift+Enter below. Naming mode takes a name instead.
  */
 export const usePalette = <A,>(options: UsePaletteOptions<A>): PaletteState<A> => {
-  const { sections, sources, onSelect, onName, onClose, onModeChange, targets, ranker, recent, typedOrder, leads } = options
+  const { sections, sources, onSelect, onName, onClose, onModeChange, targets, ranker, recent, typedOrder, emptyOrder, leads } = options
   const [ownMode, setOwnMode] = React.useState<PaletteMode>({ _tag: 'Search' })
   const mode = options.mode ?? ownMode
   const setMode = (next: PaletteMode) => {
@@ -120,8 +122,8 @@ export const usePalette = <A,>(options: UsePaletteOptions<A>): PaletteState<A> =
   const order = React.useMemo(() => new Map((recent ?? []).map((id, index) => [id, (recent?.length ?? 0) - index] as const)), [recent])
   const groups = React.useMemo(() => naming ? [] : rank(
     items.map(item => order.has(item.id) ? { ...item, recency: Math.max(item.recency ?? 0, order.get(item.id)!) } : item),
-    { query: parsed.text, sections, section, ranker, typedOrder, leads },
-  ), [naming, items, order, parsed.text, sections, section, ranker, typedOrder, leads])
+    { query: parsed.text, sections, section, ranker, typedOrder, emptyOrder, leads },
+  ), [naming, items, order, parsed.text, sections, section, ranker, typedOrder, emptyOrder, leads])
   const results = React.useMemo(() => flatten(groups), [groups])
   const selected = results[Math.min(selectedIndex, results.length - 1)]
   const setQuery = (next: string) => {

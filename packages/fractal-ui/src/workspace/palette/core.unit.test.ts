@@ -54,6 +54,10 @@ describe('ranking', () => {
     expect(rank(items, { query: '', sections, typedOrder: typed }).map(group => group.section.id)).toEqual(['people', 'projects', 'commands'])
   })
 
+  it('lists the empty query in its own section order when given one', () => {
+    expect(rank(items, { query: '', sections, emptyOrder: ['commands'] }).map(group => group.section.id)).toEqual(['commands', 'people', 'projects'])
+  })
+
   it('puts a section first when one of its rows leads, such as a command typed as it begins', () => {
     const leads = (row: PaletteItem<string>, query: string) => row.section === 'commands' && row.label.toLowerCase().startsWith(query.toLowerCase())
     expect(rank(items, { query: 't', sections }).map(group => group.section.id)).toEqual(['people', 'projects', 'commands'])

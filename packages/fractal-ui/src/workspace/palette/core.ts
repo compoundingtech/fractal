@@ -118,15 +118,18 @@ export interface RankOptions<A> {
   readonly ranker?: Ranker | undefined
   /** Section ids in the order a typed query ranks them; the given order when absent. Missing ids follow. */
   readonly typedOrder?: readonly string[] | undefined
+  /** Section ids in the order the empty query lists them, likewise. `sections` stays the order of Alt+digit. */
+  readonly emptyOrder?: readonly string[] | undefined
   readonly leads?: Leads<A> | undefined
 }
 
-const typedSections = <A>(items: readonly PaletteItem<A>[], options: RankOptions<A>, query: string): readonly PaletteSection[] => {
+const orderedSections = <A>(items: readonly PaletteItem<A>[], options: RankOptions<A>, query: string): readonly PaletteSection[] => {
+  const order = query === '' ? options.emptyOrder : options.typedOrder
   const position = (id: string) => {
-    const at = options.typedOrder?.indexOf(id) ?? -1
+    const at = order?.indexOf(id) ?? -1
     return at === -1 ? Number.MAX_SAFE_INTEGER : at
   }
-  const leading = new Set(options.leads === undefined ? [] : items.filter(item => options.leads!(item, query)).map(item => item.section))
+  const leading = new Set(options.leads === undefined || query === '' ? [] : items.filter(item => options.leads!(item, query)).map(item => item.section))
   return options.sections
     .map((section, index) => ({ section, index }))
     .toSorted((left, right) =>
@@ -137,14 +140,14 @@ const typedSections = <A>(items: readonly PaletteItem<A>[], options: RankOptions
 }
 
 /**
- * An empty query lists each section by recency, in the given order. A query keeps only matches, by
+ * An empty query lists each section by recency, in the given order (or `emptyOrder`). A query keeps only matches, by
  * section (`typedOrder`, with a section whose row `leads` first), then match quality, then recency.
  * `section` scopes to one section.
  */
 export const rank = <A>(items: readonly PaletteItem<A>[], options: RankOptions<A>): readonly RankedGroup<A>[] => {
   const ranker = options.ranker ?? fuzzyWords
   const query = options.query.trim()
-  const sections = query === '' ? options.sections : typedSections(items, options, query)
+  const sections = orderedSections(items, options, query)
   return sections.flatMap(section => {
     if (options.section !== undefined && options.section !== section.id) return []
     const ranked = items.flatMap((item): RankedItem<A>[] => {
