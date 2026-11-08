@@ -7153,7 +7153,10 @@ async fn serve_reserved_unix_with_ancestor_ready(
         let peer_pid = local_peer_pid(&stream);
         // This must precede dispatch: the numeric peer PID can be recycled while
         // a descendant continues using the connector's inherited socket.
-        let peer_process = local_peer_process(&stream).ok();
+        let (peer_process, peer_capture_error) = match local_peer_process(&stream) {
+            Ok(peer) => (Some(peer), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
         let app = app.clone();
         tokio::spawn(async move {
             if let Some(connection) = &mut diagnostic_connection {
@@ -7173,7 +7176,9 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     let ancestry = if !bind_ancestry {
                         HarnessAncestry::Person
                     } else if ancestry_peer.is_none() {
-                        HarnessAncestry::Unavailable
+                        ancestry_or_record(Err(AncestryUnavailableCause { pid: Some(pid),
+                            reason: peer_capture_error.map_or(AncestryUnavailableReason::WitnessMissing,
+                                AncestryUnavailableReason::WitnessCaptureFailed) }), AncestryUnavailableCause::record)
                     } else {
                         ancestor(pid, ancestry_peer.as_ref())
                     };
@@ -7188,8 +7193,21 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     (ancestry, caller, delivery_peer, diagnostic_connection)
                 })
                 .await
-                .unwrap_or_default(),
-                None => (if bind_ancestry { HarnessAncestry::Unavailable } else { HarnessAncestry::Person }, None, None, diagnostic_connection),
+                .unwrap_or_else(|error| {
+                    let ancestry = if bind_ancestry {
+                        ancestry_or_record(Err(AncestryUnavailableCause { pid: Some(pid),
+                            reason: AncestryUnavailableReason::LookupTaskFailed(error.to_string()) }),
+                            AncestryUnavailableCause::record)
+                    } else { HarnessAncestry::Unavailable };
+                    (ancestry, None, None, None)
+                }),
+                None => {
+                    let ancestry = if bind_ancestry {
+                        ancestry_or_record(Err(AncestryUnavailableCause { pid: None,
+                            reason: AncestryUnavailableReason::PeerPidUnavailable }), AncestryUnavailableCause::record)
+                    } else { HarnessAncestry::Person };
+                    (ancestry, None, None, diagnostic_connection)
+                }
             };
             let service = hyper::service::service_fn(move |request: Request<Incoming>| {
                 let app = app.clone();
@@ -7302,104 +7320,213 @@ impl HarnessAncestry {
     }
 }
 
+/// Diagnostic data is deliberately limited to operation names, PIDs and OS errors.
+/// In particular, identity parsing must never attach environment values.
+#[derive(Debug, PartialEq, Eq)]
+struct AncestryUnavailableCause {
+    pid: Option<u32>,
+    reason: AncestryUnavailableReason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AncestryUnavailableReason {
+    PeerPidUnavailable,
+    WitnessCaptureFailed(String),
+    WitnessMissing,
+    LookupTaskFailed(String),
+    ProcessReadFailed { operation: &'static str, error: String },
+    ProcessMetadataInvalid(&'static str),
+    ProcessTerminal,
+    EmptyEnvironment,
+    TruncatedEnvironment,
+    InvalidIdentity,
+    GenerationUnavailable,
+    WitnessRejected(String),
+    AncestorCycle,
+    AncestorGenerationChanged,
+    ConnectorGenerationChanged(String),
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    UnsupportedPlatform,
+}
+
+impl AncestryUnavailableCause {
+    fn reason_code(&self) -> &'static str {
+        match &self.reason {
+            AncestryUnavailableReason::PeerPidUnavailable => "peer-pid-unavailable",
+            AncestryUnavailableReason::WitnessCaptureFailed(_) => "witness-capture-failed",
+            AncestryUnavailableReason::WitnessMissing => "witness-missing",
+            AncestryUnavailableReason::LookupTaskFailed(_) => "lookup-task-failed",
+            AncestryUnavailableReason::ProcessReadFailed { operation, .. } => operation,
+            AncestryUnavailableReason::ProcessMetadataInvalid(_) => "process-metadata-invalid",
+            AncestryUnavailableReason::ProcessTerminal => "process-terminal",
+            AncestryUnavailableReason::EmptyEnvironment => "empty-environment",
+            AncestryUnavailableReason::TruncatedEnvironment => "truncated-environment",
+            AncestryUnavailableReason::InvalidIdentity => "invalid-or-conflicting-identity",
+            AncestryUnavailableReason::GenerationUnavailable => "generation-unavailable",
+            AncestryUnavailableReason::WitnessRejected(_) => "initial-witness-rejected",
+            AncestryUnavailableReason::AncestorCycle => "ancestor-cycle",
+            AncestryUnavailableReason::AncestorGenerationChanged => "ancestor-generation-changed",
+            AncestryUnavailableReason::ConnectorGenerationChanged(_) => "connector-generation-changed",
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            AncestryUnavailableReason::UnsupportedPlatform => "unsupported-platform",
+        }
+    }
+
+    fn record(&self) {
+        eprintln!("st3: local caller ancestry unavailable pid={:?} reason={} detail={:?}",
+            self.pid, self.reason_code(), self.reason);
+    }
+}
+
+fn ancestry_or_record(
+    result: Result<HarnessAncestry, AncestryUnavailableCause>,
+    mut record: impl FnMut(&AncestryUnavailableCause),
+) -> HarnessAncestry {
+    result.unwrap_or_else(|cause| {
+        record(&cause);
+        HarnessAncestry::Unavailable
+    })
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct HarnessProcess {
     uid: u32,
     generation: Option<(u32, u64)>,
+    generation_error: Option<AncestryUnavailableReason>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn walk_harness_ancestry(
     mut pid: u32,
     peer: Option<&fractal_runtime::PeerProcessIdentity>,
-    mut inspect: impl FnMut(u32) -> Option<HarnessProcess>,
-    identity: impl Fn(u32) -> Option<HarnessAncestry>,
-) -> HarnessAncestry {
-    let Some(first) = inspect(pid) else { return HarnessAncestry::Unavailable; };
-    let Some(peer) = peer else { return HarnessAncestry::Unavailable; };
-    let Some((_, birth)) = first.generation else { return HarnessAncestry::Unavailable; };
-    if peer.validate_generation(pid, birth).is_err() { return HarnessAncestry::Unavailable; }
+    mut inspect: impl FnMut(u32) -> Result<HarnessProcess, AncestryUnavailableReason>,
+    identity: impl Fn(u32) -> Result<HarnessAncestry, AncestryUnavailableReason>,
+) -> Result<HarnessAncestry, AncestryUnavailableCause> {
+    let cause = |pid, reason| AncestryUnavailableCause { pid: Some(pid), reason };
+    let first = inspect(pid).map_err(|reason| cause(pid, reason))?;
+    let peer = peer.ok_or_else(|| cause(pid, AncestryUnavailableReason::WitnessMissing))?;
+    let (_, birth) = first.generation.ok_or_else(|| cause(pid, first.generation_error.clone()
+        .unwrap_or(AncestryUnavailableReason::GenerationUnavailable)))?;
+    peer.validate_generation(pid, birth)
+        .map_err(|error| cause(pid, AncestryUnavailableReason::WitnessRejected(error.to_string())))?;
     let connector = pid;
     let uid = first.uid;
     let mut first = Some(first);
     let mut observed = std::collections::BTreeMap::new();
     let mut binding = HarnessAncestry::Person;
     while pid > 1 && pid != std::process::id() {
-        let Some(process) = first.take().or_else(|| inspect(pid)) else {
-            return HarnessAncestry::Unavailable;
+        let process = match first.take() {
+            Some(process) => process,
+            None => inspect(pid).map_err(|reason| cause(pid, reason))?,
         };
         // An observed ownership transition ends this caller's cooperative ancestry.
         if process.uid != uid { break; }
-        let Some((parent, birth)) = process.generation else { return HarnessAncestry::Unavailable; };
-        if observed.insert(pid, birth).is_some() { return HarnessAncestry::Unavailable; }
-        match identity(pid) {
-            Some(HarnessAncestry::Person) => {}
-            Some(ancestry) => { binding = ancestry; break; }
-            None => return HarnessAncestry::Unavailable,
+        let (parent, birth) = process.generation.ok_or_else(|| cause(pid, process.generation_error
+            .unwrap_or(AncestryUnavailableReason::GenerationUnavailable)))?;
+        if observed.insert(pid, birth).is_some() {
+            return Err(cause(pid, AncestryUnavailableReason::AncestorCycle));
+        }
+        match identity(pid).map_err(|reason| cause(pid, reason))? {
+            HarnessAncestry::Person => {}
+            HarnessAncestry::Unavailable => return Err(cause(pid, AncestryUnavailableReason::InvalidIdentity)),
+            ancestry => { binding = ancestry; break; }
         }
         pid = parent;
     }
-    if observed.into_iter().any(|(pid, birth)| {
-        !inspect(pid).is_some_and(|current| current.uid == uid && current.generation.is_some_and(|(_, token)| token == birth))
-    }) {
-        return HarnessAncestry::Unavailable;
+    for (pid, birth) in observed {
+        let current = inspect(pid).map_err(|reason| cause(pid, reason))?;
+        if current.uid != uid || !current.generation.is_some_and(|(_, token)| token == birth) {
+            return Err(cause(pid, current.generation_error
+                .unwrap_or(AncestryUnavailableReason::AncestorGenerationChanged)));
+        }
     }
-    if !inspect(connector).and_then(|process| process.generation)
-        .is_some_and(|(_, token)| peer.validate_generation(connector, token).is_ok())
-    {
-        return HarnessAncestry::Unavailable;
-    }
-    binding
+    let current = inspect(connector).map_err(|reason| cause(connector, reason))?;
+    let (_, token) = current.generation.ok_or_else(|| cause(connector, current.generation_error
+        .unwrap_or(AncestryUnavailableReason::GenerationUnavailable)))?;
+    peer.validate_generation(connector, token).map_err(|error| cause(connector,
+        AncestryUnavailableReason::ConnectorGenerationChanged(error.to_string())))?;
+    Ok(binding)
 }
 
 #[cfg(target_os = "linux")]
-fn local_harness_process(pid: u32) -> Option<HarnessProcess> {
-    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    let uid = status.lines().find_map(|line| line.strip_prefix("Uid:"))?
-        .split_whitespace().nth(1)?.parse().ok()?;
+fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailableReason> {
+    let read = |file, operation| fs::read_to_string(format!("/proc/{pid}/{file}"))
+        .map_err(|error| AncestryUnavailableReason::ProcessReadFailed { operation, error: error.to_string() });
+    let invalid = AncestryUnavailableReason::ProcessMetadataInvalid;
+    let status = read("status", "proc-status-read")?;
+    let uid = status.lines().find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok()).ok_or_else(|| invalid("effective-uid"))?;
     let generation = (|| {
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        let mut fields = stat.rsplit_once(") ")?.1.split_whitespace();
-        if matches!(fields.next()?, "Z" | "X" | "x") { return None; }
-        let parent = fields.next()?.parse().ok()?;
-        let birth = fields.nth(17)?.parse().ok()?;
-        Some((parent, birth))
+        let stat = read("stat", "proc-stat-read")?;
+        let mut fields = stat.rsplit_once(") ").ok_or_else(|| invalid("stat-fields"))?.1.split_whitespace();
+        if matches!(fields.next().ok_or_else(|| invalid("state"))?, "Z" | "X" | "x") {
+            return Err(AncestryUnavailableReason::ProcessTerminal);
+        }
+        let parent = fields.next().and_then(|value| value.parse().ok()).ok_or_else(|| invalid("parent-pid"))?;
+        let birth = fields.nth(17).and_then(|value| value.parse().ok()).ok_or_else(|| invalid("start-time"))?;
+        Ok((parent, birth))
     })();
-    Some(HarnessProcess { uid, generation })
+    let (generation, generation_error) = match generation {
+        Ok(generation) => (Some(generation), None),
+        Err(error) => (None, Some(error)),
+    };
+    Ok(HarnessProcess { uid, generation, generation_error })
 }
 
 #[cfg(target_os = "macos")]
-fn local_harness_process(pid: u32) -> Option<HarnessProcess> {
+fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailableReason> {
     match fractal_runtime::macos_process_identity(pid) {
-        Ok((parent, birth, uid)) => Some(HarnessProcess { uid, generation: Some((parent, birth)) }),
-        Err(_) => Some(HarnessProcess { uid: fractal_runtime::macos_process_owner(pid).ok()?, generation: None }),
+        Ok((parent, birth, uid)) => Ok(HarnessProcess { uid, generation: Some((parent, birth)), generation_error: None }),
+        Err(error) => {
+            let failure = |operation, error: String| AncestryUnavailableReason::ProcessReadFailed { operation, error };
+            let uid = fractal_runtime::macos_process_owner(pid)
+                .map_err(|error| failure("process-owner-read", error.to_string()))?;
+            Ok(HarnessProcess { uid, generation: None,
+                generation_error: Some(failure("process-identity-read", error.to_string())) })
+        }
     }
 }
 
 #[cfg(target_os = "linux")]
-fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
-    let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-    Some(HarnessAncestry::of_linux_environment(&environment))
+fn local_harness_identity(pid: u32) -> Result<HarnessAncestry, AncestryUnavailableReason> {
+    let environment = fs::read(format!("/proc/{pid}/environ"))
+        .map_err(|error| AncestryUnavailableReason::ProcessReadFailed {
+            operation: "proc-environ-read", error: error.to_string(),
+        })?;
+    if environment.is_empty() { return Err(AncestryUnavailableReason::EmptyEnvironment); }
+    if !environment.ends_with(&[0]) { return Err(AncestryUnavailableReason::TruncatedEnvironment); }
+    match HarnessAncestry::of_linux_environment(&environment) {
+        HarnessAncestry::Unavailable => Err(AncestryUnavailableReason::InvalidIdentity),
+        ancestry => Ok(ancestry),
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
-    let (_, environment) = local_process_arguments(pid)?;
-    Some(HarnessAncestry::of_environment(&|name| environment.iter().find_map(|entry| {
+fn local_harness_identity(pid: u32) -> Result<HarnessAncestry, AncestryUnavailableReason> {
+    let (_, environment) = local_process_arguments(pid)
+        .ok_or(AncestryUnavailableReason::ProcessMetadataInvalid("argument-environment"))?;
+    let ancestry = HarnessAncestry::of_environment(&|name| environment.iter().find_map(|entry| {
         let (key, value) = entry.split_once('=')?;
         (key == name).then_some(value)
-    })))
+    }));
+    match ancestry {
+        HarnessAncestry::Unavailable => Err(AncestryUnavailableReason::InvalidIdentity),
+        ancestry => Ok(ancestry),
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn harness_ancestor(pid: u32, peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
-    walk_harness_ancestry(pid, peer, local_harness_process, local_harness_identity)
+    ancestry_or_record(walk_harness_ancestry(pid, peer, local_harness_process, local_harness_identity),
+        AncestryUnavailableCause::record)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn harness_ancestor(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
-    HarnessAncestry::Unavailable
+fn harness_ancestor(pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
+    ancestry_or_record(Err(AncestryUnavailableCause { pid: Some(pid),
+        reason: AncestryUnavailableReason::UnsupportedPlatform }), AncestryUnavailableCause::record)
 }
 
 #[derive(Clone)]
