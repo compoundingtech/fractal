@@ -513,6 +513,41 @@ restart: it journals phase transitions and notice intents before delivery and
 recognizes native receipts on replay. The legacy weekly checkpoint remains
 byte-for-byte unchanged while the shared route is enabled.
 
+Readiness operation receipts are accepted only when their daemon author,
+origin, subject and phase/notice fields match the intended record. An
+incompatible key occupant produces a visible operational conflict and a log
+entry, not a successful phase or a fatal sampling error. Continuation keys
+derive from the original key and the conflicting native claim ID; four such
+continuations are allowed. A longer chain leaves that operation pending while
+other notices and measured recovery continue. No secret or new journal state
+is needed to replay a continuation.
+Replicated operation conflicts remain occupied. Each read retains at most 16
+native occupants, preferring local daemon receipt families before applying the
+limit. An extra row detects overflow. Expected receipts are validated even
+when other occupants overflow that window. Without a matching receipt, overflow
+blocks the operation rather than treating it as vacant.
+Existing continuations are searched before a new receipt is written. One shared
+64-visit allowance counts reads and occupant validations across all branches;
+exhaustion blocks that operation nonfatally. Conflict diagnostics and their log
+entry are deduplicated by the original operation key across replay and restart.
+
+**Disabling shared readiness cases**
+
+Do not turn off the sender with shared intents pending: receiving members
+continue to recognize managed phases and exclude them from generic delivery,
+independently of the sender's current configuration.
+
+1. Keep the executor's shared route enabled until its active case has measured
+   recovery and its journal has no pending phase transition or unrecorded owner
+   notices. Recovery discards undelivered informational backup intents.
+2. Inspect and resolve any reported readiness-operation conflicts before
+   disabling. A blocked receipt is not a completed notice.
+3. Disable `shared_case` and restart the selected executor only after that drain.
+   Retain the case journal and legacy weekly checkpoint across the change.
+4. If the sender was disabled prematurely, restore the same executor policy and
+   journal to finish admitted work first; do not delete or recreate the journal
+   to try to transfer pending delivery to generic receivers.
+
 `fractal slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
 `7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
 remaining percent of every row to `<state>/slo-history/YYYY-MM-DD.jsonl` (UTC day) and deletes a
