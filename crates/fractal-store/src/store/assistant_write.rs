@@ -31,7 +31,7 @@ pub fn validated_transition(
     connection: &Connection, granted: &ClaimRecord, owner: &str, local_origin: &str, kind: &str,
 ) -> Result<Option<ClaimRecord>, FractalError> {
     connection.query_row(
-        validated_transition_query(),
+        /* sqlite-large-value: allow-for-now lv-h0fa302b0797b owner=fractal_store::store::assistant_write TODO=trace-statement-and-value-representation */ validated_transition_query(),
         params![granted.subject, kind, granted.origin, owner, granted.id, local_origin],
         claim_from_row,
     ).optional().map_err(internal)

@@ -121,7 +121,7 @@ fn disconnected_opposite_profiles_conflict_on_both_members_and_revocation_recove
         for grant in [&assistant, &service] {
             assert!(state.store.claim_has_authenticated_member_writer(&grant.id).unwrap());
             let error = authenticate_id(state, fields(grant).unwrap()["grant_id"].as_str().unwrap())
-                .err().expect("both credentials must be suspended on either member");
+                .expect_err("both credentials must be suspended on either member");
             assert_conflict(&error);
             assert_witness(&profile_conflict(state, grant).unwrap().unwrap());
             assert_witness(&projection_with_witness(state, grant).unwrap()["conflict"]);

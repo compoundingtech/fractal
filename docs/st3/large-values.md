@@ -489,14 +489,23 @@ Inline storage here proves neither encoded size nor execution-cost bounds.
 
 ## Assistant principal admission index review
 
-`fractal_store::store` owns schema site `lv-h7e7937d8fad1`, replacing
-`lv-hb9696ca837f7`. The principal admission indexes retain claim-kind TEXT
+`fractal_store::store` owns schema site `lv-hd7de403d2fec`, replacing
+`lv-h7e7937d8fad1`. The principal admission indexes retain claim-kind TEXT
 and the effective principal JSON field inline; absent principals use the fixed
 `assistant/chatgpt` key. The added expiry suffix supports live-grant range seeks.
+`claims_assistant_v1_transition_index` keys subject, kind, origin, actor and
+store index TEXT/INTEGER columns, so an authoritative policy or revocation lookup
+seeks past overlays from another origin or actor.
 These indexes change neither claim bodies nor admission semantics. Keys remain variable-size, and SQLite maintains them
 on insertion and deletion; indexed lookup is not a byte-size or startup-cost
 proof. The producer maintainer retains `chunk-or-reference-variable-columns`
 responsibility while preserving effective-principal matching and claim authority.
+
+`fractal_store::store::assistant_write` owns the read-only sink
+`lv-h0fa302b0797b`. The shared validated transition query binds a grant subject,
+claim kind, origin, owner actor, grant claim ID and local origin, and returns at
+most one claim row. It writes nothing; bodies stay inline, so the exception
+establishes neither encoded-size nor execution-cost bounds.
 
 `fractal_api_core::api::client_v0::external_grants` owns the conservative
 read-only sink `lv-h99f1a302c7b1`. Its prepared admission query binds fixed claim
