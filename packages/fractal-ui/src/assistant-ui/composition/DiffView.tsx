@@ -48,8 +48,11 @@ const pierreChunk = createLazyChunk({
 })
 const listeners = new Set<() => void>()
 let request: Promise<void> | undefined
+/** Pierre renders through constructable stylesheets in a shadow root; without them (jsdom, old engines) stay plain. */
+export const canRenderPierre = () => typeof CSSStyleSheet !== 'undefined' && 'replaceSync' in CSSStyleSheet.prototype && typeof HTMLElement !== 'undefined' && 'attachShadow' in HTMLElement.prototype
 const subscribe = (notify: () => void) => {
   listeners.add(notify)
+  if (!canRenderPierre()) { pierreFailed = true; return () => { listeners.delete(notify) } }
   request ??= pierreChunk.load().then(module => { pierreModule = module }, () => { pierreFailed = true }).finally(() => { for (const listener of listeners) listener() })
   return () => { listeners.delete(notify) }
 }
