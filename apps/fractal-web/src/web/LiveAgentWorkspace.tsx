@@ -486,12 +486,12 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   })
   const previousNeedsYou = React.useRef<ReadonlySet<string> | undefined>(undefined)
   const needsYou = React.useMemo(() => {
-    const next = sidebarAttention({ agents, subjects })
+    const next = sidebarAttention({ agents, subjects, asking })
     const previous = previousNeedsYou.current
     if (previous !== undefined && next.size === previous.size && [...next].every(ref => previous.has(ref))) return previous
     previousNeedsYou.current = next
     return next
-  }, [agents, subjects])
+  }, [agents, subjects, asking])
   const offline = connection._tag !== 'Live'
   useTabMetadata({
     title: tabTitle({ agentName: agent?.name, needsYouCount: needsYou.size, offline }),

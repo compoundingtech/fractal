@@ -151,7 +151,8 @@ it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).fla
     await act(async () => opener.click())
   }
   const row = () => roster().querySelector('[data-wf-agent-ref="agent/example-worker"]')!.closest('[role="row"]')!
-  const expected = `Worker, Working, Mission ${mission.id.split('/').at(-1)}, 2 of 5 steps, Waiting for you: Ship the reviewed change?`
+  // The open request in the worker's own conversation is its ask of you: the row says Needs you, as Alerts counts it.
+  const expected = `Worker, Needs you, Mission ${mission.id.split('/').at(-1)}, 2 of 5 steps, Waiting for you: Ship the reviewed change?`
   expect(row().getAttribute('aria-label')).toBe(expected)
   expect(row().querySelector('[data-mission-progress="2/5"]')).not.toBeNull()
   expect(row().querySelector('[data-row-field="host"]')).toBeNull()
@@ -187,7 +188,9 @@ it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).fla
       registry.set(attentionSync, { ...registry.get(attentionSync), last: Option.none() })
     }
   })
-  expect(row().getAttribute('aria-label')).toBe('Worker, Working, mission info unavailable')
+  // The ask lives in the attention feed: while it is still observed the row still needs you.
+  const status = family === 'attention' ? 'Working' : 'Needs you'
+  expect(row().getAttribute('aria-label')).toBe(`Worker, ${status}, mission info unavailable`)
   expect(row().querySelector('[data-mission]')).toBeNull()
   const warning = row().querySelector('[data-mission-unavailable]')!
   expect(warning.textContent).toContain('Mission info unavailable')
@@ -195,9 +198,9 @@ it.each(([390, 1440] as const).flatMap(width => (['dark', 'light'] as const).fla
   expect(warning.closest('button')).toBeNull()
   expect(row().querySelector('[data-row-field="host"]')).not.toBeNull()
   await act(async () => registry.set(agents, observed({ value: [{ ...seat, current_work: [] }] })))
-  expect(row().getAttribute('aria-label')).toBe('Worker, Working')
+  expect(row().getAttribute('aria-label')).toBe(`Worker, ${status}`)
   expect(row().querySelector('[data-mission-unavailable], [data-mission]')).toBeNull()
-  expect(row().querySelector('[data-row-field="status-label"]')?.textContent).toBe('Working')
+  expect(row().querySelector('[data-row-field="status-label"]')?.textContent).toBe(status)
 })
 
 it.each(['claude', 'omp'])('keeps %s producer-shaped subagents readable but non-actionable', async driver => {
