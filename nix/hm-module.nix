@@ -450,8 +450,24 @@ in
             # A pre-Fractal rollback restores physical st3 but can leave an
             # unrelated candidate at fractal. Require installer provenance for
             # st3; the leftover's bytes are deliberately not evidence.
+            rollbackSnapshot() {
+              local candidate=$1 legacy="$binDir/st3" hash
+              [[ -f "$candidate" && ! -L "$candidate" ]] || return 1
+              [[ -f "$legacy" && ! -L "$legacy" ]] || return 1
+              ${pkgs.coreutils}/bin/stat -c '%d:%i:%f' "$candidate" "$legacy" || return 1
+              hash=$(${pkgs.coreutils}/bin/sha256sum "$legacy") || return 1
+              printf '%s\n' "''${hash%% *}"
+              if [[ -e "$binDir/st" || -L "$binDir/st" ]]; then
+                [[ -L "$binDir/st" ]] || return 1
+                ${pkgs.coreutils}/bin/stat -c '%d:%i:%f' "$binDir/st" || return 1
+                ${pkgs.coreutils}/bin/readlink "$binDir/st" || return 1
+              else
+                printf 'absent\n'
+              fi
+            }
             rollbackLayout() {
               local package recorded legacy hash expected
+              rollbackProof=$(rollbackSnapshot "$target") || return 1
               [[ ! -e "$installReceipt" && ! -L "$installReceipt" ]] || return 1
               [[ ! -e "$pendingReceipt" && ! -L "$pendingReceipt" ]] || return 1
               [[ -f "$target" && ! -L "$target" ]] || return 1
@@ -480,6 +496,7 @@ in
                 expected=$(${pkgs.coreutils}/bin/sha256sum "$expected") || return 1
                 [[ "''${hash%% *}" == "''${expected%% *}" ]] || return 1
               fi
+              [[ "$(rollbackSnapshot "$target")" == "$rollbackProof" ]] || return 1
             }
             preserveRollback=false
             # Matching payload bytes alone are not ownership: require the receipt
@@ -559,6 +576,15 @@ in
               replaced=$(${pkgs.coreutils}/bin/mktemp "$binDir/fractal.replaced-$(${pkgs.coreutils}/bin/date -u +%Y%m%dT%H%M%S).XXXXXX")
               binaryPublished=true
               ${pkgs.coreutils}/bin/mv -f "$target" "$replaced"
+              if [[ "$(rollbackSnapshot "$replaced")" != "$rollbackProof" ]] ||
+                [[ -e "$installReceipt" || -L "$installReceipt" || -e "$pendingReceipt" || -L "$pendingReceipt" ]]; then
+                # Restore the object actually moved, not the earlier backup:
+                # another writer may have replaced the checked candidate.
+                ${pkgs.coreutils}/bin/mv -Tf "$replaced" "$target"
+                binaryPublished=false
+                printf 'Home Manager: refusing to replace foreign fractal command: %s\n' "$target" >&2
+                exit 1
+              fi
             fi
             if [[ -e "$installReceipt" || -L "$installReceipt" ]]; then
               ${pkgs.coreutils}/bin/ln -P "$installReceipt" "$backup/receipt"

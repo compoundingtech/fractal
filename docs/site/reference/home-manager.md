@@ -32,8 +32,14 @@ bytes alone never establishes ownership. Symlinks to unrelated executables,
 unrecorded packages, and other alias layouts remain foreign.
 
 The leftover is renamed to a unique `bin/fractal.replaced-<timestamp>.<suffix>`
-sibling, never deleted. Installation then writes `.fractal-install.json` and
-points `st` and `st3` to `fractal`. A pre-Fractal Home Manager generation restores
+sibling, never deleted.
+The moved file's device/inode, the physical `st3` device/inode and content hash,
+and the `st` link identity/target (or absence) must still match the checked
+layout after rename. A concurrent swap restores the moved object and refuses
+installation with the usual foreign-command message.
+
+Installation then writes `.fractal-install.json` and points `st` and `st3` to
+`fractal`. A pre-Fractal Home Manager generation restores
 physical `st3` and `st -> st3`; it does not remove the preserved sibling or the
 newer `fractal` and its receipt. Rolling forward again validates that receipt,
 restores the reverse aliases, and leaves the preserved sibling untouched.
