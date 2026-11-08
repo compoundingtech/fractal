@@ -1,7 +1,7 @@
 import { selectedFaviconState, tabTitle, useTabMetadata } from './useTabMetadata.ts'
 import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
 import { prefetchChangelog } from '../changelog/load.ts'
-import { agentSeatChildren, sidebarMissionChild, sidebarRow, sidebarSubagentRow, subagentRowId, sidebarMissionFeedsAtom } from './sidebarRow.ts'
+import { agentSeatChildren, missionCardOf, sidebarMissionChild, sidebarRow, sidebarSubagentRow, subagentRowId, sidebarMissionFeedsAtom } from './sidebarRow.ts'
 import { subagentThreadFocus } from './subagentThreadFocus.ts'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
 import { DeclarationDialog } from './DeclarationDialog.tsx'
@@ -55,7 +55,8 @@ import { PinsSection } from '../../../../packages/fractal-ui/src/assistant-ui/si
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { terminalSubjectForAgent } from '../data/projections.ts'
 import { sidebarPins } from '../data/sidebarPins.ts'
-import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useDataSource, useRosterDecode, useAskingAgents } from '../data/react.tsx'
+import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useDataSource, useRosterDecode, useAskingAgents, useMissions } from '../data/react.tsx'
+import { MissionEntityCard } from '../../../../packages/fractal-ui/src/assistant-ui/entity/MissionCard.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { leftSidebar } from '../state/cells/panels.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
@@ -146,6 +147,16 @@ const LiveAgentCard = (props: { readonly agentRef: string; readonly needsMe: boo
   const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
   const row = React.useMemo(() => agent === undefined ? undefined : sidebarRow({ agent, stale, needsMe: props.needsMe, ...mission }), [agent, stale, props.needsMe, mission])
   return row === undefined ? null : <AgentHoverCard row={row} reportedStatusOnly now={props.now} />
+}
+
+/** The mission hover card, for every surface that names a mission (alerts, rows, tabs): read only while the card shows. */
+const LiveMissionCard = (props: { readonly missionRef: string; readonly now: number | undefined }) => {
+  const missions = useMissions()
+  const fleet = useFleet()
+  const view = missions._tag === 'Observed' ? missions.value.find(each => each.mission.id === props.missionRef) : undefined
+  if (view === undefined) return null
+  const card = missionCardOf({ mission: view.mission, agents: fleet._tag === 'Observed' ? fleet.value.agents : [] })
+  return <MissionEntityCard mission={card.mission} agents={card.agents} {...(props.now === undefined ? {} : { now: props.now })} />
 }
 
 /** One further current mission of an agent, as its own 48px tree row. */
@@ -556,7 +567,8 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const offline = connection._tag !== 'Live'
   // Agents resolve to the sidebar row's card; other kinds fall through to an outer source, if any.
   const resolveCard = React.useCallback<EntityCardResolver>(entity =>
-    entity.kind === 'agent' ? <LiveAgentCard agentRef={entity.id} needsMe={needsYou.has(entity.id)} now={frozenAt} /> : undefined, [needsYou, frozenAt])
+    entity.kind === 'agent' ? <LiveAgentCard agentRef={entity.id} needsMe={needsYou.has(entity.id)} now={frozenAt} />
+      : entity.kind === 'mission' ? <LiveMissionCard missionRef={entity.id} now={frozenAt} /> : undefined, [needsYou, frozenAt])
   useTabMetadata({
     title: tabTitle({ agentName: agent?.name, needsYouCount: needsYou.size, offline }),
     faviconState: selectedFaviconState({ agent, needsYou: agent !== undefined && needsYou.has(agent.ref), offline }),
