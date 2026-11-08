@@ -281,3 +281,175 @@ async fn person_pairing_completes_only_on_the_beginning_member() {
         &subject, "custom.client.pairing-completed", None, true, 1,
     ).unwrap().claims.len(), 1);
 }
+
+async fn begin_person(state: &AppState) -> Value {
+    pairing_begin(
+        State(state.clone()), Extension(ClientSession::local(Some(PERSON)).unwrap()),
+        Json(serde_json::from_value(json!({
+            "api_version": CLIENT_API_VERSION, "device_name": "Phone", "person_id": PERSON,
+        })).unwrap()),
+    ).await.unwrap().0
+}
+
+async fn finish_person(state: &AppState, challenge: &Value, code: &str) -> Result<Json<Value>, ApiError> {
+    pairing_complete(
+        State(state.clone()), Extension(ClientSession::local(Some(PERSON)).unwrap()),
+        AxumPath(challenge["pairing_id"].as_str().unwrap().trim_start_matches("pairing/").into()),
+        Json(serde_json::from_value(json!({
+            "api_version": CLIENT_API_VERSION, "code": code, "device_public_key": "b".repeat(64),
+        })).unwrap()),
+    ).await
+}
+
+fn begun_person(state: &AppState, challenge: &Value) -> ClaimRecord {
+    let id = challenge["pairing_id"].as_str().unwrap().trim_start_matches("pairing/");
+    state.store.claims_for_subject_kind_at(
+        &format!("custom/client/pairing-{id}"), "custom.client.pairing-begun", None, true, 1,
+    ).unwrap().claims.remove(0)
+}
+
+#[tokio::test]
+async fn keyed_person_pairing_is_private_and_wrong_code_does_not_consume_it() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "keyed-person");
+    let fixed_begin = |code: &str| begin_person_challenge(
+        state.clone(), ClientSession::local(Some(PERSON)).unwrap(),
+        serde_json::from_value(json!({
+            "api_version": CLIENT_API_VERSION, "device_name": "Phone", "person_id": PERSON,
+        })).unwrap(), code.into(),
+    ).unwrap().0;
+    let first = fixed_begin("ABCDEFGH");
+    let same_code = fixed_begin("ABCDEFGH");
+    assert_ne!(first["pairing_id"], same_code["pairing_id"]);
+    assert_ne!(begun_person(&state, &first).subject, begun_person(&state, &same_code).subject);
+    assert_ne!(begun_person(&state, &first).body["fields"]["code_hash"],
+        begun_person(&state, &same_code).body["fields"]["code_hash"]);
+    let second = fixed_begin("ABCDEFGJ");
+    let mut a = begun_person(&state, &first);
+    let mut b = begun_person(&state, &second);
+    assert_ne!(a.subject, b.subject);
+    assert_ne!(first["pairing_id"], second["pairing_id"]);
+    assert_eq!(a.body["fields"]["verifier"], pairing_verifier::MARKER);
+    assert_ne!(a.body["fields"]["code_hash"], credential_digest(first["code"].as_str().unwrap()));
+    // Identity and expiry are independent randomness/time; only code_hash depends on the code.
+    for claim in [&mut a, &mut b] {
+        for field in ["pairing_id", "expires_at_unix_ms", "code_hash"] {
+            claim.body["fields"].as_object_mut().unwrap().remove(field);
+        }
+    }
+    assert_eq!(a.body["fields"], b.body["fields"]);
+    let error = finish_person(&state, &first, "wrong-code").await.unwrap_err();
+    assert_eq!(error.code, "forbidden");
+    assert_eq!(finish_person(&state, &first, first["code"].as_str().unwrap()).await.unwrap().0["kind"], "paired-session");
+}
+
+#[tokio::test]
+async fn replacing_or_losing_the_pairing_secret_requires_restart() {
+    for replacement in [Some([91_u8; 32]), None] {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::tests::test_state_named(root.path(), "rotated-pairing");
+        let challenge = begin_person(&state).await;
+        let key = state.state_dir.join("pairing-verifier/key");
+        match replacement {
+            Some(bytes) => std::fs::write(key, bytes).unwrap(),
+            None => std::fs::remove_file(key).unwrap(),
+        }
+        let error = finish_person(&state, &challenge, challenge["code"].as_str().unwrap()).await.unwrap_err();
+        assert_eq!(error.code, "pairing-restart-required");
+        assert_eq!(error.message, "start pairing again");
+        let envelope = crate::api::client_error_envelope(
+            error.status, &json!({"code": error.code, "message": error.message}), "restart-test",
+        );
+        assert_eq!(envelope["retryable"], false);
+        let typed: fractal_client::ErrorEnvelope = serde_json::from_value(envelope).unwrap();
+        assert_eq!(typed.code, fractal_client::ErrorCode::PairingRestartRequired);
+    }
+}
+
+#[tokio::test]
+async fn legacy_person_pairing_requires_an_unexpired_bounded_lifetime() {
+    for (suffix, expiry_delta, accepted) in [
+        ("bounded", 299_000_i64, true),
+        ("exact-bound", 300_000, true),
+        ("over-bound", 300_001, false),
+        ("long", 600_000, false),
+        ("expired", -1, false),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::tests::test_state_named(root.path(), "legacy-person");
+        let now = client_now_ms() as i64;
+        state.store.set_write_clock_at(now as u128).unwrap();
+        let pairing_id = format!("pairing/{suffix}");
+        let begun = state.store.append_client_operation_claim(&ClaimInput {
+            subject: format!("custom/client/pairing-{suffix}"), kind: "custom.client.pairing-begun".into(),
+            actor: Some(PERSON.into()),
+            fields: serde_json::from_value(json!({
+                "pairing_id": pairing_id, "device_name": "Phone", "person_id": PERSON,
+                "code_hash": credential_digest("ABCDEFGH"), "expires_at_unix_ms": now + expiry_delta,
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        // Admit the historical payload so completion reaches the verifier, not the reservation guard.
+        assert!(state.store.client_operation_is_trusted(&begun).unwrap());
+        assert_eq!(begun.accepted_at_unix_ms, now as u128);
+        assert_eq!(begun.body["fields"]["expires_at_unix_ms"].as_i64().unwrap()
+            - begun.accepted_at_unix_ms as i64, expiry_delta);
+        let result = finish_person(&state, &json!({"pairing_id":pairing_id}), "ABCDEFGH").await;
+        if accepted {
+            assert_eq!(result.unwrap().0["kind"], "paired-session");
+        } else {
+            let error = result.unwrap_err();
+            assert_eq!(error.code, "pairing-restart-required");
+            assert_eq!(error.message, "start pairing again");
+        }
+    }
+}
+
+#[tokio::test]
+async fn unknown_or_malformed_verifier_marker_never_uses_the_legacy_digest() {
+    for marker in [json!("hmac-sha256-v99"), Value::Null, json!(7), json!({"algorithm":"hmac-sha256-v1"})] {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::tests::test_state_named(root.path(), "invalid-verifier-marker");
+        let now = client_now_ms();
+        state.store.set_write_clock_at(now).unwrap();
+        // A valid, unexpired legacy digest would succeed if marker handling fell back.
+        let begun = state.store.append_client_operation_claim(&ClaimInput {
+            subject: "custom/client/pairing-marker".into(),
+            kind: "custom.client.pairing-begun".into(),
+            actor: Some(PERSON.into()),
+            fields: serde_json::from_value(json!({
+                "pairing_id": "pairing/marker", "device_name": "Phone", "person_id": PERSON,
+                "code_hash": credential_digest("ABCDEFGH"), "verifier": marker,
+                "expires_at_unix_ms": now + 300_000,
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        assert!(state.store.client_operation_is_trusted(&begun).unwrap());
+        let before = state.store.index().unwrap();
+        let error = finish_person(&state, &json!({"pairing_id":"pairing/marker"}), "ABCDEFGH")
+            .await.unwrap_err();
+        assert_eq!(error.code, "pairing-restart-required");
+        assert_eq!(error.message, "start pairing again");
+        assert_eq!(state.store.index().unwrap(), before);
+        assert!(state.store.claims_for_subject_kind_at(
+            "custom/client/pairing-marker", "custom.client.pairing-completed", None, true, 1,
+        ).unwrap().claims.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn keyed_person_pairing_survives_reopening_the_same_daemon_state() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "reopened-pairing");
+    let challenge = begin_person(&state).await;
+    let original = begun_person(&state, &challenge);
+    let key = pairing_verifier::load_key(&state.state_dir).unwrap();
+    drop(state);
+    let reopened = super::tests::test_state_named(root.path(), "reopened-pairing");
+    assert_eq!(begun_person(&reopened, &challenge).id, original.id);
+    assert_eq!(pairing_verifier::load_key(&reopened.state_dir).unwrap(), key);
+    let Json(completed) = finish_person(&reopened, &challenge, challenge["code"].as_str().unwrap())
+        .await.unwrap();
+    assert_eq!(completed["kind"], "paired-session");
+    assert_eq!(completed["person_id"], PERSON);
+}
