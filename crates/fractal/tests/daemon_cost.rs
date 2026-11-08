@@ -1397,6 +1397,8 @@ const SEAT_RUNTIME: &str = "cost-seat-0-runtime";
 
 /// The same agent list, after one seat changes at each scale.
 const COLD_AGENTS: &str = "GET /v1/client/agents (after harness observation)";
+/// First native search through worker completion, normalized by indexed text bytes.
+const COLD_SEARCH: &str = "conversation search cold build";
 const ARRANGEMENT_OWNER: &str = "person/ada";
 const ARRANGEMENT_SUBJECT: &str = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
 const ARRANGEMENT_PATH: &str = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001";
@@ -3064,32 +3066,56 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             prepare_renames(&store);
         }
         if probe.route == "GET /v1/client/conversations/search" {
-            // Wait through the person's real search policy before warming or counting requests.
-            // Only the documented initial index build is retryable, not a failed index build.
+            // The cold build owns all SQL work through the worker's explicit completion,
+            // not merely until its first 503 or a quiet interval between reader admissions.
             let path = fixture.fill(probe.path, 0);
-            tokio::time::timeout(Duration::from_secs(60), async {
-                loop {
-                    match person.request::<(), Value>("GET", &path, None).await {
-                        Ok(_) => break,
-                        Err(error) => {
-                            assert!(
-                                fractal_daemon::client::api_error_parts(&error).is_some_and(
-                                    |(status, code, message, _)| {
-                                        status == 503
-                                            && code == "remote-unavailable"
-                                            && message
-                                                == "conversation search index is being built; retry shortly"
-                                    },
-                                ),
-                                "the search cost probe readiness request failed: {error:#}",
-                            );
-                            tokio::task::yield_now().await;
-                        }
+            smallclaims::sqlite::histogram::take();
+            let before_work = work::total();
+            let before_builds = fractal_daemon::api::managed_owner_map_build_count_for_test();
+            let started = Instant::now();
+            let (indexed_bytes, local_conversations) =
+                tokio::time::timeout(Duration::from_secs(120), async {
+                    if let Err(error) = person.request::<(), Value>("GET", &path, None).await {
+                        assert!(
+                            fractal_daemon::client::api_error_parts(&error).is_some_and(
+                                |(status, code, message, _)| {
+                                    status == 503
+                                        && code == "remote-unavailable"
+                                        && message
+                                            == "conversation search index is being built; retry shortly"
+                                },
+                            ),
+                            "the cold search request failed: {error:#}",
+                        );
                     }
-                }
-            })
-            .await
-            .expect("the search cost probe index must become ready within 60 seconds");
+                    fractal_daemon::api::client_v0::search::wait_native_index_for_test(
+                        &store, "person/bench-operator",
+                    ).await.expect("the cold search index worker must succeed")
+                })
+                .await
+                .expect("the cold search index worker must finish within 120 seconds");
+            let spent = work::total() - before_work;
+            let owner_map_builds =
+                fractal_daemon::api::managed_owner_map_build_count_for_test() - before_builds;
+            println!(
+                "scale {scale}: {COLD_SEARCH}: {:.3}s, {owner_map_builds} owner-map builds, \
+                 {local_conversations} local conversations, {indexed_bytes} indexed bytes, \
+                 {} VM steps, {} full-scan steps, {} statements",
+                started.elapsed().as_secs_f64(), spent.vm_steps, spent.fullscan_steps,
+                spent.statements,
+            );
+            assert!(
+                owner_map_builds <= local_conversations + 1,
+                "cold search rebuilt the fleet owner map {owner_map_builds} times for \
+                 {local_conversations} local conversations",
+            );
+            assert!(indexed_bytes > 0, "cold search must index the generated content");
+            let (max_repeat, top_shape) = most_repeated_shape();
+            costs.insert(COLD_SEARCH.to_owned(), Cost {
+                max_repeat,
+                top_shape,
+                ..Cost::from_work(spent, indexed_bytes as u64, None)
+            });
         }
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.
