@@ -110,6 +110,10 @@ and replacement/reclamation of local proof and allowance data.
 `lv-he1b651b77786`, replacing the earlier two-column reader with the exact
 completion ID, origin, actor and body needed for operation admission.
 The reference/chunk TODO must preserve all four values at every continuation.
+`fractal_store::store::backup` owns `lv-h339bbe5233fd`: the recovery-only
+predecessor probe binds the archived writer, sequence and exact batch digest while
+checking quarantined operation history. It reads only an existence flag; reference
+conversion must retain the exact writer-chain comparison.
 
 ### Membership projection generation inventory (PR #5381)
 
