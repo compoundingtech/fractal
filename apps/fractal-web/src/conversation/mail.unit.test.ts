@@ -40,8 +40,8 @@ describe('machine mail', () => {
   it('takes the writer from author, else from; a recipient without a writer is machine', () => {
     expect(mailOrigin({ author: 'daemon/runtime', to: 'agent/a' })).toBe('machine')
     expect(mailOrigin({ to: 'agent/a' })).toBe('machine')
-    expect(mailOrigin({ author: 'person/p', from: 'person/p', to: 'agent/a' })).toBe('person')
-    expect(mailOrigin({ from: 'person/p', to: 'agent/a' })).toBe('person')
+    expect(mailOrigin({ author: 'person/example', from: 'person/example', to: 'agent/a' })).toBe('person')
+    expect(mailOrigin({ from: 'person/example', to: 'agent/a' })).toBe('person')
     expect(mailOrigin({ from: 'agent/b', to: 'agent/a' })).toBe('agent')
   })
   it('names the trigger and step, bounded to one line', () => {
