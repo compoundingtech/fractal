@@ -9,7 +9,9 @@ import type * as SidebarMissionsListModule from '../missions/SidebarMissionsList
 import { alertTabMarkers } from './alertsTab.ts'
 import { missionTabMarkersAtom } from './missionsTab.ts'
 import { focusedPane } from '@fractal/ui/workspace'
-import { activeTab, currentSpace, showsTerminal, tabsOf, type Command, type TabView, type WorkspaceState as WorkspaceStateValue } from '../workspace/model.ts'
+import { activeTab, currentSpace, showsTerminal, tabsOf, workspaceConfig, type Command, type TabView, type WorkspaceState as WorkspaceStateValue } from '../workspace/model.ts'
+import { bootGlassesOnce, type GlassGateway } from '../workspace/glassSync.ts'
+import type { SpaceSync } from '@fractal/ui/workspace/store'
 import { OpenProvider, openCommand, type Open } from '../workspace/openable.ts'
 import { paneKey, parsePane, subjectAgent, subjectOfRef, subjectRef } from '../workspace/subject.ts'
 import { AlertsTabCodeBoundary } from '../workspace/surfaces.tsx'
@@ -261,6 +263,26 @@ interface WorkspaceProps {
   readonly build?: SettingsBuild
   /** What an empty workspace with no subject in its URL starts on: a story's or an embed's known state. */
   readonly initialRef?: string
+  /** The person's glasses, the shared layout's one truth. Absent (stories, embeds, replays): the workspace lives in memory. */
+  readonly glasses?: GlassGateway
+}
+
+type Boot = { readonly initial?: WorkspaceStateValue; readonly sync?: readonly SpaceSync[] }
+const memoryBoot: Boot = {}
+
+/** Waits for the person's glasses before the workspace mounts, so it never starts from a layout st does not have. */
+const useGlassBoot = (glasses: GlassGateway | undefined): Boot | undefined => {
+  const [boot, setBoot] = React.useState<Boot | undefined>(glasses === undefined ? memoryBoot : undefined)
+  React.useEffect(() => {
+    if (glasses === undefined) return
+    let live = true
+    // One boot per gateway for the page's life; its follow stays open with it.
+    void bootGlassesOnce({ gateway: glasses, config: workspaceConfig() }).then(result => {
+      if (live) setBoot(result._tag === 'Synced' ? { initial: result.initial, sync: [result.sync] } : memoryBoot)
+    })
+    return () => { live = false }
+  }, [glasses])
+  return boot
 }
 
 /**
@@ -273,14 +295,11 @@ export function LiveAgentWorkspace(props: WorkspaceProps) {
   const overlayHost = React.useRef<HTMLDivElement>(null)
   const getContainer = React.useCallback(() => overlayHost.current, [])
   usePortalContainerRegistration(getContainer)
+  const boot = useGlassBoot(props.glasses)
   // Alerts name their senders as the roster does, in the docked card and the alert pane alike.
-  return <UNSAFE_PortalProvider getContainer={getContainer}><LiveAlertNames><Workspace {...props} overlayHost={overlayHost} /></LiveAlertNames></UNSAFE_PortalProvider>
-}
-
-const scopeHash = (scope: string) => {
-  let hash = 0x811c9dc5
-  for (let index = 0; index < scope.length; index += 1) hash = Math.imul(hash ^ scope.charCodeAt(index), 0x01000193)
-  return (hash >>> 0).toString(36)
+  return <UNSAFE_PortalProvider getContainer={getContainer}><LiveAlertNames>{boot === undefined
+    ? <div role="status" aria-label={props.workspaceLabel ?? 'Agent workspace'} {...stylex.props(styles.booting)}>Loading your layout…</div>
+    : <Workspace {...props} boot={boot} overlayHost={overlayHost} />}</LiveAlertNames></UNSAFE_PortalProvider>
 }
 
 const activeAgentOf = (store: { readonly getState: () => WorkspaceStateValue }) => {
@@ -289,7 +308,7 @@ const activeAgentOf = (store: { readonly getState: () => WorkspaceStateValue }) 
 }
 
 /** One workspace of typed tabs; local geometry and tabs never grant backend authority. */
-function Workspace({ ux, onSelectConversation, dimensions, navigation = browserNavigation, persistGeometry = true, workspaceLabel = 'Agent workspace', build, initialRef, overlayHost }: WorkspaceProps & { readonly overlayHost: React.RefObject<HTMLDivElement | null> }) {
+function Workspace({ ux, onSelectConversation, dimensions, navigation = browserNavigation, persistGeometry = true, workspaceLabel = 'Agent workspace', build, initialRef, boot, overlayHost }: WorkspaceProps & { readonly boot: Boot; readonly overlayHost: React.RefObject<HTMLDivElement | null> }) {
   const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection(), rosterDecode = useRosterDecode()
   const [ratio, setRatio] = useAtom(sidebarRatio), [collapsed, setCollapsed] = useAtom(sidebarClosed), [preference, setPreference] = useAtom(schemePreference)
   const agentsDrawer = React.useRef<PhoneAgentDrawerHandle>(null)
@@ -314,10 +333,8 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   }, [narrow, setCollapsed])
   useSidebarShortcut(toggleSidebar)
   const location = React.useSyncExternalStore(navigation.subscribe, navigation.getLocation, navigation.getLocation)
-  const workspaceSource = useDataSource()
-  const workspaceScope = `${workspaceSource.gateway ?? workspaceSource.mode}${new URLSearchParams(location.split('?')[1]).get('scenario') ?? ''}`
   // Storage keys never carry a connection's identity; a hash keeps gateways and replays apart.
-  const store = useWorkspaceStore({ storageKey: persistGeometry ? `fractal-web.workspace.v1/${scopeHash(workspaceScope)}` : undefined, location, initialRef })
+  const store = useWorkspaceStore({ location, initialRef, initial: boot.initial, sync: boot.sync })
   const workspace = useWorkspaceState(store)
   const route = useWorkspaceRoute({ store, state: workspace, location, navigation })
   const tiers = useWorkspaceResources({ store, state: workspace })
@@ -563,7 +580,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   React.useEffect(() => {
     if (missingTerminal === undefined || activeId === undefined) return
     setTerminalFailures(failures => new Map(failures).set(current, { runtimeKey: agent?.runtimeKey, reason: missingTerminal }))
-    store.dispatch({ _tag: 'SetView', id: activeId, view: { terminal: false } })
+    store.dispatch({ _tag: 'SetView', tab: activeId, view: { terminal: false } })
     // eslint-disable-next-line react-hooks/exhaustive-deps -- react to a new failure only, not to each roster frame.
   }, [missingTerminal, current, activeId, store])
   const focusShownFace = React.useRef(false)
@@ -721,6 +738,7 @@ export function LiveSidebarToolbar(props: Omit<SidebarToolbarProps, 'searchStyle
 }
 
 const styles = stylex.create({
+  booting: { display: 'grid', placeItems: 'center', height: 'calc(100dvh - var(--wf-devbar-space, 0px))', color: c.fgMuted, fontFamily: t.fontSans, fontSize: t.uiSize },
   legacyBridge: { '--canvas': c.canvas, '--panel': c.raised, '--recess': c.message, '--ink': c.fg, '--muted': c.fgMuted, '--line': c.borderStrong, '--accent': c.primary, '--on-accent': c.onPrimary, '--selection': c.rowActive, '--good': c.done, '--warning': c.attention, '--danger': c.dangerFg, '--sans': t.fontSans, '--mono': t.fontMono },
   // The fixed-viewport shell is the containing block for every absolutely positioned descendant
   // (React Aria's VisuallyHidden, row overlays) whose own pane is static: without it they resolve

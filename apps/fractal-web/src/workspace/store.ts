@@ -1,6 +1,6 @@
 import * as Workspace from '@fractal/ui/workspace'
-import { createWorkspaceStore as createSharedStore, localStoragePersistence, memoryPersistence, type SpaceSync } from '@fractal/ui/workspace/store'
-import { currentSpace, emptyWorkspace, legacyDecoders, workspaceConfig, workspaceSchema, type Command, type TabView, type WorkspaceState } from './model.ts'
+import { createWorkspaceStore as createSharedStore, memoryPersistence, type SpaceSync } from '@fractal/ui/workspace/store'
+import { currentSpace, emptyWorkspace, workspaceConfig, workspaceSchema, type Command, type TabView, type WorkspaceState } from './model.ts'
 import { isAgentTerminalPane, paneIdentity } from './subject.ts'
 
 export interface WorkspaceStore {
@@ -14,23 +14,23 @@ export interface WorkspaceStore {
 }
 
 /**
- * The shared store with Fractal's binding: this browser's document (or memory, for embeds and stories), any
- * external space stores such as the person's glasses, and the terminal face a terminal link opens with.
+ * The shared store with Fractal's binding. The workspace lives in memory: with glasses granted, st's glasses
+ * are its spaces (`glassSync.ts`) and the layout comes back from them; without, it lasts as long as the page.
+ * A terminal link opens the agent's tab on its terminal face.
  */
-export const createWorkspaceStore = ({ storageKey, initial, sync, debounceMs, newId }: {
-  /** `undefined` keeps the workspace in memory. */
-  readonly storageKey: string | undefined
-  /** A stored document's text, for the in-memory store. */
-  readonly initial?: string | undefined
+export const createWorkspaceStore = ({ initial, sync, debounceMs, newId }: {
+  /** What the workspace starts from, such as the person's glasses; an empty one otherwise. */
+  readonly initial?: WorkspaceState | undefined
   readonly sync?: readonly SpaceSync[] | undefined
   readonly debounceMs?: number | undefined
   readonly newId?: (() => string) | undefined
-}): WorkspaceStore => {
+} = {}): WorkspaceStore => {
   const config = workspaceConfig(newId)
-  const shared = createSharedStore<TabView>(
-    storageKey === undefined ? memoryPersistence(initial) : localStoragePersistence(storageKey),
-    { config, schema: workspaceSchema, legacy: legacyDecoders(config), sync, initial: () => emptyWorkspace(config), ...(debounceMs === undefined ? {} : { debounceMs }) },
-  )
+  const shared = createSharedStore<TabView>(memoryPersistence(), {
+    config, schema: workspaceSchema, sync,
+    initial: () => initial ?? emptyWorkspace(config),
+    ...(debounceMs === undefined ? {} : { debounceMs }),
+  })
   return {
     ...shared,
     dispatch: command => {

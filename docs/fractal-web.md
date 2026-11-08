@@ -717,12 +717,18 @@ pnpm exec tsc --noEmit -p apps/fractal-web
 
 `apps/fractal-web/src/workspace/` owns what is open. A tab's identity is the Fractal TUI's pane
 key (`crates/fractal-tui/src/ui/pane.rs`); this client adds no keys of its own, and a key it
-cannot render stays as a tab so it still reaches other clients. The state is the TUI's glass
-shape, a tree of splits over groups of tabs (`layout.rs`), driven by a pure reducer
-(`model.ts`) inside an Effect store (`store.ts`) that persists to this browser's storage.
-A second window's change is adopted wholesale, as the TUI's `glasses_from_graph` does, so a tab
-opened here in the moment before that window's write arrives is discarded. Splits and dragging
-are in the reducer; the strip renders one group until their UI lands.
+cannot render stays as a tab so it still reaches other clients. The state is a set of spaces,
+each a tree of splits over panes of tabs, driven by `@fractal/ui/workspace`'s reducer and store,
+bound to Fractal in `model.ts` and `store.ts`.
+
+The person's glasses in st are the one truth for the shared layout (`glassSync.ts`): each space is
+a glass. With the `glasses` capability granted, the workspace waits for the first glasses snapshot
+and starts from it, or makes one `Main` glass when the person has none. A glass that arrives is
+adopted wholesale, as the TUI's `glasses_from_graph` does, and is never written back, even where
+adopting it normalised it (an agent and its terminal become one tab). A glass is written only when
+a command here changes its structure, on the revision it was made on; a write st refuses for good is
+dropped, and the next glass to arrive stands. Without the grant, the workspace lives in memory for
+the page. Focus, shown tabs, faces, zoom and recency are this page's alone and are not stored.
 
 Every surface opens through one verb, `open(ref)` from `openable.ts`, and `useOpenable(ref)` gives
 a surface click, Cmd-click for behind, Alt+Enter and Alt+Shift+Enter for a split, and the drag
@@ -756,7 +762,7 @@ The header's control swaps the main pane between the agent's conversation and it
 each replacing the other: **Show terminal** with a terminal glyph, then **Show conversation**
 with a message glyph and the active fill. The name carries the state, so the control has no
 `aria-pressed`. An agent has one tab, and the terminal is that tab's other face: the tab
-remembers which face it shows, across reloads, however the agent is reached again. A link to
+remembers which face it shows for as long as the page lives, however the agent is reached again. A link to
 `/w/terminal/<ref>` or `?open=terminal/<ref>:detail` opens the agent's tab on its terminal; the
 URL then names the agent.
 
