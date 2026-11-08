@@ -21,7 +21,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import { mergeProps, mergeRefs, useDrop, type DropItem } from 'react-aria'
-import { Tab, TabList, TabListStateContext, TabPanel, Tabs, TabsContext, type Key } from 'react-aria-components'
+import { Tab, TabList, TabPanel, Tabs, type Key } from 'react-aria-components'
 import { HoverCardSurface, useHoverCardIntent } from '../../../../packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx'
 import { ThemePortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/ThemePortal.tsx'
 import { interactionVars as interaction, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -478,6 +478,17 @@ export const EditorTabs = ({
   const list = useRef<HTMLDivElement>(null)
   const [drop, setDrop] = useState<{ readonly index: number; readonly offset: number } | null>(null)
   const [announcement, setAnnouncement] = useState('')
+  // RAC's panel useId retains its first id. Remount only its semantic shell; move this same portal target into it.
+  // Render the portal outside Tabs so its collection builder and selectedKey never leak into nested pane tabs.
+  const [content] = useState(() => {
+    if (!stablePanel) return null
+    const node = document.createElement('div')
+    node.className = stylex.props(styles.panel).className ?? ''
+    return node
+  })
+  const attachPanel = useCallback((panel: HTMLDivElement | null) => {
+    if (panel !== null && content !== null) panel.appendChild(content)
+  }, [content])
   const vertical = variant === 'vertical'
   // The top bar is the window's banner, as the header it replaces was; other strips are plain rows.
   const Bar = variant === 'bar' ? 'header' : 'div'
@@ -569,6 +580,7 @@ export const EditorTabs = ({
   }
 
   return (
+    <>
     <Tabs
       {...(activeId === null ? {} : { selectedKey: activeId })}
       onSelectionChange={(key: Key) => onActivate(String(key))}
@@ -678,7 +690,7 @@ export const EditorTabs = ({
         </span>
       </Bar>
       {stablePanel ? (
-        <StableTabPanel activeId={activeId}>{children}</StableTabPanel>
+        <TabPanel key={activeId ?? ''} id={activeId ?? ''} shouldForceMount ref={attachPanel} {...stylex.props(styles.panel)} />
       ) : activeId === null ? (
         children
       ) : (
@@ -687,33 +699,11 @@ export const EditorTabs = ({
         </TabPanel>
       )}
     </Tabs>
+    {content === null ? null : createPortal(children, content)}
+    </>
   )
 }
 
-/**
- * RAC's useId retains the first panel id, so its semantic shell must remount on selection. The portal target does
- * not: moving that same node into the new shell preserves PaneSlot and every surface portalled into it. Reset the
- * tab contexts as RAC's TabPanel does, so nested Details/Resources tabs never inherit the workspace selection.
- */
-const StableTabPanel = ({ activeId, children }: { readonly activeId: string | null; readonly children: ReactNode }) => {
-  const [content] = useState(() => {
-    const node = document.createElement('div')
-    node.className = stylex.props(styles.panel).className ?? ''
-    return node
-  })
-  const attach = useCallback((panel: HTMLDivElement | null) => {
-    if (panel !== null) panel.appendChild(content)
-  }, [content])
-  return <>
-    <TabPanel key={activeId ?? ''} id={activeId ?? ''} shouldForceMount ref={attach} {...stylex.props(styles.panel)} />
-    {createPortal(
-      <TabsContext.Provider value={null}>
-        <TabListStateContext.Provider value={null}>{children}</TabListStateContext.Provider>
-      </TabsContext.Provider>,
-      content,
-    )}
-  </>
-}
 
 interface TabItemProps {
   readonly tab: EditorTabItem
