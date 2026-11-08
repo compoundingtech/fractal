@@ -186,3 +186,16 @@ export const initials = (login: string): string => {
   const letters = parts.length >= 2 ? `${parts[0]![0]}${parts[1]![0]}` : login.slice(0, 2)
   return letters.toUpperCase()
 }
+
+/** Markdown source to a short plain excerpt: images and links keep their words, markup goes. */
+export const plainExcerpt = (markdown: string, limit = 220): string => {
+  const plain = markdown
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, (_, alt: string) => alt === '' ? '[image]' : `[image: ${alt}]`)
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/<[^>]+>/g, '')
+    .replace(/^#{1,6}\s+/gm, '')
+    .replace(/[*_`~>]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return plain.length <= limit ? plain : `${plain.slice(0, limit - 1).trimEnd()}…`
+}
