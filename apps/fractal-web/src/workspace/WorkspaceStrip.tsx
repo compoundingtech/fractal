@@ -35,7 +35,16 @@ export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, t
     event.preventDefault()
     setMenu({ id, target: { current: target } })
   }
-  return <div onContextMenu={onContextMenu} {...stylex.props(styles.host)}>
+  // The kit's drag wiring swallows a focused tab's own Delete; the strip closes it here, before the drag sees the key.
+  const onKeyDownCapture = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Delete' && event.key !== 'Backspace') return
+    const id = event.target instanceof Element ? event.target.closest('[data-tab-id]')?.getAttribute('data-tab-id') : null
+    if (id === null || id === undefined) return
+    event.preventDefault()
+    event.stopPropagation()
+    dispatch({ _tag: 'Close', id })
+  }
+  return <div onContextMenu={onContextMenu} onKeyDownCapture={onKeyDownCapture} {...stylex.props(styles.host)}>
     <EditorTabs
       label="Workspace tabs"
       groupId={group}

@@ -137,6 +137,48 @@ it('closes the others', async () => {
   expect(titles()).toEqual(['Agent B'])
 })
 
+it('never leaves a drag behind a tab press, so the next press still selects', async () => {
+  await mount()
+  await act(async () => row('agent/b').click())
+  // A virtual click is what a screen reader or a press at a tab's exact centre delivers.
+  await act(async () => strip()[0]!.click())
+  expect(selected()).toBe('Agent A')
+  await act(async () => strip()[1]!.click())
+  expect(selected()).toBe('Agent B')
+  expect(host.querySelector('[data-tab-id][aria-describedby]')).toBeNull()
+})
+
+it('closes the focused tab with Delete or Backspace', async () => {
+  await mount()
+  await act(async () => row('agent/b').click())
+  for (const key of ['Delete', 'Backspace']) {
+    const tab = strip().at(-1)!
+    await act(async () => { tab.focus(); tab.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true })) })
+  }
+  expect(titles()).toEqual([])
+})
+
+it('brings the selected tab into view whenever the strip changes size', async () => {
+  const observed: { readonly target: Element; readonly callback: (entries: readonly unknown[]) => void }[] = []
+  vi.stubGlobal('ResizeObserver', class { constructor(private readonly callback: (entries: readonly unknown[]) => void) {} observe(target: Element) { if (!observed.some(row => row.target === target && row.callback === this.callback)) observed.push({ target, callback: this.callback }) } unobserve() {} disconnect() {} })
+  // jsdom has no layout, so no scrollIntoView of its own.
+  Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, writable: true, value: () => {} })
+  const scrolled: string[] = []
+  const scroll = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(function (this: Element) { scrolled.push(this.getAttribute('aria-label') ?? '') })
+  try {
+    await mount()
+    await act(async () => row('agent/b').click())
+    await act(async () => row('agent/a').click())
+    scrolled.length = 0
+    // The width a phone gives the strip arrives after the selection did.
+    const strip = host.querySelector('[role="tablist"][aria-label="Workspace tabs"]')!
+    await act(async () => { for (const { target, callback } of [...observed]) if (target.contains(strip) || strip.contains(target)) callback([]) })
+    expect(scrolled).toContain('Agent A')
+  } finally {
+    scroll.mockRestore()
+  }
+})
+
 it('gives an answered alert\'s tab to the next alert, and closes it when none is left', async () => {
   window.history.replaceState(null, '', '/w/inbox/attention%2Fone')
   await mount()
