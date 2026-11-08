@@ -33,6 +33,7 @@ import { PaneSwitcher } from '../workspace/PaneSwitcher.tsx'
 import type { HostActions, HostCommand } from '../palette/mod.ts'
 import { shortcutsPausedSelector } from './shortcuts.ts'
 import { narrowLayoutQuery } from './narrowLayout.ts'
+
 import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
 import { LiveAlertNames } from '../conversation/alerts/LiveAlertNames.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
@@ -488,6 +489,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const onTabView = React.useCallback((id: string, view: TabView) => store.dispatch({ _tag: 'SetView', tab: id, view }), [store])
   const onReplaceTab = React.useCallback((id: string, ref: string) => go({ _tag: 'Replace', tab: id, ref: paneKey(subjectOfRef(ref)) }), [go])
   const onCloseTab = React.useCallback((id: string) => go({ _tag: 'Close', tab: id }), [go])
+
   const pins = useAtomValue(terminalSource.pins ?? sidebarPins())
   const pinned = React.useMemo(() => new Set(pins.state.members.map(item => item.member)), [pins.state.members])
   const pinnedItems = React.useMemo(() => {
@@ -791,6 +793,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     const terminalShown = shownTab !== undefined && paneAgent !== '' && showsTerminal(shownTab, space.local.views[shownTab.id])
     const shownSubject = shownTab === undefined ? undefined : parsePane(shownTab.ref)
     const kindAside = shownSubject === undefined ? undefined : workspaceKinds.kindOf(shownSubject).view.Aside
+
     // The control stays enabled while the terminal is shown: it is the way back, even from a deep link to a terminal this agent lacks.
     const disabledReason = terminalShown ? undefined : terminal.disabledReason
     const toggleTerminal = () => {
@@ -911,6 +914,7 @@ const ignoreSplitKey = (event: KeyboardEvent) => {
   if (target?.closest('[data-testid="terminal-pane"]') != null || target?.closest(shortcutsPausedSelector) != null) return true
   return event.altKey && !event.metaKey && !event.ctrlKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight') && isTyping(event.target)
 }
+
 
 /** The pane's own actions, with the toggle for its own side panel when its shown subject has one. */
 const PaneThreadActions = (props: Omit<React.ComponentProps<typeof ThreadActions>, 'panelOpen' | 'onTogglePanel'>) => {

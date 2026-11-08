@@ -3,7 +3,7 @@ import { Agent, UsagePeriod, decodeUnknownSync } from '@fractal/client/schema'
 import type * as Native from '@fractal/client/schema'
 import { ompAgentWire, ompDeclarationsNotReported, ompNow, ompUsagePeriodWire } from '../../../../packages/fractal-ui/src/assistant-ui/details/omp-fixtures.ts'
 import { fixtureSource } from '../data/fixtureSource.ts'
-import { observed, type DataSource, type Feed } from '../data/source.ts'
+import { observed, unavailable, type DataSource, type Feed } from '../data/source.ts'
 import type { NativeDetailsSource } from '../data/nativeDetailsSource.ts'
 import type { NativeDeclarations } from '../data/nativeDeclarations.ts'
 
@@ -16,6 +16,8 @@ export const ompDetailsSource = (): DataSource => {
     ...fixtureSource({ world: { now: ompNow, agents: [decodeUnknownSync(Agent)(ompAgentWire)], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }),
     nativeDetails: {
       usagePeriod: () => usagePeriod,
+      // The omp seat runs no mission; a mission's spend is not reported here.
+      missionUsage: () => Atom.make<Feed<Native.UsagePeriod>>(unavailable({ reason: 'unsupported', detail: 'Not reported' })),
       rawDeclarations: () => rawDeclarations,
       declarations: () => declarations,
       // The fixture world is fixed: a re-read observes the same period.

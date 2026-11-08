@@ -5,7 +5,7 @@ import * as React from 'react'
 
 import { HoverCardSurface } from '../../../../../packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx'
 import { C, Mark, SmallButton, STATE_LABEL } from './parts.tsx'
-import { layered } from './layout.ts'
+import { layered } from '../detail/layout.ts'
 import { clock, criticalPath, lineage, ranIn, runningMs, span, stateAt, stepEnd, stepStart, type ExploreMission, type PlanStep, type StepState } from './model.ts'
 
 /** Everything the linked views share. One instance per detail view. */

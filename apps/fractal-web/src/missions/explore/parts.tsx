@@ -4,7 +4,7 @@ import * as React from 'react'
 
 import { borderVars as border, statusVars as tone, surfaceVars as surface, textVars as ink } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { MissionRing } from '../../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarMissionLine.tsx'
-import { layered } from './layout.ts'
+import { layered } from '../detail/layout.ts'
 import { clock, criticalPath, progressOf, runningMs, span, stepEnd, stepStart, type ExploreMission, type PlanStep, type StepState } from './model.ts'
 
 export const C = { fg: ink.fg, soft: ink.fgSoft, muted: ink.fgMuted, line: border.border, strong: border.borderStrong, hover: surface.rowHover, active: surface.rowActive, canvas: surface.canvas, you: tone.attention, bad: tone.dangerFg }
