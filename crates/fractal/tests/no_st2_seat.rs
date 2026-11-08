@@ -34,6 +34,8 @@ fn a_claude_seat_runs_with_no_st2_on_the_machine() {
             "-u",
             "ST_AGENT",
             "-u",
+            "FRACTAL_AGENT",
+            "-u",
             "ST3_SUBJECT",
             "python3",
         ])

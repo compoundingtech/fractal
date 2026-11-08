@@ -1,5 +1,5 @@
 //! Host-local launch identity; publication never changes incarnation evidence.
-use std::{collections::BTreeMap, path::Path, sync::OnceLock};
+use std::{borrow::Cow, collections::BTreeMap, path::Path, sync::OnceLock};
 
 use anyhow::{Context as _, Result};
 use crate::launch_contract::Contract;
@@ -68,6 +68,29 @@ fn capture_with(store: &Store, desired: &DesiredSubject, member: &MemberSpec, ru
         *path = std::env::join_paths(std::env::split_paths(path).map(|entry|
             if entry.is_absolute() { entry } else { Path::new(&member.cwd).join(entry) }))?.to_string_lossy().into_owned();
     }
+    let authored = desired.member.as_ref().context("launch contract needs a member")?;
+    let provider = match &authored.launch {
+        LaunchSpec::Shell(_) => "sh",
+        LaunchSpec::Argv(argv) => {
+            let position = if authored.driver.is_some() {
+                argv.iter().position(|arg| arg == "--").context("harness launch has no provider")? + 1
+            } else { 0 };
+            argv.get(position).context("launch has no program")?
+        }
+    };
+    let mut provider = Cow::Borrowed(provider);
+    if let Some(harness @ ("omp" | "claude" | "codex")) = member.driver.as_deref() {
+        // Measure the provider child, not the raw executable in the authored expansion.
+        // Wrapper selection and its interpreter PATH must agree with driver startup without
+        // changing the daemon's environment or selecting process-global driver state.
+        let mut argv = [provider.into_owned()];
+        let path = fractal_drivers::managed_launch::resolve_with_environment(
+            harness, &mut argv, &desired.desired, &environment,
+        )?;
+        environment.insert("PATH".into(), path.into_string().map_err(|_| anyhow::anyhow!("managed provider PATH is not UTF-8"))?);
+        let [program] = argv;
+        provider = Cow::Owned(program);
+    }
     let resolve = |program: &str| {
         let mut program = program.to_owned();
         fractal_runtime::expand_path_placeholder(&mut program, &environment);
@@ -81,18 +104,8 @@ fn capture_with(store: &Store, desired: &DesiredSubject, member: &MemberSpec, ru
         let path = fractal_runtime::resolve_executable(&program, &environment)?;
         Ok(if path.is_absolute() { path } else { Path::new(&member.cwd).join(path) })
     };
-    let authored = desired.member.as_ref().context("launch contract needs a member")?;
-    let provider = match &authored.launch {
-        LaunchSpec::Shell(_) => "sh",
-        LaunchSpec::Argv(argv) => {
-            let position = if authored.driver.is_some() {
-                argv.iter().position(|arg| arg == "--").context("harness launch has no provider")? + 1
-            } else { 0 };
-            argv.get(position).context("launch has no program")?
-        }
-    };
     let mut binaries = BTreeMap::new();
-    for (role, path) in [("launcher", executable), ("provider", resolve(provider)?)] {
+    for (role, path) in [("launcher", executable), ("provider", resolve(&provider)?)] {
         // Start every pending measurement before answering, so one later read finds them all.
         binaries.insert(role.to_owned(), (measures.identity)(&path, &resolve, input)?);
     }
@@ -139,6 +152,142 @@ pub fn status(store: &Store, desired: &DesiredSubject, incarnation: Option<&str>
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+    fn isolated_capture(store: &Store, desired: &DesiredSubject, ready: bool, input: &dyn Fn(&Path) -> Result<()>) -> Result<Option<Contract>> {
+        let environment = |declared: &BTreeMap<String, String>, _: &Path| Ok(Some(declared.clone()));
+        let identity = move |path: &Path, resolve: &dyn Fn(&str) -> Result<std::path::PathBuf>, input: &dyn Fn(&Path) -> Result<()>| {
+            if ready {
+                fractal_drivers::harness_admission::executable_identity_ready_observed(path, resolve, input)
+            } else {
+                fractal_drivers::harness_admission::executable_identity_with(path, resolve).map(Some)
+            }
+        };
+        capture_with(store, desired, desired.member.as_ref().unwrap(), false, &Measures {
+            environment: &environment,
+            identity: &identity,
+        }, input)
+    }
+
+    fn managed_fixture(harness: &str, stable_profile: bool) -> (tempfile::TempDir, DesiredSubject, std::path::PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("managed/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let profile = if stable_profile {
+            root.path().join(".local/state/nix/profiles/coding-agent-runtime/share/coding-agents/profile.json")
+        } else {
+            root.path().join("profile.json")
+        };
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, serde_json::to_vec(&serde_json::json!({
+            "personas": {"launch": {
+                "generalist": {"harnessBin": bin},
+                "steward": {"harnessBin": bin},
+            }},
+        })).unwrap()).unwrap();
+        for (program, source) in [(harness, "#!/usr/bin/env node\nmanaged provider\n"), ("node", "#!/bin/sh\nmanaged interpreter\n")] {
+            let path = bin.join(program);
+            std::fs::write(&path, source).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut desired = crate::graph::parse_test_intent(&format!(
+            "version 2\nagent \"worker\" {{ workspace {:?}; harness {harness:?} {{ model \"model-a\"; }} }}",
+            root.path().to_str().unwrap(),
+        ), "node").unwrap().subjects.into_values().next().unwrap();
+        let member = desired.member.as_mut().unwrap();
+        member.environment = BTreeMap::from([
+            ("HOME".into(), root.path().display().to_string()),
+            ("PATH".into(), root.path().join("raw/bin").display().to_string()),
+        ]);
+        if !stable_profile {
+            member.environment.insert("AGENT_RUNTIME_PROFILE".into(), profile.display().to_string());
+        }
+        (root, desired, bin)
+    }
+
+    #[test]
+    fn typed_managed_contract_measures_wrapper_without_raw_provider() {
+        for harness in ["omp", "claude", "codex"] {
+            for stable_profile in [false, true] {
+                let (root, mut desired, bin) = managed_fixture(harness, stable_profile);
+                let store = Store::open_memory("node").unwrap();
+                let seen = std::cell::RefCell::new(Vec::new());
+                let original = isolated_capture(&store, &desired, false, &|path| {
+                    seen.borrow_mut().push(path.to_owned()); Ok(())
+                }).unwrap().unwrap();
+                assert!(seen.borrow().contains(&bin.join(harness)));
+                assert!(!seen.borrow().contains(&root.path().join("raw/bin").join(harness)));
+                let LaunchSpec::Argv(argv) = &mut desired.member.as_mut().unwrap().launch else { panic!("typed argv") };
+                let position = argv.iter().position(|arg| arg == "--").unwrap() + 1;
+                argv[position] = root.path().join("unavailable").join(harness).display().to_string();
+                let explicit = isolated_capture(&store, &desired, false, &|_| Ok(())).unwrap().unwrap();
+                assert_eq!(original.binary, explicit.binary, "an unavailable explicit raw provider cannot bypass the wrapper");
+                let ready_inputs = std::cell::RefCell::new(Vec::new());
+                if let Some(ready) = isolated_capture(&store, &desired, true, &|path| {
+                    ready_inputs.borrow_mut().push(path.to_owned()); Ok(())
+                }).unwrap() {
+                    assert_eq!(ready, explicit);
+                }
+                assert!(ready_inputs.borrow().contains(&bin.join(harness)));
+                assert!(ready_inputs.borrow().contains(&bin.join("node")));
+                std::fs::write(bin.join(harness), "#!/usr/bin/env node\nchanged managed provider\n").unwrap();
+                let changed = isolated_capture(&store, &desired, false, &|_| Ok(())).unwrap().unwrap();
+                assert_ne!(explicit.binary, changed.binary, "wrapper content is the provider identity");
+                std::fs::write(bin.join("node"), "#!/bin/sh\nchanged managed interpreter\n").unwrap();
+                assert_ne!(changed.binary, isolated_capture(&store, &desired, false, &|_| Ok(())).unwrap().unwrap().binary,
+                    "wrapper shebang uses the provider's prefixed PATH");
+            }
+        }
+    }
+
+    #[test]
+    fn managed_contract_uses_environment_persona_and_refuses_unknown_persona() {
+        let (root, mut desired, bin) = managed_fixture("omp", false);
+        let store = Store::open_memory("node").unwrap();
+        std::fs::write(root.path().join("profile.json"), serde_json::to_vec(&serde_json::json!({
+            "personas": {"launch": {"steward": {"harnessBin": bin}}},
+        })).unwrap()).unwrap();
+        desired.member.as_mut().unwrap().environment.insert("AGENT_PERSONA".into(), "steward".into());
+        isolated_capture(&store, &desired, false, &|_| Ok(())).unwrap().unwrap();
+        desired.member.as_mut().unwrap().environment.insert("AGENT_PERSONA".into(), "generalist".into());
+        assert!(format!("{:#}", isolated_capture(&store, &desired, false, &|_| Ok(())).unwrap_err())
+            .contains("personas.launch.generalist.harnessBin"));
+    }
+
+    #[test]
+    fn untyped_provider_named_like_managed_harness_keeps_native_identity() {
+        let (root, mut desired, bin) = managed_fixture("omp", false);
+        let store = Store::open_memory("node").unwrap();
+        let member = desired.member.as_mut().unwrap();
+        member.driver = None;
+        member.launch = LaunchSpec::Argv(vec![bin.join("omp").display().to_string()]);
+        member.environment.remove("AGENT_RUNTIME_PROFILE");
+        member.environment.insert("HOME".into(), root.path().join("no-profile").display().to_string());
+        // Native env shebang resolution still needs its authored interpreter PATH.
+        member.environment.insert("PATH".into(), bin.display().to_string());
+        isolated_capture(&store, &desired, false, &|_| Ok(())).unwrap().unwrap();
+    }
+
+    #[test]
+    fn person_bound_contract_keeps_native_provider_without_a_managed_profile() {
+        let (root, mut desired, bin) = managed_fixture("claude", false);
+        let store = Store::open_memory("node").unwrap();
+        let binding = crate::model::TerminalBinding {
+            subject: "pty/person/avery/019a0000-0000-7000-8000-000000000001".into(),
+            incarnation: "42:created".into(),
+            id: "019a0000-0000-7000-8000-000000000002".into(),
+        };
+        desired.desired["children"].as_array_mut().unwrap().push(serde_json::json!({
+            "name": "bind-terminal", "arguments": [binding.subject],
+            "properties": {"incarnation": binding.incarnation, "id": binding.id}, "children": [],
+        }));
+        let member = desired.member.as_mut().unwrap();
+        member.lifecycle = crate::model::MemberLifecycle::TerminalBound;
+        member.terminal_binding = Some(binding);
+        member.environment.remove("AGENT_RUNTIME_PROFILE");
+        member.environment.insert("HOME".into(), root.path().join("no-profile").display().to_string());
+        member.environment.insert("PATH".into(), bin.display().to_string());
+        isolated_capture(&store, &desired, false, &|_| Ok(())).unwrap().unwrap();
+    }
+
     #[test]
     fn relative_provider_and_runtime_path_use_the_prepared_member() {
         let root = tempfile::tempdir().unwrap();
