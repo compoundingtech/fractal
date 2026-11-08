@@ -50,6 +50,7 @@ Storage digest: `c98d0a28f88e6d5e8cf58f93fee817e690662de7a334089feeb8be0e6cdb2d5
 | `sekret` | `sekret/HOST or sekret/HOST/OWNER/NAME` | no | A host's sekrets gateway, or one of its profiles: calls run with a credential the caller never reads. |
 | `step-run` | `step-run/GENERATION/PATH` | no | One step attempt lineage. |
 | `subscription` | `subscription/RUN/LOCAL_ID` | no | A mission-run observer subscription. |
+| `thread` | `thread/ID` | no | A durable person and agent discussion. |
 
 Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE.NAME`.
 
@@ -235,6 +236,9 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `terminal.input.requested` | `agent`, `pty` | `authorized-requester` | `append` | `durable` | `byte_count:integer`, `incarnation_id:string`, `intent:string`, `mode:string`, `runtime_id:string`, `sequence:integer`, `sha256:string` |  |
 | `terminal.input.result` | `agent`, `pty` | `system-only` | `append` | `durable` | `incarnation_id:string`, `reason:string`, `result!:string`, `runtime_id:string`, `sequence:integer` |  |
 | `terminal.launch-geometry` | `person` | `same-subject-actor` | `append` | `durable` | `columns!:integer`, `rows!:integer` |  |
+| `thread.created` | `thread` | `system-only` | `once` | `durable` | `agent!:subject-reference(agent)`, `first_message:subject-reference(message)`, `origin_ask:subject-reference(step-run)`, `origin_ask_episode:string`, `person!:subject-reference(person)`, `title!:string` | `thread` |
+| `thread.state-set` | `thread` | `system-only` | `append` | `durable` | `state!:string` |  |
+| `thread.title-set` | `thread` | `system-only` | `append` | `durable` | `previous_title!:string`, `title!:string`, `title_revision!:string` |  |
 | `transport.observed` | `host` | `system-only` | `append` | `durable` | `last_success_at:integer`, `protocol:string`, `reason:string`, `remote_heads:object`, `status!:string` |  |
 | `vcs.item.state` | `resource` | `system-only` | `append` | `durable` | `checks_state:string`, `draft:boolean`, `head_sha:string`, `item_kind!:string`, `merge_queue:object`, `merged:boolean`, `observer!:subject-reference(observer)`, `required_checks:object`, `review_decision:string`, `state!:string`, `version!:integer` |  |
 | `work.claimed` | `step-run` | `authorized-participant` | `state-transition` | `durable` | `attempt:integer`, `claim_expires_at_unix_ms:integer`, `claim_incarnation:string`, `claimant:subject-reference`, `clock:string`, `extend_ms:integer`, `handoff_acknowledged:subject-reference`, `handoff_key:string`, `handoff_message:subject-reference`, `handoff_request:object`, `handoff_to:subject-reference`, `readiness_epoch:integer`, `reason:string`, `status:string`, `summary:string`, `wait_until_unix_ms:integer`, `worker_reported:boolean` |  |

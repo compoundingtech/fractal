@@ -466,6 +466,8 @@ pub struct ClientSession {
     /// The exact pairing grant that authenticated this session. Two pairings of the same
     /// person and device key share an actor, so only this subject names the exact grant.
     pub pairing_grant: Option<String>,
+    /// Exact person-pairing completion authenticated by the request bearer.
+    pub pairing_completion: Option<Box<str>>,
     /// Local-only push registrations belong to the member that issued this exact pairing.
     pub pairing_issued_here: bool,
     pub grant_expires_at: Option<u128>,
@@ -492,6 +494,7 @@ impl ClientSession {
             actor: actor.into(),
             authority_actor: authority_actor.into(),
             pairing_grant: None,
+            pairing_completion: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
@@ -535,6 +538,7 @@ impl ClientSession {
                 actor: "client/local/read-only".into(),
                 authority_actor: "client/local/read-only".into(),
                 pairing_grant: None,
+                pairing_completion: None,
                 pairing_issued_here: false,
             grant_expires_at: None,
                 assistant_write: None,
@@ -559,6 +563,7 @@ impl ClientSession {
             actor: person.into(),
             authority_actor: person.into(),
             pairing_grant: None,
+            pairing_completion: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
@@ -580,6 +585,7 @@ impl ClientSession {
             actor: "client/pairing/completion".into(),
             authority_actor: "client/pairing/completion".into(),
             pairing_grant: None,
+            pairing_completion: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,
@@ -710,7 +716,9 @@ pub fn credential_digest(credential: &str) -> String {
 pub fn administrative_get(request: &Request<Body>) -> bool {
     request.method() == axum::http::Method::GET
         && (request.uri().path().starts_with("/v1/client/assistant/grants/")
-            || request.uri().path() == "/v1/client/devices")
+            || request.uri().path() == "/v1/client/devices"
+            || request.uri().path() == "/v1/client/threads"
+            || request.uri().path().starts_with("/v1/client/threads/"))
 }
 
 pub fn authenticate(
@@ -887,6 +895,7 @@ pub fn paired_client_session(
         actor: actor.into(),
         authority_actor: authority_actor.into(),
         pairing_grant: Some(paired.subject.clone()),
+        pairing_completion: Some(paired.id.as_str().into()),
         pairing_issued_here: paired.origin == state.store.origin(),
         grant_expires_at: Some(expires_at),
         assistant_write: None,
@@ -4163,6 +4172,7 @@ pub async fn events(
     records.retain(|(record, _)| {
         !fractal_schema::notice::is_reserved_subject(&record.subject)
             && !fractal_schema::notice::is_reserved_kind(&record.kind)
+            && !fractal_schema::threads::is_reserved_record(&record.subject, &record.kind)
     });
     // The projection enrichment reads the store (mission attribution, snapshot ids), so it
     // takes one admitted query scope; the wait above held no reader.
@@ -4370,6 +4380,9 @@ pub struct Fence {
 }
 
 pub fn action_scope(action: &str) -> Option<&'static str> {
+    if matches!(action, "thread.rename" | "thread.close" | "thread.reopen") {
+        return Some("control.messages");
+    }
     if action == "harness.answer" {
         return Some("terminal.control");
     }

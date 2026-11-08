@@ -8,6 +8,7 @@ use super::*;
 pub(super) fn generic_claim_visible(claim: &ClaimRecord) -> bool {
     !fractal_schema::notice::is_reserved_subject(&claim.subject)
         && !fractal_schema::notice::is_reserved_kind(&claim.kind)
+        && !fractal_schema::threads::is_reserved_record(&claim.subject, &claim.kind)
 }
 
 /// Fill a serving page with visible claims, leaving raw replication/projector reads intact.

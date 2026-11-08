@@ -51,6 +51,7 @@ mod runtime_start_diagnostics;
 pub mod search;
 pub mod schedules;
 pub mod summary;
+mod threads;
 mod agents_publication_frames;
 mod agents_publication_stream;
 #[cfg(test)]
@@ -91,6 +92,9 @@ mod stream_timeline_tests;
 pub fn routes(app: Router<AppState>) -> Router<AppState> {
     app
         .route("/v1/client/arrangements", get(arrangements::list))
+        .route("/v1/client/threads", get(threads::list))
+        .route("/v1/client/threads/{id}", get(threads::detail))
+        .route("/v1/client/threads/{id}/timeline", get(threads::timeline))
         .route(
             "/v1/client/arrangements/{person_name}/{uuid}",
             get(arrangements::get),
@@ -7646,7 +7650,7 @@ fn terminal_keys_unfenced(request: &ActionRequest) -> bool {
         )
 }
 
-fn validate_fence(state: &AppState, fence: &Fence) -> Result<(), ApiError> {
+fn validate_snapshot_fence(state: &AppState, fence: &Fence) -> Result<(), ApiError> {
     let parsed = fence
         .snapshot_id
         .strip_prefix("snapshot/")
@@ -7665,6 +7669,11 @@ fn validate_fence(state: &AppState, fence: &Fence) -> Result<(), ApiError> {
             "the client snapshot belongs to another host or a future store position",
         ));
     }
+    Ok(())
+}
+
+fn validate_fence(state: &AppState, fence: &Fence) -> Result<(), ApiError> {
+    validate_snapshot_fence(state, fence)?;
     for (subject, revision) in &fence.subject_revisions {
         let current = if subject.starts_with("attention/") {
             client_attention_resources(&state.store, None, false)
@@ -9365,6 +9374,9 @@ async fn action_inner(
 ) -> Result<Json<Value>, ApiError> {
     if request.action_type == "harness.answer" {
         return harness_questions::answer(&state, &session, &request).await;
+    }
+    if matches!(request.action_type.as_str(), "thread.rename" | "thread.close" | "thread.reopen") {
+        return threads::lifecycle_action(state, session, request).await;
     }
     // The message-send wrapper validates before reserving its gate and capacity.
     // Other actions retain their original admission order here.
@@ -24050,6 +24062,7 @@ mission "example/zero-run" state="ready" {
             actor: "person/alex/session/device-one".into(),
             authority_actor: "person/alex".into(),
             pairing_grant: None,
+            pairing_completion: None,
             pairing_issued_here: false,
             grant_expires_at: None,
             assistant_write: None,

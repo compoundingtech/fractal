@@ -137,6 +137,16 @@ pub fn normalize_claim_input<'a>(connection: &Connection, input: &'a ClaimInput)
                 if let Some(identity) = identity { normalized.to_mut().fields.insert(field.into(), json!(identity)); }
             }
         }
+        if input.kind == "thread.created" {
+            for field in ["person", "agent"] {
+                if let Some(value) = input.fields.get(field).and_then(Value::as_str) {
+                    let identity = resolve_reference_conn(connection, value)?;
+                    if identity != value {
+                        normalized.to_mut().fields.insert(field.into(), json!(identity));
+                    }
+                }
+            }
+        }
         // This is local admission only: bind placement targets before operation hashing
         // and signing. Projectors must replay the signed identity without alias lookup.
         if input.kind == "arrangement.edited"
