@@ -6599,6 +6599,20 @@ fn trusted_terminal_attachment(state: &AppState, claim: &ClaimRecord, session: &
         && state.store.client_operation_is_trusted(claim).map_err(ApiError::internal)?)
 }
 
+fn admitted_terminal_record<'a>(
+    state: &AppState, claims: &'a [ClaimRecord], session: &ClientSession, kind: Option<&str>,
+) -> Result<Option<&'a ClaimRecord>, ApiError> {
+    for claim in claims.iter().rev() {
+        if matches!(claim.kind.as_str(), "custom.client.terminal-attached" | "custom.client.terminal-consumed" | "custom.client.terminal-detached")
+            && kind.is_none_or(|kind| kind == claim.kind)
+            && claim.origin == state.store.origin()
+            && trusted_terminal_attachment(state, claim, session)? {
+            return Ok(Some(claim));
+        }
+    }
+    Ok(None)
+}
+
 fn terminal_attachment_id(session: &ClientSession, request: &ActionRequest) -> String {
     let stable = hex::encode(Sha256::digest(
         format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
@@ -6618,15 +6632,12 @@ fn existing_terminal_attachment(
         .store
         .claims_for(&subject, None)
         .map_err(ApiError::internal)?;
-    let Some(attached) = claims
-        .iter()
-        .find(|claim| claim.kind == "custom.client.terminal-attached")
-    else {
+    let Some(attached) = admitted_terminal_record(state, &claims, session, Some("custom.client.terminal-attached"))? else {
+        if claims.iter().any(|claim| claim.kind == "custom.client.terminal-attached") {
+            return Err(forbidden("the terminal attachment requires a new attach operation"));
+        }
         return Ok(None);
     };
-    if !trusted_terminal_attachment(state, attached, session)? {
-        return Err(forbidden("the terminal attachment requires a new attach operation"));
-    }
     let old_digest = attached
         .body
         .pointer("/fields/request_digest")
@@ -6740,13 +6751,8 @@ fn terminal_attachment_response(
         .store
         .claims_for(&subject, None)
         .map_err(ApiError::internal)?;
-    let attached = claims
-        .iter()
-        .find(|claim| claim.kind == "custom.client.terminal-attached")
-        .ok_or_else(|| ApiError::internal("the terminal attachment claim is missing"))?;
-    if !trusted_terminal_attachment(state, attached, session)? {
-        return Err(forbidden("the terminal attachment requires a new attach operation"));
-    }
+    let attached = admitted_terminal_record(state, &claims, session, Some("custom.client.terminal-attached"))?
+        .ok_or_else(|| forbidden("the terminal attachment requires a new attach operation"))?;
     if attached.origin != state.store.origin() {
         return Err(forbidden(
             "the terminal attachment belongs to another gateway",
@@ -6769,12 +6775,8 @@ fn terminal_attachment_response(
     {
         return Err(remote_unavailable_for_owner(state, owner_host_id));
     }
-    let latest = claims
-        .last()
-        .ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
-    if !trusted_terminal_attachment(state, latest, session)? {
-        return Err(forbidden("the terminal attachment requires a new attach operation"));
-    }
+    let latest = admitted_terminal_record(state, &claims, session, None)?
+        .ok_or_else(|| forbidden("the terminal attachment requires a new attach operation"))?;
     let expires = field("expires_at_unix_ms")
         .and_then(Value::as_u64)
         .map(u128::from)
@@ -6980,6 +6982,11 @@ fn consume_terminal_attachment_mode(
         return Ok(());
     }
     let _span = crate::profile::span("terminal/capability-consume");
+    let claims = state.store.claims_for(&attached.subject, None).map_err(ApiError::internal)?;
+    if admitted_terminal_record(state, &claims, session, None)?.is_none_or(|head| head.id != attached.id) {
+        return Err(forbidden("the terminal stream capability was already consumed"));
+    }
+    let raw_head = claims.last().ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
     state
         .store
         .append_client_operation_claim(&ClaimInput {
@@ -6995,7 +7002,7 @@ fn consume_terminal_attachment_mode(
                 ),
             ]),
             evidence: vec![attached.id.clone()],
-            expected_subject: Some(Some(attached.id.clone())),
+            expected_subject: Some(Some(raw_head.id.clone())),
             idempotency_key: None,
         })
         .map_err(|_| forbidden("the terminal stream capability was already consumed"))?;
@@ -7014,17 +7021,8 @@ fn detach_terminal_attachment(
         .store
         .claims_for(&subject, None)
         .map_err(ApiError::internal)?;
-    let attached = claims
-        .iter()
-        .find(|claim| claim.kind == "custom.client.terminal-attached")
-        .ok_or_else(|| {
-            ApiError::not_found(format!(
-                "terminal attachment `{attachment_id}` does not exist"
-            ))
-        })?;
-    if !trusted_terminal_attachment(state, attached, session)? {
-        return Err(forbidden("the terminal attachment requires a new attach operation"));
-    }
+    let attached = admitted_terminal_record(state, &claims, session, Some("custom.client.terminal-attached"))?
+        .ok_or_else(|| forbidden("the terminal attachment requires a new attach operation"))?;
     if attached.origin != state.store.origin() {
         return Err(forbidden(
             "the terminal attachment belongs to another gateway",
@@ -7046,12 +7044,9 @@ fn detach_terminal_attachment(
     if incarnation != request.fence.runtime_incarnation.as_deref() {
         return Err(stale("the terminal attachment incarnation fence is stale"));
     }
-    let latest = claims
-        .last()
-        .ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
-    if !trusted_terminal_attachment(state, latest, session)? {
-        return Err(forbidden("the terminal attachment requires a new attach operation"));
-    }
+    let latest = admitted_terminal_record(state, &claims, session, None)?
+        .ok_or_else(|| forbidden("the terminal attachment requires a new attach operation"))?;
+    let raw_head = claims.last().ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
     if latest.kind == "custom.client.terminal-detached" {
         return Ok(attachment_id);
     }
@@ -7065,7 +7060,7 @@ fn detach_terminal_attachment(
                 ("attachment_id".into(), Value::String(attachment_id.clone())),
             ]),
             evidence: vec![latest.id.clone()],
-            expected_subject: Some(Some(latest.id.clone())),
+            expected_subject: Some(Some(raw_head.id.clone())),
             idempotency_key: None,
         })
         .map_err(ApiError::bad)?;
@@ -9058,19 +9053,17 @@ async fn dispatch_action(
                 .store
                 .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
                 .map_err(ApiError::internal)?;
-            let paired = claims
-                .claims
-                .iter()
-                .find(|claim| {
-                    claim
-                        .body
-                        .pointer("/fields/device_id")
-                        .and_then(Value::as_str)
-                        == Some(device.as_str())
-                })
-                .ok_or_else(|| {
-                    ApiError::not_found(format!("paired device `{device}` does not exist"))
-                })?;
+            let mut paired = None;
+            for claim in &claims.claims {
+                if claim.body.pointer("/fields/device_id").and_then(Value::as_str) == Some(device.as_str())
+                    && state.store.pairing_completion_is_admitted(claim, client_now_ms()).map_err(ApiError::internal)? {
+                    paired = Some(claim);
+                    break;
+                }
+            }
+            let paired = paired.ok_or_else(|| {
+                ApiError::not_found(format!("paired device `{device}` does not exist"))
+            })?;
             if paired.origin != state.node {
                 let issuer = client_host_id(&paired.origin);
                 return Err(ApiError {
@@ -15385,7 +15378,7 @@ subscription "watch/source" {
         let subject = "custom/client/pairing-named";
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: "custom.client.pairing-begun".into(),
                 actor: Some("person/alex".into()),
@@ -15400,7 +15393,7 @@ subscription "watch/source" {
             .unwrap();
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/alex".into()),
@@ -15431,9 +15424,7 @@ subscription "watch/source" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let append = |subject: &str, kind: &str, fields: Value| {
-            state
-                .store
-                .append_claim(&ClaimInput {
+            let input = ClaimInput {
                     subject: subject.into(),
                     kind: kind.into(),
                     actor: Some("person/alex".into()),
@@ -15441,8 +15432,12 @@ subscription "watch/source" {
                     evidence: Vec::new(),
                     expected_subject: None,
                     idempotency_key: None,
-                })
-                .unwrap()
+                };
+            if kind.starts_with("custom.client.pairing") {
+                state.store.append_client_operation_claim(&input)
+            } else {
+                state.store.append_claim(&input)
+            }.unwrap()
         };
         let seed = append(
             "message/history-seed",
@@ -15519,7 +15514,7 @@ subscription "watch/source" {
         for index in 0..300 {
             state
                 .store
-                .append_claim(&ClaimInput {
+                .append_client_operation_claim(&ClaimInput {
                     subject: format!("custom/client/pairing-{index}"),
                     kind: "custom.client.pairing-completed".into(),
                     actor: Some("person/alex".into()),
@@ -15538,7 +15533,7 @@ subscription "watch/source" {
         }
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: "custom/client/pairing-0".into(),
                 kind: "custom.client.pairing-revoked".into(),
                 actor: Some("person/alex".into()),
@@ -23758,6 +23753,25 @@ mission "example/zero-run" state="ready" {
             "custom.client.terminal-attached", None, true, 1,
         ).unwrap().claims.remove(0);
         assert!(trusted_terminal_attachment(&state, &attached, &session).unwrap());
+        let peer_root = tempfile::tempdir().unwrap();
+        let peer = test_state_named(peer_root.path(), "terminal-peer");
+        let retained = |kind: &str| {
+            peer.store.append_claim(&ClaimInput {
+                subject:attached.subject.clone(),kind:kind.into(),actor:attached.actor.clone(),
+                fields:serde_json::from_value(attached.body["fields"].clone()).unwrap(),
+                evidence:vec![],expected_subject:None,idempotency_key:None,
+            }).unwrap();
+            let exchange = peer.store.export_replication_exchange(
+                "terminal-fleet", &state.store.replication_inventory().unwrap(),
+            ).unwrap();
+            state.store.receive_replication_exchange(peer.store.origin(), "terminal-fleet", &exchange).unwrap();
+            state.store.validate_replication_backlog().unwrap();
+            state.store.project_replication_backlog().unwrap();
+        };
+        retained("custom.client.terminal-attached");
+        retained("custom.client.terminal-consumed");
+        let attachment_id = attached.body["fields"]["attachment_id"].as_str().unwrap();
+        assert_eq!(terminal_attachment_response(&state, &session, attachment_id).unwrap()["state"], "available");
         consume_terminal_attachment_mode(
             &state, &session, "terminal/agent/terminal-owner", "terminal-runtime:i1",
             Some(capability), Some("attach"),
@@ -23766,7 +23780,8 @@ mission "example/zero-run" state="ready" {
             &state, &session, "terminal/agent/terminal-owner", "terminal-runtime:i1",
             Some(capability), Some("attach"),
         ).is_err());
-        let attachment_id = attached.body["fields"]["attachment_id"].as_str().unwrap();
+        retained("custom.client.terminal-detached");
+        assert_eq!(terminal_attachment_response(&state, &session, attachment_id).unwrap()["state"], "consumed");
         detach_terminal_attachment(&state, &session, &ActionRequest {
             api_version: CLIENT_API_VERSION.into(), id:"action/detach-marked".into(),
             action_type:"terminal.detach".into(), idempotency_key:"detach-marked".into(),
@@ -23774,10 +23789,12 @@ mission "example/zero-run" state="ready" {
             parameters:json!({"target_id":attachment_id}),
         }).unwrap();
         let claims = state.store.claims_for(&attached.subject, None).unwrap();
-        assert_eq!(claims.len(), 3);
-        assert!(claims.iter().all(|claim| trusted_terminal_attachment(&state, claim, &session).unwrap()));
-        assert_eq!(claims[1].kind, "custom.client.terminal-consumed");
-        assert_eq!(claims[2].kind, "custom.client.terminal-detached");
+        assert_eq!(claims.len(), 6);
+        let admitted = claims.iter().filter(|claim| trusted_terminal_attachment(&state, claim, &session).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(admitted.len(), 3);
+        assert_eq!(admitted[1].kind, "custom.client.terminal-consumed");
+        assert_eq!(admitted[2].kind, "custom.client.terminal-detached");
     }
 
     #[test]

@@ -96,14 +96,16 @@ approval; do not replace a TODO with a permanent exemption.
 
 ### Client operation admission inventory (PR #5921)
 
-The `fractal_store::pairing` maintainer owns `lv-h137b7b4adce1`,
-`lv-h45575741d81f` and `lv-he7e4b4d5ad69`. The reader selects an existing
-completion ID by subject and origin. The member-local allowance table stores
-operator-selected exact completion IDs and content digests as inline TEXT keys
-alongside an integer deadline; installation replaces the configured set.
+The `fractal_store::pairing` maintainer owns `lv-h37e16ce1bdcb`,
+`lv-hc6841fe7d058`, `lv-ha82423ec7c26`, `lv-h45575741d81f` and
+`lv-he7e4b4d5ad69`. Lifecycle readers inspect existing claim rows before choosing
+an admitted completion or terminal transition. Member-local receipt metadata
+stores an exact receipt ID and content digest; it is not part of replication.
+The allowance table stores operator-selected exact completion IDs and content
+digests alongside an integer deadline; installation replaces the configured set.
 These transitional sites follow the existing claim representation, not a
 value-size guarantee. Reference conversion must preserve exact-record matching
-and replacement/reclamation of the local allowance set.
+and replacement/reclamation of local proof and allowance data.
 `fractal_api_core::api::client_v0::raw_terminal::lease` owns
 `lv-he1b651b77786`, replacing the earlier two-column reader with the exact
 completion ID, origin, actor and body needed for operation admission.
