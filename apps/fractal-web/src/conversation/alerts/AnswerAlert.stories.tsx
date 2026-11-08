@@ -110,9 +110,14 @@ export const AnnotatedAnswer: S = {
     await expect(canvas.queryByRole('button', { name: /Add a note to/ })).toBeNull()
     await userEvent.click(canvas.getByText('Thread the session through'))
     await expect(canvas.getByRole('textbox', { name: 'Note for Thread the session through' })).toHaveValue('Start with packages/worker')
+    // Words in the answer field take the answer's place; the card says the note is not sent with them.
+    await userEvent.click(canvas.getByPlaceholderText('Or tell it something else…'))
+    await userEvent.keyboard('Rename it instead')
+    await expect(canvas.getByRole('status')).toHaveTextContent('Your note on “Thread the session through” is not sent with them.')
+    await userEvent.keyboard('{Escape}')
     await userEvent.click(canvas.getByRole('button', { name: 'Send' }))
     await expect(JSON.parse(canvas.getByTestId('acted').textContent!)).toEqual({
-      type: 'work.done', summary: 'Thread the session through', answer: { id: 'thread', text: 'Start with packages/worker' },
+      type: 'work.done', summary: 'Thread the session through: Start with packages/worker', answer: { id: 'thread', text: 'Start with packages/worker' },
     })
   },
 }

@@ -205,7 +205,7 @@ describe('a note on an answer', () => {
     const merge = choices.find((choice) => choice.key === 'merge')!
     const change = choices.find((choice) => choice.key === 'change')!
     expect(merge.notes).toBe(true)
-    expect(merge.action('', '  after the release branch is cut ')).toEqual({ type: 'work.done', summary: 'Merge', answer: { id: 'merge', text: 'after the release branch is cut' } })
+    expect(merge.action('', '  after the release branch is cut ')).toEqual({ type: 'work.done', summary: 'Merge: after the release branch is cut', answer: { id: 'merge', text: 'after the release branch is cut' } })
     expect(merge.action('', '   ')).toEqual({ type: 'work.done', summary: 'Merge', answer: { id: 'merge' } })
     expect(change.notes).toBe(false)
     expect(change.action('Split it in two', 'ignored')).toEqual({ type: 'work.done', summary: 'Split it in two', answer: { id: 'change', text: 'Split it in two' } })

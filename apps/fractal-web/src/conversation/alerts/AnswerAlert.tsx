@@ -194,10 +194,12 @@ export const AnswerAlert = ({
   const options = parts.options
   const shownSelected = answer !== undefined && options.some((choice) => choice.key === answer.key) ? [answer.key] : []
   const movedToWords = words.trim() !== '' && selected.length > 0 && answer?.key !== selected[0]
+  // A note rides only with its own answer: once words take the answer's place, the note stays in the draft, unsent.
+  const droppedNote = movedToWords && (notes[selected[0]!] ?? '').trim() !== '' ? options.find((choice) => choice.key === selected[0])?.label : undefined
   const stuck = words.trim() !== '' && answer !== undefined && answer.words === 'none'
   const status = failure !== undefined ? { tone: 'error' as const, text: failure }
     : stuck ? { tone: 'progress' as const, text: 'This asks you to pick one of its answers, so your words can\'t be sent. Clear them to send.' }
-      : movedToWords ? { tone: 'progress' as const, text: answer?.key === 'words' ? 'Your words will be sent as the answer.' : `Your words go with “${answer?.label}”.` }
+      : movedToWords ? { tone: 'progress' as const, text: `${answer?.key === 'words' ? 'Your words will be sent as the answer.' : `Your words go with “${answer?.label}”.`}${droppedNote === undefined ? '' : ` Your note on “${droppedNote}” is not sent with them.`}` }
         : undefined
   return <DecisionCard
     density={density}

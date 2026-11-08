@@ -64,7 +64,12 @@ export const alertChoices = (alert: Native.Attention): readonly AlertChoice[] | 
         words: answer.outcome === 'request_changes' ? 'required' : 'none',
         tone: answer.outcome === 'decline' ? 'danger' : request.recommendation?.answer === answer.id ? 'primary' : 'secondary',
         notes: answer.outcome !== 'request_changes',
-        action: (words, note) => done(answer.outcome === 'request_changes' ? words.trim() : answer.label, noted(typed(request, answer.id, words), note)),
+        action: (words, note) => {
+          const sent = noted(typed(request, answer.id, words), note)
+          // The summary is the line the asker's history shows: a note reads there too, as Fractal words it (`answer_summary`).
+          const summary = answer.outcome === 'request_changes' ? words.trim() : sent?.text === undefined ? answer.label : `${answer.label}: ${sent.text}`
+          return done(summary, sent)
+        },
       }))
       if (request.type === 'feedback' || (request.type === 'choice' && request.custom === true)) {
         choices.push({
