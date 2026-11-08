@@ -1727,6 +1727,171 @@ impl Fixture {
     }
 }
 
+const READY_WORK_COST_ROUTE: &str = "GET /v1/client/ready-work";
+
+#[tokio::test]
+async fn populated_ready_work_cost_by_cohort_size() {
+    use axum::{body::{Body, to_bytes}, http::{Request, StatusCode}};
+    use tower::ServiceExt;
+
+    async fn measure(
+        app: &axum::Router,
+        store: &Store,
+        cohort: &[String],
+    ) -> Cost {
+        let cut = store.index().unwrap();
+        tokio::time::timeout(Duration::from_secs(10),
+            fractal_daemon::api::wait_published_lists_at_least(store, cut))
+            .await.expect("ready cost publication reaches graph cut").unwrap();
+        let path = format!("/v1/client/ready-work?cohort={}", urlencoding::encode(&cohort.join(",")));
+        let sample = counted(|| async {
+            let reply = app.clone().oneshot(Request::builder().uri(path)
+                .body(Body::empty()).unwrap()).await.unwrap();
+            let status = reply.status();
+            let body = to_bytes(reply.into_body(), 64 * 1024).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(status, StatusCode::OK, "{value}");
+            assert_eq!(value["snapshot"]["store_index"], cut);
+            assert_eq!(value["value"]["ready_count"], cohort.len() * 2);
+            assert_eq!(value["value"]["coverage"], "local-graph-cut");
+            Ok(value)
+        }).await;
+        assert!(sample.vm_steps > 0 && sample.statements > 0);
+        assert_eq!(sample.fullscan_steps, 0, "ready-work must use indexed lookups: {sample:?}");
+        println!("ready-work cohort={} ready={} vm_steps={} statements={} fullscan_steps={} max_repeat={} shape={}",
+            cohort.len(), cohort.len() * 2, sample.vm_steps, sample.statements,
+            sample.fullscan_steps, sample.max_repeat, sample.top_shape);
+        sample
+    }
+
+    fn append_history(store: &Store, subject: &str, actor: &str, events: std::ops::Range<usize>) {
+        for event in events {
+            let message = format!("message/ready-cost-history-{subject}-{event}");
+            for (kind, fields) in [
+                ("work.released", json!({
+                    "attempt": 1, "status": "ready",
+                    "handoff_to": actor, "handoff_message": message,
+                })),
+                ("work.progress", json!({
+                    "attempt": 1, "status": "ready",
+                    "handoff_acknowledged": message,
+                })),
+            ] {
+                store.append_claim(&fractal_daemon::model::ClaimInput {
+                    subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                }).unwrap();
+            }
+        }
+    }
+
+    fn assert_within(actual: u64, baseline: u64, growth: usize, label: &str) {
+        assert!(
+            u128::from(actual) * 2 <= u128::from(baseline) * 3 * growth as u128,
+            "{label}: actual={actual}, baseline={baseline}, allowed growth=1.5x{growth}"
+        );
+    }
+
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), NODE).unwrap());
+    let seats: Vec<_> = (0..64).map(|i| format!("bench/ready-cost/{i}")).collect();
+    let mut source = String::from("version 2\n");
+    for seat in &seats {
+        source.push_str(&format!("agent {seat:?} {{ workspace \"/tmp\"; command \"true\" }}\n"));
+    }
+    let intent = fractal_daemon::parse_intent(&source, NODE).unwrap();
+    store.apply_internal(&intent, "ready-cost-seats").unwrap();
+    let cohort: Vec<_> = seats.iter().map(|seat| format!("agent/{seat}")).collect();
+    let mut subjects = Vec::new();
+    for (index, actor) in cohort.iter().enumerate() {
+        for step in 0..2 {
+            let work = store.start_work(&fractal_daemon::model::WorkStartRequest {
+                actor: actor.clone(),
+                title: format!("Ready cost fixture {index}/{step}"),
+                idempotency_key: format!("ready-cost-{index}-{step}"),
+            }).unwrap();
+            subjects.push((work.subject, actor.clone()));
+        }
+    }
+
+    let state = AppState {
+        seat_admission: Default::default(),
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: NODE.into(),
+        state_dir: root.path().join("state"),
+        pty_root: root.path().join("pty"),
+        pty_binary: stub_pty(root.path()),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: Some(root.path().join("home")),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
+    fractal_daemon::api::start_published_lists(&state);
+    let app = fractal_daemon::api::router(state);
+    let mut sizes = Vec::new();
+    for size in [1, 8, 32, 64] {
+        let sample = measure(&app, &store, &cohort[..size]).await;
+        // There are two eligible steps/ready rows per seat, so these are both
+        // per-ready-row and per-cohort-step costs, not raw whole-request totals.
+        let rows = (size * 2) as u64;
+        println!("ready-work cohort={size} vm_steps_per_ready_row={} statements_per_cohort_step={}",
+            sample.vm_steps as f64 / rows as f64, sample.statements as f64 / rows as f64);
+        sizes.push((rows, sample));
+    }
+    // SQLite work counters are deterministic, not wall time. A 1.5x allowance
+    // tolerates fixed request overhead and modest plan changes, but not an extra
+    // cohort factor (64x here) or an unrelated-history factor (10x below).
+    // dev5 fixture observation: cohorts 1/8/32/64 yielded ready 2/16/64/128,
+    // VM 247/1458/5610/11146 and statements 13/62/230/454, all with zero scans.
+    let (small_rows, small) = &sizes[0];
+    let (large_rows, large) = sizes.last().unwrap();
+    assert_within(large.vm_steps * small_rows, small.vm_steps * large_rows, 1, "VM per ready row");
+    assert_within(large.statements * small_rows, small.statements * large_rows, 1, "statements per cohort step");
+
+    // Keep the measured cohort and answer fixed while growing both event kinds
+    // tenfold on real work subjects assigned only to seats outside that cohort.
+    let unrelated = &subjects[64..];
+    for (subject, actor) in unrelated {
+        append_history(&store, subject, actor, 0..4);
+    }
+    let short_unrelated = measure(&app, &store, &cohort[..8]).await;
+    for (subject, actor) in unrelated {
+        append_history(&store, subject, actor, 4..40);
+    }
+    let long_unrelated = measure(&app, &store, &cohort[..8]).await;
+    assert_within(long_unrelated.vm_steps, short_unrelated.vm_steps, 1, "unrelated history VM");
+    assert_within(long_unrelated.statements, short_unrelated.statements, 1, "unrelated history statements");
+    // dev5 observation: 4 -> 40 release/progress pairs per unrelated subject
+    // left the fixed 8-seat request unchanged at 1458 VM steps / 62 statements.
+
+    // In contrast, histories on an eligible subject are NOT capped. latest_handoff
+    // SEARCHes subject+kind via claims_subject_kind_index; returned/progress use
+    // claims_subject_kind_accepted_index with the same prefix. The canonical
+    // latest query still uses a temporary ordering B-tree. Thus we allow linear
+    // candidate work, not history-independent VM cost: 10x releases/progress on
+    // ONE eligible subject may cost at most 10x * 1.5 VM steps for this fixed
+    // answer. Statement count must remain within 1.5x, rejecting per-event queries.
+    // Every release has an acknowledgment, so this exercises the progress lookup
+    // without turning the probe into an empty/refused-answer measurement.
+    let (subject, actor) = &subjects[0];
+    append_history(&store, subject, actor, 0..64);
+    let short_subject = measure(&app, &store, &cohort[..1]).await;
+    append_history(&store, subject, actor, 64..640);
+    let long_subject = measure(&app, &store, &cohort[..1]).await;
+    assert_within(long_subject.vm_steps, short_subject.vm_steps, 10, "one-subject history VM");
+    assert_within(long_subject.statements, short_subject.statements, 1, "one-subject history statements");
+    // dev5 observation: 64 -> 640 pairs on one eligible subject grew VM
+    // 5223 -> 49575 (9.49x), with 15 statements and zero scans at both sizes.
+}
+
 /// Historical runs may grow the answer, but must not repeat the assignee's message scan.
 #[tokio::test]
 async fn mission_detail_many_finished_runs_do_not_repeat_step_history() {
@@ -2055,6 +2220,7 @@ fn the_cost_check_covers_every_route() {
     let measured = PROBES
         .iter()
         .map(|probe| probe.route)
+        .chain([READY_WORK_COST_ROUTE])
         .collect::<BTreeSet<_>>();
     let skipped = NOT_MEASURED
         .iter()
