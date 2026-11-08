@@ -31,6 +31,10 @@ const live: readonly SidebarTab[] = [
   { id: 'missions', label: 'Missions', icon: 'checklist', status: { glyph: '!', label: '1 stalled or failed' } },
 ]
 type Width = 'sidebar' | 'tight' | 'window1280' | 'iconsOnly' | 'phone'
+const NoIcons = () => {
+  const [selected, setSelected] = React.useState('agents')
+  return <main {...stylex.props(styles.host, styles.iconsOnly)}><SidebarTabs tabs={tabs.map(({ icon: _icon, ...tab }) => tab)} selectedId={selected} onSelectionChange={setSelected}><p>Panel</p></SidebarTabs></main>
+}
 const Surface = ({ width }: { readonly width: Width }) => {
   const [selected, setSelected] = React.useState('agents')
   return <NarrowLayoutContext.Provider value={width === 'phone'}>
@@ -66,7 +70,7 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
-export const scenarioExemptions: readonly string[] = ['At256:primitive', 'BadgeShapes:primitive', 'CountsBeforeIcons:primitive', 'CountsDropped:primitive', 'IconsOnly:primitive', 'NeverCramped:primitive', 'Phone:primitive']
+export const scenarioExemptions: readonly string[] = ['At256:primitive', 'BadgeShapes:primitive', 'CountsBeforeIcons:primitive', 'CountsDropped:primitive', 'IconsOnly:primitive', 'LabelsWithoutIcons:primitive', 'NeverCramped:primitive', 'Phone:primitive']
 
 export const At256: Story = { tags: ['critical'], name: 'Three tabs · counts fit 256px once icons give way', args: { width: 'sidebar' }, play: async ({ canvasElement }) => {
   const tablist = within(canvasElement).getByRole('tablist', { name: 'Sidebar' })
@@ -93,16 +97,16 @@ export const BadgeShapes: Story = { tags: ['critical'], name: 'Badges · 1, 12 a
   // The exact count stays spoken past the painted cap.
   await expect(within(tablist).getAllByRole('tab')[2]).toHaveAttribute('aria-label', 'Many, 1234')
 } }
-export const CountsDropped: Story = { tags: ['critical'], name: 'Three tabs · counts become compact badges when even the iconless row overflows', args: { width: 'tight' }, play: async ({ canvasElement }) => {
+// Counts are the last thing to go: only when even icon and count overflow do they become compact badges, attention as a dot.
+export const CountsDropped: Story = { tags: ['critical'], name: 'Three tabs · counts become compact badges only at the narrowest step', args: { width: 'tight' }, play: async ({ canvasElement }) => {
   const tablist = within(canvasElement).getByRole('tablist', { name: 'Sidebar' })
-  await waitFor(() => expect(fitOf(canvasElement)).toHaveAttribute('data-sidebar-tab-fit', 'compact'))
+  await waitFor(() => expect(fitOf(canvasElement)).toHaveAttribute('data-sidebar-tab-fit', 'icons-compact'))
   await expect(fitOf(canvasElement)).toHaveAttribute('data-sidebar-tab-counts', 'dropped')
-  await expect(painted(tablist)).toEqual(['Agents·', 'Alerts·', 'Missions'])
+  await expect(painted(tablist)).toEqual(['·', '·', ''])
   await expect(within(tablist).getAllByRole('tab').map(tab => tab.getAttribute('aria-label'))).toEqual(names)
   await assertWhole(tablist)
 } }
-// Numbers carry information and tab icons only repeat the label, so icons give way first and counts drop only when even
-// the iconless row cannot hold them.
+// Numbers carry information and tab icons only repeat the label, so icons give way first.
 export const CountsBeforeIcons: Story = { tags: ['critical'], name: 'Three tabs · icons give way before counts at 240px', args: { width: 'window1280' }, play: async ({ canvasElement }) => {
   const tablist = within(canvasElement).getByRole('tablist', { name: 'Sidebar' })
   await waitFor(() => expect(fitOf(canvasElement)).toHaveAttribute('data-sidebar-tab-fit', 'labels'))
@@ -111,8 +115,8 @@ export const CountsBeforeIcons: Story = { tags: ['critical'], name: 'Three tabs 
   await assertWhole(tablist)
 } }
 
-// Narrowest: each tab is its icon and count; the label moves to a tooltip and stays first in the tab's name.
-export const IconsOnly: Story = { tags: ['critical'], name: 'Three tabs · icon and count at 180px, label in the tooltip', args: { width: 'iconsOnly' }, play: async ({ canvasElement }) => {
+// Labels give way before counts: each tab is its icon and count; the label moves to a tooltip and stays first in the tab's name.
+export const IconsOnly: Story = { tags: ['critical'], name: 'Three tabs · labels give way before counts at 220px, label in the tooltip', args: { width: 'iconsOnly' }, play: async ({ canvasElement }) => {
   const tablist = within(canvasElement).getByRole('tablist', { name: 'Sidebar' })
   await waitFor(() => expect(fitOf(canvasElement)).toHaveAttribute('data-sidebar-tab-fit', 'icons'))
   await expect(painted(tablist)).toEqual(['·3', '·12', '·42'])
@@ -125,6 +129,14 @@ export const IconsOnly: Story = { tags: ['critical'], name: 'Three tabs · icon 
   await userEvent.hover(within(tablist).getAllByRole('tab')[1]!)
   await expect(await within(canvasElement.ownerDocument.body).findByRole('tooltip', {}, { timeout: 2000 })).toHaveTextContent('Alerts')
   await userEvent.unhover(within(tablist).getAllByRole('tab')[1]!)
+} }
+// A tab without an icon has nothing to stand for its label, so labels stay and counts become badges instead.
+export const LabelsWithoutIcons: Story = { tags: ['critical'], name: 'Tabs without icons · labels stay, counts become badges', args: { width: 'iconsOnly' }, render: () => <NoIcons />, play: async ({ canvasElement }) => {
+  const tablist = within(canvasElement).getByRole('tablist', { name: 'Sidebar' })
+  await waitFor(() => expect(fitOf(canvasElement)).toHaveAttribute('data-sidebar-tab-fit', 'compact'))
+  await expect(painted(tablist)).toEqual(['Agents·', 'Alerts·', 'Missions'])
+  await expect(within(tablist).getAllByRole('tab').map(tab => tab.getAttribute('aria-label'))).toEqual(names)
+  await assertWhole(tablist)
 } }
 /** Every width from a wide sidebar down to 120px: the row only ever steps down, and no step is cramped. */
 export const NeverCramped: Story = { tags: ['critical'], name: 'Three tabs · roomy at every width from 340 to 120px', args: { width: 'sidebar' }, play: async ({ canvasElement }) => {
@@ -157,9 +169,9 @@ export const Phone: Story = { tags: ['critical'], name: 'Three tabs · phone dra
 const styles = stylex.create({
   host: { backgroundColor: surface.canvas, color: ink.fg, display: 'flex', flexDirection: 'column', height: '120px' },
   sidebar: { width: '256px' },
-  tight: { width: '220px' },
+  tight: { width: '140px' },
   window1280: { width: '240px' },
-  iconsOnly: { width: '180px' },
+  iconsOnly: { width: '220px' },
   // The phone drawer's sidebar width.
   phone: { width: '319px', height: '160px' },
 })
