@@ -517,16 +517,32 @@ async fn bound_work_link_thread_cli_attaches_exact_pending_episode_without_reope
         &state.store, person, thread, "close-link-cli", Edit::Close { revision: &created.id },
     ).unwrap();
     let socket = root.path().join("thread-link.sock");
-    let app = fractal_daemon::api::router(state.clone())
-        .layer(axum::Extension(fractal_daemon::api::BoundAgent(agent.into())));
-    let server = serve_for_test(&socket, app).await;
-    let ask = value(&run_cli(&socket, &[
+    let app = fractal_daemon::api::router(state.clone());
+    #[cfg(target_os = "linux")]
+    let server = {
+        let listening = socket.clone();
+        let discovery = root.path().join("discover.sock");
+        let store = state.store.clone();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            fractal_daemon::api::serve_unix_bound_with_ready(
+                &listening, &discovery, app, store, move || { let _ = ready.send(()); },
+            ).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting).await.unwrap().unwrap();
+        server
+    };
+    #[cfg(not(target_os = "linux"))]
+    let server = serve_for_test(
+        &socket, app.layer(axum::Extension(fractal_daemon::api::BoundAgent(agent.into()))),
+    ).await;
+    let ask = value(&run_cli_with_agent_env(&socket, agent, &[
         "work", "ask", "--as", agent, "--for", person,
         "--title", "Check the latest result", "--reason", "Can we proceed?",
         "--idempotency-key", "link-cli-fresh-ask",
     ]).await);
     let ask_id = ask["subject"].as_str().unwrap();
-    let trace = run_cli(&socket, &["trace", "show", ask_id]).await;
+    let trace = run_cli_with_agent_env(&socket, agent, &["trace", "show", ask_id]).await;
     assert!(trace.status.success(), "{trace:?}");
     let ask_claim = String::from_utf8(trace.stdout).unwrap().lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -537,12 +553,12 @@ async fn bound_work_link_thread_cli_attaches_exact_pending_episode_without_reope
     let link = |episode, actor| [
         "work", "link-thread", ask_id, "--thread", thread, "--episode", episode, "--as", actor,
     ];
-    let wrong = run_cli(&socket, &link("claim/other-episode", agent)).await;
+    let wrong = run_cli_with_agent_env(&socket, agent, &link("claim/other-episode", agent)).await;
     assert!(!wrong.status.success(), "{wrong:?}");
-    let wrong_actor = run_cli(&socket, &link(episode, "agent/garden/other")).await;
+    let wrong_actor = run_cli_with_agent_env(&socket, agent, &link(episode, "agent/garden/other")).await;
     assert!(!wrong_actor.status.success(), "{wrong_actor:?}");
-    let first = value(&run_cli(&socket, &link(episode, agent)).await);
-    let retry = value(&run_cli(&socket, &link(episode, agent)).await);
+    let first = value(&run_cli_with_agent_env(&socket, agent, &link(episode, agent)).await);
+    let retry = value(&run_cli_with_agent_env(&socket, agent, &link(episode, agent)).await);
     assert_eq!(first["status"], "completed");
     assert_eq!(first["operation_id"], retry["operation_id"]);
     let link_id = fractal_daemon::store::thread_links::ask_link_subject(ask_id, episode).unwrap();

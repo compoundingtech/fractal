@@ -502,20 +502,7 @@ fn retain_live_mail(
         let Some(sent) = sent_claim(store, &message)? else {
             continue;
         };
-        // The exact recipient and immutable message already selected by the mailbox own this
-        // context. Author-supplied tags and ordinary reply pointers carry no topic authority.
-        let fields = &sent.body["fields"];
-        if let Some(thread) = fields["thread_id"].as_str()
-            && let Some(operation) = sent.operation_id.as_deref()
-            && sent.subject == message.subject
-            && sent.store_index == message.created_index
-            && fields["from"].as_str() == Some(message.from.as_str())
-            && fields["to"].as_str() == Some(message.to.as_str())
-            && smallclaims::store::operation_tx(&store.graph.readers.get(), operation)?
-                .is_some_and(|(_, id, status)| id == sent.id && status == "active")
-        {
-            message.delivery_thread = Some(thread.to_owned());
-        }
+        attach_thread_delivery_context(store, &mut message, &sent)?;
         // `through` is a graph index and a stream item's is past them all, so a stream item
         // counts as after the connection by its accepted time alone.
         let after_connection = through.is_none_or(|index| message.created_index > index)

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Preserve thread context for bound native mailbox polling",
+  "replay": { "status": "none", "detail": "Delivery context is derived from the admitted message operation." },
+  "schema": { "status": "none", "detail": "No stored or wire schema change." },
+  "rules": { "status": "none", "detail": "Existing mailbox staging and receipt rules apply." },
+  "compatibility": { "status": "changed", "detail": "A matching bound native driver receives the existing optional delivery context through its paged polling fallback. Generic and unpaged polling retain their existing responses." },
+  "downtime": { "status": "none", "detail": "No new downtime requirement." },
+  "manual": { "status": "none", "detail": "Uses the existing thread capability rollout." },
+  "recovery": { "status": "none", "detail": "No persistent state changes require recovery." }
+}
