@@ -54,3 +54,16 @@ export const usageSection = StateCell.make({
 export const missionsShowAll = StateCell.make({
   scope: 'gateway', key: 'missions.showAll', version: 1, schema: Schema.Boolean, default: false,
 })
+
+export const MissionsListView = Schema.Struct({
+  group: Schema.Literals(['state', 'project', 'agent']),
+  sort: Schema.Literals(['eta', 'activity', 'progress']),
+  /** Group keys the reader collapsed; "Recently done" starts collapsed. */
+  collapsed: Schema.Array(Schema.String),
+})
+export type MissionsListView = typeof MissionsListView.Type
+export const defaultMissionsListView: MissionsListView = { group: 'state', sort: 'activity', collapsed: ['state:done'] }
+/** Per gateway: how the missions list groups and sorts, and which groups are collapsed. */
+export const missionsListView = StateCell.make({
+  scope: 'gateway', key: 'missions.listView', version: 1, schema: MissionsListView, default: defaultMissionsListView,
+})
