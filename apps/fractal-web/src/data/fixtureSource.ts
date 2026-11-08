@@ -5,7 +5,7 @@ import * as Atom from 'effect/reactivity/Atom'
 
 import type { ProposedMissionFields } from '../missions/model.ts'
 import type { MonitorSource } from '../monitor/source.ts'
-import type { SubjectEnvelope } from '../resources/envelope.ts'
+import type { SubjectEnvelope } from '../data/subjectEnvelope.ts'
 import {
   type ConversationPage,
   type DataSource,

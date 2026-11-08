@@ -4,7 +4,7 @@
 import { Schema } from 'effect'
 
 import { agents, ciRuns, decisionD12, missions, pullRequests } from '../../fixtures/world.ts'
-import { SubjectAddress } from '../../resources/contract.ts'
+import { SubjectAddress } from '../../shell/subjectAddress.ts'
 import { subjectKey, initialState, type EditorEntry, type WorkbenchState } from '../state.ts'
 
 const worldRefs = new Set([

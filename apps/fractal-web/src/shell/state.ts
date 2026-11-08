@@ -3,7 +3,7 @@
 
 import { Schema } from 'effect'
 
-import { SubjectAddress } from '../resources/contract.ts'
+import { SubjectAddress } from '../shell/subjectAddress.ts'
 
 /** Editor-group identity within one layout (`g0`, `g1`, …). */
 export const GroupId = Schema.String

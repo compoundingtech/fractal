@@ -1,6 +1,7 @@
 import type { Attention } from '@fractal/client/schema'
 import type { IconName } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import type { EntityRef, EntityStatus } from '../../../../packages/fractal-ui/src/assistant-ui/entity/entity.ts'
+import type { ThingFace } from '../../../../packages/fractal-ui/src/assistant-ui/things/face.ts'
 import type { Agent, Feed } from '../data/source.ts'
 import type { Subject } from './subject.ts'
 
@@ -39,6 +40,7 @@ export type Mark =
   | { readonly _tag: 'Status'; readonly status: EntityStatus }
 
 export interface KindDescriptor {
+  readonly face: ThingFace
   readonly title: Title | FixedTitle
   /** What this is, in words: "Alert", "Mission", "Pull request". The card header and screen readers use it. */
   readonly kind: string
@@ -57,7 +59,7 @@ export interface PresentationWorld {
   readonly needsYou: ReadonlySet<string>
   readonly attention: Feed<readonly Attention[]>
   /** Titles by ref, from the subject index: missions, documents and observed resources. */
-  readonly subjects: ReadonlyMap<string, { readonly title: string }>
+  readonly subjects: ReadonlyMap<string, { readonly title: string; readonly face?: ThingFace }>
   /** The missions feed has been observed, so a mission absent from `subjects` is gone rather than loading. */
   readonly missionsKnown: boolean
 }

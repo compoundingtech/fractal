@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ResourceObservation, decodeUnknownSync } from '@fractal/client/schema'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
-import { gatewayResources } from '../resources/agent/source.ts'
+import { gatewayResources } from '../data/agentResources/source.ts'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
 import { AgentDetailsPanel } from './AgentDetailsPanel.tsx'
 import { retainedResourceAtoms } from './AgentResourcesPanel.tsx'
@@ -165,7 +165,7 @@ describe('the Resources tab', () => {
   const withItems = { ...source, resources: { ...source.resources, byAgent: () => Atom.make(observed({ value: { items, nextCursor: null } })) } }
   const onOpen = vi.fn()
   const render = (view: 'details' | 'resources') => act(async () => root.render(<DataSourceProvider source={withItems} registry={registry}><AgentDetailsPanel agentRef="agent/example" width="dock" scheme="dark" view={view} onClose={() => undefined} onOpen={onOpen} /></DataSourceProvider>))
-  const rows = () => [...document.querySelectorAll<HTMLButtonElement>('button[data-resource-row]')]
+  const rows = () => [...document.querySelectorAll<HTMLElement>('[data-thing-openable]')]
   beforeEach(() => onOpen.mockClear())
 
   it('counts resources on the tab while another tab is showing', async () => {
@@ -177,10 +177,10 @@ describe('the Resources tab', () => {
   it('opens the whole row by its ref, naming kinds in words and never as raw types', async () => {
     await render('resources')
     await settle()
-    expect(rows().map(each => each.querySelector('svg')?.getAttribute('aria-label'))).toEqual(['Pull request', 'Resource'])
+    expect(rows().map(each => each.getAttribute('aria-label'))).toEqual([expect.stringMatching(/^Pull request /), expect.stringMatching(/^Resource /)])
     expect(rows()[0]!.textContent).toContain('Wait for exec')
     expect(rows()[0]!.textContent).toContain('in progress')
-    expect(rows()[1]!.textContent).toContain('Resource 3')
+    expect(rows()[1]!.textContent).toContain('Resource')
     expect(document.body.textContent).not.toMatch(/vcs\.pull-request|custom\.acme/)
     await act(async () => rows()[0]!.click())
     expect(onOpen).toHaveBeenCalledWith('resource/github/acme/garden/pull-request/5707', false)
@@ -197,11 +197,10 @@ describe('the Resources tab', () => {
   it('shows the canonical resource card on a resting pointer, and closes it after the pointer leaves', async () => {
     await render('resources')
     await settle()
-    const card = () => document.querySelector<HTMLElement>('[data-hover-card] [data-entity-card="resource"]')
+    const card = () => document.querySelector<HTMLElement>('[data-hover-card] [data-thing-card]')
     await act(async () => { rows()[0]!.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })) })
     expect(card()).toBeNull()
     await vi.waitFor(() => expect(card()).not.toBeNull(), { timeout: 1000 })
-    expect(card()!.getAttribute('data-entity-id')).toBe('resource/github/acme/garden/pull-request/5707')
     expect(card()!.textContent).toContain('Wait for exec')
     expect(card()!.textContent).toContain('Pull request')
     expect(card()!.textContent).toContain('in progress')

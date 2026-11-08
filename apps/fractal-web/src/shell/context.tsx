@@ -2,7 +2,7 @@
 
 import * as React from 'react'
 
-import type { PresentationId } from '../resources/contract.ts'
+import type { PresentationId } from '../shell/subjectAddress.ts'
 import type { Platform } from '../workbench-kit/keys.tsx'
 import type { ResourcePanelState } from './state.ts'
 

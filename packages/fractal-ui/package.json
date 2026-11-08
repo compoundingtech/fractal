@@ -12,6 +12,7 @@
     "./assistant-ui/shell": "./src/assistant-ui/shell.ts",
     "./assistant-ui/transcript-skeleton": "./src/assistant-ui/composition/TranscriptSkeleton.tsx",
     "./assistant-ui/resources": "./src/assistant-ui/resources/index.ts",
+    "./assistant-ui/things": "./src/assistant-ui/things/index.ts",
     "./assistant-ui/work-log": "./src/assistant-ui/taste/work-log.ts",
     "./assistant-ui/tool-attention": "./src/assistant-ui/embrace-tool-attention.ts",
     "./assistant-ui/workbench-model": "./src/assistant-ui/workbench/workbench-model.ts",

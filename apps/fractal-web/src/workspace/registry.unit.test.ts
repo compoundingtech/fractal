@@ -16,11 +16,27 @@ const github: KindContribution<string> = {
     domCost: 1,
     dataCost: 1,
   },
-  present: () => ({ title: { _tag: 'Known', text: 'acme/garden#9' }, kind: 'Pull request', mark: { _tag: 'Icon', name: 'pull-request' }, card: { kind: 'resource', id: 'resource/github/acme/garden/pull/9' } }),
+  present: () => ({ face: { kind: 'Pull request', icon: 'pull-request', title: 'acme/garden#9', id: '#9', mark: { shape: 'none', word: '' } }, title: { _tag: 'Known', text: 'acme/garden#9' }, kind: 'Pull request', mark: { _tag: 'Icon', name: 'pull-request' }, card: { kind: 'resource', id: 'resource/github/acme/garden/pull/9' } }),
   view: 'plugin:github',
 }
 
 describe('the tab-kind registry', () => {
+  it('selects sections by resolved kind and tab, ordered by priority then stable id', () => {
+    const sections = [
+      { id: 'z', targetKind: 'Conversation', tab: 'resources' as const, order: 20, view: 'last' },
+      { id: 'b', targetKind: 'Conversation', tab: 'resources' as const, order: 10, view: 'second' },
+      { id: 'a', targetKind: 'Conversation', tab: 'resources' as const, order: 10, view: 'first' },
+      { id: 'detail', targetKind: 'Conversation', tab: 'details' as const, order: 0, view: 'detail' },
+      { id: 'github', targetKind: 'github.pull-request', tab: 'resources' as const, order: 0, view: 'plugin' },
+    ]
+    const registry = makeKindRegistry({ views, contributions: [github], sections })
+    expect(registry.sectionsFor(subjectOfRef('agent/a'), 'resources').map(section => section.view)).toEqual(['first', 'second', 'last'])
+    expect(registry.sectionsFor(subjectOfRef('agent/a'), 'details').map(section => section.view)).toEqual(['detail'])
+    expect(registry.sectionsFor(subjectOfRef('resource/github/acme/1'), 'resources').map(section => section.view)).toEqual(['plugin'])
+    expect(registry.sectionsFor(subjectOfRef('doc/a'), 'resources')).toEqual([])
+    expect(makeKindRegistry({ views, sections: sections.toReversed() }).sectionsFor(subjectOfRef('agent/a'), 'resources').map(section => section.id)).toEqual(['a', 'b', 'z'])
+  })
+
   it('gives an unclaimed ref the generic resource kind', () => {
     const kind = makeKindRegistry({ views }).kindOf(subjectOfRef('resource/github/acme/1'))
     expect(kind.id).toBe('Resource')

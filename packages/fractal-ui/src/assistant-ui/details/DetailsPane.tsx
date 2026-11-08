@@ -19,7 +19,7 @@ import { detailsReasonText } from './trace-reasons'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 
 export interface DetailsVariants {
-  overview: 'O1'|'O2'|'O3'; context:'C1'|'C2'|'C3'; spend:'S1'|'S2'|'S3'; resources:'R1'|'R2'|'R3'; empty:'E1'|'E2'|'E3'
+  overview: 'O1'|'O2'|'O3'; context:'C1'|'C2'|'C3'; spend:'S1'|'S2'|'S3'; empty:'E1'|'E2'|'E3'
 }
 /** A missing Overview fact renders nothing: absent, blank or a host state word (`Unreported`) is never a value. */
 const reported=(value:string|undefined):value is string=>value!==undefined&&value.trim()!==''&&!/^(unreported|unavailable|not reported)$/i.test(value.trim())
@@ -227,7 +227,7 @@ export function DetailsPane({variants,state,intent,onIntentChange,onOpen,onRetry
         // One wrapper whether or not the host supplies a read, so a withdrawn read hands focus to the Spend heading before its action goes.
         ?<div data-details-spend-body {...stylex.props(styles.readStack)}><DetailsSpendReadLine read={spendRead}/><DetailsCharts trace={trace} context={variants.context} spend={variants.spend} section="spend" empty={variants.empty} showUnavailableReasons={!consolidateUnavailable||spendReadSeen}/></div>
         :<DetailsCharts trace={trace} context={variants.context} spend={variants.spend} section="context" empty={variants.empty} showUnavailableReasons={!consolidateUnavailable}/>}</Section>)}
-    <DetailsResources state={contentState} sections={sections} trace={pending?pendingTrace:trace} now={now} form={variants.resources} empty={variants.empty} onOpen={onOpen} hiddenSections={intent.hiddenSections}/>
+    <DetailsResources state={contentState} sections={sections} trace={pending?pendingTrace:trace} now={now} empty={variants.empty} onOpen={onOpen} hiddenSections={intent.hiddenSections}/>
     </div>
     {noPriorFailure&&syncStatus._tag==='Failed'&&<div data-details-error {...stylex.props(styles.errorBlock)}>
       {overview.title!==undefined&&<strong>{overview.title}</strong>}

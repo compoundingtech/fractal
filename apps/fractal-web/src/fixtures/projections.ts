@@ -16,7 +16,7 @@ import { agentConversations } from '../conversation/fixtures.ts'
 import type { FixtureProjections } from '../data/fixtureSource.ts'
 import { fixtureMissions, fixtureAttention, fixtureProposed } from '../missions/fixtures.ts'
 import { worldUsageSource } from '../monitor/fixtures.ts'
-import type { SubjectEnvelope } from '../resources/envelope.ts'
+import type { SubjectEnvelope } from '../data/subjectEnvelope.ts'
 import {
   agentEnvelope,
   attentionEnvelope,
@@ -24,7 +24,7 @@ import {
   missionEnvelope,
   ptyEnvelope,
   pullRequestEnvelopes,
-} from '../resources/fixtures.ts'
+} from './subjectEnvelopes.ts'
 import { agentScreens } from '../terminal/fixtures.ts'
 import { extensionFixtures } from '../extensions/build.ts'
 import { agents, events, gatewayHost, hosts, operator, WORLD_NOW_ISO, worldNow } from './world.ts'

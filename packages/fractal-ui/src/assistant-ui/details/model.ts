@@ -1,5 +1,6 @@
 import type { SidebarAgentRow } from '../sidebar/model'
 import type { ResourceMetadata, ResourceData as TasteResource, ResourceFile as TasteFile } from '../resources/resource-model'
+import type { ThingFace } from '../things/face'
 
 export const detailsStates = ['busy', 'partial', 'unknown', 'idle', 'new', 'absent', 'loading', 'error'] as const
 export type DetailsState = typeof detailsStates[number]
@@ -32,7 +33,7 @@ export interface DetailsOverview {
   readonly age: string | undefined
 }
 
-export const detailsSectionOrder = ['Workspace', 'Pull requests', 'CI runs', 'Reviews', 'Files touched', 'Terminals', 'Subagents', 'Missions', 'Attention', 'Declared bindings', 'History'] as const
+export const detailsSectionOrder = ['Workspace', 'Pull requests', 'Issues', 'CI runs', 'Reviews', 'Files touched', 'Terminals', 'Subagents', 'Missions', 'Attention', 'Declared bindings', 'History'] as const
 export type DetailsSectionName = typeof detailsSectionOrder[number]
 export interface DetailsResource {
   readonly uri: string
@@ -41,6 +42,8 @@ export interface DetailsResource {
   readonly agent?: SidebarAgentRow
   readonly file?: TasteFile
   readonly terminal?: readonly string[]
+  /** The kind's face, supplied by the host; absent, the row derives one from `card`. */
+  readonly face?: ThingFace
 }
 export interface DetailsSection {
   readonly title: DetailsSectionName

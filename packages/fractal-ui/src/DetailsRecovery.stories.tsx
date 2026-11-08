@@ -20,7 +20,7 @@ const details: WorkbenchPane = { uri: 'agent:worker-1', view: 'details' }
 const layout = group([details])
 const widths = [118, 160, 240, 320, 400, 520] as const
 const states = ['busy', 'partial', 'new', 'error', 'loading', 'idle'] as const
-const variants: DetailsVariants[] = (['O1', 'O2', 'O3'] as const).flatMap(overview => (['C1', 'C2', 'C3'] as const).flatMap(context => (['S1', 'S2', 'S3'] as const).map(spend => ({ overview, context, spend, resources: 'R2', empty: 'E3' } satisfies DetailsVariants))))
+const variants: DetailsVariants[] = (['O1', 'O2', 'O3'] as const).flatMap(overview => (['C1', 'C2', 'C3'] as const).flatMap(context => (['S1', 'S2', 'S3'] as const).map(spend => ({ overview, context, spend, empty: 'E3' } satisfies DetailsVariants))))
 const representative = variants.filter(variant => ['O1C1S1', 'O2C2S1', 'O2C2S2', 'O3C3S3'].includes(variant.overview + variant.context + variant.spend))
 const defaultVariant = variants.findIndex(variant => variant.overview === 'O2' && variant.context === 'C2' && variant.spend === 'S1')
 const cause = 'Fractal request timed out after 15 s'
@@ -192,7 +192,7 @@ function assertPresentation(pane: HTMLElement) {
     for (const kind of ['overview', 'context', 'spend']) requireContract(Boolean(pane.querySelector(`[data-details-skeleton="${kind}"]`)), 'Loading lacks a populated-footprint skeleton')
     for (const shell of pane.querySelectorAll('[data-details-state] [data-details-skeleton]')) {
       requireContract(/rgba\(.*,\s*0\)|transparent/.test(getComputedStyle(shell).backgroundColor), 'Loading resource skeleton is a generic section block')
-      requireContract([...shell.querySelectorAll('[data-details-resource-row]')].every(row => Boolean(row.closest('[data-details-skeleton-row]'))), 'Loading resource rows lack row-shaped skeletons')
+      requireContract([...shell.querySelectorAll('[data-thing-row]')].every(row => Boolean(row.closest('[data-details-skeleton-row]'))), 'Loading resource rows lack row-shaped skeletons')
       requireContract([...shell.querySelectorAll('[data-details-skeleton-row]')].some(row => [...row.querySelectorAll('span')].some(ink => getComputedStyle(ink).visibility === 'visible' && ink.getBoundingClientRect().width > 0)), 'Loading resource skeleton has no visible row ink')
     }
   }
@@ -270,7 +270,7 @@ function pendingGeometry(pane: HTMLElement): PendingGeometry {
   return {
     bodies: [...pane.querySelectorAll('[data-details-chart]')].map(body => ({ kind: body.getAttribute('data-details-chart'), top: body.closest('section')!.getBoundingClientRect().top, height: body.closest('section')!.getBoundingClientRect().height, bodyHeight: body.getBoundingClientRect().height })),
     sections: [...pane.querySelectorAll('[data-details-state] > section')].map(section => ({ kind: section.getAttribute('aria-label'), top: section.getBoundingClientRect().top, height: section.getBoundingClientRect().height })),
-    rows: [...pane.querySelectorAll('[data-details-state] [data-details-resource-row]')].map(row => ({ label: [row.querySelector('[data-details-resource-title]')?.textContent, row.querySelector('[data-resource-meta-value]')?.textContent].filter(Boolean).join(' ') || null, top: row.getBoundingClientRect().top, height: row.getBoundingClientRect().height })),
+    rows: [...pane.querySelectorAll('[data-details-state] [data-thing-row]')].map(row => ({ label: [row.querySelector('[data-thing-title]')?.textContent, row.querySelector('[data-thing-meta]')?.textContent].filter(Boolean).join(' ') || null, top: row.getBoundingClientRect().top, height: row.getBoundingClientRect().height })),
   }
 }
 function assertPending(before: PendingGeometry, pane: HTMLElement) {

@@ -3,7 +3,7 @@ import { DateTime, Effect } from 'effect'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { describe, expect, it, vi } from 'vitest'
 
-import { gatewayResources } from '../resources/agent/source.ts'
+import { gatewayResources } from '../data/agentResources/source.ts'
 import recording from './subjectReadPort.gateway.fixtures.json' with { type: 'json' }
 import {
   gatewaySubjectReads,

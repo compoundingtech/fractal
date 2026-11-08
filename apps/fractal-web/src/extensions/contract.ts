@@ -21,13 +21,11 @@ export interface RegistryInput<TPane, THost, TClaim> {
 }
 
 import type { ComponentType, ReactNode } from 'react'
-import type { ObservationReactView } from '../resources/observation.tsx'
-import type { NativeSubjectView } from '../resources/react.tsx'
-import type { RegisteredRenderer, RegisteredSubjectRenderer, Registry } from '../resources/registry.ts'
-import type { SubjectEnvelope } from '../resources/envelope.ts'
+import type { SubjectEnvelope } from '../data/subjectEnvelope.ts'
 import type { SubjectSummary } from '../shell/context.tsx'
 import type { Feed } from '../data/source.ts'
 import type { DetailsDisplayObservation, DetailsSection, TraceAccumulationWindow, TraceCoverage, TraceFact, TraceSubagent } from '@fractal/ui/assistant-ui'
+import type { SectionContribution } from '../workspace/registry.ts'
 
 export interface AgentRowProps {
   readonly agentRef: string
@@ -49,22 +47,13 @@ export interface ExtensionViews {
   readonly Diff?: ComponentType<DiffProps>
   readonly Markdown?: ComponentType<{ readonly source: string }>
 }
-/** Claims retain the existing conflict validation; extensions cannot override public claims. */
-export interface FractalExtensions {
-  readonly renderers: readonly RegisteredRenderer<ReactNode>[]
-  readonly native: readonly RegisteredSubjectRenderer<NativeSubjectView>[]
-}
-export interface ExtensionHost {
-  readonly getRegistry: () => Registry<ReactNode, NativeSubjectView, ObservationReactView>
-}
-export type CreateExtensions = (host: ExtensionHost) => FractalExtensions
 export interface ExtensionFixtures {
   readonly envelopes: readonly SubjectEnvelope[]
   readonly subjects: readonly SubjectSummary[]
 }
 
 /** A host contribution supplements independently scoped facts, never native session accounting. */
-export interface DetailsSupplementQuery {
+export interface AgentPanelSectionQuery {
   readonly agentRef: string
   readonly nativeSessionId?: string
   /** False permits matching retained observations only, never another provider read. */
@@ -88,6 +77,12 @@ export interface DetailsSupplement {
   /** Client time of the last successful read, not the producer's observation time. */
   readonly receivedAtMs?: number
 }
-export type UseDetailsSupplement = (query: DetailsSupplementQuery) => Feed<DetailsSupplement>
-/** Protected host metadata sections are independent of any trace/root binding. */
-export type UseDetailsSections = (query: { readonly agentRef: string }) => readonly DetailsSection[]
+/** A compiled-in reader owns its hooks; the panel mounts each reader in an isolated child. */
+export interface AgentPanelSectionView {
+  readonly useData: (query: AgentPanelSectionQuery) => AgentPanelSectionData
+}
+export interface AgentPanelSectionData {
+  readonly sections: readonly DetailsSection[]
+  readonly supplement?: Feed<DetailsSupplement>
+}
+export type AgentPanelSectionContribution = SectionContribution<AgentPanelSectionView>

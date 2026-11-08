@@ -1,16 +1,7 @@
-// moves to fractal/clients/typescript
-/**
- * Data schemas for the first envelope schema ids, plus the schema-id-indexed catalog and the
- * typed `KnownEnvelope` union.
- *
- * Shapes derive from Fractal `clients/typescript/fractal-client/Models.generated.ts` (Mission,
- * MissionRunSummary, Agent, WorkLabel, Attention, Runtime, TerminalScreen) and the fact lists in
- * `docs/st3/schema.md` (`vcs.pull-request`, `ci.run`). Header fields (`id`, `kind`, `revision`)
- * move to the envelope; `data` is the rest of the subject body.
- */
+/** Data schemas used to type the local subject-envelope fixtures, not daemon contracts. */
 import { Schema } from 'effect'
 
-import { envelopeOf, SubjectRef, Timestamp } from './envelope.ts'
+import { SubjectRef, Timestamp, type SubjectEnvelope } from '../data/subjectEnvelope.ts'
 
 const optional = Schema.optionalKey
 const nullable = Schema.NullOr
@@ -195,7 +186,7 @@ export const CiRunData = Schema.Struct({
 }).annotate({ identifier: 'CiRunData' })
 export type CiRunData = typeof CiRunData.Type
 
-/** Schema id → data schema. The SDK's single source for "which schemas do we know". */
+/** Schema id → local fixture data shape. */
 export const dataSchemas = {
   'st3.mission@1': MissionData,
   'st3.agent@1': AgentData,
@@ -205,33 +196,9 @@ export const dataSchemas = {
   'st3.resource:ci.run@1': CiRunData,
 } as const
 
-/** A schema id this client has a data schema for. */
-export type KnownSchemaId = keyof typeof dataSchemas
-/** Decoded `data` type for a known schema id. */
-export type DataOf<Id extends KnownSchemaId> = (typeof dataSchemas)[Id]['Type']
-
-const MissionEnvelope = envelopeOf({ id: 'st3.mission@1', data: MissionData })
-const AgentEnvelope = envelopeOf({ id: 'st3.agent@1', data: AgentData })
-const PtyEnvelope = envelopeOf({ id: 'st3.pty@1', data: PtyData })
-const AttentionEnvelope = envelopeOf({ id: 'st3.attention@1', data: AttentionData })
-const PullRequestEnvelope = envelopeOf({
-  id: 'st3.resource:vcs.pull-request@1',
-  data: PullRequestData,
-})
-const CiRunEnvelope = envelopeOf({ id: 'st3.resource:ci.run@1', data: CiRunData })
-
-/** Typed union of every known envelope, discriminated by `schema`. */
-export const KnownEnvelope = Schema.Union(
-  [
-    MissionEnvelope,
-    AgentEnvelope,
-    PtyEnvelope,
-    AttentionEnvelope,
-    PullRequestEnvelope,
-    CiRunEnvelope,
-  ],
-  { mode: 'oneOf' },
-).annotate({ identifier: 'KnownEnvelope' })
-export type KnownEnvelope = typeof KnownEnvelope.Type
-/** The typed envelope for one known schema id. */
-export type EnvelopeOf<Id extends KnownSchemaId> = Extract<KnownEnvelope, { readonly schema: Id }>
+/** The typed data for one local fixture schema. */
+export type EnvelopeOf<TId extends keyof typeof dataSchemas> =
+  Omit<SubjectEnvelope, 'schema' | 'data'> & {
+    readonly schema: TId
+    readonly data: (typeof dataSchemas)[TId]['Type']
+  }

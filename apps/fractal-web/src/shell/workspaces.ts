@@ -2,7 +2,7 @@ import type { Attention } from '@fractal/client/schema'
 import { Schema } from 'effect'
 
 import { attentionRefs } from '../data/projections.ts'
-import { SubjectAddress } from '../resources/contract.ts'
+import { SubjectAddress } from '../shell/subjectAddress.ts'
 import type { SubjectSummary } from './context.tsx'
 import {
   subjectKey,

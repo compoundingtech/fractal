@@ -48,7 +48,7 @@ export const ompSupplementValue = {
   subagentCount: reported(1),
 }
 
-/** Subagent-activity feeds for each OMP state, shaped for the composition's `UseDetailsSupplement` seam. */
+/** Subagent-activity feeds consumed by the composition's unified section contribution readers. */
 export const ompSupplementFeeds = {
   loading: () => ({ _tag: 'Waiting' }) as const,
   /** The source's own detail is technical and must never reach the screen. */

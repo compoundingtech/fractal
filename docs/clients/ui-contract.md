@@ -47,7 +47,8 @@ Every screen is judged by these.
    outcome and collapsed to their last lines, Fractal mail in the same stream. It is stable:
    a refresh that changes nothing moves nothing, new content only appends, and the view follows
    the end only while the reader is at the end.
-3. **Everything visible is actionable.** Every tab, row, name and button responds to a tap.
+3. **Destinations are actionable; facts are not.** Tabs and rows with durable refs open their
+   subjects. Refless observations use the same row anatomy but have no pointer, hover card or drag.
 4. **Quiet chrome.** Named colour tokens, few borders, selection as a background fill, glyphs
    with a legend instead of words like "reachable".
 5. **Stable identity and order.** Rows show a name over the graph path. Ordering rules are
@@ -58,6 +59,31 @@ Every screen is judged by these.
    import requires an exact native session ID".
 8. **Every kind of attention has its own card.**
 9. **Mission control makes the fleet understandable:** who must act on each mission, and why.
+
+### Resource row vocabulary
+
+The web client uses one face per kind for rows, chips, sections and fact rows.
+The terminal client adopts these rules in its own slice; current terminal
+behavior is not evidence of web parity.
+
+Rows show one line and prioritize the title. When width decreases, metadata
+drops as whole fields: status word, spoken identifier, then age. A specific
+request or failure cause stays visible and truncates if needed. Amber means
+the viewer must act, red means failure, and all other marks are neutral.
+Read-only observations show no amber request.
+
+Only pull request, issue and CI run numbers appear beside titles. Ages are
+bare relative values: a mission's last update; a terminal's or subagent's
+start; a pull request's or issue's last update; a CI run's finish, or its
+start while running. Stale observations read “seen …” and retain request
+or failure color. A feed reconnect uses one notice above its sections.
+
+An agent's Details tab contains Overview, Context, Spend, Workspace and
+Attention. Resources contains To-dos, Missions, Terminals, Subagents,
+Pull requests, Issues, CI runs, Reviews and Declared bindings, in that order.
+Empty sections are hidden, and unavailable categories are named once.
+Requests and failures sort first within each kind, then active work,
+then newest. A thing does not appear in both tabs.
 
 Mauve (`person`) means a person is needed. Nothing else may use it.
 

@@ -11,7 +11,6 @@ import { DetailsLabelContext, traceHistorySection } from './assistant-ui/details
 import { ResourceCardV1, ResourceChipV1 } from './assistant-ui/resources/ResourceCardV1'
 import { resources as sharedResources } from './assistant-ui/details/resource-fixtures'
 import { accumulationParts, hasDetailsChartData } from './assistant-ui/details/DetailsCharts'
-import { makeDetailsFixture } from './assistant-ui/details/fixtures'
 import type { DetailsState } from './assistant-ui/details/model'
 import { detailsStoryInputs, paintedText } from './assistant-ui/details/story-fixtures'
 import { detailsTraceFixtures, traceForDetailsState } from './assistant-ui/details/trace/fixture-provider'
@@ -23,7 +22,7 @@ import { lightTheme } from './assistant-ui/composition-theme'
 import { ThemePortal } from './assistant-ui/taste/ThemePortal'
 import { surfaceVars as surface } from './assistant-ui/composition-tokens.stylex'
 
-const variants: DetailsVariants = { overview: 'O2', context: 'C2', spend: 'S1', resources: 'R2', empty: 'E3' }
+const variants: DetailsVariants = { overview: 'O2', context: 'C2', spend: 'S1', empty: 'E3' }
 const widths = [320, 400, 520]
 const full = detailsTraceFixtures.full
 const missing = { _tag: 'Unknown', reason: 'not-covered' } as const
@@ -33,7 +32,6 @@ interface Case { name: string; width: number; state: DetailsState; variants: Det
 function example(name: string, width = 400, state: DetailsState = 'busy', changes: Partial<DetailsVariants> = {}, trace?: TraceSeries): Case {
   return { name, width, state, variants: { ...variants, ...changes }, ...(trace === undefined ? {} : { trace }) }
 }
-const resourceCases = (forms: readonly DetailsVariants['resources'][], states: readonly DetailsState[], sizes: readonly number[]) => forms.flatMap(resources => states.flatMap(state => sizes.map(width => example(`${resources}/${state}/${width}`, width, state, { resources }))))
 const sourceCases = (['turn-only', 'bucket-only'] as const).flatMap(source => (['unknown', 'positive', 'zero'] as const).flatMap(amounts => (['S1', 'S2', 'S3'] as const).map(spend => {
   const meter = amounts === 'unknown' ? { ...full.meters.spend, totalUsd: missing, mainUsd: missing, subagentUsd: missing, tokens: missing, split: missing }
     : amounts === 'zero' ? { ...full.meters.spend, totalUsd: zero, mainUsd: zero, subagentUsd: zero, tokens: zero, split: { ...zero, value: zeroCost } } : full.meters.spend
@@ -43,13 +41,12 @@ const sourceCases = (['turn-only', 'bucket-only'] as const).flatMap(source => ([
   return example(`${source}/${amounts}/${spend}`, 400, 'busy', { spend, empty: 'E2' }, trace)
 })))
 const presentationCases: Case[] = [
-  ...(['new', 'busy', 'partial', 'unknown', 'idle', 'absent'] as const).flatMap(state => (['C1', 'C2', 'C3'] as const).map((context, index) => example(`${state}/${context}`, widths[index]!, state, { context, spend: (['S1', 'S2', 'S3'] as const)[index]!, resources: (['R1', 'R2', 'R3'] as const)[index]! }))),
-  ...resourceCases(['R1', 'R2', 'R3'], ['busy'], [320]),
+  ...(['new', 'busy', 'partial', 'unknown', 'idle', 'absent'] as const).flatMap(state => (['C1', 'C2', 'C3'] as const).map((context, index) => example(`${state}/${context}`, widths[index]!, state, { context, spend: (['S1', 'S2', 'S3'] as const)[index]!}))),
   ...widths.map(width => example(`new/${width}`, width, 'new')),
-  ...(['overview', 'context', 'spend', 'resources', 'empty'] as const).flatMap(dimension => ['1', '2', '3'].map(index => example(`${dimension}/${index}`, 400, 'busy', { [dimension]: `${dimension[0]!.toUpperCase()}${index}` } as Partial<DetailsVariants>))),
+  ...(['overview', 'context', 'spend', 'empty'] as const).flatMap(dimension => ['1', '2', '3'].map(index => example(`${dimension}/${index}`, 400, 'busy', { [dimension]: `${dimension[0]!.toUpperCase()}${index}` } as Partial<DetailsVariants>))),
 ]
 const resourceStates = ['busy', 'partial', 'new', 'unknown', 'idle', 'absent'] as const
-const resourceStateCases = (form: DetailsVariants['resources']) => resourceCases([form], resourceStates, [400])
+const resourceStateCases = resourceStates.map(state => example(`${state}/400`, 400, state))
 interface Args extends WorkbenchProps { cases: readonly Case[]; comparison: boolean }
 const styles = stylex.create({
   root: { display: 'flex', flexDirection: 'column', minHeight: 0, height: 560, overflow: 'hidden', backgroundColor: surface.canvas },
@@ -84,14 +81,12 @@ export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
-  'CappedResourceStates:contract-fixture',
-  'CardResourceStates:contract-fixture',
-  'DenseResourceStates:contract-fixture',
   'E3ChartMatrix:contract-fixture',
   'Interactions:contract-fixture',
   'OrientationAnchor:contract-fixture',
   'PresentationMatrix:contract-fixture',
   'ResourceGeometry:contract-fixture',
+  'ResourceStates:contract-fixture',
   'SharedResourceActionNames:contract-fixture',
   'SpendScope:contract-fixture',
   'TraceContracts:contract-fixture',
@@ -181,20 +176,20 @@ function contrast(element: Element) {
 function assertCraft(pane: HTMLElement, item: Case) {
   assertHuman(pane)
   for (const reason of pane.querySelectorAll<HTMLElement>('[data-details-unavailable]')) if (shown(reason)) requireContract(contrast(reason) >= 4.5, 'Unavailable explanation contrast below 4.5:1')
-  for (const quiet of pane.querySelectorAll<HTMLElement>('[data-details-section-count],[data-details-quiet-action]')) if (shown(quiet)) requireContract(contrast(quiet) >= 4.5, 'Section count or Open in split contrast below 4.5:1')
+  for (const count of pane.querySelectorAll<HTMLElement>('[data-details-section-count]')) if (shown(count)) requireContract(contrast(count) >= 4.5, 'Section count contrast below 4.5:1')
   for (const name of ['Workspace', 'Pull requests', 'CI runs']) {
-    const section = pane.querySelector(`section[aria-label$="${name}"]`), heading = section?.querySelector('[data-details-heading]'), meta = section?.querySelector('[data-resource-meta]')
+    const section = pane.querySelector(`section[aria-label$="${name}"]`), heading = section?.querySelector('[data-details-heading]'), meta = section?.querySelector('[data-thing-meta-item]')
     if (heading && meta) requireContract(contrast(heading) > contrast(meta), 'Resource heading is no stronger than metadata')
   }
   if (item.state === 'new' && item.variants.empty === 'E3') {
     const orientation = pane.querySelectorAll('[data-details-orientation]')
     requireContract(orientation.length === 1 && /context.*spend.*resources/i.test(orientation[0]?.textContent ?? ''), 'New agent lacks one calm Details orientation')
     requireContract(!pane.querySelector('[data-details-source-note]'), 'New agent repeats source unavailability')
-    for (const section of pane.querySelectorAll('section')) requireContract(section.querySelector('strong,dd,[data-details-data-row],[data-details-resource-row],svg[role="img"]'), 'New agent offers an empty disclosure')
+    for (const section of pane.querySelectorAll('section')) requireContract(section.querySelector('strong,dd,[data-details-data-row],[data-thing-row],svg[role="img"]'), 'New agent offers an empty disclosure')
   }
   if (item.state === 'unknown') for (const name of ['Context', 'Spend']) requireContract(pane.querySelector(`section[aria-label$="${name}"] [data-details-not-reported="group"]`), 'Unknown source omits its single not-reported line')
   const history = pane.querySelector('section[aria-label$="History"]')
-  if (item.state === 'busy' || item.state === 'idle') requireContract(history&&within(history as HTMLElement).queryAllByRole('button',{name:/^Session · /}).length>0, 'Known trace history is absent')
+  if (item.state === 'busy' || item.state === 'idle') requireContract(history&&[...history.querySelectorAll('[data-thing-title]')].some(title=>title.textContent?.startsWith('Session · ')), 'Known trace history is absent')
   const changes = pane.querySelector('[aria-label="Compaction context changes"]')
   // Compactions paint context occupancy: 897,170 → 132,952 of a 1M window, excluding the straddling bucket.
   if (changes) requireContract(/90% → 13%/.test(changes.textContent ?? ''), 'Compaction includes the straddling bucket')
@@ -215,118 +210,35 @@ async function humanControl(pane: HTMLElement) {
   assertHuman(pane)
 }
 async function contrastControl(pane: HTMLElement, item: Case) {
-  const count = [...pane.querySelectorAll<HTMLElement>('[data-details-section-count]')].find(shown), split = [...pane.querySelectorAll<HTMLElement>('[data-details-quiet-action]')].find(shown)
+  const count = [...pane.querySelectorAll<HTMLElement>('[data-details-section-count]')].find(shown)
   requireContract(count, 'Contrast control lacks a shown section count')
   // Ink equal to the pane surface is the exact low-contrast cause in either scheme.
-  for (const target of split ? [count, split] : [count]) {
-    const color = target.style.color
-    try { target.style.color = getComputedStyle(pane).backgroundColor; await rejectsControl('Section count or Open in split contrast below 4.5:1', () => assertCraft(pane, item)) } finally { target.style.color = color }
-  }
+  const color = count.style.color
+  try { count.style.color = getComputedStyle(pane).backgroundColor; await rejectsControl('Section count contrast below 4.5:1', () => assertCraft(pane, item)) } finally { count.style.color = color }
   assertCraft(pane, item)
 }
-function intrinsic(element: HTMLElement, pane: HTMLElement) {
-  const copy = element.cloneNode(true) as HTMLElement, css = getComputedStyle(element)
-  copy.className = ''; copy.removeAttribute('id')
-  copy.style.cssText = `position:fixed;visibility:hidden;pointer-events:none;width:max-content;min-width:0;max-width:none;white-space:nowrap;display:${element.hasAttribute('data-resource-meta-value') ? 'inline-flex' : 'inline-block'};font:${css.font};letter-spacing:${css.letterSpacing};`
-  pane.append(copy); const width = copy.getBoundingClientRect().width; copy.remove(); return width
-}
-function assertFit(pane: HTMLElement, item: Case) {
-  const rows = pane.querySelectorAll<HTMLElement>('[data-details-resource-row],[data-resource-row]')
-  requireContract(rows.length > 0, 'Resource fit assertions have no measured rows')
+/** Kit rows: one line each, title first, metadata whole or absent; the pane never overflows its drop surface. */
+function assertRows(pane: HTMLElement) {
+  const rows = [...pane.querySelectorAll<HTMLElement>('[data-thing-row]')].filter(row => !row.closest('[inert]'))
+  requireContract(rows.length > 0, 'Resource row assertions have no measured rows')
   for (const row of rows) {
-    if (row.closest('[inert]')) continue
-    const title = row.querySelector<HTMLElement>('[data-details-resource-title],[data-resource-title]')
-    if (!title) continue
-    const box = row.getBoundingClientRect(), css = getComputedStyle(row), gap = parseFloat(css.columnGap) || 0
-    const width = row.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight), titleWidth = intrinsic(title, pane), reservation = Math.min(titleWidth, width * 0.6 + gap)
-    if (item.width <= 322) requireContract(title.getBoundingClientRect().width >= reservation - 0.5, 'Narrow title loses intrinsic/60% priority')
+    const title = row.querySelector<HTMLElement>('[data-thing-title]'), box = row.getBoundingClientRect()
+    requireContract(title, 'Resource row lacks its title')
+    requireContract(box.height <= parseFloat(getComputedStyle(row).minHeight) + 0.5, 'Resource row wraps beyond one line')
     requireContract(title.getBoundingClientRect().right <= box.right + 1, 'Resource title escapes its row')
-    for (const slot of row.querySelectorAll<HTMLElement>('[data-resource-meta]')) {
-      const value = slot.querySelector<HTMLElement>('[data-resource-meta-value]')
-      requireContract(value, 'Metadata lacks a whole-value element')
-      if (!value.textContent?.trim()) continue
-      const slotBox = slot.getBoundingClientRect(), valueBox = value.getBoundingClientRect(), visible = shown(slot) && shown(value)
-      const controls = [...row.children].filter(child => child !== title && child !== slot && getComputedStyle(child).position !== 'absolute')
-      const available = width - reservation - controls.reduce((sum, child) => sum + child.getBoundingClientRect().width, 0) - gap * (controls.length + 1)
-      requireContract(visible === (intrinsic(value, pane) <= available + 0.5), 'Metadata is not shown whenever it fits whole')
-      requireContract(visible || slotBox.width <= 0.01, 'Absent metadata reserves horizontal space')
-      if (!visible && title.dataset.resourceTitleLines !== 'wrap' && titleWidth > title.getBoundingClientRect().width + 0.5) requireContract(title.getBoundingClientRect().width >= width - controls.reduce((sum, child) => sum + child.getBoundingClientRect().width, 0) - gap * controls.length - 0.5, 'Title truncates beside free space')
-      requireContract(!visible || (valueBox.left >= slotBox.left - 0.01 && valueBox.right <= slotBox.right + 0.01), 'Metadata is partially shown')
-      requireContract(slot.dataset.resourceMetaFit === (visible ? 'whole' : 'absent'), 'Metadata is neither whole nor absent')
-      requireContract(visible || value.getAttribute('aria-hidden') === 'true', 'Omitted metadata remains accessible')
-      if (slot.dataset.resourceMeta === 'descriptive') requireContract(getComputedStyle(value).fontFamily === getComputedStyle(pane).fontFamily, 'Descriptive metadata lacks proportional UI font')
-      if (slot.dataset.resourceMeta === 'numeric') for (const element of [slot, value, ...value.querySelectorAll('*')]) requireContract(getComputedStyle(element).textOverflow !== 'ellipsis', 'Numeric metadata is ellipsized')
-    }
+    const meta = row.querySelector<HTMLElement>('[data-thing-meta]')
+    if (!meta) continue
+    const line = meta.getBoundingClientRect(), items = [...meta.querySelectorAll<HTMLElement>('[data-thing-meta-item]')]
+    const visible = items.filter(item => { const rect = item.getBoundingClientRect(); return rect.width > 0 && rect.top < line.bottom - 0.5 })
+    for (const item of visible) { const rect = item.getBoundingClientRect(); requireContract(rect.left >= line.left - 0.5 && rect.right <= line.right + 0.5 && rect.bottom <= line.bottom + 0.5, 'Metadata is partially shown') }
+    // Meta gives way whole, status word first, then id, then age: what shows is always a prefix of age, id, status.
+    requireContract(visible.every((item, index) => item === items[index]), 'Metadata drops out of order')
+    // Title first: a cut title never sits beside shown metadata.
+    if (title.scrollWidth > title.clientWidth + 0.5) requireContract(visible.length === 0, 'Title truncates beside shown metadata')
   }
-  const metas = [...pane.querySelectorAll<HTMLElement>('[data-resource-meta]')]
-  if (item.variants.resources === 'R1' && item.width === 320) for (const pair of ['+1-1', '+2-1', '+12-4']) requireContract(metas.some(meta => meta.textContent?.replace(/−/g, '-').replace(/\s/g, '') === pair && meta.dataset.resourceMetaFit === 'whole'), 'R1 320 hides fitting numeric counts')
-  if (item.variants.resources === 'R2') {
-    if (item.width === 320) requireContract(metas.some(meta => meta.textContent === 'CI run · succeeded' && meta.dataset.resourceMetaFit === 'whole'), 'R2 320 hides whole succeeded CI status')
-    if (item.width === 520) for (const status of ['Open · sample-app · checks passed', 'Draft · sample-app · checks running']) requireContract(metas.some(meta => meta.textContent === status && meta.dataset.resourceMetaFit === 'whole'), 'R2 520 hides fitting PR status')
-    for (const row of pane.querySelectorAll<HTMLElement>('section[aria-label="Subagents"] [data-details-resource-row]')) requireContract(row.getBoundingClientRect().height <= 24.5, 'R2 subagent row is not dense 24px')
-  }
-  for (const [label, icon] of [['Observation coverage', 'clock'], ['Projection checks', 'check']]) requireContract([...rows].some(row => row.textContent?.includes(label!) && row.querySelector('[data-details-resource-icon]')?.getAttribute('data-details-resource-icon') === icon), 'CI resource lacks its pending/succeeded kit icon')
-}
-function probesFor(pane: HTMLElement) { return [...pane.querySelectorAll<HTMLElement>('*')].filter(node => { const css = getComputedStyle(node); return css.position === 'absolute' && css.visibility === 'hidden' }) }
-function assertContainment(pane: HTMLElement) {
-  for (const probe of probesFor(pane)) { const card = probe.closest('[data-resource-card],[data-testid="taste-agent-row"]'); requireContract(card && probe.offsetParent && card.contains(probe.offsetParent), 'Intrinsic-fit probe offsetParent escapes its resource card') }
   const surface = pane.closest<HTMLElement>('[data-drop-group]')
   requireContract(surface, 'Details has no production AgentDropSurface')
   requireContract(surface.scrollHeight === surface.clientHeight, 'AgentDropSurface overflows vertically')
-}
-async function containmentGate(pane: HTMLElement) {
-  assertContainment(pane)
-  const probes = probesFor(pane)
-  requireContract(probes.length > 0, 'Containment gate exercises no intrinsic-fit probes')
-  const surface = pane.closest<HTMLElement>('[data-drop-group]')!, probe = probes.at(-1)!, card = probe.closest<HTMLElement>('[data-resource-card],[data-testid="taste-agent-row"]')!
-  const scrollTop = pane.scrollTop, surfaceTop = surface.scrollTop, distance = probe.getBoundingClientRect().top - card.getBoundingClientRect().top
-  pane.scrollTop = pane.scrollHeight; await frames()
-  requireContract(Math.abs(probe.getBoundingClientRect().top - card.getBoundingClientRect().top - distance) < 0.01, 'Intrinsic-fit probe fails to follow its card while scrolling')
-  probe.scrollIntoView({ block: 'nearest' }); await frames()
-  requireContract(surface.scrollTop === surfaceTop, 'Hidden probe scrolls the outer AgentDropSurface')
-  pane.scrollTop = scrollTop
-  const cards = [...pane.querySelectorAll<HTMLElement>('[data-resource-card]')].map(element => ({ element, position: element.style.getPropertyValue('position'), priority: element.style.getPropertyPriority('position') }))
-  try {
-    for (const { element } of cards) element.style.setProperty('position', 'static', 'important')
-    await rejectsControl('Intrinsic-fit probe offsetParent escapes its resource card', () => assertContainment(pane))
-  } finally { for (const { element, position, priority } of cards) position ? element.style.setProperty('position', position, priority) : element.style.removeProperty('position') }
-  assertContainment(pane)
-}
-function assertIdentity(pane: HTMLElement) {
-  const titles = [...pane.querySelectorAll<HTMLElement>('[data-resource-title-lines]:not([data-resource-title-lines="1"])')]
-  requireContract(titles.some(title => title.textContent === 'Review the source projection'), 'Real mission identity is missing')
-  for (const title of titles) {
-    const css = getComputedStyle(title), box = title.getBoundingClientRect(), row = title.closest('[data-details-resource-row]')!.getBoundingClientRect()
-    requireContract(css.webkitLineClamp === 'none' && title.scrollHeight <= title.clientHeight + 0.5 && title.scrollWidth <= title.clientWidth + 0.5, 'Resource identity is clamped instead of wrapping in full')
-    requireContract(box.bottom <= row.bottom + 0.5 && box.top >= row.top - 0.5, 'Wrapped identity overflows its resource row')
-  }
-}
-function textLines(title: HTMLElement) {
-  const text = title.firstChild
-  requireContract(text?.nodeType === Node.TEXT_NODE, 'Wrapped identity lacks its text node')
-  const node = text as Text, range = document.createRange(), lines: { top: number; text: string }[] = []
-  for (let index = 0; index < node.length; index++) { range.setStart(node, index); range.setEnd(node, index + 1); const rect = range.getClientRects()[0]; if (!rect || rect.width === 0) continue; let line = lines.find(line => Math.abs(line.top - rect.top) < 4); if (!line) { line = { top: rect.top, text: '' }; lines.push(line) } line.text += node.data[index] }
-  return lines.map(line => line.text)
-}
-function assertBranch(pane: HTMLElement) {
-  const titles = [...pane.querySelectorAll<HTMLElement>('[data-resource-title-lines]:not([data-resource-title-lines="1"])')]
-  requireContract(titles.some(title => title.closest('[data-details-resource-row]')?.querySelector('[data-resource-meta]')?.textContent?.includes('Declared branch')), 'Declared branch row is missing')
-  for (const title of titles) {
-    const row=title.closest<HTMLElement>('[data-details-resource-row]'),label=title.textContent?.replace(/\s+/g,' ').trim();requireContract(row&&label, 'Wrapped identity lacks its full accessible name')
-    requireContract(within(pane).queryAllByRole('button',{name:name=>name.replace(/\s+/g,' ').includes(label)}).includes(row), 'Wrapped identity lacks its full accessible name')
-    const lines = textLines(title)
-    requireContract(lines.length < 2 || lines.at(-1)!.trim().split(/[\s/_-]+/).filter(Boolean).length >= 2, 'Wrapped identity leaves an orphaned final word')
-  }
-}
-function assertMissions(pane: HTMLElement) {
-  const labels = makeDetailsFixture('busy').sections.flatMap(section => section.items._tag === 'Known' ? section.items.value.filter(resource => resource.uri.startsWith('mission:')).map(resource => resource.card.label) : [])
-  requireContract(labels.length >= 2, 'Mission title fixture is incomplete')
-  for (const label of labels) {
-    const title = [...pane.querySelectorAll<HTMLElement>('[data-details-resource-title]')].find(title => title.textContent === label)
-    requireContract(title, 'Real mission title is missing')
-    const box = title.getBoundingClientRect(), range = document.createRange(); range.selectNodeContents(title)
-    requireContract([...range.getClientRects()].filter(rect => rect.width > 0).every(rect => rect.left >= box.left - 0.5 && rect.right <= box.right + 0.5 && rect.top >= box.top - 0.5 && rect.bottom <= box.bottom + 0.5) && title.scrollWidth <= title.clientWidth + 0.5 && getComputedStyle(title).textOverflow !== 'ellipsis', 'Mission title is truncated')
-  }
 }
 function assertChevron(pane: HTMLElement) {
   const columns = [...pane.querySelectorAll('section')].map(section => ({ name: section.getAttribute('aria-label'), svg: section.querySelector('button[aria-expanded] svg') }))
@@ -411,26 +323,24 @@ export const Interactions: Story = { parameters: { scenario: { _tag: 'contract-f
   context.focus(); await userEvent.keyboard(' '); await waitFor(() => requireContract(context.checked && writes() === before + 2 && pane.querySelector('section[aria-label="Context"]'), 'Keyboard restore does not commit exactly one visibility intent'))
   await userEvent.keyboard('{Escape}')
   const events = () => JSON.parse(root.dataset.openEvents!) as { key: string; split: boolean }[]
-  // Dense rows are named by their painted label and fitted meta; the meta and detail facts describe them.
-  const terminal = within(pane).getByRole('button', { name: /^Session terminal\b/, description: /Live output/ })
-  const painted = [terminal.querySelector('[data-details-resource-title]')?.textContent, terminal.querySelector('[data-resource-meta-fit="whole"] [data-resource-meta-value]')?.textContent].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
-  const assertDenseName=()=>requireContract(within(pane).queryByRole('button',{name:painted,description:description=>description.includes('terminal')&&description.includes('Live output')})===terminal,'Dense resource name differs from its painted text or omits its facts')
-  assertDenseName()
-  try{terminal.setAttribute('aria-label',`Open ${painted}`);await rejectsControl('Dense resource name differs from its painted text or omits its facts',assertDenseName)}finally{terminal.removeAttribute('aria-label')}
-  assertDenseName()
-  const describedBy=terminal.getAttribute('aria-describedby');requireContract(describedBy,'Missing dense row description reference')
-  try{terminal.removeAttribute('aria-describedby');await rejectsControl('Dense resource name differs from its painted text or omits its facts',assertDenseName)}finally{terminal.setAttribute('aria-describedby',describedBy)}
-  assertDenseName()
+  // Openable rows are links named by everything they paint: kind, title, then status or ask, whatever the width drops.
+  const terminal = within(pane).getByRole('link', { name: /^Terminal Session terminal\b/ })
+  const painted = () => [terminal.querySelector('[data-thing-title]')?.textContent, ...[...terminal.querySelectorAll('[data-thing-meta-item],[data-thing-act]')].map(node => node.textContent)].filter((text): text is string => Boolean(text))
+  const assertName = () => requireContract(within(pane).queryByRole('link', { name: name => name.startsWith('Terminal ') && painted().every(text => name.includes(text)) }) === terminal, 'Resource name differs from its painted text')
+  assertName()
+  const label = terminal.getAttribute('aria-label'); requireContract(label, 'Resource row lacks its accessible name')
+  try { terminal.setAttribute('aria-label', 'Open'); await rejectsControl('Resource name differs from its painted text', assertName) } finally { terminal.setAttribute('aria-label', label) }
+  assertName()
   await userEvent.click(terminal); await waitFor(() => requireContract(events().at(-1)?.key === 'terminal:sample/1' && !events().at(-1)?.split, 'Details terminal callback loses exact session identity'))
   await userEvent.click(terminal); requireContract(events().length === 2 && writes() === before + 2, 'Repeated terminal request alters layout intent or fails to reattach')
-  const file = within(pane).getAllByRole('button', { name: /^src\// })[0]!
+  const file = within(pane).getAllByRole('link', { name: /^File src\// })[0]!
   await userEvent.click(file); requireContract(events().at(-1)?.key.startsWith('diff:sample/') && !events().at(-1)?.split, 'Details resource open callback loses pane identity')
   // One user-event instance carries the held modifier into the click; direct APIs reset keyboard state per call.
   const user = userEvent.setup(); await user.keyboard('{Control>}'); try { await user.click(file) } finally { await user.keyboard('{/Control}') }
   requireContract(events().at(-1)?.split, 'Details modified resource open loses split intent')
-  const split = within(pane).getAllByRole('button', { name: /in split$/ })[0]!
-  await userEvent.click(split); requireContract(events().at(-1)?.split && writes() === before + 2, 'Explicit split action alters synced visibility or loses split intent')
-  await userEvent.click(file)
+  file.focus(); await user.keyboard('{Alt>}{Enter}{/Alt}')
+  requireContract(events().at(-1)?.split && writes() === before + 2, 'Alt+Enter alters synced visibility or loses split intent')
+  await user.keyboard('{Enter}')
   await rejectsControl('Details modified resource open loses split intent', () => requireContract(events().at(-1)?.split, 'Details modified resource open loses split intent'))
   await humanControl(pane)
 } }
@@ -482,45 +392,26 @@ export const SpendScope: Story = { parameters: { scenario: { _tag: 'contract-fix
   try { label.textContent = 'Cumulative tokens · invented session scope'; const reason = trace.meters.spend.tokensScope._tag === 'Unknown' ? 'Unreported total makes an unproven scope claim' : 'Reported token scope is absent from its inline label'; if (reason.startsWith('Unreported')) label.textContent = 'Cumulative tokens incl. subagents'; await rejectsControl(reason, () => assertScope(pane, trace)) } finally { label.textContent = text }
   assertScope(pane, trace)
 }) }
-/**
- * One mount per resource form, state and width owns fit, containment, identity wrap, branch orphans,
- * mission titles and chevron columns; each falsifying control runs on the pane its former story ended on.
- * R3 never wraps identities, so the 240px column covers R1/R2 only.
- */
-const geometryCases = resourceCases(['R1', 'R2', 'R3'], ['busy', 'partial'], [240, ...widths]).filter(item => item.width !== 240 || item.variants.resources !== 'R3')
-export const ResourceGeometry: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact local file diff counts, CI labels and PR statuses probe whole-or-absent metadata fitting, title priority and intrinsic-probe containment across R1/R2/R3 widths; replacing labels would change the measured geometry contract.' } }, args: { cases: geometryCases }, play: ({ canvasElement, args }) => eachCase(canvasElement, args.cases, async (pane, item) => {
-  const form = item.variants.resources, fitted = widths.includes(item.width)
-  if (fitted) { assertFit(pane, item); assertCraft(pane, item) }
-  if (fitted && item.state === 'busy') await containmentGate(pane)
-  if (form !== 'R3') assertIdentity(pane)
-  if (fitted && form === 'R2' && item.state === 'busy') assertChevron(pane)
-  if (fitted && form === 'R2' && item.state === 'partial') assertBranch(pane)
-  if (item.name === 'R1/busy/320') {
-    assertMissions(pane)
-    const title = [...pane.querySelectorAll<HTMLElement>('[data-details-resource-title]')].find(title => title.textContent === 'Review the source projection')!, original = title.style.textOverflow
-    try { title.style.textOverflow = 'ellipsis'; await rejectsControl('Mission title is truncated', () => assertMissions(pane)) } finally { title.style.textOverflow = original }
-    assertMissions(pane)
+/** One mount per state and width owns one-line rows, whole-or-absent metadata, title-first truncation and chevron columns. */
+const geometryCases = (['busy', 'partial'] as const).flatMap(state => [240, ...widths].map(width => example(`${state}/${width}`, width, state)))
+export const ResourceGeometry: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact local file diff counts, CI labels and PR statuses probe one-line kit rows, whole-or-absent metadata and title-first truncation from 240px to 520px; replacing labels would change the measured geometry contract.' } }, args: { cases: geometryCases }, play: ({ canvasElement, args }) => eachCase(canvasElement, args.cases, async (pane, item) => {
+  assertRows(pane)
+  const fitted = widths.includes(item.width)
+  if (fitted) assertCraft(pane, item)
+  if (fitted && item.state === 'busy') assertChevron(pane)
+  if (item.name === 'busy/320') {
+    const row = [...pane.querySelectorAll<HTMLElement>('[data-thing-openable]')].find(row => [...row.querySelectorAll('[data-thing-meta-item]')].some(meta => meta.getBoundingClientRect().width > 0))
+    requireContract(row, 'Row negative controls have no row with shown metadata')
+    const title = row.querySelector<HTMLElement>('[data-thing-title]')!, maxWidth = title.style.maxWidth
+    try { title.style.maxWidth = '8px'; await rejectsControl('Title truncates beside shown metadata', () => assertRows(pane)) } finally { title.style.maxWidth = maxWidth }
+    const padding = row.style.paddingBlock
+    try { row.style.paddingBlock = '12px'; await rejectsControl('Resource row wraps beyond one line', () => assertRows(pane)) } finally { row.style.paddingBlock = padding }
+    assertRows(pane)
   }
-  if (item.name === 'R2/busy/520') {
+  if (item.name === 'busy/520') {
     const svg = pane.querySelector<SVGElement>('section[aria-label="Workspace"] button[aria-expanded] svg')!, original = svg.style.transform
     try { svg.style.transform = 'translateX(2px)'; await rejectsControl('Section chevrons do not share the Overview column', () => assertChevron(pane)) } finally { svg.style.transform = original }
     assertChevron(pane)
-  }
-  if (item.name === 'R2/partial/520') {
-    const title = pane.querySelector<HTMLElement>('[data-resource-title-lines="wrap"]')!, originalText = title.textContent, originalWhiteSpace = title.style.whiteSpace, originalClamp = title.style.webkitLineClamp
-    try {
-      title.textContent = 'declared branch\norphan'; title.style.whiteSpace = 'pre'
-      await rejectsControl('Wrapped identity leaves an orphaned final word', () => assertBranch(pane))
-    } finally { title.textContent = originalText; title.style.whiteSpace = originalWhiteSpace }
-    assertBranch(pane)
-    try { title.style.webkitLineClamp = '1'; await rejectsControl('Resource identity is clamped instead of wrapping in full', () => assertIdentity(pane)) } finally { title.style.webkitLineClamp = originalClamp }
-    assertIdentity(pane)
-  }
-  if (item.name === 'R3/partial/520') {
-    const slot = [...pane.querySelectorAll<HTMLElement>('[data-resource-meta]')].find(meta => meta.dataset.resourceMetaFit === 'whole')!, original = slot.dataset.resourceMetaFit
-    requireContract(slot, 'Fit negative control has no whole metadata')
-    try { slot.dataset.resourceMetaFit = 'absent'; await rejectsControl('Metadata is neither whole nor absent', () => assertFit(pane, item)) } finally { slot.dataset.resourceMetaFit = original }
-    assertFit(pane, item)
   }
 }) }
 export const OrientationAnchor: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Host-controlled idle/new/absent Details fixtures isolate first-section anchoring and placement of new-agent orientation inside Overview, with a 4px margin negative control; catalog details has no equivalent presentation-state lifecycle.' } }, args: { cases: widths.map(width => example(`orientation/${width}`, width, 'idle')) }, play: async ({ canvasElement, args }) => {
@@ -533,20 +424,13 @@ export const OrientationAnchor: Story = { parameters: { scenario: { _tag: 'contr
     assertAnchor()
   })
 } }
-const resourceStatesFixture = { scenario: { _tag: 'contract-fixture', reason: 'The fixed R1/R2/R3 by busy/partial/new/unknown/idle/absent comparison retains exact trace/resource availability and compaction/spend assertions plus copy, contrast and containment negative controls.' } } as const
-async function resourceStatesPanes(canvasElement: HTMLElement, cases: readonly Case[]) {
+export const ResourceStates: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'The fixed busy/partial/new/unknown/idle/absent comparison retains exact trace/resource availability and compaction/spend assertions plus copy, contrast and one-line row negative controls.' } }, args: { cases: resourceStateCases, comparison: true }, play: async ({ canvasElement, args }) => {
   await ready(canvasElement)
   const panes = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="details-pane"]')]
-  requireContract(panes.length === cases.length, 'Resource-state comparison omits a production Details state')
-  for (const [index, pane] of panes.entries()) { assertCraft(pane, cases[index]!); if (cases[index]!.state === 'busy') await containmentGate(pane) }
-  return panes
-}
-export const CardResourceStates: Story = { parameters: resourceStatesFixture, args: { cases: resourceStateCases('R1'), comparison: true }, play: async ({ canvasElement, args }) => {
-  const panes = await resourceStatesPanes(canvasElement, args.cases)
+  requireContract(panes.length === args.cases.length, 'Resource-state comparison omits a production Details state')
+  for (const [index, pane] of panes.entries()) { assertCraft(pane, args.cases[index]!); if (args.cases[index]!.state === 'busy') assertRows(pane) }
   await humanControl(panes[0]!); await contrastControl(panes[0]!, args.cases[0]!)
 } }
-export const DenseResourceStates: Story = { parameters: resourceStatesFixture, args: { cases: resourceStateCases('R2'), comparison: true }, play: async ({ canvasElement, args }) => { await resourceStatesPanes(canvasElement, args.cases) } }
-export const CappedResourceStates: Story = { parameters: resourceStatesFixture, args: { cases: resourceStateCases('R3'), comparison: true }, play: async ({ canvasElement, args }) => { await resourceStatesPanes(canvasElement, args.cases) } }
 
 const e3Traces: readonly { name: string; trace: TraceSeries }[] = [
   { name: 'full', trace: full }, { name: 'partial', trace: detailsTraceFixtures.partial }, { name: 'unknown', trace: detailsTraceFixtures.unknown },

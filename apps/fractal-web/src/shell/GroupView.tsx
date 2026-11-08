@@ -6,7 +6,7 @@ import type { ReactNode } from 'react'
 
 import { Menu, MenuItem, MenuPopover, MenuTrigger } from '../ui-compat/components.tsx'
 
-import type { PresentationId, SubjectRendererManifest } from '../resources/contract.ts'
+import type { PresentationId } from './subjectAddress.ts'
 import { HarnessIcon } from '../workbench-kit/brand-icons.tsx'
 import { EditorDropZone, EditorGroup, type GroupSurface } from '../workbench-kit/EditorGroup.tsx'
 import { EditorTabs, type EditorTabItem } from '../workbench-kit/EditorTabs.tsx'
@@ -84,7 +84,6 @@ export interface GroupViewProps {
   readonly dirty: ReadonlySet<string>
   readonly platform: Platform
   readonly renderEditor: (entry: EditorEntry) => ReactNode
-  readonly subjectManifests: ReadonlyArray<SubjectRendererManifest>
 }
 
 /** A pane: its surface strip (or title bar), split actions, drop zone and active editor. */
@@ -98,7 +97,6 @@ export const GroupView = ({
   dirty,
   platform,
   renderEditor,
-  subjectManifests,
 }: GroupViewProps) => {
   const group = state.groups[id] ?? { editors: [], active: null }
   const focused = state.focusedGroup === id
@@ -109,42 +107,8 @@ export const GroupView = ({
     dispatch({ _tag: 'FocusGroup', group: id })
     dispatch(action)
   }
-  const family = active?.input.ref.split('/')[0]
-  const presentations = [
-    ...new Set(
-      subjectManifests
-        .filter((manifest) => manifest.family === family || manifest.family === '*')
-        .flatMap((manifest) => manifest.presentations),
-    ),
-  ]
   const actions = (
     <>
-      {active === undefined ? null : (
-        <MenuTrigger>
-          <IconButton
-            label="Choose presentation"
-            icon={<ContainerIcon name="resources" size={14} />}
-          />
-          <MenuPopover>
-            <Menu
-              aria-label="Subject presentation"
-              selectionMode="single"
-              selectedKeys={[active.input.presentation]}
-              onAction={(key) => {
-                const presentation = presentations.find((candidate) => candidate === key)
-                if (presentation !== undefined)
-                  focusThen({ _tag: 'Open', input: { ref: active.input.ref, presentation } })
-              }}
-            >
-              {presentations.map((presentation) => (
-                <MenuItem key={presentation} id={presentation}>
-                  {presentationTitle(presentation)}
-                </MenuItem>
-              ))}
-            </Menu>
-          </MenuPopover>
-        </MenuTrigger>
-      )}
       {active?.input.ref.startsWith('agent/') ? (
         <>
           <IconButton

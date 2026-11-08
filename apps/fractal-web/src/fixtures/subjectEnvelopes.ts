@@ -6,27 +6,18 @@ import {
   minutesAgo,
   missionByRef,
   operator,
-  pullRequestByRef,
   pullRequests,
   type MustAct as WorldMustAct,
   type WorldCiRun,
   type WorldPullRequest,
-  worldNow,
-} from '../fixtures/world.ts'
-import type { Fence } from './envelope.ts'
-/**
- * Wire-shaped envelope fixtures: one per known schema plus the edge cases resolution must
- * survive. Values follow client-v0 shapes (Models.generated.ts) and schema.md fact lists; every
- * subject, person, timestamp and id is projected from the shared fixture world
- * (`src/fixtures/world.ts`).
- */
-import type { EnvelopeOf } from './families.ts'
+} from './world.ts'
+import type { Fence } from '../data/subjectEnvelope.ts'
+import type { EnvelopeOf } from './subjectEnvelopeSchemas.ts'
 
-/** Pinned story clock: the world clock (2026-10-01T15:30:00Z). */
-export const fixtureNow = worldNow
+/** Local envelope fixtures projected from the shared fixture world. */
 
 const pick = <T>({ value, what }: { readonly value: T | undefined; readonly what: string }): T => {
-  if (value === undefined) throw new Error(`resources fixtures: world has no ${what}`)
+  if (value === undefined) throw new Error(`subject envelope fixtures: world has no ${what}`)
   return value
 }
 
@@ -38,11 +29,6 @@ const shellAgent = pick({
   value: agentByRef('agent/build-host-a/workbench-shell'),
   what: 'agent/build-host-a/workbench-shell',
 })
-const pull = pick({
-  value: pullRequestByRef('resource/github/acme/webfractal/pull-request/214'),
-  what: 'acme/webfractal#214',
-})
-const run = pick({ value: ciRuns[0], what: 'ciRuns[0]' })
 const repoRef = (repo: string) => `resource/github/${repo}`
 
 const host = `host/${gatewayHost}`
@@ -362,104 +348,3 @@ export const pullRequestEnvelopes = pullRequests.map(pullRequestEnvelopeFor)
 /** Every world CI run as an envelope, in world order. */
 export const ciRunEnvelopes = ciRuns.map(ciRunEnvelopeFor)
 
-/** The world's `acme/webfractal#214` pull request envelope. */
-export const pullRequestEnvelope = pullRequestEnvelopeFor(pull)
-/** The world's first CI run envelope. */
-export const ciRunEnvelope = ciRunEnvelopeFor(run)
-
-/** One labelled raw wire value for registry stories. */
-export interface Case {
-  /** Short quotable id for reviews, e.g. `E3`. */
-  readonly id: string
-  readonly label: string
-  readonly value: unknown
-}
-
-/** K1–K6: one envelope per known schema id. */
-export const knownCases: readonly Case[] = [
-  { id: 'K1', label: 'mission', value: missionEnvelope },
-  { id: 'K2', label: 'agent (no wf renderer)', value: agentEnvelope },
-  { id: 'K3', label: 'pty', value: ptyEnvelope },
-  { id: 'K4', label: 'attention (no wf renderer)', value: attentionEnvelope },
-  { id: 'K5', label: 'resource · vcs.pull-request', value: pullRequestEnvelope },
-  { id: 'K6', label: 'resource · ci.run (family level)', value: ciRunEnvelope },
-]
-
-/** E1–E6: what the fallback chain must survive (unknown family, custom kind, future major, invalid, partial, malformed). */
-export const edgeCases: readonly Case[] = [
-  {
-    id: 'E1',
-    label: 'unknown family',
-    value: {
-      schema: 'st3.planning-session@1',
-      ref: 'planning-session/01JDQ80A',
-      family: 'planning-session',
-      revision: 'r-1',
-      observed_at: '2026-10-01T15:10:00Z',
-      provenance: projection,
-      live: null,
-      actions: [],
-      data: {
-        title: 'Q4 agent-fleet planning',
-        state: 'open',
-        participants: [operator.ref, 'person/reviewer'],
-      },
-    },
-  },
-  {
-    id: 'E2',
-    label: 'custom resource kind',
-    value: {
-      schema: 'st3.resource:custom.acme.deploy@1',
-      ref: 'resource/acme/deploy/prod-2026-10-01',
-      family: 'resource',
-      revision: 'r-3',
-      observed_at: '2026-10-01T15:00:00Z',
-      provenance: observer('custom.acme.deploy'),
-      live: null,
-      actions: [],
-      data: {
-        name: 'prod deploy',
-        status: 'healthy',
-        url: 'https://deploy.acme.dev/prod',
-        replicas: 6,
-      },
-    },
-  },
-  {
-    id: 'E3',
-    label: 'future major (mission@2)',
-    value: {
-      ...missionEnvelope,
-      schema: 'st3.mission@2',
-      data: { ...missionEnvelope.data, lanes: [] },
-    },
-  },
-  {
-    id: 'E4',
-    label: 'invalid data (mission state "paused")',
-    value: {
-      ...missionEnvelope,
-      ref: 'mission/platform/nightly-evergreen',
-      data: { ...missionEnvelope.data, title: 'platform: nightly evergreen', state: 'paused' },
-    },
-  },
-  {
-    id: 'E5',
-    label: 'partial (checks pending)',
-    value: {
-      ...pullRequestEnvelope,
-      partial: { omitted: ['checks', 'reviews'], reason: 'pending' },
-      data: Object.fromEntries(
-        Object.entries(pullRequestEnvelope.data).filter(
-          ([key]) => key !== 'checks' && key !== 'reviews',
-        ),
-      ),
-    },
-  },
-  {
-    id: 'E6',
-    label: 'malformed envelope (no ref)',
-    value: { schema: 'st3.mission@1', family: 'mission', data: { title: 'orphan' } },
-  },
-]

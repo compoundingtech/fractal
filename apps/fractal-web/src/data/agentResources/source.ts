@@ -4,8 +4,8 @@ import { Effect, Option, Queue, Schedule, Schema, Stream } from 'effect'
 import * as AsyncResult from 'effect/reactivity/AsyncResult'
 import * as Atom from 'effect/reactivity/Atom'
 
-import type { Feed } from '../../data/source.ts'
-import { clientReadAuthorization, observed, unavailable, waiting } from '../../data/source.ts'
+import type { Feed } from '../source.ts'
+import { clientReadAuthorization, observed, unavailable, waiting } from '../source.ts'
 import { resourceTitle, sortResources, type ResourcePage } from './model.ts'
 
 /** Observed agent resources, paging controls and cached file-subject lookup. */

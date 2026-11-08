@@ -4,7 +4,7 @@
  */
 import { Schema } from 'effect'
 
-import { SubjectAddress } from '../resources/contract.ts'
+import { SubjectAddress } from '../shell/subjectAddress.ts'
 
 const decodeAddress = Schema.decodeUnknownSync(SubjectAddress)
 const encodedAgentDetail = /^\/v1\/client\/agents\/([^/]+)$/u

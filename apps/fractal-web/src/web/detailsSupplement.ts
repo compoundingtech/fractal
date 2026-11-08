@@ -1,6 +1,13 @@
-import type { DetailsOverview, TraceSeries, TraceCoverage } from '@fractal/ui/assistant-ui'
+import type { DetailsOverview, DetailsSection, TraceSeries, TraceCoverage } from '@fractal/ui/assistant-ui'
 import type { Feed } from '../data/source.ts'
 import type { DetailsSupplement } from '../extensions/contract.ts'
+
+/** A contributed section replaces its native counterpart once, including pending and failed reads. */
+export const mergePanelSections = (native: readonly DetailsSection[], contributed: readonly DetailsSection[]): readonly DetailsSection[] => {
+  const sections = new Map(native.map(section => [section.title, section]))
+  for (const section of contributed) sections.set(section.title, section)
+  return [...sections.values()]
+}
 
 const harnessName = (harness: string | undefined): string =>
   harness === 'claude' ? 'Claude Code' : harness === 'codex' ? 'Codex' : harness ?? 'this harness'
@@ -13,14 +20,20 @@ export interface DetailsAccountingNote {
 export const accountingNoteSummary = 'Agent spend and total spend come from separate reports and may not add up.'
 export const spendWindowReason = 'Spend covers this time window, not only this agent.'
 
+export interface SupplementedDetails {
+  readonly trace: TraceSeries
+  readonly overview: DetailsOverview
+  readonly accountingNote?: DetailsAccountingNote
+}
+
 /** Merge only a proven matching root. Native money/tokens and provider windows remain independent. */
 export const detailsWithSupplement = ({ trace, overview, supplement, harness, nativeSessionId }: {
   readonly trace: TraceSeries
   readonly overview: DetailsOverview
-  readonly supplement: Feed<DetailsSupplement>
+  readonly supplement?: Feed<DetailsSupplement>
   readonly harness?: string
   readonly nativeSessionId?: string
-}): { readonly trace: TraceSeries; readonly overview: DetailsOverview; readonly accountingNote?: DetailsAccountingNote } => {
+}): SupplementedDetails => {
   if (harness !== 'omp') {
     const coverage: TraceCoverage = harness === undefined
       ? { _tag: 'Unavailable', reason: 'not-attributed' }
@@ -40,7 +53,7 @@ export const detailsWithSupplement = ({ trace, overview, supplement, harness, na
       },
     }
   }
-  if (supplement._tag !== 'Observed' || nativeSessionId === undefined ||
+  if (supplement?._tag !== 'Observed' || nativeSessionId === undefined ||
     trace.nativeSessionId._tag !== 'Known' || trace.nativeSessionId.value !== nativeSessionId ||
     supplement.value.nativeSessionId !== nativeSessionId) return { trace, overview }
   const value = supplement.value

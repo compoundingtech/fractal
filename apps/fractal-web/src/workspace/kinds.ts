@@ -1,12 +1,14 @@
 import * as React from 'react'
 import type { UxTelemetry } from '../telemetry/ux.ts'
-import { makeKindRegistry, type KindPolicy } from './registry.ts'
+import { makeKindRegistry, type KindPolicy, type KindRegistry } from './registry.ts'
 import type { KindDescriptor, PresentationWorld } from './presentation.ts'
 import { AgentAside, type AsidePanelProps } from '../web/AgentAside.tsx'
 import { MissionAside } from '../missions/MissionAside.tsx'
 import type { Subject, SubjectKind } from './subject.ts'
 import { githubContributions, GithubTab } from '../plugins/github/index.ts'
 import { AgentSurface, AlertSurface, DeclarationSurface, DocumentSurface, InboxSurface, MissionsSurface, ResourceSurface, UnsupportedSurface, UsageSurface } from './surfaces.tsx'
+import { panelSectionContributions } from '../extensions/build.ts'
+import type { AgentPanelSectionContribution, AgentPanelSectionView } from '../extensions/contract.ts'
 
 /** What a kind renders and how it hides. Its data requirements live beside it in `registry.ts`. */
 export type HiddenStrategy =
@@ -34,8 +36,6 @@ export interface KindSurface {
   readonly Surface: (props: SurfaceProps) => React.ReactNode
   readonly hidden: HiddenStrategy
   readonly scrollMemory: boolean
-  /** How a row naming one of this kind's refs presents it, where a kind has its own. */
-  readonly Row?: (props: { readonly ref: string }) => React.ReactNode
   /** The hover card for one of this kind's refs. */
   readonly Card?: (props: { readonly ref: string }) => React.ReactNode
   /** The pane's side panel for this kind: its own tabs and sections. */
@@ -81,8 +81,12 @@ const githubSurface: KindSurface = {
   scrollMemory: true,
 }
 
-/** Contributed kinds join here; the core never imports a plugin's internals. */
-export const workspaceKinds = makeKindRegistry<KindSurface>({ views, contributions: githubContributions(() => githubSurface) })
+/** One composition boundary for production and injected panel readers. */
+export const makeWorkspaceKinds = (sections: readonly AgentPanelSectionContribution[]): KindRegistry<KindSurface, AgentPanelSectionView> =>
+  makeKindRegistry<KindSurface, AgentPanelSectionView>({ views, contributions: githubContributions(() => githubSurface), sections })
+
+/** Contributed kinds and panel sections share the same resolved-kind targeting. */
+export const workspaceKinds = makeWorkspaceKinds(panelSectionContributions)
 
 export const policyOf = (subject: Subject): KindPolicy => workspaceKinds.kindOf(subject).policy
 

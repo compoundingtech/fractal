@@ -9,7 +9,7 @@ import { incrDebugRuntime, RenderProfiler } from '../telemetry/meters.tsx'
 import type { UnobservedFeed } from '../data/unobservedFeed.ts'
 import { useDataSource, useFeedInterest, useGrants, useTerminal, useTerminalConnected } from '../data/react.tsx'
 import { credentialExpiredMessage, credentialNotice } from '../data/source.ts'
-import type { NativeSubjectProps } from '../resources/react.tsx'
+import type { SubjectAddress } from '../shell/subjectAddress.ts'
 import { DomTerminal } from './DomTerminal.tsx'
 import { unavailableTerminalHistory } from './historySource.ts'
 import { defaultTerminalPalette } from './palette.ts'
@@ -69,7 +69,10 @@ interface PinnedTarget {
  * explicit resize control. The projected feed is followed unless a live ATTACH owns the terminal.
  */
 export const TerminalDetail = React.memo(
-  ({ address, visibility, keepConnected = false }: NativeSubjectProps & {
+  ({ address, visibility, keepConnected = false }: {
+    readonly address: SubjectAddress
+    /** Hidden retained tabs must not start visible-only readers or resize observations. */
+    readonly visibility: 'visible' | 'hidden'
     /** A hidden pane keeps its raw session and screen for an instant reveal, but takes no input and renders no new frames. */
     readonly keepConnected?: boolean
   }) => {

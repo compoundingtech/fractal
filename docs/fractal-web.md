@@ -3,6 +3,45 @@
 Run the commands below from the repository root after a frozen workspace install.
 The [development guide](development.md) covers shared build and contribution tools.
 
+## Resource faces and agent panels
+
+Each kind supplies one `ThingFace` through its required `present` descriptor.
+The kit draws rows, inline chips, sections and fact rows from that face.
+Kinds retain their own tab body and passive hover-card body. The unused row
+override and the renderer registry under `src/resources/` are removed.
+Agent resource reads live in `src/data/agentResources/`; retained subject data
+lives in `src/data/subjectEnvelope.ts`. These are data contracts, not a second
+presentation registry.
+
+Details contains Overview, Context, Spend, Workspace and Attention. Resources
+contains To-dos, Missions, Terminals, Subagents, Pull requests, Issues, CI runs,
+Reviews and Declared bindings, in that order. Empty sections are hidden.
+Unavailable categories are named once. Within a kind, requests and failures
+come first, then active work, then the newest reported event.
+
+A row uses one line and gives its title priority. As space decreases, it drops
+the status word, spoken identifier and age, in that order. A specific request
+or failure cause stays visible and truncates instead of disappearing.
+Only pull request, issue and CI run numbers appear beside titles.
+Missions use the last update; terminals and subagents use their start;
+GitHub items use their last update; CI uses its finish, or start while running.
+A stale age reads “seen …” and retains its amber or red cause.
+Read-only observations do not show amber requests.
+
+Subagents, workspace and worktree observations, and declared bindings without
+durable refs are facts. They use the same anatomy, but have no click, hover fill,
+hover card or drag behavior. This is the shared row vocabulary for the web
+client. The terminal client adopts it in its own slice; this change does not
+claim terminal-client parity.
+
+Build-time extensions contribute ordered agent panel sections through
+`panelSectionContributions`, using the registry's `SectionContribution` contract.
+This replaces both `useDetailsSections` and `useDetailsSupplement`; there is no
+runtime plugin loader or compatibility hook. A contribution that supplies
+descendant accounting must preserve the native-session identity checks.
+Plugins may add actions only inside their own tab, and each write requires an
+audited daemon route. Rows have no plugin action menus and hover cards are passive.
+
 ## fractal-web Content Security Policy
 
 The app server and Vite's development/preview servers set an enforcing

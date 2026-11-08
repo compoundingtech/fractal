@@ -56,8 +56,20 @@ export interface ResolvedKind<View> {
   readonly view: View
 }
 
-export interface KindRegistry<View> {
+export type PanelTab = 'details' | 'resources' | 'changes'
+
+/** A host supplies the view type; contributions never depend on React or the panel's data hooks. */
+export interface SectionContribution<TView> {
+  readonly id: string
+  readonly targetKind: string
+  readonly tab: PanelTab
+  readonly order: number
+  readonly view: TView
+}
+
+export interface KindRegistry<View, TSectionView = never> {
   readonly kindOf: (subject: Subject) => ResolvedKind<View>
+  readonly sectionsFor: (subject: Subject, tab: PanelTab) => readonly SectionContribution<TSectionView>[]
 }
 
 const fleetFeeds: readonly DataResource[] = [{ _tag: 'Shared', feed: 'missions' }, { _tag: 'Shared', feed: 'agents' }, { _tag: 'Shared', feed: 'attention' }]
@@ -100,10 +112,11 @@ export class TabKindClaimConflict extends Data.TaggedError('TabKindClaimConflict
  * Claims never resolve by order. The contribution list is static, so an overlap on a declared example
  * fails when the registry is built; a ref two kinds still both claim gets the generic resource kind.
  */
-export const makeKindRegistry = <View>({ views, contributions = [] }: {
+export const makeKindRegistry = <View, TSectionView = never>({ views, contributions = [], sections = [] }: {
   readonly views: Readonly<Record<SubjectKind, View>>
   readonly contributions?: readonly KindContribution<View>[]
-}): KindRegistry<View> => {
+  readonly sections?: readonly SectionContribution<TSectionView>[]
+}): KindRegistry<View, TSectionView> => {
   for (const contribution of contributions) {
     for (const ref of contribution.examples) {
       const claimants = contributions.filter(other => other.claims(ref)).map(other => other.id)
@@ -112,13 +125,19 @@ export const makeKindRegistry = <View>({ views, contributions = [] }: {
       }
     }
   }
+  const kindOf = (subject: Subject): ResolvedKind<View> => {
+    if (subject._tag === 'Resource') {
+      const claimed = contributions.filter(contribution => contribution.claims(subject.ref))
+      if (claimed.length === 1) return claimed[0]!
+    }
+    return { id: subject._tag, policy: corePolicies[subject._tag], present: presentCore, view: views[subject._tag] }
+  }
+  const ordered = sections.toSorted((left, right) => left.order - right.order || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0))
   return {
-    kindOf: subject => {
-      if (subject._tag === 'Resource') {
-        const claimed = contributions.filter(contribution => contribution.claims(subject.ref))
-        if (claimed.length === 1) return claimed[0]!
-      }
-      return { id: subject._tag, policy: corePolicies[subject._tag], present: presentCore, view: views[subject._tag] }
+    kindOf,
+    sectionsFor: (subject, tab) => {
+      const target = kindOf(subject).id
+      return ordered.filter(section => section.targetKind === target && section.tab === tab)
     },
   }
 }

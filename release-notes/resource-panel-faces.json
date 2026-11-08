@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Shared resource faces and agent panel sections",
+  "replay": {"status": "none", "detail": "This change affects web presentation only and does not trigger replay."},
+  "schema": {"status": "none", "detail": "No database schema or stored data changes."},
+  "rules": {"status": "none", "detail": "No checkpoint rule or digest changes."},
+  "compatibility": {"status": "changed", "detail": "Build-time web extensions use ordered agent panel section contributions instead of the two details hooks. The unused renderer extension registry is removed. Private web compositions must migrate their contributions when rebuilding. Daemon routes and wire data are unchanged."},
+  "downtime": {"status": "none", "detail": "No additional service interruption is introduced."},
+  "manual": {"status": "changed", "detail": "Web composition authors must replace useDetailsSections and useDetailsSupplement with panelSectionContributions. Existing web users need no data migration or settings change."},
+  "recovery": {"status": "none", "detail": "No state conversion or runtime recovery change. A prior web build can use the same daemon data."}
+}

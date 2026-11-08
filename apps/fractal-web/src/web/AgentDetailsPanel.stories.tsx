@@ -11,7 +11,7 @@ import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed, type DataSource } from '../data/source.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
-import type { ResourcePage } from '../resources/agent/model.ts'
+import type { ResourcePage } from '../data/agentResources/model.ts'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { AgentDetailsPanel, type InspectorView } from './AgentDetailsPanel.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
@@ -22,16 +22,16 @@ const resource = (id: string, kind: string, facts: Record<string, unknown>) =>
 const page: ResourcePage = {
   nextCursor: null,
   items: [
-    resource('resource/github/acme/garden/pull-request/5707', 'vcs.pull-request', { title: 'Wait for exec in the masked-identity fixture', state: 'open' }),
-    resource('resource/ci/run/88', 'ci.run', { name: 'Linux tests', status: 'in_progress' }),
-    resource('resource/github/acme/garden/issue/9', 'vcs.issue', { title: 'Flaky backup export', state: 'closed' }),
+    resource('resource/github/acme/garden/pull-request/5707', 'vcs.pull-request', { title: 'Wait for exec in the masked-identity fixture', state: 'open', number: 5707, updated_at: '2026-10-04T11:56:00.000Z', checks: 'failing' }),
+    resource('resource/ci/run/88', 'ci.run', { name: 'Linux tests', status: 'in_progress', number: 88, started_at: '2026-10-04T11:58:00.000Z' }),
+    resource('resource/github/acme/garden/issue/9', 'vcs.issue', { title: 'Flaky backup export', state: 'closed', number: 9, updated_at: '2026-10-04T11:35:00.000Z' }),
     resource('resource/custom/board/3', 'custom.acme.board', {}),
   ],
 }
 
-type Args = { readonly scheme: 'dark' | 'light'; readonly view: InspectorView; readonly onOpen: (uri: string, split: boolean) => void }
+type Args = { readonly scheme: 'dark' | 'light'; readonly view: InspectorView; readonly width: 280 | 360; readonly onOpen: (uri: string, split: boolean) => void }
 
-const Surface = ({ scheme, view, onOpen }: Args) => {
+const Surface = ({ scheme, view, width, onOpen }: Args) => {
   const [registry] = React.useState(() => AtomRegistry.make())
   const [source] = React.useState<DataSource>(() => {
     const base = fixtureSource({ world: fixtureProjections })
@@ -42,7 +42,7 @@ const Surface = ({ scheme, view, onOpen }: Args) => {
   return <DataSourceProvider source={source} registry={registry}>
     <main data-scheme={scheme} {...stylex.props(styles.root, liveLegacyTheme, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
       <header {...stylex.props(styles.header)}><ConversationHeaderActions agentRef={agentRef} /></header>
-      <div {...stylex.props(styles.panel)}>
+      <div style={{ width }} {...stylex.props(styles.panel)}>
         <AgentDetailsPanel agentRef={agentRef} width="dock" scheme={scheme} view={shown} onViewChange={setShown} onClose={() => undefined} onOpen={onOpen} />
       </div>
     </main>
@@ -54,7 +54,7 @@ const meta = {
   title: 'Fractal/App/AgentDetailsPanel',
   component: AgentDetailsPanel,
   render: Surface,
-  args: { scheme: 'dark', view: 'resources', onOpen: fn() },
+  args: { scheme: 'dark', view: 'resources', width: 360, onOpen: fn() },
   argTypes: { onOpen: { table: { disable: true } } },
   parameters: { layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'Made-up observed resources over the fixture roster pin the three panel tabs, their count pills, whole-row resources and the header overflow.' } },
 } satisfies Meta<Args & React.ComponentProps<typeof AgentDetailsPanel>>
@@ -67,6 +67,15 @@ export const scenarioExemptions: readonly string[] = [
   'OverflowMenu:contract-fixture',
   'Resources:contract-fixture',
   'ResourcesLight:contract-fixture',
+  'Details280Dark:contract-fixture',
+  'Details280Light:contract-fixture',
+  'Details360Dark:contract-fixture',
+  'Details360Light:contract-fixture',
+  'Resources280Dark:contract-fixture',
+  'Resources280Light:contract-fixture',
+  'Resources360Dark:contract-fixture',
+  'Resources360Light:contract-fixture',
+  'AllStates:contract-fixture',
 ]
 
 /** Whole rows open; no raw types, no Open button, no paperclip. */
@@ -74,7 +83,7 @@ export const Resources: Story = {
   play: async ({ canvasElement, args }) => {
     const canvas = within(canvasElement)
     await expect(canvas.getByRole('tab', { name: /^Resources, \d+$/ })).toBeVisible()
-    const row = canvas.getByRole('button', { name: /Wait for exec/ })
+    const row = canvas.getByRole('link', { name: /Wait for exec/ })
     await userEvent.click(row)
     await expect(args.onOpen).toHaveBeenCalledWith('resource/github/acme/garden/pull-request/5707', false)
     await expect(canvasElement.textContent).not.toContain('vcs.pull-request')
@@ -94,8 +103,35 @@ export const OverflowMenu: Story = {
   },
 }
 
+const assertSplit = async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
+  const canvas = within(canvasElement)
+  const selected = canvas.getByRole('tab', { selected: true })
+  if (selected.textContent?.startsWith('Details')) {
+    await expect(canvas.queryByRole('region', { name: 'Missions' })).toBeNull()
+    await expect(canvas.queryByText('Wait for exec in the masked-identity fixture')).toBeNull()
+  } else {
+    await expect(canvas.getByRole('heading', { name: 'Pull requests' })).toBeVisible()
+    await expect(canvas.getByRole('heading', { name: 'Issues' })).toBeVisible()
+    await expect(canvas.getByRole('heading', { name: 'CI runs' })).toBeVisible()
+    await expect(canvas.getByText('checks failing')).toBeVisible()
+  }
+  const panel = canvas.getByTestId('agent-details-panel')
+  await expect(panel.scrollWidth).toBeLessThanOrEqual(panel.clientWidth)
+}
+export const Details280Dark: Story = { args: { view: 'details', width: 280 }, play: assertSplit }
+export const Details280Light: Story = { args: { view: 'details', width: 280, scheme: 'light' }, play: assertSplit }
+export const Details360Dark: Story = { args: { view: 'details', width: 360 }, play: assertSplit }
+export const Details360Light: Story = { args: { view: 'details', width: 360, scheme: 'light' }, play: assertSplit }
+export const Resources280Dark: Story = { args: { width: 280 }, play: assertSplit }
+export const Resources280Light: Story = { args: { width: 280, scheme: 'light' }, play: assertSplit }
+export const Resources360Dark: Story = { args: { width: 360 }, play: assertSplit }
+export const Resources360Light: Story = { args: { width: 360, scheme: 'light' }, play: assertSplit }
+export const AllStates: Story = {
+  render: args => <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>{(['dark', 'light'] as const).flatMap(scheme => ([280, 360] as const).flatMap(width => (['details', 'resources'] as const).map(view => <Surface key={`${scheme}-${width}-${view}`} {...args} scheme={scheme} width={width} view={view} />)))}</div>,
+}
+
 const styles = stylex.create({
   root: { display: 'flex', flexDirection: 'column', height: '100vh', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans },
   header: { display: 'flex', justifyContent: 'flex-end', padding: 8 },
-  panel: { display: 'flex', width: 420, maxWidth: '100%', flexGrow: 1, minHeight: 0, alignSelf: 'flex-end' },
+  panel: { display: 'flex', maxWidth: '100%', flexGrow: 1, minHeight: 0, alignSelf: 'flex-end' },
 })

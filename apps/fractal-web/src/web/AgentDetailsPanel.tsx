@@ -13,30 +13,28 @@ import { CountPill } from '../../../../packages/fractal-ui/src/assistant-ui/side
 import { useClockDeadline, useConversation, useDataSource, useGatewaySync, useNowSnapshot } from '../data/react.tsx'
 import { syncLineNextChange } from '@fractal/ui/assistant-ui/sync-status'
 import { earliestChange, formatRelative, nextRelativeChange } from '@fractal/ui/human-time/format'
-import { useDetailsSections, useDetailsSupplement } from '../extensions/build.ts'
-import type { UseDetailsSupplement } from '../extensions/contract.ts'
+import { panelSectionContributions } from '../extensions/build.ts'
+import type { AgentPanelSectionContribution, AgentPanelSectionData, AgentPanelSectionQuery, DetailsSupplement } from '../extensions/contract.ts'
 import { credentialExpiredMessage, credentialNotice, type Feed } from '../data/source.ts'
-import { useNativeDetails } from './useNativeDetails.ts'
-import { detailsWithSupplement } from './detailsSupplement.ts'
+import { useNativeDetails, type NativeDetailsObservation } from './useNativeDetails.ts'
+import { detailsWithSupplement, mergePanelSections, type SupplementedDetails } from './detailsSupplement.ts'
+import { traceSubagentSection } from '../../../../packages/fractal-ui/src/assistant-ui/details/DetailsResources.tsx'
 import type { OpenOperation, UxTelemetry } from '../telemetry/ux.ts'
 import { AgentResourcesView, retainedResourceAtoms, useResourcesCount } from './AgentResourcesPanel.tsx'
 import { capturedChanges } from './capturedChanges.ts'
 import { ChangesInspector } from './ChangesInspector.tsx'
-import { AgentMissions } from './AgentMissions.tsx'
 import { markStart } from './perfMarks.ts'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
+import { makeWorkspaceKinds, workspaceKinds } from '../workspace/kinds.ts'
 
 /** Deployed defaults, individually replaceable without ratifying exploration alternatives. */
 export const liveDetailsVariants: DetailsVariants = {
-  overview: 'O2', context: 'C3', spend: 'S2', resources: 'R2', empty: 'E3',
+  overview: 'O2', context: 'C3', spend: 'S2', empty: 'E3',
 }
 export type InspectorView = 'details' | 'changes' | 'resources'
 
-/**
- * Sections shown elsewhere: Reviews and Declared bindings with the agent's resources, Missions as the shared mission
- * rows. The queue read behind the reported Missions section keeps its own loading and Try again until it settles.
- */
-const notFacts: ReadonlySet<string> = new Set(['Reviews', 'Declared bindings', 'Missions'])
+/** Details is about the agent, never the things it works with (Resources). */
+const aboutAgent: Readonly<Record<string, true>> = { Workspace: true, Attention: true }
 
 export interface AgentDetailsPanelProps {
   readonly agentRef: string
@@ -47,8 +45,8 @@ export interface AgentDetailsPanelProps {
   readonly onClose: () => void
   readonly onOpen: (uri: string, split: boolean) => void
   readonly variants?: DetailsVariants
-  /** The composition's subagent-activity feed; defaults to the build-time extension. Fixed for the panel's lifetime. */
-  readonly detailsSupplement?: UseDetailsSupplement
+  /** Compiled-in panel readers; each reader has its own keyed hook boundary. */
+  readonly sectionContributions?: readonly AgentPanelSectionContribution[]
   /** The shown tab when the host owns it; otherwise the panel uses the global last-used tab. */
   readonly view?: InspectorView
   readonly onViewChange?: (view: InspectorView) => void
@@ -61,7 +59,7 @@ export interface AgentDetailsPanelProps {
  * One fixed row: Details, Changes and Resources tabs, Details' status/section controls, then the dock's close.
  * In the phone sheet (`fill`) the sheet header owns the only close. Hidden tabs unmount, releasing reader demand.
  */
-export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants = liveDetailsVariants, detailsSupplement = useDetailsSupplement, view, onViewChange, onSelectedViewChange, ux }: AgentDetailsPanelProps) {
+export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants = liveDetailsVariants, sectionContributions = panelSectionContributions, view, onViewChange, onSelectedViewChange, ux }: AgentDetailsPanelProps) {
   const narrow = React.useContext(NarrowLayoutContext)
   const source = useDataSource()
   const registry = React.useContext(RegistryContext)
@@ -101,11 +99,21 @@ export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants =
       </div>
       <TabPanel id="details" {...stylex.props(styles.panel)}>
         <PaneHeaderAccessoryHost value={accessoryHost ?? undefined}>
-          <NativeDetailsPane agentRef={agentRef} variants={variants} intent={intent} onIntentChange={setIntent} onOpen={onOpen} useSupplement={detailsSupplement} />
+          <AgentPanelData agentRef={agentRef} contributions={sectionContributions} tab="details">{(native, contributions) =>
+            <NativeDetailsPane native={native} contributions={contributions} variants={variants} intent={intent} onIntentChange={setIntent} onOpen={onOpen} />
+          }</AgentPanelData>
         </PaneHeaderAccessoryHost>
       </TabPanel>
       <TabPanel id="changes" {...stylex.props(styles.panel)}><ChangesInspector agentRef={agentRef} width={width} /></TabPanel>
-      <TabPanel id="resources" {...stylex.props(styles.panel)}><AgentResourcesView agentRef={agentRef} onOpen={onOpen} {...(opening?.operation === undefined ? {} : { opening: opening.operation })} {...(opening === undefined ? {} : { cache: opening.cache })} /></TabPanel>
+      <TabPanel id="resources" {...stylex.props(styles.panel)}>
+        <AgentPanelData agentRef={agentRef} contributions={sectionContributions} tab="resources">{(native, contributions) => {
+          const supplemented = projectContributions(native, contributions)
+          const sections = mergePanelSections([], contributions.flatMap(data => data.sections))
+          const contributedSections = contributions.some(data => data.supplement !== undefined)
+            ? mergePanelSections(sections, [traceSubagentSection(supplemented.trace)]) : sections
+          return <AgentResourcesView agentRef={agentRef} onOpen={onOpen} contributedSections={contributedSections} {...(opening?.operation === undefined ? {} : { opening: opening.operation })} {...(opening === undefined ? {} : { cache: opening.cache })} />
+        }}</AgentPanelData>
+      </TabPanel>
     </Tabs>
   </aside>
 }
@@ -114,6 +122,61 @@ export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants =
 const useChangesCount = (agentRef: string): number => {
   const feed = useConversation(agentRef)
   return React.useMemo(() => feed._tag === 'Observed' ? capturedChanges(feed.value).length : 0, [feed])
+}
+
+type ContributionContent = (native: NativeDetailsObservation, data: readonly AgentPanelSectionData[]) => React.ReactNode
+
+const projectContributions = (native: NativeDetailsObservation, contributions: readonly AgentPanelSectionData[]): SupplementedDetails => {
+  const scopedRoot = native.trace.nativeSessionId._tag === 'Known' ? native.trace.nativeSessionId.value : undefined
+  return contributions.reduce<SupplementedDetails>((current, contribution) => {
+    if (contribution.supplement === undefined) return current
+    const next = detailsWithSupplement({
+      trace: current.trace, overview: current.overview, supplement: contribution.supplement,
+      ...(native.harness === undefined ? {} : { harness: native.harness }),
+      ...(scopedRoot === undefined ? {} : { nativeSessionId: scopedRoot }),
+    })
+    return { ...current, ...next }
+  }, detailsWithSupplement({ trace: native.trace, overview: native.overview, ...(native.harness === undefined ? {} : { harness: native.harness }) }))
+}
+
+/** Readers are components, not a variable-length loop of hooks in the panel. */
+const ContributionReader = ({ contribution, query, children }: {
+  readonly contribution: AgentPanelSectionContribution
+  readonly query: AgentPanelSectionQuery
+  readonly children: (data: AgentPanelSectionData) => React.ReactNode
+}) => children(contribution.view.useData(query))
+
+const ContributionReaders = ({ contributions, query, data, children }: {
+  readonly contributions: readonly AgentPanelSectionContribution[]
+  readonly query: AgentPanelSectionQuery
+  readonly data: readonly AgentPanelSectionData[]
+  readonly children: (data: readonly AgentPanelSectionData[]) => React.ReactNode
+}): React.ReactNode => {
+  const [contribution, ...remaining] = contributions
+  return contribution === undefined ? children(data) : <ContributionReader key={contribution.id} contribution={contribution} query={query}>{value =>
+    <ContributionReaders contributions={remaining} query={query} data={[...data, value]}>{children}</ContributionReaders>
+  }</ContributionReader>
+}
+
+const AgentPanelData = ({ agentRef, contributions, tab, children }: {
+  readonly agentRef: string
+  readonly contributions: readonly AgentPanelSectionContribution[]
+  readonly tab: 'details' | 'resources'
+  readonly children: ContributionContent
+}) => {
+  const native = useNativeDetails({ agentRef })
+  const scopedRoot = native.trace.nativeSessionId._tag === 'Known' ? native.trace.nativeSessionId.value : undefined
+  const query: AgentPanelSectionQuery = {
+    agentRef,
+    ...(scopedRoot === undefined ? {} : { nativeSessionId: scopedRoot }),
+    canRefresh: native.nativeSessionId !== undefined,
+    nativeRootPending: native.nativeRootPending,
+    ...(native.incarnationId === undefined ? {} : { incarnationId: native.incarnationId }),
+    ...(native.host === undefined ? {} : { host: native.host }),
+    ...(native.harness === undefined ? {} : { harness: native.harness }),
+  }
+  const kinds = React.useMemo(() => contributions === panelSectionContributions ? workspaceKinds : makeWorkspaceKinds(contributions), [contributions])
+  return <ContributionReaders contributions={kinds.sectionsFor({ _tag: 'Conversation', agent: agentRef }, tab)} query={query} data={[]}>{data => children(native, data)}</ContributionReaders>
 }
 
 /** Plain reasons for a refused or failed subagent-activity read; the source's own detail is diagnostic only. */
@@ -131,36 +194,20 @@ const supplementStaleReason: Record<Extract<Feed<unknown>, { _tag: 'Unavailable'
   failed: "The latest update couldn't be loaded, so earlier activity is shown.",
 }
 
-function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen, useSupplement }: {
-  readonly agentRef: string
+function NativeDetailsPane({ native, contributions, variants, intent, onIntentChange, onOpen }: {
+  readonly native: NativeDetailsObservation
+  readonly contributions: readonly AgentPanelSectionData[]
   readonly variants: DetailsVariants
   readonly intent: DetailsLayoutIntent
   readonly onIntentChange: (intent: DetailsLayoutIntent) => void
   readonly onOpen: (uri: string, split: boolean) => void
-  readonly useSupplement: UseDetailsSupplement
 }) {
-  const narrow = React.useContext(NarrowLayoutContext)
-  const native = useNativeDetails({ agentRef })
-  const protectedSections = useDetailsSections({ agentRef })
-  const suppliedSections = native.sections.filter(section => !notFacts.has(section.title) || (section.title === 'Missions' && (section.failure !== undefined || section.pending === true))).map(section => protectedSections.find(contribution => contribution.title === section.title) ?? section)
+  const suppliedSections = mergePanelSections(native.sections.filter(section => aboutAgent[section.title]), contributions.flatMap(data => data.sections))
   const now = useNowSnapshot()
   const [requestedAt] = React.useState(now)
   const gateway = useGatewaySync()
-  const scopedRoot = native.trace.nativeSessionId._tag === 'Known' ? native.trace.nativeSessionId.value : undefined
-  const supplement = useSupplement({
-    agentRef,
-    ...(scopedRoot === undefined ? {} : { nativeSessionId: scopedRoot }),
-    canRefresh: native.nativeSessionId !== undefined,
-    nativeRootPending: native.nativeRootPending,
-    ...(native.incarnationId === undefined ? {} : { incarnationId: native.incarnationId }),
-    ...(native.host === undefined ? {} : { host: native.host }),
-    ...(native.harness === undefined ? {} : { harness: native.harness }),
-  })
-  const data = detailsWithSupplement({
-    trace: native.trace, overview: native.overview, supplement,
-    ...(native.harness === undefined ? {} : { harness: native.harness }),
-    ...(scopedRoot === undefined ? {} : { nativeSessionId: scopedRoot }),
-  })
+  const supplements = contributions.flatMap(data => data.supplement === undefined ? [] : [data.supplement])
+  const data = projectContributions(native, contributions)
   const status: SyncStatus = native.syncStatus ?? (native.state === 'loading'
     ? { _tag: 'Requested', since: requestedAt }
     : native.state === 'error'
@@ -168,30 +215,16 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen,
       : native.stale
         ? gateway?.status._tag === 'Stale' ? gateway.status : { _tag: 'Stale', reason: { _tag: 'Unknown' }, ...(native.observedAt === undefined ? {} : { lastLiveAt: native.observedAt }) }
         : gateway?.status ?? { _tag: 'Live', since: native.observedAt ?? requestedAt })
-  const receivedAt = supplement._tag === 'Observed' && supplement.freshness === 'stale' ? supplement.value.receivedAtMs : undefined
-  useClockDeadline(earliestChange(now, [
-    syncLineNextChange({ status, label: 'agent details', now, observedAt: native.observedAt ?? requestedAt }),
-    receivedAt === undefined ? undefined : nextRelativeChange(receivedAt, now),
-  ]))
-  const activity = credentialNotice(supplement) ? { summary: credentialExpiredMessage, reasons: [] } : native.harness !== 'omp' ? undefined
-    : supplement._tag === 'Waiting' ? { summary: 'Loading subagent activity…', reasons: [] }
-      : supplement._tag === 'Unavailable' ? { summary: "Subagent activity isn't available for this session.", reasons: [supplementUnavailableReason[supplement.reason]] }
-        : supplement.freshness === 'stale' ? {
-          summary: `Subagent activity may be out of date${receivedAt === undefined ? '' : ` (last updated ${formatRelative(receivedAt, now)})`}.`,
-          reasons: [supplement.error === undefined ? 'An update is still loading, so earlier activity is shown.' : supplementStaleReason[supplement.error.reason]],
-        } : undefined
+  useClockDeadline(syncLineNextChange({ status, label: 'agent details', now, observedAt: native.observedAt ?? requestedAt }))
   if (native.credentialNotice) return <SystemNotice kind="error" connection title={native.credentialNotice} />
+  const { mission: _mission, ...overview } = data.overview
   return <div {...stylex.props(styles.content)}>
-    {activity !== undefined && <div data-details-supplement data-details-supplement-state={supplement._tag} {...stylex.props(styles.note)}>
-      <span role="status" data-details-supplement-summary {...stylex.props(styles.noteSummary)}>{activity.summary}</span>
-      <DetailsWhy explains="Subagent activity" reasons={activity.reasons} />
-    </div>}
+    {supplements.map((supplement, index) => <SupplementNotice key={index} supplement={supplement} harness={native.harness} />)}
     {data.accountingNote !== undefined && <div data-details-accounting-note {...stylex.props(styles.note)}>
       <span data-details-accounting-summary {...stylex.props(styles.noteSummary)}>{data.accountingNote.summary}</span>
       <DetailsWhy explains="Agent and total spend" reasons={data.accountingNote.reasons} />
     </div>}
-    <AgentMissions agentRef={agentRef} onOpen={ref => onOpen(ref, false)} />
-    <DetailsPane overview={data.overview} sections={suppliedSections} trace={data.trace} now={now}
+    <DetailsPane overview={overview} sections={suppliedSections} trace={data.trace} now={now}
       variants={variants} state={native.state} intent={intent} onIntentChange={onIntentChange}
       onOpen={onOpen} onRetry={native.onRetry} syncStatus={status}
       hasPriorContent={native.state !== 'loading' && native.state !== 'error'}
@@ -200,6 +233,23 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen,
       {...(native.sessionFailure === undefined ? {} : { sessionFailure: native.sessionFailure })}
       sessionPending={native.sessionPending}
     />
+  </div>
+}
+
+const SupplementNotice = ({ supplement, harness }: { readonly supplement: Feed<DetailsSupplement>; readonly harness: string | undefined }) => {
+  const now = useNowSnapshot()
+  const receivedAt = supplement._tag === 'Observed' && supplement.freshness === 'stale' ? supplement.value.receivedAtMs : undefined
+  useClockDeadline(earliestChange(now, [receivedAt === undefined ? undefined : nextRelativeChange(receivedAt, now)]))
+  const activity = credentialNotice(supplement) ? { summary: credentialExpiredMessage, reasons: [] } : harness !== 'omp' ? undefined
+    : supplement._tag === 'Waiting' ? { summary: 'Loading subagent activity…', reasons: [] }
+      : supplement._tag === 'Unavailable' ? { summary: "Subagent activity isn't available for this session.", reasons: [supplementUnavailableReason[supplement.reason]] }
+        : supplement.freshness === 'stale' ? {
+          summary: `Subagent activity may be out of date${receivedAt === undefined ? '' : ` (last updated ${formatRelative(receivedAt, now)})`}.`,
+          reasons: [supplement.error === undefined ? 'An update is still loading, so earlier activity is shown.' : supplementStaleReason[supplement.error.reason]],
+        } : undefined
+  return activity === undefined ? null : <div data-details-supplement data-details-supplement-state={supplement._tag} {...stylex.props(styles.note)}>
+    <span role="status" data-details-supplement-summary {...stylex.props(styles.noteSummary)}>{activity.summary}</span>
+    <DetailsWhy explains="Subagent activity" reasons={activity.reasons} />
   </div>
 }
 

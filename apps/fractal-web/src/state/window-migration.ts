@@ -1,6 +1,6 @@
 import { Schema } from 'effect'
 
-import { SubjectAddress, type PresentationId } from '../resources/contract.ts'
+import { SubjectAddress, type PresentationId } from '../shell/subjectAddress.ts'
 import { LayoutJson, subjectKey, type SplitNode } from '../shell/state.ts'
 
 // One-shot reader arm for authoritative local working context. Remove when every persisted

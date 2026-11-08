@@ -73,7 +73,7 @@ const meta = {
     const [state, setState] = React.useState<'busy' | 'loading' | 'error'>('busy')
     const renderPane = (pane: WorkbenchPane) => pane.view === 'details' ? <DetailsPane
       {...detailsStoryInputs(state)}
-      variants={{ overview: 'O2', context: 'C2', spend: 'S1', resources: 'R2', empty: 'E3' }}
+      variants={{ overview: 'O2', context: 'C2', spend: 'S1', empty: 'E3' }}
       syncStatus={state === 'error' ? { _tag: 'Failed', cause: { _tag: 'Server', code: 'timeout', message: 'The agent snapshot request timed out.' } } : state === 'loading' ? { _tag: 'Connecting', attempt: 1, since: 1799999999000 } : { _tag: 'Live', since: 1799999999000 }}
       state={state} intent={intent} onIntentChange={setIntent}
       onOpen={(key, asSplit) => { setLayout(current => asSplit ? split('right', current, group([parsePaneKey(key)])) : current.kind === 'group' ? group([...current.tabs, parsePaneKey(key)]) : current); setFocused(key) }}

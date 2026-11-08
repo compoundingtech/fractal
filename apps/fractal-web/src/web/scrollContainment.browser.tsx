@@ -7,7 +7,7 @@ import { createRoot } from 'react-dom/client'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { DataSourceProvider } from '../data/react.tsx'
 import { type Feed, observed } from '../data/source.ts'
-import type { ResourcePage } from '../resources/agent/model.ts'
+import type { ResourcePage } from '../data/agentResources/model.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 
 // Executable browser fixture: scripts/scroll-containment-proof.mjs asserts body[data-test-result=pass],

@@ -56,6 +56,8 @@ group('every kind names its subject', () => {
     it(`${subject._tag}: a real name, never its kind word or a ref fragment`, () => {
       const descriptor = describe(subject)
       if (subject._tag === 'Unsupported') return expect(descriptor.title._tag).toBe('Gone')
+      expect(descriptor.face.title).toBe(descriptor.title._tag === 'Known' || descriptor.title._tag === 'Fixed' ? descriptor.title.text : descriptor.title.kind)
+      expect(descriptor.face.kind).toBe(descriptor.kind)
       expect(['Known', 'Fixed']).toContain(descriptor.title._tag)
       if (descriptor.title._tag !== 'Known') return
       expect(descriptor.title.text).not.toBe(descriptor.kind)
@@ -121,11 +123,13 @@ group('the types refuse a kind without a presenter', () => {
     // @ts-expect-error: a contributed kind must say how it is presented.
     const silent: KindContribution<string> = { id: 'x.y', claims: () => false, examples: ['x/1'], policy: { resources: () => [], keepWarm: false, domCost: 0, dataCost: 0 }, view: '' }
     // @ts-expect-error: a title is observed, pending or gone, never a bare string.
-    const bare: KindDescriptor = { title: 'Alert', kind: 'Alert', mark: { _tag: 'Icon', name: 'alert' }, card: null }
+    const bare: KindDescriptor = { face: { kind: 'Alert', icon: 'alert', title: 'Alert', mark: { shape: 'none', word: '' } }, title: 'Alert', kind: 'Alert', mark: { _tag: 'Icon', name: 'alert' }, card: null }
     // @ts-expect-error: the card is stated, even when there is none.
-    const unstated: KindDescriptor = { title: { _tag: 'Fixed', text: 'Inbox' }, kind: 'Inbox', mark: { _tag: 'Icon', name: 'bell' } }
+    const unstated: KindDescriptor = { face: { kind: 'Inbox', icon: 'bell', title: 'Inbox', mark: { shape: 'none', word: '' } }, title: { _tag: 'Fixed', text: 'Inbox' }, kind: 'Inbox', mark: { _tag: 'Icon', name: 'bell' } }
+    // @ts-expect-error: every descriptor supplies the shared face, not a private row renderer.
+    const faceless: KindDescriptor = { title: { _tag: 'Fixed', text: 'Inbox' }, kind: 'Inbox', mark: { _tag: 'Icon', name: 'bell' }, card: null }
     // @ts-expect-error: a dragged row says what it is called, never falls back to its ref.
     openableDragItems('agent/a')
-    expect([missing, silent, bare, unstated]).toHaveLength(4)
+    expect([missing, silent, bare, unstated, faceless]).toHaveLength(5)
   })
 })

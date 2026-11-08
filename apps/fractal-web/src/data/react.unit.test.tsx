@@ -13,7 +13,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 
 import { fixtureAttention, fixtureMissions } from '../missions/fixtures.ts'
-import { gatewayResources } from '../resources/agent/source.ts'
+import { gatewayResources } from '../data/agentResources/source.ts'
 import { fixtureSource, type FixtureProjections } from './fixtureSource.ts'
 import { DataSourceProvider, type SubjectIndex, useSubjectIndex, useSubjectList, useGatewaySync, useAgentsSync, useMissionsSync, useAttentionSync, useConversationSync, useTerminalSync } from './react.tsx'
 import { type ConversationPage, type DataSource, observed, unavailable, waiting } from './source.ts'

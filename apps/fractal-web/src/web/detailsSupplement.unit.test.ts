@@ -3,8 +3,8 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { DetailsResources, traceSubagentSection } from '../../../../packages/fractal-ui/src/assistant-ui/details/DetailsResources.tsx'
 import { DetailsPane } from '../../../../packages/fractal-ui/src/assistant-ui/details/DetailsPane.tsx'
-import type { DetailsOverview, TraceSeries, TraceFact } from '@fractal/ui/assistant-ui'
-import { accountingNoteSummary, detailsWithSupplement, spendWindowReason } from './detailsSupplement.ts'
+import type { DetailsOverview, DetailsSection, TraceSeries, TraceFact } from '@fractal/ui/assistant-ui'
+import { accountingNoteSummary, detailsWithSupplement, mergePanelSections, spendWindowReason } from './detailsSupplement.ts'
 import type { DetailsSupplement } from '../extensions/contract.ts'
 import { observed, unavailable } from '../data/source.ts'
 import { traceUnknownReasons } from '../../../../packages/fractal-ui/src/assistant-ui/details/trace-series.ts'
@@ -127,6 +127,25 @@ describe('independent Details metric composition', () => {
   })
 })
 
+describe('unified contributed section projection', () => {
+  it('replaces matching native sections once while preserving contribution-only order and pending or unavailable reads', () => {
+    const workspace: DetailsSection = { title: 'Workspace', items: { _tag: 'Known', value: [] } }
+    const attention: DetailsSection = { title: 'Attention', items: { _tag: 'Known', value: [] } }
+    const replacement: DetailsSection = { title: 'Workspace', items: { _tag: 'Unknown' }, pending: true }
+    const reviews: DetailsSection = { title: 'Reviews', items: { _tag: 'Unknown' }, unavailableReason: 'Review access is not granted.' }
+    const result = mergePanelSections([workspace, attention], [replacement, reviews])
+    expect(result).toEqual([replacement, attention, reviews])
+    expect(result.filter(section => section.title === 'Workspace')).toHaveLength(1)
+    expect(result[0]).toBe(replacement)
+    expect(mergePanelSections([], [])).toEqual([])
+  })
+  it('does not invent sections or duplicate observations when a composition supplies none', () => {
+    const native: DetailsSection = { title: 'Attention', items: { _tag: 'Known', value: [] } }
+    expect(mergePanelSections([native], [])).toEqual([native])
+    expect(mergePanelSections([], [native, native])).toEqual([native])
+  })
+})
+
 it('shows the reported traced count in the heading, not the bounded list size or an invented zero', () => {
   const render = (count: TraceFact<number>) => renderToStaticMarkup(createElement(DetailsResources, {
     state: 'partial', sections: [{ title: 'Subagents', items: { _tag: 'Known', value: [] } }],
@@ -141,7 +160,7 @@ it('shows the reported traced count in the heading, not the bounded list size or
 it('keeps elapsed/age acquiring independently and omits missing timing fields', () => {
   const render = (durations: DetailsOverview['durations']) => renderToStaticMarkup(createElement(DetailsPane, {
     state: 'partial', overview: { ...overview, durations }, trace: trace(), sections: [], now: 2000,
-    variants: { overview: 'O2', context: 'C3', spend: 'S2', resources: 'R1', empty: 'E3' },
+    variants: { overview: 'O2', context: 'C3', spend: 'S2', empty: 'E3' },
     intent: { hiddenSections: [] }, onIntentChange: () => {}, onOpen: () => {}, onRetry: () => {},
   }))
   const pending = render(['Managed elapsed', 'Session age'].map(label => ({ label, value: 'Loading', pending: true })))

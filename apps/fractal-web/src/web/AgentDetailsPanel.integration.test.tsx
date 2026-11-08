@@ -22,6 +22,13 @@ import { AgentDetailsPanel } from './AgentDetailsPanel.tsx'
 import { ompDetailsSource } from './ompDetailsFixtures.ts'
 import { ompAgentRef, ompSubagent, ompSupplementFeeds, type OmpSupplementState } from '../../../../packages/fractal-ui/src/assistant-ui/details/omp-fixtures.ts'
 import { accountingNoteSummary, spendWindowReason } from './detailsSupplement.ts'
+import type { AgentPanelSectionContribution, AgentPanelSectionQuery, DetailsSupplement } from '../extensions/contract.ts'
+
+const supplementContributions = (read: (query: AgentPanelSectionQuery) => Feed<DetailsSupplement>): readonly AgentPanelSectionContribution[] =>
+  (['details', 'resources'] as const).map(tab => ({
+    id: `fixture-accounting-${tab}`, targetKind: 'Conversation', tab, order: 0,
+    view: { useData: query => ({ sections: [], supplement: read(query) }) },
+  }))
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 const row = openAgent(decodeUnknownSync(Agent)({
@@ -90,22 +97,47 @@ describe('native observations mounted on the production kit Details pane', () =>
     expect(host.textContent).toContain('42%')
     expect(host.textContent).not.toContain('42% est.')
   })
-  it('hides not-supplied resource sections and names their absence once, without inventing empty counts', async () => {
-    for (const name of ['Pull requests', 'CI runs', 'Reviews', 'Files touched', 'Terminals', 'Missions', 'History'])
+  it('keeps resource categories out of Details, including their unavailable summary', async () => {
+    for (const name of ['Pull requests', 'CI runs', 'Reviews', 'Files touched', 'Terminals', 'Missions', 'History', 'Subagents']) {
       expect(within(host).queryByRole('region', { name })).toBeNull()
-    const footer = host.querySelector<HTMLElement>('[data-details-unreported-sections]')!
-    expect(footer.querySelector('[data-details-unreported-summary]')?.textContent).toContain('Not reported for this session:')
-    expect(footer.querySelector('[data-details-unreported-summary]')?.textContent).toContain('CI runs')
-    const reasonTrigger = within(footer).getByRole('button', { name: 'Why? Sections not reported' })
-    const panel = document.getElementById(reasonTrigger.getAttribute('aria-controls')!)!
-    expect(reasonTrigger.getAttribute('aria-expanded')).toBe('false')
-    expect(panel.hidden).toBe(true)
-    await act(async () => reasonTrigger.click())
-    expect(reasonTrigger.getAttribute('aria-expanded')).toBe('true')
-    expect(panel.hidden).toBe(false)
-    expect([...panel.querySelectorAll('[data-details-reason-text]')].map(reason => reason.textContent)).toContain('This session does not report CI runs.')
+      expect(host.querySelector('[data-details-unreported-sections]')?.textContent ?? '').not.toContain(name)
+    }
     expect(within(host).getByRole('region', { name: 'Attention' }).textContent).toContain('No attention action observed')
+    await act(async () => within(host).getByRole('tab', { name: /^Resources/ }).click())
+    expect(host.querySelector('[data-testid="details-pane"]')).toBeNull()
+    expect(within(host).getAllByRole('status').some(line => line.textContent?.includes('Not reported:') && line.textContent.includes('CI runs'))).toBe(true)
   })
+  it('orders matching readers, isolates their hooks, and never mounts another target or tab reader', async () => {
+    const reads: string[] = []
+    const contribution = (id: string, order: number, targetKind: string, tab: AgentPanelSectionContribution['tab'], title: 'Workspace' | 'Attention'): AgentPanelSectionContribution => ({
+      id, order, targetKind, tab,
+      view: { useData: query => {
+        React.useId()
+        reads.push(id)
+        expect(query.agentRef).toBe(row.id)
+        return { sections: [{ title, items: { _tag: 'Known', value: [] }, pending: true }] }
+      } },
+    })
+    const contributions = [
+      contribution('later', 20, 'Conversation', 'details', 'Attention'),
+      contribution('wrong-target', -1, 'Terminal', 'details', 'Workspace'),
+      contribution('resources-only', -1, 'Conversation', 'resources', 'Workspace'),
+      contribution('first', 10, 'Conversation', 'details', 'Workspace'),
+    ]
+    const source = { ...fixtureSource({ world: { now: 10_000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }), agents }
+    await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><AgentDetailsPanel agentRef={row.id} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} sectionContributions={contributions} /></DataSourceProvider>))
+    expect(reads.slice(0, 2)).toEqual(['first', 'later'])
+    expect(reads).not.toContain('wrong-target')
+    expect(reads).not.toContain('resources-only')
+    expect(within(host).getAllByRole('region', { name: 'Workspace' })).toHaveLength(1)
+    expect(within(host).getAllByRole('region', { name: 'Attention' })).toHaveLength(1)
+    reads.length = 0
+    await act(async () => within(host).getByRole('tab', { name: /^Resources/ }).click())
+    expect(reads.length).toBeGreaterThan(0)
+    expect(reads.every(id => id === 'resources-only')).toBe(true)
+    expect(host.querySelector('[data-testid="details-pane"]')).toBeNull()
+  })
+
   it('preserves Changes as a selectable real captured-changes surface and returns to Details', async () => {
     await act(async () => within(host).getByRole('tab', { name: 'Changes' }).click())
     expect(within(host).getByRole('tab', { name: 'Changes' }).getAttribute('aria-selected')).toBe('true')
@@ -173,18 +205,21 @@ describe('native observations mounted on the production kit Details pane', () =>
     await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><AgentDetailsPanel agentRef={row.id} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} /></DataSourceProvider>))
     const spend = () => within(host).getByRole('region', { name: 'Spend' })
     const missions = () => within(host).getByRole('region', { name: 'Missions' })
-    await act(async () => { await vi.waitFor(() => {
-      expect(spend().textContent).toContain("Couldn't load spend.")
-      expect(missions().textContent).toContain("Couldn't load the agent queue.")
-    }) })
-    // Healthy facts stay beside both failures; neither offers Refresh while failed.
+    await act(async () => { await vi.waitFor(() => expect(spend().textContent).toContain("Couldn't load spend.")) })
+    expect(within(host).queryByRole('region', { name: 'Missions' })).toBeNull()
+    // Healthy agent facts remain beside failed spend; queue recovery belongs only to Resources.
     expect(host.textContent).toContain('Synthetic Details seat')
     expect(within(spend()).queryByRole('button', { name: 'Refresh' })).toBeNull()
-    failing.clear()
-    const queueReads = count('/v1/client/agent-queues/agent%2Fexample-synthetic'), spendReads = count('/v1/client/usage')
+    const spendReads = count('/v1/client/usage')
+    await act(async () => within(host).getByRole('tab', { name: /^Resources/ }).click())
+    await act(async () => { await vi.waitFor(() => expect(missions().textContent).toContain("Couldn't load the agent queue.")) })
+    const queueReads = count('/v1/client/agent-queues/agent%2Fexample-synthetic')
+    failing.delete('/v1/client/agent-queues/agent%2Fexample-synthetic')
     await act(async () => within(missions()).getByRole('button', { name: 'Try again' }).click())
     await act(async () => { await vi.waitFor(() => expect(host.textContent).not.toContain("Couldn't load the agent queue.")) })
     expect([count('/v1/client/agent-queues/agent%2Fexample-synthetic'), count('/v1/client/usage')]).toEqual([queueReads + 1, spendReads])
+    await act(async () => within(host).getByRole('tab', { name: 'Details' }).click())
+    failing.clear()
     await act(async () => within(spend()).getByRole('button', { name: 'Try again' }).click())
     await act(async () => { await vi.waitFor(() => expect(spend().querySelector('[data-details-spend-updated]')?.textContent).toMatch(/^Updated \S/)) })
     expect(count('/v1/client/usage')).toBe(spendReads + 1)
@@ -247,9 +282,17 @@ describe('OMP inspector copy guard', () => {
 })
 
 describe('OMP subagent activity on the production inspector', () => {
+  it('has no provider notice or contributed resources when the public composition supplies no readers', async () => {
+    await act(async () => root.render(<DataSourceProvider source={ompDetailsSource()} registry={registry}>
+      <AgentDetailsPanel agentRef={ompAgentRef} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} />
+    </DataSourceProvider>))
+    expect(host.querySelector('[data-details-supplement]')).toBeNull()
+    expect(host.querySelector('[data-details-accounting-note]')).toBeNull()
+    expect(within(host).queryByRole('region', { name: 'Subagents' })).toBeNull()
+  })
   const mount = async (state?: OmpSupplementState) => {
     await act(async () => root.render(<DataSourceProvider source={ompDetailsSource()} registry={registry}>
-      <AgentDetailsPanel agentRef={ompAgentRef} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} {...(state === undefined ? {} : { detailsSupplement: ompSupplementFeeds[state] })} />
+      <AgentDetailsPanel agentRef={ompAgentRef} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} sectionContributions={supplementContributions(state === undefined ? () => unavailable({ reason: 'unsupported', detail: 'No descendant provider.' }) : ompSupplementFeeds[state])} />
     </DataSourceProvider>))
   }
   const why = (scope: HTMLElement, name: string) => {
@@ -258,7 +301,7 @@ describe('OMP subagent activity on the production inspector', () => {
   }
   it('uses the shared recovery copy for rejected supplement credentials', async () => {
     await act(async () => root.render(<DataSourceProvider source={ompDetailsSource()} registry={registry}>
-      <AgentDetailsPanel agentRef={ompAgentRef} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} detailsSupplement={() => unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })} />
+      <AgentDetailsPanel agentRef={ompAgentRef} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} sectionContributions={supplementContributions(() => unavailable({ reason: 'unauthorized', detail: 'private diagnostic' }))} />
     </DataSourceProvider>))
     const line = host.querySelector<HTMLElement>('[data-details-supplement]')!
     expect(within(line).getByRole('status').textContent).toBe(credentialExpiredMessage)
@@ -274,7 +317,7 @@ describe('OMP subagent activity on the production inspector', () => {
     expect(line.querySelector('button[data-details-why]')).toBeNull()
     assertPlain(host)
   })
-  it('keeps the build composition’s unavailable reason plain and behind a collapsed Why?', async () => {
+  it('keeps a contribution’s unavailable reason plain and behind a collapsed Why?', async () => {
     await mount()
     const line = host.querySelector<HTMLElement>('[data-details-supplement]')!
     expect(within(line).getByRole('status').textContent).toBe("Subagent activity isn't available for this session.")
@@ -326,9 +369,9 @@ describe('OMP subagent activity on the production inspector', () => {
     const linked = why(coverage, 'Why? Spend linked to this agent')
     expect(linked.trigger.getAttribute('aria-expanded')).toBe('false')
     expect(linked.panel.textContent).toContain('This percentage shows how much spend could be linked to this agent.')
-    // A complete subagent list needs no count line.
-    expect(host.querySelector('[data-details-subagent-window]')?.textContent).toBe('Subagents · last 7 days')
-    expect(host.querySelector('[data-details-subagent-count]')).toBeNull()
+    // Subagent resources never duplicate the accounting observations in Details.
+    expect(host.querySelector('[data-details-subagent-window]')).toBeNull()
+    expect(within(host).queryByRole('region', { name: 'Subagents' })).toBeNull()
   })
   it('describes retained activity honestly without the source’s failure detail', async () => {
     await mount('retained')
@@ -341,7 +384,11 @@ describe('OMP subagent activity on the production inspector', () => {
   })
   it('shows a subagent’s reported details in plain words, with nothing to open', async () => {
     await mount('reported')
-    const row = [...host.querySelectorAll<HTMLElement>('[data-details-resource-static]')].find(each => each.textContent?.includes(ompSubagent.label))!
+    expect(host.textContent).not.toContain(ompSubagent.label)
+    await act(async () => within(host).getByRole('tab', { name: /^Resources/ }).click())
+    expect(within(host).getAllByRole('region', { name: 'Subagents' })).toHaveLength(1)
+    const row = [...host.querySelectorAll<HTMLElement>('[data-thing-fact]')].find(each => each.textContent?.includes(ompSubagent.label))!
+    expect(row).toBeTruthy()
     expect(row.querySelector('button')).toBeNull()
     expect(within(document.body).queryByRole('dialog')).toBeNull()
     assertPlain(row)

@@ -2,7 +2,7 @@ import { Schema } from 'effect'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { describe, expect, it } from 'vitest'
 
-import { SubjectAddress } from '../resources/contract.ts'
+import { SubjectAddress } from '../shell/subjectAddress.ts'
 import {
   defaultResourcePanel,
   initialState,

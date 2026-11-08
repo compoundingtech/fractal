@@ -355,6 +355,10 @@ describe('fixture-free native Details projection', () => {
     expect(result.trace.history._tag).toBe('Unknown')
     const workspace = result.sections.find(item => item.title === 'Workspace')?.items
     expect(workspace?._tag === 'Known' ? workspace.value.map(item => item.uri) : []).toEqual(['details:workspace/declared', 'details:workspace/requested-checkout'])
+    expect(workspace?._tag === 'Known' ? workspace.value.map(item => item.face) : []).toMatchObject([
+      { kind: 'Workspace', title: 'Declared workspace', mark: { shape: 'none' } },
+      { kind: 'Workspace', title: 'Requested repository / branch', mark: { shape: 'none' } },
+    ])
   })
   it('shows declared model only under declared bindings, never as the runtime model', () => {
     const declared = { _tag: 'Observed' as const, freshness: 'live' as const, value: { agentRef: row.id, revision: 'declaration-one', declaredModel: 'declared-model', bindings: [{ kind: 'workspace', count: 1 }] } }
@@ -365,6 +369,10 @@ describe('fixture-free native Details projection', () => {
     expect(result.overview.model).toBeUndefined()
     const bindings = result.sections.find(item => item.title === 'Declared bindings')?.items
     expect(bindings?._tag === 'Known' ? bindings.value.map(item => [item.uri, item.card.label]) : []).toEqual([['details:binding/0', 'Declared workspace'], ['details:binding/model', 'Declared model']])
+    expect(bindings?._tag === 'Known' ? bindings.value.map(item => item.face) : []).toMatchObject([
+      { kind: 'Declared binding', title: 'workspace', mark: { shape: 'none' } },
+      { kind: 'Declared binding', title: 'model', mark: { shape: 'none' } },
+    ])
     const stale = projectNativeDetails({ agentRef: row.id, row: observed({ value: selected }), agent: observed({ value: undefined }), period: missing, session: missing, declarations: { ...declared, value: { ...declared.value, agentRef: 'agent/example-other' } }, missions: missing, now: 10000, onRetry: () => undefined, reads })
     expect(stale.sections.find(item => item.title === 'Declared bindings')?.items._tag).toBe('Unknown')
   })

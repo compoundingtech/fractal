@@ -30,6 +30,7 @@ import { gatewayNativeDetails } from '../../../apps/fractal-web/src/data/nativeD
 import { gatewaySubjectReads } from '../../../apps/fractal-web/src/data/subjectReadPort'
 import type { NativeDeclarations } from '../../../apps/fractal-web/src/data/nativeDeclarations'
 import { accountingNoteSummary, spendWindowReason } from '../../../apps/fractal-web/src/web/detailsSupplement'
+import type { AgentPanelSectionContribution } from '../../../apps/fractal-web/src/extensions/contract.ts'
 
 interface Args { scheme: 'light'|'dark'; width: 440|1440; opening:'UserOpened'|'Restored' }
 const styles=stylex.create({frame:(width:number)=>({width,maxWidth:'100%',height:720,backgroundColor:surface.canvas}),inspector:(width:number)=>({display:'flex',flexDirection:'column',width,maxWidth:'100%',height:720,minHeight:0,overflow:'hidden',backgroundColor:surface.canvas}),canvas:{backgroundColor:surface.canvas},pane:{height:660},comparison:{display:'flex',flexWrap:'wrap',alignItems:'flex-start',gap:space.xl,backgroundColor:surface.canvas},card:{width:440,maxWidth:'100%',height:640},control:{color:text.fg,backgroundColor:surface.controlFill,borderWidth:0,borderRadius:radius.control,paddingInline:space.sm,paddingBlock:space.xs,marginInlineEnd:space.xs,fontFamily:type.fontSans,fontSize:type.metaSize,cursor:'pointer',':focus-visible':{outlineWidth:geometry.focusRing,outlineStyle:'solid',outlineColor: interactionVars.focusRing}}})
@@ -41,7 +42,7 @@ const meta={excludeStories:['scenarioExemptions'],id: 'fractal-ui-details-presen
   const [intent,setIntent]=React.useState({hiddenSections:[] as readonly string[]})
   const inputs=detailsStoryInputs('partial',detailsTraceFixtures.unknown)
   const overview={...inputs.overview,title:'Observed agent',since:undefined,age:undefined,mission:'Review the retained session observations without inventing unavailable spend or timing.',durations:[{label:'Session elapsed (from session start to end or now; wall time, not active)',value:'Unreported'},{label:'Session age (from session start)',value:'Unreported'}]}
-  return <div ref={returnRef} role="region" aria-label="Details host" tabIndex={-1} data-testid="details-return-region" {...stylex.props(styles.frame(width),...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal>{showOpener&&<Button onPress={()=>{setOpeningOverride(undefined);setOpen(true)}} {...stylex.props(styles.control)}>Open details</Button>}<Button onPress={()=>{setOpeningOverride('UserOpened');setOpen(true)}} {...stylex.props(styles.control)}>Open as user</Button><Button onPress={()=>setShowOpener(false)} {...stylex.props(styles.control)}>Remove opener</Button>{open&&<div {...stylex.props(styles.pane)}><DetailsPane key={openingOverride??opening} {...inputs} overview={overview} variants={{overview:'O2',context:'C1',spend:'S1',resources:'R1',empty:'E2'}} state="partial" intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>{}} onClose={()=>setOpen(false)} closeFocusTarget={()=>returnRef.current} opening={{_tag:openingOverride??opening}}/></div>}</ThemePortal></div>
+  return <div ref={returnRef} role="region" aria-label="Details host" tabIndex={-1} data-testid="details-return-region" {...stylex.props(styles.frame(width),...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal>{showOpener&&<Button onPress={()=>{setOpeningOverride(undefined);setOpen(true)}} {...stylex.props(styles.control)}>Open details</Button>}<Button onPress={()=>{setOpeningOverride('UserOpened');setOpen(true)}} {...stylex.props(styles.control)}>Open as user</Button><Button onPress={()=>setShowOpener(false)} {...stylex.props(styles.control)}>Remove opener</Button>{open&&<div {...stylex.props(styles.pane)}><DetailsPane key={openingOverride??opening} {...inputs} overview={overview} variants={{overview:'O2',context:'C1',spend:'S1',empty:'E2'}} state="partial" intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>{}} onClose={()=>setOpen(false)} closeFocusTarget={()=>returnRef.current} opening={{_tag:openingOverride??opening}}/></div>}</ThemePortal></div>
 }} satisfies Meta<Args>
 export default meta
 
@@ -215,7 +216,7 @@ export const AllStates:Story={
   render:function Render({scheme}:Args){
     const [visible,setVisible]=React.useState<readonly (typeof combinedStates)[number][]>(combinedStates)
     const restoreRef=React.useRef<HTMLButtonElement>(null)
-    return <div role="main" aria-label="Details state comparison" {...stylex.props(styles.canvas,...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal><Button ref={restoreRef} onPress={()=>setVisible(combinedStates)} {...stylex.props(styles.control)}>Restore all states</Button><div {...stylex.props(styles.comparison)}>{visible.map(state=><section key={state} aria-label={`Details ${state}`} data-details-all-state={state} {...stylex.props(styles.card)}><DetailsLabelContext.Provider value={`${state} `}><DetailsPane {...detailsStoryInputs(state)} variants={{overview:'O2',context:'C1',spend:'S1',resources:'R1',empty:'E2'}} state={state} intent={{hiddenSections:[]}} onIntentChange={()=>{}} onOpen={()=>{}} onRetry={()=>{}} opening={{_tag:'Restored'}} onClose={()=>setVisible(current=>current.filter(item=>item!==state))} closeFocusTarget={()=>restoreRef.current}/></DetailsLabelContext.Provider></section>)}</div></ThemePortal></div>
+    return <div role="main" aria-label="Details state comparison" {...stylex.props(styles.canvas,...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal><Button ref={restoreRef} onPress={()=>setVisible(combinedStates)} {...stylex.props(styles.control)}>Restore all states</Button><div {...stylex.props(styles.comparison)}>{visible.map(state=><section key={state} aria-label={`Details ${state}`} data-details-all-state={state} {...stylex.props(styles.card)}><DetailsLabelContext.Provider value={`${state} `}><DetailsPane {...detailsStoryInputs(state)} variants={{overview:'O2',context:'C1',spend:'S1',empty:'E2'}} state={state} intent={{hiddenSections:[]}} onIntentChange={()=>{}} onOpen={()=>{}} onRetry={()=>{}} opening={{_tag:'Restored'}} onClose={()=>setVisible(current=>current.filter(item=>item!==state))} closeFocusTarget={()=>restoreRef.current}/></DetailsLabelContext.Provider></section>)}</div></ThemePortal></div>
   },
   play:async({canvasElement})=>{
     assertCombined(canvasElement,combinedStates);await checkMetricLines(canvasElement)
@@ -236,7 +237,7 @@ export const NarrowValueColumns:Story={
     const inputs=detailsStoryInputs('busy')
     const [intent,setIntent]=React.useState({hiddenSections:[] as readonly string[]})
     const overview={...inputs.overview,status:'Awaiting session match',machine:'Observed host',harness:'Claude Code',model:'Reported model',since:'Awaiting report',age:'Awaiting report',mission:'Review retained observations',durations:[{label:'Managed-session elapsed',value:'Awaiting session match'}]}
-    return <div role="main" aria-label="Narrow Details comparison" {...stylex.props(styles.comparison,...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal>{[240,320].map(width=><div key={width} data-details-narrow-width={width} {...stylex.props(styles.frame(width))}><DetailsLabelContext.Provider value={`${width}px `}><DetailsPane {...inputs} overview={overview} state="busy" variants={{overview:'O3',context:'C1',spend:'S1',resources:'R1',empty:'E2'}} intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>{}}/></DetailsLabelContext.Provider></div>)}</ThemePortal></div>
+    return <div role="main" aria-label="Narrow Details comparison" {...stylex.props(styles.comparison,...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal>{[240,320].map(width=><div key={width} data-details-narrow-width={width} {...stylex.props(styles.frame(width))}><DetailsLabelContext.Provider value={`${width}px `}><DetailsPane {...inputs} overview={overview} state="busy" variants={{overview:'O3',context:'C1',spend:'S1',empty:'E2'}} intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>{}}/></DetailsLabelContext.Provider></div>)}</ThemePortal></div>
   },
   play:async({canvasElement})=>{
     const assertStacked=(grid:HTMLElement)=>{
@@ -296,7 +297,7 @@ export const StandaloneRetainedFailure:Story={
     const inputs=detailsStoryInputs('busy')
     const [failed,setFailed]=React.useState(true),[open,setOpen]=React.useState(true)
     const [intent,setIntent]=React.useState({hiddenSections:[] as readonly string[]})
-    return <div role="region" aria-label="Retained Details host" {...stylex.props(styles.frame(width),...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal>{open&&<DetailsPane {...inputs} state="busy" variants={{overview:'O2',context:'C1',spend:'S1',resources:'R1',empty:'E2'}} syncStatus={failed?{_tag:'Failed',cause:{_tag:'Server',code:'timeout',message:'The retained observation request timed out.'}}:{_tag:'Live',since:inputs.now}} hasPriorContent intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>setFailed(false)} onClose={()=>setOpen(false)} opening={{_tag:'Restored'}}/>}</ThemePortal></div>
+    return <div role="region" aria-label="Retained Details host" {...stylex.props(styles.frame(width),...baselineTheme,...(scheme==='light'?lightTheme:[]))}><ThemePortal>{open&&<DetailsPane {...inputs} state="busy" variants={{overview:'O2',context:'C1',spend:'S1',empty:'E2'}} syncStatus={failed?{_tag:'Failed',cause:{_tag:'Server',code:'timeout',message:'The retained observation request timed out.'}}:{_tag:'Live',since:inputs.now}} hasPriorContent intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>setFailed(false)} onClose={()=>setOpen(false)} opening={{_tag:'Restored'}}/>}</ThemePortal></div>
   },
   play:async({canvasElement})=>{
     const canvas=within(canvasElement),pane=await canvas.findByTestId('details-pane'),band=pane.querySelector<HTMLElement>('[data-details-tab-band]');requireContract(band,'Missing standalone band')
@@ -351,7 +352,7 @@ function InspectorHost({host,scheme,width}:{readonly host:(typeof inspectorHosts
   const base=host.id==='retained'?{...input,trace:{...input.trace,meters:{...input.trace.meters,spend:{...input.trace.meters.spend,mainUsd:{_tag:'Unknown' as const,reason:'out-of-retention' as const,detail:'Earlier main session spend is no longer retained.'}}}}}:input
   const overview=host.id==='unreported'?{...base.overview,since:undefined,age:undefined,durations:[{label:'Session elapsed (from session start to end or now; wall time, not active)',value:'Unreported'}]}:base.overview
   const failure={_tag:'Failed',cause:{_tag:'Server',code:'timeout',message:'The retained observation request timed out.'}} as const
-  const renderPane=(pane:WorkbenchPane)=>pane.view==='details'?<DetailsPane {...base} overview={overview} state={host.state} variants={{overview:'O2',context:'C1',spend:'S1',resources:'R1',empty:host.empty}} {...(host.id==='retained'?{syncStatus:failure,hasPriorContent:true}:{})} intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>{}} opening={{_tag:'Restored'}}/>:undefined
+  const renderPane=(pane:WorkbenchPane)=>pane.view==='details'?<DetailsPane {...base} overview={overview} state={host.state} variants={{overview:'O2',context:'C1',spend:'S1',empty:host.empty}} {...(host.id==='retained'?{syncStatus:failure,hasPriorContent:true}:{})} intent={intent} onIntentChange={setIntent} onOpen={()=>{}} onRetry={()=>{}} opening={{_tag:'Restored'}}/>:undefined
   return <section aria-label={`${host.id} inspector`} data-details-inspector-host={host.id} {...stylex.props(styles.inspector(width))}><DetailsLabelContext.Provider value={`${host.id} `}><Workbench layout={inspectorLayout} resources={detailsWorkbenchResources} workspaceId={`details-inspector-${host.id}-${scheme}`} scheme={scheme} appearance={{width:'W1',header:'H3',chrome:'P1',dropZones:'D3'}} landmarkContext={`${host.id} inspector`} describePane={pane=>({title:pane.view==='details'?'Details':'Changes'})} renderPane={renderPane}/></DetailsLabelContext.Provider></section>
 }
 function inspectorRender(narrow:boolean,width:number){
@@ -910,7 +911,7 @@ async function ompStoryWorld(state:OmpSupplementState):Promise<OmpWorld>{
   }
   return {registry,source,transport}
 }
-/** The real inspector over an omp-driven seat; its subagent activity flows through the composition's feed seam. */
+/** The real inspector reads accounting and resource facts through compiled-in section contributions. */
 function ProductionOmpInspector({scheme,narrow,state}:Args&{readonly narrow:boolean;readonly state:OmpSupplementState}){
   const [generation,setGeneration]=React.useState(0)
   const [world,setWorld]=React.useState<OmpWorld>()
@@ -925,8 +926,12 @@ function ProductionOmpInspector({scheme,narrow,state}:Args&{readonly narrow:bool
     })
     return ()=>{mounted=false;ompStoryControls=undefined;next?.registry.dispose()}
   },[state,generation])
+  const sectionContributions: readonly AgentPanelSectionContribution[] = (['details','resources'] as const).map(tab=>({
+    id:`omp-fixture-${tab}`,targetKind:'Conversation',tab,order:0,
+    view:{useData:()=>({sections:[],supplement:ompSupplementFeeds[state]()})},
+  }))
   const panel=(close:()=>void,width:'fill'|440)=>world===undefined?null:<DataSourceProvider key={generation} source={world.source} registry={world.registry}>
-    <AgentDetailsPanel agentRef={ompAgentRef} width={width} scheme={scheme} onClose={close} onOpen={()=>undefined} detailsSupplement={ompSupplementFeeds[state]}/>
+    <AgentDetailsPanel agentRef={ompAgentRef} width={width} scheme={scheme} onClose={close} onOpen={()=>undefined} sectionContributions={sectionContributions}/>
   </DataSourceProvider>
   if(narrow)return <ProductionPhoneSheet scheme={scheme}>{close=>panel(close,'fill')}</ProductionPhoneSheet>
   return <div role="main" aria-label="Production desktop inspector" {...stylex.props(...baselineTheme,...(scheme==='light'?lightTheme:[]))} style={{width:440,maxWidth:'100%',height:900,display:'flex'}}>
@@ -960,8 +965,7 @@ function assertOmpSpend(panel:HTMLElement,state:OmpSupplementState){
       const total=spendRowLabel(spend.querySelector('[data-details-metric="total-usd"]')),coverage=[...panel.querySelectorAll('[data-details-coverage]')].map(node=>node.textContent??'')
       if(total!=='Spend incl. subagents · last 7 days')failures.push(`total row "${total}"`)
       if(coverage.length===0||coverage.some(text=>text!=='99% of spend matched to this agent')||!within(spend).queryByRole('button',{name:'Why? Spend linked to this agent'}))failures.push(`coverage "${coverage.join('|')}"`)
-      const listWindow=panel.querySelector('[data-details-subagent-window]')?.textContent
-      if(listWindow!=='Subagents · last 7 days'||panel.querySelector('[data-details-subagent-count]'))failures.push(`subagents "${listWindow}" with count ${!!panel.querySelector('[data-details-subagent-count]')}`)
+      if(panel.querySelector('section[aria-label$="Subagents"]'))failures.push('Subagents duplicated in Details')
     }
   }
   for(const node of panel.querySelectorAll('[data-details-resources-unavailable]'))if(node.textContent!=='Resources aren’t available for this session.'||!node.parentElement?.querySelector('button[data-details-why]'))failures.push(`resources "${node.textContent}"`)
@@ -1005,7 +1009,7 @@ const ompRetainedSpend="Couldn't refresh spend. Showing figures from 12m ago.|Tr
  * Try again. Failed spend dates its kept figures in that sentence with no separate `Updated` line; the queue kept nothing.
  */
 function assertOmpReads(panel:HTMLElement,narrow:boolean,state:OmpSupplementState){
-  const spend=panel.querySelector<HTMLElement>('section[aria-label$="Spend"]'),missions=panel.querySelector<HTMLElement>('section[aria-label$="Missions"]'),failures:string[]=[]
+  const spend=panel.querySelector<HTMLElement>('section[aria-label$="Spend"]'),failures:string[]=[]
   const failed=(root:HTMLElement|null)=>root?[...root.querySelectorAll<HTMLElement>('[data-details-read-failure]')].map(line=>`${line.querySelector('[data-details-read-message]')?.textContent}|${line.querySelector('button')?.textContent}`):[]
   const updated=[...spend?.querySelectorAll('[data-details-spend-updated]')??[]].map(node=>node.textContent??'')
   const refresh=spend?within(spend).queryAllByRole('button',{name:'Refresh'}):[]
@@ -1013,7 +1017,7 @@ function assertOmpReads(panel:HTMLElement,narrow:boolean,state:OmpSupplementStat
     const kept=spend?.querySelectorAll('[data-details-read-failure] [data-details-read-message] time[data-human-time="relative"]')??[]
     if(failed(spend).join()!==ompRetainedSpend||kept.length!==1||refresh.length!==0)failures.push(`spend "${failed(spend).join()}" with ${kept.length} kept times and ${refresh.length} Refresh`)
     if(updated.length!==0)failures.push(`failed spend also dated "${updated.join('|')}"`)
-    if(failed(missions).join()!=="Couldn't load the agent queue.|Try again"||missions?.querySelector('[data-details-read-failure] time'))failures.push(`queue "${failed(missions).join()}"`)
+    if(panel.querySelector('section[aria-label$="Missions"]'))failures.push('Missions duplicated in Details')
   }else{
     if(updated.length!==1||!/^Updated \S/.test(updated[0]!))failures.push(`spend dated "${updated.join('|')}"`)
     if(refresh.length!==1||failed(panel).length!==0)failures.push(`${refresh.length} Refresh with ${failed(panel).length} failures`)
@@ -1025,15 +1029,28 @@ function assertOmpReads(panel:HTMLElement,narrow:boolean,state:OmpSupplementStat
 async function checkOmpReads(panel:HTMLElement,narrow:boolean,state:OmpSupplementState){
   assertOmpReads(panel,narrow,state)
   if(state!=='unavailable')return
-  const doc=panel.ownerDocument,spend=panel.querySelector<HTMLElement>('section[aria-label$="Spend"]')!,missions=panel.querySelector<HTMLElement>('section[aria-label$="Missions"]')!
+  const doc=panel.ownerDocument,spend=panel.querySelector<HTMLElement>('section[aria-label$="Spend"]')!
   const time=spend.querySelector<HTMLElement>('[data-details-read-failure] [data-details-read-message] time')!,label=time.textContent
   try{time.textContent='just now';await rejectsCause(ompReadShape,()=>assertOmpReads(panel,narrow,state))}finally{time.textContent=label}
   const extra=doc.createElement('div');extra.setAttribute('data-details-spend-updated','');extra.textContent='Updated 12m ago'
   spend.querySelector('[data-details-read-failure]')!.after(extra)
   try{await rejectsCause(ompReadShape,()=>assertOmpReads(panel,narrow,state))}finally{extra.remove()}
+  await selectInspectorTab(panel,'Resources')
+  const missions=ompSection(panel,'Missions')
+  assertOmpQueueRead(missions)
   const queueStatus=missions.querySelector<HTMLElement>('[data-details-read-failure] [data-details-read-message]')!,queueCopy=queueStatus.textContent
-  try{queueStatus.textContent="Couldn't refresh the agent queue. Showing figures from 12m ago.";await rejectsCause(ompReadShape,()=>assertOmpReads(panel,narrow,state))}finally{queueStatus.textContent=queueCopy}
+  try{queueStatus.textContent="Couldn't refresh the agent queue. Showing figures from 12m ago.";await rejectsCause(ompReadShape,()=>assertOmpQueueRead(missions))}finally{queueStatus.textContent=queueCopy}
+  await selectInspectorTab(panel,'Details')
   assertOmpReads(panel,narrow,state)
+}
+function assertOmpQueueRead(section:HTMLElement){
+  const failure=section.querySelector('[data-details-read-failure]')
+  requireContract(failure?.querySelector('[data-details-read-message]')?.textContent==="Couldn't load the agent queue."&&failure?.querySelector('button')?.textContent==='Try again'&&!failure?.querySelector('time'),`${ompReadShape}: queue failure was dated or lost its recovery action`)
+}
+async function selectInspectorTab(panel:HTMLElement,name:'Details'|'Resources'){
+  const tab=within(panel).getByRole('tab',{name:name==='Resources'?/^Resources/:name})
+  await userEvent.click(tab)
+  await waitFor(()=>requireContract(tab.getAttribute('aria-selected')==='true',`${name} tab was not selected`))
 }
 const readFocus='Production OMP read action did not keep its node and focus through the read'
 function ompTransport(){requireContract(ompStoryControls,'OMP story transport is not mounted');return ompStoryControls.transport}
@@ -1120,9 +1137,10 @@ async function checkSpendFocus(panel:HTMLElement,state:OmpSupplementState){
  * Every other section keeps its own read line meanwhile.
  */
 async function checkSectionRetryFocus(panel:HTMLElement,read:'session'|'queue'){
+  if(read==='queue')await selectInspectorTab(panel,'Resources')
   const transport=ompTransport(),name=read==='session'?'Overview':'Missions',section=ompSection(panel,name)
   const copy=read==='session'?"Couldn't load session details.":"Couldn't load the agent queue."
-  const others=()=>requireContract([...panel.querySelectorAll('[data-details-read-action]')].length>=(read==='session'?3:2),`${readFocus}: another section lost its read action during ${name} recovery`)
+  const others=()=>requireContract([...panel.querySelectorAll('[data-details-read-action]')].length>=(read==='session'?2:1),`${readFocus}: active-tab read actions disappeared during ${name} recovery`)
   const action=within(section).getByRole('button',{name:'Try again'})
   transport.hold(read);await pressRead(action)
   await waitFor(()=>{assertReadAction(action,'Trying again…',true,copy);others()})
@@ -1143,6 +1161,7 @@ async function checkSectionRetryFocus(panel:HTMLElement,read:'session'|'queue'){
     const heading=section.querySelector<HTMLElement>('[data-details-section-control]'),active=panel.ownerDocument.activeElement
     requireContract(section.isConnected&&heading!==null&&active===heading&&!action.isConnected&&!section.querySelector('[data-details-read-failure]'),`${readFocus}: ${name} success left focus on ${focusName(active)}${action.isConnected?' with its action mounted':''}`)
   })
+  if(read==='queue')await selectInspectorTab(panel,'Details')
 }
 async function resetOmpInspector(canvasElement:HTMLElement,narrow:boolean,panel:HTMLElement,state:OmpSupplementState='unavailable'){
   const seen=new Map<Element,string>()
@@ -1154,12 +1173,13 @@ async function resetOmpInspector(canvasElement:HTMLElement,narrow:boolean,panel:
     const root=narrow?within(canvasElement).getByRole('dialog',{name:'Agent details'}):canvasElement
     const remounted=await within(root).findByRole('complementary',{name:'Agent inspector'})
     await waitFor(()=>{requireContract(remounted!==panel&&remounted.isConnected,'OMP story kept the recovered inspector');assertOmpReads(remounted,narrow,state)})
-    requireContract(seen.size>=(state==='unavailable'?3:1)&&[...seen.values()].every(text=>text===''),`${readFocus}: failure announcers were not mounted empty before announcing`)
+    requireContract(seen.size>=(state==='unavailable'?2:1)&&[...seen.values()].every(text=>text===''),`${readFocus}: failure announcers were not mounted empty before announcing`)
     return remounted
   }finally{observer.disconnect()}
 }
 /** A terminal refusal must hand off focus before removing an action, never discard its section. */
 async function checkRefusedRead(panel:HTMLElement,read:OmpRead,outcome:'refused'|'unsupported',refresh=false){
+  if(read==='queue')await selectInspectorTab(panel,'Resources')
   const transport=ompTransport(),name=read==='usage'?'Spend':read==='session'?'Overview':'Missions',section=ompSection(panel,name)
   const heading=section.querySelector<HTMLElement>('[data-details-section-control]');requireContract(heading,`${readFocus}: ${name} lacks its stable heading`)
   const action=within(section).queryByRole('button',{name:'Refresh'})??within(section).getByRole('button',{name:'Try again'})
@@ -1170,6 +1190,7 @@ async function checkRefusedRead(panel:HTMLElement,read:OmpRead,outcome:'refused'
   transport.release(read,outcome)
   await waitFor(()=>requireContract(section.isConnected&&heading.isConnected&&section.querySelector('[data-details-section-control]')===heading&&panel.ownerDocument.activeElement===heading&&!action.isConnected,`${readFocus}: ${name} ${outcome} lost its stable same-section focus target`))
   requireContract(!section.querySelector('[data-details-read-action]'),`${readFocus}: ${name} ${outcome} still offers a read action`)
+  if(read==='queue')await selectInspectorTab(panel,'Details')
 }
 /** Exercise retry success/failure, pending deduplication, heading stability, and every terminal refusal. */
 async function checkReadFocus(canvasElement:HTMLElement,narrow:boolean,state:OmpSupplementState,panel:HTMLElement){
@@ -1220,25 +1241,14 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
     }
     await checkPlainCopy(panel,whyPanel?[summary,whyPanel]:[summary])
     if(state==='reported'){
-      // A reported subagent opens a plain read-only dialog.
-      const card=[...panel.querySelectorAll<HTMLElement>('button')].find(button=>button.textContent?.includes(ompSubagent.label));requireContract(card,'Missing reported subagent card')
-      await userEvent.click(card)
-      const dialog=await within(doc.body).findByRole('dialog',{name:'Reported resource details'})
-      requireContract(dialog.textContent?.includes("Reported details only; this resource can't be opened from here."),'Subagent dialog lacks its plain read-only line')
-      await checkPlainCopy(dialog,[dialog])
-      assertPlainCopy(panel)
-      const dialogClose=within(dialog).getByRole('button',{name:'Close'})
-      if(narrow){
-        // Measured only once the dialog is open: its Close joins the 44px phone sweep, and a shrunken Close is rejected.
-        requireContract(touchTargets(dialog).includes(dialogClose),'Phone dialog sweep omitted its Close')
-        assertTouch(touchTargets(dialog))
-        const closeStyle=dialogClose.getAttribute('style')
-        try{dialogClose.style.minWidth='0';dialogClose.style.width='24px';dialogClose.style.height='24px';await rejectsCause(touchFloor,()=>assertTouch(touchTargets(dialog)))}
-        finally{if(closeStyle===null)dialogClose.removeAttribute('style');else dialogClose.setAttribute('style',closeStyle)}
-        assertTouch(touchTargets(dialog))
-      }
-      await userEvent.click(dialogClose)
-      await waitFor(()=>requireContract(!within(doc.body).queryByRole('dialog',{name:'Reported resource details'}),'Subagent dialog did not close'))
+      requireContract(!panel.textContent?.includes(ompSubagent.label),'Subagent resource leaked into Details')
+      await selectInspectorTab(panel,'Resources')
+      const fact=[...panel.querySelectorAll<HTMLElement>('[data-thing-fact]')].find(row=>row.textContent?.includes(ompSubagent.label))
+      requireContract(fact,'Missing reported subagent fact in Resources')
+      requireContract(!fact.matches('[role="link"]')&&!fact.querySelector('button,a,[role="link"]'),'A refless subagent must not offer open or dialog actions')
+      await checkPlainCopy(fact,[fact])
+      requireContract(!within(doc.body).queryByRole('dialog',{name:'Reported resource details'}),'A refless subagent opened a dialog')
+      await selectInspectorTab(panel,'Details')
     }
     assertOmpLine(panel,narrow,state);assertOmpSpend(panel,state);assertNoEpoch(panel)
     // Keyboard read recovery on the accounting seat (healthy Refresh) and the failed-reads seat, at phone and desktop widths.

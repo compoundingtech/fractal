@@ -8,6 +8,8 @@ import * as React from 'react'
 
 import { DraggableMention } from '../../workspace/DraggableMention.tsx'
 import type { KindDescriptor, Present } from '../../workspace/presentation.ts'
+import type { KindContribution } from '../../workspace/registry.ts'
+export { githubFace } from './presentation.ts'
 import { claimsKind, labelOf, parseGithubUrl, parseSubjectRef, refOf, type GithubKind, type GithubRef } from './refs.ts'
 
 export { githubSubjectRef, parseGithubUrl, parseSubjectRef, refOf, type GithubRef } from './refs.ts'
@@ -54,23 +56,8 @@ export function GithubCardFor({ subjectRef, children }: { readonly subjectRef: s
   return React.createElement(React.Suspense, { fallback: children }, React.createElement(LazyHoverLink, { target, children }))
 }
 
-/**
- * The shape `workspace/registry.ts` (`KindContribution<View>`, PR #5724) takes, kept here until the
- * registry lands on the integration branch; the host supplies `view` from its own `KindSurface`.
- */
-export interface GithubKindContribution<View> {
-  readonly id: `github.${GithubKind}`
-  readonly claims: (ref: string) => boolean
-  readonly examples: readonly [string, ...string[]]
-  readonly policy: {
-    readonly resources: (subject: { readonly _tag: string; readonly ref?: string }) => readonly { readonly _tag: 'Contributed'; readonly kind: string; readonly ref: string }[]
-    readonly keepWarm: boolean
-    readonly domCost: number
-    readonly dataCost: number
-  }
-  readonly present: Present
-  readonly view: View
-}
+/** The plugin uses the host-independent registry contract, without a duplicate shape. */
+export type GithubKindContribution<View> = KindContribution<View> & { readonly id: `github.${GithubKind}` }
 
 const words: Record<GithubKind, { readonly kind: string; readonly icon: 'pull-request' | 'dot' | 'message' | 'check' }> = {
   'pull-request': { kind: 'Pull request', icon: 'pull-request' },
@@ -91,6 +78,7 @@ const presentGithub = (kind: GithubKind): Present => (subject, world): KindDescr
   return {
     title: observed !== undefined ? { _tag: 'Known', text: observed.title } : target !== undefined ? { _tag: 'Known', text: labelOf(target) } : { _tag: 'Gone', kind: word.kind },
     kind: word.kind,
+    face: observed?.face ?? { kind: word.kind, icon: word.icon, title: observed?.title ?? (target === undefined ? word.kind : labelOf(target)), mark: { shape: 'none', word: '' }, ...(target !== undefined && 'number' in target && kind !== 'comment' ? { id: `#${target.number}` } : target !== undefined && target.kind === 'run' ? { id: `#${target.run_id}` } : {}) },
     mark: { _tag: 'Icon', name: word.icon },
     card: { kind: 'resource', id: ref },
     ...(observed !== undefined && target !== undefined ? { detail: labelOf(target) } : {}),

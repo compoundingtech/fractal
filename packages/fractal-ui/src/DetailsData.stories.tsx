@@ -89,7 +89,7 @@ const unknownCount: TraceSeries = { ...knownZero, subagentCount: unavailable }
 const boundedCount: TraceSeries = { ...inclusive, subagentCount: known(309) }
 const scenarios = { partial, boundary, boundary995, zeroCoverage, fullPartial, notCovered, independent: native, session: inclusive, partialFacts, percentOnly, percentSamples, mixedWindows, unknownTotalScope, invalidNaN, invalidNegative, invalidOverflow,
   reportedLong, knownZero, unknownCount, boundedCount, observedEmpty: native,
-  firstRead: native, firstReadDense: native, firstReadCompact: native, firstReadHideEmpty: native, firstReadShowEmpty: native, settledUnavailable: native, knownEmpty: native, timing: native,
+  firstRead: native, firstReadHideEmpty: native, firstReadShowEmpty: native, settledUnavailable: native, knownEmpty: native, timing: native,
 } as const
 /** Observed resources reported as an explicit empty list, independent of the subagent breakdown. */
 const sectionsForScenario = (scenario: string, sections: readonly DetailsSection[]): readonly DetailsSection[] =>
@@ -104,13 +104,11 @@ const unavailableSections: readonly DetailsSection[] = [
 const firstReadSections = unavailableSections.map(section => section.title === 'Reviews' ? section : { ...section, pending: true })
 const emptySections: readonly DetailsSection[] = unavailableSections.map(section => ({ title: section.title, items: { _tag: 'Known', value: [] } }))
 const resourceScenarios = {
-  firstRead: { sections: firstReadSections, resources: 'R1', empty: 'E3' },
-  firstReadDense: { sections: firstReadSections, resources: 'R2', empty: 'E3' },
-  firstReadCompact: { sections: firstReadSections, resources: 'R3', empty: 'E3' },
-  firstReadHideEmpty: { sections: firstReadSections, resources: 'R1', empty: 'E1' },
-  firstReadShowEmpty: { sections: firstReadSections, resources: 'R1', empty: 'E2' },
-  settledUnavailable: { sections: unavailableSections, resources: 'R1', empty: 'E3' },
-  knownEmpty: { sections: emptySections, resources: 'R1', empty: 'E2' },
+  firstRead: { sections: firstReadSections, empty: 'E3' },
+  firstReadHideEmpty: { sections: firstReadSections, empty: 'E1' },
+  firstReadShowEmpty: { sections: firstReadSections, empty: 'E2' },
+  settledUnavailable: { sections: unavailableSections, empty: 'E3' },
+  knownEmpty: { sections: emptySections, empty: 'E2' },
 } as const
 const elapsedLabel = 'Managed-session elapsed (from session start to end or now; wall time, not active)'
 const ageLabel = 'Current-incarnation session age (from managed session start; native launch not reported)'
@@ -126,7 +124,7 @@ const timingDurations: DetailsOverview['durations'] = [
 type ScenarioProps = Pick<DetailsPaneProps, 'sections' | 'variants' | 'overview'>
 const scenarioProps = (scenario: string, props: ScenarioProps): ScenarioProps => {
   const resource = Object.entries(resourceScenarios).find(([name]) => name === scenario)?.[1]
-  if (resource !== undefined) return { ...props, sections: resource.sections, variants: { ...props.variants, resources: resource.resources, empty: resource.empty } }
+  if (resource !== undefined) return { ...props, sections: resource.sections, variants: { ...props.variants, empty: resource.empty } }
   if (scenario === 'timing') return { ...props, overview: { ...props.overview, durations: timingDurations } }
   return { ...props, sections: sectionsForScenario(scenario, props.sections) }
 }
@@ -143,7 +141,7 @@ const meta = {
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'The exact TraceSeries matrix pins independent spend/token windows, 0.9949/0.995 and invalid attribution fractions, missing versus zero subagent counts, and first-read resource/timing skeletons. Catalog details slices contain missions and work, not these trace facts or pending-field contracts.' }, layout: 'fullscreen' },
   args: {
     ...detailsStoryInputs('busy', native),
-    variants: { overview: 'O2', context: 'C1', spend: 'S1', resources: 'R1', empty: 'E3' },
+    variants: { overview: 'O2', context: 'C1', spend: 'S1', empty: 'E3' },
     state: 'busy', intent: { hiddenSections: [] }, onIntentChange: () => {}, onOpen: () => {}, onRetry: () => {},
     scenario: 'independent', scheme: 'dark', width: 400,
   },
@@ -358,16 +356,16 @@ function assertSession(root:HTMLElement) {
  requireContract(section.querySelector('[data-details-token-label]')?.textContent === 'Cumulative tokens', 'Self tokens inherited inclusive monetary scope')
 }
 function assertPartialFacts(root:HTMLElement) {
- const card=Array.from(root.querySelectorAll<HTMLElement>('[data-resource-card]')).find(item=>item.textContent?.includes('subagent-session'))
+ const card=Array.from(root.querySelectorAll<HTMLElement>('[data-details-resource]')).find(item=>item.textContent?.includes('subagent-session'))
  requireContract(card, 'Unavailable label hid the known descendant identity')
- // Hover is supplementary: the card paints the reported facts, and they describe its open action.
- const facts=card.querySelector<HTMLElement>('[data-resource-detail]')
- requireContract(facts&&facts.checkVisibility({opacityProperty:true,visibilityProperty:true})&&facts.getBoundingClientRect().height>0&&card.querySelector('[data-details-resource-row]')?.getAttribute('aria-describedby')===facts.id, 'Reported descendant facts are hidden behind hover')
+ // A traced session is a fact row with no hover card: its reported facts paint beneath it.
+ const facts=card.querySelector<HTMLElement>('[data-details-resource-detail]')
+ requireContract(facts&&facts.checkVisibility({opacityProperty:true,visibilityProperty:true})&&facts.getBoundingClientRect().height>0&&card.querySelector('[data-thing-fact]')!==null, 'Reported descendant facts are hidden behind hover')
  const text=facts.textContent??''
  requireContract(!text.includes('Invalid Date')&&!text.includes('NaN')&&!text.includes('First observed')&&!text.includes('Parent ·')&&text.includes('Last observed'), 'Unavailable timestamps or parent fabricated lifecycle facts')
  requireContract(root.textContent?.includes('Showing 1 of 4 subagents'), 'Missing descendant facts changed the reported descendant count')
  requireContract(!card.textContent?.includes('gpt-5.4'), 'Unavailable model was fabricated')
- requireContract(card.querySelector('[data-details-resource-title]')?.textContent === 'role unreported · subagent-session', 'Missing descendant role was rendered as a bare identity')
+ requireContract(card.querySelector('[data-thing-title]')?.textContent === 'role unreported · subagent-session', 'Missing descendant role was rendered as a bare identity')
 }
 function assertContextSamples(root:HTMLElement) {
  assertPercentOnly(root)
@@ -434,7 +432,7 @@ function assertScenarioPanes(root:HTMLElement,names:readonly ScenarioName[]) {
 }
 function assertTracedDescendantTitle(root:HTMLElement) {
  // Observed Fractal rows precede the traced breakdown, so select the traced card by its session identity.
- const tracedTitles = [...root.querySelectorAll('section[aria-label="session"] section[aria-label="session Subagents"] [data-details-resource-title]')].filter(title => title.textContent?.includes('subagent-session'))
+ const tracedTitles = [...root.querySelectorAll('section[aria-label="session"] section[aria-label="session Subagents"] [data-thing-title]')].filter(title => title.textContent?.includes('subagent-session'))
  requireContract(tracedTitles.length === 1 && tracedTitles[0]!.textContent === 'Research delegate · gpt-5.4 · subagent-session', 'Traced role, model or identity is hidden behind Open')
 }
 function assertReportedLongWindow(root:HTMLElement) {
@@ -480,7 +478,7 @@ async function checkSession(canvasElement: HTMLElement) {
 async function checkPartialDescendantFacts(canvasElement: HTMLElement) {
     const root = scenarioPane(canvasElement, 'partialFacts')
     assertPartialFacts(root)
-    const card=Array.from(root.querySelectorAll<HTMLElement>('[data-resource-card]')).find(item=>item.textContent?.includes('subagent-session')),facts=card?.querySelector<HTMLElement>('[data-resource-detail]')
+    const card=Array.from(root.querySelectorAll<HTMLElement>('[data-details-resource]')).find(item=>item.textContent?.includes('subagent-session')),facts=card?.querySelector<HTMLElement>('[data-details-resource-detail]')
     requireContract(card&&facts,'Missing descendant facts negative control target')
     const original=facts.textContent,invented=card.ownerDocument.createElement('span')
     invented.textContent='gpt-5.4'
@@ -494,7 +492,7 @@ async function checkPartialDescendantFacts(canvasElement: HTMLElement) {
       facts.style.setProperty('visibility','hidden')
       await rejectsControl('Reported descendant facts are hidden behind hover',()=>assertPartialFacts(root))
       facts.style.removeProperty('visibility')
-      const title=card.querySelector<HTMLElement>('[data-details-resource-title]')
+      const title=card.querySelector<HTMLElement>('[data-thing-title]')
       requireContract(title,'Missing role-wording negative control target')
       const titleText=title.textContent
       try {
@@ -528,7 +526,7 @@ async function checkIndependentSummary(canvasElement: HTMLElement) {
 }
 export const ContextSamplesPercentOnly: Story = {
   parameters: { scenario: { _tag: 'contract-fixture', reason: 'Exact 18.2% and 37.4% retained context samples with unavailable token counts pin percentage-only meter semantics and chart titles; catalog details slices do not provide TraceSeries context observations.' } },
-  args: { scenario: 'percentSamples', variants: { overview: 'O2', context: 'C3', spend: 'S1', resources: 'R1', empty: 'E3' } },
+  args: { scenario: 'percentSamples', variants: { overview: 'O2', context: 'C3', spend: 'S1', empty: 'E3' } },
   play: async ({ canvasElement }) => {
     const root = pane(canvasElement)
     assertContextSamples(root)
@@ -582,7 +580,7 @@ export const SpendMatchingStates: Story = scenarioMatrix(['partial', 'boundary',
 })
 /** Independent native spend/token scopes, the inclusive session split and partially reported descendant facts. */
 export const SpendScopeAndSubagentStates: Story = scenarioMatrix(['independent', 'session', 'partialFacts'], assertTracedDescendantTitle, async (canvasElement, assertMatrix) => {
-  await rejectsControl('Traced role, model or identity is hidden behind Open',()=>assertMatrix(falsifyText(canvasElement,'section[aria-label="session Subagents"] [data-resource-card] [data-details-resource-title]','Research delegate · subagent-session')))
+  await rejectsControl('Traced role, model or identity is hidden behind Open',()=>assertMatrix(falsifyText(canvasElement,'section[aria-label="session Subagents"] [data-details-resource] [data-thing-title]','Research delegate · subagent-session')))
   for (const check of [checkIndependentMetricScopes, checkIndependentSummary, checkSession, checkPartialDescendantFacts]) await check(canvasElement)
 })
 /** Reported-percentage context occupancy, alone and with retained percentage samples. */
@@ -600,10 +598,10 @@ export const SubagentCountStates: Story = scenarioMatrix(['knownZero', 'unknownC
   await rejectsControl('Unknown traced count became zero',()=>assertMatrix(falsifyText(canvasElement,'section[aria-label="unknownCount Subagents"] button[aria-expanded]','Subagents0')))
   await rejectsControl('Traced heading total became the retained list size',()=>assertMatrix(falsifyText(canvasElement,'section[aria-label="boundedCount Subagents"] [data-details-subagent-count]','Showing 1 of 1 subagents')))
 })
-const firstReadResourceNames = ['firstRead', 'firstReadDense', 'firstReadCompact', 'firstReadHideEmpty', 'firstReadShowEmpty'] as const
-/** First-read resource skeletons across resource densities and empty-section policies. */
+const firstReadResourceNames = ['firstRead', 'firstReadHideEmpty', 'firstReadShowEmpty'] as const
+/** First-read resource skeletons across empty-section policies. */
 export const FirstReadResourceStates: Story = scenarioMatrix(firstReadResourceNames, root => assertResourceReads(root, firstReadResourceNames), async (canvasElement, assertMatrix) => {
-  await rejectsControl('First-read resource rendered settled-unavailable instead of a pending skeleton',()=>assertMatrix(mutated(canvasElement,'section[aria-label="firstReadDense Workspace"] [data-details-skeleton]',node=>node.removeAttribute('data-details-skeleton'))))
+  await rejectsControl('First-read resource rendered settled-unavailable instead of a pending skeleton',()=>assertMatrix(mutated(canvasElement,'section[aria-label="firstRead Workspace"] [data-details-skeleton]',node=>node.removeAttribute('data-details-skeleton'))))
   await checkFirstReadResources(canvasElement)
 })
 const settledResourceNames = ['settledUnavailable', 'knownEmpty'] as const

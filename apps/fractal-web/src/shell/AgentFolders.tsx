@@ -32,7 +32,7 @@ import { liveAncestor, project, type ProjectedFolder } from '../folders/core.mts
 import { refusalText } from '../folders/edit.ts'
 import { fixtureFolders } from '../folders/fixture.ts'
 import { WfIcon } from '../icons/WfIcon.tsx'
-import { SubjectAddress } from '../resources/contract.ts'
+import { SubjectAddress } from '../shell/subjectAddress.ts'
 import { AgentUsageRow, AgentUsageSignals, openAgentUsage } from './AgentUsage.tsx'
 import { filterFolders, matchesRow, parseSidebarQuery, sortMembers, type SidebarRow } from './sidebar/filter.ts'
 import { fixtureSidebarState, sidebarState } from './sidebar/state.ts'

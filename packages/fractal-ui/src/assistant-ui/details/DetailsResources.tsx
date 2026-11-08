@@ -1,17 +1,16 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { useDrag } from 'react-aria'
-import { Button as AriaButton, VisuallyHidden } from 'react-aria-components'
-import { HoverCard } from '../entity/HoverCard'
+import { Button as AriaButton } from 'react-aria-components'
 import { ResourceEntityCard } from '../entity/ResourceCard'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../composition-tokens.stylex'
+import { geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../composition-tokens.stylex'
 import { Icon, type IconName } from '../composition/Icons'
-import { SidebarAgentRow } from '../sidebar/SidebarAgentRow'
-import { ResourceCardV1, ResourceHoverV1, WholeResourceMeta } from '../resources/ResourceCardV1'
 import { AgentHoverCard } from '../sidebar/DeferredRowActions.tsx'
+import { needsYouLabel, rowAttention } from '../sidebar/model'
 import { agentPaneKey } from '../workbench/agent-drag'
-import { entityDragPayload } from '../entity/entity'
+import { useEntityDrag } from '../../workspace/react/mod'
+import { ThingCard, ThingRow } from '../things/Thing'
+import type { Observed, ThingAct, ThingFace, ThingMark, ThingOpenable } from '../things/face'
 import type { DetailsResource, DetailsSection, DetailsState, DetailsValue } from './model'
 import type { TraceSeries, TraceSubagent } from './trace-series'
 import { DetailsInk } from './DetailsSkeleton'
@@ -21,7 +20,6 @@ import { DetailsReadFailureLine } from './DetailsReadState'
 import { detailsReasonText, traceFactReason, traceReasonText } from './trace-reasons'
 import { traceCoverageState } from './trace-series'
 
-export type DetailsResourceForm = 'R1' | 'R2' | 'R3'
 export type DetailsEmptyRule = 'E1' | 'E2' | 'E3'
 export interface DetailsResourcesProps {
   readonly state: DetailsState
@@ -29,7 +27,6 @@ export interface DetailsResourcesProps {
   /** Breakdown facts are independent of the Fractal resource snapshot. */
   readonly trace: TraceSeries
   readonly now: number
-  readonly form?: DetailsResourceForm
   readonly empty?: DetailsEmptyRule
   readonly onOpen: (uri: string, split: boolean) => void
   /** Synced layout intent (q45): section names the parent keeps hidden. */
@@ -38,8 +35,8 @@ export interface DetailsResourcesProps {
 }
 export const DetailsLabelContext=React.createContext('')
 
-/** One pane-level column; collapse, hover and skeletons stay local, never synced. */
-export function DetailsResources({ state, sections: suppliedSections, trace, now, form = 'R1', empty = 'E1', onOpen, hiddenSections = [], styles: callerStyles }: DetailsResourcesProps) {
+/** One pane-level column; collapse, hover and skeletons stay local, never synced. Every row is the thing kit's. */
+export function DetailsResources({ state, sections: suppliedSections, trace, now, empty = 'E1', onOpen, hiddenSections = [], styles: callerStyles }: DetailsResourcesProps) {
   const labelPrefix=React.useContext(DetailsLabelContext)
   // Phone hosts: section toggles are 44px touch targets and unavailable reasons paint inline.
   const narrow = React.useContext(NarrowLayoutContext)
@@ -72,7 +69,7 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
     // First reads stay pending, never masquerading as settled unavailable data; a read section keeps its own heading and line.
     .filter(section => ownsRead(section) || state !== 'new' || empty !== 'E3' || (section.items._tag === 'Known' && section.items.value.length > 0) || (section.title === 'Subagents' && hasObservedSubagentRows))
     .filter(section => ownsRead(section) || visible(section.items, empty) || (section.title === 'Subagents' && hasSubagentEvidence))
-  return <div data-details-state={state} data-details-form={form} data-details-empty={empty} {...stylex.props(styles.root, callerStyles)}>
+  return <div data-details-state={state} data-details-empty={empty} {...stylex.props(styles.root, callerStyles)}>
     {sections.map(section => {
       const isCollapsed = collapsed[section.title] === true
       // The Subagents badge is the reported traced total, never the retained list length; an unknown total has no badge.
@@ -100,7 +97,7 @@ export function DetailsResources({ state, sections: suppliedSections, trace, now
         <div {...stylex.props(styles.body, ((isCollapsed && expandable) || unavailable) && styles.bodyCollapsed)}>
           {/* Pane-level loading has no section read in flight; a section's own pending read keeps its held failure mounted. */}
           {state !== 'loading' && <DetailsReadFailureLine failure={pending ? undefined : section.failure} pending={section.pending === true} />}
-          {expandable && !isCollapsed && <SectionContent section={section} observedSubagents={observedSubagents} trace={trace} now={now} form={form} empty={empty} open={open} pending={pending} />}
+          {expandable && !isCollapsed && <SectionContent section={section} observedSubagents={observedSubagents} trace={trace} now={now} empty={empty} open={open} pending={pending} />}
         </div>
       </section>
     })}
@@ -192,9 +189,9 @@ export function traceHistorySection(trace: TraceSeries): DetailsSection {
 }
 
 /** The loading shadow and populated body share markup, wrapping and intrinsic metadata fit. */
-function SectionContent({ section, observedSubagents, trace, now, form, empty, open, pending }: {
+function SectionContent({ section, observedSubagents, trace, now, empty, open, pending }: {
   section: DetailsSection; observedSubagents: DetailsSection | undefined; trace: TraceSeries; now: number;
-  form: DetailsResourceForm; empty: DetailsEmptyRule; open: (uri: string, split: boolean) => void; pending: boolean
+  empty: DetailsEmptyRule; open: (uri: string, split: boolean) => void; pending: boolean
 }) {
   const hasObserved = observedSubagents?.items._tag === 'Known'
   // A first-read Subagents section reserves its breakdown; pane-level loading keeps the settled footprint.
@@ -227,7 +224,7 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
     <div {...stylex.props(styles.content, pending && styles.skeletonHidden)}>
       {section.title === 'Subagents' && hasObserved && observedSubagents !== undefined && observedSubagents.items._tag === 'Known' && (observedSubagents.items.value.length === 0
         ? <SkeletonLine pending={pending}><p data-details-observed-subagent-count {...stylex.props(styles.metaLine)}>No resources for this session.</p></SkeletonLine>
-        : <SectionItems section={observedSubagents} now={now} form={form} open={open} pending={pending} />)}
+        : <SectionItems section={observedSubagents} now={now} open={open} pending={pending} />)}
       {showBreakdown && <>
         {section.title === 'Subagents' && <SkeletonLine pending={pending}><p data-details-subagent-window {...stylex.props(styles.metaLine)}>Subagents · {subagentWindow === undefined ? <MissingDetailsValue label="Subagent list window" reason={windowReason ?? 'The period for this subagent list isn’t reported.'} /> : subagentWindow.join('')}</p></SkeletonLine>}
         {/* A complete list needs no count; a bounded or unknown total says how many are shown. */}
@@ -237,7 +234,7 @@ function SectionContent({ section, observedSubagents, trace, now, form, empty, o
           ? null
           : section.items.value.length === 0
             ? <SkeletonLine pending={pending}><p {...stylex.props(styles.metaLine)}>None</p></SkeletonLine>
-            : <SectionItems section={section} now={now} form={form} open={open} pending={pending} />}
+            : <SectionItems section={section} now={now} open={open} pending={pending} />}
       </>}
       {gaps.length > 0 && <SkeletonLine pending={pending}>{gaps.length === 1 && gaps[0]!.subject === 'Resources'
         ? <p data-details-unavailable data-details-unavailable-subject="Resources" {...stylex.props(styles.whyLine)}><span data-details-resources-unavailable {...stylex.props(styles.whySummary)}>Resources aren’t available for this session.</span><DetailsWhy explains="Resources" reasons={[detailsReasonText(gaps[0]!.reason)]} /></p>
@@ -271,54 +268,85 @@ function SkeletonLine({ pending, children }: { pending: boolean; children: React
   </div>
 }
 
-function wrapsIdentity(resource: DetailsResource): boolean {
-  return resource.uri.startsWith('branch:') || resource.uri.startsWith('pr:') || resource.uri.startsWith('mission:')
-}
-
-function SectionItems({ section, now, form, open, pending }: { section: DetailsSection; now: number; form: DetailsResourceForm; open: (uri: string, split: boolean) => void; pending: boolean }) {
-  const [expanded,setExpanded]=React.useState(false)
-  const narrow = React.useContext(NarrowLayoutContext)
+function SectionItems({ section, now, open, pending }: { section: DetailsSection; now: number; open: (uri: string, split: boolean) => void; pending: boolean }) {
   const items = section.items._tag === 'Known' ? section.items.value : []
-  const capped = form === 'R3' && items.length > 3
-  const shown = capped && !expanded ? items.slice(0, 3) : items
-  // An absent agent status must not fall back to the card's projected status text.
-  const row = (resource: DetailsResource, child: React.ReactNode) => <SkeletonRow key={resource.uri} pending={pending} label={resource.card.label} meta={resource.agent === undefined ? resource.card.detail : resource.agent.status === 'unobserved' ? undefined : resource.agent.statusLabel}>{child}</SkeletonRow>
-  return <>
-    {form === 'R2' && <div role="list" aria-label={section.title} {...stylex.props(styles.dense)}>{shown.map(resource => row(resource, <DenseRow resource={resource} now={now} open={open} />))}</div>}
-    {form !== 'R2' && shown.map(resource => row(resource, <ResourceEntry resource={resource} now={now} open={open} />))}
-    {capped && <SkeletonLine pending={pending}><AriaButton data-details-quiet-action onPress={()=>setExpanded(value=>!value)} {...stylex.props(styles.splitButton, narrow && styles.touchHeight)}>{expanded?'Show fewer':`+${items.length - shown.length} more`}</AriaButton></SkeletonLine>}
-  </>
-}
-
-/** Each resource row shows its entity's canonical card: an agent's is the sidebar card; a terminal shows its observed tail. */
-function HoverContent({ resource, now }: { resource: DetailsResource; now: number }) {
-  if (resource.agent !== undefined) return <AgentHoverCard row={resource.agent} reportedStatusOnly now={now} />
-  if (resource.terminal !== undefined) return <ResourceEntityCard id={resource.uri} title={resource.card.label} kind="Terminal" icon="terminal" text={resource.card.detail} preview={resource.terminal.slice(-6)} />
-  return <ResourceHoverV1 id={resource.uri} resource={resource.card} file={resource.file} />
-}
-
-/** A resource row drags its entity, as every draggable thing does: an agent by its ref, anything else by its uri. */
-const resourceDragItems = (resource: DetailsResource): Record<string, string> => entityDragPayload(resource.agent !== undefined
-  ? { kind: 'agent', id: resource.agent.ref, title: resource.card.label }
-  : { kind: 'resource', id: resource.uri, title: resource.card.label })
-
-function ResourceEntry({ resource, now, open }: { resource: DetailsResource; now: number; open: (uri: string, split: boolean) => void }) {
-  const paneKey = agentPaneKey(resource.uri)
-  const getItems = React.useCallback(() => [resourceDragItems(resource)], [resource])
-  const { dragProps } = useDrag({ getItems, getAllowedDropOperations: () => ['copy'] })
-  const splitPress=React.useRef(false)
-  const narrow = React.useContext(NarrowLayoutContext)
-  const capture=(event:React.MouseEvent|React.PointerEvent|React.KeyboardEvent)=>{splitPress.current=event.metaKey||event.ctrlKey}
-  if (resource.agent !== undefined) {
-    return <div {...dragProps} onPointerDownCapture={capture} onKeyDownCapture={capture} onClickCapture={capture} {...stylex.props(styles.agentEntry)}>
-      <div {...stylex.props(styles.agentRow)}><SidebarAgentRow item={resource.agent} variant="SR-2" reportedStatusOnly now={now} onOpen={row => open(agentPaneKey(row.ref), splitPress.current)} /></div>
-      <AriaButton data-details-quiet-action aria-label={`Open in split: ${resource.card.label}`} onPress={() => open(paneKey, true)} {...stylex.props(styles.splitButton, styles.inlineSplit, narrow && styles.touchHeight)}>Open in split</AriaButton>
-    </div>
-  }
-  // Traced sessions and incarnations carry their reported facts only in the detail, so the card paints it.
-  return <div {...dragProps} onPointerDownCapture={capture} onKeyDownCapture={capture} onClickCapture={capture} {...stylex.props(styles.entry, narrow && narrowCardGeometry)}>
-    <ResourceCardV1 resource={resource.card} variant="RC-1" titlePriority titleLines={wrapsIdentity(resource) || resource.uri.startsWith('session:') ? 'wrap' : 1} icon={resourceIcon(resource)} detailLine={resource.uri.startsWith('session:')} onOpen={() => open(paneKey, splitPress.current)} />
+  return <div role="list" aria-label={section.title} {...stylex.props(styles.list)}>
+    {items.map(resource => {
+      const face = resource.face ?? legacyFace(resource)
+      const fact = isFact(resource)
+      return <div role="listitem" key={resource.uri} data-details-resource={resource.uri}>
+        <SkeletonRow pending={pending} label={face.title} meta={face.act?.label ?? face.mark.word}>
+          {fact ? <ThingRow observed={observedNow(face, now)} now={now} /> : <OpenableResource resource={resource} face={face} now={now} open={open} />}
+          {/* A fact row has no hover card, so its reported facts paint beneath it instead of hiding. */}
+          {fact && face.summary !== undefined && <p data-details-resource-detail {...stylex.props(styles.factDetail)}>{face.summary}</p>}
+        </SkeletonRow>
+      </div>
+    })}
   </div>
+}
+
+/** Reported facts (`details:` observations, traced sessions) have no ref to open yet: the kit draws them as fact rows. */
+const isFact = (resource: DetailsResource): boolean => resource.uri.startsWith('details:') || resource.uri.startsWith('session:')
+
+/** Details rows are a current snapshot; the host's read state speaks for staleness above the sections. */
+const observedNow = (face: ThingFace, now: number): Observed<ThingFace> => ({ _tag: 'Known', value: face, observedAt: now, freshness: 'live' })
+
+/**
+ * A row with a ref: click opens, Cmd/Ctrl-click and Alt+Enter open in a split, Enter opens, a press drags it onto the
+ * workspace, and resting on it shows its entity's canonical card.
+ */
+function OpenableResource({ resource, face, now, open }: { resource: DetailsResource; face: ThingFace; now: number; open: (uri: string, split: boolean) => void }) {
+  const key = agentPaneKey(resource.agent === undefined ? resource.uri : resource.agent.ref)
+  const entity = React.useMemo(() => resource.agent !== undefined
+    ? { kind: 'agent' as const, id: resource.agent.ref, title: face.title }
+    : { kind: 'resource' as const, id: resource.uri, title: face.title }, [resource.agent, resource.uri, face.title])
+  const drag = useEntityDrag({ ref: key, entity })
+  const openable = React.useMemo<ThingOpenable>(() => ({
+    onClick: event => open(key, event.metaKey || event.ctrlKey),
+    onKeyDown: event => {
+      if (event.key !== 'Enter') return
+      event.preventDefault()
+      open(key, event.altKey || event.metaKey || event.ctrlKey)
+    },
+    onPointerDown: drag.onPointerDown,
+  }), [key, open, drag.onPointerDown])
+  const observed = observedNow(face, now)
+  const card = () => resource.agent !== undefined ? <AgentHoverCard row={resource.agent} reportedStatusOnly now={now} />
+    : resource.terminal !== undefined ? <ResourceEntityCard id={resource.uri} title={face.title} kind="Terminal" icon="terminal" text={resource.card.detail} preview={resource.terminal.slice(-6)} />
+      : <ThingCard observed={observed} now={now} />
+  return <ThingRow observed={observed} now={now} openable={openable} hoverCard={card} />
+}
+
+const kindLabels: Readonly<Record<string, string>> = {
+  agent: 'Agent', mission: 'Mission', terminal: 'Terminal', worktree: 'Worktree', repository: 'Repository', branch: 'Branch',
+  pr: 'Pull request', issue: 'Issue', 'ci-run': 'CI run', review: 'Review', diff: 'File', file: 'File', attention: 'Attention', session: 'Session', details: 'Detail',
+}
+
+/** A face for hosts that supply only the legacy card: the card's label and detail, the agent's reported status, file counts. */
+function legacyFace(resource: DetailsResource): ThingFace {
+  const scheme = resource.uri.split(':', 1)[0] ?? ''
+  const base = {
+    kind: kindLabels[scheme] ?? 'Resource',
+    icon: resourceIcon(resource),
+    title: resource.card.label,
+    ...(resource.file !== undefined ? { titleStyle: 'path' as const } : {}),
+    ...(resource.card.detail === '' ? {} : { summary: resource.card.detail }),
+  }
+  const agent = resource.agent
+  if (agent !== undefined) {
+    const attention = rowAttention(agent)
+    // An unobserved agent has no status to show: no mark, no word, never the card's projected text.
+    const mark: ThingMark = agent.status === 'unobserved' ? { shape: 'none', word: '' }
+      : { shape: agent.status === 'working' ? 'filled' : agent.status === 'failed' || agent.status === 'ended' || agent.status === 'retired' ? 'ended' : 'hollow', word: agent.statusLabel }
+    const act: ThingAct | undefined = attention === 'failed' ? { tone: 'failed', label: agent.statusLabel }
+      : attention === 'needs-you' ? { tone: 'act', label: needsYouLabel } : undefined
+    return { ...base, mark, ...(act === undefined ? {} : { act }) }
+  }
+  const counts = resource.file === undefined ? '' : [
+    resource.file.added._tag === 'Known' && resource.file.added.value !== 0 ? `+${resource.file.added.value}` : '',
+    resource.file.removed._tag === 'Known' && resource.file.removed.value !== 0 ? `−${resource.file.removed.value}` : '',
+  ].filter(Boolean).join(' ')
+  return { ...base, mark: { shape: 'none', word: counts } }
 }
 
 /** Resource concepts use the same stroke kit as section controls, never text glyphs. */
@@ -331,7 +359,7 @@ function resourceIcon(resource: DetailsResource): IconName {
     case 'ci-run': return resource.card.detail.endsWith('running') ? 'clock' : 'check'
     case 'review': return 'check'
     case 'diff': return 'pencil'
-    case 'terminal': return 'chevron-right'
+    case 'terminal': return 'terminal'
     case 'agent':
     case 'mission': return 'message'
     case 'attention': return 'alert'
@@ -340,46 +368,9 @@ function resourceIcon(resource: DetailsResource): IconName {
   }
 }
 
-/** Dense rows retain aligned metadata while branch and PR identities get two lines; painted text names the row and its facts describe it. */
-function DenseRow({ resource, now, open }: { resource: DetailsResource; now: number; open: (uri: string, split: boolean) => void }) {
-  const paneKey = agentPaneKey(resource.uri)
-  const getItems = React.useCallback(() => [resourceDragItems(resource)], [resource])
-  const {dragProps}=useDrag({getItems,getAllowedDropOperations:()=>['copy']})
-  const meta = resource.terminal !== undefined ? 'terminal'
-    : resource.agent !== undefined ? resource.agent.status === 'unobserved' ? undefined : resource.agent.statusLabel
-    : resource.file !== undefined
-      ? [resource.file.added._tag === 'Known' && resource.file.added.value !== 0 ? `+${resource.file.added.value}` : '', resource.file.removed._tag === 'Known' && resource.file.removed.value !== 0 ? `−${resource.file.removed.value}` : ''].filter(Boolean).join(' ')
-    : resource.card.detail
-  const isSubagent = resource.agent !== undefined || resource.uri.startsWith('session:')
-  // An absent agent status must not fall back to the card's projected status text; whole meta may be hidden when it does not fit.
-  const facts = [...new Set([meta, resource.agent === undefined ? resource.card.detail : undefined, resource.file !== undefined && resource.file.path !== resource.card.label ? resource.file.path : undefined])].filter((fact): fact is string => fact !== undefined && fact !== '')
-  const descriptionId = React.useId()
-  const narrow = React.useContext(NarrowLayoutContext)
-  // Reported facts have nothing to open yet, so this is plain text until resource rows get their own design.
-  if (resource.uri.startsWith('details:') || resource.uri.startsWith('session:')) return <div data-resource-card data-details-resource-static role="listitem" {...stylex.props(styles.denseEntry, styles.staticRow)}>
-    <span data-details-resource-icon={resourceIcon(resource)} {...stylex.props(styles.resourceIcon)}><Icon name={resourceIcon(resource)} /></span>
-    <span {...stylex.props(styles.staticText)}>
-      <span data-details-resource-title {...stylex.props(styles.wrappedLabel)}>{resource.card.label}</span>
-      {resource.card.detail === '' ? null : <span {...stylex.props(styles.staticDetail)}>{resource.card.detail}</span>}
-    </span>
-  </div>
-  return <div data-resource-card role="listitem" {...dragProps} {...stylex.props(styles.denseEntry)}><HoverCard placement="left top" content={() => <HoverContent resource={resource} now={now} />}>
-    <AriaButton data-details-resource-row aria-describedby={facts.length > 0 ? descriptionId : undefined} onPress={event => open(paneKey, event.metaKey || event.ctrlKey)} {...stylex.props(styles.denseRow, narrow && styles.touchRow)}>
-      <span data-details-resource-icon={resourceIcon(resource)} {...stylex.props(styles.resourceIcon)}><Icon name={resourceIcon(resource)} /></span>
-      <span data-details-resource-title data-resource-title-lines={wrapsIdentity(resource) ? 'wrap' : 1} {...stylex.props(styles.denseLabel, wrapsIdentity(resource) && styles.wrappedLabel)}>{resource.card.label}</span>{' '}
-      <WholeResourceMeta numeric={resource.file !== undefined} styles={styles.denseMeta}>{meta}</WholeResourceMeta>
-    </AriaButton>
-  </HoverCard>{facts.length > 0 && <VisuallyHidden elementType="span"><span id={descriptionId} data-details-resource-facts>{facts.join(' · ')}</span></VisuallyHidden>}{isSubagent && <AriaButton aria-label={`Open ${resource.card.label} in split`} onPress={() => open(paneKey, true)} {...stylex.props(styles.denseSplit, narrow && styles.touchSquare)}><Icon name="panel" /></AriaButton>}</div>
-}
-
-/** Phone hosts: the shared resource card's open row (footer height) and detail row (control height) become 44px targets. */
-const narrowCardGeometry = stylex.createTheme(g, { footer: g.touchTarget, controlLg: g.touchTarget })
-
 const styles = stylex.create({
-  // Phone hosts (NarrowLayoutContext): every Details action is a 44px touch target; desktop keeps the dense rows.
+  // Phone hosts (NarrowLayoutContext): every Details action is a 44px touch target.
   touchHeight: { height: g.touchTarget },
-  touchRow: { minHeight: g.touchTarget },
-  touchSquare: { width: g.touchTarget, height: g.touchTarget },
   // The unavailable state's reason wraps onto its own row beneath the section title.
   headerWrap: { flexWrap: 'wrap', paddingBlock: s.xs },
   // The unreported-sections tail: its summary takes a full row, Why? and its panel start beneath it.
@@ -403,24 +394,9 @@ const styles = stylex.create({
   whySummary: { flexBasis: '100%', minWidth: 0, overflowWrap: 'normal' },
   allHidden: { padding: s.md },
   chevronSpace: { width: g.icon, flexShrink: 0 },
-  entry: { display: 'flex', flexDirection: 'column', minWidth: 0 },
-  agentEntry: { display: 'flex', alignItems: 'center', gap: s.xs, minWidth: 0 },
-  agentRow: { flex: 1, minWidth: 0 },
-  inlineSplit: { flexShrink: 0, whiteSpace: 'nowrap' },
-  splitButton: { height: g.controlSm, paddingInline: s.sm, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, borderRadius: r.sm, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } },
-  dense: { display: 'flex', flexDirection: 'column', minWidth: 0 },
-  denseEntry: { position: 'relative', display: 'flex', alignItems: 'center', minWidth: 0 },
-  denseSplit: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, width: g.toolRow, height: g.toolRow, padding: s.zero, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
-  denseRow: { display: 'flex', alignItems: 'center', gap: s.md, width: '100%', minWidth: 0, flex: 1, boxSizing: 'border-box', minHeight: g.toolRow, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, textAlign: 'left', cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
-  resourceIcon: { display: 'inline-flex', flexShrink: 0, color: ink.fgMuted },
-  denseLabel: { flexBasis: 0, flexGrow: 1, flexShrink: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
-  // Identity labels wrap in full (no clamp) with balanced lines: a long branch never leaves one orphaned word beside its badge.
-  wrappedLabel: { whiteSpace: 'normal', overflow: 'visible', overflowWrap: 'anywhere', textWrap: 'balance' },
-  denseMeta: { marginInlineStart: 'auto', color: ink.fgMuted, fontSize: t.microSize },
-  // Holds the place of a properly designed fact row; nothing else depends on it.
-  staticRow: { display: 'flex', alignItems: 'flex-start', gap: s.md, paddingBlock: s.xs },
-  staticText: { display: 'flex', flexDirection: 'column', minWidth: 0 },
-  staticDetail: { color: ink.fgMuted, fontSize: t.microSize, overflowWrap: 'anywhere' },
+  list: { display: 'flex', flexDirection: 'column', minWidth: 0 },
+  // Wraps in full under its fact row.
+  factDetail: { margin: s.zero, paddingInline: s.sm, paddingBottom: s.xs, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
   contentShell: { display: 'flex', flexDirection: 'column', minWidth: 0 },
   content: { display: 'flex', flexDirection: 'column', gap: s.sm, minWidth: 0 },
   skeletonHidden: { visibility: 'hidden' },
