@@ -41,7 +41,7 @@ export const scenarioExemptions: readonly string[] = ['Dark:primitive', 'Light:p
 const followsApp = (scheme: 'dark' | 'light', surface: string) => async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
   const section = within(canvasElement).getByRole('region', { name: `${scheme} devbar` })
   const probe = getComputedStyle(section.querySelector('[data-surface-probe]')!)
-  const row = getComputedStyle(within(section).getByRole('group', { name: 'Developer bar' }))
+  const row = getComputedStyle(within(section).getByRole('toolbar', { name: 'Developer bar' }))
   await expect(probe.backgroundColor).toBe(surface)
   await expect(row.backgroundColor).toBe(probe.backgroundColor)
   await expect(row.color).toBe(probe.color)
