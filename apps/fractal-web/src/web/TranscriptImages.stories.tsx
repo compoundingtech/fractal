@@ -282,12 +282,12 @@ const showReceived = async (root: HTMLElement) => {
   const section = fixtureSection(root)
   // Agent mail is one object: its header and body, the image under the body, in one row.
   const mailbox = section.dataset.row === 'mailbox'
-  const owner = card(root).closest<HTMLElement>(mailbox ? '[data-testid="mail-message"]' : '[data-testid="agent-message"]')
+  const owner = card(root).closest<HTMLElement>(mailbox ? '[data-testid="message-card"]' : '[data-testid="agent-message"]')
   await expect(owner).not.toBeNull()
   await expect(owner).toHaveAttribute('data-item-id', section.dataset.imageRow)
   await expect(owner).toHaveAttribute('data-item-kind', mailbox ? 'Message' : 'Text')
   await expect(within(section).getAllByTestId('transcript-attachments')).toHaveLength(1)
-  if (mailbox) await expect(within(owner!).getByTestId('mail-header')).toHaveTextContent('reviewer')
+  if (mailbox) await expect(within(owner!).getByTestId('message-head')).toHaveTextContent('reviewer')
   await showLoaded(root)
   await expect(within(owner!).getByRole('button', { name: `Open ${NAME}` })).toHaveFocus()
   await openAndCloseViewer(root)

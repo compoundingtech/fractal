@@ -5,6 +5,8 @@ export const surfaceVars = stylex.defineVars({
   sidebar: '#000000',
   raised: '#111111',
   message: '#141414',
+  /** Transcript message cards: the message tint in dark, the raised surface (white with a hairline) in light. */
+  messageCard: '#141414',
   glassFill: 'rgba(17, 17, 17, 0.8)',
   rowHover: '#131313',
   rowActive: '#1a1b1b',

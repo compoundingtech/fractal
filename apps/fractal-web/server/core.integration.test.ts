@@ -117,7 +117,7 @@ it('restricts HTML, assets, HEAD and cached responses with the same image policy
     `script-src 'self' 'wasm-unsafe-eval' 'sha256-${hash}'`,
     "style-src 'self' 'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUcjky8QOOrQx6o=' 'sha256-gYiS/BvZvRcK27JIXTuwhZ3hs2+VJ1X+2gUlE+farlg='",
     "style-src-attr 'unsafe-inline'",
-    "img-src 'self' data: blob:",
+    "img-src 'self' data: blob: https://avatars.githubusercontent.com",
     "font-src 'self'",
     `connect-src 'self' ws://127.0.0.1:${setup.port} wss://127.0.0.1:${setup.port}`,
     "object-src 'none'",

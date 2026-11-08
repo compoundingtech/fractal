@@ -23,7 +23,7 @@ describe('episodes', () => {
   })
   it('names mail participants: roster name, else the last segment with the full ref', () => {
     const mail = turns('agent/example/quay')[2]!.participants?.[`${P}2c2c2c2c2c2c2c2c-content`]
-    expect(mail).toEqual({ from: { label: 'Harbor', ref: 'agent/example/harbor' }, to: { label: 'quay', ref: 'agent/example/quay' }, involvesPerson: false })
+    expect(mail).toEqual({ from: { label: 'Harbor', ref: 'agent/example/harbor', kind: 'agent' }, to: { label: 'quay', ref: 'agent/example/quay', kind: 'agent' }, involvesPerson: false })
   })
   it('keeps mail the agent sends inside the episode it was sent from', () => {
     const items = project(raw()).map(item => item._tag === 'Message' ? { ...item, author: 'agent/example/quay', from: 'agent/example/quay', to: 'agent/example/harbor' } : item)

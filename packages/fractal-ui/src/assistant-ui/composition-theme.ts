@@ -8,6 +8,7 @@ const surfaceVarsTheme = stylex.createTheme(surfaceVars, {
   sidebar: '#ffffff',
   raised: '#ffffff',
   message: '#f4f4f5',
+  messageCard: '#ffffff',
   glassFill: 'rgba(255, 255, 255, 0.85)',
   rowHover: '#f4f4f5',
   rowActive: '#ebebeb',
