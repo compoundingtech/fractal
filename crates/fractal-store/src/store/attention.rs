@@ -20,18 +20,26 @@ impl Store {
         index: u64,
         history: bool,
     ) -> Result<StatusResponse> {
-        self.agent_card_status_view(names, index, history, false)
+        self.agent_card_status_view(names, index, history, CardShape::Internal)
     }
 
     pub fn agent_card_status_for_generic_reads_at(
         &self, names: Option<&BTreeSet<String>>, index: u64, history: bool,
     ) -> Result<StatusResponse> {
-        self.agent_card_status_view(names, index, history, true)
+        self.agent_card_status_view(names, index, history, CardShape::Generic)
+    }
+
+    /// Presentation-only fields; generic terminal/exec cards retain their full actual payload.
+    pub fn agent_roster_status_at(
+        &self, names: Option<&BTreeSet<String>>, index: u64, history: bool,
+    ) -> Result<StatusResponse> {
+        self.agent_card_status_view(names, index, history, CardShape::Roster)
     }
 
     fn agent_card_status_view(
-        &self, names: Option<&BTreeSet<String>>, index: u64, history: bool, generic: bool,
+        &self, names: Option<&BTreeSet<String>>, index: u64, history: bool, shape: CardShape,
     ) -> Result<StatusResponse> {
+        let generic = shape != CardShape::Internal;
         let connection = self.readers.get();
         let index = selected_index(current_index(&connection)?, Some(index)).map_err(anyhow::Error::new)?;
         let names = match names {
@@ -47,8 +55,11 @@ impl Store {
             agents
         } else { names };
         // The view and status passes share what they read of each subject.
-        let mut reads = if generic { card_fold::CardReads::for_generic_reads(index) }
-            else { card_fold::CardReads::new(index) };
+        let mut reads = match shape {
+            CardShape::Internal => card_fold::CardReads::new(index),
+            CardShape::Generic => card_fold::CardReads::for_generic_reads(index),
+            CardShape::Roster => card_fold::CardReads::for_roster(index),
+        };
         let names = if history { names } else {
             self.current_view_candidates_with(&connection, names, index, true, &mut reads)?
         };
@@ -57,7 +68,7 @@ impl Store {
         let mut kept = HashMap::new();
         let mut missing = Vec::new();
         for name in &names {
-            match self.kept_subject_status(name, index, mode, generic) {
+            match self.kept_subject_status(name, index, mode, shape) {
                 Some((status, _)) => {
                     kept.insert(name.clone(), status);
                 }
@@ -66,7 +77,7 @@ impl Store {
         }
         for (name, (status, action)) in self.agent_card_statuses(&connection, &missing, index, &mut reads)? {
             if newest {
-                self.keep_subject_status(&name, index, mode, &status, &action, generic);
+                self.keep_subject_status(&name, index, mode, &status, &action, shape);
             }
             kept.insert(name, status);
         }
