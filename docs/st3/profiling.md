@@ -1371,3 +1371,59 @@ The daemon's existing [`CollectionSubscribe`](../../crates/fractal-api-core/src/
 derives Serde deserialization without `deny_unknown_fields`, so the optional trace field
 is accepted and ignored by older servers.
 
+
+### Agent-list performance fault delivery
+
+The GET agents objective measures the local member's completed eligible requests over seven days.
+A complete window with traffic is required. The objective is met when at least 95% succeed in
+100 ms or less. Measurement continues when the optional `agents_request_slo_fault` setting is
+absent. An explicit `member` must match the daemon origin and `reviewer` must name an active
+agent. The binding comes from the Factory response intent for `fractal-agents-success-fast`.
+
+Fault delivery is disabled by default. Keep the setting absent until the owner/member and
+reviewer assignment has been reviewed and a complete durable seven-day window exists.
+The Factory response proposal alone does not enable delivery; enabling the reviewed binding
+is a separate configuration decision.
+
+The doctor field `performance.agentsRequestSloShadow` reports the current counts along with
+`fault_pending`, `fault_quarantined`, `fault_delivery_blocked`, and `fault_outbox_overflow`.
+Use the daemon log for the blocked delivery error. To inspect the ledger directly, open
+`STATE/agents-request-slo-v1.sqlite3` read-only and query the following tables.
+
+```sql
+SELECT * FROM fault_outbox ORDER BY id;
+SELECT * FROM fault_quarantine ORDER BY id;
+SELECT * FROM fault_overflow;
+```
+
+A blocked head stays pending until the same reviewer becomes active and the graph can accept
+the native transition. Removing the setting pauses delivery and admission while measurements
+continue. Restoring the same binding resumes ordered replay. Enabling a different reviewer
+quarantines old pending intents before replay. A clock rewind quarantines pending cuts that used
+invalidated minutes. Quarantine keeps the latest 64 records for inspection and never replays them.
+The native episode is `slo-objective/NODE/fractal-agents-success-fast` on `daemon/NODE`.
+Inspect that episode and reconcile any open fault with its original reviewer.
+Changing the setting never reassigns an already-open fault.
+
+Overflow means the 64-entry pending queue could not retain another transition. The daemon can
+replay retained entries but stops admitting new ones. The marker survives restart and changes to
+the binding. Before clearing it, an operator reviews the retained and quarantined decisions,
+records the accepted gap, and reconciles the native episode. Leave the marker in place if the
+episode or loss is still unresolved. Once the retained queue has drained, stop the daemon, back up
+the ledger, verify the `owner` row, and clear only the overflow marker in an explicit SQLite
+transaction. The conditional statement refuses to clear it while pending intents exist.
+
+```sql
+BEGIN IMMEDIATE;
+DELETE FROM fault_overflow WHERE singleton = 1
+    AND NOT EXISTS (SELECT 1 FROM fault_outbox);
+SELECT changes() AS deleted_marker;
+SELECT EXISTS (SELECT 1 FROM fault_overflow) AS marker_present;
+COMMIT;
+```
+
+Confirm that one row was deleted, or independently confirm the marker was already absent.
+A zero-row deletion with the marker still present leaves delivery admission paused.
+
+Restarting with the binding enabled resumes admission at the next conclusive completed cut.
+An incomplete or zero-traffic window leaves the existing native fault unchanged.

@@ -391,7 +391,7 @@ impl Store {
         if owns(&fault.person)? {
             return Ok(Some(fault.person.clone()));
         }
-        // An explicitly owned API readiness fault keeps its recorded reviewer.
+        // An explicitly owned SLO fault keeps its recorded reviewer.
         // A stopped or retired declaration makes it undeliverable, not generic.
         if explicit_reviewer_only {
             return Ok(None);
@@ -1536,7 +1536,8 @@ impl Store {
         }
         let explicit_reviewer_only = source.starts_with("daemon/")
             && claim.kind == "operational.failure"
-            && f["condition"] == API_READINESS_SLO_MISSED;
+            && (f["condition"] == API_READINESS_SLO_MISSED
+                || f["condition"] == AGENTS_REQUEST_SLO_MISSED);
         Ok(Some(OperationalFault { item, explicit_reviewer_only }))
     }
 
