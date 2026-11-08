@@ -43,10 +43,53 @@ fn answer(state: &AppState, session: &ClientSession, started: &Value, choice: &s
         "idempotency_key":format!("answer:{choice}"),"answer":{"id":choice}
     })).unwrap(), false, session.assistant_write.as_ref(), false,
         session.pairing_grant.as_deref().filter(|_|!session.local_peer).map(|grant|(grant,session.actor.as_str()))).map_err(ApiError::bad)?;
+    let done = state.store.claims_for_subject_kind_at(target,"work.person-done",None,true,1).unwrap().claims.remove(0);
+    let receipt = state.store.claims_for_subject_kind_at(
+        &format!("custom/client/browser-answer-{}",done.id),"custom.client.pairing-browser-answer-admitted",None,true,1,
+    ).unwrap().claims.into_iter().next().expect("native answer must emit its admission receipt");
+    assert_eq!(receipt.origin,done.origin,"answer receipt origin");
+    assert_eq!(receipt.actor,done.actor,"answer receipt actor");
+    assert!(state.store.client_operation_is_trusted(&receipt).unwrap(),"answer receipt operation authority");
+    let fields = &receipt.body["fields"];
+    assert_eq!(fields["answer_id"],done.id,"answer receipt answer ID");
+    assert_eq!(fields["ask"],ask.subject,"answer receipt ask subject");
+    assert_eq!(fields["episode"],ask.id,"answer receipt episode");
+    assert_eq!(fields["person"],request.body["fields"]["person_id"],"answer receipt person");
+    assert_eq!(fields["request_id"],started["requestId"],"answer receipt request ID");
+    let grant = fractal_store::store::claim_by_id_tx(&state.store.readers.get(),fields["grant_id"].as_str().unwrap())
+        .unwrap().expect("answer receipt exact grant must exist");
+    assert_eq!(grant.kind,"custom.client.pairing-completed","answer receipt grant kind");
+    assert_eq!(fields["grant_subject"],grant.subject,"answer receipt grant subject");
+    assert_eq!(grant.body["fields"]["person_id"],fields["person"],"answer receipt grant person");
+    assert!(grant.body["fields"]["scopes"].as_array().unwrap().iter().any(|scope|scope == "control.pairing"),
+        "answer receipt grant scope");
+    assert!(grant.body["fields"]["expires_at_unix_ms"].as_u64().is_some_and(|expiry|u128::from(expiry)>client_now_ms()),
+        "answer receipt grant expiry");
+    assert!(state.store.pairing_completion_is_trusted(&grant,client_now_ms()).unwrap(),"answer receipt grant authority");
+    assert!(!state.store.pairing_completion_is_revoked(&grant).unwrap(),"answer receipt grant revocation");
+    assert_eq!(done.actor.as_deref(),request.body["fields"]["person_id"].as_str(),"answer person");
+    assert!(done.accepted_at_unix_ms < u128::from(request.body["fields"]["expires_at_unix_ms"].as_u64().unwrap()),
+        "answer deadline");
+    assert_eq!(done.body["fields"]["episode"],ask.id,"answer episode");
+    assert!(done.body["fields"].get("sender_class").is_none(),"answer sender class must be absent");
+    assert!(done.body["fields"].get("delegation").is_none(),"answer delegation must be absent");
+    assert_eq!(approval(state,&request).unwrap(),if choice=="approve" {"approved"} else {"denied"},
+        "native admission receipt must satisfy the approval reducer");
     Ok(())
 }
 async fn poll(state: &AppState, session: &ClientSession, started: &Value, key: &str) -> Result<Json<Value>, ApiError> {
     redeem(State(state.clone()),Extension(session.clone()),AxumPath(started["requestId"].as_str().unwrap().into()),Json(serde_json::from_value(json!({"requestKey":key})).unwrap())).await
+}
+
+#[test]
+fn browser_pairing_request_key_verification_is_independent_of_approval() {
+    let key = "a".repeat(64);
+    let digest = credential_digest(&key);
+    assert!(verify_request_key(&key,&digest),"canonical key must verify before any approval lookup");
+    assert!(!verify_request_key(&"b".repeat(64),&digest),"different key");
+    for malformed in ["a".repeat(63),"a".repeat(66),"g".repeat(64),"A".repeat(64)] {
+        assert!(!verify_request_key(&malformed,&credential_digest(&malformed)),"malformed encoding must not verify");
+    }
 }
 
 #[tokio::test]
@@ -303,7 +346,7 @@ async fn browser_pairing_answers_require_bound_admission_receipts_and_live_pairi
             match fault {
                 "ask" => receipt.body["fields"]["ask"] = json!("step-run/another/ask"),
                 "request" => receipt.body["fields"]["request_id"] = json!("b".repeat(32)),
-                "person" => receipt.body["fields"]["person"] = json!("person/another"),
+                "person" => receipt.body["fields"]["person"] = json!("person/example"),
                 "scope" => {
                     let limited = paired_device(&state,&["read.projections","control.attention"],"receipt-limited").await;
                     let grant = state.store.claims_for_subject_kind_at(limited.pairing_grant.as_deref().unwrap(),
