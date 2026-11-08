@@ -2804,7 +2804,7 @@ impl Store {
         );
     }
 
-    /// Configure observer admission before accepting writes or replication. Empty denies all.
+    /// Configure local observer append admission and read-time folds. Empty excludes all writers.
     pub fn set_usage_limits_writers(&self, writers: Vec<String>) -> Result<(), FractalError> {
         for writer in &writers {
             let subject = fractal_schema::registry().validate_subject(writer)
@@ -2815,6 +2815,11 @@ impl Store {
         }
         *self.fractal.usage_limits_writers.lock().unwrap() = writers.into_iter().collect();
         Ok(())
+    }
+
+    /// Snapshot the local writers used by usage folds; stored evidence is configuration-independent.
+    pub fn usage_limits_writers(&self) -> BTreeSet<String> {
+        self.fractal.usage_limits_writers.lock().unwrap().clone()
     }
 
     #[cfg(any(test, feature = "test-support"))]

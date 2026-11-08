@@ -193,7 +193,7 @@ fn trusted_usage_admission_also_requires_the_allowlisted_writer() {
 }
 
 #[test]
-fn replicated_usage_admission_respects_each_receivers_configured_writers() {
+fn replicated_usage_storage_is_independent_of_each_receivers_configured_writers() {
     let anchor_key = key();
     let receiver_key = key();
     let source = node("source", Some(&anchor_key), Some(&anchor_key));
@@ -210,15 +210,87 @@ fn replicated_usage_admission_respects_each_receivers_configured_writers() {
         idempotency_key: None,
     }).unwrap();
     for writers in [None, Some(Vec::new()), Some(vec!["agent/sample/other".into()]), Some(vec!["agent/sample/usage-producer".into()])] {
-        let allowed = writers.as_ref().is_some_and(|writers| writers.iter().any(|writer| writer == "agent/sample/usage-producer"));
         let receiver = node("receiver", Some(&receiver_key), Some(&anchor_key));
         if let Some(writers) = writers {
             receiver.set_usage_limits_writers(writers).unwrap();
         }
         let admission = sync(&source, &receiver);
-        assert_eq!(admission.invalid, usize::from(!allowed));
-        assert_eq!(admitted(&receiver, &observation), allowed);
+        assert_eq!(admission.invalid, 0);
+        assert!(admitted(&receiver, &observation));
     }
+}
+
+#[test]
+fn replicated_usage_folds_existing_evidence_after_config_change_and_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let anchor_key = key();
+    let receiver_key = key();
+    let writer = "agent/sample/usage-producer";
+    let source = node("alder", Some(&anchor_key), Some(&anchor_key));
+    source.set_usage_limits_writers(vec![writer.into()]).unwrap();
+    admit(&source, "alder", &anchor_key, "anchor", None);
+    admit(&source, "cedar", &receiver_key, "invite", None);
+    let observation = source.append_claim(&ClaimInput {
+        subject: writer.into(),
+        kind: "usage.limits.observed".into(),
+        actor: Some(writer.into()),
+        fields: serde_json::from_value(json!({
+            "readings": [{
+                "account": "digest", "account_ref": "account/sample", "provider": "anthropic",
+                "window": "weekly", "used_percent": 42.0, "resets_at": null,
+                "measured_at": "2026-11-07T10:00:00Z", "coverage": "reported",
+                "source": "omp-usage", "host": "alder"
+            }],
+            "credit_readings": []
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let path = root.path().join("cedar.sqlite3");
+    let receiver = Store::open(&path, "cedar").unwrap();
+    receiver.bind_fleet(FLEET).unwrap();
+    receiver.pin_fleet_anchor(anchor_key.public()).unwrap();
+    receiver.set_member_key(Some(receiver_key)).unwrap();
+    receiver.set_usage_limits_writers(Vec::new()).unwrap();
+    assert_eq!(sync(&source, &receiver).invalid, 0);
+    assert!(admitted(&receiver, &observation));
+    let fold = |store: &Store| {
+        limits::account_limits_for_writers(&store.readers.get(), &store.usage_limits_writers()).unwrap()
+    };
+    assert!(fold(&receiver).is_empty(), "empty config retains but does not fold");
+    let before = receiver.backup_header().unwrap();
+
+    receiver.set_usage_limits_writers(vec![writer.into()]).unwrap();
+    let rows = fold(&receiver);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].windows.iter().find(|window| window.window == "weekly").unwrap().used_percent, Some(42.0));
+    let configured = receiver.backup_header().unwrap();
+    assert_eq!(configured.graph_digest, before.graph_digest);
+    assert_eq!(configured.tables["claim_sources"], before.tables["claim_sources"]);
+    receiver.set_usage_limits_writers(Vec::new()).unwrap();
+    assert!(fold(&receiver).is_empty());
+
+    let archive_path = root.path().join("cedar.jsonl");
+    let header = receiver.write_backup(&mut std::fs::File::create(&archive_path).unwrap()).unwrap();
+    let restored_path = root.path().join("restored.sqlite3");
+    let report = crate::backup::restore(&archive_path, &restored_path, root.path()).unwrap();
+    assert!(report.projections_match);
+    assert_eq!(report.graph_digest, header.graph_digest);
+    assert_eq!(report.tables["claim_sources"], header.tables["claim_sources"]);
+    let restored = Store::open(&restored_path, &report.writer).unwrap();
+    assert!(admitted(&restored, &observation));
+    assert!(fold(&restored).is_empty());
+    drop(restored);
+    drop(receiver);
+
+    let reopened = Store::open(&path, "cedar").unwrap();
+    assert!(fold(&reopened).is_empty(), "local config is supplied again on restart");
+    reopened.set_usage_limits_writers(vec![writer.into()]).unwrap();
+    assert_eq!(fold(&reopened), rows, "restart folds retained claims without another sync");
+    let after = reopened.backup_header().unwrap();
+    assert_eq!(after.graph_digest, before.graph_digest);
+    assert_eq!(after.tables["claim_sources"], before.tables["claim_sources"]);
 }
 
 #[test]

@@ -35,7 +35,7 @@ struct Credit {
 struct Evidence {
     credit: Credit,
     claim_id: String,
-    measured_at: u64,
+    measured_at: chrono::DateTime<chrono::FixedOffset>,
 }
 
 #[derive(Default)]
@@ -52,14 +52,12 @@ fn timestamp(text: &str) -> Option<u64> {
 
 impl Credits {
     fn observe(&mut self, claim: &ClaimRecord) {
-        // Admission checks the configured writer allowlist. Revocation does not erase evidence
-        // already admitted to the durable graph.
         if claim.kind != "usage.limits.observed" {
             return;
         }
         for value in claim.body["fields"]["credit_readings"].as_array().into_iter().flatten() {
             let Ok(credit) = Credit::deserialize(value) else { continue };
-            let Some(measured_at) = timestamp(&credit.measured_at) else { continue };
+            let Ok(measured_at) = chrono::DateTime::parse_from_rfc3339(&credit.measured_at) else { continue };
             let key = (credit.provider.clone(), credit.account.clone(), credit.credit_id.clone());
             // Provider measurement time wins over delivery order. Claim ID breaks equal-time ties
             // identically on every member, independent of local replication/store order.
@@ -89,8 +87,12 @@ impl Credits {
             let mut at_risk = 0_u64;
             for observation in &evidence {
                 let credit = &observation.credit;
-                stale |= now.saturating_sub(observation.measured_at) > fresh_ms;
-                unknown |= observation.measured_at > now
+                let Ok(measured_at) = u64::try_from(observation.measured_at.timestamp_millis()) else {
+                    unknown = true;
+                    continue;
+                };
+                stale |= now.saturating_sub(measured_at) > fresh_ms;
+                unknown |= measured_at > now
                     || credit.coverage != "reported"
                     || credit.source != "omp-usage"
                     || !matches!(credit.state.as_str(), "available" | "redeemed" | "forfeited");
@@ -111,7 +113,7 @@ impl Credits {
                     let disposition = &credit.disposition;
                     let documented = matches!(disposition.kind.as_str(), "planned" | "redeemed" | "declined")
                         && disposition.at.as_deref().and_then(timestamp)
-                            .is_some_and(|at| at <= observation.measured_at && at <= now)
+                            .is_some_and(|at| at <= measured_at && at <= now)
                         && disposition.evidence_ref.as_deref().is_some_and(|reference| !reference.trim().is_empty());
                     if !documented {
                         at_risk += 1;
@@ -156,13 +158,17 @@ impl Credits {
 
 /// Fold all durable pages, rather than a bounded recent page: an older forfeiture or an
 /// unrefreshed identity must not disappear and turn an incomplete inventory into success.
+/// Only currently configured writers contribute; changing that set never changes stored evidence.
 pub fn rows(store: &Store, now: u64, fresh_ms: u64) -> anyhow::Result<Vec<Value>> {
     let mut credits = Credits::default();
+    let writers = store.usage_limits_writers();
     let mut cursor = None;
     loop {
         let page = store.claims_for_kind_at("usage.limits.observed", cursor, true, 256)?;
         for claim in &page.claims {
-            credits.observe(claim);
+            if claim.actor.as_deref().is_some_and(|actor| writers.contains(actor)) {
+                credits.observe(claim);
+            }
         }
         let Some(next) = page.next_cursor else { break };
         cursor = Some(next);
@@ -291,6 +297,40 @@ mod tests {
     }
 
     #[test]
+    fn provider_submillisecond_measurements_override_claim_id_and_arrival_order() {
+        let older_at = "2026-11-08T10:00:00.000100Z";
+        let newer_at = "2026-11-08T10:00:00.000900Z";
+        let now = timestamp("2026-11-08T10:00:01Z").unwrap();
+        for objective in [0, 1] {
+            let expiry = if objective == 0 { now - DAY_MS } else { now + DAY_MS / 2 };
+            let mut older = credit("one", if objective == 0 { "redeemed" } else { "available" }, expiry);
+            older["measured_at"] = json!(older_at);
+            older["disposition"] = json!({
+                "kind": "planned", "at": older_at, "evidence_ref": "document/credit-plan",
+            });
+            let mut newer = credit("one", if objective == 0 { "forfeited" } else { "available" }, expiry);
+            newer["measured_at"] = json!(newer_at);
+            // The newer unknown disposition must replace the older documented plan.
+            let older = claim("z", json!([older]));
+            let newer = claim("a", json!([newer]));
+            for observations in [[&older, &newer], [&newer, &older]] {
+                let mut credits = Credits::default();
+                for observation in observations {
+                    credits.observe(observation);
+                }
+                let rows = credits.rows(now, DAY_MS);
+                assert_eq!(rows[objective]["status"], "missed");
+                assert_eq!(rows[objective]["evidence"][0]["claim_id"], "a");
+                assert_eq!(rows[objective]["evidence"][0]["measured_at"], newer_at);
+                assert_eq!(
+                    rows[objective]["current"],
+                    if objective == 0 { "1 forfeited window-equivalents" } else { "1 at-risk of 1 expiring credits" },
+                );
+            }
+        }
+    }
+
+    #[test]
     fn provider_identity_and_equal_time_ties_are_delivery_order_independent() {
         let mut other = credit("one", "available", NOW + 2 * DAY_MS);
         other["provider"] = json!("openai");
@@ -310,8 +350,10 @@ mod tests {
     }
 
     #[test]
-    fn durable_observation_reaches_the_shared_slo_endpoint_rows() {
-        let store = Store::open_memory("credit-objectives").unwrap();
+    fn durable_credit_fold_uses_current_writers_across_revocation_and_restart() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("credits.db");
+        let store = Store::open(&path, "alder").unwrap();
         store.set_usage_limits_writers(vec![PRODUCER.into()]).unwrap();
         let now = chrono::Utc::now().timestamp_millis() as u64;
         let mut reading = credit("one", "available", now + DAY_MS / 2);
@@ -331,8 +373,25 @@ mod tests {
             expected_subject: None,
             idempotency_key: None,
         }).unwrap();
-        // Retiring a writer stops future admission, not reads of its accepted evidence.
+        let digest = store.replication_inventory().unwrap().digest;
+        // Revocation hides retained evidence immediately, without mutating the durable graph.
         store.set_usage_limits_writers(Vec::new()).unwrap();
+        for row in rows(&store, now, DAY_MS).unwrap() {
+            assert_eq!(row["status"], "no-data");
+            assert!(row["evidence"].as_array().unwrap().is_empty());
+        }
+        let retained = store.claims_for_kind_at("usage.limits.observed", None, true, 256).unwrap();
+        assert_eq!(retained.claims.len(), 1);
+        assert_eq!(retained.claims[0].id, observed.id);
+        assert_eq!(store.replication_inventory().unwrap().digest, digest);
+        drop(store);
+        let store = Store::open(&path, "alder").unwrap();
+        for row in rows(&store, now, DAY_MS).unwrap() {
+            assert_eq!(row["status"], "no-data");
+            assert!(row["evidence"].as_array().unwrap().is_empty());
+        }
+        // Reconfiguring the local writer set activates the original claim, with no reappend.
+        store.set_usage_limits_writers(vec![PRODUCER.into()]).unwrap();
         let rows = crate::api::slo_rows(&store).unwrap();
         for objective in ["CAM-R01/anthropic", "CAM-R02/anthropic"] {
             let row = rows.iter().find(|row| row["id"] == objective).unwrap();
@@ -340,5 +399,6 @@ mod tests {
             assert_eq!(row["evidence"][0]["claim_id"], observed.id);
             assert_eq!(row["evidence"][0]["disposition"]["evidence_ref"], "document/credit-plan");
         }
+        assert_eq!(store.replication_inventory().unwrap().digest, digest);
     }
 }

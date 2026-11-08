@@ -458,8 +458,17 @@ pub fn refold_limits_tx(transaction: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Harness-only policy evidence, independent of observational writer configuration.
 pub fn account_limits_at(connection: &Connection) -> Result<Vec<AccountLimit>> {
-    account_limits_with(connection, None)
+    account_limits_with(connection, None, &BTreeSet::new())
+}
+
+/// SLO evidence under the current local observer configuration. Storage is never filtered.
+pub fn account_limits_for_writers(
+    connection: &Connection,
+    writers: &BTreeSet<String>,
+) -> Result<Vec<AccountLimit>> {
+    account_limits_with(connection, None, writers)
 }
 
 /// A reading the projection does not hold yet: its seat, the node that measured it and its
@@ -471,10 +480,11 @@ type Candidate<'a> = (&'a str, &'a str, &'a Value);
 fn account_limits_with(
     connection: &Connection,
     candidate: Option<Candidate<'_>>,
+    writers: &BTreeSet<String>,
 ) -> Result<Vec<AccountLimit>> {
     type Key = (String, String, Option<String>);
     let mut statement = connection.prepare_cached(
-        "SELECT driver, account, account_ref, weekly, origin, subject, body, head_key
+        "SELECT driver, account, account_ref, weekly, origin, subject, body, head_key, window<>''
          FROM account_limit_readings",
     )?;
     let mut rows = Vec::new();
@@ -488,9 +498,13 @@ fn account_limits_with(
             row.get::<_, String>(5)?,
             row.get::<_, String>(6)?,
             row.get::<_, Vec<u8>>(7)?,
+            row.get::<_, bool>(8)?,
         ))
     })? {
-        rows.push(row?);
+        let row = row?;
+        if !row.8 || writers.contains(&row.5) {
+            rows.push(row);
+        }
     }
     // The candidate is the newest claim, so it sorts after every key a tie could reach.
     let candidate = candidate.and_then(|(subject, origin, body)| {
@@ -505,6 +519,7 @@ fn account_limits_with(
             subject.to_owned(),
             body.to_string(),
             vec![u8::MAX; 64],
+            false,
         ));
         Some((subject, limit.driver, limit.account, account_ref))
     });
@@ -512,8 +527,8 @@ fn account_limits_with(
     // login that changed identity (a re-login), not two accounts: the identity's readings are the
     // declared account's. Only a seat's own reports link them, so nothing else is ever merged.
     let mut named = BTreeMap::<(String, String), BTreeSet<String>>::new();
-    for (driver, _, account_ref, _, _, subject, _, _) in &rows {
-        if !account_ref.is_empty() {
+    for (driver, _, account_ref, _, _, subject, _, _, observer) in &rows {
+        if !*observer && !account_ref.is_empty() {
             named
                 .entry((driver.clone(), subject.clone()))
                 .or_default()
@@ -521,8 +536,8 @@ fn account_limits_with(
         }
     }
     let mut alias = BTreeMap::<(String, String), String>::new();
-    for (driver, account, account_ref, _, _, subject, _, _) in &rows {
-        if account_ref.is_empty()
+    for (driver, account, account_ref, _, _, subject, _, _, observer) in &rows {
+        if !*observer && account_ref.is_empty()
             && let Some(declared) = named
                 .get(&(driver.clone(), subject.clone()))
                 .and_then(|names| names.first())
@@ -550,10 +565,16 @@ fn account_limits_with(
     }
     // Producer account_ref labels are display names, not part of the provider account identity.
     let mut references = BTreeMap::<(String, String), String>::new();
-    for (driver, account, account_ref, ..) in &rows {
-        if !account_ref.is_empty() {
+    for (driver, account, account_ref, _, _, _, _, _, observer) in &rows {
+        if !*observer && !account_ref.is_empty() {
             references.entry((driver.clone(), account.clone()))
                 .and_modify(|current| { if account_ref < current { *current = account_ref.clone(); } })
+                .or_insert_with(|| account_ref.clone());
+        }
+    }
+    for (driver, account, account_ref, _, _, _, _, _, observer) in &rows {
+        if *observer && !account_ref.is_empty() {
+            references.entry((driver.clone(), account.clone()))
                 .or_insert_with(|| account_ref.clone());
         }
     }
@@ -573,18 +594,18 @@ fn account_limits_with(
     let mut weekly = BTreeMap::<Key, Vec<(AccountLimit, Vec<u8>)>>::new();
     let mut partial = BTreeMap::<Key, Vec<(AccountLimit, Vec<u8>)>>::new();
     let mut windows = BTreeMap::<(String, String), BTreeMap<String, (LimitWindow, Vec<u8>)>>::new();
-    for (driver, account, account_ref, is_weekly, origin, subject, body, head_key) in rows {
+    for (driver, account, account_ref, is_weekly, origin, subject, body, head_key, observer) in rows {
         let body: Value = serde_json::from_str(&body)?;
         let Some((mut limit, _)) = reading(&origin, &body) else {
             continue;
         };
         limit.measured_by = subject;
         let aliased = account_ref.is_empty().then(|| account.clone());
-        let key = resolve(driver, account, account_ref, body["fields"]["observed_windows"].is_array());
+        let key = resolve(driver, account, account_ref, observer);
         if let Some(declared) = &key.2 {
             limit.identity = aliased.filter(|raw| *raw != key.1);
             limit.account = key.1.clone();
-            if limit.account_ref.is_some() || limit.identity.is_some() || body["fields"]["observed_windows"].is_array() {
+            if limit.account_ref.is_some() || limit.identity.is_some() || observer {
                 limit.account_ref = Some(declared.clone());
             }
             limit.identified = true;
@@ -701,7 +722,7 @@ pub fn limits_publication_due(
     };
     let (Some(before), Some(after)) = (
         of_seat(account_limits_at(connection)?),
-        of_seat(account_limits_with(connection, Some((subject, origin, body)))?),
+        of_seat(account_limits_with(connection, Some((subject, origin, body)), &BTreeSet::new())?),
     ) else {
         return Ok(true);
     };
@@ -753,12 +774,52 @@ use super::*;
     }
 
     #[test]
+    fn producer_account_labels_never_infer_a_harness_seat_relogin() {
+        let store = Store::open_memory("alder").unwrap();
+        let writer = "agent/sample/usage-producer";
+        store.set_usage_limits_writers(vec![writer.into()]).unwrap();
+        read(&store, writer, Some("claude/account-b"), 95.0, 1_000);
+        let observed = |account: &str, reference: &str, used: f64| json!({
+            "account":account, "account_ref":reference, "provider":"anthropic",
+            "window":"weekly", "used_percent":used, "resets_at":null,
+            "measured_at":"1970-01-01T00:00:03Z", "coverage":"reported",
+            "source":"omp-usage", "host":"cedar"
+        });
+        store.append_claim(&ClaimInput {
+            subject:writer.into(), actor:Some(writer.into()), kind:"usage.limits.observed".into(),
+            fields:serde_json::from_value(json!({"readings":[
+                observed("claude/account-a", "ada/claude", 10.0),
+                observed("claude/account-b", "bob/claude", 20.0)
+            ], "credit_readings":[]})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:Some("two-accounts".into()),
+        }).unwrap();
+        let limits = account_limits_for_writers(&store.readers.get(), &store.usage_limits_writers()).unwrap();
+        assert_eq!(limits.len(), 2);
+        let a = limits.iter().find(|limit| limit.account == "claude/account-a").unwrap();
+        let b = limits.iter().find(|limit| limit.account == "claude/account-b").unwrap();
+        assert_eq!(a.account_ref.as_deref(), Some("ada/claude"));
+        assert_eq!(a.weekly_percent, None);
+        assert!(a.seats.is_empty());
+        assert_eq!(b.account_ref, None);
+        assert_eq!(b.identity, None);
+        assert_eq!(b.weekly_percent, Some(95.0));
+        assert_eq!(b.seats, [writer]);
+        assert_eq!(b.windows.iter().find(|window| window.window == "weekly").unwrap().used_percent, Some(20.0));
+        store.set_usage_limits_writers(Vec::new()).unwrap();
+        let hidden = account_limits_for_writers(&store.readers.get(), &store.usage_limits_writers()).unwrap();
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].account, "claude/account-b");
+        assert_eq!(hidden[0].account_ref, None);
+        assert!(hidden[0].windows.iter().all(|window| window.source == "harness"));
+    }
+
+    #[test]
     fn newest_provider_time_merges_windows_across_kinds_and_hosts_without_enforcement() {
         let store = Store::open_memory("alder").unwrap();
         read(&store, "agent/a", Some("claude/example"), 95.0, 1_000);
         observe(&store, 20.0, "1970-01-01T00:00:03Z");
         observe(&store, 90.0, "1970-01-01T00:00:02Z");
-        let limits = account_limits_at(&store.readers.get()).unwrap();
+        let limits = account_limits_for_writers(&store.readers.get(), &store.usage_limits_writers()).unwrap();
         assert_eq!(limits.len(), 1);
         let weekly = limits[0].windows.iter().find(|window| window.window == "weekly").unwrap();
         assert_eq!(weekly.used_percent, Some(20.0));
@@ -769,7 +830,7 @@ use super::*;
         // SLO metadata stays out of the closed public UsageLimit wire contract.
         assert!(serde_json::to_value(&limits[0]).unwrap().get("windows").is_none());
         read(&store, "agent/b", Some("claude/example"), 10.0, 4_000);
-        let limits = account_limits_at(&store.readers.get()).unwrap();
+        let limits = account_limits_for_writers(&store.readers.get(), &store.usage_limits_writers()).unwrap();
         let weekly = limits[0].windows.iter().find(|window| window.window == "weekly").unwrap();
         assert_eq!(weekly.used_percent, Some(10.0));
         assert_eq!(weekly.source, "harness");
@@ -789,7 +850,7 @@ use super::*;
             evidence: vec![], expected_subject: None, idempotency_key: Some("bound".into()),
         }).unwrap();
         observe(&store, 20.0, "1970-01-01T00:00:03Z");
-        let limits = account_limits_at(&store.readers.get()).unwrap();
+        let limits = account_limits_for_writers(&store.readers.get(), &store.usage_limits_writers()).unwrap();
         assert_eq!(limits.len(), 1);
         assert_eq!(limits[0].account_ref.as_deref(), Some("ada/claude"));
         assert_eq!(limits[0].account, fractal_drivers::account::account_label("claude", "declared:ada/claude"));

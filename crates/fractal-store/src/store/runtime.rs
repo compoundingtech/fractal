@@ -15,7 +15,7 @@ pub struct PreviousRoster {
 /// the graph for the caches its reads use.
 #[derive(Default)]
 pub struct FractalRuntime {
-    /// Daemon-local observer authorization; empty until configured at startup.
+    /// Daemon-local append authorization and read-time fold writers; never replication policy.
     pub(super) usage_limits_writers: Mutex<BTreeSet<String>>,
     /// Source-owned observation fencing only; no canonical sample log or timer.
     pub(super) slo_source: Mutex<slo_breaches::SourceState>,
@@ -262,14 +262,6 @@ impl FractalRuntime {
         }
         Ok(())
     }
-
-    fn classify_usage_claim(&self, claim: &ClaimRecord) -> Result<ReplicatedClaimAdmission, FractalError> {
-        let admission = classify_replicated_claim_with_registry(claim, self.claim_registry())?;
-        if matches!(admission, ReplicatedClaimAdmission::Valid) {
-            self.validate_usage_limits_writer(&claim.kind, claim.actor.as_deref())?;
-        }
-        Ok(admission)
-    }
 }
 
 impl Runtime for FractalRuntime {
@@ -451,7 +443,7 @@ impl Runtime for FractalRuntime {
         _batch: &ReplicaBatch,
         claim: &ClaimRecord,
     ) -> Result<ReplicatedClaimAdmission, FractalError> {
-        self.classify_usage_claim(claim)
+        classify_replicated_claim_with_registry(claim, self.claim_registry())
     }
 
     fn classify_replicated_claim_unbound(
@@ -459,18 +451,7 @@ impl Runtime for FractalRuntime {
         _batch: &ReplicaBatch,
         claim: &ClaimRecord,
     ) -> Option<Result<ReplicatedClaimAdmission, FractalError>> {
-        Some(self.classify_usage_claim(claim))
-    }
-
-    fn classify_restored_claim(
-        &self,
-        _connection: &Connection,
-        _batch: &ReplicaBatch,
-        claim: &ClaimRecord,
-    ) -> Result<ReplicatedClaimAdmission, FractalError> {
-        // The source already admitted these durable facts. Current writer configuration
-        // cannot revoke history; the registry still checks schema and same-agent authorship.
-        classify_replicated_claim_with_registry(claim, self.claim_registry())
+        Some(classify_replicated_claim_with_registry(claim, self.claim_registry()))
     }
 
     fn append_claim(

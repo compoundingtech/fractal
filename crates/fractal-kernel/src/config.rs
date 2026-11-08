@@ -35,7 +35,7 @@ pub enum WorkerIngressGenerationCheck {
 pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_source: Option<QuotaSourceConfig>,
-    /// Explicit observational quota/credit writers. Absent or empty denies all.
+    /// Local quota/credit append and fold writers; absent/empty excludes all, never storage.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_limits: Option<UsageLimitsConfig>,
     /// Inactive host-envelope declaration; absent uses CONFIG/host-envelope.json if present.
@@ -148,6 +148,7 @@ pub struct Config {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct UsageLimitsConfig {
+    /// Agent identities admitted for local appends and included in read-time usage folds.
     pub writers: Vec<String>,
 }
 

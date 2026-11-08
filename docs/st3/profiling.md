@@ -328,17 +328,21 @@ window, selecting the newest provider observation time across hosts (canonical c
 breaks ties). Each window retains its own freshness clock, reset, `SOURCE` and `HOST`.
 `reported` carries a percentage; `unreported` is unknown, never zero; `unsupported` is shown
 explicitly as unsupported rather than no-data. The existing one-hour freshness window applies.
-The omp-usage observations do not change the harness-only inputs to the seat-stopping policy.
+Scheduling, quota diagnostics and enforcement read harness-only evidence; producer clocks and
+display labels cannot alter those decisions. The producer-inclusive fold is observational.
 Producer batches contain `readings` and `credit_readings`. Daemon configuration
-`[usage_limits] writers = ["agent/sample/usage-producer"]` explicitly admits agent writers,
-each writing as itself; absent or empty configuration admits nobody. Writer configuration is
-admission authority, not a filter over previously admitted durable evidence. Internal window
-metadata does not extend the public `/usage` wire contract; SLO rows expose its provenance.
+`[usage_limits] writers = ["agent/sample/usage-producer"]` admits local agent appends,
+each writing as itself, and filters quota and credit folds at read time. Absent or empty
+configuration denies local appends and folds no usage observations. Replication and backup
+restore retain every schema-valid observation regardless of local writers. Config changes
+and restart fold the already stored evidence without re-replication or digest changes.
+Internal window metadata does not extend the public `/usage` wire contract; SLO rows expose
+its provenance.
 Older members retain this non-authority unknown kind for replay after upgrade without changing
 terminal/runtime routing.
 
-Credit objectives read the durable `usage.limits.observed` evidence from the explicitly admitted
-omp-usage producer. `CAM-R01/PROVIDER` targets zero forfeited window-equivalents over rolling
+Credit objectives read durable `usage.limits.observed` evidence from the currently configured
+omp-usage producers. `CAM-R01/PROVIDER` targets zero forfeited window-equivalents over rolling
 seven days, counted by expiry; each durable credit represents one window-equivalent.
 `CAM-R02/PROVIDER` requires every credit expiring in the next 24 hours to have a `planned`,
 `redeemed` or `declined` disposition, a decision timestamp and a nonempty evidence reference;

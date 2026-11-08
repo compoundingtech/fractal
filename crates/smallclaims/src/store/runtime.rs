@@ -123,18 +123,6 @@ pub trait Runtime: Send + Sync {
         None
     }
 
-    /// Validate already-admitted historical claims during an explicit backup source import.
-    /// Hashes, schema and actor structure still apply; runtimes may omit admission policies
-    /// whose current configuration must not revoke previously accepted durable evidence.
-    fn classify_restored_claim(
-        &self,
-        connection: &Connection,
-        batch: &ReplicaBatch,
-        claim: &ClaimRecord,
-    ) -> Result<ReplicatedClaimAdmission, Error> {
-        self.classify_replicated_claim(connection, batch, claim)
-    }
-
     /// Append a claim this node writes, from a client's input. The runtime decides how the claim
     /// is kept (some kinds stay local observations), validates it, appends it through the graph
     /// and projects it. The bool says whether the claim is new rather than an idempotent repeat.

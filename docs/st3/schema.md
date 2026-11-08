@@ -259,10 +259,15 @@ A `durable` claim is a fact in the replicated claim log. A `local` claim is an o
 
 ## Observed usage limits and credits
 
-`usage.limits.observed` is observational only. Daemon configuration controls admission:
-`[usage_limits] writers = ["agent/sample/usage-producer"]`. Absent or empty writers
-deny every producer. Each configured agent writes as itself on its own subject.
-Configure the same allowlist on receiving members; changes take effect after restart.
+`usage.limits.observed` is observational only. Daemon configuration controls local append
+admission and read-time folds: `[usage_limits] writers = ["agent/sample/usage-producer"]`.
+Each configured agent writes as itself on its own subject. Absent or empty writers deny
+local producer appends and exclude all usage observations from folds, not storage.
+Replication and backup restore retain every schema-valid observation regardless of local
+writers, checking hashes, signatures and same-agent authorship through ordinary admission.
+Folds select only currently configured writers before merging quotas or credits. Changing
+configuration, including after restart, folds already stored claims without re-replication;
+it never changes stored evidence or graph and claim-source digests.
 Both `readings` and `credit_readings` arrays are required; empty arrays assert no readings,
 not zero usage or successful credit disposition. Every nested object is closed.
 
@@ -285,10 +290,6 @@ only the newest quota snapshot. Older members retain this unknown kind as retrya
 `unknown-claim-kind` evidence, without projecting it or granting authority. Known
 claims continue replicating, and an upgraded member replays the retained observations.
 
-Explicit offline backup restore imports previously admitted durable evidence on the
-archive source's authority, even when the current writer allowlist is empty. It still
-checks hashes, signatures, schema and same-agent authorship. This historical-import
-boundary never authorizes new writes or ordinary replication from a retired producer.
 
 ## Agent principal grammar
 
