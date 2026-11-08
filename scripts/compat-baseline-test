@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Native bundle pin validation, using a real local archive and no network."""
+"""Native bundle pin validation, using local archives and loopback HTTP fixtures."""
 import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.machinery
 import importlib.util
 import io
@@ -9,6 +10,7 @@ from pathlib import Path
 import sys
 import tarfile
 import tempfile
+import threading
 import urllib.error
 import unittest
 from unittest.mock import patch
@@ -106,6 +108,8 @@ class BundleTests(unittest.TestCase):
     def api_download(self, payload=None, primary=None):
         self.remote_bundle()
         primary = primary or urllib.error.HTTPError("browser", 504, "Gateway Timeout", {}, None)
+        if isinstance(primary, urllib.error.HTTPError):
+            self.addCleanup(primary.close)
         metadata = io.BytesIO(json.dumps({"assets": [{"id": 123, "name": "bundle.tar.gz"}]}).encode())
         archive = io.BytesIO(payload if payload is not None else (self.root / "bundle.tar.gz").read_bytes())
         with patch.dict(module.os.environ, {"GH_TOKEN": "test-token"}), \
@@ -144,6 +148,7 @@ class BundleTests(unittest.TestCase):
     def test_both_5xx_fail_clearly_with_bounded_retries(self):
         self.remote_bundle()
         failure = urllib.error.HTTPError("download", 504, "Gateway Timeout", {}, None)
+        self.addCleanup(failure.close)
         metadata = io.BytesIO(json.dumps({"assets": [{"id": 123, "name": "bundle.tar.gz"}]}).encode())
         with patch.object(module.urllib.request, "urlopen",
                           side_effect=[failure, metadata, failure, failure]) as opener, \
@@ -155,10 +160,73 @@ class BundleTests(unittest.TestCase):
 
     def test_primary_404_does_not_fall_back(self):
         failure = urllib.error.HTTPError("browser", 404, "Not Found", {}, None)
+        self.addCleanup(failure.close)
         with patch.object(module.urllib.request, "urlopen", side_effect=failure) as opener:
             with self.assertRaises(urllib.error.HTTPError):
                 self.run_loader()
         self.assertEqual(opener.call_count, 1)
+
+    def test_api_redirect_does_not_forward_token_and_verifies_digest(self):
+        self.remote_bundle()
+        payload = (self.root / "bundle.tar.gz").read_bytes()
+        received = []
+
+        class CDN(BaseHTTPRequestHandler):
+            def do_GET(self):
+                received.append(("cdn", self.headers.get("Authorization")))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *_):
+                pass
+
+        def serve(handler):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01})
+            thread.start()
+            self.addCleanup(server.server_close)
+            self.addCleanup(thread.join)
+            self.addCleanup(server.shutdown)
+            return server.server_port
+
+        cdn_port = serve(CDN)
+
+        class API(BaseHTTPRequestHandler):
+            def do_GET(self):
+                received.append(("api", self.headers.get("Authorization")))
+                if "/tags/" in self.path:
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"assets": [{"id": 123, "name": "bundle.tar.gz"}]}).encode())
+                else:
+                    self.send_response(302)
+                    self.send_header("Location", f"http://localhost:{cdn_port}/signed-bundle")
+                    self.end_headers()
+
+            def log_message(self, *_):
+                pass
+
+        api_port = serve(API)
+        real_request = module.api_request
+        real_open = module.urllib.request.urlopen
+        failure = urllib.error.HTTPError("browser", 504, "Gateway Timeout", {}, None)
+        self.addCleanup(failure.close)
+
+        def request(url, accept):
+            return real_request(url.replace("https://api.github.com", f"http://127.0.0.1:{api_port}"), accept)
+
+        def open_url(url, **kwargs):
+            if isinstance(url, str) and url.startswith("https://github.com/"):
+                raise failure
+            return real_open(url, **kwargs)
+
+        with patch.dict(module.os.environ, {"GH_TOKEN": "test-token"}), \
+             patch.object(module, "api_request", side_effect=request), \
+             patch.object(module.urllib.request, "urlopen", side_effect=open_url):
+            self.run_loader()
+        self.assertEqual(received, [("api", "Bearer test-token"), ("api", "Bearer test-token"), ("cdn", None)])
+        self.assertTrue((self.output / self.pin["bundles"][self.target]["sha256"] / self.package.name / "bin/st3").is_file())
 
     def test_checksum_mismatch_does_not_publish(self):
         self.pin["bundles"][self.target]["sha256"] = "0" * 64
