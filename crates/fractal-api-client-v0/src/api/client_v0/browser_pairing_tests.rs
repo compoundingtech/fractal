@@ -2,6 +2,15 @@ use super::browser_pairing::*;
 use super::*;
 
 async fn paired_device(state: &AppState, scopes: &[&str], name: &str) -> ClientSession {
+    paired_device_with_key(state, scopes, name, format!("opaque-device-identity-without-signing-key:{name}")).await.0
+}
+
+async fn paired_device_with_key(
+    state: &AppState,
+    scopes: &[&str],
+    name: &str,
+    public_key: String,
+) -> (ClientSession, String) {
     let local = ClientSession::local(Some("person/operator")).unwrap();
     let mut begin_request = json!({"api_version":CLIENT_API_VERSION,"person_id":"person/operator","device_name":name});
     if scopes == ALL_SCOPES { begin_request["full_control"] = json!(true); }
@@ -11,12 +20,13 @@ async fn paired_device(state: &AppState, scopes: &[&str], name: &str) -> ClientS
     let id = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
     let Json(paired) = pairing_complete(State(state.clone()),Extension(local),AxumPath(id.into()),Json(PairingComplete {
         api_version:CLIENT_API_VERSION.into(),code:challenge["code"].as_str().unwrap().into(),
-        device_public_key:format!("opaque-device-identity-without-signing-key:{name}"),key_storage:None,fabric_node_id:None,
+        device_public_key:public_key,key_storage:None,fabric_node_id:None,
     })).await.unwrap();
+    let credential = paired["credential"].as_str().unwrap().to_owned();
     let request = axum::http::Request::builder().method("POST").uri("/v1/client/actions")
-        .header(AUTHORIZATION,format!("Bearer {}",paired["credential"].as_str().unwrap()))
+        .header(AUTHORIZATION,format!("Bearer {credential}"))
         .body(axum::body::Body::empty()).unwrap();
-    authenticate(state,&request,"fabric-loopback").unwrap()
+    (authenticate(state,&request,"fabric-loopback").unwrap(), credential)
 }
 async fn fixture() -> (tempfile::TempDir, AppState, ClientSession) {
     let root = tempfile::tempdir().unwrap();
@@ -223,4 +233,155 @@ async fn browser_pairing_requires_operation_provenance_for_request_and_approver(
     allowance.until_unix_ms = 1;
     state.store.configure_pairing_legacy_allowances(&[allowance]).unwrap();
     assert!(answer(&state,&owner,&after_deadline,"approve").is_err());
+}
+
+#[tokio::test]
+async fn browser_pairing_authorizes_only_the_exact_browser_to_send_thread_messages() {
+    use crate::api::{ThreadMessageDraft, prepare_inline_thread_message};
+    use crate::store::thread_delivery::append_reply;
+    use std::sync::Arc;
+
+    let (_root, state, owner) = fixture().await;
+    state.store.configure_thread_write_rollout([]);
+    state.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    let person = "person/operator";
+    let agent = "agent/garden/reviewer";
+    let thread = "thread/browser-thread-proof";
+    let intent = crate::graph::parse_intent(
+        r#"version 2
+agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
+"#,
+        state.store.origin(),
+    ).unwrap();
+    state.store.apply_internal(&intent, "declare-browser-thread-agent").unwrap();
+    let ask = state.store.ask_person(&PersonAskRequest {
+        person: person.into(),
+        actor: agent.into(),
+        title: "Review CI".into(),
+        reason: "Can we proceed?".into(),
+        step: None, new_run: None, incarnation: None, legacy_request: None,
+        idempotency_key: "browser-thread-ask".into(), deadline_ms: None,
+        default_answer: None, request: None,
+    }).unwrap();
+    let episode = state.store.newest_claim_for_subject_kind(&ask.subject, "work.person-asked")
+        .unwrap().unwrap();
+
+    let (publisher, publisher_bearer) = paired_device_with_key(
+        &state, &["read.projections"], "thread-read-only-publisher", "opaque:publisher".into(),
+    ).await;
+    let key = "c".repeat(64);
+    let pairing = start(&state, &publisher, &key).await;
+    answer(&state, &owner, &pairing, "approve").unwrap();
+    let redeemed = poll(&state, &publisher, &pairing, &key).await.unwrap().0;
+    let browser_bearer = redeemed["bearer"].as_str().unwrap();
+    let device_key = smallclaims::fleet::MemberKey::generate().unwrap().0;
+    let (_, native_bearer) = paired_device_with_key(
+        &state, &["read.projections", "control.messages"], "native-thread-phone",
+        device_key.public().to_string(),
+    ).await;
+    let (_, fake_bearer) = paired_device_with_key(
+        &state, &["read.projections", "control.messages"], "browser-lookalike",
+        format!("browser:{}", pairing["requestId"].as_str().unwrap()),
+    ).await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(axum::serve(listener, crate::api::fabric_router(state.clone())).into_future());
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let get = |bearer: &str, path: &str| client.get(format!("{address}/v1/client/{path}")).bearer_auth(bearer);
+    let post = |bearer: &str, kind: &str, key: &str, parameters: Value| {
+        client.post(format!("{address}/v1/client/actions")).bearer_auth(bearer)
+            .json(&json!({
+                "api_version": CLIENT_API_VERSION, "id": format!("action/{key}"),
+                "type": kind, "idempotency_key": key,
+                "fence": { "snapshot_id": new_client_snapshot(&state).id },
+                "parameters": parameters,
+            }))
+    };
+    let capability = |body: &Value, name: &str| {
+        body["value"]["capabilities"].as_array().unwrap().iter()
+            .find(|item| item["id"] == name).unwrap()["state"].clone()
+    };
+    for (credential, expected) in [
+        (browser_bearer, "granted"), (publisher_bearer.as_str(), "ungranted"),
+        (native_bearer.as_str(), "ungranted"), (fake_bearer.as_str(), "ungranted"),
+    ] {
+        let body: Value = get(credential, "capabilities").send().await.unwrap()
+            .error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(capability(&body, "thread-browser-send"), expected);
+    }
+
+    let start_payload = json!({
+        "target_id": thread, "agent_id": agent, "origin_ask": ask.subject,
+        "origin_ask_episode": episode.id, "title": "Review CI", "content": "Check worker tests.",
+    });
+    assert_eq!(post(&publisher_bearer, "thread.start", "publisher-start", start_payload.clone())
+        .send().await.unwrap().status(), StatusCode::FORBIDDEN);
+    assert!(post(&native_bearer, "thread.start", "native-start", start_payload.clone())
+        .send().await.unwrap().status().is_client_error());
+    assert!(post(&fake_bearer, "thread.start", "fake-browser-start", start_payload.clone())
+        .send().await.unwrap().status().is_client_error());
+    let mut forged = start_payload.clone();
+    forged["browser_request"] = json!(true);
+    assert!(post(&fake_bearer, "thread.start", "forged-browser-marker", forged)
+        .send().await.unwrap().status().is_client_error());
+    assert!(state.store.newest_claim_for_subject_kind(thread, "thread.created").unwrap().is_none());
+
+    let receipt = |reply: &Value| reply["value"].clone();
+    let mut starts = Vec::new();
+    for _ in 0..2 {
+        let response = post(browser_bearer, "thread.start", "browser-start", start_payload.clone())
+            .send().await.unwrap();
+        let status = response.status();
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{body}");
+        starts.push(receipt(&body));
+    }
+    assert_eq!(starts[0]["operation_id"], starts[1]["operation_id"]);
+    let first = starts[0]["affected_ids"][1].as_str().unwrap();
+    assert_eq!(state.store.claims_for(first, Some("message.sent")).unwrap().len(), 1);
+    let reply_payload = json!({
+        "target_id": thread, "content": "Also check the restart path.", "thread_quote_id": first,
+    });
+    assert!(post(&native_bearer, "thread.reply", "native-reply", reply_payload.clone())
+        .send().await.unwrap().status().is_client_error());
+    let mut replies = Vec::new();
+    for _ in 0..2 {
+        let response = post(browser_bearer, "thread.reply", "browser-reply", reply_payload.clone())
+            .send().await.unwrap();
+        let status = response.status();
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{body}");
+        replies.push(receipt(&body));
+    }
+    assert_eq!(replies[0]["operation_id"], replies[1]["operation_id"]);
+    let reply = replies[0]["affected_ids"][1].as_str().unwrap();
+    let sent = state.store.claims_for(reply, Some("message.sent")).unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].body["fields"]["thread_quote_id"], first);
+    assert_eq!(sent[0].body["fields"]["to"], agent);
+    assert_eq!(state.store.graph.claim_signature(&sent[0].id).unwrap().unwrap().signer, person);
+    let timeline: Value = get(&native_bearer, "threads/browser-thread-proof/timeline")
+        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    assert!(timeline["value"]["items"].as_array().unwrap().iter()
+        .any(|item| item["id"] == reply && item["thread_quote_id"] == first));
+
+    let browser_request = axum::http::Request::builder().uri("/v1/client/capabilities")
+        .header(AUTHORIZATION, format!("Bearer {browser_bearer}"))
+        .body(axum::body::Body::empty()).unwrap();
+    let browser = authenticate(&state, &browser_request, "fabric-loopback").unwrap();
+    let admitted = thread_access::browser_message_authority(&state, &browser).unwrap();
+    let already_sent = prepare_inline_thread_message(&state, ThreadMessageDraft {
+        key: "browser-reply", thread, from: person, to: agent, title: None,
+        quote: Some(first), origin: None, content: "Also check the restart path.",
+    }, None).unwrap();
+    client.post(format!("{address}/v1/client/pairing/browser-requests/revoke-current"))
+        .bearer_auth(browser_bearer).send().await.unwrap().error_for_status().unwrap();
+    assert!(get(browser_bearer, "capabilities").send().await.unwrap().status().is_client_error());
+    assert!(post(browser_bearer, "thread.reply", "after-revocation", reply_payload)
+        .send().await.unwrap().status().is_client_error());
+    let writer_error = append_reply(&state.store, &already_sent, admitted, None).unwrap_err();
+    assert_eq!(writer_error.code, "thread-authority-expired");
+    assert_eq!(state.store.claims_for(reply, Some("message.sent")).unwrap().len(), 1);
+    server.abort();
 }

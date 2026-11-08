@@ -38,6 +38,26 @@ pub enum PersonAuthority<'a> {
         completion: &'a str,
         actor: &'a str,
     },
+    PairedBrowser(BrowserSendAuthority<'a>),
+}
+
+/// A device credential with a trusted browser request as its exact completion predecessor.
+pub struct BrowserSendAuthority<'a> {
+    grant: &'a str,
+    completion: &'a str,
+    actor: &'a str,
+}
+
+pub fn browser_send_authority<'a>(
+    store: &Store,
+    person: &str,
+    grant: &'a str,
+    completion: &'a str,
+    actor: &'a str,
+) -> Result<PersonAuthority<'a>, FractalError> {
+    let authority = PersonAuthority::PairedBrowser(BrowserSendAuthority { grant, completion, actor });
+    authority.check(&store.readers.get(), person)?;
+    Ok(authority)
 }
 
 impl PersonAuthority<'_> {
@@ -57,7 +77,8 @@ impl PersonAuthority<'_> {
                 grant,
                 completion,
                 actor,
-            } => {
+            }
+            | Self::PairedBrowser(BrowserSendAuthority { grant, completion, actor }) => {
                 let find = |kind| {
                     connection
                         .query_row(
@@ -83,10 +104,41 @@ impl PersonAuthority<'_> {
                 {
                     return Err(forbidden());
                 }
+                if matches!(self, Self::PairedBrowser(_))
+                    && !has_browser_pairing_provenance(connection, &pair, person)?
+                {
+                    return Err(forbidden());
+                }
                 Ok(())
             }
         }
     }
+}
+
+fn has_browser_pairing_provenance(
+    connection: &Connection,
+    pair: &ClaimRecord,
+    person: &str,
+) -> Result<bool, FractalError> {
+    let fields = &pair.body["fields"];
+    if !crate::trusted_pairing_fields(pair.actor.as_deref(), fields) {
+        return Ok(false);
+    }
+    let Some([evidence]) = pair.body["evidence"].as_array().map(Vec::as_slice) else {
+        return Ok(false);
+    };
+    let Some(id) = evidence.as_str() else { return Ok(false) };
+    let Some(begun) = claim_by_id_tx(connection, id).map_err(internal)? else { return Ok(false) };
+    let request = &begun.body["fields"];
+    Ok(begun.kind == "custom.client.pairing-begun"
+        && begun.subject == pair.subject
+        && begun.origin == pair.origin
+        && begun.actor.as_deref() == Some(person)
+        && crate::trusted_pairing_fields(begun.actor.as_deref(), request)
+        && request["pairing_id"].as_str().is_some()
+        && request["pairing_id"] == fields["pairing_id"]
+        && request["browser_request"] == true
+        && request["browser_ask"].as_str().is_some())
 }
 
 /// Admit an edit as the authenticated person and return the original receipt on retry.
