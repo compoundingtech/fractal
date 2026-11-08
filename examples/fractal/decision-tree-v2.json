@@ -27,6 +27,10 @@
           "value_type": "array",
           "max_items": 64,
           "max_bytes": 16384
+        },
+        "import": {
+          "value_type": "object",
+          "max_bytes": 128
         }
       }
     },

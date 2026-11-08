@@ -61,8 +61,9 @@ Unsupported or unavailable manifests stay in raw history, with pinned sources pe
 supported manifest dependencies arrive.
 
 Each claim schema declares an authority (`creator`, `owner`, or `recipient`) and fields using
-existing schema types. Creation fixes the owner actor and addressed person. Only creation
-claims have creator authority. Owner claims require that original actor; recipient claims
+existing schema types. Creation fixes the owner actor and addressed person, except for the
+canonical-seat ownership of migration-marked decision v2 openings described below. Only creation
+claims have creator authority. Owner claims require that owner; recipient claims
 require the original person. Raw `fractal claim` writes receive the same validation as generic
 replies. Fields support required/optional values, scalar types, enum strings, arrays with
 `min_items`/`max_items`, subject reference families, immutable documents (`document: true`)
@@ -221,6 +222,41 @@ with one addition: `assumed.selection` is an optional array of up to 64 option s
 An assumption without an explicit selection cannot satisfy an option guard. The v1 namespace
 is not an alias for v2; no v1 claim is rewritten or silently migrated.
 
+For `arn:lmig:axe:2026-10-08-decision-store-import` only, v2 `opened` additionally
+admits the optional object `import = {"migration":"arn:lmig:axe:2026-10-08-decision-store-import"}`.
+When the writing actor differs from `opened.seat`, it must be exactly
+`agent/dotfiles/axe-contraction`; `import` must equal that object without extra members,
+`legacy_trees` must be non-empty (the existing 64-item / 16,384-byte bounds apply), and the
+subject must be `custom/decision/tree/v2/` plus the seat without `agent/`, never a
+`custom/decision/tree/v2/legacy/` subject. Local append admission additionally requires no
+earlier claim of any kind on that subject, in the same transaction, including repaired raw
+claims. Replicated validation and reader recognition enforce only the stateless conditions:
+arrival order must not change acceptance. Seat-authored openings must omit `import`.
+The exception is for `opened` only. An imported tree's owner is its canonical subject seat,
+not the import writer. One owner derivation is shared by local admission, replicated projection
+and the decision reader, including projected owner/ask requester identity. The canonical seat
+can write later owner facts; the importer cannot write any later claim, including another
+opening. Owner validation and append share the same write transaction, so concurrent native
+and import openings cannot both pass the first-opening check. Recipient authority is unchanged.
+
+Every daemon advertises `decision-tree-import-opened=1` in `daemon.started`. Local import-opened
+admission reuses the strict fleet feature barrier in the append transaction: current members,
+unfenced external writers, and configured peers must each advertise the feature in their own
+newest start. Non-empty blockers produce typed `member-version-unproven` with all blockers
+listed. The configured-peer context is set once at daemon startup; an unset context is also
+blocked, not interpreted as an empty fleet. Replication and reader recognition remain
+stateless and do not apply the local barrier.
+Upgrade every fleet member before importer writes; the importer must preflight that rollout.
+The barrier is reversible, but retained history is not: once import-opened claims exist, no
+member may run a release without their reader. An old joiner must be refused or upgraded
+before joining; a later missing advertisement stops new imports, not the need to read old ones.
+The previous immutable opened schema rejects `import` as an unknown field. An old binary
+given the new manifest may admit the generic object field; this is not a binary capability
+fence. Its pre-exception decision reader still refuses actor/seat mismatch, so such a tree
+cannot become approval evidence through that reader. Older members without the decision
+reader cannot perform that read at all. Remove this migration ARN and contraction exception
+after import reconciliation; no permanent delegation or configurable actor allowlist is added.
+
 | Added kind | Authority | Required fields | Optional fields |
 | --- | --- | --- | --- |
 | `provenance` | owner | `target` (claim reference), `raw` (hash-pinned document), `source_host`, `source_layout`, `source_paths` (array), `legacy_id`, `source_scope`, `written_ms` (tagged object), `actors` (array) | none |
@@ -355,7 +391,8 @@ is open, has no `ask_linked` facts, and is not in a legacy-unproven tree.
 Subjects under `custom/decision/tree/v2/legacy/<encoded spelling>` preserve unproven legacy
 ownership: their `opened.seat` is the import actor, not proof of a native seat mapping.
 Their requests can remain open, but `needs_ask` is always false; they never propose ask
-creation. Normal trees require their subject suffix to match the creation actor's seat.
+creation. Normal trees require their subject suffix to match `opened.seat` without `agent/`;
+the creation actor must be that seat except for the migration-marked opening described above.
 `ask_links` preserves link fields without assuming that a linked ask is still active or
 authorized. The fold does not distinguish blockers from
 refinements for this open-request accounting. Decision state is derived from effective

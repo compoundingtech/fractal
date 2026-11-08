@@ -210,6 +210,251 @@ fn decision_inputs_preflight_bounds_repaired_history_work() {
     );
 }
 
+const IMPORT_ACTOR: &str = "agent/dotfiles/axe-contraction";
+const IMPORT_TREE: &str = "custom/decision/tree/v2/example/decisions";
+
+fn import_opening_fields() -> Value {
+    json!({"seat": SEAT, "recipient": DECIDER, "legacy_trees": ["mbp2025:/decisions"],
+        "import": {"migration": "arn:lmig:axe:2026-10-08-decision-store-import"}})
+}
+
+fn import_tree_manifest() -> Manifest {
+    serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h3ad7cf417e7e owner=fractal_store::store::custom::tests TODO=trace-statement-and-value-representation */ include_str!(
+        "../../../../../examples/fractal/decision-tree-v2.json"
+    )).unwrap()
+}
+
+fn import_tree_store() -> Store {
+    let store = Store::open_memory("example").unwrap();
+    store.fractal.feature_barrier_peers.set(Vec::new()).unwrap();
+    let manifest = import_tree_manifest();
+    store.register_custom_kind(&RegistrationRequest { manifest, actor: SEAT.into() }).unwrap();
+    store
+}
+
+fn import_tree_claim(store: &Store, subject: &str, kind: &str, actor: &str, fields: Value)
+    -> Result<ClaimRecord, FractalError>
+{
+    store.append_claim(&ClaimInput {
+        subject: subject.into(), kind: format!("custom.decision.tree.v2.{kind}"),
+        actor: Some(actor.into()), fields: serde_json::from_value(fields).unwrap(),
+        ..empty_input()
+    })
+}
+
+#[test]
+fn decision_import_opening_is_readable_and_owned_only_by_the_canonical_seat() {
+    let store = import_tree_store();
+    let opened = import_tree_claim(&store, IMPORT_TREE, "opened", IMPORT_ACTOR,
+        import_opening_fields()).unwrap();
+    assert_eq!(store.decision_inputs(IMPORT_TREE).unwrap().claims[0].id, opened.id);
+    let raw = tree_document(&store, "doc/example/import-owner", b"unreadable source");
+    let damage = json!({"raw":raw, "records":1, "imported":0, "malformed":1});
+    assert_eq!(store.custom_subject(IMPORT_TREE).unwrap().unwrap()["owner"], SEAT);
+    assert!(import_tree_claim(&store, IMPORT_TREE, "damaged", IMPORT_ACTOR, damage.clone())
+        .unwrap_err().to_string().contains("only the opening"));
+    import_tree_claim(&store, IMPORT_TREE, "damaged", SEAT, damage).unwrap();
+    assert_eq!(store.decision_inputs(IMPORT_TREE).unwrap().claims.len(), 2);
+}
+
+#[test]
+fn concurrent_import_and_native_opening_keep_owner_check_and_append_atomic() {
+    let store = import_tree_store();
+    let start = std::sync::Barrier::new(2);
+    let outcomes = std::thread::scope(|scope| {
+        let native = scope.spawn(|| {
+            start.wait();
+            import_tree_claim(&store, IMPORT_TREE, "opened", SEAT,
+                json!({"seat":SEAT,"recipient":DECIDER}))
+        });
+        let imported = scope.spawn(|| {
+            start.wait();
+            import_tree_claim(&store, IMPORT_TREE, "opened", IMPORT_ACTOR, import_opening_fields())
+        });
+        [native.join().unwrap(), imported.join().unwrap()]
+    });
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    let history = store.decision_inputs(IMPORT_TREE).unwrap();
+    assert_eq!(history.claims.len(), 1);
+    assert_eq!(store.custom_subject(IMPORT_TREE).unwrap().unwrap()["owner"], SEAT);
+    let raw = tree_document(&store, "doc/example/concurrent-import-owner", b"unreadable");
+    let damage = json!({"raw":raw,"records":1,"imported":0,"malformed":1});
+    assert!(import_tree_claim(&store, IMPORT_TREE, "damaged", IMPORT_ACTOR, damage.clone()).is_err());
+    import_tree_claim(&store, IMPORT_TREE, "damaged", SEAT, damage).unwrap();
+    assert_eq!(store.decision_inputs(IMPORT_TREE).unwrap().claims.len(), 2);
+}
+
+#[test]
+fn decision_import_opening_refuses_each_missing_condition() {
+    let mut missing_arn = import_opening_fields();
+    missing_arn.as_object_mut().unwrap().remove("import");
+    let mut wrong_arn = import_opening_fields();
+    wrong_arn["import"]["migration"] = json!("arn:other");
+    let mut extra_import_field = import_opening_fields();
+    extra_import_field["import"]["extra"] = json!(true);
+    let mut missing_locator = import_opening_fields();
+    missing_locator.as_object_mut().unwrap().remove("legacy_trees");
+    let mut empty_locator = import_opening_fields();
+    empty_locator["legacy_trees"] = json!([]);
+    for (actor, subject, fields, condition) in [
+        ("agent/example/other", IMPORT_TREE, import_opening_fields(), "import actor"),
+        (IMPORT_ACTOR, IMPORT_TREE, missing_arn, "import.migration"),
+        (IMPORT_ACTOR, IMPORT_TREE, wrong_arn, "import.migration"),
+        (IMPORT_ACTOR, IMPORT_TREE, extra_import_field, "import.migration"),
+        (IMPORT_ACTOR, IMPORT_TREE, missing_locator, "legacy_trees"),
+        (IMPORT_ACTOR, IMPORT_TREE, empty_locator, "legacy_trees"),
+        (IMPORT_ACTOR, "custom/decision/tree/v2/legacy/example", import_opening_fields(),
+            "non-legacy"),
+        (IMPORT_ACTOR, "custom/decision/tree/v2/example/other", import_opening_fields(),
+            "non-legacy"),
+        (SEAT, IMPORT_TREE, import_opening_fields(), "must not carry import"),
+    ] {
+        let error = import_tree_claim(&import_tree_store(), subject, "opened", actor, fields)
+            .unwrap_err();
+        assert_eq!(error.code, "invalid-custom-claim");
+        assert!(error.to_string().contains(condition), "{error}");
+    }
+}
+
+#[test]
+fn decision_import_is_opened_only_and_requires_an_empty_subject() {
+    let store = import_tree_store();
+    let opened = import_tree_claim(&store, IMPORT_TREE, "opened", IMPORT_ACTOR,
+        import_opening_fields()).unwrap();
+    let error = import_tree_claim(&store, IMPORT_TREE, "opened", IMPORT_ACTOR,
+        import_opening_fields()).unwrap_err();
+    assert!(error.to_string().contains("no earlier claim"));
+    let fields = json!({"request": opened.id, "reason": "not an opening",
+        "import": {"migration": "arn:lmig:axe:2026-10-08-decision-store-import"}});
+    assert!(import_tree_claim(&store, IMPORT_TREE, "withdrawn", IMPORT_ACTOR, fields)
+        .unwrap_err().to_string().contains("unknown typed claim field"));
+
+    // Local admission checks all raw history, not merely existing opened claims.
+    let store = Store::open_memory("unregistered").unwrap();
+    import_tree_claim(&store, IMPORT_TREE, "unregistered", SEAT, json!({})).unwrap();
+    // Registration arrives from another member; local registration rightly refuses
+    // a populated untyped prefix, but replication must retain historical raw inputs.
+    legacy_sync(&import_tree_store(), &store);
+    assert!(import_tree_claim(&store, IMPORT_TREE, "opened", IMPORT_ACTOR,
+        import_opening_fields()).unwrap_err().to_string().contains("no earlier claim"));
+}
+
+#[test]
+fn decision_import_does_not_change_legacy_unproven_or_native_openings() {
+    for (subject, actor) in [
+        (IMPORT_TREE, SEAT),
+        ("custom/decision/tree/v2/legacy/encoded-spelling", IMPORT_ACTOR),
+    ] {
+        let store = import_tree_store();
+        import_tree_claim(&store, subject, "opened", actor,
+            json!({"seat":actor, "recipient":DECIDER})).unwrap();
+        assert_eq!(store.decision_inputs(subject).unwrap().claims.len(), 1);
+    }
+}
+
+#[test]
+fn decision_import_replication_and_reader_use_stateless_checks() {
+    let (source, replica) = signed_pair();
+    source.fractal.feature_barrier_peers.set(Vec::new()).unwrap();
+    replica.fractal.feature_barrier_peers.set(Vec::new()).unwrap();
+    source.register_custom_kind(&RegistrationRequest {
+        manifest: import_tree_manifest(), actor: SEAT.into(),
+    }).unwrap();
+    let error = import_tree_claim(&source, IMPORT_TREE, "opened", IMPORT_ACTOR,
+        import_opening_fields()).unwrap_err();
+    assert_eq!(error.code, "member-version-unproven");
+    assert!(error.to_string().contains("host/birch"));
+    assert!(error.to_string().contains("decision-tree-import-opened=1"));
+    for store in [&source, &replica] {
+        store.append_claim(&ClaimInput {
+            subject: format!("daemon/{}", store.origin), kind: "daemon.started".into(),
+            fields: serde_json::from_value(json!({"status":"running",
+                "features":{DECISION_IMPORT_OPENED_FEATURE:1}})).unwrap(),
+            ..empty_input()
+        }).unwrap();
+    }
+    signed_sync(&replica, &source);
+    let opened = import_tree_claim(&source, IMPORT_TREE, "opened", IMPORT_ACTOR,
+        import_opening_fields()).unwrap();
+    signed_sync(&source, &replica);
+    assert_eq!(replica.decision_inputs(IMPORT_TREE).unwrap().claims[0].id, opened.id);
+    assert!(import_tree_claim(&replica, IMPORT_TREE, "opened", IMPORT_ACTOR,
+        import_opening_fields()).unwrap_err().to_string().contains("no earlier claim"));
+    signed_sync(&source, &replica);
+    assert_eq!(replica.decision_inputs(IMPORT_TREE).unwrap().claims[0].id, opened.id);
+    assert_eq!(replica.custom_subject(IMPORT_TREE).unwrap().unwrap()["owner"], SEAT);
+    let raw = tree_document(&replica, "doc/example/replicated-import-owner", b"unreadable");
+    let damage = json!({"raw":raw,"records":1,"imported":0,"malformed":1});
+    assert!(import_tree_claim(&replica, IMPORT_TREE, "damaged", IMPORT_ACTOR, damage.clone())
+        .unwrap_err().to_string().contains("only the opening"));
+    import_tree_claim(&replica, IMPORT_TREE, "damaged", SEAT, damage.clone()).unwrap();
+    signed_sync(&replica, &source);
+    assert_eq!(source.decision_inputs(IMPORT_TREE).unwrap().claims.len(), 2);
+
+    // Bypass local admission to model a peer transmitting an unauthorized later fact.
+    let mut forged_fields = damage;
+    forged_fields["_registration"] = fields(&opened)["_registration"].clone();
+    replica.connection.batched(|tx| -> Result<()> {
+        append_claim_tx(tx, replica.origin(), IMPORT_TREE, "custom.decision.tree.v2.damaged",
+            Some(IMPORT_ACTOR), &json!({"fields":forged_fields}), &[], None)?;
+        flush(tx)
+    }).unwrap().unwrap();
+    signed_sync(&replica, &source);
+    for store in [&source, &replica] {
+        assert_eq!(store.custom_subject(IMPORT_TREE).unwrap().unwrap()["state"], "invalid");
+        assert!(store.decision_inputs(IMPORT_TREE).is_err());
+    }
+}
+
+#[test]
+fn decision_import_field_is_refused_by_the_previous_immutable_schema() {
+    let mut old = import_tree_manifest();
+    old.claims.get_mut("custom.decision.tree.v2.opened").unwrap().fields.remove("import");
+    let fields = serde_json::from_value(import_opening_fields()).unwrap();
+    let error = schema::validate_fields(&old.claims["custom.decision.tree.v2.opened"], &fields)
+        .unwrap_err();
+    assert!(error.to_string().contains("unknown typed claim field"));
+}
+
+#[test]
+fn decision_reader_without_import_exception_refuses_foreign_creation_actor() {
+    // V1 retains exactly the pre-exception reader identity rule. Even a creator-
+    // authorized imported opening cannot become approval evidence through it.
+    let store = Store::open_memory("example").unwrap();
+    store.register_custom_kind(&RegistrationRequest {
+        manifest: decision_tree(), actor: SEAT.into(),
+    }).unwrap();
+    tree_claim(&store, TREE, "opened", IMPORT_ACTOR,
+        json!({"seat": SEAT, "recipient": DECIDER})).unwrap();
+    assert!(store.decision_inputs(TREE).unwrap_err().to_string()
+        .contains("creation actor, seat, and subject identity must match"));
+}
+
+#[test]
+fn decision_import_barrier_includes_unheard_configured_peers() {
+    let store = Store::open_memory("example").unwrap();
+    store.register_custom_kind(&RegistrationRequest {
+        manifest: import_tree_manifest(), actor: SEAT.into(),
+    }).unwrap();
+    store.fractal.feature_barrier_peers.set(vec!["unheard".into()]).unwrap();
+    let error = import_tree_claim(&store, IMPORT_TREE, "opened", IMPORT_ACTOR,
+        import_opening_fields()).unwrap_err();
+    assert_eq!(error.code, "member-version-unproven");
+    assert!(error.to_string().contains("unheard: exchanges with this member"));
+}
+
+#[test]
+fn decision_import_barrier_refuses_unset_peer_context() {
+    let store = Store::open_memory("example").unwrap();
+    store.register_custom_kind(&RegistrationRequest {
+        manifest: import_tree_manifest(), actor: SEAT.into(),
+    }).unwrap();
+    let error = import_tree_claim(&store, IMPORT_TREE, "opened", IMPORT_ACTOR,
+        import_opening_fields()).unwrap_err();
+    assert_eq!(error.code, "member-version-unproven");
+    assert!(error.to_string().contains("configured peer context is unset"));
+}
+
 fn audit_custom_dirty(store: &Store) {
     store.connection.write().execute_batch(
         /* sqlite-large-value: allow-for-now lv-h4094ac3a489b owner=fractal_store::store::custom::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE custom_dirty_audit(subject TEXT);

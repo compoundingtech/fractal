@@ -29,6 +29,8 @@ pub struct FractalRuntime {
     /// construction is serialized, including simultaneous first subscriptions.
     pub ivm_publisher: Mutex<Option<Arc<smallclaims::ivm::events::Publisher>>>,
     pub mailbox_wakes: std::sync::OnceLock<Arc<mailbox_wakes::Wakes>>,
+    /// Configured peers for strict feature barriers, initialized before daemon admission.
+    pub feature_barrier_peers: std::sync::OnceLock<Vec<String>>,
     #[cfg(any(test, feature = "test-support"))]
     pub work_extension_roots_rebuilt: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
@@ -450,7 +452,12 @@ impl Runtime for FractalRuntime {
         store: &GraphStore,
         input: &ClaimInput,
     ) -> Result<(ClaimRecord, bool), FractalError> {
-        append_claim_fenced_outcome(store, input, None)
+        append_claim_with_commit_context(store, input, None, None, None, None,
+            ClaimCommitContext {
+                feature_barrier_peers: self.feature_barrier_peers.get()
+                    .map(Vec::as_slice),
+                ..Default::default()
+            })
     }
 
     fn apply_repair_tx(
