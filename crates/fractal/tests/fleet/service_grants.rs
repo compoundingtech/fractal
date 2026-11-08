@@ -58,7 +58,11 @@ fn seed(node: &Node, number: u8, profile: &str, principal: &str, scope: &str,
     let policy = append(node, &id, POLICY, fields, Some(&granted));
     let mut claims = BTreeSet::from([granted, policy.clone()]);
     if revoked {
-        claims.insert(append(node, &id, REVOKED, json!({}), Some(&policy)));
+        // Same shape as the owner revoke route: only an authoritative revocation counts.
+        claims.insert(append(node, &id, REVOKED, json!({
+            "version": 1, "grant_id": id, "principal": principal, "issuer": PERSON,
+            "transport": "fixture", "timestamp": "2026-01-01T00:00:00Z", "outcome": "revoked"
+        }), Some(&policy)));
     }
     Grant { id, credential, claims }
 }
