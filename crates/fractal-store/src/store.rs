@@ -51,6 +51,7 @@ mod declared_admission;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
+pub mod read_positions;
 pub mod ordered_membership;
 #[cfg(test)]
 pub mod arrangements_tests;
@@ -7313,6 +7314,7 @@ impl Store {
                 | "lane.approved"
                 | "arrangement.edited"
                 | "ordered-membership.edited"
+                | "read-position.advanced"
                 | "lane.joined"
                 | "lane.left"
                 | "lane.marked"
@@ -11433,6 +11435,7 @@ pub fn append_claim_tx_with_assistant_answer(
         .map_err(anyhow::Error::new)?;
     fractal_schema::glasses::validate_owner(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::arrangements::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
+    fractal_schema::read_positions::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::directive_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     fractal_schema::usage_limits::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     if kind == "owned-set.revised" {

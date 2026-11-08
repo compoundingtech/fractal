@@ -134,6 +134,7 @@ pub mod mailbox_lease;
 pub mod mailbox_wakes;
 pub mod message_bodies;
 pub mod projection_divergence;
+pub mod read_positions;
 pub mod unread_mail;
 pub mod work_summaries_ivm;
 #[cfg(test)]

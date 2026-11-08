@@ -107,6 +107,15 @@
       "behavior": "real typed client over Unix transport: stale fence refused without writes; version-2 membership edit accepted after restart; exact replay after another restart adds no duplicate claim and preserves owner, actor, and projected root placement"
     },
     {
+      "action": "read-position.advance",
+      "tests": [
+        "crates/fractal/tests/action_coverage.rs::read_position_advances_survive_stale_fences_and_restarts",
+        "crates/fractal-api-client-v0/src/api/client_v0/read_positions/tests.rs::advances_only_move_forward_and_report_the_stored_position",
+        "crates/fractal-api-client-v0/src/api/client_v0/read_positions/tests.rs::other_people_can_neither_read_nor_advance_a_persons_positions"
+      ],
+      "behavior": "real typed client over Unix transport: stale fence refused without writes; advance accepted after restart; exact replay after another restart adds no claim; an older or equal advance completes without a claim and reports the stored larger position; another person's advance and list are forbidden"
+    },
+    {
       "action": "attention.resolve",
       "tests": [
         "crates/fractal/tests/action_coverage.rs::unavailable_actions_refuse_before_and_after_restart_without_writes"

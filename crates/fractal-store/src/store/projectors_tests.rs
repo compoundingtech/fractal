@@ -29,6 +29,7 @@ fn open_installs_each_domain_in_order() {
             "directive-notes",
             "agent-messages",
             "arrangements",
+            "read-positions",
             "limits",
             "usage-credits",
             "run-eta",
@@ -52,6 +53,7 @@ fn append_projects_each_claim_kind_in_order() {
         ("harness.limits", &["custom", "resource-preparation", "limits", "ordered-membership-flush"]),
         ("usage.limits.observed", &["custom", "resource-preparation", "limits", "usage-credits", "ordered-membership-flush"]),
         ("arrangement.edited", &["custom", "resource-preparation", "arrangements", "ordered-membership-flush"]),
+        ("read-position.advanced", &["custom", "resource-preparation", "read-positions", "ordered-membership-flush"]),
         ("ordered-membership.edited", &["custom", "resource-preparation", "ordered-membership", "ordered-membership-flush"]),
         ("intent.desired", &["identities", "custom", "resource-preparation", "ordered-membership-flush"]),
         ("work.claimed", &["custom", "resource-preparation", "ordered-membership-flush"]),
@@ -73,6 +75,7 @@ fn append_projects_each_claim_kind_in_order() {
             "limits",
             "usage-credits",
             "arrangements",
+            "read-positions",
             "ordered-membership",
             "ordered-membership-flush",
         ]
@@ -80,9 +83,10 @@ fn append_projects_each_claim_kind_in_order() {
 }
 
 #[test]
-fn replicated_claims_project_credits_arrangements_and_ordered_memberships_only() {
+fn replicated_claims_project_credits_arrangements_read_positions_and_ordered_memberships_only() {
     assert_eq!(taking(projectors::REPLICATED, "usage.limits.observed"), ["usage-credits"]);
     assert_eq!(taking(projectors::REPLICATED, "arrangement.edited"), ["arrangement-project"]);
+    assert_eq!(taking(projectors::REPLICATED, "read-position.advanced"), ["read-position-project"]);
     assert_eq!(
         taking(projectors::REPLICATED, "ordered-membership.edited"),
         ["ordered-membership-project"]
@@ -104,7 +108,7 @@ fn flush_catches_up_each_domain_in_order() {
 fn rebuild_and_full_replay_keep_their_stage_order() {
     assert_eq!(
         names(projectors::REBUILD),
-        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "usage-credits", "run-eta", "gate-runners", "wake-lookup", "ordered-membership"]
+        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "read-positions", "usage-credits", "run-eta", "gate-runners", "wake-lookup", "ordered-membership"]
     );
     assert_eq!(
         projectors::GRAPH_REPLAY.iter().map(|stage| stage.phase).collect::<Vec<_>>(),
@@ -117,6 +121,7 @@ fn rebuild_and_full_replay_keep_their_stage_order() {
             "full-replay/directive-notes",
             "full-replay/custom",
             "full-replay/arrangements",
+            "full-replay/read-positions",
             "full-replay/usage-credits",
             "full-replay/run-eta",
             "full-replay/wake-lookup",

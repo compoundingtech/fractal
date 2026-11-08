@@ -201,6 +201,32 @@ public actor FractalClient {
             }
         }
     }
+    /// Follow the person's read positions; frames are invalidations, so re-list `readPositionsList` on each.
+    public func readPositionsStream(person: String, subscriptionID: String = "read-positions", limit: Int = 100) -> AsyncThrowingStream<ReadPositionCollectionFrame, Error> {
+        var components = URLComponents(url: baseURL.appending(path: "v1/client/collections/stream"), resolvingAgainstBaseURL: false)!
+        components.scheme = components.scheme == "https" ? "wss" : "ws"
+        var request = URLRequest(url: components.url!); request.setValue("fractal.client.collections.v0", forHTTPHeaderField: "Sec-WebSocket-Protocol"); if let credential { request.setValue("Bearer \(credential)", forHTTPHeaderField: "Authorization") }
+        applyTraceContext(to: &request)
+        let task = session.webSocketTask(with: request)
+        return AsyncThrowingStream { continuation in
+            continuation.onTermination = { _ in task.cancel(with: .normalClosure, reason: nil) }
+            task.resume()
+            Task {
+                do {
+                    let subscription: [String: Any] = ["kind":"subscribe", "id":subscriptionID, "collection":"read-positions", "person":person, "limit":limit]
+                    let command = try JSONSerialization.data(withJSONObject: subscription)
+                    try await task.send(.string(String(decoding: command, as: UTF8.self)))
+                    while true {
+                        let data = try Self.websocketData(from: try await task.receive())
+                        let frame = try JSONDecoder().decode(ReadPositionCollectionFrame.self, from: data)
+                        if frame.kind == "error" { throw NSError(domain: "St3Client", code: 0, userInfo: [NSLocalizedDescriptionKey: frame.message ?? "Read position subscription failed"]) }
+                        if frame.kind == "resync" { try await task.send(.string(String(decoding: command, as: UTF8.self))); continue }
+                        continuation.yield(frame)
+                    }
+                } catch { continuation.finish(throwing: task.closeCode == .normalClosure ? nil : error); task.cancel(with: .normalClosure, reason: nil) }
+            }
+        }
+    }
     /// Advertised in capabilities when an agents subscription may select one exact agent; an older
     /// daemon ignores the selector and answers with the fleet.
     public static let exactAgentSelectorCapability = "collection.agents.exact-selector"
