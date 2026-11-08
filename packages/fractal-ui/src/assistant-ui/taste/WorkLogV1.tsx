@@ -1,6 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Disclosure, DisclosurePanel, Tooltip, TooltipTrigger } from 'react-aria-components'
+import { Button, Disclosure, DisclosurePanel } from 'react-aria-components'
+import { Tooltip } from '../composition/Controls'
 import { interactionVars as interaction, surfaceVars as surface, textVars as ink, borderVars as border, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, motionVars as m } from '../composition-tokens.stylex'
 import { Icon, type IconName } from '../composition/Icons'
 import { LiveRing } from '../composition/LiveRing'
@@ -83,14 +84,17 @@ function TimelineCall({ call }: { call: WorkLogCall }) {
   // Input-only rows still open an intent summary and the explicit raw disclosure.
   const expandable = hasOutput || call.rawInput !== undefined
   const displayed = interactive ? expandable && (open || hasOutput && preview && call.status !== 'error') : hasOutput
-  const result = call.detail ?? ''
   const label = call.argsSummary === undefined ? call.title : `${call.title} ${call.argsSummary}`
+  // The hover label repeats the row title only when the row cuts it off; the output stays in the expanded row.
+  const titleRef = React.useRef<HTMLSpanElement>(null)
+  const [labelShown, setLabelShown] = React.useState(false)
+  const showLabel = (next: boolean) => setLabelShown(next && titleRef.current !== null && titleRef.current.scrollWidth > titleRef.current.clientWidth + 1)
   const start = Date.parse(call.startedAt), end = Date.parse(call.endedAt ?? '')
   const duration = Number.isFinite(start) && Number.isFinite(end) && end >= start ? formatWorkDuration(end - start) || '<1s' : undefined
   // Status word and measured duration share the row's one right-aligned metadata column; whichever comes last ends on the row edge.
   const word = call.status === 'running' ? 'Running' : call.status === 'error' ? 'Failed' : call.status === 'interrupted' ? 'Interrupted' : undefined
-  const row = <><span aria-hidden="true" data-row-disclosure={expandable && interactive ? displayed ? 'open' : 'closed' : undefined} {...stylex.props(styles.slot, styles.disclosure)}>{expandable && interactive && <span {...stylex.props(styles.chevron, displayed && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span>}</span><span aria-hidden="true" {...stylex.props(styles.slot)}>{call.status === 'running' ? <LiveRing /> : <Icon name={call.status === 'error' ? 'alert' : call.status === 'interrupted' ? 'stop-circle' : kindIcons[call.kind]} size={14} />}</span><span data-call-title title={label} {...stylex.props(styles.callLabel)}>{call.kind === 'run' ? <code {...stylex.props(styles.mono)}><HighlightedSource code={label} language="bash" /></code> : <>{call.title}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</>}</span><span data-call-meta {...stylex.props(styles.meta)}><span data-call-word {...stylex.props(styles.callWord, word !== undefined && duration !== undefined && styles.callWordSpaced)}>{word}</span><span data-call-duration {...stylex.props(styles.duration)}>{duration}</span></span></>
-  return <div data-scroll-anchor-id={call.id} data-tool-status={call.status}>{expandable && interactive ? <TooltipTrigger delay={150}><Button aria-expanded={displayed} onPress={() => setOpen(value => !value)} {...stylex.props(stylex.defaultMarker(), styles.call, open && styles.expanded, call.status === 'error' && styles.failureInk)}>{row}</Button><Tooltip {...stylex.props(styles.hover)}><div>{label}</div><div>{result}</div></Tooltip></TooltipTrigger> : <div {...stylex.props(styles.call, styles.staticCall, call.status === 'error' && styles.failureInk)}>{row}</div>}{displayed && <div data-call-detail {...stylex.props(styles.callDetail)}>{renderDetail === undefined ? <DefaultCallDetail call={call} /> : renderDetail(call)}</div>}</div>
+  const row = <><span aria-hidden="true" data-row-disclosure={expandable && interactive ? displayed ? 'open' : 'closed' : undefined} {...stylex.props(styles.slot, styles.disclosure)}>{expandable && interactive && <span {...stylex.props(styles.chevron, displayed && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span>}</span><span aria-hidden="true" {...stylex.props(styles.slot)}>{call.status === 'running' ? <LiveRing /> : <Icon name={call.status === 'error' ? 'alert' : call.status === 'interrupted' ? 'stop-circle' : kindIcons[call.kind]} size={14} />}</span><span ref={titleRef} data-call-title {...stylex.props(styles.callLabel)}>{call.kind === 'run' ? <code {...stylex.props(styles.mono)}><HighlightedSource code={label} language="bash" /></code> : <>{call.title}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</>}</span><span data-call-meta {...stylex.props(styles.meta)}><span data-call-word {...stylex.props(styles.callWord, word !== undefined && duration !== undefined && styles.callWordSpaced)}>{word}</span><span data-call-duration {...stylex.props(styles.duration)}>{duration}</span></span></>
+  return <div data-scroll-anchor-id={call.id} data-tool-status={call.status}>{expandable && interactive ? <Tooltip label={label.replace(/\s+/g, ' ').trim()} delay={150} isOpen={labelShown} onOpenChange={showLabel}><Button aria-expanded={displayed} onPress={() => setOpen(value => !value)} {...stylex.props(stylex.defaultMarker(), styles.call, open && styles.expanded, call.status === 'error' && styles.failureInk)}>{row}</Button></Tooltip> : <div {...stylex.props(styles.call, styles.staticCall, call.status === 'error' && styles.failureInk)}>{row}</div>}{displayed && <div data-call-detail {...stylex.props(styles.callDetail)}>{renderDetail === undefined ? <DefaultCallDetail call={call} /> : renderDetail(call)}</div>}</div>
 }
 /** The detail's first line, without repeating the row: the row already names the call and shows every status but success. */
 export function callDetailLine(call: WorkLogCall): string | undefined {
@@ -142,5 +146,4 @@ const styles = stylex.create({
   live: { minHeight: g.toolRow, display: 'flex', alignItems: 'center', gap: s.md, color: ink.fgMuted, fontSize: t.metaSize },
   promoted: { display: 'flex', alignItems: 'center', gap: s.md, marginTop: s.md, padding: s.md, backgroundColor: surface.washSubtle, borderRadius: r.md, color: ink.fgSoft, fontSize: t.metaSize, lineHeight: t.uiLeading },
   failureInk: { color: status.dangerFg },
-  hover: { maxWidth: g.tooltipMax, padding: s.md, borderRadius: r.md, backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.uiLeading, zIndex: 10 },
 })

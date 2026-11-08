@@ -138,7 +138,9 @@ export const geometryVars = stylex.defineVars({
   drawerMax: '600px', rowInset: '10px', scrollbar: '6px', caret: '1.5px',
   focusOffset: '2px', focusInset: '-1px', separatorHitSlop: '3px', specimenMax: '1400px', workshopMax: '1500px',
   specimenAside: '340px', specimenSidebar: '250px', commandMaxHeight: 'min(28rem, 60vh)',
-  modalMax: '448px', tooltipMax: '320px', descriptionColumns: 'minmax(90px, auto) minmax(0, 1fr)',
+  modalMax: '448px', tooltipMax: '320px',
+  /** Tallest a label tooltip grows; a longer string clamps instead of covering the transcript. */
+  tooltipMaxBlock: '160px', descriptionColumns: 'minmax(90px, auto) minmax(0, 1fr)',
   /** Fit-within box for a sent image in the transcript; it opens full size on press. */
   imageMaxWidth: '320px', imageMaxHeight: '240px',
   /** Widest a staged attachment chip grows to fit its name: narrower on phones, where the tray scrolls. */
