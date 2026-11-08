@@ -10,8 +10,8 @@
     "detail": "Agent cards, agent declaration reads and mission list/detail reads expose optional declared_admission priority, lane and budgets. Empty groups are omitted and future priority/lane strings are preserved. Declared-admission refusals retain stable error codes and report applied=none. No database layout or claim-kind change."
   },
   "rules": {
-    "status": "none",
-    "detail": "These values do not change scheduling, admission, process priority or resource limits. No checkpoint rule change."
+    "status": "changed",
+    "detail": "Deferred declaration sources are parsed once before admission-child detection, so escaped or quoted KDL node names cannot skip semantic validation; malformed deferred KDL is refused rather than skipped by a literal-text shortcut. These values do not change scheduling, admission, process priority or resource limits. No checkpoint rule change."
   },
   "compatibility": {
     "status": "changed",
