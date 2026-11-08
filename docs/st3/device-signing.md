@@ -56,10 +56,10 @@ single-use. Pairing IDs and the begin-claim subjects use independent random 128-
 values; neither reveals the code. New challenges store an HMAC-SHA-256 verifier in
 `code_hash`, with `verifier: "hmac-sha256-v1"` and the secret's SHA-256 fingerprint
 in `verifier_key_id`.
-The MAC input is the bytes `fractal/pairing-code-verifier/v1\0` (including the NUL),
-then the full prefixed pairing ID's UTF-8 byte length as an unsigned big-endian
-64-bit integer, then that ID's UTF-8 bytes, then the code's UTF-8 bytes, without
-normalization. A verifier cannot be reused for another pairing ID.
+The MAC input is the domain bytes `fractal/pairing-code-verifier/v1` (no NUL),
+then the full prefixed pairing ID's UTF-8 bytes, then the code's UTF-8 bytes.
+Each field is prefixed by its byte length as an unsigned big-endian 32-bit integer;
+no normalization is applied. A verifier cannot be reused for another pairing ID.
 Claims never contain the code or verifier secret. Possession of replicated claims alone
 does not permit offline code guessing against the keyed verifier. This does not increase
 the code's 40-bit entropy or replace its 300-second lifetime, an encrypted transport,

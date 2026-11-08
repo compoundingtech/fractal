@@ -13,7 +13,7 @@ use sha2::{Digest as _, Sha256};
 pub const MARKER: &str = "hmac-sha256-v1";
 pub const PERSON_TTL_MS: u128 = 300_000;
 
-const MAC_DOMAIN: &[u8] = b"fractal/pairing-code-verifier/v1\0";
+const MAC_DOMAIN: &[u8] = b"fractal/pairing-code-verifier/v1";
 
 /// Load or durably create the daemon's 32-byte secret. All creators serialize on a
 /// separate lock inode; the final key is published only after its contents are synced.
@@ -68,8 +68,8 @@ pub fn key_id(key: &[u8; 32]) -> String {
 }
 
 /// Compute HMAC-SHA256 for a low-entropy pairing code; not for bearer lookup indexes.
-/// Input: domain (including NUL), pairing ID byte length as big-endian u64, full
-/// prefixed pairing ID UTF-8 bytes, then code UTF-8 bytes. No normalization is applied.
+/// Input: domain, full prefixed pairing ID UTF-8 bytes, then code UTF-8 bytes,
+/// each prefixed by its byte length as big-endian u32. No normalization is applied.
 pub fn digest(key: &[u8; 32], pairing_id: &str, code: &str) -> String {
     let mac = pairing_mac(key, pairing_id, code);
     hex::encode(mac.finalize().into_bytes())
@@ -86,10 +86,11 @@ pub fn verify(key: &[u8; 32], pairing_id: &str, code: &str, expected: &str) -> b
 
 fn pairing_mac(key: &[u8; 32], pairing_id: &str, code: &str) -> Hmac<Sha256> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts a 32-byte key");
-    mac.update(MAC_DOMAIN);
-    mac.update(&(pairing_id.len() as u64).to_be_bytes());
-    mac.update(pairing_id.as_bytes());
-    mac.update(code.as_bytes());
+    for field in [MAC_DOMAIN, pairing_id.as_bytes(), code.as_bytes()] {
+        let length = u32::try_from(field.len()).expect("pairing MAC field fits in u32");
+        mac.update(&length.to_be_bytes());
+        mac.update(field);
+    }
     mac
 }
 
@@ -126,11 +127,11 @@ mod tests {
 
     #[test]
     fn domain_separated_verifier_known_answer() {
-        // HMAC-SHA256 over b"fractal/pairing-code-verifier/v1\0", 40_u64.to_be_bytes(),
-        // b"pairing/000102030405060708090a0b0c0d0e0f", then b"ABCDEFGH".
+        // HMAC-SHA256 over domain, full pairing ID and code bytes, each prefixed
+        // by its u32 big-endian byte length (32, 40 and 8 respectively).
         assert_eq!(
             digest(&[42; 32], "pairing/000102030405060708090a0b0c0d0e0f", "ABCDEFGH"),
-            "06925ad937df8f9d773b8224b724ac236d712dd609936bd1d3e64bf1a095c641",
+            "73c6aa76a74f9f2d85a1fcaf5aecc16212c2ff1d4f5e19922a563d41abb1bc7e",
         );
     }
 
