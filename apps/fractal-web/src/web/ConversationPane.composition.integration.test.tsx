@@ -656,8 +656,10 @@ describe('ConversationPane composition activation', () => {
     await mount()
 
     const fold = container.querySelector<HTMLButtonElement>('[data-testid="work-log"] button')
-    expect(fold?.textContent).toContain('Worked for 7s')
+    expect(fold?.textContent).toContain('Worked 7s')
     await act(async () => { fold!.click() })
+    // A finished turn's rows open on click.
+    await act(async () => { for (const row of container.querySelectorAll<HTMLButtonElement>('[data-testid="work-log"] [data-tool-status] > button')) row.click() })
     const raw = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')
     await act(async () => { raw!.click() })
     const open = await act(async () => {
@@ -681,6 +683,8 @@ describe('ConversationPane composition activation', () => {
 
     const fold = container.querySelector<HTMLButtonElement>('[data-testid="work-log"] button')
     await act(async () => { fold!.click() })
+    // A finished turn's rows open on click.
+    await act(async () => { for (const row of container.querySelectorAll<HTMLButtonElement>('[data-testid="work-log"] [data-tool-status] > button')) row.click() })
     const log = container.querySelector('[data-testid="work-log"]')!
     expect(log.querySelector('[data-tool-status="success"]')?.textContent).not.toContain('No output')
     const preview = log.querySelector('[data-testid="tool-detail-preview"]')!

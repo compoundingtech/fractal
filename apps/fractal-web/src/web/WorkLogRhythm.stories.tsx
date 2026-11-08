@@ -37,6 +37,8 @@ type Story = StoryObj<typeof meta>
 const play: Story['play'] = async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await userEvent.click(await canvas.findByRole('button', { name: /^Worked/ }))
+  // A finished turn's rows open on click.
+  for (const row of canvasElement.querySelectorAll<HTMLElement>('[data-testid="work-log-children"] [data-tool-status] > button')) await userEvent.click(row)
   const gaps = () => {
     const rows = [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="work-log-children"] [data-tool-status]')]
     return rows.flatMap((row, index) => {

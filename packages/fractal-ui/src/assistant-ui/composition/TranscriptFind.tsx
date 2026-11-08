@@ -45,8 +45,8 @@ const onKeyDown = (event: KeyboardEvent) => {
     return
   }
   if (!(event.ctrlKey || event.metaKey) || event.shiftKey || event.altKey || event.key.toLowerCase() !== 'f') return
-  // A modal owns the keyboard; a second press while search is open is the way to browser Find.
-  if (focus?.closest('[aria-modal="true"], [role="dialog"]') != null) return
+  // A modal or a focused terminal owns the keyboard; a second press while search is open is the way to browser Find.
+  if (focus?.closest('[aria-modal="true"], [role="dialog"], [aria-roledescription="terminal"], [data-testid="terminal-pane"]') != null) return
   const candidate = nearest(focus)
   if (candidate === undefined || candidate.isOpen()) return
   event.preventDefault()

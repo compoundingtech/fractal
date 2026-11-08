@@ -7,7 +7,7 @@ import { Button, Disclosure, DisclosurePanel, ProgressBar, VisuallyHidden } from
 import type { ConversationItem, MessageItem, TextItem } from '../embrace-data/model'
 import { EmbraceScrollViewport, type ViewportAnchorHistory } from '../EmbraceScrollViewport'
 import { RuntimeAdoptedIds } from '../EmbraceRuntime'
-import { WorkLogV1 } from '../taste/WorkLogV1'
+import { WorkLogV1, callDetailLine } from '../taste/WorkLogV1'
 import { errorReason, formatWorkDuration, readableCommand, workLogOutputLanguage, type WorkLogCall, type WorkLogTurn } from '../taste/work-log'
 import { SyncLine } from '../sync-presentation/SyncLine'
 import { syncLine } from '../sync-presentation/sync-line'
@@ -215,6 +215,7 @@ export function SeatProse({ item, senderLine, continuation = false }: { readonly
   </MessagePrimitive.Root>
 }
 /** Human intent first; a failure shows its one-line reason, the diagnostic itself requires a second disclosure. A host's semantic detail stands in for the summary line; the raw disclosure always remains. */
+function CallLine({ line }: { readonly line: string | undefined }) { return line === undefined ? null : <p>{line}</p> }
 export function ToolDetailPreview({ call, onOpen, semantic }: { readonly call: WorkLogCall; readonly onOpen?: (call: WorkLogCall) => void; readonly semantic?: React.ReactNode }) {
   const [rawOpen, setRawOpen] = React.useState(false)
   useRevealOpen(reveal => reveal.entryId === call.id && reveal.deep, rawOpen, setRawOpen)
@@ -227,7 +228,7 @@ export function ToolDetailPreview({ call, onOpen, semantic }: { readonly call: W
   const command = readableCommand(call)
   const showOutput = (call.detail ?? '') !== '' || call.rawInput === undefined
   return <div data-testid="tool-detail-preview" {...stylex.props(styles.preview)}>
-    {semantic ?? <p>{call.summary ?? call.title} · {call.status}</p>}
+    {semantic ?? <CallLine line={callDetailLine(call)} />}
     {call.status === 'error' && call.detail !== undefined && <p data-testid="tool-error-reason" {...stylex.props(styles.errorReason)}>{errorReason(call.detail)}</p>}
     <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}>
       <Button slot="trigger" {...stylex.props(styles.previewOpen)}>Show raw input/output</Button>
@@ -348,7 +349,7 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, 
       <div {...stylex.props(styles.turnLead)}>{head}</div>
       {Number.isFinite(started) && <time data-testid="turn-time" dateTime={new Date(started).toISOString()} {...stylex.props(styles.turnTime)}>{messageTimeFormatter.format(started)}</time>}
     </div>
-    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} summaryAnchorId={workSummaryId(turn.id)} summaryMemberIds={summaryMemberIds} ariaLabel={`Work log${Number.isFinite(started) ? `, started ${messageTimeFormatter.format(started)}` : ''}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow hideTime onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.length > 0 ? <ThinkingRun key="thinking" items={reasoning} /> : undefined} />}
+    {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} summaryAnchorId={workSummaryId(turn.id)} summaryMemberIds={summaryMemberIds} ariaLabel={`Work log${Number.isFinite(started) ? `, started ${messageTimeFormatter.format(started)}` : ''}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} interactiveCalls={onOpenTool !== undefined} hideLiveRow hideTime onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.length > 0 ? <ThinkingRun key="thinking" items={reasoning} /> : undefined} />}
     {shown.map((item, index) => renderItem(item, continues[index]!, runTexts[index]))}
     {turn.work.running && <LiveActivity state={turn.activity ?? { _tag: 'Working' }} startedAt={turn.work.startedAt} now={now} />}
     {!turn.work.running && renderFooter?.(turn)}
