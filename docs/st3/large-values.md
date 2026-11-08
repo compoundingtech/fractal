@@ -475,3 +475,37 @@ current publication rejects for-each syntax. The UPDATE binds body, mission-ID
 and revision TEXT values; no production writer changes. The maintainer must
 preserve this historical regression through referenced storage/reclamation work.
 Inline storage here proves neither encoded size nor execution-cost bounds.
+
+## Incremental observed credit heads
+
+`fractal_store::store::usage_credits` owns `lv-h3e04a0b79a9c`,
+`lv-h9b470b7969be`, `lv-hfa1f0cadbda8`, `lv-h78cef2ce4382`,
+`lv-h8e8ca6ee8350`, `lv-hb2a7b858df59` and `lv-h032c204ec84f`.
+The projection retains one inline credit JSON object and claim ID per
+provider/account/credit ID/writer. Heads compare absorbing state precedence
+(`redeemed` > `forfeited` > `available`/`unknown`), then exact seconds/nanoseconds
+and claim ID within a state class. SQL extracts the rank from the retained JSON;
+the table layout is unchanged.
+Its pending table contains newly admitted claim IDs, drained in the projection
+transaction; only bootstrap and explicit rebuild visit retained history.
+Provider, account, credit ID, actor and claim ID TEXT keys and credit JSON
+remain variable-size values. The owner must preserve exact ordering and
+writer-selectable evidence when moving these columns and queue reclamation
+to bounded/reference storage. Head-count-bounded reads prove no byte bound.
+The fixed v2 metadata marker forces a historical refold on upgrades from the
+timestamp-only v1 projection, recovering terminal evidence previously discarded.
+It is one initialization scalar, not growing history.
+
+The module's tests own `lv-hd4c1f52b5ad6`, `lv-hd2ecc22bed99`,
+`lv-h342a097047a2`, `lv-h9706066ba498` and `lv-hcec7294d27f7`:
+fixture-only resets, legacy-head replacement and backfills exercise bootstrap,
+v1 upgrade recovery and pending catch-up using existing inline claim IDs.
+State-order regressions cover both delivery orders, replication, rebuild and
+writer-configuration changes. Preserve these scenarios
+when the production representation changes.
+
+`fractal_store::store::limits` owns revised `lv-hc361226a445f` and
+`lv-he63d64cf72c5`. Quota reclamation now binds the writer subject as well as
+provider/account/reference/window, so an excluded writer cannot delete another
+writer's evidence. Existing inline keys remain; the owner must preserve this
+per-writer reclamation boundary in the eventual bounded representation.

@@ -2143,6 +2143,81 @@ fn coordination_bootstrap_work_is_bounded_independently_of_history_size() {
     assert!(samples[1].fullscan_steps <= samples[0].fullscan_steps + 8);
 }
 
+/// Both the HTTP SLO route and main.rs's history tick call this same SLO fold.
+/// Repeated observations grow the durable log, not the projected credit inventory.
+#[test]
+fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
+    const WRITER: &str = "agent/sample/usage-producer";
+    const DAY_MS: u64 = 86_400_000;
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("credits.db"), "cost-node").unwrap();
+    store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    let time = |at: u64| chrono::DateTime::from_timestamp_millis(at as i64).unwrap().to_rfc3339();
+    let append = |credit_id: &str, state: &str, expires: u64, n: u64| {
+        store.append_claim(&ClaimInput {
+            subject: WRITER.into(), kind: "usage.limits.observed".into(), actor: Some(WRITER.into()),
+            fields: BTreeMap::from([
+                ("readings".into(), json!([])),
+                ("credit_readings".into(), json!([{
+                    "account": "digest", "account_ref": "account/one", "provider": "anthropic",
+                    "credit_id": credit_id, "expires_at": time(expires),
+                    "measured_at": time(now - 1_000 + n),
+                    "state": state, "coverage": "reported", "source": "omp-usage", "host": "cost-node",
+                    "disposition": {"kind": "unknown", "at": null, "evidence_ref": null},
+                }])),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    // An identity not refreshed by any later batch must never vanish from the inventory.
+    let forfeited = append("retained-forfeiture", "forfeited", now - DAY_MS, 0);
+    let mut enabled = Vec::new();
+    let mut disabled = Vec::new();
+    for n in 1..=1_000 {
+        let refreshed = append("refreshed", "available", now + 2 * DAY_MS, n);
+        if !matches!(n, 100 | 1_000) {
+            continue;
+        }
+        for configured in [true, false] {
+            store.set_usage_limits_writers(if configured { vec![WRITER.into()] } else { vec![] }).unwrap();
+            let mut samples = Vec::new();
+            for _ in 0..4 {
+                let scope = work::SqliteWorkScope::start();
+                let rows = fractal_daemon::api::slo_rows(&store).unwrap();
+                let spent = scope.finish();
+                if configured {
+                    let row = rows.iter().find(|row| row["id"] == "CAM-R01/anthropic").unwrap();
+                    assert_eq!(row["status"], "missed");
+                    assert_eq!(row["current"], "1 forfeited window-equivalents");
+                    let evidence = row["evidence"].as_array().unwrap();
+                    assert_eq!(evidence.len(), 2);
+                    assert!(evidence.iter().any(|entry| entry["claim_id"] == forfeited.id));
+                    assert!(evidence.iter().any(|entry| entry["claim_id"] == refreshed.id));
+                } else {
+                    let row = rows.iter().find(|row| row["id"] == "CAM-R01/unknown").unwrap();
+                    assert_eq!(row["status"], "no-data");
+                    assert!(row["evidence"].as_array().unwrap().is_empty());
+                }
+                samples.push(spent);
+            }
+            let spent = samples.into_iter().skip(1).min_by_key(|sample| sample.vm_steps).unwrap();
+            if configured { enabled.push(spent); } else { disabled.push(spent); }
+        }
+        store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+    }
+    for (configured, samples) in [(true, enabled), (false, disabled)] {
+        let (small, large) = (samples[0], samples[1]);
+        assert!(small.statements > 0, "shared SLO SQL work must be traced");
+        assert!(large.statements <= small.statements + 2,
+            "SLO SQL calls grew with durable credit history (configured={configured}): {small:?} -> {large:?}");
+        assert!(large.vm_steps <= small.vm_steps + SLACK,
+            "SLO row work grew with durable credit history (configured={configured}): {small:?} -> {large:?}");
+        assert!(large.fullscan_steps <= small.fullscan_steps + 8,
+            "SLO scanned durable credit history (configured={configured}): {small:?} -> {large:?}");
+    }
+}
+
 #[test]
 fn v2_arrangement_renames_are_bounded_with_hidden_and_absent_membership_history() {
     let mut measurements = Vec::new();

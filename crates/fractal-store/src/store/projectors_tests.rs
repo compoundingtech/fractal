@@ -30,6 +30,7 @@ fn open_installs_each_domain_in_order() {
             "agent-messages",
             "arrangements",
             "limits",
+            "usage-credits",
             "run-eta",
             "gate-runners",
             "wake-lookup",
@@ -49,6 +50,7 @@ fn append_projects_each_claim_kind_in_order() {
         ("person.directive-note-set", &["custom", "resource-preparation", "directive-notes", "ordered-membership-flush"]),
         ("message.sent", &["custom", "resource-preparation", "agent-messages", "ordered-membership-flush"]),
         ("harness.limits", &["custom", "resource-preparation", "limits", "ordered-membership-flush"]),
+        ("usage.limits.observed", &["custom", "resource-preparation", "limits", "usage-credits", "ordered-membership-flush"]),
         ("arrangement.edited", &["custom", "resource-preparation", "arrangements", "ordered-membership-flush"]),
         ("ordered-membership.edited", &["custom", "resource-preparation", "ordered-membership", "ordered-membership-flush"]),
         ("intent.desired", &["identities", "custom", "resource-preparation", "ordered-membership-flush"]),
@@ -69,6 +71,7 @@ fn append_projects_each_claim_kind_in_order() {
             "directive-notes",
             "agent-messages",
             "limits",
+            "usage-credits",
             "arrangements",
             "ordered-membership",
             "ordered-membership-flush",
@@ -92,7 +95,7 @@ fn replicated_claims_project_arrangements_and_ordered_memberships_only() {
 fn flush_catches_up_each_domain_in_order() {
     assert_eq!(
         names(projectors::FLUSH),
-        ["custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "limits", "arrangements", "run-eta", "ordered-membership"]
+        ["custom", "identities", "resources", "completion-health", "glass-heads", "directive-notes", "agent-messages", "limits", "usage-credits", "arrangements", "run-eta", "ordered-membership"]
     );
 }
 
@@ -100,7 +103,7 @@ fn flush_catches_up_each_domain_in_order() {
 fn rebuild_and_full_replay_keep_their_stage_order() {
     assert_eq!(
         names(projectors::REBUILD),
-        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "run-eta", "gate-runners", "wake-lookup", "ordered-membership"]
+        ["planning", "identities", "resources", "completion-health", "slo-breaches", "glass-heads", "directive-notes", "arrangements", "usage-credits", "run-eta", "gate-runners", "wake-lookup", "ordered-membership"]
     );
     assert_eq!(
         projectors::GRAPH_REPLAY.iter().map(|stage| stage.phase).collect::<Vec<_>>(),
@@ -113,6 +116,7 @@ fn rebuild_and_full_replay_keep_their_stage_order() {
             "full-replay/directive-notes",
             "full-replay/custom",
             "full-replay/arrangements",
+            "full-replay/usage-credits",
             "full-replay/run-eta",
             "full-replay/wake-lookup",
             "full-replay/ordered-membership",

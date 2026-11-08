@@ -323,6 +323,48 @@ the part not yet used and a reset time. `fractal slo explain ID` says one row in
 may be the start of an id. The list is computed on each read from the live windows and the limit
 readings, and writes nothing.
 
+Quota windows merge `harness.limits` and `usage.limits.observed` by provider account digest and
+window, selecting the newest provider observation time across hosts (canonical claim order
+breaks ties). Each window retains its own freshness clock, reset, `SOURCE` and `HOST`.
+`reported` carries a percentage; `unreported` is unknown, never zero; `unsupported` is shown
+explicitly as unsupported rather than no-data. The existing one-hour freshness window applies.
+Scheduling, quota diagnostics and enforcement read harness-only evidence; producer clocks and
+display labels cannot alter those decisions. The producer-inclusive fold is observational.
+Producer batches contain `readings` and `credit_readings`. Daemon configuration
+`[usage_limits] writers = ["agent/sample/usage-producer"]` admits local agent appends,
+each writing as itself, and filters quota and credit folds at read time. Absent or empty
+configuration denies local appends and folds no usage observations. Replication and backup
+restore retain every schema-valid observation regardless of local writers. Config changes
+and restart fold the already stored evidence without re-replication or digest changes.
+Quota retention is writer-local: a newer observation from an excluded producer cannot reclaim
+another writer's latest account/window evidence, including after a projection rebuild.
+Internal window metadata does not extend the public `/usage` wire contract; SLO rows expose
+its provenance.
+Older members retain this non-authority unknown kind for replay after upgrade without changing
+terminal/runtime routing.
+
+Credit objectives read durable `usage.limits.observed` evidence from the currently configured
+omp-usage producers. `CAM-R01/PROVIDER` targets zero forfeited window-equivalents over rolling
+seven days, counted by expiry; each durable credit represents one window-equivalent.
+`CAM-R02/PROVIDER` requires every credit expiring in the next 24 hours to have a `planned`,
+`redeemed` or `declined` disposition, a decision timestamp and a nonempty evidence reference;
+otherwise it is at-risk. Credits fold by provider, account digest and durable `credit_id`,
+not host or friendly account reference. Terminal states are absorbing across writers and hosts:
+`redeemed` wins over `forfeited`, and `forfeited` wins over `available` or `unknown`, regardless
+of measurement time. Within a state class (`available` and `unknown` share one), the newest
+provider `measured_at` at full RFC3339 precision wins, then claim ID breaks equal-time ties
+consistently across members. An incrementally maintained local projection retains the winning
+reading per provider/account/credit identity **and writer**, including excluded writers.
+SLO requests and the SLO-history tick read those heads, filter the current writer configuration,
+then apply the same state-class/time/claim-ID ordering across writers.
+Read work depends on retained identities and writers, not the
+number of durable observations. An empty writer configuration returns unknown credit rows without
+credit SQL. Rows retain the selected claim and disposition evidence. Missing expiry, unknown state,
+unreported/unsupported coverage or a future measurement
+is `no-data`; stale readings are `stale`, never success. The same freshness policy as account
+readings applies. These rows describe only observed credits and are observational: they do not
+stop seats, enforce quotas or redeem credits.
+
 The same file declares CI's objectives, observed outside the daemon. A `[[duration]]` is one
 percentile of a duration (`percentile` from 1 to 99, `target_ms`), the objective
 `NAME/pPERCENTILE`, and its budget is the `100 - percentile` samples in a hundred that may run
