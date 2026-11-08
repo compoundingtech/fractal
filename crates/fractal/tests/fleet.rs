@@ -8107,12 +8107,12 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
     assert_eq!(this_build["message"]["subject"], last, "this build's CLI on the release reads the graph: {this_build}");
 }
 
-const OUTBOX_READER: &str = "agent/fleet/outbox-reader";
+const OUTBOX_READER: &str = "agent/example/outbox-reader";
 
 fn declare_outbox_reader(node: &Node) {
     let declaration = node.root.join("outbox-recipient.kdl");
     fs::write(&declaration, format!(
-        "version 2\nagent \"fleet/outbox-reader\" {{ host {:?}; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        "version 2\nagent \"example/outbox-reader\" {{ host {:?}; workspace {:?}; command \"true\"; restart \"never\" }}\n",
         node.name, node.root,
     )).unwrap();
     node.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
