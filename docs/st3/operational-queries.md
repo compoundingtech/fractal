@@ -53,14 +53,18 @@ for this snapshot path: fetch the card. For bulk roster status, use
 `fractal agents ls --all --json`; roster fields such as `state`, `host_id`, and
 `operational` are not interchangeable with card state, host, or projection fields.
 
-An undecodable retained member (including an unknown newer member kind) produces
+A retained member containing an unsupported enum variant anywhere in its schema,
+or an unknown field in a structure that rejects unknown fields, produces
 `actual: {"unavailable":{"code":"member-version-unproven"}}` for that item,
 instead of failing the batch. Its declaration and selected token remain in the page;
 the current daemon omits `member` when it cannot decode it. The unavailable marker
 replaces the normal actual summary, so it carries no revision. Other items keep their
-normal summaries. Database, mission, declaration-body and other unrelated failures
-still fail the page. The CLI retains raw extensible item JSON from newer servers,
-including member payloads it cannot itself decode, and preserves unavailable markers.
+normal summaries. The authority is the full `MemberSpec` serde schema, including
+nested discriminators and `deny_unknown_fields` structures, not a numeric wire version.
+Malformed JSON, wrong types, missing required fields, database, mission,
+declaration-body and other unrelated failures still fail the page.
+The CLI retains raw extensible item JSON from newer servers, including member
+payloads it cannot itself decode, and preserves unavailable markers.
 
 Non-agent actual summaries contain the published declaration `revision` and `digest`,
 plus `state` when cheaply maintained (`draft`, `ready`, or `retired` for missions).

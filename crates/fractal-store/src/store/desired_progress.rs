@@ -24,3 +24,20 @@ pub(super) fn desired_projection_progress(
     )?;
     Ok(DesiredProjectionProgress { graph, desired_write_generation })
 }
+
+pub(super) fn initialize_write_witness(connection: &Connection) -> Result<()> {
+    // Complete-store startup must stay read-only even while another connection
+    // holds the writer. INSERT OR IGNORE alone would still acquire that lock.
+    let initialized: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_desired_write_witness WHERE id=1)",
+        [], |row| row.get(0),
+    )?;
+    if !initialized {
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-h5650ece9d11e owner=fractal_store::store::desired_progress TODO=bound-or-reference-values-and-reclamation */
+            "INSERT OR IGNORE INTO local_desired_write_witness(id,generation) VALUES(1,0)",
+            [],
+        )?;
+    }
+    Ok(())
+}

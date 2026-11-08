@@ -173,6 +173,76 @@ mod tests {
     }
 
     #[test]
+    fn nested_member_schema_extensions_are_unavailable_per_item() {
+        let store = Store::open_memory("node").unwrap();
+        let intent = declaration("sleep 100");
+        publish(&store, &intent, "publish-nested-member");
+        let member = serde_json::to_value(
+            intent.subjects["agent/example/worker"].member.as_ref().unwrap(),
+        ).unwrap();
+        let request = desired_batch::DesiredBatchRequest::default();
+        let mut future_launch = member.clone();
+        future_launch["launch"] = json!({"type": "future-launch", "value": {}});
+        let mut future_budget = member;
+        future_budget["declared_budgets"] = json!({"future_budget": 1});
+        for (payload, prefix) in [
+            (future_launch, "unknown variant "),
+            (future_budget, "unknown field "),
+        ] {
+            let payload = serde_json::to_string(&payload).unwrap();
+            // Pin serde_json's classification wording so dependency changes cannot
+            // silently turn supported per-item degradation into whole-page failures.
+            let error = serde_json::from_str::<crate::model::MemberSpec>(&payload).unwrap_err();
+            assert!(error.to_string().starts_with(prefix), "{error}");
+            store.replace_desired_member_for_test("agent/example/worker", &payload);
+            let page = store.desired_batch(&request).unwrap();
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(page.items[0].actual, Some(json!({
+                "unavailable": {"code": "member-version-unproven"},
+            })));
+        }
+    }
+
+    #[test]
+    fn malformed_known_member_payloads_still_fail_the_batch() {
+        let store = Store::open_memory("node").unwrap();
+        let intent = declaration("sleep 100");
+        publish(&store, &intent, "publish-known-member");
+        let member = serde_json::to_value(
+            intent.subjects["agent/example/worker"].member.as_ref().unwrap(),
+        ).unwrap();
+        let mut corrupt = member.clone();
+        corrupt["host"] = json!(42);
+        let mut missing = member.clone();
+        missing.as_object_mut().unwrap().remove("launch");
+        let mut invalid_launch_tag = member.clone();
+        invalid_launch_tag["launch"] = json!({"type": 42, "value": "true"});
+        let mut invalid_launch_value = member.clone();
+        invalid_launch_value["launch"] = json!({"type": "shell", "value": 42});
+        let mut invalid_kind = member;
+        invalid_kind["kind"] = json!(42);
+        for payload in [
+            serde_json::to_string(&corrupt).unwrap(),
+            serde_json::to_string(&missing).unwrap(),
+            serde_json::to_string(&invalid_kind).unwrap(),
+            serde_json::to_string(&invalid_launch_tag).unwrap(),
+            serde_json::to_string(&invalid_launch_value).unwrap(),
+            "{broken".into(),
+            r#"{"kind":"future-member-kind","unfinished":"#.into(),
+            r#"{"kind":"future-member-kind"} trailing-garbage"#.into(),
+            r#"{"kind":"agent","launch":{"type":"future-launch"},"unfinished":"#.into(),
+            r#"{"kind":"agent","launch":{"type":"future-launch"}} trailing-garbage"#.into(),
+        ] {
+            store.replace_desired_member_for_test("agent/example/worker", &payload);
+            let error = store.desired_batch(
+                &desired_batch::DesiredBatchRequest::default(),
+            ).unwrap_err();
+            let error = error.downcast_ref::<FractalError>().unwrap();
+            assert_ne!(error.code, "member-version-unproven");
+        }
+    }
+
+    #[test]
     fn published_mission_revision_state_and_digest_match_selected_definition() {
         let store = Store::open_memory("node").unwrap();
         let intent = crate::graph::parse_intent(

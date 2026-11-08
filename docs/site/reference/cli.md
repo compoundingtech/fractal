@@ -104,11 +104,13 @@ status, use `fractal agents ls --all --json`, whose status is not card state. Se
 [the operational query contract](../../st3/operational-queries.md#bulk-desired-declarations)
 for exact omissions and the SHA-256 digest's canonical input.
 
-If a retained member payload cannot be decoded by this daemon (for example, a newer
-member kind), only that item's `actual` becomes
+If a retained member contains an unsupported enum variant anywhere in its schema,
+or an unknown field in a structure that rejects unknown fields, only that item's `actual` becomes
 `{"unavailable":{"code":"member-version-unproven"}}`; normal items and the page
 still succeed. This marker is not a revision or a negative runtime observation.
-Other read failures still fail the page. The CLI preserves extensible item JSON,
+Malformed JSON, wrong types, missing required fields, and other read failures still
+fail the page. The authority is the full `MemberSpec` serde schema, including nested
+discriminators; it has no numeric wire version. The CLI preserves extensible item JSON,
 including member payloads from newer daemons, rather than decoding each member locally.
 
 This automation read deliberately does not reduce status or fold cards. It is not a

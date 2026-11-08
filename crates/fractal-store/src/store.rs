@@ -787,7 +787,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hf78167c9efd9 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h6e39e16546c7 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -1053,7 +1053,6 @@ CREATE TABLE IF NOT EXISTS local_desired_write_witness (
     id INTEGER PRIMARY KEY CHECK(id=1),
     generation INTEGER NOT NULL CHECK(typeof(generation)='integer' AND generation>=0)
 );
-INSERT OR IGNORE INTO local_desired_write_witness(id,generation) VALUES(1,0);
 CREATE TRIGGER IF NOT EXISTS desired_write_witness_insert AFTER INSERT ON desired BEGIN
     UPDATE local_desired_write_witness SET generation=generation+1 WHERE id=1;
 END;

@@ -71,10 +71,29 @@ pub fn selected(
                     member: row
                         .member
                         .map(|body| serde_json::from_str(&body).map_err(|error| {
-                            FractalError::new(
-                                "member-version-unproven",
-                                format!("cannot decode retained member for `{subject}`: {error}"),
-                            )
+                            // serde_json exposes no structured unknown-variant/field code.
+                            // These prefixes identify unsupported schema throughout MemberSpec,
+                            // including nested enums and deny_unknown_fields structures. Tests
+                            // pin the wording; wrong types, missing fields and syntax stay loud.
+                            let message = error.to_string();
+                            if message.starts_with("unknown variant ")
+                                || message.starts_with("unknown field ")
+                            {
+                                // Typed decoding can stop at an unknown discriminator before
+                                // reaching malformed JSON later in the document. Validate the
+                                // entire syntax without materializing a second JSON tree.
+                                if let Err(syntax_error) =
+                                    serde_json::from_str::<serde::de::IgnoredAny>(&body)
+                                {
+                                    return internal(syntax_error);
+                                }
+                                FractalError::new(
+                                    "member-version-unproven",
+                                    format!("unsupported retained member schema for `{subject}`: {message}"),
+                                )
+                            } else {
+                                internal(error)
+                            }
                         }))
                         .transpose()?,
                     owner_run: row.owner_run,
