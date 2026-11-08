@@ -1165,7 +1165,9 @@
             # activation, not via a production environment-variable hook.
             substitute activate race-activate \
               --replace-fail '${pkgs.coreutils}/bin/mv -f "$target" "$replaced"' \
-                'raceSwap; ${pkgs.coreutils}/bin/mv -f "$target" "$replaced"'
+                'raceSwap; ${pkgs.coreutils}/bin/mv -f "$target" "$replaced"' \
+              --replace-fail 'if [[ "$(rollbackSnapshot "$replaced")" != "$rollbackProof" ]]' \
+                'raceAfterMove; if [[ "$(rollbackSnapshot "$replaced")" != "$rollbackProof" ]]'
             raceSwap() {
               case "$RACE_LAYOUT" in
                 candidate)
@@ -1185,10 +1187,21 @@
                   ln -s st3 "$binDir/.racing-st"
                   mv -Tf "$binDir/.racing-st" "$binDir/st"
                   ;;
+                failed-rename)
+                  mv "$target" "$binDir/checked-candidate"
+                  mkdir "$target"
+                  printf 'foreign directory entry\n' > "$target/binary"
+                  ;;
               esac
             }
-            export -f raceSwap
-            for RACE_LAYOUT in candidate st3-inode st3-content st-link; do
+            raceAfterMove() {
+              if [ "$RACE_LAYOUT" = concurrent-target ]; then
+                printf 'concurrent command\n' > "$target"
+                ln -sfn elsewhere "$binDir/st"
+              fi
+            }
+            export -f raceSwap raceAfterMove
+            for RACE_LAYOUT in candidate st3-inode st3-content st-link failed-rename concurrent-target; do
               export RACE_LAYOUT
               rm -rf state
               mkdir -p "$binDir" "$PWD/state/binary-installer"
@@ -1204,15 +1217,39 @@
                 echo "unexpected race adoption: $RACE_LAYOUT" >&2; exit 1
               fi
               ${pkgs.gnugrep}/bin/grep -q 'Home Manager: refusing to replace foreign fractal command:' refusal
-              if [ "$RACE_LAYOUT" = candidate ]; then
+              if [ "$RACE_LAYOUT" = failed-rename ]; then
+                test -d "$target"
+                cmp "$target/binary" <(printf 'foreign directory entry\n')
+                cmp "$binDir/checked-candidate" <(printf 'leftover candidate\n')
+              elif [ "$RACE_LAYOUT" = concurrent-target ]; then
+                cmp "$target" <(printf 'concurrent command\n')
+                set -- "$binDir"/fractal.replaced-*
+                test "$#" = 1
+                cmp "$1" <(printf 'leftover candidate\n')
+                ${pkgs.gnugrep}/bin/grep -F "preserved candidate at $1; leaving concurrent command at $target untouched." refusal
+              elif [ "$RACE_LAYOUT" = candidate ]; then
                 cmp "$target" <(printf 'racing foreign candidate\n')
                 cmp "$binDir/checked-candidate" <(printf 'leftover candidate\n')
               else
                 cmp "$target" <(printf 'leftover candidate\n')
               fi
               test ! -e "$receipt"
-              test -z "$(find "$binDir" -name 'fractal.replaced-*' -print)"
-              echo "PASS: rollback adoption restores and refuses $RACE_LAYOUT race"
+              case "$RACE_LAYOUT" in
+                failed-rename)
+                  # A failed rename may retain the empty reserved aside path,
+                  # but must never trigger restoration into the foreign directory.
+                  set -- "$binDir"/fractal.replaced-*
+                  test "$#" = 1 && test -f "$1" && test ! -s "$1"
+                  echo 'PASS: rollback adoption refuses failed rename without restoring over foreign entry'
+                  ;;
+                concurrent-target)
+                  echo 'PASS: rollback adoption preserves both paths and refuses concurrent target publication'
+                  ;;
+                *)
+                  test -z "$(find "$binDir" -name 'fractal.replaced-*' -print)"
+                  echo "PASS: rollback adoption restores and refuses $RACE_LAYOUT race"
+                  ;;
+              esac
             done
             # A managed physical layout supports mixed exact reverse aliases.
             rm -rf state

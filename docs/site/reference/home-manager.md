@@ -35,8 +35,12 @@ The leftover is renamed to a unique `bin/fractal.replaced-<timestamp>.<suffix>`
 sibling, never deleted.
 The moved file's device/inode, the physical `st3` device/inode and content hash,
 and the `st` link identity/target (or absence) must still match the checked
-layout after rename. A concurrent swap restores the moved object and refuses
-installation with the usual foreign-command message.
+layout after rename. A concurrent swap restores the moved object without
+clobbering a new target and refuses installation with the usual foreign-command
+message. If another writer has published a target, both it and the preserved
+copy remain untouched, and the refusal names both paths. A failed preservation
+rename never triggers binary restoration; it can leave an empty reserved aside
+file, but does not overwrite entries in a foreign destination.
 
 Installation then writes `.fractal-install.json` and points `st` and `st3` to
 `fractal`. A pre-Fractal Home Manager generation restores

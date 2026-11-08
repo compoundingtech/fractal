@@ -574,14 +574,21 @@ in
               # mktemp reserves a unique timestamped sibling, including when
               # several rollback/roll-forward cycles occur within one second.
               replaced=$(${pkgs.coreutils}/bin/mktemp "$binDir/fractal.replaced-$(${pkgs.coreutils}/bin/date -u +%Y%m%dT%H%M%S).XXXXXX")
-              binaryPublished=true
-              ${pkgs.coreutils}/bin/mv -f "$target" "$replaced"
+              if ${pkgs.coreutils}/bin/mv -f "$target" "$replaced"; then
+                binaryPublished=true
+              else
+                printf 'Home Manager: refusing to replace foreign fractal command: %s\n' "$target" >&2
+                exit 1
+              fi
               if [[ "$(rollbackSnapshot "$replaced")" != "$rollbackProof" ]] ||
                 [[ -e "$installReceipt" || -L "$installReceipt" || -e "$pendingReceipt" || -L "$pendingReceipt" ]]; then
-                # Restore the object actually moved, not the earlier backup:
-                # another writer may have replaced the checked candidate.
-                ${pkgs.coreutils}/bin/mv -Tf "$replaced" "$target"
+                # Do not let the EXIT trap restore the earlier backup over a
+                # concurrently published target, even if this restore fails.
                 binaryPublished=false
+                if ! ${pkgs.coreutils}/bin/mv -Tn "$replaced" "$target" ||
+                  [[ -e "$replaced" || -L "$replaced" ]]; then
+                  printf 'Home Manager: preserved candidate at %s; leaving concurrent command at %s untouched.\n' "$replaced" "$target" >&2
+                fi
                 printf 'Home Manager: refusing to replace foreign fractal command: %s\n' "$target" >&2
                 exit 1
               fi
