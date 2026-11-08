@@ -248,6 +248,16 @@ describe('pointer drag and drop', () => {
     expect(panesOf(currentSpace(store.getState()).layout).map(pane => pane.tabs.map(tab => tab.ref))).toEqual([['doc:b'], ['doc:a', 'doc:c']])
   })
 
+  it('lets a draggable live outside any workspace, where a press is only a press', () => {
+    const Row = () => <div data-testid="lonely" {...useEntityDrag({ ref: 'note:x' })}>row</div>
+    render(<Row />)
+    const row = container.querySelector('[data-testid="lonely"]')!
+    pointer(row, 'pointerdown', { clientX: 0, clientY: 0 })
+    pointer(window, 'pointermove', { clientX: 300, clientY: 0 })
+    pointer(window, 'pointerup', { clientX: 300, clientY: 0 })
+    expect(document.querySelector('[data-drag-chip]')).toBeNull()
+  })
+
   it('cancels on Escape and drops nothing where nothing would change', () => {
     const store = memoryStore(['doc:a'])
     render(<App store={store} />)

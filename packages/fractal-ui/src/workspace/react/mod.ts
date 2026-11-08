@@ -1,4 +1,4 @@
-export { WorkspaceProvider, useCurrentSpace, useDispatch, useWorkspace, useWorkspaceContext } from './context.tsx'
+export { WorkspaceProvider, useCurrentSpace, useDispatch, useOptionalWorkspaceContext, useWorkspace, useWorkspaceContext } from './context.tsx'
 export type { WorkspaceContextValue, WorkspaceProviderProps } from './context.tsx'
 export { DragController, DragLayer, dragThreshold, useDragState, useEntityDrag } from './dnd.tsx'
 export type { DragOver, DragState, EntityDragProps } from './dnd.tsx'

@@ -4,7 +4,7 @@ import { dropFor, isNoopDrop, resolveDropZone, stripDropIndex, stripInsertIndex,
 import type { EntityDescriptor, EntityDragPayload } from '../entity.ts'
 import { findPane } from '../layout.ts'
 import { currentSpace, type Drop, type WorkspaceState } from '../model.ts'
-import { useWorkspaceContext } from './context.tsx'
+import { useOptionalWorkspaceContext, useWorkspaceContext } from './context.tsx'
 
 /**
  * Pointer-event drag and drop: no HTML5 drag, so the chip under the pointer is live React and every
@@ -174,7 +174,8 @@ export interface EntityDragProps {
 /**
  * Makes anything that shows an entity draggable onto the workspace: a list row, a resource, a mention,
  * a tab. Spread (or `mergeProps`) the result onto the element. Touch presses scroll as usual unless
- * `touch` is set, since phones show one pane and have nowhere to drop.
+ * `touch` is set, since phones show one pane and have nowhere to drop. Outside any workspace a press
+ * is only a press, so the same row can render where nothing takes drops.
  */
 export const useEntityDrag = ({ ref, entity, tab, touch = false, isDisabled = false }: {
   readonly ref: string
@@ -185,11 +186,12 @@ export const useEntityDrag = ({ ref, entity, tab, touch = false, isDisabled = fa
   readonly touch?: boolean | undefined
   readonly isDisabled?: boolean | undefined
 }): EntityDragProps => {
-  const { drag, describe } = useWorkspaceContext()
+  const workspace = useOptionalWorkspaceContext()
   const tabSpace = tab?.space, tabId = tab?.id
   return React.useMemo(() => ({
     onPointerDown: (event: React.PointerEvent) => {
-      if (isDisabled || event.button !== 0 || (event.pointerType === 'touch' && !touch)) return
+      if (workspace === undefined || isDisabled || event.button !== 0 || (event.pointerType === 'touch' && !touch)) return
+      const { drag, describe } = workspace
       drag.press(event, () => {
         const described = entity ?? describe(ref)
         return tabSpace === undefined || tabId === undefined
@@ -197,7 +199,7 @@ export const useEntityDrag = ({ ref, entity, tab, touch = false, isDisabled = fa
           : { entity: described, ref, tab: { space: tabSpace, id: tabId } }
       })
     },
-  }), [drag, describe, ref, entity, tabSpace, tabId, touch, isDisabled])
+  }), [workspace, ref, entity, tabSpace, tabId, touch, isDisabled])
 }
 
 /** The live chip that follows the pointer while dragging. */
