@@ -12,6 +12,7 @@ impl Ledger {
     pub(super) fn open(path: &Path, node: &str) -> Result<Self> {
         let mut db = Connection::open(path)?;
         db.execute_batch(
+            /* sqlite-large-value: allow-for-now lv-h0b46b2c4f63d owner=fractal_api_core::api::agents_request_slo::ledger TODO=chunk-or-reference-variable-columns */
             "PRAGMA synchronous = FULL;
              CREATE TABLE IF NOT EXISTS owner (
                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -24,7 +25,7 @@ impl Ledger {
              ) STRICT;",
         )?;
         let transaction = db.transaction()?;
-        transaction.execute("INSERT OR IGNORE INTO owner VALUES (1, ?1)", [node])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-ha343b14aeb75 owner=fractal_api_core::api::agents_request_slo::ledger TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO owner VALUES (1, ?1)", [node])?;
         let owner: String =
             transaction.query_row("SELECT node FROM owner WHERE singleton = 1", [], |row| {
                 row.get(0)
@@ -45,7 +46,7 @@ impl Ledger {
     ) -> Result<Reading> {
         let transaction = self.0.transaction()?;
         if let Some(slot) = invalidate_from {
-            transaction.execute("DELETE FROM minute_receipts WHERE slot >= ?1", [slot])?;
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h1a72f3f86c24 owner=fractal_api_core::api::agents_request_slo::ledger TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM minute_receipts WHERE slot >= ?1", [slot])?;
         }
         if let Some(receipt) = receipt {
             ensure!(
@@ -66,13 +67,14 @@ impl Ledger {
                 );
             } else {
                 transaction.execute(
+                    /* sqlite-large-value: allow-for-now lv-h613b05daf268 owner=fractal_api_core::api::agents_request_slo::ledger TODO=bound-or-reference-values-and-reclamation */
                     "INSERT INTO minute_receipts VALUES (?1, ?2, ?3)",
                     params![receipt.slot, receipt.eligible, receipt.fast],
                 )?;
             }
         }
         let start = end.saturating_sub(WINDOW);
-        transaction.execute("DELETE FROM minute_receipts WHERE slot < ?1", [start])?;
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h196978d00369 owner=fractal_api_core::api::agents_request_slo::ledger TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM minute_receipts WHERE slot < ?1", [start])?;
         let mut reading = Reading::new(end, true);
         {
             let mut query = transaction.prepare(
