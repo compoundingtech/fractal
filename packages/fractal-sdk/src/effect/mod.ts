@@ -189,10 +189,14 @@ export type FollowSpec =
       readonly collection: CollectionName
       readonly limit: number
       readonly filters?: CollectionFilters
+      /** Opt in to the daemon-owned aggregate for existing attention rows. */
+      readonly attentionThreadHints?: true
       /** Local decoder identity, never serialized; different typed descriptors remain independent. */
       readonly descriptor?: string
     }
-  | { readonly _tag: 'ThreadSummary'; readonly context: ThreadCollectionContext; readonly limit: number }
+  | ({ readonly _tag: 'ThreadSummary'; readonly limit: number } & (
+      { readonly context: ThreadCollectionContext } | { readonly thread: string }
+    ))
   | { readonly _tag: 'ThreadTimeline'; readonly thread: string; readonly limit: number }
   | { readonly _tag: 'Conversation'; readonly ref: string }
   | {
@@ -206,9 +210,9 @@ export type FollowSpec =
 export const followKey = (spec: FollowSpec): string => {
   switch (spec._tag) {
     case 'Window':
-      return `window:${spec.collection}:${spec.limit}:${JSON.stringify(spec.filters ?? {})}${spec.descriptor === undefined ? '' : `:descriptor:${spec.descriptor}`}`
+      return `window:${spec.collection}:${spec.limit}:${JSON.stringify(spec.filters ?? {})}${spec.descriptor === undefined ? '' : `:descriptor:${spec.descriptor}`}${spec.attentionThreadHints === true ? ':thread-hints' : ''}`
     case 'ThreadSummary':
-      return `threads:${JSON.stringify(spec.context)}:${spec.limit}`
+      return 'thread' in spec ? `threads:subject:${spec.thread}:${spec.limit}` : `threads:${JSON.stringify(spec.context)}:${spec.limit}`
     case 'ThreadTimeline':
       return `thread-timeline:${spec.thread}:${spec.limit}`
     case 'Conversation':
@@ -221,6 +225,7 @@ export const followKey = (spec: FollowSpec): string => {
 export interface ThreadWindow<Row> {
   readonly items: readonly Row[]
   readonly hasMore: boolean
+  readonly snapshotId: string
 }
 
 /** A collection window: decoded rows in the server's order. */
@@ -581,6 +586,7 @@ const make = (options: FractalOptions) =>
       reportFollows()
       settleBudget()
     }
+    let attentionThreadHintsGranted = false
     const channel = yield* makeChannel({
       client,
       socket,
@@ -588,11 +594,15 @@ const make = (options: FractalOptions) =>
       commandTraceContext: () => outbound,
       ...(options.onDiagnostics === undefined ? {} : { onDiagnostics: options.onDiagnostics }),
       onCapabilities: (envelope: AdvertisedEnvelope) => {
+        attentionThreadHintsGranted = envelope.value.capabilities.some(capability =>
+          capability.id === 'collection.attention.thread-hints' && capability.state === 'granted' && capability.version >= 1,
+        )
         Effect.runFork(Deferred.succeed(firstProbe, undefined))
         if (options.conversationSlots === 'advertised')
           acceptBudget(advertisedSubscriptionLimit(envelope))
       },
       onProbeFailure: () => {
+        attentionThreadHintsGranted = false
         Effect.runFork(Deferred.fail(firstProbe, new AttachFailure({ message: 'Roster discovery is unavailable.' })))
         // A refused or unavailable first probe still releases every admission waiter.
         // Permanent rejection is reported by the channel to each follow, not hidden
@@ -952,8 +962,13 @@ const make = (options: FractalOptions) =>
             },
           })
           return {
-            subscribe: ({ stream, id }) =>
-              Effect.sync(() => stream.subscribe(id, spec.collection, spec.limit, spec.filters)),
+            subscribe: ({ stream, id }) => Effect.sync(() => {
+              if (spec.collection === 'attention' && spec.attentionThreadHints === true && attentionThreadHintsGranted) {
+                stream.subscribe(id, 'attention', spec.limit, { ...spec.filters, attention_thread_hints: true })
+              } else {
+                stream.subscribe(id, spec.collection, spec.limit, spec.filters)
+              }
+            }),
             onData: (frame) => {
               ingest.accept(frame)
               return undefined
@@ -972,13 +987,13 @@ const make = (options: FractalOptions) =>
         makeProtocol: (observe) => {
           let window: CollectionWindow<ThreadSummaryWire> | undefined
           return {
-            subscribe: ({ stream, id }) => Effect.sync(() => stream.subscribe(id, 'threads', spec.limit, { thread_context: spec.context })),
+            subscribe: ({ stream, id }) => Effect.sync(() => stream.subscribe(id, 'threads', spec.limit, 'thread' in spec ? { subject: spec.thread } : { thread_context: spec.context })),
             onData: (frame) => {
               if ((frame.kind !== 'snapshot' && frame.kind !== 'changes') || frame.collection !== 'threads') return
               window = applyWindow(window, frame)
               if (window === undefined) return
               try {
-                observe({ items: window.items.map(row => decodeUnknownSync(ThreadSummary)(row)), hasMore: window.hasMore }, window.snapshot)
+                observe({ items: window.items.map(row => decodeUnknownSync(ThreadSummary)(row)), hasMore: window.hasMore, snapshotId: window.snapshot.id }, window.snapshot)
               } catch {
                 return new DecodeFailure({ message: 'Thread summaries could not be decoded' })
               }
@@ -1000,7 +1015,7 @@ const make = (options: FractalOptions) =>
               window = applyWindow(window, frame)
               if (window === undefined) return
               try {
-                observe({ items: window.items.map(row => decodeUnknownSync(ThreadTimelineEvent)(row)), hasMore: window.hasMore }, window.snapshot)
+                observe({ items: window.items.map(row => decodeUnknownSync(ThreadTimelineEvent)(row)), hasMore: window.hasMore, snapshotId: window.snapshot.id }, window.snapshot)
               } catch {
                 return new DecodeFailure({ message: 'Thread history could not be decoded' })
               }
