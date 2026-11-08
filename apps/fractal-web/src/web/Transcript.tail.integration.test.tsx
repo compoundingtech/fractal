@@ -800,7 +800,7 @@ describe('following the live end', () => {
     </EmbraceScrollViewport>
   }
   const distance = () => lane().scrollHeight - lane().clientHeight - lane().scrollTop
-  const jump = () => container.querySelector<HTMLButtonElement>('button[hidden], button:not([aria-expanded])')!
+  const jump = () => container.querySelector<HTMLButtonElement>('[data-testid="jump-to-latest"]')!
   const appendRow = async () => {
     await act(async () => append())
     await flushFrames()
@@ -839,6 +839,7 @@ describe('following the live end', () => {
     await appendRow()
     expect(lane().scrollTop).toBe(120)
     expect(jump().hidden).toBe(false)
+    expect(jump().textContent).toBe('Jump to latest · 1 new')
     await act(async () => { jump().click() })
     await flushFrames(20)
     expect(distance()).toBeLessThanOrEqual(1)

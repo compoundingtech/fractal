@@ -70,7 +70,7 @@ export async function ready(canvasElement: HTMLElement, abortSignal: AbortSignal
   await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
   const viewport = await committedTranscriptHistory(canvasElement, initialTurns.length, abortSignal)
   await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(2))
-  return { viewport, canvas, jump: canvas.getByText('New messages ↓'), retries: canvas.getByTestId('retry-count') }
+  return { viewport, canvas, jump: canvas.getByTestId('jump-to-latest'), retries: canvas.getByTestId('retry-count') }
 }
 export async function readerScrollsUp(viewport: HTMLElement) {
   viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -viewport.scrollHeight }))

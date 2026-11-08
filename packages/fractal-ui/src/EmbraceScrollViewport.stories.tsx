@@ -62,18 +62,18 @@ export const FollowingAndAnchored: Story = { play: async ({ canvasElement }) => 
   await userEvent.click(canvas.getByRole('button', { name: 'Append message' }))
   await frame()
   await expect(Math.abs(anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset)).toBeLessThanOrEqual(1)
-  await expect(canvas.getByRole('button', { name: 'New messages ↓' })).toBeVisible()
+  await expect(canvas.getByRole('button', { name: /^Jump to latest/ })).toBeVisible()
   await userEvent.click(canvas.getByRole('button', { name: 'Change width' }))
   await frame()
   // ResizeObserver schedules compensation on the next frame; two frames alone race that work.
   await waitFor(() => expect(Math.abs(anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top - offset)).toBeLessThanOrEqual(1))
-  await userEvent.click(canvas.getByRole('button', { name: 'New messages ↓' }))
+  await userEvent.click(canvas.getByRole('button', { name: /^Jump to latest/ }))
   // The return eases over the standard motion duration (200ms) of frame time from its first frame, or lands at once under
   // reduced motion. The jump requested that frame before this play does, so the lane has landed once the play's frames span
   // the duration. A loaded host delays or pauses frames while timers run, so a wall-clock bound failed a lane on course (#4469).
   await framesSpanning(motionNumbers.standard)
   await expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(1)
-  await expect(canvas.queryByRole('button', { name: 'New messages ↓' })).toBeNull()
+  await expect(canvas.queryByRole('button', { name: /^Jump to latest/ })).toBeNull()
 } }
 export const FollowingAndAnchoredLight: Story = { ...FollowingAndAnchored, args: { scheme: 'light' } }
 /** The return to the end eases and yields to the reader's wheel; under reduced motion it lands at once. */
@@ -87,7 +87,7 @@ export const EasedReturnYieldsToReader: Story = { play: async ({ canvasElement }
   viewport.dispatchEvent(new Event('scroll'))
   await frame()
   await userEvent.click(canvas.getByRole('button', { name: 'Append message' }))
-  const jump = await canvas.findByRole('button', { name: 'New messages ↓' })
+  const jump = await canvas.findByRole('button', { name: /^Jump to latest/ })
   await userEvent.click(jump)
   if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
     await frame()
@@ -143,7 +143,10 @@ export const FollowsTheLiveEnd: Story = { play: async ({ canvasElement }) => {
   const top = viewport.scrollTop
   await append()
   await expect(Math.abs(viewport.scrollTop - top), 'a scroll up kept following').toBeLessThanOrEqual(1)
-  await userEvent.click(canvas.getByRole('button', { name: 'New messages ↓' }))
+  await append()
+  await waitFor(() => expect(canvas.getByTestId('jump-to-latest')).toHaveTextContent('Jump to latest · 2 new'))
+  await expect(canvas.getByTestId('jump-to-latest')).toBeVisible()
+  await userEvent.click(canvas.getByRole('button', { name: /^Jump to latest/ }))
   await framesSpanning(motionNumbers.standard)
   await expect(distance()).toBeLessThanOrEqual(1)
   await append()

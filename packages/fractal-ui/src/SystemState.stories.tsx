@@ -259,7 +259,7 @@ export const BandKeepsFollow: Story = { ...geometry, play: async ({ canvasElemen
     await waitFor(() => expect(distanceFromEnd(viewport)).toBeLessThanOrEqual(1))
   })
   await waitFor(() => expect(distanceFromEnd(viewport)).toBeLessThanOrEqual(1))
-  await expect(within(canvasElement).queryByRole('button', { name: 'New messages ↓' })).toBeNull()
+  await expect(within(canvasElement).queryByRole('button', { name: /^Jump to latest/ })).toBeNull()
 } }
 /** Negative control: a reader up in history keeps their row in place while the band comes and goes; no jump to the end. */
 export const BandKeepsReadingPosition: Story = { ...geometry, play: async ({ canvasElement }) => {

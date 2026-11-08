@@ -41,6 +41,8 @@ export interface ViewportState {
   readonly top: number
   readonly following: boolean
   readonly unread: boolean
+  /** Rows that arrived below a reader away from the end; the jump control counts them. */
+  readonly newCount?: number
   readonly firstRenderedId?: string
   /** The reader's line by row identity: `top` alone drifts when a remount backfills rows above it. `memberId` is a source leaf the row owns, so a summary whose turn id changed still restores. */
   readonly anchor?: { readonly id: string; readonly offset: number; readonly memberId?: string }
@@ -169,6 +171,8 @@ class ViewportController {
   private frame: number | undefined
   private captureFrame: number | undefined
   private unread = false
+  private newCount = 0
+  private jumpCount: HTMLElement | null = null
   private lastTop = 0
   private lastWidth = 0
   private programmaticTop: number | undefined
@@ -220,7 +224,13 @@ class ViewportController {
       this.pendingAnchor = saved.anchor
       this.snapshotAnchor = saved.anchor
       this.unread = saved.unread
+      this.newCount = saved.newCount ?? 0
     }
+  }
+
+  readonly attachJumpCount = (count: HTMLElement | null) => {
+    this.jumpCount = count
+    this.dock()
   }
 
   readonly attachJump = (button: HTMLButtonElement | null) => {
@@ -230,6 +240,8 @@ class ViewportController {
 
   /** Shows the jump for unread rows or a run the reader has scrolled away from, and never reflows the lane under an active press. */
   private dock() {
+    if (!this.unread) this.newCount = 0
+    if (this.jumpCount !== null) this.jumpCount.textContent = this.newCount > 0 ? ` · ${this.newCount} new` : ''
     if (this.jumpButton !== null && this.pressed.size === 0) this.jumpButton.hidden = !(this.unread || (this.running && !this.following))
   }
 
@@ -240,7 +252,7 @@ class ViewportController {
   }
 
   readonly released = (): ViewportState => {
-    const state = { top: this.lastTop, following: this.following, unread: this.unread, firstRenderedId: this.firstRenderedId }
+    const state = { top: this.lastTop, following: this.following, unread: this.unread, newCount: this.newCount, firstRenderedId: this.firstRenderedId }
     const anchor = this.pendingAnchor ?? this.snapshotAnchor
     return this.following || anchor === undefined ? state : { ...state, anchor }
   }
@@ -284,6 +296,7 @@ class ViewportController {
   readonly resume = (saved?: ViewportState) => {
     this.followAnimation.cancel()
     this.unread = saved !== undefined && !saved.following && saved.unread
+    this.newCount = this.unread ? saved?.newCount ?? 0 : 0
     this.snapshotAnchor = saved?.following === false ? saved.anchor : undefined
     this.dock()
     if (saved !== undefined && !saved.following) {
@@ -412,9 +425,11 @@ class ViewportController {
     this.schedule()
   }
 
-  readonly changed = () => {
+  /** `added`: rows new to this conversation, as opposed to rows whose content changed. */
+  readonly changed = (added = 0) => {
     if (!this.following) {
       this.unread = true
+      this.newCount += added
       this.dock()
     }
     this.schedule()
@@ -679,7 +694,10 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
       const olderLoaded = previous.length > 0 && items.length > previous.length && sameRows(previous, items.slice(items.length - previous.length))
       prepended.current ||= olderLoaded
       if (olderLoaded || sameRows(previous, items)) controller.schedule()
-      else controller.changed()
+      else {
+        const before = new Set(previous.map(row => row.id))
+        controller.changed(items.reduce((count, row) => before.has(row.id) ? count : count + 1, 0))
+      }
     }
     controller.updateHistory(history)
     // The first render is not a command, and a conversation switch adopts its key without scrolling.
@@ -707,7 +725,7 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
   return <div {...stylex.props(styles.frame)}>
     {renderHeader?.(startIndex, revealRow, materializing)}
     <div {...props} style={{ ...props.style, overflowAnchor: 'none' }} ref={controller.attach}><div {...contentProps}>{typeof children === 'function' ? children(startIndex, revealRow, materializing) : children}</div></div>
-    <Button ref={controller.attachJump} onPress={controller.jump} hidden {...stylex.props(styles.jump)}>{running ? <span {...stylex.props(styles.jumpWorking)}><LiveRing size="sm" />Working · Jump to latest</span> : 'New messages ↓'}</Button>
+    <Button ref={controller.attachJump} onPress={controller.jump} hidden data-testid="jump-to-latest" {...stylex.props(styles.jump)}><span {...stylex.props(styles.jumpWorking)}>{running && <LiveRing size="sm" />}<span>{running && 'Working · '}Jump to latest<span ref={controller.attachJumpCount} /></span></span></Button>
   </div>
 })
 
