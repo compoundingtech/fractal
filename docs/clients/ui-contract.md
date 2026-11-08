@@ -355,6 +355,11 @@ Rules every client follows; `transcripts/*.expected.json` checks the cleaning.
 - A message is one object: sender, recipient, subject, then the body. Only mail a person writes
   takes the person's own style. Mail between others takes `mail.between_others` and mail to or from
   the person `mail.involving_you` (`conversation-style.json`).
+- A harness may read the same Fractal message more than once, for example after waking again. A native user turn
+  that names the message it consumed (`delivers`, negotiated with `conversation-delivery-links.v1`) and repeats a
+  message an earlier turn already delivered reads as that earlier prompt, with a count. Equal text without a link
+  never collapses. Only Claude's verified transcript binding produces the link today, and only the web follows
+  this rule so far.
 - Message headers use names ("you", "Fractal", agent names), not graph ids.
 - Tool calls take their results by call id; a failed result tints the box red.
 

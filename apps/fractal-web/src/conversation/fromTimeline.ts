@@ -101,6 +101,10 @@ const joinResult = ({
  * header, not a Fractal delivery (those always name `from`/`to`), so it renders nothing; the
  * parts after it carry the content.
  */
+/** The Fractal message a native turn consumed (`conversation-delivery-links.v1`), when Fractal links it. */
+const deliversOf = (entry: Entry): string | undefined =>
+  entry.type === 'unrecognized' || entry.type === 'reasoning' || !('delivers' in entry) ? undefined : entry.delivers
+
 const isTurnHeader = (entry: Entry) =>
   entry.type === 'message' && entry.body.from === undefined && entry.body.to === undefined
   // Fractal names no participants on a native turn; an author alone makes a header mail only on a graph message.
@@ -547,6 +551,7 @@ interface CachedItem {
   readonly result: ToolResultEntry | undefined
   readonly active: boolean
   readonly mailbox: MessageEntry | undefined
+  readonly redelivered: number
   readonly items: readonly ConversationItem[]
   readonly classified: BlockClassification
 }
@@ -652,6 +657,8 @@ export class LiveTimeline {
       changed = true
       // Mail may arrive after its native delivery; visibility depends on the whole shown set.
       if (entry.type === 'message' || previous?.type === 'message') this.dirtyFrom = 0
+      // A re-delivery folds into the first turn that delivered the same message, wherever that turn is.
+      if (deliversOf(entry) !== undefined || (previous !== undefined && deliversOf(previous) !== undefined)) this.dirtyFrom = 0
       // A later mailbox content entry may absorb a header already rendered in an earlier frame.
       if (entry.type === 'content' && MAILBOX_CONTENT_ID.test(entry.id)) this.dirtyFrom = 0
       let at: number
@@ -903,6 +910,25 @@ export class LiveTimeline {
     return { bodies, headerOf, paired }
   }
 
+  /**
+   * Native user turns that consumed the same Fractal message (`delivers`), by entry id: the first maps to how many
+   * later turns repeated it, each later one to 'repeat'. Only the link decides; equal text never does.
+   */
+  private redeliveries(): ReadonlyMap<string, number | 'repeat'> {
+    const first = new Map<string, string>()
+    const result = new Map<string, number | 'repeat'>()
+    for (const entry of this.ordered) {
+      const message = deliversOf(entry)
+      if (message === undefined || entry.type !== 'content' || entry.role !== 'user') continue
+      const owner = first.get(message)
+      if (owner === undefined) { first.set(message, entry.id); continue }
+      result.set(entry.id, 'repeat')
+      const count = result.get(owner)
+      result.set(owner, (typeof count === 'number' ? count : 0) + 1)
+    }
+    return result
+  }
+
   /** Register only a send that painted an outbox row; an already-shown Resend keeps its server id. */
   keepOwnSendId(messageIds: readonly string[], itemId: string): void {
     for (const messageId of messageIds) {
@@ -943,11 +969,15 @@ export class LiveTimeline {
       if (key !== undefined) userMailContent.add(key)
     }
     const pairs = this.mailPairs(mailboxHeaders)
+    const deliveries = this.redeliveries()
     const shownBodies = pairs.bodies
     for (let at = from; at < this.ordered.length; at += 1) {
       const entry = this.ordered[at]!
       this.itemsBefore.push(items.length)
       if (isTurnHeader(entry) || entry.type === 'truncation') continue
+      // A native turn that delivers a message an earlier turn already delivered reads as that first turn.
+      const delivered = deliveries.get(entry.id)
+      if (delivered === 'repeat') continue
       if (entry.type === 'message' && entry.role === 'user' && entry.body.from?.startsWith('person/')) {
         // Own-send prose stays in the outbox until its correlated content is visible.
         if (this.ownSendIds.has(entry.body.message_id)) continue
@@ -989,7 +1019,7 @@ export class LiveTimeline {
         items.push(...this.cached({ entry, result: this.joined.get(at), active: this.active }))
       else {
         const mailbox = entry.type === 'content' ? pairs.headerOf.get(entry.id) : undefined
-        const projected = this.cached({ entry, result: undefined, active: true, mailbox })
+        const projected = this.cached({ entry, result: undefined, active: true, mailbox, redelivered: typeof delivered === 'number' ? delivered : 0 })
         // A header is drawn at its body only when the body became the message; otherwise it keeps its own row.
         if (mailbox !== undefined && !projected.some(isMailBody))
           items.push(...this.cached({ entry: mailbox, result: undefined, active: true }))
@@ -1045,18 +1075,20 @@ export class LiveTimeline {
     result,
     active,
     mailbox,
+    redelivered = 0,
   }: {
     readonly entry: Exclude<Entry, { type: 'truncation' }>
     readonly result: ToolResultEntry | undefined
     readonly active: boolean
     readonly mailbox?: MessageEntry
+    readonly redelivered?: number
   }): readonly ConversationItem[] {
     const key = entry.type === 'content' && entry.role === 'user' && entry.body.media_type === 'text/plain'
       ? mailboxPairKey(entry) : undefined
     const id = (key === undefined ? undefined : this.ownSendContentIds.get(key)) ?? entry.id
     const hit = this.cache.get(entry.id)
     if (hit !== undefined && hit.entry === entry && hit.result === result && hit.active === active &&
-      hit.mailbox === mailbox && hit.items.every(item => item._tag !== 'Text' || item.id === id))
+      hit.mailbox === mailbox && hit.redelivered === redelivered && hit.items.every(item => item._tag !== 'Text' || item.id === id))
       return hit.items
     const classified = hit?.entry === entry ? hit.classified : blockItems(entry)
     let item: ConversationItem | undefined
@@ -1086,6 +1118,7 @@ export class LiveTimeline {
       }
     }
     if (item?._tag === 'Text' && item.id !== id) item = { ...item, id }
+    if (item?._tag === 'Text' && redelivered > 0) item = { ...item, redelivered }
     // Mail reads as one object; only a person's mail keeps the person's row (the blue bar).
     if (item?._tag === 'Text' && mailbox !== undefined && mailOrigin(mailbox.body) !== 'person') item = mailItem(mailbox, item)
     // Fractal-minted mail content whose header left the window: who wrote it is unknown, so not a person's row.
@@ -1098,7 +1131,7 @@ export class LiveTimeline {
       this.telemetryRevisions.set(entry.id, entry.revision)
       recordTranscriptTelemetry(items, 'degraded' in entry ? entry.degraded ?? [] : [], entry.type === 'unrecognized' ? entry.issue : undefined)
     }
-    this.cache.set(entry.id, { entry, result, active, mailbox, items, classified })
+    this.cache.set(entry.id, { entry, result, active, mailbox, redelivered, items, classified })
     return items
   }
 }

@@ -24,6 +24,8 @@ const records = [
   { id: 'timeline-entry/session-wake/native-11', sequence: 11, revision: 1, timestamp: '2026-11-07T08:11:00.000Z', role: 'assistant', final: true, type: 'message', body: { message_id: 'native-turn-11' } },
   { id: 'timeline-entry/session-wake/4e4e4e4e4e4e4e4e-message', sequence: 12, revision: 1, timestamp: '2026-11-07T08:11:00.000Z', role: 'assistant', final: true, type: 'message', body: { message_id: 'message/mail05', author: agentRef, from: agentRef, to: 'agent/example/docs-writer', title: 'Changelog wording' } },
   { id: 'timeline-entry/session-wake/4e4e4e4e4e4e4e4e-content', sequence: 13, revision: 1, timestamp: '2026-11-07T08:11:00.000Z', role: 'assistant', final: true, type: 'content', body: { media_type: 'text/plain', text: longBody } },
+  // The harness read one message twice: both native turns link it (`delivers`), so they read as one prompt.
+  ...[15, 17].map(sequence => ({ id: `timeline-entry/session-wake/native-${sequence}`, sequence, revision: 1, timestamp: `2026-11-07T08:${sequence + 5}:00.000Z`, role: 'user', final: true, type: 'content', delivers: 'message/ask09', body: { media_type: 'text/plain', text: 'Also bump the lockfile.' } })),
   { id: 'timeline-entry/session-wake/native-14', sequence: 14, revision: 1, timestamp: '2026-11-07T08:12:00.000Z', role: 'assistant', final: true, type: 'content', body: { media_type: 'text/plain', text: 'Done: **every reader** uses the new key, and the docs agent has the changelog wording.' } },
 ]
 const timeline = new LiveTimeline()
@@ -55,8 +57,11 @@ const assertEpisodes: NonNullable<Story['play']> = async ({ canvasElement }) => 
   await expect(await canvas.findByText('Woken by mission step · Review the key audit', {}, { timeout: 60000 })).toBeInTheDocument()
   await expect(canvas.getByText('Woken by restart handoff')).toBeInTheDocument()
   const people = canvas.getAllByTestId('user-message')
-  await expect(people).toHaveLength(1)
+  await expect(people).toHaveLength(2)
   await expect(people[0]).toHaveTextContent('Skip the Windows runners for this one.')
+  // A message the harness read twice is one prompt with its count, matched by link, never by text.
+  await expect(people[1]).toHaveTextContent('Also bump the lockfile.')
+  await expect(within(people[1]!).getByTestId('user-redelivered')).toHaveTextContent('Delivered to the agent 2 times')
   // A wake's whole body is behind Read message, as Markdown.
   const wake = canvas.getAllByTestId('harness-notice')[0]!
   await userEvent.click(within(wake).getByRole('button', { name: 'Read message' }))
@@ -71,7 +76,7 @@ const assertEpisodes: NonNullable<Story['play']> = async ({ canvasElement }) => 
   await expect(within(mails[1]!).getByRole('button', { name: 'Read message' })).toHaveAttribute('aria-expanded', 'false')
   // Trigger, work, outcome: one timestamp per episode, and a day line where the day changes.
   const turns = canvas.getAllByTestId('transcript-turn')
-  await expect(turns).toHaveLength(4)
+  await expect(turns).toHaveLength(5)
   for (const turn of turns) await expect(within(turn).getAllByTestId('turn-time')).toHaveLength(1)
   await expect(canvas.queryAllByTestId('message-time')).toHaveLength(0)
   await expect(canvas.getAllByTestId('transcript-day')).toHaveLength(1)

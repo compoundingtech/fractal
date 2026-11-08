@@ -107,6 +107,8 @@ export type ConversationItem =
       readonly streaming: boolean
       /** Host-observed send lifecycle for user prompts; absent means not reported. */
       readonly sendState?: SendState
+      /** Later native turns that delivered the same message again; the host folds them into this prompt. */
+      readonly redelivered?: number
       readonly model?: string
       readonly at: string
       readonly sender?: Sender
