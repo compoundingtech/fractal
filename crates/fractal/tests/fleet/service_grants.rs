@@ -32,6 +32,7 @@ fn append(node: &Node, id: &str, kind: &str, fields: Value, previous: Option<&st
         evidence: previous.into_iter().map(str::to_owned).collect(),
         expected_subject: Some(previous.map(str::to_owned)), idempotency_key: None,
     }).unwrap();
+    store.seal_local_batches().unwrap();
     assert_eq!(claim.origin, node.name);
     assert!(store.claim_signature(&claim.id).unwrap().is_some(), "fixture must be signed");
     claim.id
