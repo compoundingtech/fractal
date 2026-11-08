@@ -18,6 +18,8 @@ const GAP_X = 48
 const GAP_Y = 16
 const PAD = 12
 const MAX_HEIGHT = 300
+/** Below this the node labels stop being legible; a narrower pane pans instead. */
+const MIN_FIT = 0.6
 
 const nodeLabel = (step: DetailStep, state: ReturnType<typeof stateAt>, ran: number) =>
   `${step.title}, ${STATE_LABEL[state]}${ran > 0 ? `, ran ${span(ran)}` : ''}${step.attemptCount > 1 ? `, ${step.attemptCount} attempts` : ''}`
@@ -47,9 +49,10 @@ export const PlanGraph = ({ model, controls, agentLabel }: { readonly model: Mis
     observer.observe(element)
     return () => observer.disconnect()
   }, [])
-  // Fit: never larger than life, never wider than the pane; a narrow pane gets a shorter graph.
-  const fit = width === 0 ? 1 : Math.min(1, width / contentW, MAX_HEIGHT / contentH)
-  const height = Math.max(120, Math.min(MAX_HEIGHT, Math.ceil(contentH * Math.max(fit, 0.3))))
+  // Fit: never larger than life, never wider than the pane, never so small its labels cannot be read; past that a
+  // narrow pane pans. A narrow pane also gets a shorter graph.
+  const fit = width === 0 ? 1 : Math.max(MIN_FIT, Math.min(1, width / contentW, MAX_HEIGHT / contentH))
+  const height = Math.max(120, Math.min(MAX_HEIGHT, Math.ceil(contentH * fit)))
   const [view, setView] = React.useState<{ readonly x: number; readonly y: number; readonly k: number } | undefined>(undefined)
   const fitted = { k: fit, x: Math.max(0, (width - contentW * fit) / 2), y: Math.max(0, (height - contentH * fit) / 2) }
   const shown = view ?? fitted
@@ -85,7 +88,8 @@ export const PlanGraph = ({ model, controls, agentLabel }: { readonly model: Mis
     else if (event.key === '0') { event.preventDefault(); setView(undefined) }
   }
   return <div ref={box} data-plan-graph="" {...stylex.props(styles.frame)}>
-    <div {...stylex.props(styles.toolbar)}>
+    <div role="toolbar" aria-label="Graph controls" {...stylex.props(styles.toolbar)}>
+      <span {...stylex.props(styles.label)}>Plan</span>
       {focus.cursor !== undefined ? <span data-graph-replaying="" {...stylex.props(styles.replaying)}>Replaying</span> : null}
       <SmallButton label="Critical path" pressed={showCritical} onPress={() => setShowCritical(value => !value)}><span aria-hidden="true">Critical path</span></SmallButton>
       <SmallButton label="Zoom out" onPress={() => zoom(1 / 1.2)}>−</SmallButton>
@@ -138,7 +142,7 @@ export const PlanGraph = ({ model, controls, agentLabel }: { readonly model: Mis
             ? (focus.cursor === undefined ? step.expected === undefined ? 'not started' : `usually ${span((step.expected.lowMs + step.expected.highMs) / 2)}` : 'not started')
             : `${ran > 0 ? span(ran) : STATE_LABEL[state]}${step.attemptCount > 1 ? ` · ${step.attemptCount} tries` : ''}`
           const who = agentLabel(step.agent)
-          return <g key={step.id} id={nodeDomId(step.id)} role="button" aria-label={nodeLabel(step, state, ran)} aria-pressed={isSelected}
+          return <g key={step.id} id={nodeDomId(step.id)} role="button" aria-pressed={isSelected}
             data-dag-node={step.id} data-state={state} data-dimmed={dimmed || undefined} data-selected={isSelected || undefined}
             transform={`translate(${x} ${y})`} onClick={() => controls.select(step.id)}
             onPointerEnter={() => controls.hover(step.id)} onPointerLeave={() => controls.hover(undefined)}
@@ -147,7 +151,7 @@ export const PlanGraph = ({ model, controls, agentLabel }: { readonly model: Mis
             {showCritical && critical.has(step.id) ? <rect data-critical="" width={3} height={NODE_H} rx={1.5} {...stylex.props(styles.criticalBar)} /> : null}
             <foreignObject x={8} y={5} width={NODE_W - 14} height={NODE_H - 8}>
               <div {...stylex.props(styles.nodeBody)}>
-                <span {...stylex.props(styles.nodeTitle)}><StepMark state={state} /><span {...stylex.props(styles.ellipsis)}>{step.title}</span></span>
+                <span {...stylex.props(styles.nodeTitle)}><StepMark state={state} /><span {...stylex.props(styles.ellipsis)}>{step.title}</span><SrOnly>, {STATE_LABEL[state]}{step.attemptCount > 1 ? `, ${step.attemptCount} attempts` : ''},</SrOnly></span>
                 <span {...stylex.props(styles.nodeSub, styles.ellipsis)}>{sub}{who === undefined ? '' : ` · ${who}`}</span>
               </div>
             </foreignObject>
@@ -161,7 +165,8 @@ export const PlanGraph = ({ model, controls, agentLabel }: { readonly model: Mis
 
 const styles = stylex.create({
   frame: { position: 'relative', minWidth: 0, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md, overflow: 'hidden', backgroundColor: surface.canvas },
-  toolbar: { position: 'absolute', top: s.sm, insetInlineEnd: s.sm, zIndex: 1, display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center', gap: s.xs },
+  toolbar: { display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center', gap: s.xs, paddingInline: s.md, paddingBlock: s.sm, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  label: { marginInlineEnd: 'auto', color: ink.fgMuted, fontSize: t.denseSize, fontWeight: 500 },
   replaying: { marginInlineEnd: s.xs, color: ink.fg, fontSize: t.denseSize },
   svg: { display: 'block', cursor: 'grab', touchAction: 'none', outline: 'none', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: '-2px' } },
   arrow: { fill: ink.fgMuted },

@@ -25,6 +25,8 @@ export type MissionDetailRead =
     readonly stale: boolean
     /** Whether the run's spend is known, still loading, or cannot be read here. */
     readonly spend: 'known' | 'loading' | 'unavailable'
+    /** This mission's open attention: what asks the person. */
+    readonly attention: readonly Fractal.Attention[]
   }
 
 const notReported = Atom.make<Feed<Native.UsagePeriod>>(unavailable({ reason: 'unsupported', detail: 'This connection does not report usage.' }))
@@ -41,15 +43,15 @@ export const useMissionDetail = (missionRef: string): MissionDetailRead => {
   const start = mission === undefined ? undefined : missionRunStart(mission)
   const usage = useAtomValue(start === undefined || source.nativeDetails === undefined ? notReported : source.nativeDetails.missionUsage(start))
   const agents = agentsFeed._tag === 'Observed' ? agentsFeed.value : undefined
-  const attention = attentionFeed._tag === 'Observed' ? attentionFeed.value : undefined
+  const open = React.useMemo(() => attentionFeed._tag === 'Observed' ? attentionFeed.value.filter(item => item.state === 'open') : [], [attentionFeed])
   const rows = usage._tag === 'Observed' ? usage.value.rows : undefined
   const model = React.useMemo(() => mission === undefined ? undefined
-    : missionDetailModel({ mission, agents: agents ?? [], attention: (attention ?? []).filter(item => item.state === 'open'), usage: rows, now }), [mission, agents, attention, rows, now])
+    : missionDetailModel({ mission, agents: agents ?? [], attention: open, usage: rows, now }), [mission, agents, open, rows, now])
   if (mission === undefined || model === undefined) {
     if (detail._tag === 'Waiting' || window._tag === 'Waiting') return { _tag: 'Loading' }
     if (window._tag === 'Unavailable') return { _tag: 'WindowUnavailable', window }
     return { _tag: 'Missing' }
   }
   const stale = detail._tag === 'Observed' ? detail.freshness === 'stale' : window._tag === 'Observed' && window.freshness === 'stale'
-  return { _tag: 'Ready', mission, model, stale, spend: usage._tag === 'Observed' ? 'known' : usage._tag === 'Waiting' ? 'loading' : 'unavailable' }
+  return { _tag: 'Ready', mission, model, stale, spend: usage._tag === 'Observed' ? 'known' : usage._tag === 'Waiting' ? 'loading' : 'unavailable', attention: open.filter(item => item.mission_id === mission.id) }
 }

@@ -44,17 +44,23 @@ export const SmallButton = ({ label, onPress, children, pressed, isDisabled }: {
 
 export const SrOnly = ({ children }: { readonly children: React.ReactNode }) => <span {...stylex.props(styles.srOnly)}>{children}</span>
 
-/** A tab row: Aria tabs over the kit's quiet underline. */
-export const TabRow = <T extends string>({ label, tabs, selected, onChange, children }: {
+/** A tab row: Aria tabs over the kit's quiet underline, with room after the tabs for the host's own controls. */
+export const TabRow = <T extends string>({ label, tabs, selected, onChange, trailing, dense = false, children }: {
   readonly label: string
   readonly tabs: ReadonlyArray<{ readonly id: T; readonly label: string; readonly count?: number | undefined }>
   readonly selected: T
   readonly onChange: (id: T) => void
+  readonly trailing?: React.ReactNode
+  /** The side panel's tighter inset. */
+  readonly dense?: boolean
   readonly children: (id: T) => React.ReactNode
 }) => <Aria.Tabs selectedKey={selected} onSelectionChange={key => onChange(String(key) as T)} {...stylex.props(styles.tabs)}>
-  <Aria.TabList aria-label={label} {...stylex.props(styles.tabList)}>
-    {tabs.map(tab => <Aria.Tab key={tab.id} id={tab.id} {...stylex.props(styles.tab)}>{tab.label}{tab.count !== undefined && tab.count > 0 ? <span {...stylex.props(styles.count)}>{tab.count}</span> : null}</Aria.Tab>)}
-  </Aria.TabList>
+  <div {...stylex.props(styles.tabBar, dense && styles.tabBarDense)}>
+    <Aria.TabList aria-label={label} {...stylex.props(styles.tabList)}>
+      {tabs.map(tab => <Aria.Tab key={tab.id} id={tab.id} {...stylex.props(styles.tab)}>{tab.label}{tab.count !== undefined && tab.count > 0 ? <span {...stylex.props(styles.count)}>{tab.count}</span> : null}</Aria.Tab>)}
+    </Aria.TabList>
+    {trailing}
+  </div>
   {tabs.map(tab => <Aria.TabPanel key={tab.id} id={tab.id} {...stylex.props(styles.tabPanel)}>{children(tab.id)}</Aria.TabPanel>)}
 </Aria.Tabs>
 
@@ -74,7 +80,9 @@ export const styles = stylex.create({
   smallPressed: { backgroundColor: surface.rowActive },
   srOnly: { position: 'absolute', width: '1px', height: '1px', overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap' },
   tabs: { display: 'flex', flexDirection: 'column', minWidth: 0 },
-  tabList: { display: 'flex', gap: s.lg, paddingInline: s.xl, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  tabBar: { display: 'flex', alignItems: 'center', gap: s.md, minWidth: 0, paddingInline: s.xl, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  tabBarDense: { paddingInline: s.md },
+  tabList: { display: 'flex', flex: '1 1 auto', flexWrap: 'wrap', columnGap: s.lg, minWidth: 0 },
   tab: { display: 'inline-flex', alignItems: 'center', gap: s.xs, paddingBlock: s.sm, marginBlockEnd: '-1px', borderBottomWidth: '2px', borderBottomStyle: 'solid', borderBottomColor: { default: 'transparent', ':is([data-selected])': ink.fg }, color: { default: ink.fgMuted, ':is([data-selected])': ink.fg, ':hover': ink.fg }, fontSize: t.metaSize, fontWeight: 500, cursor: 'pointer', outline: 'none', ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing } },
   count: { minWidth: '16px', paddingInline: s.xs, borderRadius: r.full, backgroundColor: surface.rowActive, color: ink.fgSoft, fontSize: t.denseSize, textAlign: 'center' },
   tabPanel: { minWidth: 0, outline: 'none' },
