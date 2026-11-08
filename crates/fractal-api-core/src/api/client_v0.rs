@@ -3284,13 +3284,41 @@ pub fn timeline_value(
     id: &str,
     query: &ClientListQuery,
 ) -> Result<Json<Value>, ApiError> {
+    timeline_value_with_subject(state, snapshot, session, id, query, None)
+}
+
+/// Inventory subjects are hints only: resolve on this page sequence's pinned snapshot.
+pub fn timeline_value_for_subject(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    id: &str,
+    query: &ClientListQuery,
+    owner_subject: &str,
+) -> Result<Json<Value>, ApiError> {
+    timeline_value_with_subject(state, snapshot, session, id, query, Some(owner_subject))
+}
+
+fn timeline_value_with_subject(
+    state: &AppState,
+    snapshot: &ClientSnapshot,
+    session: &ClientSession,
+    id: &str,
+    query: &ClientListQuery,
+    owner_subject: Option<&str>,
+) -> Result<Json<Value>, ApiError> {
     require_scope(session, "read.projections")?;
     let session_id = client_detail_id("session", id);
+    let managed_owner = || match owner_subject {
+        Some(subject) => super::managed_session_owner_for_timeline_at(
+            &state.store, snapshot.store_index, &session_id, subject,
+        ),
+        None => super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id),
+    }.map_err(ApiError::internal);
     if let Some(cursor) = query.cursor.as_deref() {
         let _span = crate::profile::span("timeline/cached-page");
         if cursor.starts_with(NATIVE_PAGE_CURSOR_PREFIX) {
-            let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
-                .map_err(ApiError::internal)?;
+            let managed = managed_owner()?;
             let source = conversation_blocks::source(state, &session_id, managed.as_ref())
                 .map_err(|_| client_page_expired("the page snapshot is no longer available; restart pagination"))?;
             return native_slice_page_at_generation(
@@ -3328,8 +3356,7 @@ pub fn timeline_value(
         return Ok(Json(page_value));
     }
     crate::performance::task("conversation/first-page", || {
-        let managed = super::managed_session_owner_at(&state.store, snapshot.store_index, &session_id)
-            .map_err(ApiError::internal)?;
+        let managed = managed_owner()?;
         timeline_first_page(state, snapshot, session, session_id, query, None, managed.as_ref())
     })
 }
