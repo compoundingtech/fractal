@@ -130,13 +130,16 @@ function assertHeader(pane: HTMLElement) {
     requireContract(rect.left >= clip.left - 0.5 && rect.right <= clip.right + 0.5 && rect.top >= clip.top - 0.5 && rect.bottom <= clip.bottom + 0.5, 'Header control escapes the effective clip')
   }
 }
+/** The loading ring spins unless the viewer asked for reduced motion. */
+const stillRing = () => matchMedia('(prefers-reduced-motion: reduce)').matches
+const ringMotion = (glyph: Element) => (getComputedStyle(glyph.firstElementChild!).animationName === 'none') === stillRing()
 function assertPhase(pane: HTMLElement, phase: 'live' | 'loading' | 'failed') {
   const head = headFor(pane), status = element(head, '[data-pane-sync-status]')
   const word = [...status.querySelectorAll('[data-pane-sync-word],[data-pane-sync-word-trigger]')].find(shown)
   const glyph = status.querySelector('[data-pane-sync-glyph]')
   requireContract(status.dataset.paneSyncPhase === phase, 'Header has the wrong observation phase')
   if (phase === 'live') requireContract(!word && !glyph && [...status.childNodes].filter(node => node instanceof Element && !node.matches('[data-pane-sync-announcer],:has([data-pane-sync-announcer])') && shown(node)).every(node => !node.textContent?.trim()), 'Live header shows a status')
-  if (phase === 'loading') requireContract(!word && shown(glyph) && getComputedStyle(glyph!.firstElementChild!).animationName === 'none' && [...status.childNodes].filter(node => node instanceof Element && !node.matches('[data-pane-sync-announcer],:has([data-pane-sync-announcer])') && shown(node)).every(node => !node.textContent?.trim()), 'Loading is not one still glyph without a word')
+  if (phase === 'loading') requireContract(!word && shown(glyph) && glyph!.firstElementChild!.hasAttribute('data-live-ring') && ringMotion(glyph!) && [...status.childNodes].filter(node => node instanceof Element && !node.matches('[data-pane-sync-announcer],:has([data-pane-sync-announcer])') && shown(node)).every(node => !node.textContent?.trim()), 'Loading is not the one live ring without a word')
   if (phase === 'failed') {
     requireContract(Boolean(word), 'Failure lacks its recovery status')
     const label = word!.querySelector('[data-pane-sync-word-label]'), glyphOnly = Boolean(label && getComputedStyle(label).display === 'none')
@@ -401,7 +404,7 @@ function assertTiming({ samples, settled }: GlyphTiming) {
   const index = samples.findIndex(sample => sample.visible), first = samples[index]?.t
   requireContract(index > 0 && first !== undefined && first >= 290 && first <= settled, 'Loading glyph does not first appear around 300ms')
   requireContract(!samples.some(sample => sample.word), 'Loading shows a status word')
-  requireContract(!samples.some(sample => sample.animation !== null && sample.animation !== 'none'), 'Loading glyph animates')
+  requireContract(!samples.some(sample => sample.animation !== null && (sample.animation === 'none') !== stillRing()), 'Loading ring does not spin, or spins under reduced motion')
   requireContract(!samples.some((sample, index) => index > 0 && samples[index - 1]!.visible && !sample.visible), 'Loading glyph flickers')
 }
 async function sampleGlyph(canvas: HTMLElement, mutate?: (glyph: HTMLElement) => void): Promise<GlyphTiming> {

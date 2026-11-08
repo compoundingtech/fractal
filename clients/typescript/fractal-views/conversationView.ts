@@ -820,12 +820,15 @@ export function conversationEntries(timeline: Entry[], names: Names, filters: re
       headers.delete(str(message.message_id) ?? '');
       if (mail === message) mail = undefined;
       const text = cleanMessageText(contentText(entry.body), filters);
-      const from = str(message.from) ?? '';
-      if (from === 'daemon/runtime') {
-        // Step-ready pings are graph events, not conversation.
+      // The writer: `author` (conversation-message-participants.v1) before the legacy `from`. A daemon's
+      // wake has author `daemon/runtime` and never a `from`; an unnegotiated read drops both, leaving a
+      // recipient and no writer, which is Fractal too.
+      const from = str(message.author) ?? str(message.from) ?? '';
+      const to = str(message.to);
+      if (from.startsWith('daemon/') || (!from && to)) {
+        // Step-ready pings and restart handoffs are graph events, not conversation.
         push(entry, str(message.message_id)!, { kind: 'event', tone: 'quiet', text: str(message.title) ?? text.split('\n')[0] ?? '' });
       } else {
-        const to = str(message.to);
         const images = mailImages(message);
         push(entry, str(message.message_id)!, {
           kind: 'mail',

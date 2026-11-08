@@ -206,13 +206,14 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
   await expect(thinkingTitle.getBoundingClientRect().left).toBeCloseTo(toolTitle.getBoundingClientRect().left, 1)
   await expect(canvas.getByTestId('thinking-body').getBoundingClientRect().left - thinkingRow.getBoundingClientRect().left).toBeCloseTo(22, 1)
 
-  // Message: header (12/16) holds time and Copy, the body follows; no footer row.
+  // Message: header (12/16) holds Copy, the body follows; no footer row. The episode head holds the time.
   const answer = canvasElement.querySelector<HTMLElement>('[data-item-id="hierarchy/rich"]')!
   const header = within(answer).getByTestId('message-header')
   const markdown = within(answer).getByTestId('markdown')
   await expect(header.getBoundingClientRect().height).toBe(16)
   await expect(getComputedStyle(header).fontSize).toBe('12px')
-  await expect(header).toContainElement(answer.querySelector('time'))
+  await expect(answer.querySelector('time')).toBeNull()
+  await expect(answer.closest('[data-testid="transcript-turn"]')!.querySelector('[data-testid="turn-time"]')).not.toBeNull()
   await expect(header).toContainElement(within(answer).getByRole('button', { name: 'Copy answer' }))
   await expect(header.getBoundingClientRect().bottom).toBeLessThanOrEqual(markdown.getBoundingClientRect().top)
   await expect(answer.getBoundingClientRect().bottom - markdown.getBoundingClientRect().bottom).toBeLessThanOrEqual(2)
@@ -291,10 +292,11 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
     if (original === undefined) delete (clipboard as unknown as Record<string, unknown>)['writeText']; else Object.defineProperty(clipboard, 'writeText', original)
   }
 
-  // Prose run: one sender line with the time, then the following blocks without a header.
+  // Prose run: one sender line, then the following blocks without a header; the episode head holds the time.
   const runBlocks = run.map((_, index) => runBlock(index)!)
   await expect(within(runBlocks[0]!).getByTestId('message-sender')).toHaveTextContent(caption)
-  await expect(within(runBlocks[0]!).getByTestId('message-header')).toContainElement(runBlocks[0]!.querySelector('time'))
+  await expect(runBlocks[0]!.querySelector('time')).toBeNull()
+  await expect(runBlocks[0]!.closest('[data-testid="transcript-turn"]')!.querySelector('[data-testid="turn-time"]')).not.toBeNull()
   for (const block of runBlocks.slice(1)) {
     await expect(block).toHaveAttribute('data-run-continuation', 'true')
     await expect(block.querySelector('[data-testid="message-header"]')).toBeNull()

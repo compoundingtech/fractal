@@ -7,6 +7,8 @@ import type * as LazyChunkModule from '../../../../packages/fractal-ui/src/lazy-
 import type { ConversationPage, Feed } from '../data/source.ts'
 import { ConversationPane } from './ConversationPane.tsx'
 
+// One stable empty roster: a fresh map per render would re-project the transcript every frame.
+const noRosterNames = vi.hoisted((): ReadonlyMap<string, string> => new Map())
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 const recovery = vi.hoisted(() => ({ load: vi.fn(), retry: vi.fn(), reload: vi.fn() }))
 vi.mock('../../../../packages/fractal-ui/src/lazy-chunk.ts', async importOriginal => {
@@ -37,6 +39,8 @@ vi.mock('../data/react.tsx', async () => {
     useConversation: () => source.feed,
     useConversationSync: () => ({ status: { _tag: 'Live', since: 1000 }, observedAt: 1000 }),
     useConnection: () => ({ _tag: 'Live' }),
+    // Roster names for mail headers; an empty roster reads refs by their last segment.
+    useFleetSelection: () => noRosterNames,
     useDataSource: () => ({ agents, attachments: {} }),
     useFeedInterest: () => {},
     useNowSnapshot: () => 1000,

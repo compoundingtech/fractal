@@ -316,6 +316,20 @@ describe('tail-first transcript mounting', () => {
     expect(summary()).toContain('All 41 entries shown')
   })
 
+  it('times a trigger-led episode from its trigger while the tail window has trimmed it', async () => {
+    const later = new Date(now + 3_600_000).toISOString()
+    const trigger: ConversationItem = { _tag: 'Text', id: 'wake/trigger', role: 'user', text: 'Wake: audit the keys', attachments: [], streaming: false, at: sourceAt }
+    const answers = range('wake', 0, 40).map(id => ({ ...answerRow(id), at: later }))
+    await render(transcript([{ ...sourceTurn('wake-turn', [trigger, ...answers]), triggerId: trigger.id }]))
+    expect(mountedSourceIds()).not.toContain('wake/trigger')
+    const time = () => container.querySelector<HTMLTimeElement>('[data-testid="turn-time"]')!.dateTime
+    expect(time()).toBe(sourceAt)
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!.click() })
+    await flushHistory(answers.length + 1)
+    expect(mountedSourceIds()).toContain('wake/trigger')
+    expect(time()).toBe(sourceAt)
+  })
+
   it('mounts all reasoning in a crossing work-log disclosure and keeps it open while Show all reveals deferred tools and prose', async () => {
     const tool: ConversationItem = { _tag: 'ToolCall', id: 'split/tool', callId: 'split/tool', name: 'read', input: { path: 'split.ts' }, status: 'success', callSeen: true, at: sourceAt }
     const items = [...range('before', 0, 6).map(answerRow), thought('early/0'), thought('early/1'), tool, ...range('run', 0, 5).map(thought), ...range('after', 0, 3).map(answerRow)]
@@ -769,18 +783,19 @@ describe('batched message measurements', () => {
     expect(message.textContent).not.toContain('Show full message')
   })
 
-  it('keeps localized completion times and machine instants when formatting multiple answer rows', async () => {
+  it('keeps localized episode times and machine instants, one per episode, none on its answers', async () => {
     const entries: readonly TranscriptTurn[] = [0, 1].map(index => ({
       ...turns[index]!,
       items: [{ _tag: 'Text', id: `answer-${index}`, role: 'assistant', text: `Answer ${index}`, attachments: [], streaming: false, at: new Date(now + index * 60_000).toISOString() }],
     }))
     await render(transcript(entries))
-    const times = [...container.querySelectorAll<HTMLTimeElement>('[data-testid="message-time"]')]
+    expect(container.querySelectorAll('[data-testid="message-time"]')).toHaveLength(0)
+    const times = [...container.querySelectorAll<HTMLTimeElement>('[data-testid="turn-time"]')]
     expect(times).toHaveLength(2)
     times.forEach((time, index) => {
-      const completed = new Date(now + index * 60_000)
-      expect(time.dateTime).toBe(completed.toISOString())
-      expect(time.textContent).toBe(new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(completed))
+      const started = new Date(Date.parse(entries[index]!.prompt?.at ?? entries[index]!.items[0]!.at!))
+      expect(time.dateTime).toBe(started.toISOString())
+      expect(time.textContent).toBe(new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(started))
     })
   })
 })

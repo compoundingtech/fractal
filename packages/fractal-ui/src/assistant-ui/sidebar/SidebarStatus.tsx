@@ -2,9 +2,10 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { VisuallyHidden } from 'react-aria-components'
-import { geometryVars as g, motionVars as m, spaceVars as s, statusVars as tone, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { geometryVars as g, spaceVars as s, statusVars as tone, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { compactTime, statuses, type AgentStatus } from './model'
 import { useClockLabel } from '../../time/clock'
+import { LiveRing } from '../composition/LiveRing'
 
 export type GlyphVariant = 'SG-1' | 'SG-2' | 'SG-3' | 'Agents'
 export type DiscRefinement = 'G1' | 'G2' | 'G3'
@@ -51,13 +52,14 @@ export function SidebarStatus({ status, statusLabel = statuses[status].label, va
   const frozen = snapshotFrozen || freshness === 'stale' || (variant === 'Agents' && freshness === 'unobserved')
   const boundary = statusSince === undefined ? 'Status boundary unavailable' : `Observed status since ${new Date(statusSince).toISOString()}`
   const elapsed = useClockLabel(now => statusSince === undefined || statusSince > now || iconOnly ? '' : compactTime({ at: statusSince, now }), statusSince === undefined || iconOnly ? 0 : now)
-  const runningRing = variant === 'SG-1' && discRefinement === 'G2' && status === 'working' && !frozen
+  // The roster disc stays a disc; only the G2 refinement and the stroke-only SG-3 set draw the shared ring for working.
+  const liveRing = status === 'working' && (variant === 'SG-3' || (variant === 'SG-1' && discRefinement === 'G2' && !frozen))
   const shapeCue = variant === 'SG-1' && (frozen || (discRefinement === 'G3' && status !== 'working' && status !== 'idle'))
   const snapshot = frozen ? '; last-observed snapshot' : ''
   // The former native title text stays exact as the glyph's description; hosts own the only hover disclosure.
   const descriptionId = React.useId()
   return <span aria-hidden={decorative || undefined} data-status={status} data-frozen={frozen || undefined} data-status-frozen={frozen || undefined} {...stylex.props(styles.root, status === 'working' && styles.working, status === 'waiting' && styles.waiting, status === 'failed' && styles.staleDanger, status === 'stale' && (staleTone === 'danger' ? styles.staleDanger : styles.staleMuted), frozen && styles.frozen)}>
-    {variant === 'Agents' ? <span role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation${snapshot}`} aria-describedby={descriptionId} data-agent-glyph {...stylex.props(styles.agentGlyph)}>{agentGlyphs[status]}</span> : <svg data-disc-refinement={variant === 'SG-1' ? discRefinement : undefined} role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation${snapshot}`} aria-describedby={descriptionId} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...stylex.props(styles.icon, runningRing && styles.iconRing, (runningRing || (status === 'working' && variant === 'SG-3' && !frozen)) && styles.spin)}>{variant === 'SG-2' ? <circle cx="10" cy="10" r="4" fill="currentColor" stroke="none" /> : variant === 'SG-3' ? paths[status] : <><circle cx="10" cy="10" r="5" fill="currentColor" stroke="none" opacity={shapeCue ? '.25' : undefined} />{runningRing && <><circle cx="10" cy="10" r="7.5" opacity=".3" /><path d="M10 2.5a7.5 7.5 0 0 1 7.5 7.5" /></>}{shapeCue && paths[status]}</>}</svg>}
+    {variant === 'Agents' ? <span role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation${snapshot}`} aria-describedby={descriptionId} data-agent-glyph {...stylex.props(styles.agentGlyph)}>{agentGlyphs[status]}</span> : liveRing ? <span data-disc-refinement={variant === 'SG-1' ? discRefinement : undefined} role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation${snapshot}`} aria-describedby={descriptionId} {...stylex.props(styles.ringSlot)}><LiveRing spinning={!frozen} /></span> : <svg data-disc-refinement={variant === 'SG-1' ? discRefinement : undefined} role="img" aria-label={`${statusLabel}; ${boundary}; ${freshness} observation${snapshot}`} aria-describedby={descriptionId} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" {...stylex.props(styles.icon)}>{variant === 'SG-2' ? <circle cx="10" cy="10" r="4" fill="currentColor" stroke="none" /> : variant === 'SG-3' ? paths[status] : <><circle cx="10" cy="10" r="5" fill="currentColor" stroke="none" opacity={shapeCue ? '.25' : undefined} />{shapeCue && paths[status]}</>}</svg>}
     <VisuallyHidden elementType="span"><span id={descriptionId}>{`${statusLabel}. ${boundary}. Observation ${freshness}.${frozen ? ' Last-observed snapshot.' : ''}`}</span></VisuallyHidden>
     {variant === 'SG-2' && !iconOnly && <span>{statusLabel}</span>}
     {/* Icon-only glyphs sit in a fixed icon column; visible text there would overrun the next column. */}
@@ -66,10 +68,9 @@ export function SidebarStatus({ status, statusLabel = statuses[status].label, va
 }
 const styles = stylex.create({
   root: { display: 'inline-flex', alignItems: 'center', gap: s.xs, color: ink.fgSoft, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap', flexShrink: 0 },
-  icon: { width: g.icon, height: g.icon, flexShrink: 0 }, iconRing: { width: g.glyphRing, height: g.glyphRing },
+  icon: { width: g.icon, height: g.icon, flexShrink: 0 }, ringSlot: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.icon, flexShrink: 0 },
   agentGlyph: { width: g.icon, textAlign: 'center', flexShrink: 0 },
   working: { color: tone.runningFg }, waiting: { color: tone.attention }, staleDanger: { color: tone.dangerFg }, staleMuted: { color: ink.fgMuted },
   // Last observed: one muted tone for every state, so nothing reads as live; the SG-1 shape cue carries the state.
   frozen: { color: ink.fgMuted },
-  spin: { animationName: stylex.keyframes({ to: { transform: 'rotate(360deg)' } }), animationDuration: m.spin, animationTimingFunction: m.linear, animationIterationCount: 'infinite', '@media (prefers-reduced-motion: reduce)': { animationName: 'none' } },
 })
