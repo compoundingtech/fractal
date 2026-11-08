@@ -8,7 +8,7 @@ pub(super) const MAX_VISITS: usize = 64;
 
 pub(super) enum Lookup {
     Vacant(String),
-    Recorded(ClaimRecord),
+    Recorded(Box<ClaimRecord>),
     Blocked,
 }
 
@@ -82,7 +82,7 @@ pub(super) fn resolve(
         }
     }
     if let Some(receipt) = expected {
-        return Ok(Lookup::Recorded(receipt.clone()));
+        return Ok(Lookup::Recorded(Box::new(receipt.clone())));
     }
     if overflow || depth == MAX_CONFLICTS { return Ok(Lookup::Blocked); }
     let mut selected = None;
@@ -123,7 +123,7 @@ pub(super) fn append(store: &Store, input: &mut ClaimInput, owner: &str) -> Resu
     // again, and both the chain and append attempts are bounded.
     for _ in 0..=MAX_CONFLICTS {
         match lookup(store, &root, owner, |receipt, key| matches(store, input, receipt, key))? {
-            Lookup::Recorded(receipt) => return Ok(Some(receipt)),
+            Lookup::Recorded(receipt) => return Ok(Some(*receipt)),
             Lookup::Blocked => return Ok(None),
             Lookup::Vacant(key) => {
                 if input.kind == "message.sent" && input.idempotency_key.as_deref() != Some(key.as_str()) {

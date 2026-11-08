@@ -3,7 +3,7 @@ use super::migration_tests::{fixture, reading};
 
 fn recorded_phase(store: &Store, opening: &Opening, phase: &str) -> crate::model::ClaimRecord {
     match phase_receipt(store, opening, phase).unwrap() {
-        keys::Lookup::Recorded(receipt) => receipt,
+        keys::Lookup::Recorded(receipt) => *receipt,
         keys::Lookup::Vacant(_) => panic!("phase is vacant"),
         keys::Lookup::Blocked => panic!("phase lookup is blocked"),
     }
@@ -217,15 +217,21 @@ fn merge_different_occupant(store: &Store, remote: &Store, key: &str) {
     assert_eq!(store.operation_claims(key).unwrap().0.len(), 2);
 }
 
+/// The production sampler sequence after root-controlled evidence has been read.
+fn sample(admission: &mut Admission, journal: &Path, policy: &Policy, store: &Store, weekly: &Reading) {
+    admission.replay(journal, |opening| record(store, &policy.config, opening)).unwrap();
+    admission.replay_weekly(journal, |opening, action| record_weekly(store, opening, action)).unwrap();
+    drain_notices(admission, journal, store, None).unwrap();
+    admission.weekly(journal, &policy.config, store, weekly, weekly.end_ms,
+        |opening, action| record_weekly(store, opening, action)).unwrap();
+    drain_notices(admission, journal, store, None).unwrap();
+}
+
 #[test]
 fn replicated_conflicts_continue_each_family_and_preserve_acknowledged_receipts() {
-    let (dir, mut policy, store) = fixture();
+    let (dir, policy, store) = fixture();
     let remote = Store::open_memory("remote").unwrap();
     let journal = dir.path().join("readiness-case.json");
-    policy.config.evidence_file = dir.path().join("weekly-evidence.json");
-    policy.config.retained_pairs_file = Some(dir.path().join("retained-evidence.json"));
-    fs::write(policy.config.retained_pairs_file.as_ref().unwrap(),
-        serde_json::to_vec(&json!({"version":1,"pairs":[]})).unwrap()).unwrap();
     let end = (MINUTES + 10) * MINUTE_MS;
     let mut admission = Admission::load(&journal, &policy.config).unwrap();
     let opening = plan(&mut admission, &policy, &journal, end);
@@ -244,9 +250,7 @@ fn replicated_conflicts_continue_each_family_and_preserve_acknowledged_receipts(
     assert!(admission.case.as_ref().unwrap().recorded);
     let early = recorded_phase(&store, &opening, "early");
     let missed = reading(end + MINUTE_MS, 11);
-    fs::write(&policy.config.evidence_file, serde_json::to_vec(&missed).unwrap()).unwrap();
-    run_sampler(&policy, &store, missed.end_ms).unwrap();
-    admission = Admission::load(&journal, &policy.config).unwrap();
+    sample(&mut admission, &journal, &policy, &store, &missed);
     let weekly = recorded_phase(&store, &opening, "weekly");
     assert_eq!(weekly.body["evidence"], json!([early.id]));
     assert_eq!(store.messages(Some(&policy.config.reviewer), true).unwrap().len(), 2);
@@ -283,9 +287,7 @@ fn replicated_conflicts_continue_each_family_and_preserve_acknowledged_receipts(
         merge_different_occupant(&store, &remote, &key);
     }
     let met = reading(end + 2 * MINUTE_MS, 0);
-    fs::write(&policy.config.evidence_file, serde_json::to_vec(&met).unwrap()).unwrap();
-    run_sampler(&policy, &store, met.end_ms).unwrap();
-    admission = Admission::load(&journal, &policy.config).unwrap();
+    sample(&mut admission, &journal, &policy, &store, &met);
     assert!(admission.weekly.recovered);
     assert_eq!(store.operational_failure(&opening.episode).unwrap().unwrap().status, "resolved");
     for receipt in [&early, &weekly] {
@@ -316,7 +318,7 @@ fn replicated_occupants(store: &Store, key: &str, count: usize, serial: &mut usi
     let mut ids = Vec::new();
     for _ in 0..count {
         *serial += 1;
-        let peer = Store::open_memory(&format!("replica-{serial}")).unwrap();
+        let peer = Store::open_memory(format!("replica-{serial}")).unwrap();
         let receipt = peer.append_claim(&ClaimInput {
             subject: "custom/fixture/record".into(), kind: "custom.fixture.record".into(),
             actor: Some("agent/fixture.owner".into()),
@@ -331,12 +333,8 @@ fn replicated_occupants(store: &Store, key: &str, count: usize, serial: &mut usi
 
 #[test]
 fn overflowing_occupants_block_lookup_without_stopping_sampler_or_sibling_recovery() {
-    let (dir, mut policy, store) = fixture();
+    let (dir, policy, store) = fixture();
     let journal = dir.path().join("readiness-case.json");
-    policy.config.evidence_file = dir.path().join("weekly-evidence.json");
-    policy.config.retained_pairs_file = Some(dir.path().join("retained-evidence.json"));
-    fs::write(policy.config.retained_pairs_file.as_ref().unwrap(),
-        serde_json::to_vec(&json!({"version":1,"pairs":[]})).unwrap()).unwrap();
     let end = (MINUTES + 10) * MINUTE_MS;
     let mut admission = Admission::load(&journal, &policy.config).unwrap();
     let opening = plan(&mut admission, &policy, &journal, end);
@@ -354,19 +352,17 @@ fn overflowing_occupants_block_lookup_without_stopping_sampler_or_sibling_recove
         &opening.reviewer, 0, &|_, _| false, &mut remaining).unwrap(), keys::Lookup::Blocked));
     assert_eq!(keys::MAX_VISITS - remaining, 17, "one bounded read and sixteen occupants");
     let missed = reading(end + MINUTE_MS, 11);
-    fs::write(&policy.config.evidence_file, serde_json::to_vec(&missed).unwrap()).unwrap();
-    run_sampler(&policy, &store, missed.end_ms).unwrap();
+    sample(&mut admission, &journal, &policy, &store, &missed);
     assert_eq!(store.messages(Some(&policy.config.reviewer), true).unwrap().len(), 1);
     let met = reading(end + 2 * MINUTE_MS, 0);
-    fs::write(&policy.config.evidence_file, serde_json::to_vec(&met).unwrap()).unwrap();
-    run_sampler(&policy, &store, met.end_ms).unwrap();
+    sample(&mut admission, &journal, &policy, &store, &met);
     let pending = Admission::load(&journal, &policy.config).unwrap();
     assert!(!pending.weekly.recovered);
     assert!(pending.weekly.pending.is_some());
     assert_eq!(pending.case.as_ref().unwrap().episode, opening.episode);
     assert_eq!(store.operational_failure(&opening.episode).unwrap().unwrap().status, "resolved");
     let index = store.index().unwrap();
-    run_sampler(&policy, &store, met.end_ms).unwrap();
+    sample(&mut admission, &journal, &policy, &store, &met);
     assert_eq!(store.index().unwrap(), index, "diagnostics and notices are deduplicated");
 }
 

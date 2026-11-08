@@ -433,7 +433,7 @@ fn send_notice(store: &Store, notice: &Notice) -> Result<Option<crate::model::Cl
     let mut input = notice_input(notice);
     match keys::lookup(store, input.idempotency_key.as_deref().unwrap(), &notice.owner,
         |receipt, key| keys::matches(store, &input, receipt, key))? {
-        keys::Lookup::Recorded(receipt) => return Ok(Some(receipt)),
+        keys::Lookup::Recorded(receipt) => return Ok(Some(*receipt)),
         keys::Lookup::Blocked => return Ok(None),
         keys::Lookup::Vacant(_) => {},
     }
