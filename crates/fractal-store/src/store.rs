@@ -259,6 +259,7 @@ pub mod message_marks;
 mod message_marks_tests;
 pub mod message_outbox;
 pub mod message_routing;
+pub mod thread_metadata;
 #[cfg(test)]
 mod message_routing_tests;
 pub mod message_sent;
@@ -788,6 +789,9 @@ WHERE kind='custom.client.terminal-attached';
 CREATE INDEX IF NOT EXISTS claims_harness_receipt_actor_key_index
 ON claims(json_extract(body, '$.fields.receipt.actor_key'), origin, subject)
 WHERE kind='harness-question.resolved' AND actor IS NULL;
+CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.agent'), subject)
+WHERE kind='thread.created';
 CREATE INDEX IF NOT EXISTS claims_message_to_index
 ON claims(json_extract(body, '$.fields.to'), subject)
 WHERE kind='message.sent';
@@ -5394,7 +5398,10 @@ impl Store {
     pub fn generic_status_subject_names_at(
         &self, mut subjects: BTreeSet<String>, index: u64,
     ) -> Result<BTreeSet<String>> {
-        subjects.retain(|subject| !fractal_schema::notice::is_reserved_subject(subject));
+        subjects.retain(|subject| {
+            !fractal_schema::notice::is_reserved_subject(subject)
+                && !fractal_schema::threads::is_reserved_subject(subject)
+        });
         if subjects.is_empty() { return Ok(subjects); }
         let connection = self.readers.get();
         let mut query = connection.prepare_cached(
@@ -5404,7 +5411,11 @@ impl Store {
         for row in query.query_map(params![serde_json::to_string(&subjects)?,index], |row|
             Ok((row.get::<_,String>(0)?,row.get::<_,String>(1)?)))? {
             let (subject,kind) = row?;
-            if fractal_schema::notice::is_reserved_kind(&kind) { subjects.remove(&subject); }
+            if fractal_schema::notice::is_reserved_kind(&kind)
+                || fractal_schema::threads::is_reserved_kind(&kind)
+            {
+                subjects.remove(&subject);
+            }
         }
         Ok(subjects)
     }
@@ -5489,11 +5500,16 @@ impl Store {
     /// A serving reduction must omit the whole subject if reserved facts contributed to it.
     /// This does not change internal reductions or authoritative claim availability.
     pub fn generic_status_subject_visible_at(&self, subject: &str, cut: u64) -> Result<bool> {
-        if fractal_schema::notice::is_reserved_subject(subject) {
+        if fractal_schema::notice::is_reserved_subject(subject)
+            || fractal_schema::threads::is_reserved_subject(subject)
+        {
             return Ok(false);
         }
         let kinds = subject_kinds_at(&self.readers.get(), subject, cut)?;
-        Ok(!kinds.iter().any(|kind| fractal_schema::notice::is_reserved_kind(kind)))
+        Ok(!kinds.iter().any(|kind| {
+            fractal_schema::notice::is_reserved_kind(kind)
+                || fractal_schema::threads::is_reserved_kind(kind)
+        }))
     }
 
     /// Generic serving status must not reduce reserved facts into fields or claim identities.
@@ -5506,6 +5522,7 @@ impl Store {
             let connection = self.readers.get();
             let cut = selected_index(current_index(&connection)?, at).map_err(anyhow::Error::new)?;
             let mut excluded = BTreeSet::new();
+            let mut selected_thread = selected.is_some_and(fractal_schema::threads::is_reserved_subject);
             let status_query = if selected.is_some() {
                 "SELECT DISTINCT subject,kind FROM claims WHERE subject=?2 AND store_index<=?1"
             } else {
@@ -5514,9 +5531,19 @@ impl Store {
             let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-hdacaab2c061c owner=fractal_store::store TODO=trace-statement-and-value-representation */ status_query)?;
             for row in query.query_map(params![cut,selected], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))? {
                 let (subject,kind) = row?;
-                if fractal_schema::notice::is_reserved_subject(&subject) || fractal_schema::notice::is_reserved_kind(&kind) {
+                if fractal_schema::threads::is_reserved_record(&subject, &kind) {
+                    selected_thread |= selected == Some(subject.as_str());
+                    excluded.insert(subject);
+                } else if fractal_schema::notice::is_reserved_subject(&subject)
+                    || fractal_schema::notice::is_reserved_kind(&kind)
+                {
                     excluded.insert(subject);
                 }
+            }
+            if selected_thread {
+                return Err(anyhow::Error::new(FractalError::new(
+                    "thread-unavailable", "the thread is unavailable",
+                )));
             }
             if selected.is_some_and(|s| fractal_schema::notice::is_reserved_subject(s) || excluded.contains(s)) {
                 return Err(anyhow::Error::new(FractalError::new(
@@ -22467,6 +22494,8 @@ pub struct ClaimCommitContext<'a> {
     /// Only rename_identity supplies naming CAS, owner and fleet registry admission.
     pub identity_writer: bool,
     pub admission: Option<&'a ClaimAdmission<'a>>,
+    /// Current authority required for both a new append and replay of an existing receipt.
+    pub authority: Option<&'a ClaimAdmission<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
     /// Write the claim as a build from before its kind became a local observation did: a
@@ -22561,6 +22590,9 @@ pub fn append_claim_with_commit_context(
                 assistant_input.fields.insert("assistant_session_actor".into(), json!(authorization.actor));
                 &assistant_input
             } else { input };
+            if let Some(authority) = context.authority {
+                authority(transaction)?;
+            }
             let operation = identities::claim_operation(input)?;
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;

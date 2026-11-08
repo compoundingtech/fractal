@@ -135,6 +135,11 @@ pub async fn basis(
     State(state): State<AppState>,
     Query(query): Query<BasisQuery>,
 ) -> Result<Json<Value>, ApiError> {
+    if fractal_schema::threads::is_reserved_subject(&query.subject)
+        || query.kinds.split(',').any(fractal_schema::threads::is_reserved_kind)
+    {
+        return Err(ApiError::not_found("the thread is unavailable"));
+    }
     if fractal_schema::notice::is_reserved_subject(&query.subject)
         || query.kinds.split(',').any(fractal_schema::notice::is_reserved_kind)
     {
@@ -403,6 +408,70 @@ mod tests {
         assert!(!feed.to_string().contains("custom.attention"));
         assert!(!feed.to_string().contains("custom/attention"));
         assert!(!feed.to_string().contains("custom/example/alternate"));
+    }
+
+    #[tokio::test]
+    async fn thread_metadata_is_hidden_from_generic_reads_without_losing_raw_history() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let (thread, _) = crate::store::thread_metadata::apply(
+            &state.store,
+            "person/example",
+            "thread/private-example",
+            "create-private-example",
+            crate::store::thread_metadata::Edit::Create {
+                agent: "agent/example",
+                title: "private thread title",
+            },
+        ).unwrap();
+        let other = legacy_claim(&state, "custom/example/public", "custom.example.created");
+        let app = router(state.clone());
+
+        for path in [
+            "/v1/claims",
+            "/v1/claims?subject=thread/private-example",
+            "/v1/events?after=0&wait=false",
+            "/v1/events/page?after=0",
+            "/v1/client/history",
+            "/v1/status?history=true",
+        ] {
+            let (status, value) = client_json(app.clone(), path).await;
+            assert_eq!(status, StatusCode::OK, "{path}: {value}");
+            let rendered = value.to_string();
+            assert!(!rendered.contains(&thread.id), "{path}: {rendered}");
+            assert!(!rendered.contains("private-example"), "{path}: {rendered}");
+            assert!(!rendered.contains("private thread title"), "{path}: {rendered}");
+            if matches!(path, "/v1/claims" | "/v1/client/history" | "/v1/events/page?after=0") {
+                assert!(rendered.contains(&other.subject), "{path}: {rendered}");
+            }
+        }
+        for path in [
+            format!("/v1/claims/by-id/{}", urlencoding::encode(&thread.id)),
+            format!("/v1/client/history/{}", thread.store_index),
+            "/v1/status?subject=thread/private-example&history=true".to_owned(),
+            "/v1/status?subject=thread/private-example&harness_only=true".to_owned(),
+            "/v1/custom/basis?subject=thread/private-example&kinds=custom.example.created".to_owned(),
+        ] {
+            let (status, value) = client_json(app.clone(), &path).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {value}");
+            assert!(!value.to_string().contains("private thread title"), "{path}: {value}");
+        }
+        let feed = client_v0::events(
+            State(state.clone()),
+            Extension(client_v0::ClientSession::for_tests_scoped(
+                "client/example", "person/other", &["read.projections"],
+            )),
+            Query(client_v0::EventsQuery {
+                after: Some("event-cursor/node/0".into()),
+                limit: Some(500),
+                ..Default::default()
+            }),
+        ).await.unwrap().0;
+        assert!(feed.to_string().contains(&other.subject));
+        assert!(!feed.to_string().contains("private-example"));
+        assert!(!feed.to_string().contains("private thread title"));
+        let raw = state.store.claim_by_id(&thread.id).unwrap().unwrap();
+        assert_eq!(raw.body["fields"]["title"], "private thread title");
     }
 
     #[tokio::test]

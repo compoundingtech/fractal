@@ -11,6 +11,7 @@ pub mod github_plugin;
 pub mod glasses;
 pub mod lifecycle;
 pub mod notice;
+pub mod threads;
 pub mod ordered_membership;
 pub mod harness_questions;
 pub mod owned_terminals;
@@ -1085,6 +1086,7 @@ fn build_registry() -> Registry {
             false,
         ),
         ("message", "message/ID", "A Small Talk message.", true),
+        ("thread", "thread/ID", "A durable person and agent discussion.", false),
         (
             "observer",
             "observer/RUN/LOCAL_ID",
@@ -2493,6 +2495,33 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::AuthorizedParticipant,
             Cardinality::OncePerActor,
             Some("messages"),
+            true,
+            &[],
+        ),
+        (
+            "thread.created",
+            &["thread"],
+            WritePolicy::SystemOnly,
+            Cardinality::Once,
+            None,
+            true,
+            &["thread"],
+        ),
+        (
+            "thread.title-set",
+            &["thread"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
+            true,
+            &[],
+        ),
+        (
+            "thread.state-set",
+            &["thread"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            None,
             true,
             &[],
         ),
@@ -4175,6 +4204,20 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "message.read" => &[("status", required_enum(&["read"])), ("acting_for", reference_to(&["agent"]))],
         "message.closed" => &[("status", required_enum(&["closed"])), ("acting_for", reference_to(&["agent"]))],
+        "thread.created" => &[
+            ("person", required_reference_to(&["person"])),
+            ("agent", required_reference_to(&["agent"])),
+            ("title", required_string()),
+            ("origin_ask", reference_to(&["step-run"])),
+            ("origin_ask_episode", string()),
+            ("first_message", reference_to(&["message"])),
+        ],
+        "thread.title-set" => &[
+            ("title", required_string()),
+            ("previous_title", required_string()),
+            ("title_revision", required_string()),
+        ],
+        "thread.state-set" => &[("state", required_enum(&["open", "closed"]))],
         "planning-session.started" => &[
             ("mission", reference()),
             ("request", reference()),
