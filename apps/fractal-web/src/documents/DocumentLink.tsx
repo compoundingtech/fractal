@@ -3,9 +3,10 @@ import * as React from 'react'
 
 import { colorVars as c, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { DOCUMENT_REF } from './document-port.ts'
+import { DraggableMention } from '../workspace/DraggableMention.tsx'
 
 /** A `doc/…` name in Markdown that opens the document in a workspace tab. */
-export const DocumentLink = ({ name, onOpen }: { readonly name: string; readonly onOpen: (ref: string) => void }): React.ReactNode => (
+export const DocumentLink = ({ name, onOpen }: { readonly name: string; readonly onOpen: (ref: string) => void }): React.ReactNode => <DraggableMention subject={name}>
   <a
     href={name}
     onClick={(event) => {
@@ -17,7 +18,7 @@ export const DocumentLink = ({ name, onOpen }: { readonly name: string; readonly
   >
     {name}
   </a>
-)
+</DraggableMention>
 
 /** The inline-reference renderer a transcript or document uses for `doc/…` names. */
 export const documentReferences = (onOpen: (ref: string) => void) => (text: string): React.ReactNode | undefined =>

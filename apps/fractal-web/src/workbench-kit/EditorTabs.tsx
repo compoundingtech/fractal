@@ -90,6 +90,16 @@ export interface EditorTabsProps {
   readonly leading?: ReactNode
   /** After the strip's own controls: in `bar`, the controls that end the window's top bar. */
   readonly end?: ReactNode
+  /**
+   * A host's own drag and drop in place of the platform's: each tab takes `tabProps` (a pointer press that
+   * starts the host's drag) and is not natively draggable; the strip takes `stripProps` (what marks it a
+   * drop target) and shows the insert line before `dropIndex`.
+   */
+  readonly hostDrag?: {
+    readonly tabProps: (tab: EditorTabItem) => Readonly<Record<string, unknown>>
+    readonly stripProps: Readonly<Record<string, unknown>>
+    readonly dropIndex: number | null
+  } | undefined
 }
 
 const styles = stylex.create({
@@ -441,6 +451,7 @@ export const EditorTabs = ({
   touch = false,
   leading,
   end,
+  hostDrag,
 }: EditorTabsProps) => {
   const list = useRef<HTMLDivElement>(null)
   const [drop, setDrop] = useState<{ readonly index: number; readonly offset: number } | null>(null)
@@ -513,6 +524,22 @@ export const EditorTabs = ({
     },
   })
 
+  // The host's drag names a slot; the line sits where the native drop would draw it.
+  const hostIndex = hostDrag?.dropIndex ?? null
+  const [hostDrop, setHostDrop] = useState<{ readonly index: number; readonly offset: number } | null>(null)
+  useEffect(() => {
+    const container = list.current
+    if (hostIndex === null || container === null) { setHostDrop(null); return }
+    const box = container.getBoundingClientRect()
+    const nodes = [...container.querySelectorAll<HTMLElement>('[data-tab-id]')]
+    const scroll = vertical ? container.scrollTop : container.scrollLeft
+    const at = nodes[hostIndex]?.getBoundingClientRect()
+    const last = nodes.at(-1)?.getBoundingClientRect()
+    const edge = at !== undefined ? (vertical ? at.top : at.left) : last !== undefined ? (vertical ? last.bottom : last.right) : (vertical ? box.top : box.left)
+    setHostDrop({ index: hostIndex, offset: edge - (vertical ? box.top : box.left) + scroll - 1 })
+  }, [hostIndex, vertical])
+  const indicator = drop ?? hostDrop
+
   const reorder = ({ tab, to }: { readonly tab: EditorTabItem; readonly to: number }) => {
     if (tabs[to]?.id === tab.id) return
     onMove({ source: { groupId, tabId: tab.id }, toIndex: to })
@@ -528,6 +555,7 @@ export const EditorTabs = ({
     >
       <Bar
         {...(variant === 'bar' ? { 'data-testid': 'thread-header' } : {})}
+        {...hostDrag?.stripProps}
         {...stylex.props(
           styles.strip,
           variant === 'classic'
@@ -578,15 +606,16 @@ export const EditorTabs = ({
               onClose={onClose}
               onReorder={reorder}
               touch={touch}
+              hostDragProps={hostDrag?.tabProps(tab)}
             />
           ))}
         </TabList>
         </div>
-        {drop === null ? null : (
+        {indicator === null ? null : (
           <span
             aria-hidden="true"
             {...stylex.props(
-              vertical ? styles.dropIndicatorY(drop.offset) : styles.dropIndicatorX(drop.offset),
+              vertical ? styles.dropIndicatorY(indicator.offset) : styles.dropIndicatorX(indicator.offset),
             )}
           />
         )}
@@ -652,6 +681,8 @@ interface TabItemProps {
   readonly onClose: (id: string) => void
   readonly onReorder: (move: { readonly tab: EditorTabItem; readonly to: number }) => void
   readonly touch: boolean
+  /** The host's drag in place of the platform's. */
+  readonly hostDragProps?: Readonly<Record<string, unknown>> | undefined
 }
 
 const TabItem = ({
@@ -666,6 +697,7 @@ const TabItem = ({
   onClose,
   onReorder,
   touch,
+  hostDragProps,
 }: TabItemProps) => {
   const [hovered, setHovered] = useState(false)
   const anchor = useRef<HTMLDivElement | null>(null)
@@ -704,7 +736,7 @@ const TabItem = ({
       onHoverChange={setHovered}
       render={(props) => (
         <div
-          {...mergeProps(props, dragProps, {
+          {...mergeProps(props, hostDragProps ?? dragProps, {
             onKeyDownCapture: (event: KeyboardEvent) => {
               if (event.altKey && event.shiftKey && (event.key === back || event.key === forward)) {
                 onReorder({

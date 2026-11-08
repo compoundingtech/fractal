@@ -5,6 +5,7 @@ import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packa
 import { Menu, MenuItem, MenuPopover, MenuTrigger } from '../ui-compat/components.tsx'
 import { EditorTabs, type EditorTabItem } from '../workbench-kit/EditorTabs.tsx'
 import { IconButton } from '../workbench-kit/IconButton.tsx'
+import { useCurrentSpace, useDragState, useWorkspaceContext } from '@fractal/ui/workspace/react'
 import type { Command } from './model.ts'
 
 const PlusIcon = () => <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M6 2v8M2 6h8" /></svg>
@@ -16,8 +17,10 @@ const openable = [
 ] as const
 
 /** The tab strip at every width. The panel it hosts keeps one identity, so no activation remounts a surface. */
-export const WorkspaceStrip = ({ items, active, group, focused = true, narrow, dispatch, open, leading, trailing, bar = false, children }: {
+export const WorkspaceStrip = ({ items, refs, active, group, focused = true, narrow, dispatch, open, leading, trailing, bar = false, children }: {
   readonly items: readonly EditorTabItem[]
+  /** Each tab's ref, which a drag of it carries. */
+  readonly refs: ReadonlyMap<string, string>
   readonly active: string | null
   /** The pane this strip belongs to. */
   readonly group: string
@@ -50,6 +53,23 @@ export const WorkspaceStrip = ({ items, active, group, focused = true, narrow, d
     event.stopPropagation()
     dispatch({ _tag: 'Close', tab: id })
   }
+  // Tabs drag on the workspace's pointer drag: within and between strips, and onto a pane's centre or edges.
+  const { drag, describe } = useWorkspaceContext()
+  const space = useCurrentSpace().id
+  const dropIndex = useDragState(state => state.over?._tag === 'Strip' && state.over.pane === group ? state.over.slot : null)
+  const hostDrag = React.useMemo(() => ({
+    stripProps: { 'data-drop-strip': group },
+    dropIndex,
+    tabProps: (tab: EditorTabItem) => ({
+      'data-workspace-tab': '',
+      onPointerDown: (event: React.PointerEvent) => {
+        const ref = refs.get(tab.id)
+        // A phone shows one pane: a touch press scrolls the strip.
+        if (event.button !== 0 || event.pointerType === 'touch' || ref === undefined) return
+        drag.press(event, () => ({ entity: describe(ref), ref, tab: { space, id: tab.id } }))
+      },
+    }),
+  }), [group, dropIndex, refs, drag, describe, space])
   return <div onContextMenu={onContextMenu} onKeyDownCapture={onKeyDownCapture} {...stylex.props(styles.host)}>
     <EditorTabs
       label="Workspace tabs"
@@ -63,6 +83,7 @@ export const WorkspaceStrip = ({ items, active, group, focused = true, narrow, d
       dragType="application/x-fractal-workspace-tab"
       stablePanel
       touch={narrow}
+      hostDrag={hostDrag}
       onActivate={id => dispatch({ _tag: 'Activate', tab: id })}
       onClose={id => dispatch({ _tag: 'Close', tab: id })}
       onMove={({ source, toIndex }) => dispatch({ _tag: 'Move', tab: source.tabId, to: { _tag: 'Strip', pane: group, index: toIndex } })}

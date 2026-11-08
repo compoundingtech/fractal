@@ -85,6 +85,9 @@ Each `SpaceSync` is an external store that keeps spaces as whole bodies. The sto
   - The chip that follows the pointer is live React, and the overlays are ordinary state.
   - Escape cancels.
   - Touch presses scroll unless `touch` is set.
+  - `useDropTarget({ id, resolve, drop })` adds a host's own target, such as a sidebar's folders. It is asked about each element under the pointer before the strips and panes, and can claim the point, refuse it, or pass.
+  - A drag with `opens: false` (a folder) never lands in a strip or pane; its `data` is the host's.
+  - Outside a `WorkspaceProvider`, `useEntityDrag` does nothing, so a row can render anywhere.
 - **The aside.**
   - `PaneAside` shows by default when the pane is at least `threshold` wide.
   - A person's toggle (`usePaneAside().toggle`) holds until the pane crosses into the other width band by more than `hysteresis` (24 px by default).
