@@ -51,8 +51,24 @@ deployment-owned resources; scripts do not provision deployments or credentials.
 | `FRACTAL_INTEGRATOR_GIT_USER_NAME` | Optional launcher-owned local commit name; defaults to `Fractal live-r3 integrator` |
 | `FRACTAL_INTEGRATOR_GIT_USER_EMAIL` | Optional launcher-owned local commit email; defaults to `live-r3@fractal-integrator.invalid` |
 | `FRACTAL_INTEGRATOR_SANDBOX` | Required: `bwrap`; no default or unsandboxed fallback |
-| `FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT` | Absolute, deployment-owned bootstrap scratch directory outside candidate clones and snapshots |
+| `FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT` | Absolute, deployment-owned bootstrap scratch directory outside candidate clones and snapshots; `nix-bootstrap-cache/` retains trusted Nix fetcher metadata across isolated bootstrap HOMEs and must be disjoint from candidate worktrees and the pnpm store |
 | `FRACTAL_INTEGRATOR_PNPM_STORE` | Absolute, dedicated writable pnpm package cache outside candidate clones; must contain no credentials |
+
+The launcher fails closed with `RuntimeError` if the resolved bootstrap cache
+and pnpm store paths overlap, or if the resolved cache and candidate worktree
+paths overlap: neither may contain the other, and equal paths are refused.
+These checks prevent candidate-writable mounts from exposing the trusted cache.
+Candidate worktree overlap is checked before any sandbox tool bootstrap or
+trusted package realization, including on cold invocations and when the cache
+path is a symlink into the worktree. CLI execution and `--check-config --worktree`
+pass the worktree to `validate_configuration`; the integrator passes its configured
+candidate clone (including the dry-run clone), and `build-and-swap.sh` passes
+`SOURCE` before creating worktrees. Direct `run` and `run_package` calls check
+their worktree before tool or package realization. A standalone `--check-config`
+without `--worktree` validates only deployment configuration: no candidate path
+is known. `tools` and `realize_megarepo` are trusted bootstrap primitives; callers
+with a candidate path must validate it first. The capacity precheck uses no
+persistent cache or candidate filesystem access.
 
 The configured package store is mounted only in candidate children at
 `/sandbox/pnpm-store`; trusted install invocations pass that path with pnpm's
