@@ -43,6 +43,7 @@ import type { RawTerminalPort } from '../terminal/rawTerminalState.ts'
 import type { TerminalInputPortFactory } from '../terminal/orderedTerminalInput.ts'
 import type { TerminalResizePort } from '../terminal/terminal-resize-port.ts'
 import type { AgentControlPort } from '../agents/agent-control-port.ts'
+import type { MissionActionPort } from '../missions/missionActions.ts'
 import type { PromptAnswerPort } from '../conversation/alerts/prompt-answer-port.ts'
 import type { AlertActionPort } from '../conversation/alerts/alert-action-port.ts'
 import type { DocumentPort } from '../documents/document-port.ts'
@@ -391,6 +392,8 @@ export interface DataSource {
   readonly retryTerminal?: (terminalRef: string) => void
   /** Restart, suspend, retire, start, resume or interrupt a seat (`agent.*`, Esc to its terminal). */
   readonly agentControls?: AgentControlPort
+  /** Runs the actions Fractal offers on a mission (retry a step, start or restart its seat, cancel a run). */
+  readonly missionActions?: MissionActionPort
   /** Fractal documents by name or exact reference (`GET /v1/client/documents/content`). */
   readonly documents?: DocumentPort
   /** Explicit geometry action; never tied to the browser pane dimensions. The raw ATTACH path resizes on the socket instead. */

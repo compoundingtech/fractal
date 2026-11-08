@@ -14,6 +14,8 @@ import { formatDuration } from '../../../../packages/fractal-ui/src/time/human-t
 import { leafText } from '../data/projections.ts'
 import { useDataSource, useGrants, useNow } from '../data/react.tsx'
 import type { Feed } from '../data/source.ts'
+import { MissionActionControl, useMissionActions, type MissionActions } from './MissionActionControl.tsx'
+import { missionActionOffers, type MissionActionOffer, type MissionActionPort } from './missionActions.ts'
 import { MissionFeedNotice } from './MissionFeedNotice.tsx'
 import { missionActivity, missionPlan, stepDuration, type ActivityEntry, type MissionPlan, type PlanStep } from './missionPlan.ts'
 import { missionEta, missionReaderTitle, presentMission, type StepWord } from './presentation.ts'
@@ -44,22 +46,25 @@ export const MissionDetailView = ({ missionRef, visible, onOpen }: MissionDetail
   const now = useNow()
   const agents = agentsFeed._tag === 'Observed' ? agentsFeed.value : []
   const attention = attentionFeed._tag === 'Observed' ? attentionFeed.value.filter(item => item.state === 'open') : []
-  return <MissionDetail missionRef={missionRef} visible={visible} onOpen={onOpen} missions={missions} agents={agents} attention={attention} readOnly={grants.actions !== 'granted'} now={now} />
+  return <MissionDetail missionRef={missionRef} visible={visible} onOpen={onOpen} missions={missions} agents={agents} attention={attention} readOnly={grants.actions !== 'granted'} now={now} {...(source.missionActions === undefined ? {} : { actionPort: source.missionActions })} />
 }
 
 /** Data in, for stories and tests. */
-export const MissionDetail = ({ missionRef, visible, onOpen, missions, agents, attention, readOnly, now }: MissionDetailViewProps & {
+export const MissionDetail = ({ missionRef, visible, onOpen, missions, agents, attention, readOnly, now, actionPort }: MissionDetailViewProps & {
   readonly missions: Feed<readonly Fractal.Mission[]>
   readonly agents: readonly DecodedAgent[]
   readonly attention: readonly Fractal.Attention[]
   readonly readOnly: boolean
   readonly now: number
+  /** Runs Fractal's offered actions; absent, they show why they cannot run here. */
+  readonly actionPort?: MissionActionPort
 }): React.ReactNode => {
   const mission = missions._tag === 'Observed' ? missions.value.find(item => item.id === missionRef) : undefined
   const presentation = React.useMemo(() => mission === undefined ? undefined : presentMission({ mission, agents, attention }), [mission, agents, attention])
   const plan = React.useMemo(() => mission === undefined || presentation === undefined ? undefined : missionPlan(mission, presentation), [mission, presentation])
   const [expanded, setExpanded] = React.useState<ReadonlySet<string>>(new Set())
   const stepper = React.useRef<HTMLOListElement>(null)
+  const actions = useMissionActions({ port: actionPort, mission: mission ?? { id: missionRef, run_generations: {} }, readOnly, onOpen: ref => onOpen(ref) })
   if (missions._tag !== 'Observed') return <div {...stylex.props(styles.notice)}><MissionFeedNotice missions={missions} total={0} shown={0} /></div>
   if (mission === undefined || presentation === undefined || plan === undefined) return <div role="status" data-mission-missing {...stylex.props(styles.notice, styles.missing)}>This mission is not in the current missions feed. It may have been retired, or lie beyond what this view can load.</div>
   const row = { mission, presentation }
@@ -75,8 +80,7 @@ export const MissionDetail = ({ missionRef, visible, onOpen, missions, agents, a
     requestAnimationFrame(() => stepper.current?.querySelector<HTMLElement>(`[data-step-id="${CSS.escape(stepId)}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }))
   }
   const toggle = (stepId: string) => setExpanded(current => { const next = new Set(current); if (!next.delete(stepId)) next.add(stepId); return next })
-  const served = (mission as Fractal.Mission & { readonly presentation?: { readonly actions?: ReadonlyArray<{ readonly id: string; readonly action: string; readonly target: string; readonly confirm: boolean }> } }).presentation
-  const actions = served?.actions ?? []
+  const offers = missionActionOffers(mission)
   return <article aria-label={data.title} data-mission-detail={mission.id} data-stale={stale || undefined} {...stylex.props(styles.root)}>
     <header {...stylex.props(styles.header)}>
       <h1 {...stylex.props(styles.title)}>{data.title}</h1>
@@ -87,7 +91,7 @@ export const MissionDetail = ({ missionRef, visible, onOpen, missions, agents, a
         {agentInfo.length > 0 ? <span {...stylex.props(styles.metaItem)}><AgentStack agents={agentInfo} /><span>{agentInfo.slice(0, 2).map(agent => agent.label).join(', ')}{agentInfo.length > 2 ? ` +${agentInfo.length - 2}` : ''}</span></span> : null}
         <span {...stylex.props(styles.metaItem, styles.soft)}>{stale ? 'last observed ' : 'updated '}{compactAge(data.updatedAt, now)} ago</span>
       </div>
-      <Banner mission={mission} presentation={presentation} plan={plan} attention={mine} onOpen={onOpen} onJump={jumpTo} />
+      <Banner mission={mission} presentation={presentation} plan={plan} attention={mine} onOpen={onOpen} onJump={jumpTo} offers={offers} actions={actions} />
     </header>
     <div {...stylex.props(styles.body)}>
       <section aria-labelledby="mission-plan" {...stylex.props(styles.section)}>
@@ -97,7 +101,7 @@ export const MissionDetail = ({ missionRef, visible, onOpen, missions, agents, a
           <ol ref={stepper} aria-label="Steps" {...stylex.props(styles.stepper)}>
             {plan.levels.map((level, depth) => <li key={depth} data-plan-level={depth} {...stylex.props(styles.level)} style={{ paddingInlineStart: `calc(${Math.min(depth, 6)} * 16px)` }}>
               <ol aria-label={level.length > 1 ? `${level.length} steps in parallel` : undefined} {...stylex.props(styles.levelSteps, level.length > 1 && styles.parallel)}>
-                {level.map(step => <StepRow key={step.id} step={step} now={now} expanded={expanded.has(step.id)} onToggle={() => toggle(step.id)} onOpen={onOpen} visible={visible && !stale} compact={level.length > 1} />)}
+                {level.map(step => <StepRow key={step.id} step={step} now={now} expanded={expanded.has(step.id)} onToggle={() => toggle(step.id)} onOpen={onOpen} visible={visible && !stale} compact={level.length > 1} offers={offers.filter(offer => offer.target === step.id)} actions={actions} />)}
               </ol>
             </li>)}
           </ol>
@@ -122,16 +126,10 @@ export const MissionDetail = ({ missionRef, visible, onOpen, missions, agents, a
       <section aria-labelledby="mission-actions" {...stylex.props(styles.section)}>
         <h2 id="mission-actions" {...stylex.props(styles.h2)}>Actions</h2>
         <div {...stylex.props(styles.actions)}>
-          {actions.map(action => {
-            const reason = readOnly ? 'This device is read-only' : 'Not available from the web client yet'
-            return <span key={`${action.id}:${action.target}`} title={reason} {...stylex.props(styles.actionWrap)}>
-              <Aria.Button isDisabled data-mission-action={action.id} aria-describedby={`why-${action.id}`} {...stylex.props(styles.action)}>{action.action}</Aria.Button>
-              <span id={`why-${action.id}`} {...stylex.props(styles.why)}>{reason}</span>
-            </span>
-          })}
+          {offers.map(offer => <MissionActionControl key={`${offer.id}:${offer.action}:${offer.target}`} offer={offer} actions={actions} />)}
           <Aria.Button data-open-ref={`declaration/${mission.id}`} onPress={event => onOpen(`declaration/${mission.id}`, event.metaKey || event.ctrlKey ? { background: true } : undefined)} {...stylex.props(styles.action)}>View mission KDL</Aria.Button>
         </div>
-        {actions.length === 0 ? <p {...stylex.props(styles.soft)}>Fractal offers no actions on this mission right now.</p> : null}
+        {offers.length === 0 ? <p {...stylex.props(styles.soft)}>Fractal offers no actions on this mission right now.</p> : null}
       </section>
     </div>
   </article>
@@ -143,13 +141,15 @@ const AgentStack = ({ agents }: { readonly agents: readonly AgentInfo[] }) =>
   <span aria-hidden="true" {...stylex.props(styles.stack)}>{agents.slice(0, 3).map(agent => <span key={agent.id} {...stylex.props(styles.avatar, styles.stacked)}>{initials(agent.label)}</span>)}</span>
 
 /** Amber when the person must act or the mission is stuck, red only for failure; nothing when it is moving. */
-const Banner = ({ mission, presentation, plan, attention, onOpen, onJump }: {
+const Banner = ({ mission, presentation, plan, attention, onOpen, onJump, offers, actions }: {
   readonly mission: Fractal.Mission
   readonly presentation: ReturnType<typeof presentMission>
   readonly plan: MissionPlan
   readonly attention: readonly Fractal.Attention[]
   readonly onOpen: MissionDetailViewProps['onOpen']
   readonly onJump: (step: string) => void
+  readonly offers: readonly MissionActionOffer[]
+  readonly actions: MissionActions
 }) => {
   const gate = attention.find(item => item.attention_kind === 'human-gate' || item.attention_kind === 'person-step') ?? attention[0]
   const youStep = plan.steps.find(step => step.word === 'needs_you')
@@ -167,6 +167,8 @@ const Banner = ({ mission, presentation, plan, attention, onOpen, onJump }: {
   }
   if (stuck === undefined && !failed && presentation.word !== 'stalled' && presentation.word !== 'unstaffed') return null
   const agent = presentation.stuck?.agent
+  // The one thing most likely to unstick it: retry the failed step, else bring its seat back.
+  const lead = offers.find(offer => offer.id === 'retry-step') ?? offers.find(offer => offer.id === 'restart-agent')
   const why = failed
     ? `${stuck?.title ?? 'A step'} failed${(stuck?.attempts ?? 0) > 1 ? ` after ${stuck!.attempts} attempts` : ''}.`
     : stuck === undefined ? 'Nothing is moving.'
@@ -175,6 +177,7 @@ const Banner = ({ mission, presentation, plan, attention, onOpen, onJump }: {
     <strong {...stylex.props(styles.bannerLead, failed && styles.bannerLeadFailed)}>{failed ? 'Failed' : 'Stuck'}</strong>
     <span {...stylex.props(styles.bannerText)}>{why}</span>
     <span {...stylex.props(styles.bannerActions)}>
+      {lead !== undefined ? <MissionActionControl offer={lead} actions={actions} primary /> : null}
       {stuck !== undefined ? <Aria.Button onPress={() => onJump(stuck.id)} {...stylex.props(styles.action)}>Jump to step</Aria.Button> : null}
       {agent !== null && agent !== undefined ? <Aria.Button onPress={() => onOpen(agent.id)} {...stylex.props(styles.action)}>Open {agent.label}</Aria.Button> : null}
     </span>
@@ -190,7 +193,7 @@ const StepMark = ({ word, spinning }: { readonly word: StepWord; readonly spinni
       : <span {...stylex.props(styles.stepMark)}><MissionStateMark tone={STEP_TONE[word]} label={STEP_LABEL[word]} /></span>
 
 /** `compact`: one of several parallel steps in a column; owner and duration move under the title. */
-const StepRow = ({ step, now, expanded, onToggle, onOpen, visible, compact = false }: { readonly step: PlanStep; readonly now: number; readonly expanded: boolean; readonly onToggle: () => void; readonly onOpen: MissionDetailViewProps['onOpen']; readonly visible: boolean; readonly compact?: boolean }) => {
+const StepRow = ({ step, now, expanded, onToggle, onOpen, visible, compact = false, offers = [], actions }: { readonly step: PlanStep; readonly now: number; readonly expanded: boolean; readonly onToggle: () => void; readonly onOpen: MissionDetailViewProps['onOpen']; readonly visible: boolean; readonly compact?: boolean; readonly offers?: readonly MissionActionOffer[]; readonly actions?: MissionActions }) => {
   const duration = stepDuration(step, now)
   // Progress and goal are Markdown as written; the blocked reason and note are plain text, escaped to render as written.
   const lines = [step.goal !== undefined && markdownSource(step.goal) !== step.title ? step.goal : undefined, step.progress,
@@ -209,6 +212,7 @@ const StepRow = ({ step, now, expanded, onToggle, onOpen, visible, compact = fal
       <span {...stylex.props(styles.duration)}>{duration === undefined ? '' : `${formatDuration(duration, { maxUnits: 1 })}${step.word === 'working' ? '…' : ''}`}</span>
     </div>
     {step.attempts > 1 ? <div {...stylex.props(styles.stepSub)}>attempt {step.attempts}</div> : null}
+    {offers.length > 0 && actions !== undefined ? <div {...stylex.props(styles.stepActions)}>{offers.map(offer => <MissionActionControl key={offer.action} offer={offer} actions={actions} />)}</div> : null}
     {expanded && detail.length > 0 ? <div {...stylex.props(styles.output)}>{detail.map((line, index) => <p key={index} {...stylex.props(styles.outputLine)}><InlineMarkdown text={line} /></p>)}</div> : null}
   </li>
 }
@@ -323,6 +327,7 @@ const styles = stylex.create({
   ownerCompact: { flex: '1 1 0', maxWidth: 'none', marginInlineStart: g.statusSm, textAlign: 'start' },
   ownerButton: { margin: 0, padding: 0, paddingInline: s.xs, borderWidth: 0, borderRadius: r.sm, backgroundColor: 'transparent', fontFamily: 'inherit', cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: ink.fg } },
   duration: { flexShrink: 0, minWidth: '3rem', textAlign: 'end', color: ink.fgMuted, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums' },
+  stepActions: { display: 'flex', flexWrap: 'wrap', gap: s.sm, paddingInlineStart: `calc(${g.statusSm} + ${s.sm})`, paddingBlockEnd: s.xs },
   stepSub: { paddingInlineStart: `calc(${g.statusSm} + ${s.sm})`, color: ink.fgMuted, fontSize: t.denseSize },
   output: { marginInlineStart: `calc(${g.statusSm} + ${s.sm})`, marginBlockEnd: s.sm, paddingInline: s.sm, paddingBlock: s.xs, borderRadius: r.sm, backgroundColor: surface.rowHover, color: ink.fgSoft, fontSize: t.metaSize },
   outputLine: { margin: 0, overflowWrap: 'anywhere' },
@@ -342,8 +347,6 @@ const styles = stylex.create({
   eventTime: { flexShrink: 0, fontVariantNumeric: 'tabular-nums' },
   more: { alignSelf: 'flex-start', padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgSoft, fontFamily: 'inherit', fontSize: t.denseSize, cursor: 'pointer', ':hover': { color: ink.fg } },
   actions: { display: 'flex', flexWrap: 'wrap', gap: s.sm },
-  actionWrap: { display: 'inline-flex', flexDirection: 'column', gap: '2px' },
   action: { height: g.controlSm, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: 'transparent', color: ink.fg, fontFamily: 'inherit', fontSize: t.denseSize, cursor: { default: 'pointer', ':is([data-disabled])': 'not-allowed' }, opacity: { default: 1, ':is([data-disabled])': 0.5 }, ':hover': { backgroundColor: surface.rowHover }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted } },
   primary: { borderColor: tone.attention, backgroundColor: tone.attention, color: '#1a1205', ':hover': { backgroundColor: tone.attention } },
-  why: { color: ink.fgMuted, fontSize: '11px' },
 })
