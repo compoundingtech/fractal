@@ -72,9 +72,9 @@ async fn service_r29_claim_parity_paging_bounds_redaction_and_credential_secrecy
     for gateway in [false, true] {
         let app = if gateway { crate::api::fabric_router(state.clone()) } else { crate::api::router(state.clone()) };
         let mut ids = Vec::new();
-        let mut after = 0;
+        let mut after = grant.store_index;
         loop {
-            let (status, page) = call(&app, "GET", &format!("/v1/client/claims?subject=custom/service/paging&limit=2&after={after}"), Value::Null, false).await;
+            let (status, page) = call(&app, "GET", &format!("/v1/client/claims?limit=2&after={after}&before={}",expected.last().unwrap()+1), Value::Null, false).await;
             assert_eq!(status, StatusCode::OK, "{page}");
             let serialized = page.to_string();
             assert!(!serialized.contains("environment-secret"));
@@ -340,5 +340,86 @@ async fn service_receipt_bodies_use_only_the_closed_field_schema() {
         assert!(!value.to_string().contains("receipt-secret-sentinel"));
         assert!(!value.to_string().contains("other-verifier"));
         assert!(!value.to_string().contains("private-free-text"));
+    }
+}
+
+async fn page_wire(app: &Router, path: &str) -> (StatusCode, String) {
+    let response = app.clone().oneshot(Request::builder().uri(path)
+        .header("authorization",format!("Bearer {TOKEN}"))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(),usize::MAX).await.unwrap();
+    let mut wire = String::from_utf8(bytes.to_vec()).unwrap();
+    let envelope: Value = serde_json::from_str(&wire).unwrap();
+    if let Some(correlation) = envelope["request_id"].as_str() {
+        wire = wire.replace(correlation,"request/test");
+    }
+    (status,wire)
+}
+
+#[tokio::test]
+async fn service_selectors_match_only_disclosed_claim_kinds() {
+    let root = tempfile::tempdir().unwrap();
+    let (state, _) = fixture(root.path(),SERVICE_SCOPES);
+    let mut withheld_indexes = Vec::new();
+    let hidden_subject = "gate-operation/service/selected";
+    let mixed_subject = "gate-operation/service/mixed";
+    let hidden_owner = "mission-run/service-selected";
+    let mixed_owner = "mission-run/service-mixed";
+    for (subject,owner) in [(hidden_subject,hidden_owner),(mixed_subject,mixed_owner)] {
+        for n in 0..7 {
+            let claim = state.store.append_claim(&ClaimInput {
+                subject:subject.into(),kind:"custom.service-test.v1.item".into(),
+                actor:None,fields:serde_json::from_value(json!({"number":n})).unwrap(),
+                evidence:vec![],expected_subject:None,idempotency_key:None,
+            }).unwrap();
+            withheld_indexes.push(claim.store_index);
+            if n == 0 {
+                state.store.connection.lock().unwrap().execute(
+                    "INSERT INTO desired(subject,kind,revision,claim_id,body,owner_run) VALUES (?1,'gate-operation',?2,?2,'{}',?3)",
+                    rusqlite::params![subject,claim.id,owner],
+                ).unwrap();
+            }
+        }
+    }
+    assert_eq!(state.store.claims_page(None,Some(hidden_owner),0,None,false,500).unwrap().claims.len(),7);
+    let receipt = state.store.append_claim(&ClaimInput {
+        subject:mixed_subject.into(),kind:"gate.result".into(),actor:None,
+        fields:serde_json::from_value(json!({"verdict":"pass"})).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    for gateway in [false,true] {
+        let app = if gateway { crate::api::fabric_router(state.clone()) } else { crate::api::router(state.clone()) };
+        call(&app,"GET","/v1/client/claims?limit=1",Value::Null,false).await;
+        for prefix in if gateway { vec!["/v1/client/claims"] } else { vec!["/v1/client/claims","/v1/claims"] } {
+            for suffix in ["&limit=1","&limit=500&order=desc","&limit=2&after=1&before=9223372036854775807"] {
+                for (selected,absent) in [
+                    (format!("subject={hidden_subject}"),"subject=gate-operation/service/unused".to_owned()),
+                    (format!("owner_run={hidden_owner}"),"owner_run=mission-run/service-unused".to_owned()),
+                    (format!("subject={hidden_subject}&owner_run={hidden_owner}"),"subject=gate-operation/service/unused&owner_run=mission-run/service-unused".to_owned()),
+                ] {
+                    let actual = page_wire(&app,&format!("{prefix}?{selected}{suffix}")).await;
+                    let missing = page_wire(&app,&format!("{prefix}?{absent}{suffix}")).await;
+                    assert_eq!(actual,missing,"filtered empty pages are byte-identical except fresh correlation ids");
+                    assert_eq!(actual.0,StatusCode::OK);
+                    let envelope: Value = serde_json::from_str(&actual.1).unwrap();
+                    let page = envelope.get("value").unwrap_or(&envelope);
+                    assert_eq!(page,&json!({"claims":[],"next_cursor":null}));
+                }
+                for selector in [format!("subject={mixed_subject}"),format!("owner_run={mixed_owner}"),
+                    format!("subject={mixed_subject}&owner_run={mixed_owner}")] {
+                    let (status,page) = call(&app,"GET",&format!("{prefix}?{selector}{suffix}"),Value::Null,false).await;
+                    assert_eq!(status,StatusCode::OK);
+                    assert!(page["next_cursor"].is_null());
+                    let claims = page["claims"].as_array().unwrap();
+                    assert_eq!(claims.len(),1);
+                    assert_eq!(claims[0]["id"],receipt.id);
+                    for claim in claims {
+                        assert!(claim.get("withheld").is_none());
+                        assert!(!withheld_indexes.contains(&claim["store_index"].as_u64().unwrap()));
+                    }
+                }
+            }
+        }
     }
 }

@@ -13,6 +13,7 @@ pub(super) fn generic_claim_visible(claim: &ClaimRecord) -> bool {
 }
 
 /// Fill a serving page with visible claims, leaving raw replication/projector reads intact.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn generic_claims_page(
     store: &Store,
     subject: Option<&str>,
@@ -21,10 +22,11 @@ pub(super) fn generic_claims_page(
     mut before: Option<u64>,
     descending: bool,
     limit: usize,
+    kinds: Option<&[&str]>,
 ) -> anyhow::Result<ClaimsPage> {
     let mut claims = Vec::with_capacity(limit.saturating_add(1));
     loop {
-        let page = store.claims_page(subject, owner_run, after, before, descending, limit.saturating_add(1))?;
+        let page = store.claims_page_with_kinds(subject, owner_run, after, before, descending, limit.saturating_add(1), kinds)?;
         let next = page.next_cursor;
         for claim in page.claims.into_iter().filter(generic_claim_visible) {
             claims.push(claim);
@@ -352,6 +354,12 @@ pub struct ClaimsQuery {
     limit: usize,
 }
 
+impl ClaimsQuery {
+    fn has_selector(&self) -> bool {
+        self.subject.is_some() || self.owner_run.is_some()
+    }
+}
+
 #[derive(Clone, Copy, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum ClaimsOrder {
@@ -378,6 +386,7 @@ pub async fn list_claims(
     let service = session.as_ref().is_some_and(|session| client_v0::external_grants::is_service(&session.0));
     let store = state.store.clone();
     let page = blocking_store(move || {
+        let kinds = (service && query.has_selector()).then_some(SERVICE_CLAIM_KINDS);
         let subject = query.subject.as_deref().map(|subject| {
             crate::store::identities::resolve_reference_conn(&store.readers.get(), subject)
         }).transpose()?;
@@ -389,6 +398,7 @@ pub async fn list_claims(
             query.before_index,
             matches!(query.order, ClaimsOrder::Desc),
             query.limit,
+            kinds,
         )
     })
     .await?;
@@ -427,17 +437,23 @@ fn service_claim(claim: &ClaimRecord) -> Value {
     value
 }
 
+const SERVICE_CLAIM_KINDS: &[&str] = &[
+    "gate.result", "work.claimed", "work.renewed", "work.progress", "work.submitted",
+    "work.failed", "work.released", "work.extended",
+];
+
 fn service_claim_fields(kind: &str) -> Option<&'static [&'static str]> {
-    Some(match kind {
-        "gate.result" => &["verdict", "operation", "request", "baseline", "token_usage", "stage"],
-        "work.claimed" | "work.renewed" | "work.progress" | "work.submitted" | "work.failed"
-            | "work.released" | "work.extended" => &[
-                "attempt", "status", "worker_reported", "claimant", "claim_incarnation",
-                "claim_expires_at_unix_ms", "readiness_epoch", "extend_ms", "clock",
-                "wait_until_unix_ms", "submitted_incarnation",
-            ],
-        _ => return None,
-    })
+    if kind == "gate.result" {
+        Some(&["verdict", "operation", "request", "baseline", "token_usage", "stage"])
+    } else if SERVICE_CLAIM_KINDS.contains(&kind) {
+        Some(&[
+            "attempt", "status", "worker_reported", "claimant", "claim_incarnation",
+            "claim_expires_at_unix_ms", "readiness_epoch", "extend_ms", "clock",
+            "wait_until_unix_ms", "submitted_incarnation",
+        ])
+    } else {
+        None
+    }
 }
 
 #[derive(Default, Deserialize)]

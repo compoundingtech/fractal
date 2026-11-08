@@ -153,6 +153,11 @@ Nonallowlisted by-id requests return the same not-found response as nonexistent
 ids. Service by-id admission first reads only the kind through the id index;
 hidden and absent rows return before loading or parsing a body, avoiding a
 body-size/JSON-parse existence oracle. Withheld rows retain page positions without gaps.
+Service claim selectors (`subject` and `owner_run`, the complete selector set)
+never match withheld rows: filtered store queries restrict kinds to the disclosure
+allowlist in SQL before paging. Filtered pages contain only allowlisted claims,
+never withheld markers or indexes; empty filtered pages retain the ordinary empty
+page/cursor shape. Unfiltered paging still includes withheld positions.
 The new client claim/work aliases admit only services; device, assistant and
 browser clients gain no new routes. Existing native routes retain non-service
 semantics. No declaration, assistant, action, upgrade, HEAD or unknown route is admitted.
