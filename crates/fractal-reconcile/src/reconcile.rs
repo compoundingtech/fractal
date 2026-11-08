@@ -50162,6 +50162,7 @@ mission "fresh" state="ready" {
     struct SeatQueueFixture {
         store: Arc<Store>,
         reconciler: Reconciler<FakeRuntime>,
+        agent: &'static str,
     }
 
     impl SeatQueueFixture {
@@ -50170,12 +50171,23 @@ mission "fresh" state="ready" {
         }
 
         fn with_store(store: Arc<Store>) -> Self {
-            apply_source(&store, SEAT_QUEUE_SOURCE, "seat-queue-missions");
+            Self::with_store_for_agent(store, SEAT)
+        }
+
+        fn with_store_for_agent(store: Arc<Store>, agent: &'static str) -> Self {
+            let source = if agent == SEAT {
+                SEAT_QUEUE_SOURCE.to_owned()
+            } else {
+                SEAT_QUEUE_SOURCE
+                    .replace("agent \"worker\"", &format!("agent \"{}\"", agent.strip_prefix("agent/").unwrap()))
+                    .replace(SEAT, agent)
+            };
+            apply_source(&store, &source, "seat-queue-missions");
             let desired = store
                 .desired_subjects()
                 .unwrap()
                 .into_iter()
-                .find(|subject| subject.subject == SEAT)
+                .find(|subject| subject.subject == agent)
                 .unwrap();
             let runtime = Arc::new(FakeRuntime::default());
             runtime.ptys.lock().unwrap().push(RuntimeObservation {
@@ -50194,9 +50206,9 @@ mission "fresh" state="ready" {
             reconciler.reconcile_once().unwrap();
             store
                 .append_claim(&ClaimInput {
-                    subject: SEAT.into(),
+                    subject: agent.into(),
                     kind: "harness.observed".into(),
-                    actor: Some(SEAT.into()),
+                    actor: Some(agent.into()),
                     fields: BTreeMap::from([
                         ("state".into(), Value::String("ready".into())),
                         ("driver".into(), Value::String("codex".into())),
@@ -50207,7 +50219,7 @@ mission "fresh" state="ready" {
                     idempotency_key: Some("seat-one-ready".into()),
                 })
                 .unwrap();
-            Self { store, reconciler }
+            Self { store, reconciler, agent }
         }
 
         /// Start a run a little later than the last so join times differ.
@@ -50239,7 +50251,7 @@ mission "fresh" state="ready" {
         }
 
         fn queue(&self) -> crate::model::SeatQueueView {
-            self.store.seat_queue(SEAT).unwrap()
+            self.store.seat_queue(self.agent).unwrap()
         }
 
         fn order(&self) -> Vec<String> {
@@ -50259,7 +50271,7 @@ mission "fresh" state="ready" {
                 .store
                 .agent_work_queues()
                 .unwrap()
-                .remove(SEAT)
+                .remove(self.agent)
                 .and_then(|queue| queue.next_work_id);
             assert_eq!(queue.next_work_id, roster, "the roster disagrees");
             queue.next_work_id
@@ -50267,15 +50279,15 @@ mission "fresh" state="ready" {
 
         /// The step the reconciler wakes now, or none while the seat is held.
         fn wake(&self) -> Option<String> {
-            let work = self.store.work_for_reconcile(SEAT).unwrap();
-            let order = self.store.seat_run_order_for_mutation(SEAT).unwrap();
-            next_work_wake_for_agent(SEAT, &work, &order).map(str::to_owned)
+            let work = self.store.work_for_reconcile(self.agent).unwrap();
+            let order = self.store.seat_run_order_for_mutation(self.agent).unwrap();
+            next_work_wake_for_agent(self.agent, &work, &order).map(str::to_owned)
         }
 
         /// Steps named by open wake messages, oldest first.
         fn woken(&self) -> Vec<String> {
             self.store
-                .messages(Some(SEAT), false)
+                .messages(Some(self.agent), false)
                 .unwrap()
                 .into_iter()
                 .filter_map(|message| {
@@ -50294,7 +50306,7 @@ mission "fresh" state="ready" {
         ) -> Result<crate::model::ClaimRecord, crate::model::FractalError> {
             self.store
                 .move_seat_queue_run(&crate::model::SeatQueueMoveRequest {
-                    agent: SEAT.into(),
+                    agent: self.agent.into(),
                     run: run.into(),
                     placement: placement.into(),
                     anchor: anchor.map(str::to_owned),
@@ -50311,7 +50323,7 @@ mission "fresh" state="ready" {
                     action,
                     &crate::model::WorkRequest {
                         wait_ms: None,
-                        actor: Some(SEAT.into()),
+                        actor: Some(self.agent.into()),
                         incarnation: Some("seat-one".into()),
                         summary: None,
                         reason: None,
@@ -50325,9 +50337,12 @@ mission "fresh" state="ready" {
 
     #[test]
     fn wake_order_ignores_alias_join_times_and_agrees_with_claim_admission() {
+        const SEAT: &str = "agent/node/worker";
         let root = tempfile::tempdir().unwrap();
         let database = root.path().join("literal-wake-order.sqlite");
-        let seat = SeatQueueFixture::with_store(Arc::new(Store::open(&database, "node").unwrap()));
+        let seat = SeatQueueFixture::with_store_for_agent(
+            Arc::new(Store::open(&database, "node").unwrap()), SEAT,
+        );
         let a = seat.start("mixed", "literal-wake-a");
         let b = seat.start("queued", "literal-wake-b");
         let a_work = SeatQueueFixture::step(&a, "work");
@@ -50337,7 +50352,7 @@ mission "fresh" state="ready" {
         crate::store::configure_projection_writer(&connection).unwrap();
         for (subject, assignee, joined) in [
             (a_work.as_str(), SEAT, 20),
-            (a_legacy.as_str(), "node.worker", 1),
+            (a_legacy.as_str(), "node/worker", 1),
             (b_work.as_str(), SEAT, 10),
         ] {
             connection.execute(
