@@ -13778,6 +13778,134 @@ async fn notice_managed_owner_reads_ignore_a_repair_rebuilt_cache_after_snapshot
     }
 }
 
+#[test]
+fn managed_owner_collision_keeps_the_first_visible_subject_and_exact_path_equivalence() {
+    for hide_first in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let first = "agent/collision/a";
+        let second = "agent/collision/a:b";
+        for (subject, incarnation) in [(first, "b:c"), (second, "c")] {
+            roster_fixture_append(&state.store, subject, "runtime.observed", json!({
+                "status":"running", "runtime_id":subject, "host":state.node,
+                "incarnation_id":incarnation,
+            }));
+        }
+        let id = managed_session_id(first, "b:c");
+        assert_eq!(id, managed_session_id(second, "c"));
+        if hide_first {
+            // A retained reserved fact hides the subject without changing its routing ID.
+            state.store.connection.write().execute(
+                "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+                 SELECT 'collision-notice',batch_id,subject,'attention.notice',origin,
+                        '{\"fields\":{}}','[]',accepted_at_unix_ms
+                 FROM claims WHERE subject=?1 LIMIT 1", [first],
+            ).unwrap();
+        }
+        state.store.read_snapshot(|cut| {
+            assert_eq!(state.store.generic_status_subject_visible_at(first, cut)?, !hide_first);
+            let generic = managed_session_owner_at(&state.store, cut, &id)?;
+            assert_eq!(generic.as_ref().unwrap().0, if hide_first { second } else { first });
+            for hint in [first, second, "agent/missing"] {
+                assert_eq!(
+                    managed_session_owner_for_timeline_at(&state.store, cut, &id, hint)?,
+                    generic,
+                    "hide_first={hide_first}, hint={hint}",
+                );
+            }
+            Ok(())
+        }).unwrap();
+    }
+}
+
+#[test]
+fn managed_owner_map_is_built_once_for_many_timeline_pages_in_one_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let subjects: Vec<_> = (0..4).map(|i| format!("agent/owner-memo/worker-{i}")).collect();
+    for subject in &subjects {
+        roster_fixture_append(&state.store, subject, "runtime.observed", json!({
+            "status":"running", "runtime_id":subject, "host":state.node,
+            "incarnation_id":"current",
+        }));
+    }
+    let session = client_v0::ClientSession::for_tests_scoped(
+        "person/alex", "person/alex", &["read.projections"],
+    );
+    MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(0));
+    state.store.read_snapshot(|_| {
+        let snapshot = new_client_snapshot(&state);
+        for subject in &subjects {
+            let id = managed_session_id(subject, "current");
+            assert_eq!(managed_session_owner_for_timeline_at(
+                &state.store, snapshot.store_index, &id, subject,
+            )?.unwrap().0, *subject);
+        }
+        assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 0);
+        // First pages perform authorization too: repeating them must not fold the fleet.
+        for _ in 0..5 {
+            for subject in &subjects {
+                let id = managed_session_id(subject, "current");
+                let Json(page) = client_v0::timeline_value(
+                    &state, &snapshot, &session, &id,
+                    &ClientListQuery { limit: Some(1), ..Default::default() },
+                ).unwrap();
+                assert!(page["items"].is_array(), "{page}");
+                assert_eq!(managed_session_owner_at(&state.store, snapshot.store_index, &id)?.unwrap().0, *subject);
+                assert_eq!(managed_session_owner_for_timeline_at(
+                    &state.store, snapshot.store_index, &id, subject,
+                )?, managed_session_owner_at(&state.store, snapshot.store_index, &id)?);
+            }
+        }
+        assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 1);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn managed_owner_memo_expires_before_a_same_cut_repair_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = &state.store;
+    let subject = "agent/owner-memo/repair";
+    for incarnation in ["before", "after"] {
+        roster_fixture_append(store, subject, "runtime.observed", json!({
+            "status":"running", "runtime_id":subject, "host":state.node,
+            "incarnation_id":incarnation,
+        }));
+    }
+    let through = store.index().unwrap();
+    let repaired = store.status_summary_at(subject, Some(through)).unwrap()
+        .subjects.remove(0).actual_claim.unwrap();
+    let after = managed_session_id(subject, "after");
+    let before = managed_session_id(subject, "before");
+    MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(0));
+    store.read_snapshot(|_| {
+        assert!(managed_session_owner_at(store, through, &after)?.is_some());
+        assert!(managed_session_owner_at(store, through, &before)?.is_none());
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &after, subject)?,
+            managed_session_owner_at(store, through, &after)?);
+        Ok(())
+    }).unwrap();
+    assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 1);
+    store.connection.write().execute(
+        "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)", [&repaired],
+    ).unwrap();
+    smallclaims::Runtime::forget_views(store.fractal.as_ref());
+    assert_eq!(store.index().unwrap(), through);
+    store.read_snapshot(|_| {
+        assert!(managed_session_owner_at(store, through, &after)?.is_none());
+        // The inventory's old session must be re-resolved after repair on this new pin.
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &after, subject)?,
+            managed_session_owner_at(store, through, &after)?);
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &before, subject)?,
+            managed_session_owner_at(store, through, &before)?);
+        assert_eq!(managed_session_owner_at(store, through, &before)?.unwrap().1.as_deref(), Some("before"));
+        Ok(())
+    }).unwrap();
+    assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 2);
+}
+
 
 #[tokio::test]
 async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_replication() {
