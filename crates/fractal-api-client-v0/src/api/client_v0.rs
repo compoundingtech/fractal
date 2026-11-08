@@ -6602,6 +6602,17 @@ fn terminal_attachment_subject(id: &str) -> Result<String, ApiError> {
         .ok_or_else(|| validation("the terminal attachment ID is invalid"))
 }
 
+fn trusted_terminal_attachment(claim: &ClaimRecord, session: &ClientSession) -> bool {
+    let actor = if session.authority_actor.starts_with("person/")
+        || session.authority_actor.starts_with("agent/") {
+        session.authority_actor.as_str()
+    } else {
+        "requester"
+    };
+    claim.actor.as_deref() == Some(actor)
+        && claim.body.pointer("/fields/terminal_operation_version").and_then(Value::as_u64) == Some(1)
+}
+
 fn terminal_attachment_id(session: &ClientSession, request: &ActionRequest) -> String {
     let stable = hex::encode(Sha256::digest(
         format!("{}:{}", session.actor, request.idempotency_key).as_bytes(),
@@ -6627,6 +6638,9 @@ fn existing_terminal_attachment(
     else {
         return Ok(None);
     };
+    if !trusted_terminal_attachment(attached, session) {
+        return Err(forbidden("the terminal attachment requires a new attach operation"));
+    }
     let old_digest = attached
         .body
         .pointer("/fields/request_digest")
@@ -6744,6 +6758,9 @@ fn terminal_attachment_response(
         .iter()
         .find(|claim| claim.kind == "custom.client.terminal-attached")
         .ok_or_else(|| ApiError::internal("the terminal attachment claim is missing"))?;
+    if !trusted_terminal_attachment(attached, session) {
+        return Err(forbidden("the terminal attachment requires a new attach operation"));
+    }
     if attached.origin != state.store.origin() {
         return Err(forbidden(
             "the terminal attachment belongs to another gateway",
@@ -6769,6 +6786,9 @@ fn terminal_attachment_response(
     let latest = claims
         .last()
         .ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
+    if !trusted_terminal_attachment(latest, session) {
+        return Err(forbidden("the terminal attachment requires a new attach operation"));
+    }
     let expires = field("expires_at_unix_ms")
         .and_then(Value::as_u64)
         .map(u128::from)
@@ -6852,6 +6872,7 @@ fn create_terminal_attachment(
         kind: "custom.client.terminal-attached".into(),
         actor: Some(session_claim_actor(session)),
         fields: BTreeMap::from([
+            ("terminal_operation_version".into(), json!(1)),
             ("attachment_id".into(), Value::String(attachment_id.clone())),
             ("terminal_id".into(), Value::String(terminal_id.clone())),
             (
@@ -6937,6 +6958,7 @@ fn consume_terminal_attachment_mode(
         remote_terminal_live_session(state, &terminal_subject(terminal_id), incarnation)
     }).transpose()?;
     let valid = is_current
+        && trusted_terminal_attachment(&attached, session)
         && attached.origin == state.store.origin()
         && field("session_actor").and_then(Value::as_str) == Some(session.actor.as_str())
         && field("raw_mode").and_then(Value::as_str) == raw_mode
@@ -6979,12 +7001,15 @@ fn consume_terminal_attachment_mode(
             subject: attached.subject.clone(),
             kind: "custom.client.terminal-consumed".into(),
             actor: Some(session_claim_actor(session)),
-            fields: BTreeMap::from([(
-                "attachment_id".into(),
-                field("attachment_id")
-                    .cloned()
-                    .ok_or_else(|| ApiError::internal("terminal attachment ID is missing"))?,
-            )]),
+            fields: BTreeMap::from([
+                ("terminal_operation_version".into(), json!(1)),
+                (
+                    "attachment_id".into(),
+                    field("attachment_id")
+                        .cloned()
+                        .ok_or_else(|| ApiError::internal("terminal attachment ID is missing"))?,
+                ),
+            ]),
             evidence: vec![attached.id.clone()],
             expected_subject: Some(Some(attached.id.clone())),
             idempotency_key: None,
@@ -7013,6 +7038,9 @@ fn detach_terminal_attachment(
                 "terminal attachment `{attachment_id}` does not exist"
             ))
         })?;
+    if !trusted_terminal_attachment(attached, session) {
+        return Err(forbidden("the terminal attachment requires a new attach operation"));
+    }
     if attached.origin != state.store.origin() {
         return Err(forbidden(
             "the terminal attachment belongs to another gateway",
@@ -7037,6 +7065,9 @@ fn detach_terminal_attachment(
     let latest = claims
         .last()
         .ok_or_else(|| ApiError::internal("the terminal attachment has no head"))?;
+    if !trusted_terminal_attachment(latest, session) {
+        return Err(forbidden("the terminal attachment requires a new attach operation"));
+    }
     if latest.kind == "custom.client.terminal-detached" {
         return Ok(attachment_id);
     }
@@ -7046,10 +7077,10 @@ fn detach_terminal_attachment(
             subject,
             kind: "custom.client.terminal-detached".into(),
             actor: Some(session_claim_actor(session)),
-            fields: BTreeMap::from([(
-                "attachment_id".into(),
-                Value::String(attachment_id.clone()),
-            )]),
+            fields: BTreeMap::from([
+                ("terminal_operation_version".into(), json!(1)),
+                ("attachment_id".into(), Value::String(attachment_id.clone())),
+            ]),
             evidence: vec![latest.id.clone()],
             expected_subject: Some(Some(latest.id.clone())),
             idempotency_key: None,
@@ -16133,7 +16164,7 @@ subscription "watch/source" {
     }
 
     #[test]
-    fn legacy_terminal_attachment_replay_conflicts_without_execution() {
+    fn unmarked_terminal_attachment_requires_a_new_attach_operation() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let session = ClientSession::local(Some("person/alex")).unwrap();
@@ -16161,8 +16192,9 @@ subscription "watch/source" {
         let before = state.store.status(None).unwrap().store_index;
         let error = existing_terminal_attachment(&state, &session, &request, &current_digest)
             .unwrap_err();
-        assert_eq!(error.status, StatusCode::CONFLICT);
-        assert_eq!(error.code, "idempotency-conflict");
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(error.code, "forbidden");
+        assert!(terminal_attachment_response(&state, &session, &attachment_id).is_err());
         assert_eq!(state.store.status(None).unwrap().store_index, before);
     }
 
@@ -23222,6 +23254,7 @@ mission "example/zero-run" state="ready" {
             .collect::<Vec<_>>();
         assert_eq!(lifecycle.len(), 2);
         for claim in lifecycle {
+            assert!(trusted_terminal_attachment(&claim, &session));
             let projected = safe_event_projection(
                 &restarted,
                 &EventRecord {
@@ -23673,6 +23706,53 @@ mission "example/zero-run" state="ready" {
         }
     }
 
+    #[tokio::test]
+    async fn terminal_operations_mark_attach_consume_and_detach_records() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        state.store.append_claim(&ClaimInput {
+            subject: "agent/terminal-owner".into(), kind: "runtime.observed".into(),
+            actor: Some("agent/terminal-owner".into()),
+            fields: serde_json::from_value(json!({
+                "runtime_id":"terminal-runtime", "incarnation_id":"terminal-runtime:i1",
+                "status":"running", "terminal":true
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let session = ClientSession::local(Some("person/alex")).unwrap();
+        let Json(attachment) = raw_terminal::attachment(
+            State(state.clone()), Extension(session.clone()), AxumPath("agent/terminal-owner".into()),
+            Json(serde_json::from_value(json!({
+                "runtime_incarnation":"terminal-runtime:i1", "mode":"attach"
+            })).unwrap()),
+        ).await.unwrap();
+        let capability = attachment["stream_capability"].as_str().unwrap();
+        let attached = state.store.claims_for_kind_at(
+            "custom.client.terminal-attached", None, true, 1,
+        ).unwrap().claims.remove(0);
+        assert!(trusted_terminal_attachment(&attached, &session));
+        consume_terminal_attachment_mode(
+            &state, &session, "terminal/agent/terminal-owner", "terminal-runtime:i1",
+            Some(capability), Some("attach"),
+        ).unwrap();
+        assert!(consume_terminal_attachment_mode(
+            &state, &session, "terminal/agent/terminal-owner", "terminal-runtime:i1",
+            Some(capability), Some("attach"),
+        ).is_err());
+        let attachment_id = attached.body["fields"]["attachment_id"].as_str().unwrap();
+        detach_terminal_attachment(&state, &session, &ActionRequest {
+            api_version: CLIENT_API_VERSION.into(), id:"action/detach-marked".into(),
+            action_type:"terminal.detach".into(), idempotency_key:"detach-marked".into(),
+            fence: Fence { runtime_incarnation:Some("terminal-runtime:i1".into()), ..Fence::default() },
+            parameters:json!({"target_id":attachment_id}),
+        }).unwrap();
+        let claims = state.store.claims_for(&attached.subject, None).unwrap();
+        assert_eq!(claims.len(), 3);
+        assert!(claims.iter().all(|claim| trusted_terminal_attachment(claim, &session)));
+        assert_eq!(claims[1].kind, "custom.client.terminal-consumed");
+        assert_eq!(claims[2].kind, "custom.client.terminal-detached");
+    }
+
     #[test]
     fn raw_capability_refuses_changed_selected_owner_or_runtime() {
         for (bound_owner, bound_runtime) in [("host/another-owner", "r"), ("host/matrix-owner", "old")] {
@@ -23701,6 +23781,7 @@ mission "example/zero-run" state="ready" {
                 kind: "custom.client.terminal-attached".into(),
                 actor: Some(session_claim_actor(&session)),
                 fields: serde_json::from_value(json!({
+                    "terminal_operation_version":1,
                     "attachment_id":"terminal-attachment/matrix", "terminal_id":"terminal/agent/fence-matrix",
                     "runtime_incarnation":"i", "runtime_id":bound_runtime, "owner_host_id":bound_owner,
                     "session_actor":session.actor, "person_id":session.authority_actor, "raw_mode":"peek",

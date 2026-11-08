@@ -2265,6 +2265,10 @@ The pairing operation stamps `pairing_operation_version: 1` on its challenge and
 records. Authentication requires this marker and the concrete person actor matching
 `person_id`. Unmarked challenges and credentials, including previously retained pairings,
 require a new pairing. There is no automatic legacy admission.
+Terminal attachment lifecycle records likewise require the dedicated terminal operations:
+`custom.client.terminal*` kinds and `custom/client/terminal-*` subjects are reserved.
+Attachments and their consumption/detachment records carry `terminal_operation_version: 1`.
+Unmarked attachments require a new attach operation; they cannot provide stream authority.
 
 Unknown, expired, or revoked paired-device credentials return HTTP 403, `code: forbidden`,
 `retryable: false`, and `details.reason: credential-rejected`. Pair the device again to restore
