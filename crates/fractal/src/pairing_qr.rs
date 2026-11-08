@@ -8,6 +8,9 @@ use serde::Serialize;
 pub(super) fn parse_gateway(value: &str) -> Result<reqwest::Url, String> {
     let invalid = || "gateway must be an HTTP or HTTPS URL without a query or fragment".to_owned();
     let url = reqwest::Url::parse(value).map_err(|_| invalid())?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("gateway URL must not contain userinfo (username or password)".to_owned());
+    }
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || url.query().is_some()
@@ -281,6 +284,19 @@ mod tests {
             assert!(!error.contains(value));
         }
         assert_eq!(parse_gateway("HTTPS://EXAMPLE.TEST:443/base").unwrap().as_str(), "https://example.test/base");
+    }
+
+    #[test]
+    fn pairing_qr_rejects_gateway_userinfo_without_echoing_credentials() {
+        for value in [
+            "https://user:password@example.test",
+            "https://user@example.test",
+            "https://:password@example.test",
+        ] {
+            let error = parse_gateway(value).unwrap_err();
+            assert_eq!(error, "gateway URL must not contain userinfo (username or password)");
+            assert!(!error.contains(value));
+        }
     }
 
     #[test]

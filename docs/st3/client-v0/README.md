@@ -2281,6 +2281,9 @@ with `code: pairing-origin-required`, `retryable: false`, and the message
 `complete pairing on the member that began it`. This check precedes code verification and
 does not consume the challenge or issue a device grant. Complete on the beginning member,
 or start a new pairing on the desired member.
+This guarantee holds only when every member accepting pairing completion runs this
+version or later. An older member has no origin check and can still complete a replicated
+challenge begun on an upgraded member, so upgrade all members.
 
 Adding optional fields is compatible. Removing or retyping a field, changing ordering or token
 rules, adding a required action parameter, or changing action semantics requires a new capability
