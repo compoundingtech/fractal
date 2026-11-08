@@ -43,7 +43,10 @@ same content-hash comparison. Git sources never substitute a codeload archive.
 Each archive attempt has a 60-second elapsed deadline, and each `zig fetch`
 subprocess has a 60-second timeout. The cache phase has a shared 660-second
 budget; source clone and checkout each have a 120-second timeout (15 minutes
-total). Unavailable transports warn with the package name and leave fetching to
+total workload budget, plus process cleanup). Subprocesses own their process groups;
+timeouts send the whole group SIGTERM, allow up to 0.2 seconds, then send SIGKILL
+and reap the direct child so Git helpers cannot outlive the deadline.
+Unavailable transports warn with the package name and leave fetching to
 the normal Zig build; reaching the shared deadline warns and stops seeding.
 Printed content-hash mismatches remain fatal integrity errors.
 

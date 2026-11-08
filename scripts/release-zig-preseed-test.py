@@ -8,6 +8,7 @@ import json
 import io
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -145,7 +146,7 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack
     print("PASS Git-source hash mismatch refused")
 
     output = io.StringIO()
-    with patch.object(preseed.subprocess, "check_output", side_effect=subprocess.TimeoutExpired("zig", 0.02)) as process:
+    with patch.object(preseed, "run_command", side_effect=subprocess.TimeoutExpired("zig", 0.02)) as process:
         with contextlib.redirect_stdout(output):
             preseed.seed(source, attempt_timeout=0.02, **options)
         assert process.call_count == 3
@@ -192,3 +193,36 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack
     assert "archive attempt elapsed deadline exceeded" in output.getvalue()
     assert "WARNING Zig preseed total deadline reached" in output.getvalue()
     print("PASS drip responses obey per-attempt and total elapsed deadlines with warning")
+
+    heartbeat = source / "grandchild-heartbeat"
+    grandchild = source / "grandchild.py"
+    grandchild.write_text(
+        "import os, signal, sys, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "while True:\n"
+        "    with open(sys.argv[1], 'w') as output:\n"
+        "        output.write(str(time.monotonic_ns()))\n"
+        "    time.sleep(0.01)\n"
+    )
+    parent = source / "parent.py"
+    parent.write_text(
+        "import subprocess, sys, time\n"
+        "subprocess.Popen([sys.executable, sys.argv[1], sys.argv[2]])\n"
+        "time.sleep(60)\n"
+    )
+    started = time.monotonic()
+    try:
+        preseed.run_command([sys.executable, str(parent), str(grandchild), str(heartbeat)],
+                            timeout=0.5, capture=True)
+    except subprocess.TimeoutExpired:
+        pass
+    else:
+        raise AssertionError("process-tree timeout was not enforced")
+    assert time.monotonic() - started < 2
+    assert heartbeat.exists(), "grandchild never started"
+    stopped = heartbeat.read_bytes()
+    time.sleep(0.1)
+    assert heartbeat.read_bytes() == stopped, "grandchild survived group timeout cleanup"
+    assert preseed.run_command([sys.executable, "-c", "print('normal output')"],
+                               timeout=2, capture=True) == "normal output\n"
+    print("PASS timed-out process group kills TERM-resistant grandchild and reaps parent")

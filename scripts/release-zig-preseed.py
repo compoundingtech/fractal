@@ -96,6 +96,36 @@ def fetch_git(package, fetch, sleep=time.sleep, budget=None):
             print(f"Git transport failed: {url}: {error}", flush=True)
 
 
+def run_command(args, *, timeout, capture=False):
+    # Git/Zig can launch helpers that inherit stdout and outlive their parent.
+    # Own their session so timeout cleanup covers the complete process tree.
+    process = subprocess.Popen(
+        args, start_new_session=True, text=True,
+        stdout=subprocess.PIPE if capture else None,
+    )
+    try:
+        output, _ = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        def kill_group(sig):
+            try:
+                os.killpg(process.pid, sig)
+            except ProcessLookupError:
+                pass
+        kill_group(signal.SIGTERM)
+        try:
+            process.communicate(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            pass
+        finally:
+            # Even if the direct child already exited, helpers may ignore TERM.
+            kill_group(signal.SIGKILL)
+            process.communicate()
+        raise
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, args, output)
+    return output
+
+
 def seed(source, *, fetch=None, total_timeout=660, attempt_timeout=60, **download_options):
     budget = Budget(total_timeout, attempt_timeout)
     # This upstream generated manifest includes transitive pins (notably zigimg)
@@ -106,7 +136,7 @@ def seed(source, *, fetch=None, total_timeout=660, attempt_timeout=60, **downloa
         raise ValueError("Ghostty package manifest is empty")
     if fetch is None:
         def fetch(archive):
-            return subprocess.check_output(["zig", "fetch", str(archive)], text=True, timeout=budget.remaining()).strip()
+            return run_command(["zig", "fetch", str(archive)], capture=True, timeout=budget.remaining()).strip()
     with tempfile.TemporaryDirectory(prefix="zig-preseed-") as directory:
         directory = Path(directory)
         for package in pins:
@@ -145,8 +175,8 @@ def main():
     commit = re.search(r'const GHOSTTY_COMMIT: &str = "([0-9a-f]{40})";', build)[1]
     source = Path(tempfile.mkdtemp(prefix="release-ghostty-", dir=os.environ["RUNNER_TEMP"]))
     try:
-        subprocess.run(["git", "clone", "--filter=blob:none", "--no-checkout", repo, str(source)], check=True, timeout=120)
-        subprocess.run(["git", "-C", str(source), "checkout", "--detach", commit], check=True, timeout=120)
+        run_command(["git", "clone", "--filter=blob:none", "--no-checkout", repo, str(source)], timeout=120)
+        run_command(["git", "-C", str(source), "checkout", "--detach", commit], timeout=120)
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
         print(f"WARNING Ghostty preseed checkout unavailable: {error}; left to Cargo", flush=True)
         return
