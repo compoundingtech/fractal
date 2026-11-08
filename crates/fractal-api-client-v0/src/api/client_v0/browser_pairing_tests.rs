@@ -103,7 +103,7 @@ async fn browser_pairing_pending_deny_and_exact_single_use_grant_revocation() {
     assert!(answer(&state,&browser,&next_request,"approve").is_err());
     let snapshot = new_client_snapshot(&state);
     let send: ActionRequest = serde_json::from_value(json!({
-        "api_version":CLIENT_API_VERSION,"id":"action/browser-send","type":"message.send","idempotency_key":"browser-send",
+        "api_version":CLIENT_API_VERSION,"id":"action/browser-send","type":"message.send","idempotency_key":"browser-send-proof",
         "fence":{"snapshot_id":snapshot.id,"subject_revisions":{}},
         "parameters":{"to":"person/operator","content":"Browser pairing proof"}
     })).unwrap();
@@ -111,7 +111,7 @@ async fn browser_pairing_pending_deny_and_exact_single_use_grant_revocation() {
     assert!(!sent["affected_ids"].as_array().unwrap().is_empty());
     let snapshot = new_client_snapshot(&state);
     let mission: ActionRequest = serde_json::from_value(json!({
-        "api_version":CLIENT_API_VERSION,"id":"action/browser-mission","type":"mission.start","idempotency_key":"browser-mission",
+        "api_version":CLIENT_API_VERSION,"id":"action/browser-mission","type":"mission.start","idempotency_key":"browser-mission-proof",
         "fence":{"snapshot_id":snapshot.id,"subject_revisions":{}},"parameters":{}
     })).unwrap();
     assert!(action(State(state.clone()),Extension(snapshot),Extension(browser.clone()),Json(mission)).await.is_err());
@@ -367,6 +367,8 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].body["fields"]["thread_quote_id"], first);
     assert_eq!(sent[0].body["fields"]["to"], agent);
+    state.store.seal_local_batches().unwrap();
+    state.store.judge_claims(true).unwrap();
     let envelopes = state.store.export_replication(0).unwrap();
     assert_eq!(state.store.graph.claim_signature(&sent[0].id).unwrap().unwrap().signer, person);
     let timeline: Value = get(&native_bearer, "threads/browser-thread-proof/timeline")
