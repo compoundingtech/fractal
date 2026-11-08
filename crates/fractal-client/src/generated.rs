@@ -137,6 +137,7 @@ pub enum ErrorCode {
     LegacyActionReceiptUntrusted,
     IssuerRequired,
     PairingOriginRequired,
+    PairingRestartRequired,
     SuspendAuthoredSessionSelection,
     StaleFence,
     CursorGap,
