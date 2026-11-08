@@ -45,6 +45,14 @@ struct Credits {
     latest: BTreeMap<(String, String, String), Evidence>,
 }
 
+fn state_class(state: &str) -> u8 {
+    match state {
+        "redeemed" => 2,
+        "forfeited" => 1,
+        _ => 0,
+    }
+}
+
 fn timestamp(text: &str) -> Option<u64> {
     chrono::DateTime::parse_from_rfc3339(text)
         .ok()
@@ -56,10 +64,11 @@ impl Credits {
         let Ok(credit) = Credit::deserialize(value) else { return };
         let Ok(measured_at) = chrono::DateTime::parse_from_rfc3339(&credit.measured_at) else { return };
         let key = (credit.provider.clone(), credit.account.clone(), credit.credit_id.clone());
-        // Provider measurement time wins over delivery order, at full RFC3339 precision.
-        // Claim ID breaks equal-time ties identically on every member.
+        // Terminal states are absorbing across writers and hosts, regardless of measurement time.
+        // Within a state class, full provider time then claim ID determine the winner.
         if self.latest.get(&key).is_some_and(|previous| {
-            (previous.measured_at, previous.claim_id.as_str()) >= (measured_at, claim_id)
+            (state_class(&previous.credit.state), previous.measured_at, previous.claim_id.as_str())
+                >= (state_class(&credit.state), measured_at, claim_id)
         }) {
             return;
         }
@@ -149,7 +158,7 @@ impl Credits {
                     "window": window, "status": status,
                     "remaining_percent": if known { Some(if count == 0 { 100.0 } else { 0.0 }) } else { None },
                     "explain": format!(
-                        "{objective} for {provider}: {target}. {current}. One durable credit is one window-equivalent; identities are provider/account/credit_id. CAM-R01 counts confirmed forfeitures by expiry in the rolling seven days. CAM-R02 checks expiry in the next 24 hours and requires planned, redeemed or declined with a timestamp and evidence reference. Only observed credits are covered; missing, unsupported, unknown or stale evidence never proves success. Observational only: no enforcement."
+                        "{objective} for {provider}: {target}. {current}. One durable credit is one window-equivalent; identities are provider/account/credit_id. Across writers and hosts, redeemed wins over forfeited, and forfeited wins over available or unknown regardless of timestamp. Within the same state class (available and unknown share a class), newest full-precision measured_at then claim ID wins. CAM-R01 counts confirmed forfeitures by expiry in the rolling seven days. CAM-R02 checks expiry in the next 24 hours and requires planned, redeemed or declined with a timestamp and evidence reference. Only observed credits are covered; missing, unsupported, unknown or stale evidence never proves success. Observational only: no enforcement."
                     ),
                     "evidence": sources,
                 }));
@@ -298,13 +307,44 @@ mod tests {
     }
 
     #[test]
+    fn state_class_precedes_provider_time_in_both_arrival_orders() {
+        for (older_state, newer_state, winner, status) in [
+            ("redeemed", "unknown", "z", "met"),
+            ("redeemed", "forfeited", "z", "met"),
+            ("unknown", "available", "a", "met"),
+        ] {
+            let mut older = credit("one", older_state, NOW - DAY_MS);
+            older["measured_at"] = json!(time(NOW - 1));
+            let mut newer = credit("one", newer_state, NOW - DAY_MS);
+            newer["host"] = json!("other");
+            if newer_state == "available" {
+                newer["expires_at"] = json!(time(NOW + 2 * DAY_MS));
+            }
+            let older = claim("z", json!([older]));
+            let newer = claim("a", json!([newer]));
+            for observations in [[&older, &newer], [&newer, &older]] {
+                let mut credits = Credits::default();
+                for observation in observations {
+                    credits.observe(observation);
+                }
+                let selected = &credits.latest.values().next().unwrap().credit;
+                assert_eq!(selected.state, if winner == "z" { older_state } else { newer_state });
+                for row in credits.rows(NOW, DAY_MS) {
+                    assert_eq!(row["evidence"][0]["claim_id"], winner);
+                    assert_eq!(row["status"], status);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn provider_submillisecond_measurements_override_claim_id_and_arrival_order() {
         let older_at = "2026-11-08T10:00:00.000100Z";
         let newer_at = "2026-11-08T10:00:00.000900Z";
         let now = timestamp("2026-11-08T10:00:01Z").unwrap();
         for objective in [0, 1] {
             let expiry = if objective == 0 { now - DAY_MS } else { now + DAY_MS / 2 };
-            let mut older = credit("one", if objective == 0 { "redeemed" } else { "available" }, expiry);
+            let mut older = credit("one", if objective == 0 { "forfeited" } else { "available" }, expiry);
             older["measured_at"] = json!(older_at);
             older["disposition"] = json!({
                 "kind": "planned", "at": older_at, "evidence_ref": "document/credit-plan",
@@ -412,6 +452,61 @@ mod tests {
     }
 
     #[test]
+    fn projected_cross_writer_state_precedence_is_arrival_order_independent() {
+        const OTHER: &str = "agent/sample/other-producer";
+        for (older_state, newer_state, older_wins, status) in [
+            ("redeemed", "unknown", true, "met"),
+            ("redeemed", "forfeited", true, "met"),
+            ("unknown", "available", false, "met"),
+        ] {
+            for older_actor in [PRODUCER, OTHER] {
+                let newer_actor = if older_actor == PRODUCER { OTHER } else { PRODUCER };
+                for reverse in [false, true] {
+                    let root = tempfile::tempdir().unwrap();
+                    let path = root.path().join("credits.db");
+                    let store = Store::open(&path, "alder").unwrap();
+                    store.set_usage_limits_writers(vec![PRODUCER.into(), OTHER.into()]).unwrap();
+                    let mut older = credit("one", older_state, NOW - DAY_MS);
+                    older["measured_at"] = json!(time(NOW - 1));
+                    let mut newer = credit("one", newer_state, NOW - DAY_MS);
+                    newer["host"] = json!("other");
+                    if newer_state == "available" {
+                        newer["expires_at"] = json!(time(NOW + 2 * DAY_MS));
+                    }
+                    let append = |actor: &str, reading: Value| {
+                        store.append_claim(&crate::model::ClaimInput {
+                            subject: actor.into(), kind: "usage.limits.observed".into(), actor: Some(actor.into()),
+                            fields: BTreeMap::from([
+                                ("readings".into(), json!([])), ("credit_readings".into(), json!([reading])),
+                            ]),
+                            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+                        }).unwrap()
+                    };
+                    let (older_claim, newer_claim) = if reverse {
+                        let newer_claim = append(newer_actor, newer);
+                        (append(older_actor, older), newer_claim)
+                    } else {
+                        (append(older_actor, older), append(newer_actor, newer))
+                    };
+                    let expected = if older_wins { &older_claim.id } else { &newer_claim.id };
+                    for row in rows(&store, NOW, DAY_MS).unwrap() {
+                        assert_eq!(row["evidence"][0]["claim_id"], expected.as_str());
+                        assert_eq!(row["evidence"][0]["state"], if older_wins { older_state } else { newer_state });
+                        assert_eq!(row["status"], status);
+                    }
+                    drop(store);
+                    let store = Store::open(&path, "alder").unwrap();
+                    store.set_usage_limits_writers(vec![PRODUCER.into(), OTHER.into()]).unwrap();
+                    for row in rows(&store, NOW, DAY_MS).unwrap() {
+                        assert_eq!(row["evidence"][0]["claim_id"], expected.as_str());
+                        assert_eq!(row["status"], status);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn projected_credit_fold_preserves_precision_ties_and_each_writers_head() {
         const OTHER: &str = "agent/sample/other-producer";
         let root = tempfile::tempdir().unwrap();
@@ -433,15 +528,15 @@ mod tests {
         let newer_at = "2026-11-08T10:00:00.000900Z";
         let now = timestamp("2026-11-08T10:00:01Z").unwrap();
         let newer = append(PRODUCER, newer_at, "forfeited");
-        append(PRODUCER, older_at, "redeemed");
-        let other = append(OTHER, "2026-11-08T10:00:00.000950Z", "redeemed");
+        append(PRODUCER, older_at, "unknown");
+        let other = append(OTHER, "2026-11-08T10:00:00.000950Z", "forfeited");
         assert_eq!(rows(&store, now, DAY_MS).unwrap()[0]["evidence"][0]["claim_id"], other.id);
         store.set_usage_limits_writers(vec![PRODUCER.into()]).unwrap();
         let selected = rows(&store, now, DAY_MS).unwrap();
         assert_eq!(selected[0]["status"], "missed");
         assert_eq!(selected[0]["evidence"][0]["claim_id"], newer.id);
         assert_eq!(selected[0]["evidence"][0]["measured_at"], newer_at);
-        let tied = append(PRODUCER, "2026-11-08T11:00:00.000900+01:00", "redeemed");
+        let tied = append(PRODUCER, "2026-11-08T11:00:00.000900+01:00", "forfeited");
         let expected = if tied.id > newer.id { tied.id } else { newer.id };
         assert_eq!(rows(&store, now, DAY_MS).unwrap()[0]["evidence"][0]["claim_id"], expected);
         drop(store);

@@ -981,8 +981,11 @@ The same list includes observational credit objectives `CAM-R01/PROVIDER` (zero 
 window-equivalents in rolling seven days, by expiry) and `CAM-R02/PROVIDER` (a documented
 planned/redeemed/declined disposition for every credit expiring within 24 hours). One durable
 credit is one window-equivalent. Their evidence comes from replicated, durable
-`usage.limits.observed` claims, folded by provider/account digest/credit ID using provider
-measurement time, not delivery order. Missing/unknown/unreported/unsupported evidence is
+`usage.limits.observed` claims, folded by provider/account digest/credit ID across writers and
+hosts. Terminal states are absorbing: `redeemed` wins over `forfeited`, and `forfeited` wins over
+`available` or `unknown`, regardless of timestamp. Within the same state class (`available` and
+`unknown` share one), newest full-precision provider measurement time then claim ID wins, not
+delivery order. Missing/unknown/unreported/unsupported evidence is
 `no-data`, stale evidence is `stale`; neither proves success. These rows describe observed
 credits only and do not enforce quotas or redeem credits.
 

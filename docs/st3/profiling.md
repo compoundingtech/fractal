@@ -349,11 +349,15 @@ seven days, counted by expiry; each durable credit represents one window-equival
 `CAM-R02/PROVIDER` requires every credit expiring in the next 24 hours to have a `planned`,
 `redeemed` or `declined` disposition, a decision timestamp and a nonempty evidence reference;
 otherwise it is at-risk. Credits fold by provider, account digest and durable `credit_id`,
-not host or friendly account reference. An incrementally maintained local projection retains the
-latest reading per provider/account/credit identity **and writer**, including excluded writers.
+not host or friendly account reference. Terminal states are absorbing across writers and hosts:
+`redeemed` wins over `forfeited`, and `forfeited` wins over `available` or `unknown`, regardless
+of measurement time. Within a state class (`available` and `unknown` share one), the newest
+provider `measured_at` at full RFC3339 precision wins, then claim ID breaks equal-time ties
+consistently across members. An incrementally maintained local projection retains the winning
+reading per provider/account/credit identity **and writer**, including excluded writers.
 SLO requests and the SLO-history tick read those heads, filter the current writer configuration,
-then select the newest provider `measured_at` at full RFC3339 precision; claim ID breaks equal-time
-ties consistently across members. Read work depends on retained identities and writers, not the
+then apply the same state-class/time/claim-ID ordering across writers.
+Read work depends on retained identities and writers, not the
 number of durable observations. An empty writer configuration returns unknown credit rows without
 credit SQL. Rows retain the selected claim and disposition evidence. Missing expiry, unknown state,
 unreported/unsupported coverage or a future measurement

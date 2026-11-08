@@ -11,7 +11,7 @@ pub struct UsageCreditReading {
 }
 
 impl Store {
-    /// Latest evidence per provider/account/credit ID/writer, before writer authorization.
+    /// Absorbing-state evidence per provider/account/credit ID/writer, before authorization.
     pub fn usage_credit_readings(&self) -> Result<Vec<UsageCreditReading>> {
         readings(&self.readers.get())
     }
@@ -46,11 +46,13 @@ pub fn open(tx: &Transaction<'_>) -> Result<()> {
         INSERT OR IGNORE INTO local_usage_credit_pending VALUES(NEW.id);
     END;")?;
     let initialized: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='usage_credit_heads_v1')", [], |row| row.get(0),
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='usage_credit_heads_v2')", [], |row| row.get(0),
     )?;
     if !initialized {
+        // The timestamp-only v1 fold may have discarded terminal evidence. Refold history
+        // even when its existing head table and initialization marker are present.
         rebuild(tx)?;
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h70e958b8f520 owner=fractal_store::store::usage_credits TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('usage_credit_heads_v1','1')", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h9b470b7969be owner=fractal_store::store::usage_credits TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('usage_credit_heads_v2','1')", [])?;
     }
     flush(tx)
 }
@@ -68,20 +70,25 @@ pub fn flush(tx: &Transaction<'_>) -> Result<()> {
     )?;
     let mut rows = statement.query([])?;
     let mut upsert = tx.prepare_cached(
-        /* sqlite-large-value: allow-for-now lv-hdd8c5ea7ce43 owner=fractal_store::store::usage_credits TODO=bound-or-reference-values-and-reclamation */
+        /* sqlite-large-value: allow-for-now lv-h8e8ca6ee8350 owner=fractal_store::store::usage_credits TODO=bound-or-reference-values-and-reclamation */
         "INSERT INTO local_usage_credit_heads(provider,account,credit_id,actor,measured_seconds,measured_nanos,claim_id,credit)
          VALUES(?1,?2,?3,?4,?5,?6,?7,?8)
          ON CONFLICT(provider,account,credit_id,actor) DO UPDATE SET
          measured_seconds=excluded.measured_seconds,measured_nanos=excluded.measured_nanos,
          claim_id=excluded.claim_id,credit=excluded.credit
-         WHERE (excluded.measured_seconds,excluded.measured_nanos,excluded.claim_id) >
-         (local_usage_credit_heads.measured_seconds,local_usage_credit_heads.measured_nanos,local_usage_credit_heads.claim_id)",
+         WHERE (CASE json_extract(excluded.credit,'$.state') WHEN 'redeemed' THEN 2 WHEN 'forfeited' THEN 1 ELSE 0 END,
+                excluded.measured_seconds,excluded.measured_nanos,excluded.claim_id) >
+         (CASE json_extract(local_usage_credit_heads.credit,'$.state') WHEN 'redeemed' THEN 2 WHEN 'forfeited' THEN 1 ELSE 0 END,
+          local_usage_credit_heads.measured_seconds,local_usage_credit_heads.measured_nanos,local_usage_credit_heads.claim_id)",
     )?;
     while let Some(row) = rows.next()? {
         let claim_id: String = row.get(0)?;
         let actor: String = row.get(1)?;
         let body: Value = serde_json::from_str(&row.get::<_, String>(2)?)?;
         for credit in body["fields"]["credit_readings"].as_array().context("validated credit readings")? {
+            // Terminal states absorb later weaker evidence: redeemed > forfeited >
+            // available/unknown. Only within one state class does provider time, then
+            // claim ID, choose the winner. Keep every writer's head independently.
             // Do not truncate to milliseconds or compare RFC3339 text: offsets and fractional
             // precision differ. Chrono's seconds/nanoseconds pair preserves its exact ordering,
             // including leap seconds, matching the read-time credit winner fold.
