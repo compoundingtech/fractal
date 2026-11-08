@@ -505,6 +505,9 @@ cursor; older and equal cuts are not routed. Exact admitted pending work
 replays separately using its original observation clock.
 Receivers classify managed failures by their originating daemon and linked
 opening, independently of the receiver's local policy configuration.
+Committing recovery also advances the short-admission cursor through that
+weekly cut. A delayed companion at or before recovery cannot reopen the case,
+including after restart; a genuinely later short cut can open a new case.
 Keep `readiness-case.json` across
 restart: it journals phase transitions and notice intents before delivery and
 recognizes native receipts on replay. The legacy weekly checkpoint remains

@@ -225,6 +225,8 @@ impl Admission {
             WeeklyAction::Escalate { .. } => settled.weekly.escalated = true,
             WeeklyAction::Recover { .. } => {
                 settled.weekly.recovered = true;
+                // Companion cuts at/before measured recovery belong to the closed case.
+                settled.through = settled.through.max(settled.weekly.through);
                 // Informational delivery never survives the case it describes.
                 settled.notices.retain(|notice| !notice.held || notice.episode != opening.episode);
             }
@@ -1141,6 +1143,52 @@ mod migration_tests {
         assert!(!restarted.legacy_draining);
         assert_eq!(store.operational_failure(&episode).unwrap().unwrap().status, "resolved");
         assert_eq!(fs::read(&policy.checkpoint).unwrap(), legacy_bytes);
+    }
+
+    fn retained_lag_after_weekly_recovery(restart: bool) {
+        let (dir, policy, store) = fixture();
+        let journal = dir.path().join("case.json");
+        let end = (MINUTES + 10) * MINUTE_MS;
+        let mut admission = Admission::load(&journal, &policy.config).unwrap();
+        let miss = |end_ms| ShortSummary { end_ms, known: 5, failed: 3 };
+        admission.reconcile(&journal, &policy.config, || Ok(vec![miss(end)]),
+            |opening| record(&store, &policy.config, opening)).unwrap();
+        let weekly_miss = reading(end, 11);
+        admission.weekly(&journal, &policy.config, &store, &weekly_miss, end,
+            |opening, action| record_weekly(&store, opening, action)).unwrap();
+        // Weekly publication advances to T2 while its short companion is still at T0.
+        let recovered = reading(end + 2 * MINUTE_MS, 0);
+        admission.weekly(&journal, &policy.config, &store, &recovered, recovered.end_ms,
+            |opening, action| record_weekly(&store, opening, action)).unwrap();
+        assert!(admission.weekly.recovered);
+        assert_eq!(admission.through, recovered.end_ms);
+        if restart {
+            admission = Admission::load(&journal, &policy.config).unwrap();
+        }
+        let committed = fs::read(&journal).unwrap();
+        let index = store.index().unwrap();
+        // Delayed retained publication catches up with still-fresh T1 and T2 misses.
+        admission.reconcile(&journal, &policy.config,
+            || Ok(vec![miss(end + MINUTE_MS), miss(recovered.end_ms)]),
+            |_| panic!("late companion cannot reopen the recovered case")).unwrap();
+        assert_eq!(fs::read(&journal).unwrap(), committed);
+        assert_eq!(store.index().unwrap(), index);
+        assert!(admission.weekly.recovered);
+        let fresh = recovered.end_ms + MINUTE_MS;
+        admission.reconcile(&journal, &policy.config, || Ok(vec![miss(fresh)]),
+            |opening| record(&store, &policy.config, opening)).unwrap();
+        assert_eq!(admission.case.as_ref().unwrap().cut, fresh);
+        assert!(!admission.weekly.recovered);
+    }
+
+    #[test]
+    fn delayed_retained_cuts_before_or_at_recovery_cannot_reopen() {
+        retained_lag_after_weekly_recovery(false);
+    }
+
+    #[test]
+    fn recovery_short_watermark_survives_restart_before_retained_catchup() {
+        retained_lag_after_weekly_recovery(true);
     }
 
     #[test]
