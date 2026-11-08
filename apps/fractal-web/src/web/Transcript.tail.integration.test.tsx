@@ -316,6 +316,20 @@ describe('tail-first transcript mounting', () => {
     expect(summary()).toContain('All 41 entries shown')
   })
 
+  it('times a trigger-led episode from its trigger while the tail window has trimmed it', async () => {
+    const later = new Date(now + 3_600_000).toISOString()
+    const trigger: ConversationItem = { _tag: 'Text', id: 'wake/trigger', role: 'user', text: 'Wake: audit the keys', attachments: [], streaming: false, at: sourceAt }
+    const answers = range('wake', 0, 40).map(id => ({ ...answerRow(id), at: later }))
+    await render(transcript([{ ...sourceTurn('wake-turn', [trigger, ...answers]), triggerId: trigger.id }]))
+    expect(mountedSourceIds()).not.toContain('wake/trigger')
+    const time = () => container.querySelector<HTMLTimeElement>('[data-testid="turn-time"]')!.dateTime
+    expect(time()).toBe(sourceAt)
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Show all messages"]')!.click() })
+    await flushHistory(answers.length + 1)
+    expect(mountedSourceIds()).toContain('wake/trigger')
+    expect(time()).toBe(sourceAt)
+  })
+
   it('mounts all reasoning in a crossing work-log disclosure and keeps it open while Show all reveals deferred tools and prose', async () => {
     const tool: ConversationItem = { _tag: 'ToolCall', id: 'split/tool', callId: 'split/tool', name: 'read', input: { path: 'split.ts' }, status: 'success', callSeen: true, at: sourceAt }
     const items = [...range('before', 0, 6).map(answerRow), thought('early/0'), thought('early/1'), tool, ...range('run', 0, 5).map(thought), ...range('after', 0, 3).map(answerRow)]

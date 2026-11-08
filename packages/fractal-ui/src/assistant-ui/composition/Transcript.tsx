@@ -299,7 +299,7 @@ const dayKey = (time: number) => Number.isFinite(time) ? new Date(time).toDateSt
 function DaySeparator({ time }: { readonly time: number }) {
   return <div role="separator" data-testid="transcript-day" {...stylex.props(styles.day)}><time dateTime={new Date(time).toISOString().slice(0, 10)}>{dayFormatter.format(time)}</time></div>
 }
-const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef, newDay }: { turn: TranscriptTurn; summaryMemberIds?: readonly string[]; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement>; newDay?: boolean }) {
+const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef, newDay, startedAt }: { turn: TranscriptTurn; /** When the whole episode began; the mounted turn may have lost its trigger to the tail window. */ startedAt?: number; summaryMemberIds?: readonly string[]; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement>; newDay?: boolean }) {
   const renderFooter = React.useContext(TurnFooterRenderer)
 
   const renderToolDetail = React.useContext(ToolDetailRenderer)
@@ -310,7 +310,7 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, 
   const reasoning = workLogReasoning(turn.items)
   const trigger = turn.triggerId === undefined ? undefined : turn.items.find(item => item.id === turn.triggerId)
   const shown = turn.items.filter(item => item._tag !== 'ToolCall' && item._tag !== 'Reasoning' && item !== trigger)
-  const started = turnStart(turn)
+  const started = startedAt ?? turnStart(turn)
   const renderItem = (item: ConversationItem, continuation = false, runText?: string) => stranded?.has(item.id) ? <StrandedItem key={item.id} item={item} /> : <MailNames.Provider key={item.id} value={turn.participants?.[item.id]}><SenderCaption.Provider value={turn.senderCaptions?.[item.id]}><RunContinuation.Provider value={continuation}><RunCopyText.Provider value={runText}><ThreadPrimitive.Unstable_MessageById messageId={item.id} components={messageComponents} /></RunCopyText.Provider></RunContinuation.Provider></SenderCaption.Provider></MailNames.Provider>
   // A shown block continues a prose run when it and the block before it are the same sender's adopted prose.
   const continues = shown.map((item, index) => [item, shown[index - 1]].every(entry => entry?._tag === 'Text' && entry.role === 'assistant' && stranded?.has(entry.id) !== true) && turn.senderCaptions?.[item.id] === turn.senderCaptions?.[shown[index - 1]!.id])
@@ -389,15 +389,19 @@ function MountedTurns({ turns, sourceTurns, rowIds, start, pinnedPrompt, pinnedR
   }, [turns, rowIds, start, pinnedPrompt, pinnedReasoning])
   const last = turns[turns.length - 1]
   // A day separator wherever an episode starts on another day than the episode before it.
+  // Both come from the whole episode, so revealing history never moves its time or its day.
   const days = new Map<string, boolean>()
+  const starts = new Map<string, number>()
   let previousDay: string | undefined
   for (const turn of turns) {
-    const day = dayKey(turnStart(turn))
+    const started = turnStart(turn)
+    starts.set(turn.id, started)
+    const day = dayKey(started)
     if (day === undefined) continue
     days.set(turn.id, previousDay !== undefined && day !== previousDay)
     previousDay = day
   }
-  return mounted.map(turn => <PreparedTurn key={turn.id} newDay={days.get(turn.id)} turn={turn} summaryMemberIds={workMembers(sourceTurns.get(turn.id) ?? turn)} tailRef={turn.id === last?.id ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)
+  return mounted.map(turn => <PreparedTurn key={turn.id} newDay={days.get(turn.id)} startedAt={starts.get(turn.id)} turn={turn} summaryMemberIds={workMembers(sourceTurns.get(turn.id) ?? turn)} tailRef={turn.id === last?.id ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)
 }
 /**
  * The window of rendered source rows, kept outside the scroll body so its warning and recovery stay visible at the tail.
