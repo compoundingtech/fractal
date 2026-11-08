@@ -1,24 +1,29 @@
 use super::browser_pairing::*;
 use super::*;
 
-fn paired_device(state: &AppState, scopes: &[&str], name: &str) -> ClientSession {
-    let actor = format!("person/operator/session/{name}");
-    let paired = state.store.append_claim(&ClaimInput {
-        subject: format!("custom/client/pairing-{name}"), kind: "custom.client.pairing-completed".into(),
-        actor: Some("person/operator".into()), fields: serde_json::from_value(json!({
-            "person_id":"person/operator","session_actor":actor,"device_id":format!("device/{name}"),
-            "credential_hash":credential_digest(name),"expires_at_unix_ms":client_now_ms()+30*24*60*60*1000u128,
-            "scopes":scopes,"delegated_scopes":scopes,"delegated_by":"person/operator"
-        })).unwrap(), evidence:vec![], expected_subject:None,idempotency_key:None,
-    }).unwrap();
-    paired_client_session(state,&paired,"fabric-loopback",false).unwrap()
+async fn paired_device(state: &AppState, scopes: &[&str], name: &str) -> ClientSession {
+    let local = ClientSession::local(Some("person/operator")).unwrap();
+    let mut begin_request = json!({"api_version":CLIENT_API_VERSION,"person_id":"person/operator","device_name":name});
+    if scopes == ALL_SCOPES { begin_request["full_control"] = json!(true); }
+    else { begin_request["scopes"] = json!(scopes); }
+    let Json(challenge) = pairing_begin(State(state.clone()),Extension(local.clone()),
+        Json(serde_json::from_value(begin_request).unwrap())).await.unwrap();
+    let id = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
+    let Json(paired) = pairing_complete(State(state.clone()),Extension(local),AxumPath(id.into()),Json(PairingComplete {
+        api_version:CLIENT_API_VERSION.into(),code:challenge["code"].as_str().unwrap().into(),
+        device_public_key:format!("opaque-device-identity-without-signing-key:{name}"),key_storage:None,fabric_node_id:None,
+    })).await.unwrap();
+    let request = axum::http::Request::builder().method("POST").uri("/v1/client/actions")
+        .header(AUTHORIZATION,format!("Bearer {}",paired["credential"].as_str().unwrap()))
+        .body(axum::body::Body::empty()).unwrap();
+    authenticate(state,&request,"fabric-loopback").unwrap()
 }
-fn fixture() -> (tempfile::TempDir, AppState, ClientSession) {
+async fn fixture() -> (tempfile::TempDir, AppState, ClientSession) {
     let root = tempfile::tempdir().unwrap();
     let mut state = super::tests::test_state_named(root.path(), "browser-issuer");
     state.owning_person = Some("person/operator".into());
     state.browser_pairing_login = Some("owner@example.test".into());
-    let session = paired_device(&state, ALL_SCOPES, "owner-phone");
+    let session = paired_device(&state, ALL_SCOPES, "owner-phone").await;
     (root, state, session)
 }
 async fn start(state: &AppState, session: &ClientSession, key: &str) -> Value {
@@ -46,7 +51,7 @@ async fn poll(state: &AppState, session: &ClientSession, started: &Value, key: &
 
 #[tokio::test]
 async fn browser_pairing_wrong_login_disabled_and_rate_limit() {
-    let (_root, mut state, session) = fixture();
+    let (_root, mut state, session) = fixture().await;
     let body = || Json(serde_json::from_value(json!({"deviceLabel":"Browser","tailnetLogin":"wrong@example.test","requestKeyDigest":"a".repeat(64)})).unwrap());
     assert!(begin(State(state.clone()),Extension(session.clone()),body()).await.is_err());
     for _ in 0..3 { start(&state,&session,&"a".repeat(64)).await; }
@@ -57,7 +62,7 @@ async fn browser_pairing_wrong_login_disabled_and_rate_limit() {
 
 #[tokio::test]
 async fn browser_pairing_pending_deny_and_exact_single_use_grant_revocation() {
-    let (_root,state,owner) = fixture();
+    let (_root,state,owner) = fixture().await;
     let key = "a".repeat(64);
     let denied = start(&state,&owner,&key).await;
     assert_eq!(poll(&state,&owner,&denied,&key).await.unwrap().0["status"],"pending");
@@ -82,6 +87,8 @@ async fn browser_pairing_pending_deny_and_exact_single_use_grant_revocation() {
     assert!(require_scope(&browser,action_scope("message.send").unwrap()).is_ok());
     assert!(require_scope(&browser,"control.missions").is_err());
     assert!(require_scope(&browser,"control.pairing").is_err());
+    let next_request = start(&state,&owner,&key).await;
+    assert!(answer(&state,&browser,&next_request,"approve").is_err());
     let snapshot = new_client_snapshot(&state);
     let send: ActionRequest = serde_json::from_value(json!({
         "api_version":CLIENT_API_VERSION,"id":"action/browser-send","type":"message.send","idempotency_key":"browser-send",
@@ -103,12 +110,10 @@ async fn browser_pairing_pending_deny_and_exact_single_use_grant_revocation() {
 
 #[tokio::test]
 async fn browser_pairing_refuses_insufficient_devices_agents_and_local_harnesses() {
-    let (_root,state,owner) = fixture();
+    let (_root,state,owner) = fixture().await;
     let started = start(&state,&owner,&"a".repeat(64)).await;
-    for (name,scopes) in [("attention",vec!["read.projections","control.attention"]),("browser",SCOPES.to_vec())] {
-        let limited = paired_device(&state,&scopes,name);
-        assert!(answer(&state,&limited,&started,"approve").is_err());
-    }
+    let limited = paired_device(&state,&["read.projections","control.attention"],"attention-only").await;
+    assert!(answer(&state,&limited,&started,"approve").is_err());
     let local = ClientSession::local(Some("person/operator")).unwrap();
     assert!(answer(&state,&local,&started,"approve").is_err());
     let mut agent = owner.clone();
@@ -128,7 +133,7 @@ async fn browser_pairing_refuses_insufficient_devices_agents_and_local_harnesses
 
 #[tokio::test]
 async fn browser_pairing_expiry_refuses_redeem_even_after_approval() {
-    let (_root,state,owner) = fixture();
+    let (_root,state,owner) = fixture().await;
     let started = start(&state,&owner,&"a".repeat(64)).await;
     answer(&state,&owner,&started,"approve").unwrap();
     let mut request = begun(&state,&started);
@@ -138,12 +143,12 @@ async fn browser_pairing_expiry_refuses_redeem_even_after_approval() {
 
 #[tokio::test]
 async fn browser_pairing_completion_boundary_requires_paired_device_for_every_target_form() {
-    let (_root,state,owner) = fixture();
+    let (_root,state,owner) = fixture().await;
     let started = start(&state,&owner,&"a".repeat(64)).await;
     let request = begun(&state,&started);
     let target = request.body["fields"]["browser_ask"].as_str().unwrap();
     let ask = state.store.claims_for_subject_kind_at(target,"work.person-asked",None,true,1).unwrap().claims.remove(0);
-    let attention = paired_device(&state,&["read.projections","control.attention"],"attention-only");
+    let attention = paired_device(&state,&["read.projections","control.attention"],"attention-only").await;
     for target in [target, target.strip_prefix("step-run/").unwrap()] {
         let snapshot = new_client_snapshot(&state);
         let action_request: ActionRequest = serde_json::from_value(json!({

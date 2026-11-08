@@ -30,7 +30,8 @@ fn request(state: &AppState, id: &str) -> Result<ClaimRecord, ApiError> {
 }
 fn owner(state: &AppState, session: &ClientSession) -> Result<(), ApiError> {
     if state.owning_person.as_deref() != Some(session.authority_actor.as_str())
-        || session.local_peer || session.assistant_write.is_some() || !session.authority_actor.starts_with("person/") {
+        || session.pairing_grant.is_none() || session.local_peer
+        || session.assistant_write.is_some() || !session.authority_actor.starts_with("person/") {
         return Err(forbidden("browser pairing requires the configured person's device"));
     }
     require_scope(session, "read.projections")
