@@ -214,6 +214,9 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/conversation-timeline", get(assistant::read_projection))
         .route("/v1/client/assistant/conversation-search", get(assistant::read_projection))
         .route("/v1/client/assistant/conversation-content", get(assistant::read_projection))
+        .route("/v1/client/assistant/threads", get(assistant::read_projection))
+        .route("/v1/client/assistant/thread-detail", get(assistant::read_projection))
+        .route("/v1/client/assistant/thread-timeline", get(assistant::read_projection))
         .route("/v1/client/assistant/terminal-content", get(assistant::read_projection))
         .route("/v1/client/assistant/grants/{id}/policy", post(assistant::update_policy))
         .route(

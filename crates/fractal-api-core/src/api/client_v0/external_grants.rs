@@ -12,6 +12,9 @@ pub const ROUTES: &[(&str, &str)] = &[
     ("conversation-detail", "read.assistant.conversation"),
     ("conversation-timeline", "read.assistant.conversation"),
     ("conversation-search", "read.assistant.conversation"),
+    ("threads", "read.assistant.conversation"),
+    ("thread-detail", "read.assistant.conversation"),
+    ("thread-timeline", "read.assistant.conversation"),
     ("terminal-content", "read.assistant.terminal"),
 ];
 pub const PRINCIPAL: &str = "assistant/chatgpt";
@@ -266,6 +269,11 @@ pub fn authorize_route(session: &ClientSession, request: &Request<Body>) -> Resu
     let projection = request.uri().path().strip_prefix("/v1/client/assistant/");
     let Some((_, scope)) = ROUTES.iter().find(|(route, _)| projection == Some(*route))
         else { return Err(forbidden("assistants may access only explicit proof-bearing read projections")) };
+    if matches!(projection, Some("threads" | "thread-detail" | "thread-timeline"))
+        && session.authority_actor != MCP_PRINCIPAL
+    {
+        return Err(forbidden("this thread projection requires an assistant/mcp grant"));
+    }
     if request.method() != axum::http::Method::GET || !session.allows(scope)
         || request.headers().contains_key(axum::http::header::UPGRADE) {
         return Err(forbidden("assistant read requires its exact scope"));
