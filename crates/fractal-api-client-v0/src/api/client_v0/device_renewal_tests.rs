@@ -8,7 +8,7 @@ fn fixture() -> (tempfile::TempDir, AppState, MemberKey, ClaimRecord) {
     state.store.set_node_key(Arc::new(MemberKey::generate().unwrap().0)).unwrap();
     state.store.use_key_directory(&root.path().join("keys")).unwrap();
     let old = MemberKey::generate().unwrap().0;
-    let source = state.store.append_claim(&ClaimInput {
+    let source = state.store.append_client_operation_claim(&ClaimInput {
         subject: "custom/client/pairing-historical-phone".into(), kind: "custom.client.pairing-completed".into(), actor: Some(PERSON.into()),
         fields: serde_json::from_value(json!({"device_id":"device/historical-phone","person_id":PERSON,"device_public_key":old.public(),"credential_hash":credential_digest("old-bearer"),"session_actor":"person/avery/session/phone","scopes":["read.projections"],"expires_at_unix_ms":1})).unwrap(),
         evidence: vec![],expected_subject:None,idempotency_key:None,

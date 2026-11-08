@@ -72,7 +72,7 @@ mod tests {
     }
     fn fixture_with_expiry(stage_expiry: u64, challenge_expiry: u64) -> (Store, ClaimRecord, ClaimRecord, ClaimRecord, ClaimInput, ClaimInput) {
         let store=Store::open_memory("member").unwrap();
-        let source=store.append_claim(&input("custom/client/pairing-history","custom.client.pairing-completed",
+        let source=store.append_client_operation_claim(&input("custom/client/pairing-history","custom.client.pairing-completed",
             json!({"person_id":"person/example","device_id":"device/old","device_public_key":"old-key","scopes":["read.projections"],"expires_at_unix_ms":1}))).unwrap();
         let stage=store.append_client_operation_claim(&input("custom/client/pairing-renewal-stage","custom.client.pairing-renewal-staged",
             json!({"person_id":"person/example","renewal_id":"renewal/test","source_grant_id":source.id,"old_public_key":"old-key","scopes":["read.projections"],"expires_at_unix_ms":stage_expiry}))).unwrap();
