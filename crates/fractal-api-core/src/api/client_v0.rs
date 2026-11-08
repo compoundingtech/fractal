@@ -467,7 +467,7 @@ pub struct ClientSession {
     /// person and device key share an actor, so only this subject names the exact grant.
     pub pairing_grant: Option<String>,
     /// Exact person-pairing completion authenticated by the request bearer.
-    pub pairing_completion: Option<String>,
+    pub pairing_completion: Option<Box<str>>,
     /// Local-only push registrations belong to the member that issued this exact pairing.
     pub pairing_issued_here: bool,
     pub grant_expires_at: Option<u128>,
@@ -895,7 +895,7 @@ pub fn paired_client_session(
         actor: actor.into(),
         authority_actor: authority_actor.into(),
         pairing_grant: Some(paired.subject.clone()),
-        pairing_completion: Some(paired.id.clone()),
+        pairing_completion: Some(paired.id.as_str().into()),
         pairing_issued_here: paired.origin == state.store.origin(),
         grant_expires_at: Some(expires_at),
         assistant_write: None,

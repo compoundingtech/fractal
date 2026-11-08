@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v16.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v17.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -980,9 +980,12 @@ impl World {
             .values()
             // Checkpoint claims come from checkpoint work. A planning preview without its
             // optional candidate revision stops the store's projection, so a restart fails;
-            // only the planner writes those, always with one.
+            // only the planner writes those, always with one. Thread metadata also needs
+            // typed admission to establish ownership and fence lifecycle revisions.
             .filter(|spec| {
-                !spec.kind.starts_with("checkpoint.") && !spec.kind.starts_with("planning-session.")
+                !spec.kind.starts_with("checkpoint.")
+                    && !spec.kind.starts_with("planning-session.")
+                    && !fractal_schema::threads::is_reserved_kind(&spec.kind)
             })
             .collect::<Vec<_>>();
         let spec = *self.rng.pick(&kinds);
@@ -1778,14 +1781,14 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v16 shifts shared RNG draws through kind selection and optional action fields.
+/// Corpus v17 adds typed-only thread metadata without changing the v16 generator's draws.
 /// All 32 fixed seeds converge; 30 trim. Preserve exact equality with the measured never-trim set.
 const NEVER_TRIMS: &[u64] = &[2, 34];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v16 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v17 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -2014,7 +2017,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v16.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v17.json"
         }))
         .unwrap(),
     )
