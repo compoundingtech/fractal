@@ -16,8 +16,8 @@ DataSourceProvider and AtomRegistry over the fixed-clock fixture source.
 Terminal views decode bundled TerminalScreen JSON and reuse DomTerminal.
 No gateway or telemetry runtime is imported. No frames are fetched at runtime.
 
-The embed build replaces browser persistence with an iframe-local memory adapter:
-it neither reads nor writes `wf.ui@1`, and storage events cannot synchronize sibling
+The embed build replaces the UI state cells' storage with an iframe-local memory environment:
+it neither reads nor writes the host's `wf.c/`, `wf.w/` or `wf.boot@1` keys, and storage events cannot synchronize sibling
 frames. Agent and pane navigation stays in memory, preserving the embed URL and the
 host page's Back history. Reload resets the fixture selection. The workspace uses
 its measured container dimensions; `#web-narrow` selects the phone layout even in a

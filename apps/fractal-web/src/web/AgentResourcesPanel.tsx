@@ -159,7 +159,8 @@ export const AgentResourcesView = ({ agentRef, onOpen, opening, cache }: {
 }
 
 const styles = stylex.create({
-  contents: { flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column', gap: s.xl, padding: s.lg, overflowY: 'auto' },
+  // The scroller owns its visually hidden labels: positioned, so they scroll and clip with it.
+  contents: { position: 'relative', flex: '1 1 0', minHeight: 0, display: 'flex', flexDirection: 'column', gap: s.xl, padding: s.lg, overflowY: 'auto' },
   sectionTitle: { margin: 0, marginBottom: s.md, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, color: c.fgMuted },
   note: { margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: c.fgSoft, overflowWrap: 'anywhere' },
   plain: { listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: s.xs2 },

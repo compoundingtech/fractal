@@ -12,7 +12,7 @@ vi.mock('@stylexjs/stylex', () => ({
   keyframes: () => 'test-animation',
   props: () => ({}),
 }))
-vi.mock('../../data/react.tsx', () => ({ useAttention: vi.fn(), useDataSource: vi.fn() }))
+vi.mock('../../data/react.tsx', () => ({ useOptionalDataSource: () => undefined, useAttention: vi.fn(), useDataSource: vi.fn() }))
 
 import { AgentAlerts } from './AgentAlerts.tsx'
 import { AnswerAlert } from './AnswerAlert.tsx'

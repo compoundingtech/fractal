@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type * as Native from '@fractal/client/schema'
 
 vi.mock('@stylexjs/stylex', () => import('../../testStylex.ts'))
-vi.mock('../../data/react.tsx', () => ({ useAttention: vi.fn(), useDataSource: vi.fn() }))
+vi.mock('../../data/react.tsx', () => ({ useOptionalDataSource: () => undefined, useAttention: vi.fn(), useDataSource: vi.fn() }))
 
 import { AgentAlerts } from './AgentAlerts.tsx'
 import { DateTime, Option } from 'effect'

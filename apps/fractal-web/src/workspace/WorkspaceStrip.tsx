@@ -16,14 +16,17 @@ const openable = [
 ] as const
 
 /** The tab strip at every width. The panel it hosts keeps one identity, so no activation remounts a surface. */
-export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, trailing, children }: {
+export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, leading, trailing, bar = false, children }: {
   readonly items: readonly EditorTabItem[]
   readonly active: string | null
   readonly group: string
   readonly narrow: boolean
   readonly dispatch: (command: Command) => void
   readonly open: (ref: string) => void
+  readonly leading?: React.ReactNode
   readonly trailing?: React.ReactNode
+  /** The strip is the window's one top bar: it leads with `leading` and carries the conversation's controls in `trailing`. */
+  readonly bar?: boolean
   readonly children: React.ReactNode
 }) => {
   const [menu, setMenu] = React.useState<{ readonly id: string; readonly target: React.RefObject<Element | null> }>()
@@ -50,7 +53,9 @@ export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, t
       groupId={group}
       tabs={items}
       activeId={active}
-      variant="compact"
+      variant={bar ? "bar" : "compact"}
+      leading={leading}
+      end={bar ? trailing : undefined}
       isGroupFocused
       dragType="application/x-fractal-workspace-tab"
       stablePanel
@@ -70,7 +75,7 @@ export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, t
             </Menu>
           </MenuPopover>
         </MenuTrigger>
-        {trailing}
+        {bar ? null : trailing}
       </>}
     >
       {children}

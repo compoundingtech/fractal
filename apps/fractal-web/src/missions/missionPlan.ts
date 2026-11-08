@@ -1,6 +1,8 @@
+import { markdownSource, type MarkdownInline } from '@fractal/client/markdown'
 import type * as Fractal from '@fractal/client/schema'
 import { DateTime, Option } from 'effect'
 
+import { markdownPlainText } from '../../../../packages/fractal-ui/src/assistant-ui/composition/markdown-source.ts'
 import { missionSteps, type MissionPresentation, type PresentedStep } from './presentation.ts'
 
 // The mission's plan as a dependency-ordered stepper: levels from the visualization's dependency edges (else the steps'
@@ -21,15 +23,23 @@ const text = (value: unknown): string | undefined => {
   return typeof value === 'string' && value !== '' ? value : undefined
 }
 
+/** An optional decoded Markdown field, kept Markdown; empty counts as absent. */
+const markdown = (value: Option.Option<MarkdownInline> | MarkdownInline | null | undefined): MarkdownInline | undefined => {
+  const field = Option.isOption(value) ? Option.getOrUndefined(value) : value ?? undefined
+  return field === undefined || markdownSource(field) === '' ? undefined : field
+}
+
 export type PlanStep = PresentedStep & {
   readonly level: number
   /** Paths this step waits for. */
   readonly after: readonly string[]
-  readonly goal: string | undefined
+  /** What the step is for, as its author wrote it (inline Markdown). */
+  readonly goal: MarkdownInline | undefined
   readonly startedAt: number | undefined
   readonly completedAt: number | undefined
   readonly since: number | undefined
-  readonly progress: string | undefined
+  /** The agent's last progress line (inline Markdown). */
+  readonly progress: MarkdownInline | undefined
   readonly blockedReason: string | undefined
 }
 
@@ -76,11 +86,12 @@ export const missionPlan = (mission: Fractal.Mission, presentation: MissionPrese
   const order = new Map([...nodes.map(node => node.path), ...raw.map(step => step.path)].map((path, index) => [path, index] as const).reverse())
   const steps = raw.map((step): PlanStep => {
     const shown = presented.get(step.id)
-    const goal = step.goals?.[0] ?? nodes.find(node => node.path === step.path)?.goals[0]
+    const goal = markdown(step.goals?.[0] ?? nodes.find(node => node.path === step.path)?.goals[0])
     return {
       id: step.id,
       path: step.path,
-      title: shown?.title ?? text(step.title) ?? goal ?? step.path,
+      // A title is a label: a goal standing in for one shows its words, without Markdown markers.
+      title: shown?.title ?? text(step.title) ?? (goal === undefined ? undefined : markdownPlainText(markdownSource(goal))) ?? step.path,
       word: shown?.word ?? 'pending',
       owner: shown?.owner ?? { kind: 'nobody', label: 'nobody yet' },
       note: shown?.note ?? null,
@@ -93,7 +104,7 @@ export const missionPlan = (mission: Fractal.Mission, presentation: MissionPrese
       startedAt: millis(step.started_at),
       completedAt: millis(step.completed_at),
       since: millis(step.since),
-      progress: text(step.last_progress),
+      progress: markdown(step.last_progress),
       blockedReason: text(step.blocked_reason),
     }
   }).sort((a, b) => a.level - b.level || (order.get(a.path) ?? 0) - (order.get(b.path) ?? 0))

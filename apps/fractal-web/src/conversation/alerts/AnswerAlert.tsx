@@ -16,6 +16,7 @@ import { InlineMarkdown, Markdown } from '../../../../../packages/fractal-ui/src
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 import { useAlertAnswersStore } from './alertAnswers.ts'
 import { AlertNames } from './alertNames.ts'
+import { useDecisionWords } from './decisionWords.ts'
 import { KIND_WORDS, alertChoices, alertFrom, answeredLabel, canSend, effectiveChoice, partitionChoices, webLink } from './alertChoices.ts'
 import { contextOf, firstLine, isPlainHeading, markdownLine, repeatsHeading, sameWords, useArmed } from './decisionText.ts'
 
@@ -147,7 +148,7 @@ export const AnswerAlert = ({
   const store = useAlertAnswersStore()
   const choices = alertChoices(alert)
   const parts = choices === null ? { options: [] } : partitionChoices(choices)
-  const words = store.words(alert.id)
+  const [words, setWords] = useDecisionWords(store, alert.id)
   const chosen = store.selected(alert)
   const selected = chosen ?? parts.options.filter((choice) => choice.recommended === true).map((choice) => choice.key)
   const answer = choices === null ? undefined : effectiveChoice(choices, selected[0], words)
@@ -219,7 +220,7 @@ export const AnswerAlert = ({
         value: words,
         label: `Your answer to ${from}`,
         placeholder: answer?.words === 'required' ? 'What should it do instead?' : parts.words !== undefined ? 'Or tell it something else…' : choices.some((choice) => choice.words === 'optional') ? 'Add a note (optional)…' : 'Or tell it something else…',
-        onChange: (value: string) => store.setWords(alert.id, value),
+        onChange: setWords,
       },
       send: { label: 'Send', disabled: !canSend(answer, words), onPress: () => { if (answer !== undefined) send(answer) } },
     })}

@@ -14,7 +14,6 @@ import { credentialExpiredMessage, observed, unavailable, type Feed } from '../d
 import type { ResourcePage } from '../resources/agent/model.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import { rightPanelAtom } from './rightPanel.ts'
-import { inspectorViewPreference } from './conversationPreferences.ts'
 import type { ConversationPage } from '../data/source.ts'
 import { decodeConversationChunk } from '@fractal/sdk/read'
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
@@ -67,7 +66,6 @@ beforeEach(async () => {
   registry = AtomRegistry.make()
   // The dock is one app-wide setting; each test starts it closed.
   registry.set(rightPanelAtom, { open: false, tab: 'details' })
-  registry.set(inspectorViewPreference, 'details')
   registry.set(resources, observed({ value: { items: [resource], nextCursor: null } }))
   host = document.createElement('div')
   document.body.append(host)
@@ -78,11 +76,12 @@ afterEach(async () => { await act(async () => root.unmount()); registry.dispose(
 
 describe('live header parity', () => {
   it('keeps only the overflow, terminal and panel controls in the owning header, with system events in Settings', async () => {
+    // The tab strip is the one top bar; the conversation's controls are its trailing cluster.
     const header = host.querySelector('[data-testid="thread-header"]')!
-    const names = [...header.querySelectorAll('button')].map(node => node.getAttribute('aria-label') ?? node.textContent?.trim())
+    const names = [...header.querySelectorAll('[data-thread-actions] button')].map(node => node.getAttribute('aria-label') ?? node.textContent?.trim())
     expect(names).toEqual(['More actions', 'Show terminal', 'Toggle right panel'])
-    // A calm agent carries no status mark beside its title; only amber and red ones do.
-    expect(header.querySelector('[data-status]')).toBeNull()
+    // A calm agent's tab carries its status circle, never the amber or red mark.
+    expect(header.querySelector('[data-mark="needs-you"], [data-mark="failed"]')).toBeNull()
     const setting = await openSettings()
     expect(setting.checked).toBe(false)
     // The conversation pane loads lazily; wait for its first transcript frame.
@@ -164,9 +163,9 @@ describe('live header parity', () => {
     const setting = await openSettings()
     await act(async () => setting.click())
     // The persistence boundary flushes on pagehide; no debounce sleeps are needed.
-    window.dispatchEvent(new Event('pagehide'))
-    const stored = window.localStorage.getItem('wf.ui@1') ?? ''
-    expect(stored).toContain('"conversation.systemEvents":')
+    await act(async () => { window.dispatchEvent(new Event('pagehide')); await new Promise((resolve) => setTimeout(resolve, 0)) })
+    const stored = window.localStorage.getItem('wf.c/conversation.systemEvents') ?? ''
+    expect(stored).toContain('"d":true')
     expect(stored).not.toContain(agent.id)
     expect(stored).not.toContain(source.label)
     expect(stored).not.toContain(source.gateway)

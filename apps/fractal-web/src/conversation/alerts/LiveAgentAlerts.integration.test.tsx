@@ -13,7 +13,7 @@ vi.mock('@stylexjs/stylex', () => ({
   keyframes: () => 'test-animation',
   props: () => ({}),
 }))
-vi.mock('../../data/react.tsx', () => ({
+vi.mock('../../data/react.tsx', () => ({ useOptionalDataSource: () => undefined,
   useAttention: () => ({ _tag: 'Observed', value: data.attention, freshness: 'live' }),
   useDataSource: () => ({ alertActions: { act: data.act } }),
   useGrants: () => ({ actions: data.actions }),

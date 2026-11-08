@@ -3,6 +3,7 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { Agent, Attention, decodeUnknownSync } from '@fractal/client/schema'
+import { Option } from 'effect'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
@@ -25,7 +26,7 @@ const alertOf = (id: string, title: string) => decodeUnknownSync(Attention)({
 })
 
 const source = fixtureSource({ world: {
-  now: 5000, gateway: 'gateway.example.invalid', agents: [agent, { ...agent, id: 'agent/b', name: 'Agent B' } as Agent], missions: [],
+  now: 5000, gateway: 'gateway.example.invalid', agents: [agent, { ...agent, id: 'agent/b', name: 'Agent B' } as Agent, { ...agent, id: 'agent/c', name: 'Agent C', ask: Option.some('question') } as Agent], missions: [],
   attention: [alertOf('attention/one', 'First alert'), alertOf('attention/two', 'Second alert')], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
 } })
 
@@ -158,25 +159,63 @@ it('closes the focused tab with Delete or Backspace', async () => {
   expect(titles()).toEqual([])
 })
 
-it('brings the selected tab into view whenever the strip changes size', async () => {
+it('brings the selected tab into view whenever the strip changes size, scrolling only the strip', async () => {
   const observed: { readonly target: Element; readonly callback: (entries: readonly unknown[]) => void }[] = []
   vi.stubGlobal('ResizeObserver', class { constructor(private readonly callback: (entries: readonly unknown[]) => void) {} observe(target: Element) { if (!observed.some(row => row.target === target && row.callback === this.callback)) observed.push({ target, callback: this.callback }) } unobserve() {} disconnect() {} })
-  // jsdom has no layout, so no scrollIntoView of its own.
+  // scrollIntoView also scrolls every ancestor (and the document) that clips the tab: the reveal must never use it.
   Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, writable: true, value: () => {} })
-  const scrolled: string[] = []
-  const scroll = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(function (this: Element) { scrolled.push(this.getAttribute('aria-label') ?? '') })
+  const scrolledIntoView: string[] = []
+  const scroll = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(function (this: Element) { scrolledIntoView.push(this.getAttribute('aria-label') ?? '') })
+  // jsdom has no layout: a 200px strip whose selected tab sits at 300-400px of its content.
+  let scrollLeft = 0
+  const rect = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    const box = (left: number, right: number) => ({ left, right, top: 0, bottom: 30, x: left, y: 0, width: right - left, height: 30, toJSON: () => ({}) }) as DOMRect
+    if (this.matches('[role="tablist"][aria-label="Workspace tabs"]')) return box(0, 200)
+    if (this.getAttribute('aria-label') === 'Agent A') return box(300 - scrollLeft, 400 - scrollLeft)
+    return box(0 - scrollLeft, 100 - scrollLeft)
+  })
   try {
     await mount()
     await act(async () => row('agent/b').click())
     await act(async () => row('agent/a').click())
-    scrolled.length = 0
+    const strip = host.querySelector<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"]')!
+    Object.defineProperty(strip, 'clientWidth', { configurable: true, value: 200 })
+    Object.defineProperty(strip, 'clientHeight', { configurable: true, value: 30 })
+    Object.defineProperty(strip, 'scrollLeft', { configurable: true, get: () => scrollLeft, set: (value: number) => { scrollLeft = value } })
+    scrollLeft = 0
     // The width a phone gives the strip arrives after the selection did.
-    const strip = host.querySelector('[role="tablist"][aria-label="Workspace tabs"]')!
     await act(async () => { for (const { target, callback } of [...observed]) if (target.contains(strip) || strip.contains(target)) callback([]) })
-    expect(scrolled).toContain('Agent A')
+    expect(scrollLeft).toBe(200)
+    expect(scrolledIntoView).toEqual([])
   } finally {
     scroll.mockRestore()
+    rect.mockRestore()
   }
+})
+
+it('has one top bar: the tab strip carries the conversation\'s actions, and the open agent\'s name stays its heading', async () => {
+  await mount()
+  const workspace = host.querySelector<HTMLElement>('section[aria-label="Agent workspace"]')!
+  const bars = workspace.querySelectorAll('header')
+  expect(bars).toHaveLength(1)
+  const bar = bars[0]!
+  expect(bar.querySelector('[role="tablist"][aria-label="Workspace tabs"]')).not.toBeNull()
+  for (const name of ['More actions', 'Show terminal', 'Toggle right panel']) expect(bar.querySelector(`button[aria-label="${name}"]`), name).not.toBeNull()
+  // The breadcrumb is kept for assistive technology, though no longer drawn as its own line.
+  expect(bar.querySelector('nav[aria-label="Breadcrumb"] [role="heading"]')?.textContent).toBe('Agent A')
+})
+
+it('marks a tab that needs you with the amber status ring, and shows the sidebar\'s hover card on a resting pointer', async () => {
+  await mount()
+  await act(async () => row('agent/c').click())
+  const tab = (name: string) => strip().find(node => node.getAttribute('aria-label')?.startsWith(name))!
+  expect(tab('Agent C').querySelector('[data-mark="needs-you"]')).not.toBeNull()
+  expect(tab('Agent C').getAttribute('aria-label')).toContain('needs you')
+  expect(tab('Agent A').querySelector('[data-mark="needs-you"]')).toBeNull()
+  expect(tab('Agent A').querySelector('[data-status]')).not.toBeNull()
+  // The same card the sidebar row shows, with the host it no longer gets from a header line.
+  await act(async () => { tab('Agent C').dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+  await vi.waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')?.textContent).toContain('Agent C'), { timeout: 3000 })
 })
 
 it('gives an answered alert\'s tab to the next alert, and closes it when none is left', async () => {

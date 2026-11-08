@@ -19,7 +19,6 @@ import { gatewayNativeDetails } from '../data/nativeDetailsSource.ts'
 import { gatewaySubjectReads } from '../data/subjectReadPort.ts'
 import recording from '../data/subjectReadPort.gateway.fixtures.json' with { type: 'json' }
 import { AgentDetailsPanel } from './AgentDetailsPanel.tsx'
-import { inspectorViewPreference } from './conversationPreferences.ts'
 import { ompDetailsSource } from './ompDetailsFixtures.ts'
 import { ompAgentRef, ompSubagent, ompSupplementFeeds, type OmpSupplementState } from '../../../../packages/fractal-ui/src/assistant-ui/details/omp-fixtures.ts'
 import { accountingNoteSummary, spendWindowReason } from './detailsSupplement.ts'
@@ -44,8 +43,6 @@ beforeEach(async () => {
   Object.defineProperty(Range.prototype, 'getClientRects', { configurable: true, value: () => [] })
   window.localStorage.clear()
   registry = AtomRegistry.make()
-  // The last-used tab is global, so each test states where it starts.
-  registry.set(inspectorViewPreference, 'details')
   agents = Atom.make<Feed<readonly DecodedAgent[]>>(observed({ value: [row] }))
   const source = { ...fixtureSource({ world: { now: 10_000, agents: [], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } }), agents }
   host = document.createElement('div')

@@ -1,4 +1,8 @@
 import type { Attention } from '@fractal/client/schema'
+import { AgentHoverCard } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/DeferredRowActions.tsx'
+import { SidebarStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarStatus.tsx'
+import { rowStatusLabel } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
+import { sidebarRow } from '../web/sidebarRow.ts'
 import type { Agent, Feed } from '../data/source.ts'
 import { alertTabMarkers } from '../web/alertsTab.ts'
 import type { EditorTabItem } from '../workbench-kit/EditorTabs.tsx'
@@ -6,13 +10,6 @@ import { workspaceKinds } from './kinds.ts'
 import type { Tab } from './model.ts'
 import { parsePane } from './subject.ts'
 
-/** `docs/clients/ui-contract.md`: one activity glyph before an agent tab's title. */
-const activityGlyph = (agent: Agent | undefined): string => {
-  if (agent === undefined) return '~'
-  if (agent.activity === 'errored') return '!'
-  if (!agent.connected) return '×'
-  return agent.activity === 'working' ? '●' : '○'
-}
 
 const lastSegment = (ref: string) => ref.split('/').at(-1) ?? ref
 
@@ -35,12 +32,17 @@ export const tabPresentation = ({ tab, agents, rosterKnown, needsYou, attention,
     case 'Conversation':
     case 'Terminal': {
       const agent = agents.find(row => row.ref === subject.agent)
-      const mark = suffix({ questions: agent?.ask._tag === 'Known' && agent.ask.value === 'question' ? 1 : 0, others: needsYou.has(subject.agent) ? 1 : 0 })
+      const needsMe = needsYou.has(subject.agent)
+      // The sidebar row's own status circle and hover card: amber when the agent needs you, red when it failed.
+      const row = agent === undefined ? undefined : sidebarRow({ agent, stale: false, needsMe })
       return {
         ...base,
         title: tab.title ?? agent?.name ?? lastSegment(subject.agent),
-        icon: <span aria-hidden="true">{activityGlyph(agent)}</span>,
-        ...(mark === undefined ? {} : { detail: mark, attention: true }),
+        ...(row === undefined ? {} : {
+          icon: <SidebarStatus status={row.status} statusLabel={rowStatusLabel(row)} variant="Marks" needsYou={needsMe} iconOnly decorative freshness="live" />,
+          hoverCard: <AgentHoverCard row={row} />,
+        }),
+        ...(needsMe ? { attention: true } : {}),
         ...(rosterKnown && agent === undefined ? { status: 'unavailable' as const } : {}),
       }
     }

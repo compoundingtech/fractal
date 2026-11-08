@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({ tag: 'Waiting' }))
 const noRosterNames = vi.hoisted((): ReadonlyMap<string, string> => new Map())
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 vi.mock('@effect/atom-react', () => ({ useAtomValue: () => false }))
+vi.mock('./composerDraftPort.ts', () => ({ useComposerDraftPort: () => undefined }))
 vi.mock('../data/react.tsx', () => ({
   useDataSource: () => ({}), useConversation: () => state.tag === 'Waiting' ? { _tag: 'Waiting' } : { _tag: 'Unavailable', reason: 'failed', detail: 'example' },
   useConversationSync: () => undefined, useFeedInterest: () => {}, useGrants: () => ({ messageSend: 'ungranted' }), useNow: () => 0, useAttention: () => ({ _tag: 'Waiting' }),

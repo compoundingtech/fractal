@@ -16,9 +16,11 @@ import {
   type KeyboardEvent,
   type MouseEvent,
   type ReactNode,
+  type Ref,
 } from 'react'
-import { mergeProps, useDrop, type DropItem } from 'react-aria'
-import { Tab, TabList, TabPanel, Tabs, type Key } from 'react-aria-components'
+import { mergeProps, mergeRefs, useDrop, type DropItem } from 'react-aria'
+import { Popover, Tab, TabList, TabPanel, Tabs, type Key } from 'react-aria-components'
+import { borderVars as border, elevationVars as elevation, geometryVars as g, interactionVars as interaction, motionVars as m, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 import { Menu, MenuItem, MenuPopover, MenuTrigger } from '../ui-compat/components.tsx'
 import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
@@ -42,8 +44,10 @@ export interface EditorTabItem {
   readonly dirty?: boolean
   /** `live`: following a working subject; `unavailable`: stale or absent (dimmed). */
   readonly status?: 'live' | 'unavailable'
-  /** Needs the user (notification ring). */
+  /** Needs the user: spoken in the tab's name; the host draws the mark itself, in `icon`. */
   readonly attention?: boolean
+  /** Shown while the pointer rests on the tab: the same card the subject's row shows elsewhere. */
+  readonly hoverCard?: ReactNode
 }
 
 /** Source tab identity transferred between strips during drag and drop. */
@@ -52,8 +56,11 @@ export interface TabDragPayload {
   readonly tabId: string
 }
 
-/** Strip presentation: VS Code tabs, compact pills, or a vertical session list. */
-export type EditorTabsVariant = 'classic' | 'compact' | 'vertical'
+/**
+ * Strip presentation: VS Code tabs, compact pills, a vertical session list, or `bar`: the window's one top bar, flat on
+ * the content's surface, with an accent line along the selected tab's top edge.
+ */
+export type EditorTabsVariant = 'classic' | 'compact' | 'vertical' | 'bar'
 
 /** Controlled tab strip state, drag configuration, actions, and active panel. */
 export interface EditorTabsProps {
@@ -77,6 +84,10 @@ export interface EditorTabsProps {
   readonly stablePanel?: boolean
   /** 44px targets for a coarse pointer. */
   readonly touch?: boolean
+  /** Before the tabs, in the same row: in `bar`, the controls that lead the window's top bar. */
+  readonly leading?: ReactNode
+  /** After the strip's own controls: in `bar`, the controls that end the window's top bar. */
+  readonly end?: ReactNode
 }
 
 const styles = stylex.create({
@@ -124,6 +135,31 @@ const styles = stylex.create({
   },
   listCompact: { alignItems: 'center', gap: '2px' },
   stripTouch: { height: '2.75rem' },
+  stripBar: {
+    height: '2.5rem',
+    alignItems: 'stretch',
+    backgroundColor: tokens['--ds-background-100'],
+    borderBottomWidth: '1px',
+    borderBottomStyle: 'solid',
+    borderBottomColor: tokens['--ds-gray-alpha-400'],
+  },
+  listBar: { alignItems: 'stretch', gap: 0 },
+  // The sidebar row's hover-card frame (MilestoneAgentRow), so the same card looks the same from a tab.
+  hoverCard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', boxShadow: elevation.popover, outlineStyle: 'none', animationName: stylex.keyframes({ from: { opacity: 0 }, to: { opacity: 1 } }), animationDuration: m.fast, animationTimingFunction: 'ease-out', animationFillMode: 'backwards' },
+  tabBar: {
+    height: '100%',
+    boxSizing: 'border-box',
+    paddingInline: scale.space3,
+    // Inactive titles step back, so the selected one reads at a glance; gray-800 still meets text contrast.
+    color: tokens['--ds-gray-800'],
+    backgroundColor: { default: 'transparent', ':hover': tokens['--ds-gray-alpha-100'] },
+  },
+  // The selected tab: full-contrast title and an accent line along its top edge.
+  tabBarActive: {
+    color: tokens['--ds-gray-1000'],
+    fontWeight: 500,
+    boxShadow: `inset 0 2px 0 ${tokens['--ds-blue-700']}`,
+  },
   tabTouch: { height: '2.5rem', flexShrink: 0 },
   trailingTouch: { width: '1.75rem', height: '1.75rem' },
   listVertical: {
@@ -156,7 +192,8 @@ const styles = stylex.create({
     color: tokens['--ds-gray-900'],
     outlineStyle: 'none',
   },
-  focusVisible: { boxShadow: `inset 0 0 0 2px ${tokens['--ds-focus-color']}` },
+  // The shared focus ring, on keyboard focus only: inside the tab, so the strip's clipping never cuts it.
+  focusVisible: { outlineWidth: '2px', outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: '-2px' },
   tabClassic: {
     borderRightWidth: '1px',
     borderRightStyle: 'solid',
@@ -253,8 +290,6 @@ const styles = stylex.create({
     animationDuration: { default: '1.6s', '@media (prefers-reduced-motion: reduce)': '0s' },
     animationIterationCount: 'infinite',
   },
-  // Attention uses amber so a notification cannot be mistaken for the blue focused-pane ring.
-  attention: { boxShadow: `inset 0 0 0 1px ${tokens['--ds-amber-700']}` },
   attentionDot: {
     width: '6px',
     height: '6px',
@@ -365,6 +400,24 @@ const definedProps = (props: object): object =>
   Object.fromEntries(Object.entries(props).filter(([, value]) => value !== undefined))
 
 /** Accessible editor tab strip with drag, keyboard reorder, and overflow navigation. */
+/**
+ * Scroll only the strip so `item` is fully in view (`nearest` semantics on both axes). Unlike
+ * `scrollIntoView`, it never scrolls the strip's ancestors or the document: this effect also runs on
+ * every resize, while the strip may sit outside a pane's or the window's visible box.
+ */
+const revealInStrip = (strip: HTMLElement, item: Element) => {
+  const box = strip.getBoundingClientRect()
+  const left = box.left + strip.clientLeft
+  const top = box.top + strip.clientTop
+  const right = left + strip.clientWidth
+  const bottom = top + strip.clientHeight
+  const target = item.getBoundingClientRect()
+  if (target.left < left) strip.scrollLeft -= left - target.left
+  else if (target.right > right) strip.scrollLeft += Math.min(target.right - right, target.left - left)
+  if (target.top < top) strip.scrollTop -= top - target.top
+  else if (target.bottom > bottom) strip.scrollTop += Math.min(target.bottom - bottom, target.top - top)
+}
+
 export const EditorTabs = ({
   label,
   groupId,
@@ -380,11 +433,15 @@ export const EditorTabs = ({
   children,
   stablePanel = false,
   touch = false,
+  leading,
+  end,
 }: EditorTabsProps) => {
   const list = useRef<HTMLDivElement>(null)
   const [drop, setDrop] = useState<{ readonly index: number; readonly offset: number } | null>(null)
   const [announcement, setAnnouncement] = useState('')
   const vertical = variant === 'vertical'
+  // The top bar is the window's banner, as the header it replaces was; other strips are plain rows.
+  const Bar = variant === 'bar' ? 'header' : 'div'
 
   // Keep the active tab visible when it changes (keyboard cycling, quick-open, overflow menu), and when the
   // strip or its tabs change size under it: a phone's width and restored titles arrive after the selection.
@@ -396,7 +453,8 @@ export const EditorTabs = ({
     const reveal = () => {
       const nodes = [...strip.querySelectorAll('[data-tab-id]')]
       for (const node of nodes) resized?.observe(node)
-      nodes.find((node) => node.getAttribute('data-tab-id') === activeId)?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+      const active = nodes.find((node) => node.getAttribute('data-tab-id') === activeId)
+      if (active !== undefined) revealInStrip(strip, active)
     }
     resized?.observe(strip)
     const added = typeof MutationObserver === 'undefined' ? undefined : new MutationObserver(reveal)
@@ -462,17 +520,21 @@ export const EditorTabs = ({
       orientation={vertical ? 'vertical' : 'horizontal'}
       {...stylex.props(styles.tabs)}
     >
-      <div
+      <Bar
+        {...(variant === 'bar' ? { 'data-testid': 'thread-header' } : {})}
         {...stylex.props(
           styles.strip,
           variant === 'classic'
             ? styles.stripClassic
             : variant === 'compact'
               ? styles.stripCompact
-              : styles.stripVertical,
+              : variant === 'bar'
+                ? styles.stripBar
+                : styles.stripVertical,
           touch && styles.stripTouch,
         )}
       >
+        {leading}
         {vertical ? (
           <div {...stylex.props(styles.verticalHeading)}>
             <span>Open surfaces</span>
@@ -491,6 +553,7 @@ export const EditorTabs = ({
           {...stylex.props(
             styles.list,
             variant === 'compact' && styles.listCompact,
+            variant === 'bar' && styles.listBar,
             vertical && styles.listVertical,
             isDropTarget && styles.listDropTarget,
           )}
@@ -550,11 +613,12 @@ export const EditorTabs = ({
               </Menu>
             </MenuPopover>
           </MenuTrigger>
+          {end}
         </div>
         <span role="status" aria-live="polite" {...stylex.props(styles.srOnly)}>
           {announcement}
         </span>
-      </div>
+      </Bar>
       {stablePanel ? (
         <TabPanel key="stable" id={activeId ?? ''} shouldForceMount {...stylex.props(styles.panel)}>
           {children}
@@ -598,6 +662,19 @@ const TabItem = ({
   touch,
 }: TabItemProps) => {
   const [hovered, setHovered] = useState(false)
+  const anchor = useRef<HTMLDivElement | null>(null)
+  // A resting pointer, not a passing one, opens the card. Tracked apart from React Aria's hover, which the tab's
+  // render override does not receive, and never on touch, where a tap is not a rest.
+  const [resting, setResting] = useState(false)
+  const [cardOpen, setCardOpen] = useState(false)
+  useEffect(() => {
+    if (!resting || touch || tab.hoverCard === undefined) {
+      setCardOpen(false)
+      return
+    }
+    const timer = window.setTimeout(() => setCardOpen(true), 500)
+    return () => window.clearTimeout(timer)
+  }, [resting, touch, tab.hoverCard])
   const [isDragging, setDragging] = useState(false)
   const dragProps = {
     draggable: true,
@@ -626,7 +703,7 @@ const TabItem = ({
       id={tab.id}
       data-tab-id={tab.id}
       data-tab-kind={tab.kind}
-      aria-label={`${tab.title}${tab.detail === undefined && tab.harness === undefined ? '' : `, ${[tab.detail, tab.harness].filter((part) => part !== undefined).join(' · ')}`}${tab.attention === true ? ', needs attention' : ''}${tab.status === 'live' ? ', live' : tab.status === 'unavailable' ? ', unavailable' : ''}`}
+      aria-label={`${tab.title}${tab.detail === undefined && tab.harness === undefined ? '' : `, ${[tab.detail, tab.harness].filter((part) => part !== undefined).join(' · ')}`}${tab.attention === true ? ', needs you' : ''}${tab.status === 'live' ? ', live' : tab.status === 'unavailable' ? ', unavailable' : ''}`}
       aria-keyshortcuts={`Enter Delete Alt+Shift+${back} Alt+Shift+${forward}`}
       onHoverChange={setHovered}
       render={(props) => (
@@ -646,10 +723,13 @@ const TabItem = ({
               event.preventDefault()
               event.stopPropagation()
             },
+            onMouseEnter: () => setResting(true),
+            onMouseLeave: () => setResting(false),
             onAuxClick: (event: MouseEvent) => {
               if (event.button === 1) onClose(tab.id)
             },
           })}
+          ref={mergeRefs(anchor, (props as { readonly ref?: Ref<HTMLDivElement> }).ref ?? null)}
         />
       )}
       className={({ isFocusVisible }) =>
@@ -659,15 +739,18 @@ const TabItem = ({
             ? styles.tabClassic
             : variant === 'compact'
               ? styles.tabCompact
-              : styles.tabVertical,
+              : variant === 'bar'
+                ? styles.tabBar
+                : styles.tabVertical,
           active &&
             (variant === 'classic'
               ? styles.tabClassicActive
               : variant === 'compact'
                 ? styles.tabCompactActive
-                : styles.tabVerticalActive),
+                : variant === 'bar'
+                  ? styles.tabBarActive
+                  : styles.tabVerticalActive),
           active && variant === 'classic' && isGroupFocused && styles.tabClassicFocused,
-          tab.attention === true && styles.attention,
           tab.status === 'unavailable' && styles.unavailable,
           touch && styles.tabTouch,
           isDragging && styles.dragging,
@@ -715,6 +798,11 @@ const TabItem = ({
               <CloseIcon />
             )}
           </span>
+          {cardOpen && tab.hoverCard !== undefined ? (
+            <Popover isNonModal isOpen triggerRef={anchor} placement="bottom start" offset={6} onOpenChange={(open) => { if (!open) setCardOpen(false) }} {...stylex.props(styles.hoverCard)}>
+              {tab.hoverCard}
+            </Popover>
+          ) : null}
         </>
       )}
     </Tab>

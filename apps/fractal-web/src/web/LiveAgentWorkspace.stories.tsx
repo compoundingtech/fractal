@@ -5,6 +5,7 @@ import { AppStorySpecimen, type AppStoryArgs } from '../fixtures/AppStoryHarness
 import { assertProductionAppState } from '../fixtures/appStoryAssertions.ts'
 import { appStoryAgent, appStoryStates } from '../fixtures/appStoryStates.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
+import { writeCellsLikeAnotherWindow } from '../state/cell/testing.ts'
 
 /** The production workspace module, as the app mounts it, over one availability state of the fixture world. */
 const meta = {
@@ -18,13 +19,15 @@ const meta = {
   },
   parameters: { layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'The production LiveAgentWorkspace module, with its lazily loaded ConversationPane, over fixtureSource feeds of the deterministic fixture world pins loading, empty, populated, failed-tool, offline, unavailable and streaming repair states without a gateway.' } },
   // The workspace keeps its scheme, selected agent and panes in persisted UI state; every story starts from the same
-  // state. A storage event makes the already-loaded persistence merge it, as it does for another tab's write.
+  // state. Storage events make the already-running cell store adopt it, as it does another window's write.
   beforeEach: ({ args }) => {
     const agentRef = appStoryAgent(args.state)
-    const entry = (value: unknown) => ({ version: 1, value, clock: Date.now(), writer: 'app-story' })
-    const raw = JSON.stringify({ version: 1, entries: { 'round2.scheme': entry(args.scheme), 'round2.agent': entry(agentRef), 'round2.sidebarClosed': entry(false), [`round2.panes.${agentRef}`]: entry([]) } })
-    window.localStorage.setItem('wf.ui@1', raw)
-    window.dispatchEvent(new StorageEvent('storage', { key: 'wf.ui@1', newValue: raw }))
+    writeCellsLikeAnotherWindow({
+      'round2.scheme': { value: args.scheme },
+      'round2.agent': { value: agentRef },
+      'panels.leftSidebar': { value: { open: true, ratio: 256 / 1440 } },
+      [`round2.panes.${agentRef}`]: { value: [] },
+    })
   },
   render: ({ state }) => <AppStorySpecimen state={state}>{() => <LiveAgentWorkspace initialRef={appStoryAgent(state)} persistGeometry={false} />}</AppStorySpecimen>,
   play: async ({ canvasElement, args }) => {

@@ -8,9 +8,3 @@ export const systemEventsPreference = persistedAtom({
   defaultValue: false,
 })
 
-/** The right panel's last tab, the same in every conversation. */
-export const inspectorViewPreference = persistedAtom({
-  key: 'inspector.view',
-  schema: Schema.Literals(['details', 'changes', 'resources']),
-  defaultValue: 'details',
-})

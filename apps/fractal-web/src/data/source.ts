@@ -332,6 +332,8 @@ export interface DataSource {
   /** Status bar / live picker bar text, e.g. `fixtures` or `dev gateway · read-only`. */
   readonly label: string
   readonly gateway?: string
+  /** The signed-in person (`person/…`) once discovery answers; owns person-scoped UI state such as drafts. */
+  readonly person?: Atom.Atom<string | undefined>
   readonly pins?: Atom.Atom<{
     readonly state: { readonly phase: string; readonly members: readonly { readonly member: string }[] }
     readonly editable: boolean

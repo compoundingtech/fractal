@@ -1,6 +1,6 @@
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
-import { storageAdapter } from './storageAdapter.ts'
+import * as StateCell from './cell/StateCell.ts'
 
 /** One origin-local document. Individual entries carry their own migration version. */
 interface Entry {
@@ -169,7 +169,27 @@ export const createPersistence = ({
     },
   }
 }
-/** Shared browser persistence boundary for application working state. */
-export const persistence = createPersistence({ adapter: storageAdapter })
-/** Creates schema-backed atoms through the shared browser persistence boundary. */
-export const persistedAtom = persistence.atom
+/** Shared browser persistence boundary for application working state: the StateCell store. */
+export const persistence = { flush: StateCell.flush }
+/**
+ * A global StateCell under the same key, for state that has not moved to its own cell module.
+ * The first read seeds from the key's entry in the retired `wf.ui@1` document, through `migrate`
+ * when that entry is older; nothing writes `wf.ui@1` any more.
+ */
+export const persistedAtom = <A, I>({ key, schema, defaultValue, version = 1, migrate }: {
+  readonly key: string
+  readonly schema: Schema.Codec<A, I>
+  readonly defaultValue: NoInfer<A>
+  readonly version?: number
+  readonly migrate?: (value: unknown, fromVersion: number) => unknown
+}): Atom.Writable<A> => StateCell.make({
+  scope: 'global', key, schema, version, default: defaultValue,
+  ...(migrate === undefined ? {} : { migrate }),
+  seed: (retired) => {
+    const entry = retired.versioned(key)
+    if (entry === undefined || entry.version > version) return undefined
+    if (entry.version < version && migrate === undefined) return undefined
+    const decoded = Schema.decodeUnknownOption(schema)(entry.version === version ? entry.value : migrate!(entry.value, entry.version))
+    return decoded._tag === 'Some' ? decoded.value : undefined
+  },
+})
