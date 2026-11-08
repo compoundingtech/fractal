@@ -207,10 +207,10 @@ fn classification_deadline(store: &Store, cards: &[Value], now: u128) -> anyhow:
                 candidates[1] = Some(heard_at.saturating_add(u128::from(super::HEARTBEAT_MS) + 1));
             }
         }
-        if matches!(card["state"].as_str(), Some("desired" | "starting")) {
-            if let Some(since) = card["_launch_since_ms"].as_u64() {
-                candidates[2] = Some(u128::from(since).saturating_add(u128::from(super::LAUNCH_WINDOW_MS) + 1));
-            }
+        if matches!(card["state"].as_str(), Some("desired" | "starting"))
+            && let Some(since) = card["_launch_since_ms"].as_u64()
+        {
+            candidates[2] = Some(u128::from(since).saturating_add(u128::from(super::LAUNCH_WINDOW_MS) + 1));
         }
         deadline = deadline.into_iter().chain(candidates.into_iter().flatten().filter(|at| *at > now)).min();
     }
@@ -596,8 +596,8 @@ mod tests {
         let card = json!({"id":"agent/example.worker", "state":"starting", "_launch_since_ms":1000,
             "_status_source":{"state":"idle", "incarnation_id":"one", "claim":"claim/example",
                 "since_unix_ms":1000, "observed_at_unix_ms":2000}});
-        assert_eq!(classification_deadline(&store, &[card.clone()], 2000).unwrap(), Some(92_001));
-        assert_eq!(classification_deadline(&store, &[card.clone()], 92_001).unwrap(), Some(121_001));
+        assert_eq!(classification_deadline(&store, std::slice::from_ref(&card), 2000).unwrap(), Some(92_001));
+        assert_eq!(classification_deadline(&store, std::slice::from_ref(&card), 92_001).unwrap(), Some(121_001));
         assert_eq!(classification_deadline(&store, &[card], 121_001).unwrap(), Some(663_001));
         let working = json!({"id":"agent/example.worker", "state":"running",
             "_status_source":{"state":"working", "incarnation_id":"one", "claim":"claim/example",
