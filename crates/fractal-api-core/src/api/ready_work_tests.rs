@@ -64,7 +64,13 @@ fn claim(state: &AppState, step: &str) {
 async fn refused(state: &AppState, path: &str, status: StatusCode, code: &str) {
     let (actual, error) = get_request(router(state.clone()), path).await;
     assert_eq!(actual, status, "{error}");
-    assert_eq!(error["code"], code, "{error}");
+    if code == "work-list-not-ready" {
+        assert_eq!(error["code"], "internal", "{error}");
+        assert_eq!(error["retryable"], true, "{error}");
+        assert_eq!(error["details"]["reason"], code, "{error}");
+    } else {
+        assert_eq!(error["code"], code, "{error}");
+    }
 }
 
 #[tokio::test]
@@ -127,7 +133,7 @@ async fn ready_work_refuses_graph_head_and_frontier_staleness_independently() {
         let publication = state.store.published_work().unwrap();
         if graph_head {
             state.store.append_claim(&ClaimInput {
-                subject: "custom/ready-demand-marker".into(), kind: "custom.test.marker".into(),
+                subject: "custom/test/ready-demand-marker".into(), kind: "custom.test.marker".into(),
                 actor: None, fields: BTreeMap::new(), evidence: Vec::new(), expected_subject: None,
                 idempotency_key: None,
             }).unwrap();
