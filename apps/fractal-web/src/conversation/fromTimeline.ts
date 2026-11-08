@@ -101,7 +101,9 @@ const joinResult = ({
  * parts after it carry the content.
  */
 const isTurnHeader = (entry: Entry) =>
-  entry.type === 'message' && entry.body.from === undefined && entry.body.to === undefined && entry.body.author === undefined
+  entry.type === 'message' && entry.body.from === undefined && entry.body.to === undefined
+  // Fractal names no participants on a native turn; an author alone makes a header mail only on a graph message.
+  && (entry.body.author === undefined || !entry.body.message_id.startsWith('message/'))
 
 /**
  * Ids Fractal mints for a mailbox message's own content (`client_v0.rs`): the native projection
@@ -525,6 +527,10 @@ export const timelineItems = (
   for (const frame of frames) timeline.apply(frame)
   return timeline.project().items
 }
+
+/** An item a mail body projects to when it carries its header: the person's prose, a message or a wake. */
+const isMailBody = (item: ConversationItem): boolean =>
+  item._tag === 'Text' || item._tag === 'Message' || (item._tag === 'Event' && item.kind === 'delivery')
 
 interface MailPairs {
   /** Each shown message's body, by message id (delivery-echo removal compares against it). */
@@ -953,7 +959,7 @@ export class LiveTimeline {
       // message's own content is person-authored text that may quote anything.
       if (
         entry.type === 'content' && isPlainText(entry) &&
-        !MAILBOX_CONTENT_ID.test(entry.id) &&
+        !MAILBOX_CONTENT_ID.test(entry.id) && !pairs.headerOf.has(entry.id) &&
         (entry.role === 'user' || entry.role === 'system')
       ) {
         const text = withoutShownDeliveries(entry.body.text ?? '', shownBodies)
@@ -981,10 +987,12 @@ export class LiveTimeline {
       if (entry.type === 'tool_call')
         items.push(...this.cached({ entry, result: this.joined.get(at), active: this.active }))
       else {
-        items.push(...this.cached({
-          entry, result: undefined, active: true,
-          mailbox: entry.type === 'content' ? pairs.headerOf.get(entry.id) : undefined,
-        }))
+        const mailbox = entry.type === 'content' ? pairs.headerOf.get(entry.id) : undefined
+        const projected = this.cached({ entry, result: undefined, active: true, mailbox })
+        // A header is drawn at its body only when the body became the message; otherwise it keeps its own row.
+        if (mailbox !== undefined && !projected.some(isMailBody))
+          items.push(...this.cached({ entry: mailbox, result: undefined, active: true }))
+        items.push(...projected)
       }
     }
     this.items = items
