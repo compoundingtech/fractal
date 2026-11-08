@@ -59,9 +59,10 @@ pub struct FleetAnchor {
     pub fleet_anchor: String,
 }
 
+/// The native API's value envelope, distinct from client-v0's snapshot envelope.
 #[derive(Deserialize)]
-struct NativeValue<T> {
-    value: T,
+pub struct NativeValue<T> {
+    pub value: T,
 }
 
 // Native routes use the st3.v1 value envelope, not the client-v0 snapshot envelope.
