@@ -27,7 +27,7 @@ fn probe_with_temp(selectors: &[&str], temp: Option<&std::path::Path>) {
         command.env("TMPDIR", temp);
     }
     let result = command
-        .args(["-f", "env", "-u", "ST_AGENT", "python3"])
+        .args(["-f", "env", "-u", "ST_AGENT", "-u", "FRACTAL_AGENT", "-u", "ST3_SUBJECT", "python3"])
         .arg(repo.join("scripts/fractal-delivery-probe-test"))
         .arg("--binary")
         .arg(test_env!("CARGO_BIN_EXE_fractal-fixture"))
