@@ -146,9 +146,16 @@ fn held_notice_continues_and_replays_without_a_second_message() {
     let opening = plan(&mut admission, &policy, &journal, (MINUTES + 10) * MINUTE_MS);
     assert!(record(&store, &policy.config, &opening).unwrap());
     let backup = "agent/fixture.backup";
-    occupy_chain(&store, &format!("{}:early:{backup}", opening.episode), 1);
+    let root = format!("{}:early:{backup}", opening.episode);
+    occupy_chain(&store, &root, 1);
+    let remote = Store::open_memory("remote").unwrap();
+    merge_different_occupant(&store, &remote, &root);
     drain_notices(&mut admission, &journal, &store, Some(backup)).unwrap();
     assert_eq!(store.messages(Some(backup), true).unwrap().len(), 1);
+    let occupants = store.operation_claims(&root).unwrap();
+    merge_different_occupant(&store, &remote,
+        &format!("{root}:conflict:{}", occupants[0].id));
+    drain_notices(&mut admission, &journal, &store, Some(backup)).unwrap();
     let index = store.index().unwrap();
     for notice in &mut admission.notices { notice.recorded = false; }
     admission.persist(&journal).unwrap();
@@ -187,5 +194,112 @@ fn capped_recovery_does_not_prevent_other_failure_receipts_from_closing() {
     restarted.replay_weekly(&journal,
         |opening, action| record_weekly(&store, opening, action)).unwrap();
     assert!(restarted.weekly.pending.is_some());
+    assert_eq!(store.index().unwrap(), index);
+}
+
+fn merge_different_occupant(store: &Store, remote: &Store, key: &str) {
+    remote.append_claim(&ClaimInput {
+        subject: "custom/fixture/remote".into(), kind: "custom.fixture.record".into(),
+        actor: Some("agent/fixture.owner".into()),
+        fields: BTreeMap::from([("member".into(), json!("remote"))]),
+        evidence: Vec::new(), expected_subject: None, idempotency_key: Some(key.into()),
+    }).unwrap();
+    store.import_replication(remote.origin(), &remote.export_replication(0).unwrap()).unwrap();
+    assert!(store.operation_claim(key).unwrap().is_none());
+    assert_eq!(store.operation_claims(key).unwrap().len(), 2);
+}
+
+#[test]
+fn replicated_conflicts_continue_each_family_and_preserve_acknowledged_receipts() {
+    let (dir, mut policy, store) = fixture();
+    let remote = Store::open_memory("remote").unwrap();
+    let journal = dir.path().join("readiness-case.json");
+    policy.config.evidence_file = dir.path().join("weekly-evidence.json");
+    policy.config.retained_pairs_file = Some(dir.path().join("retained-evidence.json"));
+    fs::write(policy.config.retained_pairs_file.as_ref().unwrap(),
+        serde_json::to_vec(&json!({"version":1,"pairs":[]})).unwrap()).unwrap();
+    let end = (MINUTES + 10) * MINUTE_MS;
+    let mut admission = Admission::load(&journal, &policy.config).unwrap();
+    let opening = plan(&mut admission, &policy, &journal, end);
+    for suffix in ["early", "weekly", "notice:early", "notice:weekly"] {
+        let root = format!("{}:{suffix}", opening.episode);
+        let first = occupy(&store, &root);
+        merge_different_occupant(&store, &remote, &root);
+        let occupants = store.operation_claims(&root).unwrap();
+        // A continuation can itself receive divergent replicated requests.
+        let continuation = format!("{root}:conflict:{}", occupants[0].id);
+        occupy(&store, &continuation);
+        merge_different_occupant(&store, &remote, &continuation);
+        assert!(occupants.iter().any(|claim| claim.id == first.id));
+    }
+    admission.replay(&journal, |opening| record(&store, &policy.config, opening)).unwrap();
+    assert!(admission.case.as_ref().unwrap().recorded);
+    let early = phase_receipt(&store, &opening, "early").unwrap().unwrap();
+    let missed = reading(end + MINUTE_MS, 11);
+    fs::write(&policy.config.evidence_file, serde_json::to_vec(&missed).unwrap()).unwrap();
+    run_sampler(&policy, &store, missed.end_ms).unwrap();
+    admission = Admission::load(&journal, &policy.config).unwrap();
+    let weekly = phase_receipt(&store, &opening, "weekly").unwrap().unwrap();
+    assert_eq!(weekly.body["evidence"], json!([early.id]));
+    assert_eq!(store.messages(Some(&policy.config.reviewer), true).unwrap().len(), 2);
+
+    // The actual daemon phase and message receipts remain discoverable after a
+    // later divergent request changes their operation registry state to conflict.
+    let notices = admission.notices.clone();
+    for receipt in [&early, &weekly] {
+        let root = if receipt.id == early.id {
+            format!("{}:early", opening.episode)
+        } else {
+            format!("{}:weekly", opening.episode)
+        };
+        let id = receipt.body["_operation"]["id"].as_str().unwrap();
+        let first = store.operation_claims(&root).unwrap();
+        let next = format!("{root}:conflict:{}", first[0].id);
+        let second = store.operation_claims(&next).unwrap();
+        let actual = format!("{root}:conflict:{}", second[0].id);
+        assert_eq!(store.operation_claims(&actual).unwrap()[0].body["_operation"]["id"], id);
+        merge_different_occupant(&store, &remote, &actual);
+    }
+    for notice in &notices {
+        let input = notice_input(notice);
+        let root = input.idempotency_key.as_deref().unwrap();
+        let first = store.operation_claims(root).unwrap();
+        let next = format!("{root}:conflict:{}", first[0].id);
+        let second = store.operation_claims(&next).unwrap();
+        let actual = format!("{root}:conflict:{}", second[0].id);
+        merge_different_occupant(&store, &remote, &actual);
+    }
+    for receipt in [&early, &weekly] {
+        let key = format!("{}:recovered", receipt.id);
+        occupy(&store, &key);
+        merge_different_occupant(&store, &remote, &key);
+    }
+    let met = reading(end + 2 * MINUTE_MS, 0);
+    fs::write(&policy.config.evidence_file, serde_json::to_vec(&met).unwrap()).unwrap();
+    run_sampler(&policy, &store, met.end_ms).unwrap();
+    admission = Admission::load(&journal, &policy.config).unwrap();
+    assert!(admission.weekly.recovered);
+    assert_eq!(store.operational_failure(&opening.episode).unwrap().unwrap().status, "resolved");
+    for receipt in [&early, &weekly] {
+        let root = format!("{}:recovered", receipt.id);
+        let occupants = store.operation_claims(&root).unwrap();
+        merge_different_occupant(&store, &remote,
+            &format!("{root}:conflict:{}", occupants[0].id));
+    }
+    admission.case.as_mut().unwrap().recorded = false;
+    for notice in &mut admission.notices { notice.recorded = false; }
+    admission.persist(&journal).unwrap();
+    // First observation records the late conflicts; subsequent restart is read-only.
+    admission.replay(&journal, |opening| record(&store, &policy.config, opening)).unwrap();
+    assert!(record_weekly(&store, &opening, &WeeklyAction::Recover { cut: met.end_ms }).unwrap());
+    drain_notices(&mut admission, &journal, &store, None).unwrap();
+    let index = store.index().unwrap();
+    drop(store);
+    let store = Store::open(&dir.path().join("graph.db"), "fixture").unwrap();
+    let mut restarted = Admission::load(&journal, &policy.config).unwrap();
+    restarted.replay(&journal, |opening| record(&store, &policy.config, opening)).unwrap();
+    assert!(record_weekly(&store, &opening, &WeeklyAction::Recover { cut: met.end_ms }).unwrap());
+    drain_notices(&mut restarted, &journal, &store, None).unwrap();
+    assert_eq!(store.messages(Some(&policy.config.reviewer), true).unwrap().len(), 2);
     assert_eq!(store.index().unwrap(), index);
 }

@@ -41,19 +41,41 @@ pub(super) fn lookup(
     store: &Store, root: &str, owner: &str,
     accepts: impl Fn(&ClaimRecord, &str) -> bool,
 ) -> Result<Lookup> {
-    let mut key = root.to_owned();
-    for depth in 0..=MAX_CONFLICTS {
-        let Some(receipt) = store.operation_claim(&key)? else {
-            return Ok(Lookup::Vacant(key));
-        };
-        if accepts(&receipt, &key) {
-            return Ok(Lookup::Recorded(receipt));
-        }
-        conflict(store, root, owner, &receipt)?;
-        if depth == MAX_CONFLICTS { return Ok(Lookup::Blocked); }
-        key = format!("{root}:conflict:{}", receipt.id);
+    resolve(store, root, root, owner, 0, &accepts)
+}
+
+fn resolve(
+    store: &Store, root: &str, key: &str, owner: &str, depth: usize,
+    accepts: &impl Fn(&ClaimRecord, &str) -> bool,
+) -> Result<Lookup> {
+    let receipts = store.operation_claims(key)?;
+    if receipts.is_empty() {
+        return Ok(Lookup::Vacant(key.to_owned()));
     }
-    unreachable!("bounded key resolution returns at the limit")
+    let mut expected = None;
+    for receipt in &receipts {
+        if accepts(receipt, key) {
+            expected.get_or_insert(receipt);
+        } else {
+            conflict(store, root, owner, receipt)?;
+        }
+    }
+    if let Some(receipt) = expected {
+        return Ok(Lookup::Recorded(receipt.clone()));
+    }
+    if depth == MAX_CONFLICTS { return Ok(Lookup::Blocked); }
+    let mut selected = None;
+    // Search occupied alternative continuations before creating any new receipt.
+    // A later replicated occupant can sort before the occupant originally used.
+    for receipt in &receipts {
+        let next = format!("{root}:conflict:{}", receipt.id);
+        let found = resolve(store, root, &next, owner, depth + 1, accepts)?;
+        if matches!(found, Lookup::Recorded(_)) {
+            return Ok(found);
+        }
+        selected.get_or_insert(found);
+    }
+    Ok(selected.unwrap_or(Lookup::Blocked))
 }
 
 pub(super) fn message_subject(key: &str) -> String {
@@ -98,7 +120,7 @@ pub(super) fn append(store: &Store, input: &mut ClaimInput, owner: &str) -> Resu
                 conflict(store, &root, owner, &receipt)?;
                 return Ok(None);
             }
-            Err(error) if error.code == "idempotency-mismatch" => {},
+            Err(error) if matches!(error.code.as_str(), "idempotency-mismatch" | "idempotency-conflict") => {},
             Err(error) => return Err(error.into()),
         }
     }

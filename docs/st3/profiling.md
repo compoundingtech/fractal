@@ -521,6 +521,10 @@ derive from the original key and the conflicting native claim ID; four such
 continuations are allowed. A longer chain leaves that operation pending while
 other notices and measured recovery continue. No secret or new journal state
 is needed to replay a continuation.
+Replicated operation conflicts remain occupied: all native occupants are
+validated, including expected daemon receipts alongside divergent requests.
+Existing continuations are searched before a new receipt is written, so a
+later occupant does not hide an already acknowledged phase or notice.
 
 **Disabling shared readiness cases**
 
