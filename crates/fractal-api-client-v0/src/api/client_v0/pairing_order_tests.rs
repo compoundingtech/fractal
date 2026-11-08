@@ -257,12 +257,19 @@ async fn replacing_or_losing_the_pairing_secret_requires_restart() {
 
 #[tokio::test]
 async fn legacy_person_pairing_requires_an_unexpired_bounded_lifetime() {
-    for (suffix, expiry_delta, accepted) in [("bounded", 299_000_i64, true), ("long", 600_000, false), ("expired", -1, false)] {
+    for (suffix, expiry_delta, accepted) in [
+        ("bounded", 299_000_i64, true),
+        ("exact-bound", 300_000, true),
+        ("over-bound", 300_001, false),
+        ("long", 600_000, false),
+        ("expired", -1, false),
+    ] {
         let root = tempfile::tempdir().unwrap();
         let state = super::tests::test_state_named(root.path(), "legacy-person");
         let now = client_now_ms() as i64;
+        state.store.set_write_clock_at(now as u128).unwrap();
         let pairing_id = format!("pairing/{suffix}");
-        state.store.append_claim(&ClaimInput {
+        let begun = state.store.append_claim(&ClaimInput {
             subject: format!("custom/client/pairing-{suffix}"), kind: "custom.client.pairing-begun".into(),
             actor: Some(PERSON.into()),
             fields: serde_json::from_value(json!({
@@ -271,6 +278,9 @@ async fn legacy_person_pairing_requires_an_unexpired_bounded_lifetime() {
             })).unwrap(),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();
+        assert_eq!(begun.accepted_at_unix_ms, now as u128);
+        assert_eq!(begun.body["fields"]["expires_at_unix_ms"].as_i64().unwrap()
+            - begun.accepted_at_unix_ms as i64, expiry_delta);
         let result = finish_person(&state, &json!({"pairing_id":pairing_id}), "ABCDEFGH").await;
         if accepted {
             assert_eq!(result.unwrap().0["kind"], "paired-session");
@@ -280,4 +290,52 @@ async fn legacy_person_pairing_requires_an_unexpired_bounded_lifetime() {
             assert_eq!(error.message, "start pairing again");
         }
     }
+}
+
+#[tokio::test]
+async fn unknown_or_malformed_verifier_marker_never_uses_the_legacy_digest() {
+    for marker in [json!("hmac-sha256-v99"), Value::Null, json!(7), json!({"algorithm":"hmac-sha256-v1"})] {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::tests::test_state_named(root.path(), "invalid-verifier-marker");
+        let now = client_now_ms();
+        state.store.set_write_clock_at(now).unwrap();
+        // A valid, unexpired legacy digest would succeed if marker handling fell back.
+        state.store.append_claim(&ClaimInput {
+            subject: "custom/client/pairing-marker".into(),
+            kind: "custom.client.pairing-begun".into(),
+            actor: Some(PERSON.into()),
+            fields: serde_json::from_value(json!({
+                "pairing_id": "pairing/marker", "device_name": "Phone", "person_id": PERSON,
+                "code_hash": credential_digest("ABCDEFGH"), "verifier": marker,
+                "expires_at_unix_ms": now + 300_000,
+            })).unwrap(),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let before = state.store.index().unwrap();
+        let error = finish_person(&state, &json!({"pairing_id":"pairing/marker"}), "ABCDEFGH")
+            .await.unwrap_err();
+        assert_eq!(error.code, "pairing-restart-required");
+        assert_eq!(error.message, "start pairing again");
+        assert_eq!(state.store.index().unwrap(), before);
+        assert!(state.store.claims_for_subject_kind_at(
+            "custom/client/pairing-marker", "custom.client.pairing-completed", None, true, 1,
+        ).unwrap().claims.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn keyed_person_pairing_survives_reopening_the_same_daemon_state() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "reopened-pairing");
+    let challenge = begin_person(&state).await;
+    let original = begun_person(&state, &challenge);
+    let key = pairing_verifier::load_key(&state.state_dir).unwrap();
+    drop(state);
+    let reopened = super::tests::test_state_named(root.path(), "reopened-pairing");
+    assert_eq!(begun_person(&reopened, &challenge).id, original.id);
+    assert_eq!(pairing_verifier::load_key(&reopened.state_dir).unwrap(), key);
+    let Json(completed) = finish_person(&reopened, &challenge, challenge["code"].as_str().unwrap())
+        .await.unwrap();
+    assert_eq!(completed["kind"], "paired-session");
+    assert_eq!(completed["person_id"], PERSON);
 }
