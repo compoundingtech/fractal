@@ -23,6 +23,7 @@ pub mod missions;
 pub mod seats;
 pub mod helper_launchers;
 pub mod trace_principal;
+pub mod workspace_observations;
 #[cfg(test)]
 pub mod accountable_tests;
 pub mod custom;
@@ -1923,6 +1924,8 @@ struct StatusSubjects<'a> {
 pub enum ClaimsReduction {
     Full,
     Summary,
+    /// Internal full status fields without provenance. Never cached or exposed as a status response.
+    Fields,
     /// Runtime resources do not consume claim ids, counts, or session boundaries.
     Runtime,
     AgentCard,
@@ -1942,6 +1945,7 @@ pub fn subject_status_at(
     let _profile = crate::profile::span(match claims {
         ClaimsReduction::Full => "status/reduction-full",
         ClaimsReduction::Summary => "status/reduction-summary",
+        ClaimsReduction::Fields => "status/reduction-fields",
         ClaimsReduction::Runtime => "status/reduction-runtime",
         ClaimsReduction::AgentCard => "status/reduction-agent-card",
         ClaimsReduction::Incarnation => "status/reduction-incarnation",
@@ -2017,7 +2021,7 @@ pub fn subject_status_at(
                 at_index,
             )?,
         ),
-        ClaimsReduction::Runtime => (
+        ClaimsReduction::Runtime | ClaimsReduction::Fields => (
             current_harness_at(connection, subject, at_index)?,
             Vec::new(),
             ClaimsSummary::default(),
@@ -5279,7 +5283,7 @@ impl Store {
             ClaimsReduction::Runtime => &cache.runtime_statuses,
             ClaimsReduction::AgentCard if serving_card => &cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &cache.card_statuses,
-            ClaimsReduction::Incarnation => return None,
+            ClaimsReduction::Incarnation | ClaimsReduction::Fields => return None,
         };
         entries.get(subject)
             .filter(|entry| {
@@ -5315,7 +5319,7 @@ impl Store {
             ClaimsReduction::Runtime => &mut cache.runtime_statuses,
             ClaimsReduction::AgentCard if serving_card => &mut cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &mut cache.card_statuses,
-            ClaimsReduction::Incarnation => return,
+            ClaimsReduction::Incarnation | ClaimsReduction::Fields => return,
         };
         // At capacity, a cold summary remains correct and uncached. Invalidation
         // frees slots; no growing history map or full-status cache warming is needed.
@@ -5554,8 +5558,21 @@ impl Store {
     /// Generic serving status must not reduce reserved facts into fields or claim identities.
     /// Keep internal status and authoritative replication readers unchanged.
     pub fn status_for_generic_reads(
+        &self, selected: Option<&str>, owner: Option<&str>, at: Option<u64>, history: bool,
+    ) -> Result<StatusResponse> {
+        self.generic_status_reduction(selected, owner, at, history, ClaimsReduction::Full)
+    }
+
+    /// Owned-set member reads consume actual only: never expose an unenumerated claims vector.
+    pub fn actual_for_generic_reads(&self, subject: &str, at: Option<u64>) -> Result<Option<Value>> {
+        Ok(self.generic_status_reduction(
+            Some(subject), None, at, false, ClaimsReduction::Fields,
+        )?.subjects.into_iter().next().and_then(|status| status.actual))
+    }
+
+    fn generic_status_reduction(
         &self, selected: Option<&str>, owner: Option<&str>, at: Option<u64>,
-        history: bool,
+        history: bool, claims: ClaimsReduction,
     ) -> Result<StatusResponse> {
         self.read_snapshot(|_| {
             let connection = self.readers.get();
@@ -5580,7 +5597,7 @@ impl Store {
             }
             self.status_at_view_for_names_in_snapshot(
                 selected, owner, at, history,
-                StatusSubjects { names: None, excluded: Some(&excluded) }, ClaimsReduction::Full,
+                StatusSubjects { names: None, excluded: Some(&excluded) }, claims,
             )
         })
     }
@@ -5665,10 +5682,10 @@ impl Store {
                 )?;
             }
         }
-        // Incarnation reads are uncached: pinning their logical cut must not
+        // Uncached field/incarnation reads must not
         // scan an unrelated backlog to maintain shared caches they never use.
         let newest = match at_index {
-            Some(_) if selected_owner_run.is_none() && !matches!(claims, ClaimsReduction::Incarnation) => {
+            Some(_) if selected_owner_run.is_none() && !matches!(claims, ClaimsReduction::Incarnation | ClaimsReduction::Fields) => {
                 Some(self.advance_subject_cache(&connection, store_index)?)
             }
             _ => None,

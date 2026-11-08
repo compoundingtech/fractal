@@ -2300,6 +2300,15 @@ Revoking a pairing from a non-issuer returns HTTP 409 with `code: issuer-require
 `retryable: false`, and `details.issuer_host_id` naming the authoritative issuer.
 The caller must direct revocation to that issuer rather than retrying the same gateway.
 
+Completing a person pairing on a member other than the one that began it returns HTTP 403
+with `code: pairing-origin-required`, `retryable: false`, and the message
+`complete pairing on the member that began it`. This check precedes code verification and
+does not consume the challenge or issue a device grant. Complete on the beginning member,
+or start a new pairing on the desired member.
+This guarantee holds only when every member accepting pairing completion runs this
+version or later. An older member has no origin check and can still complete a replicated
+challenge begun on an upgraded member, so upgrade all members.
+
 Adding optional fields is compatible. Removing or retyping a field, changing ordering or token
 rules, adding a required action parameter, or changing action semantics requires a new capability
 version or API version. Clients preserve unknown enum cases for display but never send an action
