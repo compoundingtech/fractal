@@ -6,8 +6,8 @@ import type { PairingStore, PairingView } from './browserPairingState.ts'
 
 /**
  * Pairing for this browser, above the composer in the reading lane. It asks only where sending is not
- * already granted, shows the code to approve in Fractal while it waits, and offers to forget a paired
- * browser. Hosts without browser pairing render nothing, leaving the composer as it was.
+ * already granted or Fractal refused a send, shows the code to approve in Fractal while it waits, and
+ * offers to forget a paired browser. Hosts without browser pairing render nothing, leaving the composer as it was.
  */
 export function BrowserPairing({ store, messageSend }: { readonly store: PairingStore; readonly messageSend: 'granted' | 'ungranted' }) {
   const subscribe = React.useCallback((listener: () => void) => {
@@ -50,13 +50,15 @@ const notice = (view: PairingView, messageSend: 'granted' | 'ungranted', store: 
     case 'Unpaired':
       // Another credential may already allow sending; only a browser that cannot send is asked to pair.
       if (view.error !== undefined) return { title: view.error, danger: true, action: request }
+      // A refused send outranks the grants read at load: they no longer show whether this browser can send.
+      if (view.sendRefused === true) return { title: 'Fractal did not accept sending from this browser.', danger: true, detail: 'Approve it in Fractal to send messages from here.', action: request }
       return messageSend === 'granted' ? undefined : { title: 'This browser can read but not send.', detail: 'Approve it in Fractal to send messages from here.', action: request }
     case 'Requesting':
       return { title: 'Requesting a pairing code…', action: { ...request, label: 'Requesting code…', busy: true } }
     case 'Pending':
       return view.displayCode === undefined
         ? { title: 'Approve in Fractal', detail: 'Waiting for approval. This page reloads once the browser is approved.' }
-        : { title: 'Approve in Fractal', code: view.displayCode, detail: 'Check that Fractal shows this code, then approve. This page reloads once the browser is approved.' }
+        : { title: 'Approve in Fractal', code: view.displayCode, detail: 'Approve only if Fractal shows the code in the browser you are using. Browser labels and login names are not proof of who requested access.' }
     case 'Ended':
       return view.outcome === 'denied'
         ? { title: 'Fractal declined this browser.', danger: true, detail: 'Request a new code if this was a mistake.', action: retry }

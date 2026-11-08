@@ -2,13 +2,18 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ClientError, type FractalClient } from '@fractal/client'
 import type { BrowserPairingPort, BrowserPairingStatusReply } from '../data/source.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
+import { gatewayAttachments } from '../data/attachmentPort.ts'
 import { browserPairingPort, PairingHttpError } from '../data/browserPairing.ts'
 import { BrowserPairing } from './BrowserPairing.tsx'
-import { browserDeviceLabel, createPairingStore } from './browserPairingState.ts'
+import { browserDeviceLabel, createPairingStore, pairingSendRefusal } from './browserPairingState.ts'
+import { createComposerDraftAdapter } from './composerDraftAdapter.ts'
+import { createLocalComposerDraftStore } from './composerDrafts.ts'
+import { composerSendBinding } from './composerSend.ts'
 
 const pollMs = 100
 const fakePort = (initial: BrowserPairingStatusReply) => {
@@ -45,7 +50,7 @@ const mount = async (port: BrowserPairingPort, messageSend: 'granted' | 'ungrant
   root = createRoot(container)
   await act(async () => root!.render(<BrowserPairing store={store} messageSend={messageSend} />))
   await flush()
-  return { credentialChanged }
+  return { credentialChanged, store }
 }
 const notice = () => container!.querySelector('[data-testid="browser-pairing"]')
 const text = () => notice()?.querySelector('[role="status"]')?.textContent ?? ''
@@ -65,9 +70,11 @@ const poll = async () => {
 describe('BrowserPairing', () => {
   it('renders nothing on a host without browser pairing, so the composer stays as it was', async () => {
     const { port } = fakePort(undefined)
-    await mount(port)
+    const { store } = await mount(port)
     expect(container!.innerHTML).toBe('')
     await poll()
+    await act(() => store.sendRefused())
+    expect(container!.innerHTML).toBe('')
     expect(port.status).toHaveBeenCalledTimes(1)
   })
 
@@ -91,6 +98,8 @@ describe('BrowserPairing', () => {
     expect(port.start).toHaveBeenCalledWith('Firefox on Linux')
     expect(text()).toContain('Approve in Fractal')
     expect(container!.querySelector('[data-testid="pairing-code"]')?.textContent).toBe('K7Q-4MX')
+    expect(text()).toContain('the browser you are using')
+    expect(text()).toContain('Browser labels and login names are not proof')
 
     next({ status: 'pending', displayCode: 'K7Q-4MX' })
     await poll()
@@ -103,6 +112,42 @@ describe('BrowserPairing', () => {
     expect(notice()?.getAttribute('data-pairing-state')).toBe('Reloading')
     await poll()
     expect(port.status).toHaveBeenCalledTimes(3)
+  })
+
+  it('asks a paired browser to pair again once Fractal refuses its send, keeping the draft', async () => {
+    const seat = 'agent/example/scratch'
+    localStorage.clear()
+    const drafts = createLocalComposerDraftStore({ storage: localStorage, events: window })
+    const draft = createComposerDraftAdapter({ store: drafts, conversationId: seat, getHandle: () => undefined, now: () => 10 })
+    draft.onDraftChange({ text: 'hello', revision: 1, savedAt: 10, cause: 'user' })
+    const { port, next } = fakePort({ status: 'paired' })
+    // Grants read at load still say the browser can send; its credential no longer can.
+    const { store } = await mount(port, 'granted')
+    expect(text()).toBe('This browser is paired.')
+    const forbidden = new ClientError({ api_version: 'st3.client.v0', error_version: 'st3.client.error.v0', request_id: 'request/x', code: 'forbidden', message: 'refused', retryable: false, details: {} }, 403)
+    const client = { capabilities: vi.fn(async () => { throw forbidden }) } as unknown as FractalClient
+    const setRefusal = vi.fn()
+    const binding = composerSendBinding({
+      source: { attachments: gatewayAttachments(client, async () => ({ _tag: 'Success', value: 'snapshot/example' })) },
+      agentRef: seat,
+      grants: { actions: 'granted', messageSend: 'granted', attachmentUpload: 'granted', terminalInput: 'ungranted', terminalControl: 'ungranted' },
+      readable: true, items: [], onRefused: pairingSendRefusal(store, setRefusal), onSending: draft.onSending,
+    })
+    // The server drops the cookie it no longer accepts and answers unpaired.
+    next({ status: 'unpaired' })
+    draft.onDraftChange({ text: '', revision: 2, savedAt: 11, cause: 'submit-reset' })
+    await act(async () => binding.runtime.onNew({
+      role: 'user', content: [{ type: 'text', text: 'hello' }], createdAt: new Date(0),
+      metadata: { custom: {} }, parentId: null, sourceId: null, runConfig: undefined,
+    }))
+    await flush()
+    expect(setRefusal).toHaveBeenCalledWith({ reason: 'ungranted' })
+    expect(port.status).toHaveBeenCalledTimes(2)
+    expect(text()).toContain('Fractal did not accept sending from this browser.')
+    expect(drafts.read(seat)?.text).toBe('hello')
+    await press('Enable sending on this browser')
+    expect(container!.querySelector('[data-testid="pairing-code"]')?.textContent).toBe('K7Q-4MX')
+    draft.close()
   })
 
   it('names a refusal and lets the person request a new code', async () => {

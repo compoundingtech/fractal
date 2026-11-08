@@ -122,6 +122,15 @@ clearing its cookie. HTTP and WebSocket gateway requests use that device's
 bearer when present and otherwise retain the read-only publisher bearer.
 The daemon seals the browser grant to `read.projections`, `read.declarations`,
 `read.glasses`, `read.arrangements`, `terminal.read`, and `control.messages`.
+Raw daemon `pairing` and `pairings` routes are never forwarded from HTTP or
+WebSocket browsers; only the publisher wrapper may call them. Encoded routes
+are decoded once and ambiguous paths are refused before routing.
+Status validates an existing browser credential with the daemon; revoked or
+expired credentials are cleared and must pair again. A send authorization
+refusal rechecks status and restores the pairing prompt without dropping drafts.
+Approve only after
+comparing the code in Fractal with the browser being used: labels and login
+names are display metadata, not proof of who initiated the request.
 
 ## Trust boundary
 

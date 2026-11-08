@@ -13,11 +13,11 @@ const json = (res: ServerResponse, status: number, body: unknown): void => {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' })
   res.end(JSON.stringify(body))
 }
-const daemonCall = (gateway: GatewayOptions, path: string, body: unknown, authorization = gateway.authorization): Promise<{ status: number; body: unknown }> => {
+const daemonCall = (gateway: GatewayOptions, path: string, body: unknown, authorization = gateway.authorization, method: 'GET' | 'POST' = 'POST'): Promise<{ status: number; body: unknown }> => {
     const { promise, resolve, reject } = Promise.withResolvers<{ status: number; body: unknown }>()
-    const payload = JSON.stringify(body)
-    const upstream = request({ socketPath: gateway.socketPath, host: gateway.host, path, method: 'POST', headers: {
-      host: gateway.host, authorization, 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload),
+    const payload = method === 'GET' ? undefined : JSON.stringify(body)
+    const upstream = request({ socketPath: gateway.socketPath, host: gateway.host, path, method, headers: {
+      host: gateway.host, authorization, ...(payload === undefined ? {} : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) }),
     }, agent: false }, response => {
       const chunks: Buffer[] = []
       let size = 0
@@ -28,7 +28,9 @@ const daemonCall = (gateway: GatewayOptions, path: string, body: unknown, author
       })
       response.once('error', reject)
       response.once('end', () => {
-        try { resolve({ status: response.statusCode ?? 502, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }) }
+        const status = response.statusCode ?? 502
+        if (status === 401 || status === 403) { resolve({ status, body: undefined }); return }
+        try { resolve({ status, body: JSON.parse(Buffer.concat(chunks).toString('utf8')) }) }
         catch { reject(new TypeError('Invalid pairing response')) }
       })
     })
@@ -99,7 +101,16 @@ export const handlePairing = async (req: IncomingMessage, res: ServerResponse, g
       res.setHeader('set-cookie', secureCookie(pairCookie, Buffer.from(JSON.stringify(pending)).toString('base64url'), 300))
       json(res, 200, { requestId: response.requestId, displayCode: response.displayCode, expiresAt: response.expiresAt }); return
     }
-    if (browserBearer(req.headers) !== undefined) { json(res, 200, { status: 'paired' }); return }
+    const bearer = browserBearer(req.headers)
+    if (bearer !== undefined) {
+      const grant = await daemonCall(gateway, '/v1/client/capabilities', undefined, `Bearer ${bearer}`, 'GET')
+      if (grant.status === 401 || grant.status === 403) {
+        res.setHeader('set-cookie', secureCookie(deviceCookie, '', 0))
+        json(res, 200, { status: 'unpaired' }); return
+      }
+      if (grant.status !== 200) { json(res, 502, { error: 'Could not validate this browser' }); return }
+      json(res, 200, { status: 'paired' }); return
+    }
     const pending = pendingPair(req)
     if (pending === undefined) { json(res, 200, { status: 'unpaired' }); return }
     const result = await daemonCall(gateway, `/v1/client/pairing/browser-requests/${encodeURIComponent(pending.requestId)}/redeem`, { requestKey: pending.requestKey })

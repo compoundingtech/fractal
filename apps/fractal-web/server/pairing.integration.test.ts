@@ -27,11 +27,18 @@ const fixture = async () => {
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   const received: { path: string; auth: string | undefined; body: Record<string, unknown>; cookie: string | undefined }[] = []
   let status = 'pending'
+  let grantStatus = 200
   const daemon = createServer((req, res) => { void (async () => {
     const chunks: Buffer[] = []
     for await (const chunk of req) chunks.push(Buffer.from(chunk))
-    received.push({ path: req.url ?? '', auth: req.headers.authorization, body: JSON.parse(Buffer.concat(chunks).toString('utf8')), cookie: req.headers.cookie })
+    received.push({ path: req.url ?? '', auth: req.headers.authorization, body: JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'), cookie: req.headers.cookie })
     res.setHeader('content-type', 'application/json')
+    if (req.url === '/v1/client/capabilities') {
+      expect(req.method).toBe('GET')
+      res.statusCode = grantStatus
+      res.end(grantStatus === 200 ? '{"capabilities":[]}' : '')
+      return
+    }
     res.end(JSON.stringify(req.url?.endsWith('/redeem') ? status === 'approved' ? { bearer: device, scopes: ['control.messages'], expiresAt: 123 } : { status }
       : req.url?.endsWith('/revoke-current') ? {} : { requestId: 'request-one', displayCode: '123456', expiresAt: 123 }))
   })().catch(() => res.destroy()) })
@@ -53,7 +60,7 @@ const fixture = async () => {
     method: action === 'status' ? 'GET' : 'POST', headers: { ...headers, ...(cookie === undefined ? {} : { cookie }), ...overrides },
     ...(action === 'start' ? { body: JSON.stringify({ deviceLabel: 'Personal browser' }) } : {}),
   })
-  return { call, received, setStatus: (value: string) => { status = value } }
+  return { call, received, setStatus: (value: string) => { status = value }, setGrantStatus: (value: number) => { grantStatus = value } }
 }
 
 it('keeps request secrets and grants only in secure cookies and revokes before forgetting', async () => {
@@ -103,4 +110,20 @@ it('reports unpaired without a cookie and clears both cookies when already forgo
   const forgotten = await setup.call('forget')
   expect(forgotten.headers.getSetCookie()).toEqual([`fractal_device=${flags}0`, `fractal_pair=${flags}0`])
   expect(setup.received).toEqual([])
+})
+
+it('validates a device cookie with the daemon before reporting paired', async () => {
+  const setup = await fixture()
+  const response = await setup.call('status', `fractal_device=${device}; other=private`)
+  expect(await response.json()).toEqual({ status: 'paired' })
+  expect(response.headers.getSetCookie()).toEqual([])
+  expect(setup.received).toEqual([{ path: '/v1/client/capabilities', auth: `Bearer ${device}`, cookie: undefined, body: {} }])
+})
+it.each([401, 403])('clears a revoked or expired device cookie when daemon authentication returns %s', async status => {
+  const setup = await fixture()
+  setup.setGrantStatus(status)
+  const response = await setup.call('status', `fractal_device=${device}`)
+  expect(await response.json()).toEqual({ status: 'unpaired' })
+  expect(response.headers.getSetCookie()).toEqual([`fractal_device=${flags}0`])
+  expect(setup.received[0]?.auth).toBe(`Bearer ${device}`)
 })

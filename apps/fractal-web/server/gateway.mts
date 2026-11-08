@@ -24,13 +24,22 @@ export const cleanHeaders = (headers: IncomingHttpHeaders, upgrade = false): Out
   if (upgrade) { result.connection = 'Upgrade'; result.upgrade = 'websocket' }
   return result
 }
-export const clientRoute = (url: string): boolean => {
-  const path = url.split('?')[0] ?? ''
-  if (path !== '/v1/client' && !path.startsWith('/v1/client/')) return false
+/** Decode once; reject paths whose interpretation could change in another router. */
+export const browserPath = (url: string): string | undefined => {
   try {
-    const decoded = decodeURIComponent(path)
-    return !decoded.includes('\\') && !decoded.includes('\0') && !decoded.split('/').includes('..')
-  } catch { return false }
+    const decoded = decodeURIComponent(url.split('?')[0] ?? '')
+    if (!decoded.startsWith('/') || decoded.includes('//') || /[\\%\x00-\x1f\x7f?#]/.test(decoded)) return undefined
+    const segments = decoded.split('/')
+    if (segments.some(segment => segment === '.' || segment === '..')) return undefined
+    const normalized = `/${segments.filter(segment => segment !== '').join('/')}`
+    return decoded === normalized || decoded === `${normalized}/` ? normalized : undefined
+  } catch { return undefined }
+}
+export const clientRoute = (url: string): boolean => {
+  const path = browserPath(url)
+  if (path === undefined || (path !== '/v1/client' && !path.startsWith('/v1/client/'))) return false
+  // Only the publisher's cookie-only wrapper may begin or complete browser/device pairing.
+  return !/^\/v1\/client\/pairings?(?:\/|$)/.test(path)
 }
 /** Remove propagation-only query fields without rewriting application query bytes. */
 export const withoutTraceQuery = (url: string | undefined): string | undefined => {

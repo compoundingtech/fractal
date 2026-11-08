@@ -157,6 +157,36 @@ it.each([undefined, 'other=private', `other=private; fractal_device=${'a'.repeat
     expect(request.cookie).toBeUndefined()
   }
 })
+
+it.each([
+  '/v1/client/pairing/browser-requests',
+  '/v1/client/pairing/browser-requests/request/redeem',
+  '/v1/client/pairing/browser-requests/revoke-current',
+  '/v1/client/pairings',
+  '/v1/client/pairings/request/complete',
+  '/v1/client/pairings/request/complete/extra',
+  '/v1/client/pairing/browser-requests/request/redeem/',
+  '/v1/client/pairing/browser-requests/request/redeem/extra',
+  '/v1/client/%70airing/browser-requests',
+  '/%76%31/client/pairing/browser-requests',
+  '/v1/%63lient/pairings/request/complete',
+  '/v1/client/pairing%2Fbrowser-requests%2Frequest%2Fredeem',
+  '/v1/client/%2570airing/browser-requests',
+  '/v1//client/pairing/browser-requests',
+  '/v1/client//pairings/request/complete',
+  '//v1/client/pairing/browser-requests',
+  '/v1/client/pairing/%2e%2e/pairings/request/complete',
+])('never forwards raw pairing routes over HTTP or WebSocket (%s)', async path => {
+  // Even an otherwise admitted edge request must use the stricter cookie-only publisher wrapper.
+  const setup = await fixture()
+  expect(clientRoute(path)).toBe(false)
+  for (const method of ['GET', 'POST']) {
+    const response = await fetch(setup.base + path, { method, headers: { cookie: `fractal_device=${'a'.repeat(43)}` } })
+    expect(response.status).toBe(404)
+  }
+  expect(await openUpgrade(setup.port, path)).toContain('403 Forbidden')
+  expect(setup.received).toEqual([])
+})
 it.each([
   ['br, gzip', 'br'],
   ['gzip, br;q=0', 'gzip'],

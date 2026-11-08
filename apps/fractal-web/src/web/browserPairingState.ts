@@ -1,12 +1,14 @@
 import { PairingHttpError } from '../data/browserPairing.ts'
 import type { BrowserPairingPort, BrowserPairingStatus, BrowserPairingStatusReply } from '../data/source.ts'
+import type { SendRefusal } from './composerSend.ts'
 
 /** One browser has one pairing: every composer dock reads the same view and shares one poll. */
 export type PairingView =
   | { readonly _tag: 'Checking' }
   /** This host does not offer pairing, or its status is unreadable: the composer stays as it was. */
   | { readonly _tag: 'Hidden' }
-  | { readonly _tag: 'Unpaired'; readonly error?: string }
+  /** `sendRefused`: Fractal refused a send for authorization, so the browser is asked to pair whatever its initial grants said. */
+  | { readonly _tag: 'Unpaired'; readonly error?: string; readonly sendRefused?: true }
   | { readonly _tag: 'Requesting' }
   | { readonly _tag: 'Pending'; readonly displayCode?: string }
   | { readonly _tag: 'Ended'; readonly outcome: 'denied' | 'expired' }
@@ -22,6 +24,8 @@ export interface PairingStore {
   readonly acquire: () => () => void
   readonly start: () => Promise<void>
   readonly forget: () => Promise<void>
+  /** Fractal refused a send for authorization: re-read status, so the server drops a credential it no longer accepts. */
+  readonly sendRefused: () => Promise<void>
 }
 
 export const pairingPollMs = 2000
@@ -42,6 +46,8 @@ export const createPairingStore = ({ port, deviceLabel, credentialChanged, pollM
 }): PairingStore => {
   let view: PairingView = { _tag: 'Checking' }
   let checked = false
+  // Sticky for the page: initial grants no longer show whether this browser can send.
+  let refused = false
   let holders = 0
   let timer: ReturnType<typeof setTimeout> | undefined
   // Each action supersedes replies that were in flight when it began.
@@ -90,6 +96,7 @@ export const createPairingStore = ({ port, deviceLabel, credentialChanged, pollM
     if (at !== generation) return
     set(reply === undefined ? { _tag: 'Hidden' }
       : reply.status === 'pending' ? { _tag: 'Pending', ...(reply.displayCode === undefined ? {} : { displayCode: reply.displayCode }) }
+      : reply.status === 'unpaired' && refused ? { _tag: 'Unpaired', sendRefused: true }
       : settled(reply.status))
   }
   return {
@@ -132,6 +139,14 @@ export const createPairingStore = ({ port, deviceLabel, credentialChanged, pollM
         if (at === generation) set({ _tag: 'Paired', error: failure('forget this browser', error) })
       }
     },
+    sendRefused: async () => {
+      refused = true
+      // A first read still in flight applies the refusal; a request or outcome on screen already offers pairing;
+      // a host without pairing stays as it was.
+      if (view._tag !== 'Unpaired' && view._tag !== 'Paired') return
+      generation += 1
+      await check()
+    },
   }
 }
 
@@ -150,6 +165,12 @@ export const browserDeviceLabel = (userAgent: string) => {
     : /Linux|CrOS/.test(userAgent) ? 'Linux'
     : undefined
   return platform === undefined ? browser : `${browser} on ${platform}`
+}
+
+/** The composer's refusal handler, also re-pairing this browser when a send was refused for authorization. */
+export const pairingSendRefusal = (store: PairingStore | undefined, onRefused: (refusal: SendRefusal) => void) => (refusal: SendRefusal) => {
+  onRefused(refusal)
+  if (refusal.reason === 'ungranted') void store?.sendRefused()
 }
 
 const stores = new WeakMap<BrowserPairingPort, PairingStore>()
