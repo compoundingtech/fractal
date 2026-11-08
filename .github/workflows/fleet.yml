@@ -694,22 +694,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Require successful archive preparation
-        shell: bash
-        env:
-          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
-        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
-      - name: Identify the pinned fleet archive
-        id: compat-identity
-        shell: bash
-        run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
-      - name: Restore the prepared compatibility archive
-        id: compat-archive
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
-          key: ${{ steps['compat-identity'].outputs.key }}
-          fail-on-cache-miss: true
       - name: Look for an existing evidence note
         id: gate
         env:
@@ -762,7 +746,6 @@ jobs:
           CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
-    needs: [compat-archives-x86_64-unknown-linux-gnu]
   evidence-gate-typescript-client:
     name: evidence-gate-typescript-client
     runs-on: ubuntu-latest
@@ -2266,13 +2249,17 @@ jobs:
         id: compat-identity
         shell: bash
         run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
-      - name: Restore the prepared compatibility archive
+      - name: Download the prepared compatibility archive
         id: compat-archive
-        uses: actions/cache/restore@v4
+        uses: actions/download-artifact@v4
         with:
-          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
-          key: ${{ steps['compat-identity'].outputs.key }}
-          fail-on-cache-miss: true
+          name: ${{ steps['compat-identity'].outputs.key }}
+          path: ${{ steps['compat-identity'].outputs.directory }}
+      - name: Verify the prepared compatibility archive
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_CACHE_HIT: "true"
+        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -2493,13 +2480,17 @@ jobs:
         id: compat-identity
         shell: bash
         run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
-      - name: Restore the prepared compatibility archive
+      - name: Download the prepared compatibility archive
         id: compat-archive
-        uses: actions/cache/restore@v4
+        uses: actions/download-artifact@v4
         with:
-          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
-          key: ${{ steps['compat-identity'].outputs.key }}
-          fail-on-cache-miss: true
+          name: ${{ steps['compat-identity'].outputs.key }}
+          path: ${{ steps['compat-identity'].outputs.directory }}
+      - name: Verify the prepared compatibility archive
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_CACHE_HIT: "true"
+        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -2762,13 +2753,17 @@ jobs:
         id: compat-identity
         shell: bash
         run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
-      - name: Restore the prepared compatibility archive
+      - name: Download the prepared compatibility archive
         id: compat-archive
-        uses: actions/cache/restore@v4
+        uses: actions/download-artifact@v4
         with:
-          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
-          key: ${{ steps['compat-identity'].outputs.key }}
-          fail-on-cache-miss: true
+          name: ${{ steps['compat-identity'].outputs.key }}
+          path: ${{ steps['compat-identity'].outputs.directory }}
+      - name: Verify the prepared compatibility archive
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_CACHE_HIT: "true"
+        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -3028,13 +3023,17 @@ jobs:
         id: compat-identity
         shell: bash
         run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
-      - name: Restore the prepared compatibility archive
+      - name: Download the prepared compatibility archive
         id: compat-archive
-        uses: actions/cache/restore@v4
+        uses: actions/download-artifact@v4
         with:
-          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
-          key: ${{ steps['compat-identity'].outputs.key }}
-          fail-on-cache-miss: true
+          name: ${{ steps['compat-identity'].outputs.key }}
+          path: ${{ steps['compat-identity'].outputs.directory }}
+      - name: Verify the prepared compatibility archive
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_CACHE_HIT: "true"
+        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -3294,13 +3293,17 @@ jobs:
         id: compat-identity
         shell: bash
         run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
-      - name: Restore the prepared compatibility archive
+      - name: Download the prepared compatibility archive
         id: compat-archive
-        uses: actions/cache/restore@v4
+        uses: actions/download-artifact@v4
         with:
-          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
-          key: ${{ steps['compat-identity'].outputs.key }}
-          fail-on-cache-miss: true
+          name: ${{ steps['compat-identity'].outputs.key }}
+          path: ${{ steps['compat-identity'].outputs.directory }}
+      - name: Verify the prepared compatibility archive
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_CACHE_HIT: "true"
+        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -3784,13 +3787,17 @@ jobs:
         id: compat-identity
         shell: bash
         run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
-      - name: Restore the prepared compatibility archive
+      - name: Download the prepared compatibility archive
         id: compat-archive
-        uses: actions/cache/restore@v4
+        uses: actions/download-artifact@v4
         with:
-          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
-          key: ${{ steps['compat-identity'].outputs.key }}
-          fail-on-cache-miss: true
+          name: ${{ steps['compat-identity'].outputs.key }}
+          path: ${{ steps['compat-identity'].outputs.directory }}
+      - name: Verify the prepared compatibility archive
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_CACHE_HIT: "true"
+        run: 'python3 scripts/ci-compat-archive prepare fleet x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -5074,52 +5081,69 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Identify the pinned fleet archive
+      - name: Identify the pinned messaging archive
         id: identity-0
         shell: bash
-        run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
-      - name: Identify the pinned messaging archive
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Identify the pinned fleet archive
         id: identity-1
         shell: bash
-        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
-      - name: Restore fleet archive
+        run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
+      - name: Restore messaging archive
         id: archive-0
         uses: actions/cache/restore@v4
         with:
           path: ${{ steps['identity-0'].outputs['cache-path'] }}
           key: ${{ steps['identity-0'].outputs.key }}
-      - name: Verify and prepare fleet archive
+      - name: Verify and prepare messaging archive
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           COMPAT_ARCHIVE_CACHE_HIT: ${{ steps.archive-0.outputs.cache-hit }}
-        run: 'python3 scripts/ci-compat-archive prepare fleet x86_64-unknown-linux-gnu "${{ steps[''identity-0''].outputs.path }}"'
-      - name: Save verified fleet archive
+        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''identity-0''].outputs.path }}"'
+      - name: Save verified messaging archive
         if: steps.archive-0.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ steps['identity-0'].outputs['cache-path'] }}
           key: ${{ steps['identity-0'].outputs.key }}
-      - name: Restore messaging archive
+      - name: Share verified messaging archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps['identity-0'].outputs.key }}
+          path: ${{ steps['identity-0'].outputs.path }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - name: Restore fleet archive
         id: archive-1
         if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256
         uses: actions/cache/restore@v4
         with:
           path: ${{ steps['identity-1'].outputs['cache-path'] }}
           key: ${{ steps['identity-1'].outputs.key }}
-      - name: Verify and prepare messaging archive
+      - name: Verify and prepare fleet archive
         shell: bash
         if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256
         env:
           GH_TOKEN: ${{ github.token }}
           COMPAT_ARCHIVE_CACHE_HIT: ${{ steps.archive-1.outputs.cache-hit }}
-        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''identity-1''].outputs.path }}"'
-      - name: Save verified messaging archive
+        run: 'python3 scripts/ci-compat-archive prepare fleet x86_64-unknown-linux-gnu "${{ steps[''identity-1''].outputs.path }}"'
+      - name: Save verified fleet archive
         if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256 && steps.archive-1.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ steps['identity-1'].outputs['cache-path'] }}
           key: ${{ steps['identity-1'].outputs.key }}
+      - name: Share verified fleet archive
+        if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps['identity-1'].outputs.key }}
+          path: ${{ steps['identity-1'].outputs.path }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
       - name: Report compatibility archive cache coverage
         shell: bash
         run: 'echo "Compatibility archives: exact native-target + pinned-SHA256 restore/save; every restored archive is reverified before use." >> "$GITHUB_STEP_SUMMARY"'

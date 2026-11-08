@@ -16,9 +16,10 @@ def identity(kind, target, *, root=None):
     if not isinstance(sha, str) or not re.fullmatch(r"[a-f0-9]{64}", sha):
         raise ValueError(f"Invalid pinned SHA256 for {kind}/{target}")
     relative = Path("tmp/compat-archives") / target / f"{sha}.tar.gz"
-    # Cache version paths must be identical across hosted and Namespace runners.
+    # Producers cache across runs; artifacts carry the verified bytes across runner types.
     return {"sha256": sha, "key": f"compat-archive-v1-{target}-{sha}",
-            "cache-path": str(relative), "path": str(root / relative)}
+            "cache-path": str(relative), "path": str(root / relative),
+            "directory": str((root / relative).parent)}
 
 
 def prepare(kind, target, archive, *, cache_hit, root=None, run=subprocess.run):

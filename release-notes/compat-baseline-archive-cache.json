@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Prepare verified compatibility archives once per workflow and reuse checksum-keyed cache entries across jobs",
+  "summary": "Prepare verified compatibility archives once per workflow and share them across runner types through run-scoped artifacts",
   "replay": {"status": "none", "detail": "CI transport and cache changes only."},
   "schema": {"status": "none", "detail": "No persisted schema changes."},
   "rules": {"status": "none", "detail": "No rule changes."},

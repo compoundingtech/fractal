@@ -17,6 +17,8 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
   const jobs: Record<string, Job> = { ...workflow.jobs }
   const targets = new Map<string, Set<Kind>>()
   for (const [id, job] of Object.entries(jobs)) {
+    // Evidence gates inspect receipts only; they never execute compatibility tests.
+    if (id.startsWith('evidence-gate-')) continue
     // Shared historical setup covers test-build, archive consumers and cache warmers.
     const messaging = job.steps.some((step) => step.name === 'Prepare the historical messaging channel')
       || id === 'macos-ci'
@@ -38,8 +40,14 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
         env: { PRODUCER_RESULT: `\${{ needs['${producer}'].result }}` },
         run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }' },
       identity(kind, target, 'compat-identity'),
-      { name: 'Restore the prepared compatibility archive', id: 'compat-archive',
-        uses: 'actions/cache/restore@v4', with: { ...cache('compat-identity'), 'fail-on-cache-miss': true } },
+      { name: 'Download the prepared compatibility archive', id: 'compat-archive',
+        uses: 'actions/download-artifact@v4', with: {
+          name: "${{ steps['compat-identity'].outputs.key }}",
+          path: "${{ steps['compat-identity'].outputs.directory }}",
+        } },
+      { name: 'Verify the prepared compatibility archive', shell: 'bash',
+        env: { COMPAT_ARCHIVE_CACHE_HIT: 'true' },
+        run: `python3 scripts/ci-compat-archive prepare ${kind} ${target} "\${{ steps['compat-identity'].outputs.path }}"` },
       ...job.steps.slice(checkout + 1),
     ] }
   }
@@ -64,6 +72,12 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
             { name: `Save verified ${kind} archive`,
               if: `${index === 0 ? '' : "steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256 && "}steps.archive-${index}.outputs.cache-hit != 'true'`,
               uses: 'actions/cache/save@v4', with: cache(`identity-${index}`) },
+            { name: `Share verified ${kind} archive`, ...condition,
+              uses: 'actions/upload-artifact@v4', with: {
+                name: `\${{ steps['identity-${index}'].outputs.key }}`,
+                path: `\${{ steps['identity-${index}'].outputs.path }}`,
+                'if-no-files-found': 'error', 'retention-days': 1, 'compression-level': 0,
+              } },
           ]
         }),
         { name: 'Report compatibility archive cache coverage', shell: 'bash',
