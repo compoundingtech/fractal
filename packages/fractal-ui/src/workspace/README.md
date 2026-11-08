@@ -45,7 +45,7 @@ Each `SpaceSync` is an external store that keeps spaces as whole bodies. The sto
 
 - **Publishing.** A space is published only when a command here changed its structure. View-only changes never publish, and neither does adopting a body: one that arrived, another window's, or the stored document's, even where adoption normalised it. Closing a space here is the only thing that removes it there.
 - **Write metadata.** Each write carries `base` (the space's last revision) and a `key` that stays the same across retries of the same body on the same base.
-- **No echoes.** A body the store just sent or adopted is never sent back.
+- **No echoes.** A body the store just sent or adopted is never sent back. `publish` may return the body as the external store keeps it (binary splits, clamped sizes), so that its echo is recognised as this client's own write.
 - **In-flight hold.** While a space's write is out, incoming bodies for that space are held. When the write settles, only the latest held body is applied.
 - **Sizes.** With `syncsSizes: false`, bodies carry no sizes, and incoming bodies never reset the local ones.
 - **Spaces appearing and disappearing.** A space that arrives is created. A removed one is retired, and its local view comes back if the space returns. Closing a space here calls `remove`.

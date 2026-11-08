@@ -266,6 +266,11 @@ const styles = stylex.create({
   },
   liveRing: { boxShadow: `0 0 0 2px ${tokens['--ds-green-300']}` },
   title: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  // The title and its selected-weight twin share one grid cell, so a tab is as wide selected as not and
+  // switching tabs changes only colour and the accent line, never the strip's geometry.
+  titleBox: { display: 'inline-grid', minWidth: 0 },
+  titleCell: { gridArea: '1 / 1', minWidth: 0 },
+  titleReserve: { gridArea: '1 / 1', minWidth: 0, fontWeight: 500, visibility: 'hidden', pointerEvents: 'none' },
   // Colour, not opacity: a 55% tab title fails WCAG contrast (axe color-contrast).
   unavailable: { color: tokens['--ds-gray-800'], fontStyle: 'italic' },
   detail: {
@@ -761,7 +766,10 @@ const TabItem = ({
             </span>
           ) : (
             <>
-              <span {...stylex.props(styles.title)}>{tab.title}</span>
+              <span {...stylex.props(styles.titleBox)}>
+                <span {...stylex.props(styles.title, styles.titleCell)}>{tab.title}</span>
+                <span aria-hidden="true" {...stylex.props(styles.title, styles.titleReserve)}>{tab.title}</span>
+              </span>
               {detail}
             </>
           )}

@@ -58,9 +58,11 @@ export interface SpaceSync {
   readonly incoming: Stream.Stream<SpaceEvent>
   /**
    * Writes a whole body. `base` is the revision it was made on; `key` is stable across retries of the
-   * same body on the same base, for the store's idempotency. Succeeds with the new revision, if any.
+   * same body on the same base, for the store's idempotency. Succeeds with the new revision, if any, and
+   * the body as the external store keeps it, where that differs from the one sent (binary splits, clamped
+   * sizes): its echo is then recognised as this client's own write rather than adopted as another's.
    */
-  readonly publish: (space: string, body: SpaceBody, meta: { readonly base: string | undefined; readonly key: string }) => Effect.Effect<{ readonly revision?: string | undefined } | void, unknown>
+  readonly publish: (space: string, body: SpaceBody, meta: { readonly base: string | undefined; readonly key: string }) => Effect.Effect<{ readonly revision?: string | undefined; readonly body?: SpaceBody | undefined } | void, unknown>
   /** A space closed here. Absent: closing stays local. */
   readonly remove?: ((space: string, meta: { readonly base: string | undefined }) => Effect.Effect<void, unknown>) | undefined
 }
@@ -242,7 +244,7 @@ export const makeWorkspaceStore = Effect.fn('makeWorkspaceStore')(function* <V>(
       return sync.publish(space, current.body, meta).pipe(
         Effect.retry({ schedule: Schedule.exponential('200 millis'), times: 3 }),
         Effect.tap(result => Effect.sync(() => {
-          track.sent.set(space, text)
+          track.sent.set(space, result === undefined || result.body === undefined ? text : canonicalBody(result.body))
           track.known.add(space)
           // Written as it stands: nothing is left to write until a command here changes it again.
           const now = bodyOf(space)

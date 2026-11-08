@@ -140,6 +140,28 @@ it('starts from the person\'s glasses after a reload; faces and the shared panel
   expect(button('Toggle right panel').getAttribute('aria-pressed')).toBe('true')
 })
 
+it('says when the layout is not syncing, and a retry that reaches the glasses starts from them', async () => {
+  const st = glassStore()
+  await mount(st.gateway())
+  await act(async () => row('agent/b').click())
+  await vi.waitFor(() => expect(JSON.stringify([...st.glasses.values()][0]?.body)).toContain('agent:agent/b'))
+  await unmount()
+  // st is out of reach for this page's first look.
+  let reachable = false
+  const flaky = st.gateway()
+  const discover = flaky.discover
+  flaky.discover = async () => { if (!reachable) throw new TypeError('fetch failed'); return discover() }
+  window.history.replaceState(null, '', '/')
+  root = createRoot(host)
+  await act(async () => root!.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace glasses={flaky} /></DataSourceProvider>))
+  await vi.waitFor(() => expect(host.textContent).toContain('Layout not syncing'))
+  expect(titles()).toEqual([])
+  reachable = true
+  await act(async () => [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Retry')!.click())
+  await vi.waitFor(() => expect(host.textContent).not.toContain('Layout not syncing'))
+  await vi.waitFor(() => expect(titles()).toEqual(['Agent A', 'Agent B']))
+})
+
 it('opens a terminal link as the agent\'s one tab on its terminal, and the URL names the agent', async () => {
   window.history.replaceState(null, '', '/w/agent/a?open=terminal/a:detail')
   await mount()
