@@ -6,6 +6,16 @@ ended, so other clients can tell the question is waiting. It records **ids and p
 never text**. The question text, option labels, free-text answers and notes stay in the harness's
 own timeline; a client that shows the question joins its text from there.
 
+## Managed seats
+
+A managed seat asks its person through native work asks (`fractal work ask`), not through a harness
+question tool. The managed launch wrapper selected from the runtime profile (see
+[configuration](../site/reference/configuration.md)) decides which harness-native tools the agent
+receives, and it removes model-authored question tools before the first turn. Fractal does not refuse,
+translate or answer a question tool on the agent's behalf. The records below cover a harness question
+that a seat still holds open, such as one raised by a session that started before its wrapper removed
+the tool. Harness permission, login and recovery prompts are separate: their alerts stay visible.
+
 ## Identity
 
 A question is the subject `harness-question/ID`. `ID` is the first 16 bytes, in hex, of a SHA-256
