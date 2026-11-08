@@ -31,7 +31,9 @@ pub(crate) fn warn_before_startup_build(connection: &Connection) {
         )?;
         let mut missing = 0;
         for name in INDEX_NAMES {
-            if query.query_row([name], |_| Ok(())).optional()?.is_none() {
+            if query.query_row(
+                /* sqlite-large-value: allow-for-now lv-hf1e9830a3796 owner=fractal_store::owner_indexes TODO=trace-statement-and-value-representation */
+                [name], |_| Ok(())).optional()?.is_none() {
                 missing += 1;
             }
         }
