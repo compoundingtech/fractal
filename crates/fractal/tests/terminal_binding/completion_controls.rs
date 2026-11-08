@@ -132,25 +132,22 @@ async fn completion_control(order: Option<&str>, exit: u8, rejection: Option<&st
     let runtime = runtime();
     let socket = root.path().join("api.sock");
     let events = watch::channel(0).0;
-    let state = fractal_daemon::api::AppState {
-        seat_admission: Default::default(),
-        owning_person: None,
-        store: store.clone(),
-        notify: Arc::new(Notify::new()),
-        event_notify: events.clone(),
-        node: "orchid".into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: vec![],
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        harness_question_sink: None,
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = fractal_daemon::api::AppState { browser_pairing_login: None, seat_admission: Default::default(), owning_person: None,
+    store: store.clone(),
+    notify: Arc::new(Notify::new()),
+    event_notify: events.clone(),
+    node: "orchid".into(),
+    state_dir: root.path().into(),
+    pty_root: root.path().join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: vec![],
+    client_relay: None,
+    native_session_home: None,
+    planner_default: Default::default(),
+    harness_question_sink: None,
+    assistant_receipts: Default::default(),
+    private_notes: Default::default(), };
     let server_socket = socket.clone();
     let server = tokio::spawn(async move {
         let store = state.store.clone();

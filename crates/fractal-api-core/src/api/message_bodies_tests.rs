@@ -287,13 +287,10 @@ fn node_state(root: &Path, name: &str) -> AppState {
     fs::create_dir_all(&dir).unwrap();
     let store = Store::open(&dir.join("graph.db"), name).unwrap();
     store.bind_fleet(FLEET).unwrap();
-    AppState {
-        seat_admission: Default::default(),
-        store: Arc::new(store),
-        node: name.into(),
-        state_dir: dir,
-        ..super::tests::state(root)
-    }
+    AppState { browser_pairing_login: None, seat_admission: Default::default(), store: Arc::new(store),
+    node: name.into(),
+    state_dir: dir,
+    ..super::tests::state(root) }
 }
 
 /// Everything `from` holds, delivered to `to` and admitted the way a peer exchange does it.

@@ -406,7 +406,7 @@ impl PersonWorkStore for Store {
         if !input.person.starts_with("person/")
             || input.person.matches('/').count() != 1
             || input.person == "person/"
-            || !input.actor.starts_with("agent/")
+            || !(input.actor.starts_with("agent/") || input.actor == "daemon/browser-pairing")
             || input.title.trim().is_empty()
             || input.reason.trim().is_empty()
             || input.idempotency_key.is_empty()
@@ -554,6 +554,11 @@ impl PersonWorkStore for Store {
             let ask = request(tx, &subject).map_err(internal)?;
             if update_only && ask.as_ref().is_none_or(|ask| !is_update(ask)) {
                 return Err(FractalError::new("invalid-update-withdrawal", "withdraw names an informational update, not an ask or authored work"));
+            }
+            if ask.as_ref().is_some_and(|ask| ask.actor.as_deref() == Some("daemon/browser-pairing"))
+                && (authorization.is_some() || input.delegation.is_some() || !input.actor.starts_with("person/"))
+            {
+                return Err(FractalError::new("forbidden", "only an owner device can answer browser pairing asks"));
             }
             if let Some(authorization) = authorization {
                 let ask = ask.as_ref().filter(|ask| ask.kind == "work.person-asked"
@@ -986,7 +991,7 @@ impl PersonWorkStore for Store {
                 stable_input.actor = actor;
                 &stable_input
             };
-            if !fractal_store::store::person_work::requester_declared(tx, &input.actor).map_err(internal)? {
+            if input.actor != "daemon/browser-pairing" && !fractal_store::store::person_work::requester_declared(tx, &input.actor).map_err(internal)? {
                 return Err(FractalError::new("missing-ask-owner", "the requester must have an existing agent declaration; declare the agent before asking"));
             }
             let key = if input.new_run.is_some() {

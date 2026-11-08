@@ -67,6 +67,9 @@ pub struct Config {
     pub lanes: Option<Lanes>,
     /// The concrete person represented by trusted local product commands.
     pub person: Option<String>,
+    /// Tailnet login admitted for browser pairing; absent disables browser pairing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub browser_pairing_login: Option<String>,
     pub fleet_id: Option<String>,
     pub shared_secret_file: Option<PathBuf>,
     pub state_dir: PathBuf,
@@ -702,6 +705,7 @@ impl Default for Config {
             seat_admission: None,
             lanes: None,
             person: None,
+            browser_pairing_login: None,
             fleet_id: None,
             shared_secret_file: None,
             state_dir,

@@ -104,26 +104,23 @@ async fn serve_seeded_fixture_for_the_website_cli_capture() {
     for suffix in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{suffix}", database.display()));
     }
-    let state = AppState {
-        seat_admission: Default::default(),
-        owning_person: None,
-        store: Arc::new(Store::open(&database, "studio").unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: "studio".into(),
-        state_dir: dir.clone(),
-        pty_root: dir.join("pty"),
-        pty_binary: PathBuf::from("pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        harness_question_sink: None,
-        // The app seed's maintainer runs Codex. The daemon reads its native session from here.
-        native_session_home: app.then(|| dir.join("home")),
-        planner_default: fractal_daemon::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-    };
+    let state = AppState { browser_pairing_login: None, seat_admission: Default::default(), owning_person: None,
+    store: Arc::new(Store::open(&database, "studio").unwrap()),
+    notify: Arc::new(Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: "studio".into(),
+    state_dir: dir.clone(),
+    pty_root: dir.join("pty"),
+    pty_binary: PathBuf::from("pty"),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    harness_question_sink: None,
+    // The app seed's maintainer runs Codex. The daemon reads its native session from here.
+    native_session_home: app.then(|| dir.join("home")),
+    planner_default: fractal_daemon::model::PlannerSpec::default(),
+    assistant_receipts: Default::default(),
+    private_notes: Default::default(), };
     let store = state.store.clone();
     let (source, workspace, requester) = if app {
         (APP, "/work/app", "person/ada")

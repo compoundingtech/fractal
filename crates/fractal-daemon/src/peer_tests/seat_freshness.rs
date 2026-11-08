@@ -27,25 +27,22 @@ const RECEIVER: &str = "conversation-owner";
 const HOST: &str = "conversation-gateway";
 
 fn app(store: Arc<Store>, node: &str, root: &Path) -> crate::api::AppState {
-    crate::api::AppState {
-        seat_admission: Default::default(),
-        owning_person: None,
-        store,
-        notify: Arc::new(tokio::sync::Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: node.into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: crate::model::PlannerSpec::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(),
-        harness_question_sink: None,
-    }
+    crate::api::AppState { browser_pairing_login: None, seat_admission: Default::default(), owning_person: None,
+    store,
+    notify: Arc::new(tokio::sync::Notify::new()),
+    event_notify: watch::channel(0_u64).0,
+    node: node.into(),
+    state_dir: root.into(),
+    pty_root: root.join("pty"),
+    pty_binary: "pty".into(),
+    fleet_id: None,
+    configured_peers: Vec::new(),
+    client_relay: None,
+    native_session_home: None,
+    planner_default: crate::model::PlannerSpec::default(),
+    assistant_receipts: Default::default(),
+    private_notes: Default::default(),
+    harness_question_sink: None, }
 }
 
 fn append(store: &Store, subject: &str, kind: &str, actor: Option<&str>, fields: Value) {
