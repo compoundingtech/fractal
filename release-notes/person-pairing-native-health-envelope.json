@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Pairing gateway discovery decodes the real native health envelope and never follows HTTP redirects.",
+  "replay": { "status": "none", "detail": "No replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage or wire schema change; reuses the existing native value envelope." },
+  "rules": { "status": "none", "detail": "No checkpoint or fleet coordination change." },
+  "compatibility": { "status": "changed", "detail": "Gateway discovery reads the node from the native response value envelope. HTTP redirects are not followed and leave the gateway unverified, producing the existing warning. The server completion-origin guard remains authoritative." },
+  "downtime": { "status": "none", "detail": "No downtime or restart-time work." },
+  "manual": { "status": "none", "detail": "No additional manual steps." },
+  "recovery": { "status": "none", "detail": "Health discovery writes no persisted state." }
+}

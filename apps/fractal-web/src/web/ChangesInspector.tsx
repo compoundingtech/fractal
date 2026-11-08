@@ -4,7 +4,7 @@ import { DiffPanel } from '../../../../packages/fractal-ui/src/assistant-ui/comp
 import { ResourceCardV1, ResourceChipV1 } from '@fractal/ui/assistant-ui/resources'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useConversation, useDataSource, useFeedInterest } from '../data/react.tsx'
-import type { Feed, ConversationPage } from '../data/source.ts'
+import { credentialNotice, type Feed, type ConversationPage } from '../data/source.ts'
 import { capturedChanges, capturedProvenance, selectedCapturedChange } from './capturedChanges.ts'
 
 /** Shares the retained public conversation feed and acquires demand only while visible.
@@ -26,6 +26,8 @@ export function CapturedChangesView({ feed, width, onClose }: { readonly feed: F
   const lines = choice?.resource.files[0]?.lines
   const fill = width === 'fill'
   const root = React.useRef<HTMLElement>(null)
+  const refusal = credentialNotice(feed)
+  if (refusal) return <aside aria-label="Changes" {...stylex.props(styles.root)}><p role="status" {...stylex.props(styles.scope)}>{refusal}</p></aside>
   const dockInfo = <>
     <p {...stylex.props(styles.scope)}>{feed._tag === 'Waiting' ? 'Waiting for captured changes.' : feed._tag === 'Unavailable' ? 'Captured changes unavailable: ' + feed.detail : (feed.freshness === 'stale' ? 'Last verified captured changes · ' : '') + 'Successful-tool captures · loaded transcript window' + (page?.hasOlder ? ' · older history not shown' : '')}{feed._tag === 'Observed' && feed.error ? ' · ' + feed.error.detail : ''}</p>
     {choice ? <>

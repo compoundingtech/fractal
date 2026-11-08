@@ -157,6 +157,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case attentionMigrated
     case invalidAnswer, notAnswerable
     case issuerRequired
+    case pairingOriginRequired
     case suspendAuthoredSessionSelection
     case legacyActionReceiptUntrusted
     case arrangementExists
@@ -245,6 +246,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "idempotency-conflict": .idempotencyConflict
         case "stale-fence": .staleFence
         case "issuer-required": .issuerRequired
+        case "pairing-origin-required": .pairingOriginRequired
         case "invalid-answer": .invalidAnswer; case "not-answerable": .notAnswerable
         case "suspend-authored-session-selection": .suspendAuthoredSessionSelection
         case "legacy-action-receipt-untrusted": .legacyActionReceiptUntrusted
@@ -335,6 +337,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .idempotencyConflict: "idempotency-conflict"
         case .staleFence: "stale-fence"
         case .issuerRequired: "issuer-required"
+        case .pairingOriginRequired: "pairing-origin-required"
         case .invalidAnswer: "invalid-answer"; case .notAnswerable: "not-answerable"
         case .suspendAuthoredSessionSelection: "suspend-authored-session-selection"
         case .legacyActionReceiptUntrusted: "legacy-action-receipt-untrusted"
@@ -464,7 +467,7 @@ public struct UsageSummary: Codable, Sendable {
     public let cost: Double?; public let currency: String?; public let incarnationCount: Int; public let aggregation: String; public let context: UsageContext?
     enum CodingKeys: String, CodingKey { case totalTokens = "total_tokens", inputTokens = "input_tokens", outputTokens = "output_tokens", cachedTokens = "cached_tokens", cost, currency, incarnationCount = "incarnation_count", aggregation, context }
 }
-public struct AttentionResource: Codable, Sendable { public let customForm: JSONValue?; public let id, kind, revision, updatedAt, attentionKind, sourceID, personID, title, detail, priority, state, requestedAt: String; public let deadlineAt: String?; public let defaultAnswer: AskDefaultAnswer?; public let alert: Bool?; public let conversationIDs: [String]?; public let conversationID, requesterID, launchID, variantID, messageID, previewToken, what, because, reviewMode, missionID, missionRunID, stepRunID, episode, sourceKind: String?; public let actionParameters: JSONValue?; public let request: StructuredRequest?; public let update: PersonUpdate?; public let blocked: AttentionBlocked?; public let presentation: AttentionPresentation?; public let preview: LaunchPreview?; public let fix: JSONValue?; public let targets, actions: [String]; public let targetStates: [AttentionTargetState]?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case customForm = "custom_form", id, kind, revision, updatedAt = "updated_at", attentionKind = "attention_kind", episode, sourceKind = "source_kind", actionParameters = "action_parameters", request, update, blocked, presentation, sourceID = "source_id", personID = "person_id", alert, conversationID = "conversation_id", conversationIDs = "conversation_ids", requesterID = "requester_id", launchID = "launch_id", variantID = "variant_id", messageID = "message_id", previewToken = "preview_token", preview, what, because, fix, reviewMode = "review_mode", missionID = "mission_id", missionRunID = "mission_run_id", stepRunID = "step_run_id", title, detail, priority, state, requestedAt = "requested_at", deadlineAt = "deadline_at", defaultAnswer = "default_answer", targets, targetStates = "target_states", actions, operational } }
+public struct AttentionResource: Codable, Sendable { public let customForm: JSONValue?; public let id, kind, revision, updatedAt, attentionKind, sourceID, personID, title, detail, priority, state, requestedAt: String; public let deadlineAt: String?; public let defaultAnswer: AskDefaultAnswer?; public let alert, threadUnread: Bool?; public let conversationIDs: [String]?; public let conversationID, requesterID, launchID, variantID, messageID, previewToken, what, because, reviewMode, missionID, missionRunID, stepRunID, episode, sourceKind: String?; public let actionParameters: JSONValue?; public let request: StructuredRequest?; public let update: PersonUpdate?; public let blocked: AttentionBlocked?; public let presentation: AttentionPresentation?; public let preview: LaunchPreview?; public let fix: JSONValue?; public let targets, actions: [String]; public let targetStates: [AttentionTargetState]?; public let operational: Operational?; enum CodingKeys: String, CodingKey { case customForm = "custom_form", id, kind, revision, updatedAt = "updated_at", attentionKind = "attention_kind", episode, sourceKind = "source_kind", actionParameters = "action_parameters", request, update, blocked, presentation, sourceID = "source_id", personID = "person_id", alert, threadUnread = "thread_unread", conversationID = "conversation_id", conversationIDs = "conversation_ids", requesterID = "requester_id", launchID = "launch_id", variantID = "variant_id", messageID = "message_id", previewToken = "preview_token", preview, what, because, fix, reviewMode = "review_mode", missionID = "mission_id", missionRunID = "mission_run_id", stepRunID = "step_run_id", title, detail, priority, state, requestedAt = "requested_at", deadlineAt = "deadline_at", defaultAnswer = "default_answer", targets, targetStates = "target_states", actions, operational } }
 /// st's presentation of an attention row; words are fixtures/clients/words.json ids.
 public struct AttentionPresentation: Codable, Sendable { public let tier, kind: String?; public let agent: AttentionActor?; public let raisedBy: AttentionActor?; public let waiting: AttentionWaiting?; public let revision: AttentionRevision?; public let launch: AttentionLaunch?; public let prompt: AttentionPrompt?; enum CodingKeys: String, CodingKey { case tier, kind, agent, raisedBy = "raised_by", waiting, revision, launch, prompt } }
 public struct AttentionRevision: Codable, Sendable { public let fromRevision, toRevision, reason: String; public let lines: [AttentionRevisionLine]; public let truncated: Bool; enum CodingKeys: String, CodingKey { case fromRevision = "from_revision", toRevision = "to_revision", reason, lines, truncated } }
@@ -1204,6 +1207,7 @@ public struct ActionRequest: Codable, Sendable {
     public static func terminalInput(id: String, idempotencyKey: String, fence: Fence, parameters: TerminalInputParameters) throws -> Self { try .init(id: id, type: .terminalInput, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func terminalResize(id: String, idempotencyKey: String, fence: Fence, parameters: TerminalResizeParameters) throws -> Self { try .init(id: id, type: .terminalResize, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func threadClose(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) throws -> Self { try .init(id: id, type: .threadClose, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
+    public static func threadRead(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadReadParameters) throws -> Self { try .init(id: id, type: .threadRead, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func threadRename(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadRenameParameters) throws -> Self { try .init(id: id, type: .threadRename, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func threadReopen(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) throws -> Self { try .init(id: id, type: .threadReopen, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
     public static func threadReply(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadReplyParameters) throws -> Self { try .init(id: id, type: .threadReply, idempotencyKey: idempotencyKey, fence: fence, typedParameters: parameters) }
@@ -1233,6 +1237,25 @@ public struct PersonAnswerInput: Codable, Sendable { public var id, text: String
 public struct AskDefaultAnswer: Codable, Sendable { public let id, label: String }
 public struct PersonAnswer: Codable, Sendable { public let type, outcome: String; public let id, label, text: String? }
 public struct PersonAnswerRecord: Codable, Sendable { public let ask, status, summary, respondent: String; public let actedFor, senderClass, assistantGrantID, assistantOwner, assistantSessionActor, resolvedBy: String?; public let answeredAtUnixMS: UInt64; public let answer: PersonAnswer?; public let evidence: [String]?; enum CodingKeys: String, CodingKey { case ask, status, summary, respondent, actedFor = "acted_for", senderClass = "sender_class", assistantGrantID = "assistant_grant_id", assistantOwner = "assistant_owner", assistantSessionActor = "assistant_session_actor", resolvedBy = "resolved_by", answer, evidence, answeredAtUnixMS = "answered_at_unix_ms" } }
+public struct ThreadReadParameters: Codable, Sendable {
+    public let targetID: String
+    public let throughMessageID: String?
+    public let seenMessageIDs: [String]
+    public init(targetID: String, throughMessageID: String?, seenMessageIDs: [String]) {
+        self.targetID = targetID
+        self.throughMessageID = throughMessageID
+        self.seenMessageIDs = seenMessageIDs
+    }
+    enum CodingKeys: String, CodingKey {
+        case targetID = "target_id", throughMessageID = "through_message_id", seenMessageIDs = "seen_message_ids"
+    }
+    public func encode(to encoder: Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(targetID, forKey: .targetID)
+        try values.encode(throughMessageID, forKey: .throughMessageID)
+        try values.encode(seenMessageIDs, forKey: .seenMessageIDs)
+    }
+}
 public struct TargetParameters: Codable, Sendable { public var targetID: String; public var reason: String?; public var summary: String?; public var evidence: [String]; public init(targetID: String, reason: String? = nil, summary: String? = nil, evidence: [String] = []) { self.targetID = targetID; self.reason = reason; self.summary = summary; self.evidence = evidence }; enum CodingKeys: String, CodingKey { case targetID = "target_id", reason, summary, evidence } }
 public struct AgentRetireParameters: Codable, Sendable { public var agent: String; public var reason: String; public var successor: String?; public var expectRevision: String?; public init(agent: String, reason: String, successor: String? = nil, expectRevision: String? = nil) { self.agent = agent; self.reason = reason; self.successor = successor; self.expectRevision = expectRevision }; enum CodingKeys: String, CodingKey { case agent, reason, successor; case expectRevision = "expect_revision" } }
 public struct AgentStopParameters: Codable, Sendable { public var agent: String; public var reason: String?; public init(agent: String, reason: String? = nil) { self.agent = agent; self.reason = reason } }
@@ -1553,7 +1576,7 @@ public enum PairedSession: Codable, Sendable {
     private enum KindKeys: String, CodingKey { case kind }
 }
 public struct PersonPairedSession: Codable, Sendable { public let kind: String; public let deviceID: String; public let personID: String; public let sessionActor: String; public let credential: String; public let scopes: [String]; public let expiresAt: String; public let deviceKeyChain: [String]?; public let deviceKeyProofs: [JSONValue]?; public let personRootKeyProof: JSONValue?; public let fabricGrant: JSONValue?; enum CodingKeys: String, CodingKey { case kind, deviceID = "device_id", personID = "person_id", sessionActor = "session_actor", credential, scopes, expiresAt = "expires_at", deviceKeyChain = "device_key_chain", deviceKeyProofs = "device_key_proofs", personRootKeyProof = "person_root_key_proof", fabricGrant = "fabric_grant" } }
-public enum AssistantPrincipal: String, Codable, Sendable { case chatgpt = "assistant/chatgpt" }
+public enum AssistantPrincipal: String, Codable, Sendable { case chatgpt = "assistant/chatgpt"; case mcp = "assistant/mcp" }
 public enum AssistantSenderClass: String, Codable, Sendable { case externalAssistant = "external-assistant" }
 public enum AssistantMinimalReadMode: String, Codable, Sendable { case approvalOnce = "approval-once", callerBoundAllow = "caller-bound-allow" }
 public enum AssistantScope: String, Codable, Sendable {
@@ -1642,7 +1665,7 @@ public enum AssistantContentRequest: Codable, Sendable, Equatable {
     }
 }
 public enum AssistantProjection: String, Codable, Sendable { case summary, attention, missions, agents, conversationContent = "conversation-content", terminalContent = "terminal-content", conversations, conversationDetail = "conversation-detail", conversationTimeline = "conversation-timeline", conversationSearch = "conversation-search" }
-public enum ScgReadIdentity: String, Codable, Sendable { case chatgpt }
+public enum ScgReadIdentity: String, Codable, Sendable { case chatgpt, mcp }
 /// Signed by the pinned attestor (Ed25519) over UTF-8 `st3.scg-read.v1\n` + canonical JSON of this payload.
 public struct ScgReadAuthorizationPayload: Codable, Sendable, Equatable {
     public let issuer, grantID, keyID, approvalID, executionID, requestDigest, nonce: String

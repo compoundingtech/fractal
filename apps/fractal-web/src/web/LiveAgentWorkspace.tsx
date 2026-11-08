@@ -58,7 +58,7 @@ import { defaultFilters, fixtureSidebarState, sidebarState } from '../shell/side
 import { useMachineMemory, withRememberedMachines } from '../shell/sidebar/show.ts'
 import { parseSidebarQuery } from '../shell/sidebar/filter.ts'
 import { SidebarToolbar, type SidebarToolbarProps } from '../shell/sidebar/Toolbar.tsx'
-import type { Agent } from '../data/source.ts'
+import { credentialNotice, type Agent } from '../data/source.ts'
 import { sidebarAttention } from './sidebarAttention.ts'
 import { FolderAttentionSignal } from './AttentionControls.tsx'
 import { liveShowRows, liveSidebarTree } from './liveSidebarTree.ts'
@@ -435,10 +435,10 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // A canonical subject address is not proof of a terminal. Keep the control disabled
   // from its first render until the roster can establish the selected agent's runtime.
   const terminalDisabledReason = terminalSubjectForAgent(current) === undefined ? undefined
-    : fleet._tag === 'Waiting' ? 'Waiting for the live agent roster to find this agent’s terminal.'
+    : credentialNotice(fleet) ?? (fleet._tag === 'Waiting' ? 'Waiting for the live agent roster to find this agent’s terminal.'
       : fleet._tag === 'Unavailable' ? 'The agent roster is unavailable, so this agent’s terminal cannot be found.'
         : agent === undefined ? 'This agent is not in the live agent roster, so it has no terminal.'
-          : agent.terminalDisabledReason
+          : agent.terminalDisabledReason)
   const terminalRef = terminalDisabledReason === undefined ? agent?.terminal : undefined
   const terminalSource = useDataSource()
   // After first paint, idle time warms the terminal chunk and fonts; data waits for explicit intent.
@@ -657,7 +657,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const sidebarBody = <SidebarTabs panelHasTabbableContent selectedId={sidebarTab === 'alerts' ? 'alerts' : 'agents'} onSelectionChange={id => setSidebarTab(id === 'alerts' ? 'alerts' : 'agents')} tabs={[{ id: 'agents', label: 'Agents', questionCount: agents.filter(agent => agent.ask._tag === 'Known' && agent.ask.value === 'question').length, needsYouCount: needsYou.size }, { id: 'alerts', label: 'Alerts', ...alertTabMarkers(attention) }]}>
     {sidebarTab === 'alerts' ? <AlertsTabCodeBoundary onOpen={ref => { if (ref.startsWith('agent/')) select(ref); else { agentsDrawer.current?.close(); open({ ref }) } }} /> : <>
     <LiveSidebarToolbar filters={filters} update={updateFilters} hosts={hosts} showRows={showRows} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
-    {fleet._tag === 'Unavailable' ? <RosterUnavailable reason={fleet.reason} onRetry={fleet.reason === 'failed' && fleet.retryable !== false ? folderSource.retryAgents : undefined} />
+    {credentialNotice(fleet) ? <RosterUnavailable reason="unauthorized" onRetry={undefined} /> : fleet._tag === 'Unavailable' ? <RosterUnavailable reason={fleet.reason} onRetry={fleet.reason === 'failed' && fleet.retryable !== false ? folderSource.retryAgents : undefined} />
       : fleet._tag !== 'Observed' ? null
       : <>
         {stale ? <RosterStaleNotice decodeStale={rosterDecode.decodeStale} observedAt={rosterObservedAt} partial={fleet.coverage?._tag === 'Partial'} refreshFailed={fleet.error?.reason === 'failed'} onRetry={folderSource.retryAgents} /> : null}

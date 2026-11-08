@@ -186,22 +186,19 @@ pub struct V2Plan {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "_tag")]
 pub enum V2Refusal {
-    Projection { error: crate::model::ProjectionError },
     Move { refusal: MoveRefusal },
     OrderingUnavailable,
     TooManyOperations { count: usize },
     TooManyBytes { bytes: usize },
 }
 
-/// Plan one drop against complete confirmed v2 inputs. Folder and member ordering domains
-/// stay separate; membership moves emit only Place, never legacy subject.place.
+/// Plan one drop against an already projected, complete v2 model (including pending overlay).
+/// Folder and member ordering domains stay separate; emit Place, never legacy subject.place.
 pub fn plan_v2(
-    arrangement: &crate::model::ArrangementInput,
-    memberships: &[crate::model::MembershipInput],
+    tree: &SidebarTree,
     intent: &MoveIntent,
 ) -> Result<V2Plan, V2Refusal> {
-    let tree = crate::projection::build_v2(arrangement, memberships).map_err(|error| V2Refusal::Projection { error })?;
-    validate_move(&tree, intent).map_err(|refusal| V2Refusal::Move { refusal })?;
+    validate_move(tree, intent).map_err(|refusal| V2Refusal::Move { refusal })?;
     let siblings = match &intent.parent {
         Parent::Folder { id } => &tree.nodes[&format!("folder:{id}")].children,
         _ => &tree.roots,

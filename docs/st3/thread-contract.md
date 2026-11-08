@@ -39,6 +39,12 @@ and show its full history without reopening it. A related ask can record an expl
 and the reason for revisiting a decision. The initial release presents this history. Any
 conditional activation continues to use existing mission step gates.
 
+A bound agent can create an ask with `fractal work ask`, then run
+`fractal work link-thread ASK --thread THREAD --episode CLAIM --as "$ST_AGENT"`.
+The `work.person-asked` claim ID is available in `fractal --json trace show ASK`. Repeating
+the same link returns the original operation receipt. An attachment failure leaves the
+ask available to retry with its exact episode.
+
 The initial lifecycle is Open, Close and Reopen. Closing moves a thread into Recently closed
 threads, leaves history readable and keeps any linked ask answerable. An ordinary incoming reply
 from the agent joins closed history without reopening the thread, adding an alert or resurrecting
@@ -68,10 +74,15 @@ Use the conversation composer with an explicit destination. When a thread is act
 composer sends into it without a separate reply mode. A quoted reply adds the message target.
 Agent conversation and thread drafts are separate and survive switching destinations.
 
-Track read progress per reader and thread against ordered messages. Moving a cursor forward can
-clear an unread reply on the existing Inbox row without creating an ask, changing the alert count
-or resolving an approval. Which visible interaction advances the read cursor should be tested
-with real UI visibility and reviewed before client implementations treat it as read.
+Mark shown messages read explicitly. The client submits up to 50 exact rendered message IDs
+and the newest of those IDs as an anchor. Fetching or preloading a page alone does not mark it
+read. The daemon verifies the authenticated person's ownership and every selected message before
+writing ordinary replicated read facts for incoming replies. A late arrival stays unread even if
+it sorts before the anchor. A retry of the same selection returns the same acknowledged incoming
+IDs without duplicating facts. Empty selections acknowledge nothing.
+
+Read progress also works in closed threads and requires the same message-control scope as
+ordinary read actions. It does not reopen a thread, resolve an ask, or change the alert count.
 
 ## Daemon boundary
 

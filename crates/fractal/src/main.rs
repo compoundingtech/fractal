@@ -2149,8 +2149,8 @@ enum DevicesCommand {
         /// Explicit phone-reachable gateway URL; show a pairing QR in an interactive terminal.
         #[arg(long, value_parser = pairing_qr::parse_gateway, conflicts_with = "assistant")]
         gateway: Option<reqwest::Url>,
-        /// Begin a revocable external-assistant grant instead of a person device.
-        #[arg(long, value_parser = parse_assistant_principal)]
+        /// Begin a revocable external-assistant grant (defaults to assistant/chatgpt).
+        #[arg(long, num_args = 0..=1, default_missing_value = "assistant/chatgpt", value_parser = parse_assistant_principal)]
         assistant: Option<AssistantPrincipal>,
         #[command(flatten)]
         grant: AssistantGrantTerms,
@@ -4101,6 +4101,8 @@ enum WorkCommand {
     ///
     /// Puts a structured request on the person's home.
     Ask(WorkAskArgs),
+    /// Attach one pending ask episode to an existing thread as its requesting agent.
+    LinkThread(WorkThreadLinkArgs),
     /// Bring a person information they asked for. Nothing waits on it; it clears once read.
     Update(WorkUpdateArgs),
     /// Complete a person-assigned step with a response.
@@ -4232,6 +4234,20 @@ struct WorkAcknowledgeArgs {
     /// The message ID from the handoff note or work show.
     #[arg(long)]
     message: String,
+}
+
+#[derive(Args)]
+struct WorkThreadLinkArgs {
+    /// Exact ask step-run ID returned by work ask.
+    ask: String,
+    /// Exact existing thread ID. Closed threads are eligible.
+    #[arg(long)]
+    thread: String,
+    /// ID of the work.person-asked claim for this ask, visible in its trace.
+    #[arg(long)]
+    episode: String,
+    #[arg(long = "as", env = "ST_AGENT")]
+    actor: String,
 }
 
 #[derive(Args)]
@@ -4520,6 +4536,19 @@ enum MessageCommand {
     /// A message is a direct connection: it wakes the recipient agent for a full turn,
     /// which rereads its context. A reply that only acknowledges or reports is `--kind silent`.
     Reply(MessageReplyArgs),
+    /// Send a conversation reply to an existing topic thread from its bound agent seat.
+    ReplyInThread {
+        thread: String,
+        /// Quote a canonical message in this thread.
+        #[arg(long)]
+        quote: Option<String>,
+        /// Reply text, or - to read UTF-8 from stdin without trimming.
+        #[arg(short = 'm', long)]
+        body: String,
+        /// Reuse the same key if the outcome of this request is uncertain.
+        #[arg(long)]
+        idempotency_key: Option<String>,
+    },
     /// Wait up to a deadline for a reply from one sender, and print the reply or `no reply`.
     ///
     /// The reply is marked read for the waiting agent, so native delivery does not hand it over
@@ -5230,6 +5259,7 @@ fn cli_main() -> ExitCode {
         cli_output::stdout().is_terminal(),
         crate::agent_environment_present(),
     ) {
+        fractal_client::set_client_name(fractal_tui::client_name());
         let subject = match crate::setup::prepare_plain_ui() {
             Ok(subject) => subject,
             Err(error) => {
@@ -5314,8 +5344,13 @@ fn cli_main() -> ExitCode {
     if let Command::Demo { command } = cli.command {
         return run_demo(command);
     }
-    // Set the CLI identity only after the TUI path has chosen its stui client identity.
-    fractal_client::set_client_name(format!("st {}", fractal_drivers::version::machine_version()));
+    // Set the CLI identity only after the TUI path has chosen its fractal-tui client identity.
+    let client_product = match &cli.command {
+        Command::Driver(_) => "fractal-driver",
+        Command::ReplicationWorker(_) => "fractal-replication-worker",
+        _ => "fractal",
+    };
+    fractal_client::set_client_name(format!("{client_product} {}", fractal_drivers::version::machine_version()));
     if let Command::Up(args) = &cli.command {
         record_daemon_commands(args);
     }
@@ -5991,7 +6026,7 @@ async fn run(cli: Cli) -> Result<()> {
         }) => run_devices_fabric(&config, command, cli.json).await,
         Command::Schedules { command } => schedules_cli::run(&endpoint, config.person.as_deref(), command, cli.json).await,
         Command::Devices(args) => {
-            run_devices(endpoint.clone(), config.person.as_deref(), args, cli.json).await
+            run_devices(endpoint.clone(), &config, args, cli.json).await
         }
         Command::Clients => run_clients(&endpoint, cli.json).await,
         Command::Work { command } => run_work(&client, &endpoint, command, cli.json).await,
@@ -6316,6 +6351,7 @@ fn guard_mutating_cli_actor(
         },
         Command::Work { command } => match command {
             WorkCommand::Delegation(args) => Some(args.actor.as_str()),
+            WorkCommand::LinkThread(args) => Some(args.actor.as_str()),
             WorkCommand::Done(args) | WorkCommand::CancelAsk(args) => Some(args.actor.as_str()),
             WorkCommand::Start(args) => Some(args.actor.as_str()),
             WorkCommand::Handoff(args) => Some(args.actor.as_str()),
@@ -6976,6 +7012,7 @@ fn open_daemon_store(
         Some(admitted) => Store::open_admitted(admitted.clone(), &config.node)?,
         None => Store::open(&config.store_path(), &config.node)?,
     };
+    store.set_usage_limits_writers(config.usage_limits.as_ref().map(|usage| usage.writers.clone()).unwrap_or_default())?;
     if let Some(person) = &config.person {
         let _ = store.question_principal_default.set(person.clone());
     }
@@ -7266,6 +7303,16 @@ async fn run_up(args: UpArgs) -> Result<()> {
             open_daemon_store(&config, &state_identity)
         })
     })?);
+    store
+        .extension::<fractal_daemon::config::AgentPopulationEnabled>()
+        .0
+        .set(config.agent_population_enabled)
+        .map_err(|_| anyhow::anyhow!("population activation already initialized"))?;
+    store
+        .extension::<fractal_daemon::config::AgentPopulationRepositories>()
+        .0
+        .set(config.agent_population_repositories.clone())
+        .map_err(|_| anyhow::anyhow!("population repository registry already initialized"))?;
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;
     }
@@ -7387,7 +7434,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"thread_read_privacy":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -7458,8 +7505,13 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fractal_daemon::sekrets::client::socket_path(),
     );
     store.install_git_change_registry(Arc::new(fractal_daemon::changes::service::Registry::new(&config.changes, &config.node)?))?;
-    if config.thread_writes {
-        store.configure_thread_write_rollout(config.peers.iter().map(|peer| peer.name.clone()));
+    if config.thread_writes
+        && !store.initialize_thread_write_rollout(
+            fractal_schema::threads::READ_PRIVACY_VERSION,
+            config.peers.iter().map(|peer| peer.name.clone()),
+        )
+    {
+        stderr_message("fractal", format_args!("thread writes require an upgraded local privacy reader"));
     }
     let state = AppState {
         owning_person: config.person.clone(),
@@ -7530,6 +7582,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.agent_message_days", backfill_agent_message_days(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.stop_deferral_history", copy_stop_deferral_history(store.clone())));
     tokio::spawn(fractal_daemon::task_cpu::account("maintenance.gate_runner_history", copy_gate_runner_history(store.clone())));
+    tokio::spawn(fractal_daemon::task_cpu::account("maintenance.work_wake_index", copy_work_wake_history(store.clone())));
     if let Some(interval) = fractal_daemon::maintenance::divergence_check_interval(
         std::env::var(fractal_daemon::maintenance::DIVERGENCE_CHECK_ENV).ok().as_deref(),
     ) {
@@ -7545,13 +7598,15 @@ async fn run_up(args: UpArgs) -> Result<()> {
         config.observations.clone(),
     )));
     tokio::spawn(fractal_daemon::task_cpu::account("account_limits.catch_up", catch_up_account_limits(store.clone(), notify.clone())));
+    fractal_daemon::readiness_slo::configure(config.readiness_slo.as_ref(), &config.state_dir, store.origin())?;
     {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
             fractal_daemon::slo_history::dir(&config.state_dir),
             move || {
-                let rows = fractal_daemon::api::slo_rows(&store)?;
+                let mut rows = fractal_daemon::api::slo_rows(&store)?;
                 fractal_daemon::objective_faults::check_and_report(&store, &rows);
+                rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
             },
         )));
@@ -7775,6 +7830,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // Shutdown refuses receipts from connections still being served, then waits for the writer
     // to commit every admitted one however long it takes. Only a second stop signal, an
     // explicit forced stop, ends the daemon before they commit.
+    let receipts_started = Instant::now();
     tokio::select! {
         flushed = receipts.shutdown() => if let Err(error) = flushed {
             stderr_message("fractal", format_args!("assistant read receipts failed to commit at shutdown: {}", error.message));
@@ -7782,9 +7838,11 @@ async fn run_up(args: UpArgs) -> Result<()> {
         _ = terminate.recv() => stderr_message("fractal", format_args!("forced stop before assistant read receipts committed")),
         _ = interrupt.recv() => stderr_message("fractal", format_args!("forced stop before assistant read receipts committed")),
     }
+    stderr_message("fractal", format_args!("shutdown: receipt drain stage finished in {} ms", receipts_started.elapsed().as_millis()));
     // Leave the replication inventory for the next start, which extends it instead of reading
     // every envelope while its peers reconnect. A second stop signal skips it.
     let saving = store.clone();
+    let inventories_started = Instant::now();
     tokio::select! {
         saved = tokio::task::spawn_blocking(move || save_replication_inventories(&saving)) => if let Err(error) = saved {
             stderr_message("fractal", format_args!("saving the replication inventory stopped: {error}"));
@@ -7792,7 +7850,10 @@ async fn run_up(args: UpArgs) -> Result<()> {
         _ = terminate.recv() => stderr_message("fractal", format_args!("forced stop before the replication inventory was saved")),
         _ = interrupt.recv() => stderr_message("fractal", format_args!("forced stop before the replication inventory was saved")),
     }
+    stderr_message("fractal", format_args!("shutdown: replication inventory save stage finished in {} ms", inventories_started.elapsed().as_millis()));
+    let telemetry_started = Instant::now();
     telemetry.shutdown();
+    stderr_message("fractal", format_args!("shutdown: telemetry stage finished in {} ms", telemetry_started.elapsed().as_millis()));
     match stopped {
         Ok(signal) => end_by_signal(signal),
         Err(served) => served.map(|_| ()),
@@ -9411,7 +9472,7 @@ async fn run_devices_fabric(
 
 async fn run_devices(
     endpoint: Endpoint,
-    configured_person: Option<&str>,
+    config: &Config,
     args: DevicesArgs,
     json_output: bool,
 ) -> Result<()> {
@@ -9422,6 +9483,7 @@ async fn run_devices(
         limit,
         command,
     } = args;
+    let configured_person = config.person.as_deref();
     let person = configured_human(person.as_deref(), configured_person, "devices")?;
     let client = generated_client(&endpoint, Some(&person))?;
     match command.unwrap_or(DevicesCommand::Ls) {
@@ -9465,7 +9527,10 @@ async fn run_devices(
             let response = client
                 .pairing_begin(&PairingBegin::Assistant(AssistantPairingBegin {
                     api_version: CLIENT_V0_API_VERSION.into(),
-                    device_name: device_name.unwrap_or_else(|| "ChatGPT".into()),
+                    device_name: device_name.unwrap_or_else(|| match assistant {
+                        AssistantPrincipal::Chatgpt => "ChatGPT".into(),
+                        AssistantPrincipal::Mcp => "MCP".into(),
+                    }),
                     assistant_id: assistant,
                     scopes: terms.scopes,
                     expires_in_seconds: Some(terms.expires_in_seconds),
@@ -9496,6 +9561,15 @@ async fn run_devices(
                 "--expires-in, --scope, --disclose-to-openai and --consent-evidence apply only to --assistant pairing"
             );
             let device_name = device_name.context("name the device to pair")?;
+            if let Some(gateway) = &gateway {
+                let local_member = client.capabilities().await?.snapshot.host_id;
+                pairing_qr::check_begin_member(gateway, &local_member, &config.peers)?;
+                if !pairing_qr::gateway_is_begin_member(gateway, &local_member).await? {
+                    eprintln!(
+                        "Warning: the gateway's final member cannot be verified; this pairing must be completed on {local_member}. Run the pair command on the gateway member if it is different."
+                    );
+                }
+            }
             let response = client
                 .pairing_begin_person(&PersonPairingBegin {
                     api_version: CLIENT_V0_API_VERSION.into(),
@@ -9938,6 +10012,25 @@ fn execution_client(endpoint: &Endpoint, actor: String) -> Result<Client> {
     Ok(client
         .with_endpoint(endpoint.clone())
         .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true))
+}
+
+async fn submit_thread_action(
+    endpoint: &Endpoint,
+    actor: &str,
+    kind: &str,
+    key: &str,
+    parameters: Value,
+) -> Result<Value> {
+    let client = execution_client(endpoint, actor.to_owned())?;
+    let capability = generated_client(endpoint, Some(actor))?.capabilities().await?;
+    client.post("/v1/client/actions", &json!({
+        "api_version": CLIENT_V0_API_VERSION,
+        "id": format!("action/{}", hex::encode(Sha256::digest(key))),
+        "type": kind,
+        "idempotency_key": key,
+        "fence": { "snapshot_id": capability.snapshot.id },
+        "parameters": parameters,
+    })).await
 }
 
 /// The actor of a terminal or client-v0 command: an explicit person or agent, else the harness's
@@ -10669,11 +10762,13 @@ fn render_slo_list(rows: &[Value]) -> String {
                     text(row, "current"),
                     text(row, "window"),
                     left(row),
+                    text(row, "source"),
+                    text(row, "host"),
                 ]
             })
             .collect::<Vec<_>>();
-        let header = ["STATUS", "ID", "TARGET", "CURRENT", "WINDOW", "LEFT"].map(str::to_owned);
-        let widths: Vec<usize> = (0..6)
+        let header = ["STATUS", "ID", "TARGET", "CURRENT", "WINDOW", "LEFT", "SOURCE", "HOST"].map(str::to_owned);
+        let widths: Vec<usize> = (0..8)
             .map(|column| {
                 std::iter::once(&header)
                     .chain(&table)
@@ -10787,6 +10882,9 @@ fn render_slo_explanation(row: &Value) -> String {
     let _ = writeln!(output, "{}  {} · {}", text("id"), text("kind"), text("status"));
     let _ = writeln!(output, "TARGET   {}", text("target"));
     let _ = writeln!(output, "CURRENT  {} · {}", text("current"), text("window"));
+    if row["source"].is_string() {
+        let _ = writeln!(output, "SOURCE   {} · {}", text("source"), text("host"));
+    }
     if let Some(left) = row["remaining_percent"].as_f64() {
         let _ = writeln!(output, "LEFT     {left:.0}% of the {}", if row["kind"] == "budget" { "allowance" } else { "error budget" });
     }
@@ -17424,12 +17522,13 @@ fn pi_family_message_frame(
             fractal_drivers::ding::NotificationMetadata {
                 attachments,
                 assistant: message.assistant_metadata().as_ref(),
+                delivery_thread: message.delivery_thread.as_deref(),
             },
         ), &message.tags.iter().filter(|tag| tag.as_str() != fractal_daemon::silent::SILENT_TAG || fractal_daemon::silent::is_held(message)).cloned().collect::<Vec<_>>()),
         "meta": {
             "from": message.from,
             "messageId": message.subject,
-            "threadId": message.in_reply_to.clone().unwrap_or_else(|| message.subject.clone()),
+            "threadId": message.delivery_thread.as_ref().or(message.in_reply_to.as_ref()).unwrap_or(&message.subject),
             "identity": identity,
         },
     })
@@ -19662,6 +19761,9 @@ fn native_queued_message(
             })
             .cloned(),
     );
+    if let Some(thread) = &view.delivery_thread {
+        tags.push(format!("{}{thread}", fractal_drivers::ding::FRACTAL_DELIVERY_THREAD_TAG));
+    }
     tags.extend(
         attachments
             .iter()
@@ -19949,7 +20051,12 @@ async fn forward_projected_messages_reporting(
                     } else {
                         message.content.clone()
                     };
-                    let mut tags = message.tags.clone();
+                    let prefix = fractal_drivers::ding::FRACTAL_DELIVERY_THREAD_TAG;
+                    let mut tags: Vec<_> = message.tags.iter()
+                        .filter(|tag| !tag.starts_with(prefix)).cloned().collect();
+                    if let Some(thread) = &message.delivery_thread {
+                        tags.push(format!("{prefix}{thread}"));
+                    }
                     tags.push(format!("{TAG_PREFIX}{}", message.subject));
                     tags.push(format!("{}{}", fractal_drivers::ding::FRACTAL_TO_TAG, message.to));
                     tags.push(format!(
@@ -20905,6 +21012,27 @@ async fn backfill_agent_message_days(store: Arc<Store>) {
             error => {
                 stderr_message("fractal", format_args!("agent message usage backfill failed: {error:?}"));
                 tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        }
+    }
+}
+
+/// Each turn copies at most one fixed page, releases the background writer loan, then yields.
+/// The writer's background admission gives foreground work priority; there is no sleep polling.
+async fn copy_work_wake_history(store: Arc<Store>) {
+    loop {
+        let page_store = store.clone();
+        let result = store.connection.write_workers().spawn_blocking(move || {
+            fractal_daemon::task_cpu::profiled_blocking("maintenance.work_wake_index", || {
+                fractal_daemon::store::wake_lookup::advance(&page_store)
+            })
+        }).await;
+        match result {
+            Ok(Ok(true)) => return,
+            Ok(Ok(false)) => tokio::task::yield_now().await,
+            error => {
+                stderr_message("fractal", format_args!("work wake index copy stopped: {error:?}; doctor reports the retained cursor"));
+                return;
             }
         }
     }

@@ -94,7 +94,10 @@ fi`,
     ...whenMissing([
       ...(stage === 'genie' ? setup.filter((step) => step !== buildSnapshotRestore && step !== buildSnapshotPrepare) : setup),
       ...(stage === 'genie' ? [megarepoApplyStep] : []),
-      nixDevelopStep({ name: 'Build missing cache contents', flake: stage === 'genie' ? '.#genie' : '.', command: ['bash', 'scripts/ci-cache-warm', stage] }),
+      {
+        ...nixDevelopStep({ name: 'Build missing cache contents', flake: stage === 'genie' ? '.#genie' : '.', command: ['bash', 'scripts/ci-cache-warm', stage] }),
+        ...(stage === 'fleet-compat' ? { env: { GH_TOKEN: '${{ github.token }}' } } : {}),
+      },
       { name: 'Save Nix outputs', run: 'bash scripts/ci-nix-cache save' },
       // PR/merge builds restore these entries and retain exact-source artifacts. Only
       // protected main fills the shared dependency quota, including after eviction.

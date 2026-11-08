@@ -4,7 +4,7 @@ use super::*;
 
 #[path = "thread_message_window.rs"]
 mod message_window;
-pub use message_window::{ThreadMessage, TimelineItem, TimelinePage, mixed_timeline};
+pub use message_window::{ThreadMessage, TimelineItem, TimelinePage, mark_read, mixed_timeline};
 
 pub enum Edit<'a> {
     Create {
@@ -578,6 +578,135 @@ pub fn list_context(
     })())).map_err(internal)?
 }
 
+/// Graph changes that can alter an Inbox thread badge, independent of ask publication.
+pub fn attention_unread_changed(store: &Store, after: u64, through: u64) -> anyhow::Result<bool> {
+    let conn = store.readers.get();
+    Ok(conn.prepare_cached(
+        "SELECT EXISTS (
+            SELECT 1 FROM claims changed
+            WHERE changed.store_index>?1 AND changed.store_index<=?2 AND (
+                changed.kind IN ('thread.created','thread.ask-linked','agent.renamed','record.repaired')
+                OR (changed.kind='message.sent'
+                    AND json_extract(changed.body,'$.fields.thread_id') IS NOT NULL)
+                OR (changed.kind IN ('message.read','message.closed') AND EXISTS (
+                    SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+                    WHERE claims.subject=changed.subject AND claims.kind='message.sent'
+                      AND json_extract(claims.body,'$.fields.thread_id') IS NOT NULL
+                ))
+            )
+        )"
+    )?.query_row(params![after, through], |row| row.get(0))?)
+}
+
+/// Unread incoming thread replies on the caller's already selected Inbox rows.
+pub fn unread_ask_positions(
+    store: &Store,
+    person: &str,
+    asks: &[(&str, &str)],
+) -> Result<BTreeSet<usize>, FractalError> {
+    if asks.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let conn = store.readers.get();
+    let person = identities::resolve_reference_conn(&conn, person)?;
+    let keys = asks.iter().map(|(ask, episode)| {
+        Ok((ask, episode, thread_links::ask_link_subject(ask, episode)?))
+    }).collect::<Result<Vec<_>, FractalError>>()?;
+    let keys = serde_json::to_string(&keys).map_err(internal)?;
+    let mut query = conn.prepare_cached(
+        "WITH inbox AS (
+            SELECT CAST(key AS INTEGER) AS position, json_extract(value,'$[0]') AS ask,
+                   json_extract(value,'$[1]') AS episode, json_extract(value,'$[2]') AS link
+            FROM json_each(?1)
+         )
+         SELECT inbox.position, claims.subject, false
+         FROM inbox CROSS JOIN claims INDEXED BY claims_thread_origin_index
+         WHERE claims.kind='thread.created' AND json_extract(claims.body,'$.fields.person')=?2
+           AND json_extract(claims.body,'$.fields.origin_ask')=inbox.ask
+           AND json_extract(claims.body,'$.fields.origin_ask_episode')=inbox.episode
+         UNION
+         SELECT inbox.position, inbox.link, true
+         FROM inbox WHERE EXISTS (
+            SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+            WHERE claims.subject=inbox.link AND claims.kind='thread.ask-linked'
+         )
+         ORDER BY 1"
+    ).map_err(internal)?;
+    let mut rows = query.query(params![keys, person]).map_err(internal)?;
+    let mut unread = BTreeSet::new();
+    let mut qualification = None;
+    while let Some(row) = rows.next().map_err(internal)? {
+        let position: usize = row.get(0).map_err(internal)?;
+        let (ask, episode) = asks[position];
+        if unread.contains(&position) {
+            continue;
+        }
+        let qualified = match qualification {
+            Some((previous, qualified)) if previous == position => qualified,
+            _ => owns_ask_episode(&conn, &person, ask, episode)?,
+        };
+        qualification = Some((position, qualified));
+        if !qualified {
+            continue;
+        }
+        let linked: bool = row.get(2).map_err(internal)?;
+        let subject: String = row.get(1).map_err(internal)?;
+        let thread = if linked {
+            let link = match latest_applied_claim(&conn, &subject, "thread.ask-linked") {
+                Ok(Some(link)) => link,
+                Ok(None) => continue,
+                Err(error) if error.code == "idempotency-conflict" => continue,
+                Err(error) => return Err(error),
+            };
+            let fields = &link.body["fields"];
+            if fields["ask"].as_str() != Some(ask)
+                || fields["ask_episode"].as_str() != Some(episode)
+            {
+                continue;
+            }
+            let Some(thread) = fields["thread_id"].as_str() else { continue };
+            thread.to_owned()
+        } else {
+            subject
+        };
+        let creation = match owned_creation(&conn, &thread, &person, false) {
+            Ok(Some(creation)) => creation,
+            Ok(None) => continue,
+            Err(error) if error.code == "thread-unavailable" => continue,
+            Err(error) => return Err(error),
+        };
+        let fields = &creation.body["fields"];
+        if !linked && (fields["origin_ask"].as_str() != Some(ask)
+            || fields["origin_ask_episode"].as_str() != Some(episode))
+        {
+            continue;
+        }
+        let Some(agent) = fields["agent"].as_str() else { continue };
+        if message_window::message_unread(&conn, &person, agent, &thread, &creation)? {
+            unread.insert(position);
+        }
+    }
+    Ok(unread)
+}
+
+fn owns_ask_episode(
+    connection: &Connection,
+    person: &str,
+    ask: &str,
+    episode: &str,
+) -> Result<bool, FractalError> {
+    let assigned = person_work::step(connection, ask)
+        .map_err(internal)?
+        .and_then(|step| step.assigned_to)
+        .is_some_and(|assignee| {
+            identities::resolve_reference_conn(connection, &assignee)
+                .is_ok_and(|owner| owner == person)
+        });
+    Ok(assigned && person_work::request(connection, ask)
+        .map_err(internal)?
+        .is_some_and(|request| request.id == episode))
+}
+
 /// Qualify the exact ask and person before resolving its private sidecar. Otherwise
 /// a conflicted association could reveal the existence of an unrelated ask.
 fn linked_context_thread(
@@ -587,18 +716,7 @@ fn linked_context_thread(
     episode: &str,
     after: &str,
 ) -> Result<Option<String>, FractalError> {
-    let assigned = person_work::step(connection, ask)
-        .map_err(internal)?
-        .and_then(|step| step.assigned_to)
-        .is_some_and(|assignee| {
-            identities::resolve_reference_conn(connection, &assignee)
-                .is_ok_and(|owner| owner == person)
-        });
-    if !assigned
-        || !person_work::request(connection, ask)
-            .map_err(internal)?
-            .is_some_and(|request| request.id == episode)
-    {
+    if !owns_ask_episode(connection, person, ask, episode)? {
         return Ok(None);
     }
     let link = thread_links::ask_link_subject(ask, episode)?;
@@ -859,6 +977,7 @@ pub fn start_from_ask_as(
         ));
     }
     let mut first_message = first_message.clone();
+    thread_delivery::add_reader_marker(&mut first_message);
     for (name, value) in [
         ("thread_id", thread),
         ("thread_origin_ask", ask),
@@ -997,18 +1116,25 @@ pub fn start_from_ask_as(
                     params![first_message.subject, person, signature],
                 ).map_err(internal)?;
             }
-            append_receipt_claim_tx(
-                tx,
-                &store.origin,
-                &first_message.subject,
+            // The typed transaction has already authorized this exact ask and sender.
+            // Retain the ordinary recipient and provenance checks before the admitted append.
+            retirements::admit_recipient(tx, Some(agent))?;
+            assistant_write::refuse_unverified(
                 "message.sent",
                 Some(person),
-                &message_body,
-                &[],
-                Some(&created.batch_id),
-                &format!("thread-start-message:{key}"),
-            )
-            .map_err(claim_append_error)?;
+                Some(person),
+                ["sender_class", "assistant_grant_id", "assistant_owner", "assistant_session_actor"]
+                    .iter().any(|field| first_message.fields.contains_key(*field)),
+            )?;
+            let mut message_body = message_body.clone();
+            smallclaims::store::idempotency::attach(
+                &mut message_body, &format!("thread-start-message:{key}"),
+            ).map_err(internal)?;
+            let message = append_admitted_claim_tx(
+                tx, &store.origin, &first_message.subject, "message.sent", Some(person),
+                &message_body, &[], Some(&created.batch_id),
+            ).map_err(claim_append_error)?;
+            register_operation_tx(tx, &message).map_err(internal)?;
             if encoded_signature.is_some() {
                 tx.execute(
                     "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind='message.sent' AND actor=?2",

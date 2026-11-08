@@ -20,7 +20,7 @@ fn independently_folded_faults(store: &Store, as_of: u128) -> Result<Vec<FaultVi
         .filter(|item| !dismissed.contains(&(item.subject.clone(), item.episode.clone())))
         .map(|item| {
             Ok(FaultView {
-                owner: store.fault_owner(&item, fallback.as_deref())?,
+                owner: store.fault_owner(&item, fallback.as_deref(), false)?,
                 item,
             })
         })
@@ -241,7 +241,7 @@ fn reference_fault_snapshot(store: &Store, as_of: u128) -> Result<Vec<FaultView>
         .filter(|item| !dismissed.contains(&(item.subject.clone(), item.episode.clone())))
         .map(|item| {
             Ok(FaultView {
-                owner: store.fault_owner(&item, fallback.as_deref())?,
+                owner: store.fault_owner(&item, fallback.as_deref(), false)?,
                 item,
             })
         })
@@ -781,6 +781,34 @@ fn cached_snapshot_cost(store: &Store, as_of: u128) -> (u64, usize) {
     let statements = scope.finish().statements;
     FAULT_CACHE_PARITY.with(|parity| parity.set(true));
     (statements, FAULT_CACHE_READS.with(std::cell::Cell::get))
+}
+
+#[test]
+fn legacy_daemon_fault_without_reviewer_does_not_reread_its_claim() {
+    let snapshot_cost = |subject: &str| {
+        let store = Store::open_memory("node").unwrap();
+        let source = "version 2\nagent \"node.source\" { command \"true\" }\nagent \"node.ops\" { command \"true\"; handles-faults }\n";
+        let intent = parse_intent(source, "node").unwrap();
+        let preview = store.mission(&intent, IntentInput {
+            kdl: source.into(), source_name: None,
+        }).unwrap();
+        store.apply(&intent, &preview.subject_tokens, "fault-history-owner").unwrap();
+        let claim = append_history_failure(
+            &store, "legacy", "ordinary failure", "agent/absent", "observed", vec![subject.into()],
+        );
+        let as_of = now_ms().max(claim.accepted_at_unix_ms);
+        let faults = store.fault_snapshot(as_of).unwrap();
+        let fault = faults.iter().find(|fault| fault.item.episode == claim.id).unwrap();
+        assert_eq!(fault.owner.as_deref(), Some("agent/node.ops"));
+        cached_snapshot_cost(&store, as_of + 1)
+    };
+
+    // Both scopes do the same legacy owner resolution; the daemon scope must not
+    // reread the cached failure to check for a readiness-only routing policy.
+    let daemon = snapshot_cost("daemon/node");
+    let agent = snapshot_cost("agent/node.source");
+    assert_eq!(daemon.1, 0, "no cache misses");
+    assert_eq!(daemon, agent, "daemon faults need no extra claim lookup");
 }
 
 #[test]
