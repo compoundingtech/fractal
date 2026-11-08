@@ -7218,12 +7218,10 @@ impl HarnessAncestry {
     }
 
     #[cfg(target_os = "linux")]
-    fn of_linux_environment(environment: &[u8], flags: u64) -> Self {
-        // /proc/<pid>/stat field 9: PF_FORKNOEXEC means the child still has
-        // its parent's image/environment. Comparing exe paths would also
-        // reject legitimate children that exec the same binary.
-        const PF_FORKNOEXEC: u64 = 0x0000_0040;
-        if flags & PF_FORKNOEXEC != 0 || environment.is_empty() || !environment.ends_with(&[0]) {
+    fn of_linux_environment(environment: &[u8]) -> Self {
+        // An empty or unterminated read cannot establish absence of agent markers.
+        // Fork-only children may legitimately retain a complete parent environment.
+        if environment.is_empty() || !environment.ends_with(&[0]) {
             return Self::Unavailable;
         }
         Self::of_environment(&|name| environment.split(|byte| *byte == 0).find_map(|entry| {
@@ -7327,10 +7325,8 @@ fn local_harness_process(pid: u32) -> Option<HarnessProcess> {
 
 #[cfg(target_os = "linux")]
 fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let flags = stat.rsplit_once(") ")?.1.split_whitespace().nth(6)?.parse().ok()?;
     let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-    Some(HarnessAncestry::of_linux_environment(&environment, flags))
+    Some(HarnessAncestry::of_linux_environment(&environment))
 }
 
 #[cfg(target_os = "macos")]

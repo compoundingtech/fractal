@@ -16,15 +16,14 @@ use std::path::PathBuf;
 #[cfg(target_os = "linux")]
 #[test]
 fn incomplete_linux_environment_is_unavailable() {
-    for (case, environment, flags, expected) in [
-        ("empty environ", b"".as_slice(), 0, HarnessAncestry::Unavailable),
-        ("truncated environ", b"PATH=/bin".as_slice(), 0, HarnessAncestry::Unavailable),
-        ("fork before exec", b"PATH=/bin\0".as_slice(), 0x40, HarnessAncestry::Unavailable),
-        ("exec completed without markers", b"PATH=/bin\0".as_slice(), 0, HarnessAncestry::Person),
-        ("exec completed with marker", b"ST_AGENT=agent/fixture/worker\0".as_slice(), 0,
+    for (case, environment, expected) in [
+        ("empty environ", b"".as_slice(), HarnessAncestry::Unavailable),
+        ("truncated environ", b"PATH=/bin".as_slice(), HarnessAncestry::Unavailable),
+        ("complete environment without markers", b"PATH=/bin\0".as_slice(), HarnessAncestry::Person),
+        ("complete environment with marker", b"ST_AGENT=agent/fixture/worker\0".as_slice(),
             HarnessAncestry::Bound("agent/fixture/worker".into())),
     ] {
-        assert_eq!(HarnessAncestry::of_linux_environment(environment, flags), expected, "{case}");
+        assert_eq!(HarnessAncestry::of_linux_environment(environment), expected, "{case}");
     }
 }
 
