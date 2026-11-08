@@ -60,11 +60,16 @@ fn validate_policy(version: &str, scopes: &[String], seconds: u64, consent: bool
     Ok(())
 }
 
+fn admitted_principal(id: &str) -> bool {
+    matches!(id, PRINCIPAL | MCP_PRINCIPAL)
+}
+
 pub async fn begin(state: AppState, session: ClientSession,
                          request: AssistantPairingBegin) -> Result<Json<Value>, ApiError> {
+    let requested_principal = admitted_principal(&request.assistant_id).then(|| request.assistant_id.clone());
     let result = begin_inner(state.clone(), session.clone(), request).await;
     let id = result.as_ref().ok().and_then(|Json(value)| value["grant_id"].as_str());
-    audit(&state, "create", &session.actor, session.transport, id, &result)?;
+    audit(&state, "create", &session.actor, session.transport, id, requested_principal.as_deref(), &result)?;
     result
 }
 
@@ -74,7 +79,7 @@ pub async fn complete(state: &AppState, id: &str, request: &PairingComplete,
     if !matches!(&result, Ok(None)) {
         let actor = result.as_ref().ok().and_then(Option::as_ref)
             .and_then(|Json(value)| value["session_actor"].as_str()).unwrap_or("custom/client/pairing-completion");
-        audit(state, "complete", actor, transport, Some(id), &result)?;
+        audit(state, "complete", actor, transport, Some(id), None, &result)?;
     }
     result
 }
@@ -82,7 +87,7 @@ pub async fn complete(state: &AppState, id: &str, request: &PairingComplete,
 pub async fn revoke(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
                           AxumPath(id): AxumPath<String>) -> Result<Json<Value>, ApiError> {
     let result = revoke_inner(State(state.clone()), Extension(session.clone()), AxumPath(id.clone())).await;
-    audit(&state, "revoke", &session.actor, session.transport, Some(&id), &result)?;
+    audit(&state, "revoke", &session.actor, session.transport, Some(&id), None, &result)?;
     result
 }
 
@@ -90,7 +95,7 @@ pub async fn update_policy(State(state): State<AppState>, Extension(session): Ex
                                  AxumPath(id): AxumPath<String>, Json(request): Json<AssistantGrantPolicy>)
     -> Result<Json<Value>, ApiError> {
     let result = update_policy_inner(State(state.clone()), Extension(session.clone()), AxumPath(id.clone()), Json(request)).await;
-    audit(&state, "renew-policy", &session.actor, session.transport, Some(&id), &result)?;
+    audit(&state, "renew-policy", &session.actor, session.transport, Some(&id), None, &result)?;
     result
 }
 
@@ -102,7 +107,7 @@ async fn begin_inner(state: AppState, session: ClientSession,
     if !matches!(request.minimal_read_mode.as_str(), "approval-once" | "caller-bound-allow") {
         return Err(forbidden("unsupported assistant read mode"));
     }
-    if !matches!(request.assistant_id.as_str(), PRINCIPAL | MCP_PRINCIPAL) || request.device_name.trim().is_empty()
+    if !admitted_principal(&request.assistant_id) || request.device_name.trim().is_empty()
         || request.device_name.len() > 120 {
         return Err(validation("invalid assistant principal or device name"));
     }
@@ -582,6 +587,29 @@ mod tests {
                     assert_eq!(response.status(),StatusCode::FORBIDDEN,"{principal}: {action_type}");
                 }
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn denied_begin_audits_the_admitted_requested_principal() {
+        for (requested, expected) in [
+            (MCP_PRINCIPAL, MCP_PRINCIPAL),
+            (PRINCIPAL, PRINCIPAL),
+            ("assistant/unknown", PRINCIPAL),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let state = state(root.path());
+            let mut request = request();
+            request.assistant_id = requested.into();
+            request.disclosure_consent = false;
+            assert!(begin(state.clone(), ClientSession::local(Some(ISSUER)).unwrap(), request).await.is_err());
+            let audits = state.store.claims_for_kind_at("custom.client.assistant.v1.audit", None, true, 100).unwrap().claims;
+            assert_eq!(audits.len(), 1);
+            let fields = &audits[0].body["fields"];
+            assert_eq!(fields["operation"], "create");
+            assert_eq!(fields["outcome"], "denied");
+            assert_eq!(fields["principal"], expected);
+            assert!(fields["grant_id"].is_null());
         }
     }
 

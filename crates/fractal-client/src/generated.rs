@@ -136,6 +136,7 @@ pub enum ErrorCode {
     IdempotencyConflict,
     LegacyActionReceiptUntrusted,
     IssuerRequired,
+    PairingOriginRequired,
     SuspendAuthoredSessionSelection,
     StaleFence,
     CursorGap,
