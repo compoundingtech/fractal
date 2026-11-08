@@ -150,6 +150,7 @@ async fn ready_work_refuses_generation_invalidated_after_count() {
     FORGET_AFTER_COUNT.with(|hook| assert!(hook.get().is_none(), "the post-count seam was reached"));
 }
 
+#[cfg(test)]
 #[tokio::test]
 async fn ready_work_excludes_claimants_person_blockers_future_work_and_pending_handoffs() {
     for exclusion in ["claimant", "blockers", "not-before", "handoff"] {
