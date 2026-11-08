@@ -24,7 +24,7 @@ const settle = async (ms = 200) => { await act(async () => { await new Promise(r
 const view = (turns: readonly TranscriptTurn[], props: { readonly history?: TranscriptHistory; readonly active?: boolean; readonly viewportKey?: string } = {}) => <>
   <input data-testid="composer" />
   <EmbraceRuntimeProvider options={{ messages: turns.flatMap(entry => entry.prompt === undefined ? entry.items : [entry.prompt, ...entry.items]), isRunning: false, onNew: async () => {} }}>
-    <Transcript turns={turns} title="Search" sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} onOpenTool={() => {}} {...props} />
+    <Transcript turns={turns} title="Search" sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} interactiveCalls {...props} />
   </EmbraceRuntimeProvider>
 </>
 const render = async (element: React.ReactNode) => { await act(async () => root.render(element)); await settle(30) }

@@ -3253,8 +3253,7 @@ export type PairingComplete = {
 export type ParticipantRef = string;
 
 export type PersonAnswer = {
-  id?: string;
-  label?: string;
+  choices: Array<PersonAnswerChoice>;
   outcome: 
   "accept"
   | "decline"
@@ -3265,13 +3264,19 @@ export type PersonAnswer = {
   | "read"
   | "dismissed"
 ;
-  text?: string;
   type: "decision" | "choice" | "feedback" | "update";
+  words?: string;
+};
+
+export type PersonAnswerChoice = {
+  id: string;
+  label?: string;
+  note?: string;
 };
 
 export type PersonAnswerInput = {
-  id?: string;
-  text?: string;
+  choices?: Array<PersonChoiceInput>;
+  words?: string;
 };
 
 export type PersonAnswerRecord = {
@@ -3299,6 +3304,11 @@ export type PersonAskParameters = {
   request?: StructuredRequest;
   step_id?: Id;
   title: string;
+};
+
+export type PersonChoiceInput = {
+  id: string;
+  note?: string;
 };
 
 export type PersonId = string;
@@ -3849,6 +3859,7 @@ export type StructuredRequest = {
   type: "decision" | "choice" | "feedback";
   version: 1;
   why_person: MarkdownInline;
+  words?: "none" | "optional" | "required";
 };
 
 export type SubagentSummary = {

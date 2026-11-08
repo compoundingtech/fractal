@@ -117,7 +117,7 @@ export const AnnotatedAnswer: S = {
     await userEvent.keyboard('{Escape}')
     await userEvent.click(canvas.getByRole('button', { name: 'Send' }))
     await expect(JSON.parse(canvas.getByTestId('acted').textContent!)).toEqual({
-      type: 'work.done', summary: 'Thread the session through: Start with packages/worker', answer: { id: 'thread', text: 'Start with packages/worker' },
+      type: 'work.done', summary: 'Thread the session through: Start with packages/worker', answer: { choices: [{ id: 'thread', note: 'Start with packages/worker' }] },
     })
   },
 }

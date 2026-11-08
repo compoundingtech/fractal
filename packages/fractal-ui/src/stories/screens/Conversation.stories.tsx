@@ -12,7 +12,7 @@ interface ConversationScreenArgs { readonly scheme: 'dark' | 'light' }
 const ConversationScreen = ({ scheme }: ConversationScreenArgs) => <main data-scheme={scheme} {...stylex.props(styles.root, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
   <ScenarioScreen scheme={scheme}>{({ agentRef, agentName }) => agentRef === ''
     ? <p data-testid="screen-no-agent" {...stylex.props(styles.noAgent)}>This world has no agent to open.</p>
-    : <ConversationPane agentRef={agentRef} agentName={agentName} onOpenTool={() => undefined} />}</ScenarioScreen>
+    : <ConversationPane agentRef={agentRef} agentName={agentName} />}</ScenarioScreen>
 </main>
 
 /** The production pane mounted, unless the toolbar selected a world with no agent to open. */

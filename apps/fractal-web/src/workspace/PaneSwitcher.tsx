@@ -10,7 +10,8 @@ const layoutOf = (state: WorkspaceState) => currentSpace(state)
 
 /**
  * A phone keeps the splits but shows the focused pane alone; this reaches the others. It reads as the
- * focused pane's place among them ("1/2") and lists each pane by what it shows. Hidden with one pane.
+ * focused pane's place among them ("1 of 2", as its name says it) and lists each pane by what it shows. Hidden
+ * with one pane.
  */
 export const PaneSwitcher = ({ titleOf, onFocusPane }: {
   /** A tab's title, as its strip shows it. */
@@ -27,7 +28,7 @@ export const PaneSwitcher = ({ titleOf, onFocusPane }: {
   }
   return <Aria.MenuTrigger>
     <Aria.Button aria-label={`Pane ${index + 1} of ${panes.length}`} data-testid="pane-switcher" {...stylex.props(styles.trigger)}>
-      <span>{index + 1}/{panes.length}</span>
+      <span>{index + 1} of {panes.length}</span>
       <Icon name="chevron-down" size={12} />
     </Aria.Button>
     <Aria.Popover placement="bottom start" {...stylex.props(styles.popover)}>

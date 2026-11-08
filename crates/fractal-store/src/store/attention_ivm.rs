@@ -73,7 +73,7 @@ impl View for Family {
     fn definition(&self) -> Definition {
         Definition {
             name: self.view(),
-            fingerprint: "projected-source.v1;canonical-person-fences.v3.lowercase-range;custom-source.v1;u128-time.v1;public-row.v3.notice-isolation",
+            fingerprint: "projected-source.v1;canonical-person-fences.v3.lowercase-range;custom-source.v1;u128-time.v1;public-row.v3.notice-isolation;work-done-answer.v2.one-answer-schema",
             kinds: &[],
             local_kinds: match self {
                 Self::Person => &[PERSON_CHANGE, PERSON_CLOCK],
@@ -308,7 +308,7 @@ fn person_row(
     match item.request.as_ref() {
         Some(update) if update["type"] == "update" => {
             row["action_parameters"]["work.done"]["summary"] = json!("Read");
-            row["action_parameters"]["work.done"]["answer"] = json!({"id":"read"});
+            row["action_parameters"]["work.done"]["answer"] = json!({"choices":[{"id":"read"}]});
             row["update"] = update.clone();
         }
         Some(request) => row["request"] = crate::person_request::client_view(request),

@@ -68,10 +68,14 @@ export const Offline: Story = { args: { state: 'offline' } }
 export const Unavailable: Story = { args: { state: 'unavailable' } }
 export const ScriptedRepair: Story = { args: { state: 'scripted-repair' } }
 
-/** Every tab's box and the strip's height, rounded to a tenth of a pixel. */
+/**
+ * Every tab's box and the strip's height, rounded to a tenth of a pixel. A tab's x is measured within the list's
+ * scrolled content: a phone's list scrolls the selected tab into view, which moves no box.
+ */
 const stripGeometry = (canvas: HTMLElement) => {
   const strip = canvas.querySelector<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"]')!
-  const box = (element: Element) => { const rect = element.getBoundingClientRect(); return [rect.x, rect.y, rect.width, rect.height].map(value => Math.round(value * 10) / 10) }
+  const origin = strip.getBoundingClientRect().x - strip.scrollLeft
+  const box = (element: Element) => { const rect = element.getBoundingClientRect(); return [rect.x - origin, rect.y, rect.width, rect.height].map(value => Math.round(value * 10) / 10) }
   return { strip: box(strip)[3], tabs: [...strip.querySelectorAll('[role="tab"]')].map(box) }
 }
 
@@ -80,13 +84,14 @@ export const TabSwitchGeometry: Story = {
   args: { state: 'populated' },
   play: async ({ canvasElement, args }) => {
     await waitFor(() => assertProductionAppState(canvasElement, args.state, true), { timeout: 60000 })
-    // Two more agents' tabs, opened as a link would.
-    for (const agent of fixtureProjections.agents.filter(row => row.id !== appStoryAgent(args.state)).slice(0, 2)) {
+    const tabs = () => [...canvasElement.querySelectorAll<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"] [role="tab"]')]
+    // Two more agents' tabs, opened as a link would. Each navigation lands before the next, as two clicks would:
+    // two locations in one task reach the workspace as only the last.
+    for (const [index, agent] of fixtureProjections.agents.filter(row => row.id !== appStoryAgent(args.state)).slice(0, 2).entries()) {
       window.history.pushState(null, '', `/w/${agent.id}`)
       window.dispatchEvent(new PopStateEvent('popstate'))
+      await waitFor(() => expect(tabs()).toHaveLength(index + 2))
     }
-    const tabs = () => [...canvasElement.querySelectorAll<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"] [role="tab"]')]
-    await waitFor(() => expect(tabs()).toHaveLength(3))
     await document.fonts.ready
     const before = stripGeometry(canvasElement)
     for (const index of [0, 1, 2, 0]) {

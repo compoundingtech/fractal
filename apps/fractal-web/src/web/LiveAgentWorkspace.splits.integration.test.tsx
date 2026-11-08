@@ -9,7 +9,6 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
-import { rightPanelAtom } from './rightPanel.ts'
 import type { GlassGateway } from '../workspace/glassSync.ts'
 import type { CollectionStream, Glass } from '@fractal/client'
 
@@ -71,7 +70,6 @@ beforeEach(() => {
   window.localStorage.clear()
   window.history.replaceState(null, '', '/w/agent/a')
   registry = AtomRegistry.make()
-  registry.set(rightPanelAtom, { open: false, tab: 'details' })
   host = document.createElement('div')
   document.body.append(host)
 })

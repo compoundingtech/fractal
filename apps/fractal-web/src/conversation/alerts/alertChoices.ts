@@ -2,7 +2,7 @@ import type * as Native from '@fractal/client/schema'
 import { Option } from 'effect'
 
 import { alertsIn, alertConversations } from '../../../../../clients/typescript/fractal-views/homeView.ts'
-import { ANSWERS, isRequest, personAnswer, yesNo } from '../../../../../clients/typescript/fractal-views/requestView.ts'
+import { ANSWERS, isRequest, personAnswer, yesNo, type AnswerInput } from '../../../../../clients/typescript/fractal-views/requestView.ts'
 import type { AlertAction } from './alert-action-port.ts'
 
 // What an alert offers, separate from how it looks: the answers the Fractal terminal UI and the phone give (a structured
@@ -25,25 +25,23 @@ export type AlertChoice = {
   readonly notes?: boolean
 }
 
-const done = (summary: string, answer?: { readonly id?: string; readonly text?: string }): AlertAction => ({
+const done = (summary: string, answer?: AnswerInput): AlertAction => ({
   type: 'work.done',
   summary,
   ...(answer === undefined ? {} : { answer }),
 })
 
-/** The person's answer to a structured request, as the Fractal terminal UI types it; the words become the summary. */
-const typed = (request: NonNullable<Native.Attention['request']>, chosen: string | undefined, words: string) => {
-  const answer = personAnswer(request as Parameters<typeof personAnswer>[0], chosen, words)
+/** The person's answer to a structured request in the one answer schema, as the Fractal terminal UI types it. */
+const typed = (request: NonNullable<Native.Attention['request']>, chosen: string | undefined, words: string, note?: string): AnswerInput | undefined => {
+  const answer = personAnswer(request as Parameters<typeof personAnswer>[0], chosen, words, note)
   return typeof answer === 'object' ? answer : undefined
 }
 
-/**
- * A named answer with the person's note on it, as `text` beside the answer's `id`: Fractal records text on any named
- * answer (`PersonRequest::answer`), the way it records the changes a request-changes answer carries.
- */
-const noted = (answer: { readonly id?: string; readonly text?: string } | undefined, note: string | undefined) => {
-  const text = note?.trim() ?? ''
-  return answer === undefined || answer.id === undefined || text === '' || answer.text !== undefined ? answer : { ...answer, text }
+/** The history line for a named answer, as Fractal words it (`answer_summary`): the label, its note, then the words. */
+const summaryLine = (label: string, answer: AnswerInput | undefined): string => {
+  const note = answer?.choices[0]?.note
+  const chosen = note === undefined ? label : `${label}: ${note}`
+  return answer?.words === undefined || answer.words === '' ? chosen : `${chosen} — ${answer.words}`
 }
 
 /**
@@ -65,10 +63,9 @@ export const alertChoices = (alert: Native.Attention): readonly AlertChoice[] | 
         tone: answer.outcome === 'decline' ? 'danger' : request.recommendation?.answer === answer.id ? 'primary' : 'secondary',
         notes: answer.outcome !== 'request_changes',
         action: (words, note) => {
-          const sent = noted(typed(request, answer.id, words), note)
-          // The summary is the line the asker's history shows: a note reads there too, as Fractal words it (`answer_summary`).
-          const summary = answer.outcome === 'request_changes' ? words.trim() : sent?.text === undefined ? answer.label : `${answer.label}: ${sent.text}`
-          return done(summary, sent)
+          const sent = typed(request, answer.id, words, answer.outcome === 'request_changes' ? undefined : note)
+          // The summary is the line the asker's history shows: the note and words read there too.
+          return done(summaryLine(answer.label, sent), sent)
         },
       }))
       if (request.type === 'feedback' || (request.type === 'choice' && request.custom === true)) {
@@ -79,7 +76,7 @@ export const alertChoices = (alert: Native.Attention): readonly AlertChoice[] | 
       }
       // A request with named answers is set aside by name; Fractal tells its asker it was dismissed.
       choices.push((request.answers ?? []).length > 0
-        ? { key: 'dismiss', label: 'Dismiss', words: 'none', tone: 'secondary', action: () => done('Dismissed without an answer.', { id: 'dismiss' }) }
+        ? { key: 'dismiss', label: 'Dismiss', words: 'none', tone: 'secondary', action: () => done('Dismissed without an answer.', { choices: [{ id: 'dismiss' }] }) }
         : { key: 'nothing', label: 'Nothing to do', words: 'none', tone: 'secondary', action: () => done(ANSWERS.nothing, typed(request, undefined, ANSWERS.nothing)) })
       return choices
     }

@@ -187,7 +187,7 @@ const DevBarContent = ({ defaultVisible = import.meta.env?.DEV ?? false }: { rea
   return (
     <div ref={host} data-testid="wf-devbar" {...stylex.props(devbarTheme(dark))}>
       <MetersProvider meters={meters}>
-        <Devbar panels={panels} segments={segments} openPanel={openPanel} onOpenPanelChange={setOpenPanel} stripMinWidth={0} style={styles.root} />
+        <Devbar panels={panels} segments={segments} openPanel={openPanel} onOpenPanelChange={setOpenPanel} stripSizing="content" style={styles.root} />
       </MetersProvider>
     </div>
   )

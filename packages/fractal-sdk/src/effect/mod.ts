@@ -561,7 +561,7 @@ const make = (options: FractalOptions) =>
     const channel = yield* makeChannel({
       client,
       socket,
-      parentSpan: options.parentSpan,
+      ...(options.parentSpan === undefined ? {} : { parentSpan: options.parentSpan }),
       commandTraceContext: () => outbound,
       ...(options.onDiagnostics === undefined ? {} : { onDiagnostics: options.onDiagnostics }),
       onCapabilities: (envelope: AdvertisedEnvelope) => {
@@ -590,7 +590,7 @@ const make = (options: FractalOptions) =>
           Effect.sync(() => {
             if (state._tag !== 'Reconnecting') return
             for (const apply of fresheners.values())
-              apply({ _tag: 'SocketDropped', attempt: state.attempt, issue: state.issue, nextAt: state.nextAt })
+              apply({ _tag: 'SocketDropped', attempt: state.attempt, issue: state.issue, ...(state.nextAt === undefined ? {} : { nextAt: state.nextAt }) })
           }),
         ),
       ),

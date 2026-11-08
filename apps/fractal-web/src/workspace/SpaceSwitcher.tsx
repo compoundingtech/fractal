@@ -5,6 +5,7 @@ import { currentSpace, type Command, type WorkspaceState } from '@fractal/ui/wor
 import { useDispatch, useWorkspace } from '@fractal/ui/workspace/react'
 import { colorVars as c, geometryVars as g, interactionVars as interaction, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
+import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { Tooltip } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
 import { namingCommand, type NamingIntent } from '../palette/dispatch.ts'
 
@@ -36,6 +37,8 @@ export const SpaceSwitcher = ({ rail = false, note }: { readonly rail?: boolean;
   const { spaces, current } = state
   const name = spaces.find(space => space.id === current)?.name ?? 'Space'
   const trigger = React.useRef<HTMLButtonElement>(null)
+  // The sidebar provides its touch density (a coarse pointer) here, as for its other controls: 44px targets.
+  const touch = React.useContext(NarrowLayoutContext)
   const noteId = React.useId()
   const [mode, setMode] = React.useState<Mode>({ _tag: 'Idle' })
   const [draft, setDraft] = React.useState('')
@@ -48,7 +51,7 @@ export const SpaceSwitcher = ({ rail = false, note }: { readonly rail?: boolean;
     dispatch(namingCommand(state, mode.intent, draft.trim()))
     setMode({ _tag: 'Idle' })
   }
-  const button = <Aria.Button ref={trigger} aria-label={`Space: ${name}`} {...(note === undefined ? {} : { 'aria-describedby': noteId })} data-testid="space-switcher" {...stylex.props(rail ? styles.railTrigger : styles.trigger)}>
+  const button = <Aria.Button ref={trigger} aria-label={`Space: ${name}`} {...(note === undefined ? {} : { 'aria-describedby': noteId })} data-testid="space-switcher" {...stylex.props(rail ? styles.railTrigger : styles.trigger, touch && styles.touch)}>
     {rail
       ? <span aria-hidden="true">{initialOf(name)}</span>
       : <><span {...stylex.props(styles.name)}>{name}</span><Icon name="chevron-down" size={12} /></>}
@@ -109,6 +112,7 @@ const styles = stylex.create({
     color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, fontWeight: 500, cursor: 'pointer',
     outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusOffset,
   },
+  touch: { minWidth: g.touchTarget, minHeight: g.touchTarget },
   // A 28px square holding the initial, the rail's other controls' size; its fill marks it as the current space.
   railTrigger: {
     position: 'relative', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, width: g.controlMd, height: g.controlMd, padding: 0,

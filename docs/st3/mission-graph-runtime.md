@@ -1121,18 +1121,21 @@ Each named answer has a stable `id`, a `label`, the `consequence` that follows, 
 shows a complete example.
 
 ```sh
-fractal work done step-run/release/ask-ID --as person/operator --answer land
-fractal work done step-run/release/ask-ID --as person/operator --answer revise --text "Split the migration"
+fractal work done step-run/release/ask-ID --as person/operator --choice land
+fractal work done step-run/release/ask-ID --as person/operator --choice "land=Merge after the freeze"
+fractal work done step-run/release/ask-ID --as person/operator --choice revise --words "Split the migration"
 ```
 
-The person answers with a named `--answer ID`, adding `--text` where the answer needs words:
-requesting changes, a custom choice, or feedback. A reply in words alone does not answer a
-decision or a choice; `answer-required` lists the answer IDs. Feedback also accepts a plain
-`--summary`. The `work.person-done` claim records the typed
-answer as `{type, outcome, id, label, text}`, where `outcome` is `accept`, `decline`,
-`request_changes`, `selected`, `custom`, `feedback` or `dismissed`. `--answer dismiss` (with an optional
-`--text` reason) sets any decision or choice aside without answering it: the asker is told the person
-dismissed it, and a request that defines its own `dismiss` answer keeps that meaning. The resumed origin step lists it in
+The person answers with a named `--choice ID`, optionally with a note on it as `--choice ID=NOTE`,
+and adds their own words with `--words` where the request takes them; requesting changes, a custom
+choice and feedback need them. A reply in words alone does not answer a decision or a choice;
+`answer-required` lists the answer IDs. Feedback also accepts a plain `--summary`. The
+`work.person-done` claim records the typed answer in the one answer schema
+([person answers](person-answers.md)), `{type, outcome, choices: [{id, label, note?}], words?}`, where
+`outcome` is `accept`, `decline`, `request_changes`, `selected`, `custom`, `feedback` or `dismissed`.
+`--choice dismiss` (with optional `--words` saying why) sets any decision or choice aside without
+answering it: the asker is told the person dismissed it, and a request that defines its own
+`dismiss` answer keeps that meaning. The resumed origin step lists it in
 `person_answers` with the ask, respondent, time and summary; a person ask's own step does too,
 which is where a `--new-run` asker reads it. `fractal work show STEP --json` and the client `work`
 resource both carry the field. The summary stays as the `Person response:` constraint for
@@ -1156,8 +1159,8 @@ returns `update-not-asked`.
 The update is a person step in a run of its own, so no step waits on it and the poster keeps
 working. It stays on the person's home until they read it, even after the poster stops; the
 poster can withdraw it with `cancel-ask`. Opening it with `fractal alerts show` as the person (not
-from an agent seat) reads it, as does `fractal work done STEP --as PERSON --answer read`. Reading
-records `{type: "update", outcome: "read"}` and tells nobody. The client attention card carries
+from an agent seat) reads it, as does `fractal work done STEP --as PERSON --choice read`. Reading
+records `{type: "update", outcome: "read", choices: []}` and tells nobody. The client attention card carries
 the update under `update`, not `request`.
 
 A person message leaves on read or archive, without an age expiry. A launch needs its current

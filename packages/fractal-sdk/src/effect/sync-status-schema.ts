@@ -14,15 +14,15 @@ export const StaleReason = Schema.Union([
 ]).annotate({ identifier: 'Fractal.StaleReason' })
 export const SyncFailureCause = Schema.Union([
   Schema.TaggedStruct('Server', { code: Schema.NonEmptyString, message: Schema.String }),
-  Schema.TaggedStruct('Local', { kind: Schema.NonEmptyString, detail: Schema.optional(Schema.Struct({ cap: Schema.optional(Count), message: Schema.optional(Schema.String) })) }),
+  Schema.TaggedStruct('Local', { kind: Schema.NonEmptyString, detail: Schema.optionalKey(Schema.Struct({ cap: Schema.optionalKey(Count), message: Schema.optionalKey(Schema.String) })) }),
   Schema.TaggedStruct('Unknown', {}),
 ]).annotate({ identifier: 'Fractal.SyncFailureCause' })
 export const SyncStatus = Schema.Union([
   Schema.TaggedStruct('Connecting', { attempt: Count, since: Timestamp }),
   Schema.TaggedStruct('Requested', { since: Timestamp }),
-  Schema.TaggedStruct('Progress', { stage: SyncStage, elapsedMs: Count, stageSince: Timestamp, reportedAt: Timestamp, host: Schema.optional(Schema.String), done: Schema.optional(Count), total: Schema.optional(Count) }),
-  Schema.TaggedStruct('Live', { since: Timestamp, snapshot: Schema.optional(Schema.Unknown) }),
-  Schema.TaggedStruct('Stale', { reason: StaleReason, lastLiveAt: Schema.optional(Timestamp) }),
+  Schema.TaggedStruct('Progress', { stage: SyncStage, elapsedMs: Count, stageSince: Timestamp, reportedAt: Timestamp, host: Schema.optionalKey(Schema.String), done: Schema.optionalKey(Count), total: Schema.optionalKey(Count) }),
+  Schema.TaggedStruct('Live', { since: Timestamp, snapshot: Schema.optionalKey(Schema.Unknown) }),
+  Schema.TaggedStruct('Stale', { reason: StaleReason, lastLiveAt: Schema.optionalKey(Timestamp) }),
   Schema.TaggedStruct('Failed', { cause: SyncFailureCause }),
 ]).annotate({ identifier: 'Fractal.SyncStatus' })
 export const Fractal = { SyncStatus, SyncStage, StaleReason, SyncFailureCause } as const

@@ -32,8 +32,8 @@ export const createReadTracker = (source?: ServedSlices): ReadTracker => {
 
 export interface ScenarioProviderProps {
   readonly world: World
-  readonly clock?: Clock
-  readonly tracker?: ReadTracker | ServedSlices
+  readonly clock?: Clock | undefined
+  readonly tracker?: ReadTracker | ServedSlices | undefined
   readonly children?: React.ReactNode
 }
 

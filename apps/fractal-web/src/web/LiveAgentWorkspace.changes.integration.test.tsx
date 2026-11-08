@@ -12,7 +12,6 @@ import type { ConversationPage, DataSource } from '../data/source.ts'
 import type * as CapturedChangesModule from './capturedChanges.ts'
 import type * as InspectorModule from './ChangesInspector.tsx'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
-import { rightPanelAtom } from './rightPanel.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 const { inspectorRequested, projectedChanges } = vi.hoisted(() => ({
@@ -77,6 +76,8 @@ beforeEach(() => {
       const width = this === split ? available : this.hasAttribute('role') ? 1 : this.hasAttribute('data-dock') ? Number.parseFloat(split.style.getPropertyValue('--dock-size')) : available - Number.parseFloat(split.style.getPropertyValue('--dock-size')) - 1
       return new DOMRect(0, 0, width, 900)
     }
+    // A pane narrower than the agent panel's default threshold: the panel opens only when asked.
+    if (this.hasAttribute('data-pane')) return new DOMRect(0, 0, 640, 900)
     return originalRect.call(this)
   })
   // Keep speculative frame work out of assertions; selected threads still load normally.
@@ -90,7 +91,6 @@ beforeEach(() => {
   projectedChanges.mockClear()
   registry = AtomRegistry.make()
   // The dock is one app-wide setting; each test starts it closed.
-  registry.set(rightPanelAtom, { open: false, tab: 'details' })
   now = Atom.make(Date.parse('2026-10-19T12:00:02.000Z'))
   source = {
     ...fixtureSource({ world: {
@@ -122,8 +122,6 @@ const mount = async () => {
   await act(async () => vi.dynamicImportSettled())
 }
 const toggle = () => host.querySelector<HTMLButtonElement>('button[aria-label="Toggle right panel"]')!
-const separator = () => host.querySelector<HTMLElement>('[role="separator"][aria-label="Resize Changes"]')!
-const inspectorSeparators = () => [...host.querySelectorAll<HTMLElement>('[role="separator"]')].map(node => node.getAttribute('aria-label')).filter(label => label !== 'Agent sidebar width')
 const inspectorTab = (name: 'Changes' | 'Details') => [...host.querySelectorAll<HTMLElement>('[data-testid="agent-details-panel"] [role="tab"]')].find(tab => tab.textContent?.trim() === name)!
 const close = () => host.querySelector<HTMLButtonElement>('button[aria-label="Close agent inspector"]')!
 const openChanges = async () => {
@@ -138,24 +136,19 @@ const openChanges = async () => {
     expect(host.querySelector('[data-testid="diff-code"]')).not.toBeNull()
   }, { timeout: 15_000 })
 }
-const key = async (value: string) => {
-  await act(async () => separator().dispatchEvent(new KeyboardEvent('keydown', { key: value, bubbles: true })))
-}
 const selectAgent = async (ref: string) => {
   const row = host.querySelector<HTMLElement>(`nav[aria-label="Agent roster"] [data-wf-agent-ref="${ref}"]`)!
   expect(row).not.toBeNull()
   await act(async () => row.click())
   await act(async () => vi.dynamicImportSettled())
 }
-const panelWidth = () => Number(separator().getAttribute('aria-valuenow'))
 
-describe('live captured Changes dock', () => {
+describe('live captured Changes in the pane side panel', () => {
   it('loads inspector code and derives captured diffs only on open, then closes without losing the thread', async () => {
     expect(inspectorRequested).not.toHaveBeenCalled()
     await mount()
     expect(inspectorRequested).not.toHaveBeenCalled()
     expect(projectedChanges).not.toHaveBeenCalled()
-    expect(separator()).toBeNull()
     expect(close()).toBeNull()
     expect(toggle().getAttribute('aria-pressed')).toBe('false')
     const thread = host.querySelector('[data-testid="conversation-history-host"]')
@@ -171,8 +164,6 @@ describe('live captured Changes dock', () => {
     expect(inspectorRequested).toHaveBeenCalledTimes(1)
     expect(projectedChanges).toHaveBeenCalledWith(page)
     expect(toggle().getAttribute('aria-pressed')).toBe('true')
-    expect(separator().getAttribute('aria-valuemin')).toBe('320')
-    expect(separator().getAttribute('aria-valuemax')).toBe('720')
     expect(host.querySelector('[data-testid="diff-code"]')).not.toBeNull()
     expect(host.textContent).toContain('src/example.ts')
     expect(host.textContent).toContain('Successful-tool captures')
@@ -188,7 +179,6 @@ describe('live captured Changes dock', () => {
     expect(provenance.textContent).toContain('not current repository contents')
 
     await act(async () => close().click())
-    expect(separator()).toBeNull()
     expect(close()).toBeNull()
     expect(host.querySelector('[data-testid="diff-code"]')).toBeNull()
     expect(toggle().getAttribute('aria-pressed')).toBe('false')
@@ -201,129 +191,6 @@ describe('live captured Changes dock', () => {
     expect(inspectorRequested).toHaveBeenCalledTimes(1)
     expect(host.querySelector('[data-testid="conversation-history-host"]')).toBe(thread)
     await act(async () => toggle().click())
-    expect(separator()).toBeNull()
   })
 
-  it('names the dock separator after the visible inspector view, and keeps the panel and its tab across close and tabs', async () => {
-    await mount()
-    expect(inspectorSeparators()).toEqual([])
-    await act(async () => toggle().click())
-    await act(async () => vi.dynamicImportSettled())
-    await vi.waitFor(() => expect(inspectorTab('Details')?.getAttribute('aria-selected')).toBe('true'))
-    expect(inspectorSeparators()).toEqual(['Resize Details'])
-    await act(async () => inspectorTab('Changes').click())
-    expect(inspectorTab('Changes').getAttribute('aria-selected')).toBe('true')
-    expect(inspectorSeparators()).toEqual(['Resize Changes'])
-    await act(async () => inspectorTab('Details').click())
-    expect(inspectorSeparators()).toEqual(['Resize Details'])
-    await act(async () => inspectorTab('Changes').click())
-    // Closing and reopening comes back to the tab it was on.
-    await act(async () => close().click())
-    expect(inspectorSeparators()).toEqual([])
-    await act(async () => toggle().click())
-    await act(async () => vi.dynamicImportSettled())
-    await vi.waitFor(() => expect(inspectorTab('Changes')?.getAttribute('aria-selected')).toBe('true'))
-    expect(inspectorSeparators()).toEqual(['Resize Changes'])
-    // Opened for one tab, it stays open for the next, on the same tab.
-    await selectAgent('agent/example-changes-peer')
-    await vi.waitFor(() => expect(inspectorTab('Changes')?.getAttribute('aria-selected')).toBe('true'))
-    expect(inspectorSeparators()).toEqual(['Resize Changes'])
-    expect(toggle().getAttribute('aria-pressed')).toBe('true')
-  })
-
-  it('clamps keyboard resizing and persists the committed width across close and remount', async () => {
-    await mount()
-    await openChanges()
-    await key('Home')
-    expect(panelWidth()).toBe(320)
-    await key('ArrowRight')
-    expect(panelWidth()).toBe(320)
-    await key('End')
-    expect(panelWidth()).toBe(720)
-    await key('ArrowLeft')
-    expect(panelWidth()).toBe(720)
-    await key('Home')
-    await key('ArrowLeft')
-    const width = panelWidth()
-    expect(width).toBeGreaterThan(320)
-    expect(width).toBeLessThan(720)
-    await act(async () => close().click())
-    await openChanges()
-    expect(panelWidth()).toBe(width)
-
-    await act(async () => root.unmount())
-    registry.dispose()
-    registry = AtomRegistry.make()
-    root = createRoot(host)
-    await mount()
-    await openChanges()
-    expect(panelWidth()).toBe(width)
-  })
-
-  it('shares its width across every tab', async () => {
-    await mount()
-    await openChanges()
-    await key('End')
-    expect(panelWidth()).toBe(720)
-    for (const ref of ['agent/example-changes-peer', 'agent/changes-b', 'agent/changes-a']) {
-      await selectAgent(ref)
-      await openChanges()
-      expect(panelWidth()).toBe(720)
-    }
-    await key('Home')
-    expect(panelWidth()).toBe(320)
-    await selectAgent('agent/changes-b')
-    await openChanges()
-    expect(panelWidth()).toBe(320)
-  })
-
-  it('keeps a 360px thread at the 900px desktop boundary when End is pressed', async () => {
-    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 900 })
-    await mount()
-    await act(async () => host.querySelector('[role="separator"][aria-label="Agent sidebar width"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true })))
-    await openChanges()
-    await key('End')
-    const split = separator().parentElement!
-    expect(split.firstElementChild!.getBoundingClientRect().width).toBeGreaterThanOrEqual(360)
-    // 900px minus the sidebar's 240px floor, 360px thread and two 1px tracks.
-    expect(panelWidth()).toBe(298)
-    expect(separator().getAttribute('aria-valuemax')).toBe('298')
-  })
-
-  it('bounds a restored 720px preference at 900px without replacing the preference', async () => {
-    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 900 })
-    await mount()
-    await act(async () => host.querySelector('[role="separator"][aria-label="Agent sidebar width"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true })))
-    const split = host.querySelector<HTMLElement>('[data-docked-split]')!
-    const storageKey = `composition.${split.getAttribute('data-docked-split')}`
-    window.localStorage.setItem(storageKey, '720')
-    await openChanges()
-    expect(split.firstElementChild!.getBoundingClientRect().width).toBeGreaterThanOrEqual(360)
-    expect(Number.parseFloat(host.querySelector<HTMLElement>('aside[aria-label="Agents"]')!.style.width)).toBeGreaterThanOrEqual(208)
-    expect(panelWidth()).toBe(split.getBoundingClientRect().width - 361)
-    expect(separator().getAttribute('aria-valuemax')).toBe(String(panelWidth()))
-    expect(window.localStorage.getItem(storageKey)).toBe('720')
-  })
-
-  it('constrains a shrinking window and restores the preferred width when space returns', async () => {
-    await mount()
-    await openChanges()
-    await key('End')
-    const split = separator().parentElement!
-    const storageKey = `composition.${split.getAttribute('data-docked-split')}`
-    expect(panelWidth()).toBe(720)
-    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 900 })
-    await act(async () => { window.dispatchEvent(new Event('resize')) })
-    await act(async () => host.querySelector('[role="separator"][aria-label="Agent sidebar width"]')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true })))
-    await act(async () => { for (const notify of splitObservers) notify() })
-    expect(split.firstElementChild!.getBoundingClientRect().width).toBeGreaterThanOrEqual(360)
-    expect(panelWidth()).toBeLessThanOrEqual(330)
-    expect(separator().getAttribute('aria-valuemax')).toBe(String(panelWidth()))
-    expect(window.localStorage.getItem(storageKey)).toBe('720')
-    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1600 })
-    await act(async () => { window.dispatchEvent(new Event('resize')) })
-    await act(async () => { for (const notify of splitObservers) notify() })
-    expect(panelWidth()).toBe(720)
-    expect(window.localStorage.getItem(storageKey)).toBe('720')
-  })
 })

@@ -67,13 +67,13 @@ const preview = (value: unknown): unknown => {
 
 // A deliberately plain diagnostic consumer displays every slice's wire state, not fixture constants.
 // Each slice is a separate component: no variable hook order when the catalog grows.
-const SliceConsumer = ({ kind, bound }: { kind: SliceKind; bound?: (value: unknown) => unknown }) => {
+const SliceConsumer = ({ kind, bound }: { kind: SliceKind; bound?: ((value: unknown) => unknown) | undefined }) => {
   const slice = useScenarioSlice(kind)
   return React.createElement('pre', { 'data-slice': kind }, JSON.stringify(slice.loading ? { loading: true } : {
     loading: slice.loading, state: bound === undefined ? slice.state : bound(slice.state), ...('status' in slice ? { status: slice.status } : {}),
   }))
 }
-const Consumer = ({ bound }: { bound?: (value: unknown) => unknown }) =>
+const Consumer = ({ bound }: { bound?: ((value: unknown) => unknown) | undefined }) =>
   React.createElement('main', {}, ...SLICE_KINDS.map((kind) => React.createElement(SliceConsumer, { key: kind, kind, bound })))
 const meta = {
   title: 'Scenarios/CatalogEndToEnd', component: Consumer,

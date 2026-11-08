@@ -204,9 +204,9 @@ const styles = stylex.create({
   avatar: { position: 'relative', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, width: avatarSize, height: avatarSize, borderRadius: r.sm, color: '#ffffff', fontSize: 9, fontWeight: 600, letterSpacing: '0.02em', lineHeight: 1 },
   avatarPerson: { borderRadius: r.full },
   avatarMachine: { backgroundColor: surface.washSubtle, color: ink.fgMuted, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong },
-  // One palette: the same lightness and chroma for every sender, only the hue varies.
-  // 54% lightness keeps the white 9px monogram at 4.5:1 or better on every hue (worst, teal near 191°: 4.7:1); 58% fell to 4.05:1.
-  avatarHue: (hue: number) => ({ backgroundColor: `oklch(54% 0.1 ${hue})` }),
+  // One palette: the same lightness and chroma for every sender, only the hue varies. At L 53% white initials keep
+  // 4.5:1 or better on every hue; 58% fell to about 4.1 on the worst ones.
+  avatarHue: (hue: number) => ({ backgroundColor: `oklch(53% 0.1 ${hue})` }),
   avatarImage: { width: '100%', height: '100%', objectFit: 'cover', borderRadius: r.sm },
   dot: { position: 'absolute', insetInlineEnd: -2, insetBlockEnd: -2, width: 8, height: 8, borderRadius: r.full, boxShadow: `0 0 0 2px ${surface.messageCard}` },
 })

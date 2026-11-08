@@ -99,7 +99,7 @@ const Loading = ({ title }: { readonly title: string }) => <div {...stylex.props
  * One agent's tab, on either face. The conversation stays retained behind its terminal. The terminal
  * mounts when first shown, then stays connected until the tab is left, so the toggle only reveals it.
  */
-export const AgentSurface = ({ subject, name, visible, terminal, onOpenTool, onOpen, ux }: SurfaceProps) => {
+export const AgentSurface = ({ subject, name, visible, terminal, onOpen, ux }: SurfaceProps) => {
   const source = useDataSource()
   const agent = subjectAgent(subject) ?? ''
   // The resource manager owns this demand. Passing the atom stops the pane acquiring it again.
@@ -110,7 +110,7 @@ export const AgentSurface = ({ subject, name, visible, terminal, onOpenTool, onO
   const terminalShown = visible && terminal
   return <>
     <div data-wf-shown-pane={conversationShown ? '' : undefined} {...stylex.props(styles.face, conversationShown ? styles.faceShown : styles.faceHidden)}>
-      <ConversationPaneCodeBoundary agentRef={agent} agentName={name ?? agent.split('/').at(-1) ?? 'Conversation'} onOpenTool={onOpenTool} onOpenDocument={onOpen} ux={ux} visible={conversationShown} interest={interest} />
+      <ConversationPaneCodeBoundary agentRef={agent} agentName={name ?? agent.split('/').at(-1) ?? 'Conversation'} onOpenDocument={onOpen} ux={ux} visible={conversationShown} interest={interest} />
     </div>
     {terminalMounted ? <section aria-label="Terminal" data-testid="terminal-pane" data-terminal-shown={terminalShown} tabIndex={-1} inert={!terminalShown} aria-hidden={!terminalShown} {...stylex.props(styles.face, styles.terminal, terminalShown ? styles.faceShown : styles.faceHidden)}>
       <TerminalCodeBoundary terminalRef={`terminal/${agent.slice('agent/'.length)}`} shown={terminalShown} connected={visible} />

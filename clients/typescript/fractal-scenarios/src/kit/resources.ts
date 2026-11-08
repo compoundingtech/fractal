@@ -103,7 +103,7 @@ export interface WorkInput {
   readonly step: number
   readonly state: WorkState
   readonly updatedMs: number
-  readonly claimant?: CastAgent
+  readonly claimant?: CastAgent | undefined
   readonly blockedReason?: string
   readonly goals: string[]
 }

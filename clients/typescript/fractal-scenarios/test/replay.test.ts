@@ -371,9 +371,8 @@ describe('conversation dispatch and consumer fold', () => {
   it.each(['catalog', 'recorded-transport'] as const)('snapshots Builder immediately before and after the recorded onboarding thread appears (%s)', async (source) => {
     // Match the web replay's non-anchor ISO start, with a pane opened after the roster arrives.
     const world = loadWorld('first-run-onboarding', { now: '2026-10-20T12:00:00.000Z' })
-    const h = setup(source === 'catalog' ? world : {
-      ...world, recording: loadRecordedWorld('first-run-onboarding', world.now).world.recording,
-    })
+    const recording = loadRecordedWorld('first-run-onboarding', world.now).world.recording
+    const h = setup(source === 'catalog' ? world : { ...world, ...(recording === undefined ? {} : { recording }) })
     const builder = h.world.cast.agents.find((member) => member.key === 'builder')!
     const stream = await h.connect()
     h.clock.advance(4_010)

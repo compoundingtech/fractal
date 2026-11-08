@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ConversationItem } from '../conversation/model.ts'
 import type { ConversationPage, Feed } from '../data/source.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
-import { Markdown, type WorkLogCall } from '@fractal/ui/assistant-ui'
+import { Markdown } from '@fractal/ui/assistant-ui'
 import type * as Kit from '@fractal/ui/assistant-ui'
 import type * as KitRuntime from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import type * as KitTranscript from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
@@ -161,8 +161,6 @@ afterEach(async () => {
   vi.unstubAllGlobals()
 })
 
-const opened: WorkLogCall[] = []
-
 const clock = {
   now: () => source.now,
   subscribe: (listener: () => void) => {
@@ -172,7 +170,7 @@ const clock = {
 }
 const mount = async (ux?: UxTelemetry, strictMode = false) => {
   await act(async () => {
-    const pane = <HumanClockProvider clock={clock}><ConversationPane agentRef="agent/selected" agentName="Example Agent" onOpenTool={call => opened.push(call)} ux={ux} /></HumanClockProvider>
+    const pane = <HumanClockProvider clock={clock}><ConversationPane agentRef="agent/selected" agentName="Example Agent" ux={ux} /></HumanClockProvider>
     root!.render(strictMode ? <React.StrictMode>{pane}</React.StrictMode> : pane)
   })
 }
@@ -306,7 +304,7 @@ describe('ConversationPane composition activation', () => {
   it('gives a read-only thread no bottom dock to clear: no fade, no end inset, the lane runs to the pane end', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
     await act(async () => {
-      root!.render(<HumanClockProvider clock={clock}><ConversationPane agentRef="session/read-only-child" agentName="Reviewer" onOpenTool={() => {}} readOnly /></HumanClockProvider>)
+      root!.render(<HumanClockProvider clock={clock}><ConversationPane agentRef="session/read-only-child" agentName="Reviewer" readOnly /></HumanClockProvider>)
     })
     expect(container.querySelector('[data-testid="conversation-composer-dock"]')).toBeNull()
     const dock = container.querySelector<HTMLElement>('[data-testid="conversation-bottom-dock"]')!
@@ -415,7 +413,7 @@ describe('ConversationPane composition activation', () => {
     const show = async (ref: string, surfaceKey = 'surface') => {
       recent = [ref, ...recent.filter(other => other !== ref)]
       const tiers = new Map(recent.map((id, index) => [id, index === 0 ? 'active' as const : index < 3 ? 'mounted' as const : 'cold' as const]))
-      await act(async () => root!.render(<WorkspaceBody key={surfaceKey} tabs={rosterRefs.map(id => ({ id, ref: `agent:${id}` }))} active={ref} shown={new Set([ref])} paneOf={new Map(rosterRefs.map(id => [id, 'pane']))} headerSlots={new Map()} onFocusPane={() => {}} tiers={tiers} views={{}} names={new Map(rosterRefs.map(id => [id, id]))} onOpenTool={() => {}} onOpen={() => {}} onReplace={() => {}} onClose={() => {}} onBackToAlerts={() => {}} onView={() => {}} focusShownFace={{ current: false }} />))
+      await act(async () => root!.render(<WorkspaceBody key={surfaceKey} tabs={rosterRefs.map(id => ({ id, ref: `agent:${id}` }))} active={ref} shown={new Set([ref])} paneOf={new Map(rosterRefs.map(id => [id, 'pane']))} headerSlots={new Map()} onFocusPane={() => {}} tiers={tiers} views={{}} names={new Map(rosterRefs.map(id => [id, id]))} onOpen={() => {}} onReplace={() => {}} onClose={() => {}} onBackToAlerts={() => {}} onView={() => {}} focusShownFace={{ current: false }} />))
       await flushFrames()
     }
     const lane = (ref: string) => {
@@ -674,7 +672,7 @@ describe('ConversationPane composition activation', () => {
     expect(container.querySelector('[data-testid="history-boundary"] button')).toBeNull()
   })
 
-  it('hands an opened tool call to the host surface from the kit work log', async () => {
+  it('reads a tool call whole, inline in the kit work log, with nothing to open elsewhere', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario.slice(0, 5), hasOlder: false, observation: { empty: false } } }
     source.sync = { status: { _tag: 'Live', since: 100 }, observedAt: 100 }
     await mount()
@@ -686,14 +684,11 @@ describe('ConversationPane composition activation', () => {
     await act(async () => { for (const row of container.querySelectorAll<HTMLButtonElement>('[data-testid="work-log"] [data-tool-status] > button')) row.click() })
     const raw = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')
     await act(async () => { raw!.click() })
-    const open = await act(async () => {
-      const button = container.querySelector<HTMLButtonElement>('button[aria-label="Open Reading information tool detail"]')
-      button?.click()
-      return button
-    })
-    expect(open).not.toBeNull()
-    expect(opened).toHaveLength(1)
-    expect(opened[0]).toMatchObject({ id: 'read', kind: 'read', title: 'Reading information', argsSummary: undefined })
+    const log = container.querySelector('[data-testid="work-log"]')!
+    expect(log.textContent).toContain('export const rows = []')
+    expect(log.textContent).toContain('export const count = rows.length')
+    expect(container.querySelector('button[aria-label="Open Reading information tool detail"]')).toBeNull()
+    expect(container.querySelector('[data-testid="tool-preview-actions"]')).toBeNull()
   })
 
   it('shows native text-block tool output on the expanded row instead of No output', async () => {

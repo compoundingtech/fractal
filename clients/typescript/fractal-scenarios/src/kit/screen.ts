@@ -30,14 +30,13 @@ const applySgr = (style: Style, params: string): Style => {
   return next
 }
 
-const sameStyle = (a: Style, b: Style) => a.fg === b.fg && a.bold === b.bold && a.dim === b.dim
+const sameStyle = (run: TerminalRun, style: Style) => run.fg === style.fg && run.bold === style.bold && run.dim === style.dim
 
 const toLine = (cells: Cell[], row: number, wrapped: boolean): TerminalLine => {
   const runs: TerminalRun[] = []
   for (const cell of cells) {
     const last = runs.at(-1)
-    const lastStyle: Style | undefined = last && { fg: last.fg as number | undefined, bold: last.bold, dim: last.dim }
-    if (last !== undefined && lastStyle !== undefined && sameStyle(lastStyle, cell.style)) {
+    if (last !== undefined && sameStyle(last, cell.style)) {
       last.text += cell.ch
       last.cells = (last.cells ?? 0) + 1
     } else runs.push({ text: cell.ch, cells: 1, ...cell.style })

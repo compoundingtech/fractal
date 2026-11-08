@@ -92,7 +92,6 @@ it('connects the responsive drawer toggle to its dialog while retaining narrow a
   expect(toggle.getAttribute('aria-haspopup')).toBe('dialog')
   expect(toggle.getAttribute('aria-expanded')).toBe('false')
   expect(toggle.hasAttribute('aria-controls')).toBe(false)
-  expect(within(host).getByRole('button', { name: 'Agent details' })).not.toBeNull()
   await act(async () => toggle.click())
   const dialog = within(host).getByRole('dialog', { name: 'Agents' })
   expect(dialog.id).toBe(toggle.getAttribute('aria-controls'))

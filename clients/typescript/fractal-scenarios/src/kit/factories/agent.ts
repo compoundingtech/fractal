@@ -10,18 +10,18 @@ export interface AgentOptions {
   /** Offset of the last state change. */
   readonly sinceMs: number
   readonly lastActivityMs?: number
-  readonly harnessState?: 'ready' | 'busy' | 'blocked' | 'idle'
-  readonly blockedOn?: string
+  readonly harnessState?: 'ready' | 'busy' | 'blocked' | 'idle' | undefined
+  readonly blockedOn?: string | undefined
   readonly ask?: string
-  readonly fault?: string
-  readonly mission?: CastMission
+  readonly fault?: string | undefined
+  readonly mission?: CastMission | undefined
   /** Index into the mission's steps for the current work. */
-  readonly step?: number
+  readonly step?: number | undefined
   readonly workState?: WorkState
   /** Offset at which the current work entered `workState`; defaults to `sinceMs`. */
   readonly workSinceMs?: number
   readonly upcoming?: readonly number[]
-  readonly reachability?: Agent['reachability']
+  readonly reachability?: Agent['reachability'] | undefined
 }
 
 export interface AgentFactoryResult {

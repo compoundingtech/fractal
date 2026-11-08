@@ -13,11 +13,11 @@ import { fixtureSource } from '../data/fixtureSource.ts'
 import { credentialExpiredMessage, observed, unavailable, type Feed } from '../data/source.ts'
 import type { ResourcePage } from '../resources/agent/model.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
-import { rightPanelAtom } from './rightPanel.ts'
 import type { ConversationPage } from '../data/source.ts'
 import { decodeConversationChunk } from '@fractal/sdk/read'
 import { LiveTimeline } from '../conversation/fromTimeline.ts'
 import { createConversationTranscript } from './conversationTranscript.ts'
+import { asideTabAtom } from './AgentAside.tsx'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
@@ -47,7 +47,7 @@ const openSettings = async () => { await click('Settings'); return within(docume
 const closeSettings = () => click('Close settings')
 /** The right panel on its Resources tab. */
 const openResources = async () => {
-  await click('Toggle right panel')
+  if (button('Toggle right panel')?.getAttribute('aria-pressed') !== 'true') await click('Toggle right panel')
   await vi.waitFor(() => expect(host.querySelector('[data-testid="agent-details-panel"]')).not.toBeNull(), { timeout: 15_000 })
   await act(async () => within(host).getByRole('tab', { name: /^Resources/ }).click())
   return host.querySelector<HTMLElement>('[data-agent-resources]')!
@@ -64,15 +64,17 @@ beforeEach(async () => {
   window.localStorage.clear()
   window.history.replaceState(null, '', '/w/agent/example?open=thread')
   registry = AtomRegistry.make()
+  registry.set(asideTabAtom('agent'), '')
+  // A pane wide enough for a conversation and its side panel.
+  vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) { return this.hasAttribute('data-pane') ? new DOMRect(0, 0, 1024, 800) : new DOMRect() })
   // The dock is one app-wide setting; each test starts it closed.
-  registry.set(rightPanelAtom, { open: false, tab: 'details' })
   registry.set(resources, observed({ value: { items: [resource], nextCursor: null } }))
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
   await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
 })
-afterEach(async () => { await act(async () => root.unmount()); registry.dispose(); host.remove(); vi.unstubAllGlobals() })
+afterEach(async () => { await act(async () => root.unmount()); registry.dispose(); host.remove(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
 describe('live header parity', () => {
   it('keeps only the overflow, terminal and panel controls in the owning header, with system events in Settings', async () => {
@@ -97,7 +99,8 @@ describe('live header parity', () => {
   it('opens real resources and queue observations, and closes their inspector', async () => {
     const dialog = await openResources()
     expect(dialog?.textContent).toContain('Observed project notes')
-    expect(dialog?.closest('[data-dock]')).not.toBeNull()
+    // Inside its own pane, not a global dock.
+    expect(dialog?.closest('[data-pane-aside]')?.closest('[data-pane]')).not.toBeNull()
     expect(host.querySelector('[data-testid="thread-header"]')?.contains(dialog)).toBe(false)
     const row = dialog?.querySelector('[aria-label="Observed resources"] li')
     // The kind is named by its icon in words, never as the raw type.
@@ -131,7 +134,7 @@ describe('live header parity', () => {
       await act(async () => registry.set(conversation, observed({ value: {
         items: timeline.project().items, hasOlder: timeline.hasOlder,
       } })))
-      await click('Toggle right panel')
+      if (button('Toggle right panel')?.getAttribute('aria-pressed') !== 'true') await click('Toggle right panel')
       await vi.waitFor(() => expect(host.querySelector('[data-testid="details-pane"]')).not.toBeNull(), { timeout: 15_000 })
       expect(within(host).getByRole('tab', { name: 'Details' }).getAttribute('aria-selected')).toBe('true')
       expect(within(host).getByRole('tab', { name: /^Changes/ }).getAttribute('aria-selected')).toBe('false')
