@@ -166,7 +166,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         {item.closedElsewhere
           ? <Button label="clear from Now" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
           : item.actions.includes('work.done') ? <Button label="mark read" disabled={busy || status !== 'online'} onPress={() => void actions.done(item, 'Read', 'read').then(done => { if (done) navigation.goBack(); })} /> : null}
-        {agentId ? <Button label={`chat with ${from}`} onPress={() => navigation.navigate('Conversation', { target: agentId, title: from })} /> : null}
+        {agentId ? <Button label="Open agent conversation" onPress={() => navigation.navigate('Conversation', { target: agentId, title: from })} /> : null}
         <T dim selectable>{item.id}</T>
       </ScrollView>
     </Screen>;
@@ -189,7 +189,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
           {blockedLine(item) ? <T dim selectable>{blockedLine(item)}</T> : <T dim>Answer it, or Nothing to do if there is nothing for you to do. Either way the step it waits on continues.</T>}
           {mission ? <Button label={`mission ${missionTitle(mission)}`} onPress={() => navigation.navigate('Mission', { id: mission.id })} /> : item.mission_id ? <T dim>mission {item.mission_id}</T> : null}
           {askOrigin ? <AskThread origin={askOrigin} initialTitle={item.title} onOpen={id => navigation.navigate('Thread', { id })} /> : null}
-          {agentId ? <Button label={`chat with ${from}`} onPress={() => navigation.navigate('Conversation', { target: agentId, title: from })} /> : null}
+          {agentId ? <Button label="Open agent conversation" onPress={() => navigation.navigate('Conversation', { target: agentId, title: from })} /> : null}
           <T dim selectable>{item.id}</T>
         </ScrollView>
       </KeyboardAvoidingView>
@@ -207,7 +207,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
       {item.because ? <T soft>because {item.because}</T> : null}
       {row.waiting ? <T dim>{row.waiting}</T> : null}
       {mission ? <Button label={`mission ${missionTitle(mission)}`} onPress={() => navigation.navigate('Mission', { id: mission.id })} /> : item.mission_id ? <T dim>mission {item.mission_id}</T> : null}
-      {agentId ? <Button label={`chat with ${agent ? agentName(agent) : agentId}`} onPress={() => navigation.navigate('Conversation', { target: agentId, title: agent ? agentName(agent) : undefined })} /> : null}
+      {agentId ? <Button label="Open agent conversation" onPress={() => navigation.navigate('Conversation', { target: agentId, title: agent ? agentName(agent) : undefined })} /> : null}
       <T dim selectable>{item.id}{item.source_id !== item.id ? ` · from ${item.source_id}` : ''}</T>
       {item.actions.includes('work.done') ? <Button label={attentionActionLabel('work.done').toLowerCase()} disabled={busy || status !== 'online'} onPress={() => Alert.prompt('Complete step', item.title, summary => { if (summary.trim()) void actions.done(item, summary).then(done => { if (done) navigation.goBack(); }); })} /> : null}
       {item.actions.includes('message.read') ? <Button label="dismiss: mark read" disabled={busy || status !== 'online'} onPress={() => void actions.markRead(item).then(done => { if (done) navigation.goBack(); })} /> : null}
