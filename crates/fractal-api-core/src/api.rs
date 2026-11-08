@@ -1990,6 +1990,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "custody-pending"
         | "not-found"
         | "forbidden"
+        | "pairing-origin-required"
         | "attention-migrated"
         | "unsupported-capability"
         | "peer-too-old"
