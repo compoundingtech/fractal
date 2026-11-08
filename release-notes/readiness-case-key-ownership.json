@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Validate shared readiness operation receipts and continue deterministically when an operation key is occupied by a different record.",
+  "replay": {"status": "changed", "detail": "Receipt validation follows a bounded deterministic continuation derived from the original operation key and the conflicting record ID. Replay and restart retain the same operation identity without additional journal state."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "changed", "detail": "Shared readiness failure, notice and recovery receipts must match their expected daemon operation. Conflicts are recorded and logged; exhausted continuations remain pending without preventing other drain items from progressing."},
+  "compatibility": {"status": "none", "detail": "Shared readiness routing remains disabled by default. Normal operation keys and legacy weekly checkpoint bytes are unchanged."},
+  "downtime": {"status": "none", "detail": "No coordinated downtime required."},
+  "manual": {"status": "changed", "detail": "Before disabling an enabled shared readiness sender, drain its active case and pending primary notices. Resolve any blocked operation conflicts first; receiver-side generic suppression remains independent of the sender option."},
+  "recovery": {"status": "changed", "detail": "Retain the existing journal across restart. If shared routing was disabled before draining, restore the same sender policy and journal to finish its pending work."}
+}
