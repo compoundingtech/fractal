@@ -158,7 +158,7 @@ class ReleaseNotes(unittest.TestCase):
         queue_ref = 'refs/heads/gh-readonly-queue/main/pr-1660-' + self.base
         with self.assertRaisesRegex(ImpactError, 'add a uniquely named'):
             check_pull_request(self.repo, self.base, 'HEAD', queue_ref=queue_ref)
-        self.git('reset', '--hard', old)
+        self.git('switch', '--detach', '--quiet', old)
         self.git('checkout', '-q', 'new')
         self.add_fragment('new')
         self.commit('New PR note')
@@ -260,7 +260,7 @@ class ReleaseNotes(unittest.TestCase):
         self.add_fragment('published')
         base = self.commit('Published note')
         for operation in ('edit', 'delete', 'rename'):
-            self.git('reset', '--hard', base)
+            self.git('switch', '--detach', '--quiet', base)
             if operation == 'edit':
                 self.add_fragment('published', fragment('Changed old summary'))
             elif operation == 'delete':
@@ -277,7 +277,7 @@ class ReleaseNotes(unittest.TestCase):
         source = self.commit('Invalid fragment')
         with self.assertRaisesRegex(ImpactError, 'invalid JSON'):
             check_pull_request(self.repo, self.base, source)
-        self.git('reset', '--hard', self.base)
+        self.git('switch', '--detach', '--quiet', self.base)
         self.write('crates/fractal-store/src/store/checkpoint_rules.rs', 'pub const RULES_VERSION: u32 = 11;')
         self.add_fragment()
         source = self.commit('Missing rules transition')
@@ -456,11 +456,18 @@ class ReleaseNotes(unittest.TestCase):
         downloads = self.repo / 'downloads'
         downloads.mkdir()
         commands = []
+        drafts = []
         def run(*args, cwd=None):
             commands.append(args)
             if args[0] == 'git':
                 return self.git(*args[1:])
-            if args[:2] == ('gh', 'api'):
+            if args[:5] == ('gh', 'api', '--paginate', '--slurp',
+                             'repos/compoundingtech/fractal/releases?per_page=100'):
+                return json.dumps([drafts])
+            if args == ('gh', 'api', 'repos/compoundingtech/fractal/actions/runs/1'):
+                return json.dumps({'status': 'completed', 'conclusion': 'success', 'run_attempt': 2})
+            if args == ('gh', 'api', 'repos/compoundingtech/fractal/actions/runs/1/artifacts',
+                        '--paginate', '--slurp'):
                 return json.dumps([{'artifacts': [{'name': 'fractal-release', 'expired': False}]}])
             if args[:3] == ('gh', 'run', 'download'):
                 (downloads / 'example.tar.gz').write_bytes(b'archive fixture')
@@ -471,26 +478,38 @@ class ReleaseNotes(unittest.TestCase):
             if args[0] in ('sha256sum', 'python3'):
                 return 'Existing artifact proof fixture'
             raise AssertionError(f'Unexpected publication command in dry run: {args}')
-        output = io.StringIO()
-        with patch.object(sys, 'argv', ['release-fractal-daily', '--dry-run']), \
-             patch.object(daily, '__file__', str(self.repo / 'scripts/release-fractal-daily')), \
-             patch.object(daily, 'newest_verified_main_run', return_value=(1, source)), \
-             patch.object(daily, 'latest_release_tag', return_value='v0.3.0'), \
-             patch.object(daily, 'next_tag', return_value='v0.3.1'), \
-             patch.object(daily, 'run', side_effect=run), \
-             patch.object(daily.tempfile, 'mkdtemp', return_value=str(downloads)), \
-             contextlib.redirect_stdout(output):
-            self.assertEqual(daily.main(), 0)
-        self.assertIn(expected, output.getvalue())
-        self.assertEqual((downloads / 'RELEASE-NOTES.md').read_text(), expected)
-        self.assertEqual(json.loads((downloads / 'UPGRADE-IMPACT.json').read_text()), report)
+        for drafts, tag, summary in [
+            ([], 'v0.3.1', ''),
+            ([{'draft': True, 'prerelease': False, 'tag_name': 'v0.3.4'}], 'v0.3.5',
+             'Keep v0.3.1 references in operator guidance.'),
+        ]:
+            with self.subTest(tag=tag):
+                expected, report = render(self.repo, 'v0.3.0', source, tag)
+                if summary:
+                    expected = f'## Operator impact summary\n\n{summary}\n\n' + expected
+                output = io.StringIO()
+                with patch.object(sys, 'argv', ['release-fractal-daily', '--dry-run', '--summary', summary]), \
+                     patch.object(daily, '__file__', str(self.repo / 'scripts/release-fractal-daily')), \
+                     patch.object(daily, 'newest_verified_main_run', return_value=(1, source)), \
+                     patch.object(daily, 'latest_release_tag', return_value='v0.3.0'), \
+                     patch.object(daily, 'run', side_effect=run), \
+                     patch.object(daily, 'render', wraps=render) as classify, \
+                     patch.object(daily.tempfile, 'mkdtemp', return_value=str(downloads)), \
+                     contextlib.redirect_stdout(output):
+                    self.assertEqual(daily.main(), 0)
+                classify.assert_called_once()
+                self.assertIn(expected, output.getvalue())
+                self.assertEqual((downloads / 'RELEASE-NOTES.md').read_text(), expected)
+                self.assertEqual(json.loads((downloads / 'UPGRADE-IMPACT.json').read_text()), report)
+                self.assertEqual(json.loads((downloads / 'CANDIDATE.json').read_text()), {
+                    'source': source, 'build_run': 1, 'build_attempt': 2})
         self.assertFalse(any(args[:2] == ('gh', 'release') for args in commands))
         workflow = (ROOT / '.github/workflows/release-fractal.yml.genie.ts').read_text()
-        # Only native tag publication renders release notes; the independent embed
-        # publisher has its own provenance-only notes and can appear earlier.
-        workflow = workflow.split('"publish": {', 1)[1].split('    advance:', 1)[0]
-        self.assertIn('python3 scripts/release_notes.py --source', workflow)
-        self.assertLess(workflow.index('python3 scripts/release_notes.py --source'), workflow.index('gh release create'))
+        # Tag runs now produce verified artifacts only; stable publication belongs
+        # exclusively to the product-GO daily publication path.
+        self.assertNotIn('"publish": {', workflow)
+        self.assertNotIn('gh release create', workflow)
+        self.assertNotIn('python3 scripts/release_notes.py --source', workflow)
 
     def test_daily_rejects_missing_classification_before_download_or_release(self):
         self.write('unclassified.rs', '// change')
@@ -510,9 +529,10 @@ class ReleaseNotes(unittest.TestCase):
              patch.object(daily, 'latest_release_tag', return_value='v0.3.0'), \
              patch.object(daily, 'next_tag', return_value='v0.3.1'), \
              patch.object(daily, 'run', side_effect=run), \
-             patch.object(daily.subprocess, 'run', side_effect=[subprocess.CompletedProcess([], 1), subprocess.CompletedProcess([], 1)]), \
-             patch.object(daily, 'render', side_effect=ImpactError('Missing upgrade classifications')):
+             patch.object(daily.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1)), \
+             patch.object(daily, 'render', side_effect=ImpactError('Missing upgrade classifications')) as classify:
             self.assertEqual(daily.main(), 1)
+        classify.assert_called_once()
         self.assertFalse(any(args[0] == 'gh' for args in commands))
 
 

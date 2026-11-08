@@ -20,7 +20,8 @@ import './scenario-fixture-graph.unit.test.ts'
 import { storyGlobs } from '../.storybook/stories.ts'
 import storybookConfig from '../.storybook/main.ts'
 
-import { transcriptInitialSourceRowCount, transcriptMountedWindow, type TranscriptTurn } from './assistant-ui/composition/Transcript'
+import type { TranscriptTurn } from './assistant-ui/composition/Transcript'
+import { transcriptInitialSourceRowCount, transcriptMountedWindow } from './assistant-ui/composition/transcript-window'
 
 // jsdom has no layout engine. This test observes domain reads, not resize geometry;
 // the real browser plays remain the proof for observer-driven layout behavior.

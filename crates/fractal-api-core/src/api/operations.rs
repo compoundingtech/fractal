@@ -513,6 +513,7 @@ pub async fn get_slo(State(state): State<AppState>) -> Result<Json<Value>, ApiEr
     let dir = crate::slo_history::dir(&state.state_dir);
     let rows = blocking_store(move || {
         let mut rows = slo_rows(&store)?;
+        rows.extend(crate::readiness_slo::current(&store));
         add_budget_forecasts(&mut rows, &dir, client_now_ms() as u64);
         add_tones(&mut rows);
         Ok(rows)

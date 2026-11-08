@@ -1031,7 +1031,7 @@ and `documentReferencesGet(subject:)`; TypeScript `documentGet(name)`,
 ### Clients connected now
 
 A client may name itself and its build in an `x-st3-client` header on every request and stream,
-for example `stui 0.1.0+a0c135e3`, `smalltalk-ios 1.0 (42)` or `st 0.1.0+a0c135e3`. The Rust
+for example `fractal-tui 0.1.0+a0c135e3`, `fractal-ios 1.0 (42)` or `fractal 0.1.0+a0c135e3`. The Rust
 crate sends what `fractal_client::set_client_name` was given; the TypeScript client takes `client` in
 its options, and Swift `client:` in its initializer. The header is optional, and Fractal shows it as
 reported: it is never identity or authority, and no client is refused, slowed or warned for its
@@ -2275,6 +2275,15 @@ seeded store cut. A bare router refuses unpublished runtime reads rather than fo
 Revoking a pairing from a non-issuer returns HTTP 409 with `code: issuer-required`,
 `retryable: false`, and `details.issuer_host_id` naming the authoritative issuer.
 The caller must direct revocation to that issuer rather than retrying the same gateway.
+
+Completing a person pairing on a member other than the one that began it returns HTTP 403
+with `code: pairing-origin-required`, `retryable: false`, and the message
+`complete pairing on the member that began it`. This check precedes code verification and
+does not consume the challenge or issue a device grant. Complete on the beginning member,
+or start a new pairing on the desired member.
+This guarantee holds only when every member accepting pairing completion runs this
+version or later. An older member has no origin check and can still complete a replicated
+challenge begun on an upgraded member, so upgrade all members.
 
 Adding optional fields is compatible. Removing or retyping a field, changing ordering or token
 rules, adding a required action parameter, or changing action semantics requires a new capability
