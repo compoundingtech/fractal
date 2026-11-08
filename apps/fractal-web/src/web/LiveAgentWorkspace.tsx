@@ -96,7 +96,6 @@ import type { SettingsBuild } from './settingsModel.ts'
 import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/sync-presentation/sync-line.ts'
 import { DecodeNotice, shownRosterRefs } from './LiveRoster.tsx'
 import { schemePreference, useResolvedScheme } from './themePreference.ts'
-import { workspaceKinds } from '../workspace/kinds.ts'
 
 const emptyAgents: readonly Agent[] = []
 const idleTerminal = Atom.make<Feed<TerminalScreen>>(waiting)
