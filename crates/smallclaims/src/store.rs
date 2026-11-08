@@ -8367,7 +8367,14 @@ impl Store {
                         continue;
                     }
                     let started = std::time::Instant::now();
-                    let hold = match (authority, shard.as_deref()) {
+                    let keyed = prepared.requires_keyed_envelope();
+                    let hold = if keyed && !matches!(
+                        prepared_membership.window(&envelope.writer, envelope.sequence), crate::fleet::Window::Keyed(_),
+                    ) {
+                        Some("unsigned")
+                    } else if keyed {
+                        fleet_admission_hold(&pass, prepared_membership, envelope)?
+                    } else { match (authority, shard.as_deref()) {
                         (AdmissionAuthority::Membership, Some(shard)) => {
                             shard_admission_hold(&pass, prepared_membership, shard, envelope)?
                         }
@@ -8375,7 +8382,7 @@ impl Store {
                             fleet_admission_hold(&pass, prepared_membership, envelope)?
                         }
                         (AdmissionAuthority::Source, _) => None,
-                    };
+                    }};
                     outcome.verify += started.elapsed();
                     if let Some(reason) = hold {
                         hold_replica_envelope(&pass, envelope, reason)?;

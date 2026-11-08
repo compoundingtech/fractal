@@ -869,10 +869,14 @@ impl Registry {
         actor: Option<&str>,
     ) -> Result<&ClaimSpec, ValidationError> {
         if kind.starts_with("custom.client.assistant.")
-            || subject.starts_with("custom/client/assistant-v1-") {
+            || subject.starts_with("custom/client/assistant-v1-")
+            || kind.starts_with("custom.client.pairing")
+            || subject.starts_with("custom/client/pairing")
+            || kind.starts_with("custom.client.terminal")
+            || subject.starts_with("custom/client/terminal-") {
             return Err(error(
                 "claim-write-forbidden",
-                "assistant authority claims require a dedicated trusted-local operation",
+                "client authority claims require a dedicated trusted-local operation",
             ));
         }
         let spec = self.validate_claim(subject, kind, fields)?;
@@ -2155,6 +2159,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
         ),
         (
             "client.action-result", &["custom"], WritePolicy::SystemOnly,
+            Cardinality::Append, None, true, &[],
+        ),
+        (
+            "client.operation-authorized", &["custom"], WritePolicy::SystemOnly,
             Cardinality::Append, None, true, &[],
         ),
         (
@@ -3561,6 +3569,11 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("previous_revision", string()),
             ("preserved_incarnation", string()),
             ("request", FieldSpec { required: true, ..object() }),
+        ],
+        "client.operation-authorized" => &[
+            ("record_id", required_string()),
+            ("record_hash", required_string()),
+            ("completion_id", string()),
         ],
         "custom.client.action-result" | "client.action-result" => &[
             ("authority_actor", string()),

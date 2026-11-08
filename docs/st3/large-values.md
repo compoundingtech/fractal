@@ -94,6 +94,30 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Client operation admission inventory (PR #5921)
+
+The `fractal_store::pairing` maintainer owns `lv-h37e16ce1bdcb`,
+`lv-hc6841fe7d058`, `lv-ha82423ec7c26`, `lv-h45575741d81f` and
+`lv-he7e4b4d5ad69`. Lifecycle readers inspect existing claim rows before choosing
+an admitted completion or terminal transition. Member-local receipt metadata
+stores an exact receipt ID and content digest; it is not part of replication.
+The allowance table stores operator-selected exact completion IDs and content
+digests alongside an integer deadline; installation replaces the configured set.
+These transitional sites follow the existing claim representation, not a
+value-size guarantee. Reference conversion must preserve exact-record matching
+and replacement/reclamation of local proof and allowance data.
+`fractal_api_core::api::client_v0::raw_terminal::lease` owns
+`lv-he1b651b77786`, replacing the earlier two-column reader with the exact
+completion ID, origin, actor and body needed for operation admission.
+The reference/chunk TODO must preserve all four values at every continuation.
+`fractal_store::store::backup` owns `lv-h339bbe5233fd`: the recovery-only
+predecessor probe binds the archived writer, sequence and exact batch digest while
+checking quarantined operation history. It reads only an existence flag; reference
+conversion must retain the exact writer-chain comparison.
+`lv-h756acba9d94c` replaces the admitted-only log reader. It pages exact envelope
+identities and certified tombstones, including quarantined identities only after the
+archive adapter validates the complete quarantined set; it never reads claim authority.
+
 ### Membership projection generation inventory (PR #5381)
 
 `fractal_store::store::ordered_membership` owns `lv-h3b5ec217e92b`.
