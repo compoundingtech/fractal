@@ -131,6 +131,9 @@ pub struct RestoreReport {
     pub source_graph_digest: String,
     pub log_digest: String,
     pub projections_match: bool,
+    /// Retained operation envelopes without portable authority; their claims are not admitted.
+    #[serde(default)]
+    pub operation_envelopes_quarantined: u64,
     pub tables: BTreeMap<String, TableDigest>,
     /// Long message bodies the archive held and the restored claims name, verified by hash.
     #[serde(default)]
