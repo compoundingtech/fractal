@@ -149,7 +149,7 @@ def ledger_entries(path, names):
         return None
 
 
-def publish_existing(repository, dist, names, source, existing):
+def publish_assets(repository, dist, names, source, existing):
     # Source markers alone do not prove aliases survived an interrupted clobber.
     # Keep staged bytes until every fixed asset has been compared and repaired.
     with tempfile.TemporaryDirectory(prefix='fractal-edge-assets-') as directory:
@@ -241,19 +241,15 @@ def main():
 
     notes_file = pathlib.Path(tempfile.mkdtemp(prefix='fractal-edge-')) / 'NOTES.md'
     notes_file.write_text(body)
-    files = [str(dist / n) for n in names]
     if existing is None:
-        # A create that timed out may still have made the release, with some of its assets.
+        # Create only the release container: --target does not move a retained tag.
+        # A timeout may still have created it, so reconcile before retrying.
         gh('release', 'create', TAG, '--repo', repository, '--target', args.source, '--prerelease',
-           '--latest=false', '--title', title, '--notes-file', str(notes_file), *files,
+           '--latest=false', '--title', title, '--notes-file', str(notes_file),
            done=lambda: release_assets(repository) is not None)
         say(f'created the {TAG} pre-release')
-        present = release_assets(repository) or set()
-        lacking = [str(dist / n) for n in names if n not in present]
-        if lacking:
-            gh('release', 'upload', TAG, '--repo', repository, '--clobber', *lacking)
-    else:
-        publish_existing(repository, dist, names, args.source, existing)
+        existing = release_assets(repository) or set()
+    publish_assets(repository, dist, names, args.source, existing)
     for leftover in sorted((release_assets(repository) or set()) - set(names)):
         gh('release', 'delete-asset', TAG, leftover, '--repo', repository, '--yes',
            done=lambda leftover=leftover: leftover not in (release_assets(repository) or set()))

@@ -211,6 +211,10 @@ can upload concurrently; separate commands enforce alias and sidecar ordering.
 It then removes stale assets and rewrites the notes, which give the exact source commit, a link to the run,
 and the merged pull request titles since the previous edge (at most 30).
 Archives carry no tag in `BUILD.json`; `source` identifies the commit.
+If the release is absent but its tag remains, the same forward-only guard still applies. Creation
+adds only the release container; it then shares the normal staging, tag PATCH, alias replacement,
+verification and cleanup sequence. `gh release create --target` alone does not move a retained tag.
+
 
 - Versioned releases and tags are unchanged. `edge` is marked as a pre-release and never as latest, so the
   daily release, `latest/download` and the default installer ignore it.

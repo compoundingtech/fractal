@@ -59,7 +59,8 @@ elif args[:2] == ['release', 'create']:
     state['release'] = {'assets': {pathlib.Path(f).name: pathlib.Path(f).read_bytes().decode('latin1') for f in files},
                         'prerelease': '--prerelease' in args, 'latest': option('--latest=false') is None and '--latest=false' not in args,
                         'notes': pathlib.Path(option('--notes-file')).read_text(), 'title': option('--title')}
-    state['tag'] = option('--target')
+    # GitHub's --target creates a missing tag, but never moves an existing ref.
+    if state['tag'] is None: state['tag'] = option('--target')
 elif args[:2] == ['release', 'upload']:
     files = [a for a in args[args.index('--clobber') + 1:]]
     for f in files: state['release']['assets'][pathlib.Path(f).name] = pathlib.Path(f).read_bytes().decode('latin1')
@@ -273,6 +274,32 @@ with tempfile.TemporaryDirectory() as temporary:
     def complete():
         release = current()
         return release['tag'] == commits[2] and len(release['release']['assets']) == 10
+
+    done = from_scratch(tag=commits[0])
+    assert done.returncode == 0 and complete(), (done, current())
+    assert calls(['api', '--method', 'PATCH']) == 1
+    recorded = current()['calls']
+    moved = next(index for index, call in enumerate(recorded) if 'PATCH' in call)
+    staged = [index for index, call in enumerate(recorded)
+              if call[:2] == ['release', 'upload'] and call[-1].endswith('STAGING-LEDGER.sha256')]
+    fixed = [index for index, call in enumerate(recorded)
+             if call[:2] == ['release', 'upload'] and Path(call[-1]).name in first['release']['assets']]
+    assert staged and fixed and staged[0] < moved < min(fixed), recorded
+    print('passed: test_missing_release_with_retained_older_tag_converges')
+    for retained, candidate, label in ((divergent, commits[2], 'divergent'),
+                                       (commits[2], commits[1], 'newer')):
+        state.write_text(json.dumps({'release': None, 'tag': retained, 'calls': []}))
+        done = publish(candidate, 'retained-' + label)
+        assert done.returncode == 0 and current()['release'] is None and current()['tag'] == retained, (done, current())
+        assert calls(['release', 'create']) == 0 and calls(['api', '--method', 'PATCH']) == 0
+        print('passed: test_missing_release_with_retained_' + label + '_tag_refused')
+    state.write_text(json.dumps({'release': None, 'tag': commits[0], 'calls': []}))
+    env['FAKE_ANCESTRY_ERROR'] = '1'
+    done = publish(commits[2], 'retained-lookup-error')
+    del env['FAKE_ANCESTRY_ERROR']
+    assert done.returncode != 0 and current()['release'] is None and current()['tag'] == commits[0]
+    assert calls(['release', 'create']) == 0
+    print('passed: test_missing_release_with_retained_tag_lookup_error_refused')
 
     # A create that made the release and then timed out continues from it, never "already exists".
     done = from_scratch((['release', 'create'], True, 1, timeout))
