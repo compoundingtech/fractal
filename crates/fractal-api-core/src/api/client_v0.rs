@@ -3355,8 +3355,8 @@ fn timeline_value_with_subject(
         }
         return Ok(Json(page_value));
     }
+    let managed = managed_owner()?;
     crate::performance::task("conversation/first-page", || {
-        let managed = managed_owner()?;
         timeline_first_page(state, snapshot, session, session_id, query, None, managed.as_ref())
     })
 }
