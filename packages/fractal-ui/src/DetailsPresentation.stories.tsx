@@ -1220,25 +1220,13 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
     }
     await checkPlainCopy(panel,whyPanel?[summary,whyPanel]:[summary])
     if(state==='reported'){
-      // A reported subagent opens a plain read-only dialog.
-      const card=[...panel.querySelectorAll<HTMLElement>('button')].find(button=>button.textContent?.includes(ompSubagent.label));requireContract(card,'Missing reported subagent card')
-      await userEvent.click(card)
-      const dialog=await within(doc.body).findByRole('dialog',{name:'Reported resource details'})
-      requireContract(dialog.textContent?.includes("Reported details only; this resource can't be opened from here."),'Subagent dialog lacks its plain read-only line')
-      await checkPlainCopy(dialog,[dialog])
-      assertPlainCopy(panel)
-      const dialogClose=within(dialog).getByRole('button',{name:'Close'})
-      if(narrow){
-        // Measured only once the dialog is open: its Close joins the 44px phone sweep, and a shrunken Close is rejected.
-        requireContract(touchTargets(dialog).includes(dialogClose),'Phone dialog sweep omitted its Close')
-        assertTouch(touchTargets(dialog))
-        const closeStyle=dialogClose.getAttribute('style')
-        try{dialogClose.style.minWidth='0';dialogClose.style.width='24px';dialogClose.style.height='24px';await rejectsCause(touchFloor,()=>assertTouch(touchTargets(dialog)))}
-        finally{if(closeStyle===null)dialogClose.removeAttribute('style');else dialogClose.setAttribute('style',closeStyle)}
-        assertTouch(touchTargets(dialog))
-      }
-      await userEvent.click(dialogClose)
-      await waitFor(()=>requireContract(!within(doc.body).queryByRole('dialog',{name:'Reported resource details'}),'Subagent dialog did not close'))
+      // A reported subagent is a plain fact row: its label and facts, nothing that opens.
+      const row=[...panel.querySelectorAll<HTMLElement>('[data-details-resource-static]')].find(row=>row.textContent?.includes(ompSubagent.label));requireContract(row,'Missing reported subagent row')
+      requireContract(row.closest('button,a')===null&&row.querySelector('button,a,[tabindex]')===null,'Reported subagent row offers an action')
+      const dialogs=doc.querySelectorAll('[role="dialog"]').length
+      await userEvent.click(row)
+      requireContract(doc.querySelectorAll('[role="dialog"]').length===dialogs,'Reported subagent row opened a dialog')
+      await checkPlainCopy(row,[row])
     }
     assertOmpLine(panel,narrow,state);assertOmpSpend(panel,state);assertNoEpoch(panel)
     // Keyboard read recovery on the accounting seat (healthy Refresh) and the failed-reads seat, at phone and desktop widths.
