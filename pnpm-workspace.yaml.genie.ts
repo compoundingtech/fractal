@@ -28,6 +28,8 @@ export default pnpmWorkspaceYaml.root({
     allowedVersions: {
       ...pnpmPolicy.peerDependencyRules?.allowedVersions,
       ...diagnosticsSourceInputs.peerDependencyRules.allowedVersions,
+      // @pierre/trees 1.0.0-beta.6 pins @pierre/theming 1.0.0 (peer @pierre/theme ^1.1.0); @pierre/diffs brings theme 2.0.0, which trees only reads optionally.
+      '@pierre/theming>@pierre/theme': '>=1.1.0',
     },
   },
   minimumReleaseAgeExclude: ['@types/node'],
