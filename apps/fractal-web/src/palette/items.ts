@@ -91,7 +91,7 @@ export const worldItems = (world: PaletteWorld, query = ''): readonly PaletteRow
     ...world.alerts.map(alert => {
       const ref = alert.pane ?? `home:${alert.ref}`
       return row({ id: ref, section: 'alerts', label: alert.title, detail: alert.kind, search: `${alert.title} ${ref}` },
-        open(ref, { icon: 'alert', entity: { kind: 'resource', id: alert.ref, title: alert.title, ...withStatus(alert.status) } }))
+        open(ref, { icon: 'alert', entity: { kind: 'alert', id: alert.ref, title: alert.title, ...withStatus(alert.status) } }))
     }),
     ...world.agents.map(agent => {
       const ref = `agent:${agent.ref}`

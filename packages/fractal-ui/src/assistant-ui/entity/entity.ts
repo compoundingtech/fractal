@@ -1,10 +1,10 @@
 /**
- * One descriptor for every entity the app shows: agents, missions, resources (files, diffs, terminals, PRs, issues,
+ * One descriptor for every entity the app shows: agents, missions, alerts, resources (files, diffs, terminals, PRs, issues,
  * runs, documents) and folders. The hover card resolves its content from `kind` + `id`, and a drag carries the same
  * descriptor as its payload, so a sidebar row, a tab, a transcript mention and a resource row name one entity one way.
  * Pure data: no React, no styles, so drag-and-drop and hosts import it without loading any card.
  */
-export const ENTITY_KINDS = ['agent', 'mission', 'resource', 'folder'] as const
+export const ENTITY_KINDS = ['agent', 'mission', 'alert', 'resource', 'folder'] as const
 export type EntityKind = (typeof ENTITY_KINDS)[number]
 
 /** The identity of an entity. Two refs with the same kind and id show the identical card. */

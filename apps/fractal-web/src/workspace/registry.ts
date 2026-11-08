@@ -1,4 +1,6 @@
 import { Data } from 'effect'
+import { presentCore } from './present.ts'
+import type { Present } from './presentation.ts'
 import type { Subject, SubjectKind } from './subject.ts'
 
 /**
@@ -38,6 +40,8 @@ export interface KindContribution<View> {
   /** Refs this kind owns. The registry checks them against every contribution when it is built. */
   readonly examples: readonly [string, ...string[]]
   readonly policy: KindPolicy
+  /** How its refs are named and marked everywhere: tab, palette row, breadcrumb, drag, card. Required, like `policy`. */
+  readonly present: Present
   /**
    * Everything the host renders this kind with. The host's `View` type widens with what it needs (tab
    * surface, row and hover presenters over one decoded model), so there is no second registry to keep in step.
@@ -48,6 +52,7 @@ export interface KindContribution<View> {
 export interface ResolvedKind<View> {
   readonly id: string
   readonly policy: KindPolicy
+  readonly present: Present
   readonly view: View
 }
 
@@ -113,7 +118,7 @@ export const makeKindRegistry = <View>({ views, contributions = [] }: {
         const claimed = contributions.filter(contribution => contribution.claims(subject.ref))
         if (claimed.length === 1) return claimed[0]!
       }
-      return { id: subject._tag, policy: corePolicies[subject._tag], view: views[subject._tag] }
+      return { id: subject._tag, policy: corePolicies[subject._tag], present: presentCore, view: views[subject._tag] }
     },
   }
 }

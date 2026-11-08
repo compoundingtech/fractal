@@ -7,7 +7,8 @@
 import * as React from 'react'
 
 import { DraggableMention } from '../../workspace/DraggableMention.tsx'
-import { claimsKind, parseGithubUrl, parseSubjectRef, refOf, type GithubKind, type GithubRef } from './refs.ts'
+import type { KindDescriptor, Present } from '../../workspace/presentation.ts'
+import { claimsKind, labelOf, parseGithubUrl, parseSubjectRef, refOf, type GithubKind, type GithubRef } from './refs.ts'
 
 export { githubSubjectRef, parseGithubUrl, parseSubjectRef, refOf, type GithubRef } from './refs.ts'
 export { gatewayGithubReader, GithubReaderProvider, sharedGithubReader, type GithubReader } from './data.ts'
@@ -67,7 +68,33 @@ export interface GithubKindContribution<View> {
     readonly domCost: number
     readonly dataCost: number
   }
+  readonly present: Present
   readonly view: View
+}
+
+const words: Record<GithubKind, { readonly kind: string; readonly icon: 'pull-request' | 'dot' | 'message' | 'check' }> = {
+  'pull-request': { kind: 'Pull request', icon: 'pull-request' },
+  issue: { kind: 'Issue', icon: 'dot' },
+  comment: { kind: 'Comment', icon: 'message' },
+  run: { kind: 'Run', icon: 'check' },
+}
+
+/**
+ * A GitHub item is named by its observed title, else by the handle GitHub itself prints (`owner/repo#12`),
+ * which the ref carries: never by the ref's last segment.
+ */
+const presentGithub = (kind: GithubKind): Present => (subject, world): KindDescriptor => {
+  const ref = subject._tag === 'Resource' ? subject.ref : ''
+  const target = parseSubjectRef(ref)
+  const observed = world.subjects.get(ref)
+  const word = words[kind]
+  return {
+    title: observed !== undefined ? { _tag: 'Known', text: observed.title } : target !== undefined ? { _tag: 'Known', text: labelOf(target) } : { _tag: 'Gone', kind: word.kind },
+    kind: word.kind,
+    mark: { _tag: 'Icon', name: word.icon },
+    card: { kind: 'resource', id: ref },
+    ...(observed !== undefined && target !== undefined ? { detail: labelOf(target) } : {}),
+  }
 }
 
 const kinds: readonly { readonly kind: GithubKind; readonly example: string }[] = [
@@ -89,6 +116,7 @@ export const githubContributions = <View>(view: (kind: GithubKind) => View): rea
       domCost: 1,
       dataCost: 1,
     },
+    present: presentGithub(kind),
     view: view(kind),
   }))
 

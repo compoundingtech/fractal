@@ -45,6 +45,9 @@ import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/
 import { MilestoneAgentRow } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/MilestoneAgentRow.tsx'
 import { AgentHoverCard } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/DeferredRowActions.tsx'
 import { EntityCardSource, type EntityCardResolver } from '../../../../packages/fractal-ui/src/assistant-ui/entity/EntityHoverCard.tsx'
+import type { EntityKind } from '../../../../packages/fractal-ui/src/assistant-ui/entity/entity.ts'
+import type { PresentationWorld } from '../workspace/presentation.ts'
+import { LiveAlertCard } from './LiveAlertCard.tsx'
 import { SidebarMissionChildRow, missionChildAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarMissionLine.tsx'
 import { SidebarQueryContext, sidebarRowAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/rowPresentation.tsx'
 import { SystemNotice, ConnectionStatus } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
@@ -576,13 +579,16 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   }, [agents, subjects, asking])
   const offline = connection._tag !== 'Live'
   // Agents resolve to the sidebar row's card; other kinds fall through to an outer source, if any.
-  const resolveCard = React.useCallback<EntityCardResolver>(entity =>
-    entity.kind === 'agent' ? <LiveAgentCard agentRef={entity.id} needsMe={needsYou.has(entity.id)} now={frozenAt} />
-      : entity.kind === 'mission' ? <LiveMissionCard missionRef={entity.id} now={frozenAt} /> : undefined, [needsYou, frozenAt])
-  useTabMetadata({
-    title: tabTitle({ agentName: agent?.name, needsYouCount: needsYou.size, offline }),
-    faviconState: selectedFaviconState({ agent, needsYou: agent !== undefined && needsYou.has(agent.ref), offline }),
-  })
+  // One entry per entity kind, so a kind the kit adds without a card here does not compile. `undefined`
+  // defers to an outer source: resources and folders belong to plugins and the sidebar.
+  const cards = React.useMemo((): { readonly [K in EntityKind]: (id: string) => React.ReactNode | undefined } => ({
+    agent: id => <LiveAgentCard agentRef={id} needsMe={needsYou.has(id)} now={frozenAt} />,
+    mission: id => <LiveMissionCard missionRef={id} now={frozenAt} />,
+    alert: id => <LiveAlertCard alertId={id} />,
+    resource: () => undefined,
+    folder: () => undefined,
+  }), [needsYou, frozenAt])
+  const resolveCard = React.useCallback<EntityCardResolver>(entity => cards[entity.kind](entity.id), [cards])
   // Filtering uses observed status, not wall time; ticking cannot change membership.
   const visibleSidebarTree = React.useMemo(() => liveSidebarTree({ tree: sidebarFolders.orderingTree, agents, needsYou, asking, filters: deferredFilters, stale }), [sidebarFolders.orderingTree, agents, needsYou, asking, deferredFilters, stale])
   const showRows = React.useMemo(() => liveShowRows({ agents, needsYou, asking, filters: deferredFilters, stale }), [agents, needsYou, asking, deferredFilters, stale])
@@ -604,8 +610,15 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const byRef = React.useMemo(() => new Map(subjects.map((subject) => [subject.ref, subject])), [subjects])
   const allTabs = React.useMemo(() => tabsOf(workspace), [space.layout])
   const unread = useUnreadMarks(agents)
-  const tabItems = React.useMemo(() => allTabs.map(tab => ({ ...tabPresentation({ tab, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef, unread }), ...(space.local.views[tab.id]?.dirty === true ? { dirty: true } : {}) })), [allTabs, space.local.views, agents, fleet._tag, needsYou, attention, byRef, unread])
+  const missionsKnown = useMissions()._tag === 'Observed'
+  const presentationWorld = React.useMemo((): PresentationWorld => ({ agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef, missionsKnown }), [agents, fleet._tag, needsYou, attention, byRef, missionsKnown])
+  const tabItems = React.useMemo(() => allTabs.map(tab => ({ ...tabPresentation({ tab, world: presentationWorld, unread }), ...(space.local.views[tab.id]?.dirty === true ? { dirty: true } : {}) })), [allTabs, space.local.views, presentationWorld, unread])
+  // The breadcrumb and the document title name the shown tab as its tab does.
   const activeLabel = tabItems.find(item => item.id === activeRow?.id)?.title
+  useTabMetadata({
+    title: tabTitle({ agentName: agent?.name ?? activeLabel, needsYouCount: needsYou.size, offline }),
+    faviconState: selectedFaviconState({ agent, needsYou: agent !== undefined && needsYou.has(agent.ref), offline }),
+  })
   const itemById = React.useMemo(() => new Map(tabItems.map(item => [item.id, item])), [tabItems])
   const refById = React.useMemo(() => new Map(allTabs.map(tab => [tab.id, tab.ref])), [allTabs])
   const previousNames = React.useRef<ReadonlyMap<string, string>>(new Map())

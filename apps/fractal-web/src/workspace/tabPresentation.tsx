@@ -1,76 +1,83 @@
-import type { Attention } from '@fractal/client/schema'
+import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
+import { EntityStatusMark } from '../../../../packages/fractal-ui/src/assistant-ui/entity/EntityCard.tsx'
 import { EntityHoverCard } from '../../../../packages/fractal-ui/src/assistant-ui/entity/EntityHoverCard.tsx'
 import { SidebarStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarStatus.tsx'
 import { rowStatusLabel } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { sidebarRow } from '../web/sidebarRow.ts'
-import type { Agent, Feed } from '../data/source.ts'
 import { alertTabMarkers } from '../web/alertsTab.ts'
 import type { EditorTabItem } from '../workbench-kit/EditorTabs.tsx'
 import { unreadLabel } from '../conversation/unread.ts'
 import { workspaceKinds } from './kinds.ts'
 import type { Tab } from './model.ts'
-import { parsePane } from './subject.ts'
-
-
-const lastSegment = (ref: string) => ref.split('/').at(-1) ?? ref
+import { titleText, type KindDescriptor, type Mark, type PresentationWorld } from './presentation.ts'
+import { parsePane, type Subject } from './subject.ts'
 
 /** A count only above one, as the TUI's tab suffix: `?`, `?2`, `◆`, `◆3`. */
 const suffix = ({ questions, others }: { readonly questions: number; readonly others: number }) =>
   questions > 0 ? `?${questions > 1 ? questions : ''}` : others > 0 ? `◆${others > 1 ? others : ''}` : undefined
 
+/** The one descriptor of a subject, through its kind. Every surface that names a subject asks here. */
+export const describe = (subject: Subject, world: PresentationWorld): KindDescriptor =>
+  workspaceKinds.kindOf(subject).present(subject, world)
+
+/** The printed title: a pending one shows its kind word until the data arrives. */
+export const describedTitle = (descriptor: KindDescriptor): string =>
+  `${titleText(descriptor.title)}${descriptor.title._tag === 'Pending' ? '…' : ''}`
+
+/** The mark as drawn: an agent's own sidebar ring, a status mark, or the kind's icon. */
+const markNode = (mark: Mark, world: PresentationWorld) => {
+  switch (mark._tag) {
+    case 'Agent': {
+      const agent = world.agents.find(row => row.ref === mark.agent)
+      if (agent === undefined) return undefined
+      const needsMe = world.needsYou.has(mark.agent)
+      const row = sidebarRow({ agent, stale: false, needsMe })
+      return <SidebarStatus status={row.status} statusLabel={rowStatusLabel(row)} variant="Marks" needsYou={needsMe} iconOnly decorative freshness="live" />
+    }
+    case 'Status': return <EntityStatusMark status={mark.status} />
+    case 'Icon': return <Icon name={mark.name} size={12} />
+  }
+}
+
 /** Presentation is derived on every observation, never stored: only the pane key is the tab's identity. */
-export const tabPresentation = ({ tab, agents, rosterKnown, needsYou, attention, subjects, unread }: {
+export const tabPresentation = ({ tab, world, unread }: {
   readonly tab: Tab
-  readonly agents: readonly Agent[]
-  readonly rosterKnown: boolean
-  readonly needsYou: ReadonlySet<string>
-  readonly attention: Feed<readonly Attention[]>
-  readonly subjects: ReadonlyMap<string, { readonly title?: string }>
+  readonly world: PresentationWorld
   /** New prose since the person last looked, by agent ref: a count, or `some` when only a newer time is known. */
   readonly unread?: ReadonlyMap<string, number | 'some'>
 }): EditorTabItem => {
   const subject = parsePane(tab.ref)
-  const base = { id: tab.id, kind: workspaceKinds.kindOf(subject).id }
+  const descriptor = describe(subject, world)
+  const icon = markNode(descriptor.mark, world)
+  const item: EditorTabItem = {
+    id: tab.id,
+    kind: workspaceKinds.kindOf(subject).id,
+    // A person's own name for the tab wins.
+    title: tab.title ?? describedTitle(descriptor),
+    ...(icon === undefined ? {} : { icon }),
+    ...(descriptor.card === null ? {} : { hoverCard: <EntityHoverCard entity={descriptor.card} /> }),
+    ...(descriptor.title._tag === 'Gone' ? { status: 'unavailable' as const } : {}),
+  }
   switch (subject._tag) {
     case 'Conversation':
     case 'Terminal': {
-      const agent = agents.find(row => row.ref === subject.agent)
-      const needsMe = needsYou.has(subject.agent)
-      // The sidebar row's own status circle, amber when the agent needs you and red when it failed, and its one card.
-      const row = agent === undefined ? undefined : sidebarRow({ agent, stale: false, needsMe })
+      const needsMe = world.needsYou.has(subject.agent)
+      const unseen = unread?.get(subject.agent)
       return {
-        ...base,
-        title: tab.title ?? agent?.name ?? lastSegment(subject.agent),
-        ...(row === undefined ? {} : {
-          icon: <SidebarStatus status={row.status} statusLabel={rowStatusLabel(row)} variant="Marks" needsYou={needsMe} iconOnly decorative freshness="live" />,
-          hoverCard: <EntityHoverCard entity={{ kind: 'agent', id: subject.agent }} />,
-        }),
+        ...item,
         ...(needsMe ? { attention: true } : {}),
         // Needs-you keeps the slot; unread shows only on the conversation itself.
-        ...(!needsMe && subject._tag === 'Conversation' && unread?.get(subject.agent) !== undefined ? { detail: unreadLabel(unread.get(subject.agent)!) } : {}),
-        ...(rosterKnown && agent === undefined ? { status: 'unavailable' as const } : {}),
+        ...(!needsMe && subject._tag === 'Conversation' && unseen !== undefined ? { detail: unreadLabel(unseen) } : {}),
       }
     }
     case 'Inbox': {
-      const markers = alertTabMarkers(attention)
+      const markers = alertTabMarkers(world.attention)
       const mark = suffix({ questions: markers.questionCount, others: markers.needsYouCount })
-      return { ...base, title: tab.title ?? 'Inbox', ...(mark === undefined ? {} : { detail: mark, attention: true }) }
+      return mark === undefined ? item : { ...item, detail: mark, attention: true }
     }
     case 'Alert':
-      return { ...base, title: tab.title ?? 'Alert' }
-    case 'Missions':
-      return { ...base, title: tab.title ?? 'Missions' }
-    case 'Mission':
-      return { ...base, title: tab.title ?? subjects.get(subject.ref)?.title ?? lastSegment(subject.ref) }
-    case 'Usage':
-      return { ...base, title: tab.title ?? 'Usage' }
-    case 'Document':
-      return { ...base, title: tab.title ?? subjects.get(subject.ref)?.title ?? lastSegment(subject.ref) }
-    case 'Declaration':
-      return { ...base, title: tab.title ?? `${agents.find(row => row.ref === subject.ref)?.name ?? lastSegment(subject.ref)} KDL` }
-    case 'Resource':
-      return { ...base, title: tab.title ?? subjects.get(subject.ref)?.title ?? lastSegment(subject.ref) }
-    case 'Unsupported':
-      return { ...base, title: tab.title ?? lastSegment(subject.key), status: 'unavailable' }
+      return descriptor.mark._tag === 'Status' && descriptor.mark.status.tone === 'needs-you' ? { ...item, attention: true } : item
+    default:
+      return item
   }
 }

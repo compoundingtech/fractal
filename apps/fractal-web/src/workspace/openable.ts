@@ -39,7 +39,7 @@ export const openCommand = ({ ref, gesture = {}, focus }: {
 export const openableDragType = ENTITY_DRAG_TYPE
 
 const entityKindOf = (subject: Subject): EntityKind =>
-  subject._tag === 'Conversation' || subject._tag === 'Terminal' ? 'agent' : subject._tag === 'Mission' ? 'mission' : 'resource'
+  subject._tag === 'Conversation' || subject._tag === 'Terminal' ? 'agent' : subject._tag === 'Mission' ? 'mission' : subject._tag === 'Alert' ? 'alert' : 'resource'
 
 export const openableDragItems = (ref: string, title = ref): Record<string, string> =>
   entityDragPayload({ kind: entityKindOf(subjectOfRef(ref)), id: subjectRef(subjectOfRef(ref)), title })

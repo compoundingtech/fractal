@@ -16,6 +16,7 @@ const github: KindContribution<string> = {
     domCost: 1,
     dataCost: 1,
   },
+  present: () => ({ title: { _tag: 'Known', text: 'acme/garden#9' }, kind: 'Pull request', mark: { _tag: 'Icon', name: 'pull-request' }, card: { kind: 'resource', id: 'resource/github/acme/garden/pull/9' } }),
   view: 'plugin:github',
 }
 

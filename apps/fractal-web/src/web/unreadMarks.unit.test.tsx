@@ -14,7 +14,7 @@ vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 const agent: Agent = { ref: 'agent/scout', terminal: '', name: 'Scout', lifecycle: { _tag: 'Unknown' }, host: 'build-1', connected: true, activity: 'idle', status: 'idle', usage: { _tag: 'Unknown' }, checkout: { _tag: 'Unknown' }, workspace: { _tag: 'Unknown' }, startedAt: { _tag: 'Unknown' }, endedAt: { _tag: 'Unknown' }, blockedOn: { _tag: 'Unknown' }, ask: { _tag: 'Unknown' }, lastActivityAt: { _tag: 'Known', value: 500 } }
 const tab = { id: 'tab-1', pane: 'agent:agent/scout', ref: 'agent:agent/scout' } as unknown as Tab
 const present = (props: { readonly needsYou?: ReadonlySet<string>; readonly unread?: ReadonlyMap<string, number | 'some'> }) =>
-  tabPresentation({ tab, agents: [agent], rosterKnown: true, needsYou: props.needsYou ?? new Set(), attention: { _tag: 'Waiting' } as never, subjects: new Map(), ...(props.unread === undefined ? {} : { unread: props.unread }) })
+  tabPresentation({ tab, world: { agents: [agent], rosterKnown: true, needsYou: props.needsYou ?? new Set(), attention: { _tag: 'Waiting' }, subjects: new Map(), missionsKnown: true }, ...(props.unread === undefined ? {} : { unread: props.unread }) })
 
 describe('unread on conversation tabs', () => {
   it('shows the count, or a dot when only "something new" is known', () => {
