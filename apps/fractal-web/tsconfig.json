@@ -15,6 +15,64 @@
     ],
     "types": [
       "node"
+    ],
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        "ignoreEffectWarningsInTscExitCode": false,
+        "ignoreEffectSuggestionsInTscExitCode": false,
+        "ignoreEffectErrorsInTscExitCode": false,
+        "includeSuggestionsInTsc": true,
+        "pipeableMinArgCount": 2,
+        "diagnosticSeverity": {
+          "missedPipeableOpportunity": "warning",
+          "schemaUnionOfLiterals": "warning",
+          "anyUnknownInErrorContext": "warning",
+          "preferSchemaOverJson": "warning"
+        },
+        "overrides": [
+          {
+            "include": ["src/data/**/*.ts"],
+            "options": {
+              "diagnosticSeverity": {
+                "missedPipeableOpportunity": "warning",
+                "schemaUnionOfLiterals": "warning",
+                "anyUnknownInErrorContext": "warning",
+                "preferSchemaOverJson": "warning",
+                "asyncFunction": "warning",
+                "newPromise": "warning",
+                "globalTimers": "warning",
+                "globalDate": "warning",
+                "globalFetch": "warning",
+                "globalConsole": "warning",
+                "globalRandom": "warning",
+                "cryptoRandomUUID": "warning",
+                "extendsNativeError": "warning"
+              }
+            }
+          },
+          {
+            "include": ["src/data/**/*.test.ts", "src/data/**/*.test.tsx", "src/data/**/*.fixtures.ts"],
+            "options": {
+              "diagnosticSeverity": {
+                "missedPipeableOpportunity": "warning",
+                "schemaUnionOfLiterals": "warning",
+                "anyUnknownInErrorContext": "warning",
+                "preferSchemaOverJson": "warning",
+                "asyncFunction": "off",
+                "newPromise": "off",
+                "globalTimers": "off",
+                "globalDate": "off",
+                "globalFetch": "off",
+                "globalConsole": "off",
+                "globalRandom": "off",
+                "cryptoRandomUUID": "off",
+                "extendsNativeError": "off"
+              }
+            }
+          }
+        ]
+      }
     ]
   },
   "include": [

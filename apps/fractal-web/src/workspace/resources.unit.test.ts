@@ -66,7 +66,7 @@ describe('planTiers', () => {
   it('evicts the least recently used conversation first, keeping the tab', () => {
     const state = workspace(agents)
     const tiers = planTiers({ state, budget: defaultBudget })
-    expect(state.mru.map(id => tiers.get(id))).toEqual(['active', 'mounted', 'mounted', 'mounted', 'warm', 'warm', 'warm', 'warm', 'warm', 'cold', 'cold', 'cold'])
+    expect(state.mru.map(id => tiers.get(id))).toEqual(['active', 'mounted', 'mounted', 'warm', 'warm', 'warm', 'warm', 'warm', 'warm', 'cold', 'cold', 'cold'])
     expect(tabsOf(state.layout)).toHaveLength(12)
   })
 

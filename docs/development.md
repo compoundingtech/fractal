@@ -247,6 +247,12 @@ inventory's read-only permissions (Git does not preserve them).
 [Fractal web implementation](fractal-web.md) documents the app’s security policy, transcript paint,
 captured changes, composer, arrangements, roster and terminal attachment.
 
+New TypeScript code must not add Effect language-service diagnostics or effect-utils oxlint
+findings. Run `nix develop .#web -c python3 scripts/ci-fractal-web-effect-lint` before pushing.
+After fixing existing findings, lower the baseline with `--update`; see
+[Effect diagnostics and lint ratchet](ci.md#effect-diagnostics-and-lint-ratchet). For editor
+diagnostics, point the TypeScript language server at `effect-tsgo` from the web shell.
+
 ### Storybook deployment
 
 The UI component reference targets [storybook.compounding.tech](https://storybook.compounding.tech).

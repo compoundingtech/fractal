@@ -289,7 +289,8 @@
   },
   "fractal-runtime": {
    "extra": [
-    "crates/pty-launch-environment.rs"
+    "crates/pty-launch-environment.rs",
+    "fixtures/host-envelope.schema.json"
    ]
   },
   "fractal-schema": {

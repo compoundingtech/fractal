@@ -9,7 +9,8 @@ import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { observed, waiting } from '../data/source.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
-import { LiveAgentWorkspace, narrowLayoutQuery } from './LiveAgentWorkspace.tsx'
+import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
+import { narrowLayoutQuery } from './narrowLayout.ts'
 import { tooltipFor } from '../../../../packages/fractal-ui/src/story-play.ts'
 import { touchPointerQuery } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/useTouchLayout.ts'
 
@@ -33,7 +34,7 @@ const decodeStaleSource = {
 }
 const NarrowLayoutStory = ({ decodeStale = false, terminalRuntime = false }: { readonly scheme: 'dark' | 'light'; readonly pointer?: 'fine' | 'coarse'; readonly decodeStale?: boolean; readonly terminalRuntime?: boolean }) => {
   const [registry] = React.useState(() => AtomRegistry.make())
-  return <DataSourceProvider source={decodeStale ? decodeStaleSource : terminalRuntime ? terminalSource : source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>
+  return <DataSourceProvider source={decodeStale ? decodeStaleSource : terminalRuntime ? terminalSource : source} registry={registry}><LiveAgentWorkspace initialRef={storyAgent} persistGeometry={false} /></DataSourceProvider>
 }
 
 /**

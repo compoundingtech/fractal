@@ -293,7 +293,9 @@ export const Settled: Story = { tags: ['critical'], play: async ({ canvasElement
   const fold = await canvas.findByRole('button', { name: /Worked for 24s/ })
   await expect(fold).toHaveAttribute('aria-expanded', 'false')
   await expect(canvasElement.querySelector('[data-testid="tool-detail-preview"]')).toBeNull()
-  await expect(canvasElement.querySelector('[data-testid="message-header"] time')).not.toBeNull()
+  // One timestamp per episode: the turn head carries it, the answer header does not.
+  await expect(canvasElement.querySelector('[data-testid="turn-head"] [data-testid="turn-time"]')).not.toBeNull()
+  await expect(canvasElement.querySelector('[data-testid="message-header"] time')).toBeNull()
   await expect(canvasElement.querySelector('[data-testid="live-work"]')).toBeNull()
 } }
 export const SettledLight: Story = { ...Settled, args: { scheme: 'light' } }
@@ -549,7 +551,7 @@ const rawDefaultTurn = workLogTurnFromItems([{ _tag: 'ToolCall', id: 'raw-defaul
 /** The kit's default detail renderer applies the same rule; a string input stays verbatim. */
 export const RawInputDefaultDetail: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><WorkLogV1 turn={rawDefaultTurn} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  await userEvent.click(canvas.getByRole('button', { name: 'Worked · 1 command' }))
+  await userEvent.click(canvas.getByRole('button', { name: 'Worked · 1 tool · 1 command' }))
   await expect(canvas.queryByTestId('tool-raw-input')).toBeNull()
   await expect(canvasElement.textContent).not.toContain(rawMarker)
   await expectNoOutputWithControl(canvas.getByRole('button', { name: /^run/ }))
@@ -612,7 +614,7 @@ const nativeOutputItems: readonly ConversationItem[] = [
 const nativeOutputTurn = workLogTurnFromItems(nativeOutputItems, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true })
 export const NativeToolOutput: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><WorkLogV1 turn={nativeOutputTurn} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  await userEvent.click(canvas.getByRole('button', { name: 'Worked' }))
+  await userEvent.click(canvas.getByRole('button', { name: 'Worked · 4 tools' }))
   const native = canvas.getByRole('button', { name: /^native array output/ })
   await userEvent.click(native)
   await expect(native).toHaveAttribute('aria-expanded', 'true')
@@ -708,7 +710,9 @@ export const SettledAnswerMeta: Story = { tags: ['critical'], render: args => <A
   await canvas.findAllByRole('button', { name: 'Copy answer' })
   const answers = canvas.getAllByTestId('agent-message')
   await expect(answers).toHaveLength(3)
-  await expect(answers[0]!.querySelector('time')?.getAttribute('datetime')).toBe('2026-01-15T12:00:24.000Z')
+  // The episode head carries the one timestamp; answers carry none.
+  await expect(answers[0]!.closest('[data-testid="transcript-turn"]')!.querySelector('[data-testid="turn-time"]')).not.toBeNull()
+  await expect(answers[0]!.querySelector('time')).toBeNull()
   await expect(answers[1]!.querySelector('time')).toBeNull()
   await expect(answers[2]!.querySelector('[aria-label="Copy answer"]')).toBeNull()
   const header = within(answers[0]!).getByTestId('message-header')
@@ -716,7 +720,6 @@ export const SettledAnswerMeta: Story = { tags: ['critical'], render: args => <A
   const prose = answers[0]!.querySelector('[data-testid="markdown"]')!
   await expect(header.getBoundingClientRect().bottom).toBeLessThanOrEqual(prose.getBoundingClientRect().top)
   await expect(header.getBoundingClientRect().height).toBe(16)
-  await expect(header).toContainElement(answers[0]!.querySelector('time'))
   await expect(getComputedStyle(copy).opacity).toBe('0')
   await userEvent.hover(answers[0]!)
   await waitFor(() => expect(getComputedStyle(copy).opacity).toBe('1'))

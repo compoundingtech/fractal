@@ -13,7 +13,8 @@ describe('native delivery echoes (fixtures/clients/transcripts/omp-delivery-echo
     return timeline.project().items
   }
   const raw = () => fixture('omp-delivery-echo.json') as Array<{ id: string; body: { text?: string } }>
-  const bodies = (items: ReturnType<typeof transcript>) => items.flatMap(item => item._tag === 'Text' ? [item.text] : [])
+  // Mail reads as one Message carrying its body; prose stays Text.
+  const bodies = (items: ReturnType<typeof transcript>) => items.flatMap(item => item._tag === 'Text' ? [item.text] : item._tag === 'Message' && item.text !== undefined ? [item.text] : [])
 
   it('reads exactly the expected bodies: an echo of a shown body once, an unshown delivery or watch excerpt kept', () => {
     const expected = fixture('omp-delivery-echo.expected.json') as ReadonlyArray<{ body: { value: string | { body: string } } }>
@@ -276,8 +277,9 @@ The person reads replies in st, not in the agent's session.`,
         }),
       ],
     })
+    // The header and its body are one row, at the body.
     expect(timeline.project().items.map((item) => item.id)).toEqual([
-      'timeline-entry/mail/message', 'timeline-entry/mail/content', 'timeline-entry/reply',
+      'timeline-entry/mail/content', 'timeline-entry/reply',
     ])
   })
 
@@ -301,7 +303,7 @@ and copied it into my reply`,
       ],
     })
     expect(timeline.project().items.map((item) => item.id)).toEqual([
-      'timeline-entry/first/message', 'timeline-entry/first/content',
+      'timeline-entry/first/content',
       'timeline-entry/s1/1111111111111111-content',
     ])
     const quoted = timeline.project().items.at(-1)
@@ -330,7 +332,7 @@ and copied it into my reply`,
       ],
     })
     expect(timeline.project().items.map((item) => item.id)).toEqual([
-      'timeline-entry/first/message', 'timeline-entry/first/content',
+      'timeline-entry/first/content',
       'timeline-entry/s1/2222222222222222-content',
     ])
   })
@@ -397,8 +399,9 @@ describe('mailbox provenance and server ordering', () => {
         entry('timeline-entry/native-6', 6, 'content', { media_type: 'text/plain', text: 'Unrelated' }, role),
       ],
     })
+    // A person's mail is the person's prose; anyone else's is one Message with its body.
     expect(timeline.project().items.find(item => item.id === contentId)).toMatchObject({
-      _tag: 'Text', text: 'See screenshot',
+      ...(from.startsWith('person/') ? { _tag: 'Text', text: 'See screenshot' } : { _tag: 'Message', text: 'See screenshot', from }),
       attachments: [{
         id: image.blob, mediaType: 'image/png', name: 'screenshot.png',
         size: 1234, messageId: 'message/abc',
@@ -436,10 +439,10 @@ describe('mailbox provenance and server ordering', () => {
     })
     const items = timeline.project().items
     expect(items.find(item => item.id === 'timeline-entry/s1/222222222222222222222222')).toMatchObject({
-      _tag: 'Text', text: 'first', attachments: [{ messageId: 'message/first' }],
+      _tag: 'Message', text: 'first', attachments: [{ messageId: 'message/first' }],
     })
     if (named) expect(items.find(item => item.id === 'timeline-entry/s1/444444444444444444444444')).toMatchObject({
-      _tag: 'Text', text: 'second', attachments: [{ messageId: 'message/second' }],
+      _tag: 'Message', text: 'second', attachments: [{ messageId: 'message/second' }],
     })
   })
 
@@ -498,7 +501,8 @@ describe('mailbox provenance and server ordering', () => {
     const content = entry(mailContent, 5, 'content', { media_type: 'text/plain', text: 'See screenshot' })
     timeline.apply({ replace: true, hasMore: false, entries: [content] })
     const before = timeline.project().items[0]
-    expect(before).toMatchObject({ _tag: 'Text', attachments: [] })
+    // Until its header is known, mail content is a message from an unknown sender, not the person's row.
+    expect(before).toMatchObject({ _tag: 'Message', attachments: [] })
     timeline.apply({
       replace: false, hasMore: false,
       entries: [entry(mailMessage, 4, 'message', {
@@ -531,7 +535,7 @@ in my own words`
       ],
     })
     expect(timeline.project().items.map(item => item.id)).toEqual([
-      contentId, 'timeline-entry/s1/3333333333333333-message', 'timeline-entry/s1/3333333333333333-content',
+      contentId, 'timeline-entry/s1/3333333333333333-content',
     ])
     expect(Array.from(timeline.shownMessageIds())).toEqual(['message/abc', 'message/separate'])
   })
@@ -947,7 +951,7 @@ but this line is the harness's own`,
     })
     const items = timeline.project().items
     expect(items.map((item) => item.id)).toEqual([
-      'timeline-entry/shown/message', 'timeline-entry/shown/content', 'timeline-entry/native-3',
+      'timeline-entry/shown/content', 'timeline-entry/native-3',
     ])
     const orphan = items.at(-1)
     expect(orphan?._tag === 'Text' ? orphan.text : '').toBe(
@@ -966,8 +970,10 @@ but this line is the harness's own`,
     })
     const items = timeline.project().items
     expect(items.map((item) => item.id)).toEqual([mailContent, id])
+    // Its header is outside the window: one message from an unknown sender, its body verbatim.
     const kept = items.at(-1)
-    expect(kept?._tag === 'Text' ? kept.text : '').toBe(quote)
+    expect(kept).toMatchObject({ _tag: 'Message', text: quote })
+    expect(kept?._tag === 'Message' ? kept.from : 'no').toBeUndefined()
   })
 
   it('suppresses a native delivery whose sequence lands in a mailbox content slot', () => {
