@@ -684,6 +684,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/client/launches/{id}", get(client_reads::client_launches_detail))
         .route("/v1/client/work", get(client_reads::client_work))
+        .route(
+            "/v1/client/ready-work",
+            // Axum otherwise runs GET for HEAD, which does not pass the paired GET scope gate.
+            get(client_reads::client_ready_work).head(|| async { StatusCode::METHOD_NOT_ALLOWED }),
+        )
         .route("/v1/client/changes", get(changes::list))
         .route("/v1/client/changes/sync", post(changes::sync))
         .route("/v1/client/change", get(changes::show))
@@ -2038,6 +2043,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "cursor-gap"
         | "page-cursor-expired"
         | "agent-roster-not-ready"
+        | "ready-work-unavailable"
         | "agent-roster-cut-not-ready"
         | "rate-limited"
         | "mission-list-not-ready"
@@ -12568,6 +12574,8 @@ pub fn normalize_message_party(value: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ready_work_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests_shared;
 

@@ -32,14 +32,61 @@ pub fn pending_handoff(
     connection: &Connection,
     view: &StepRunView,
 ) -> Result<bool, FractalError> {
-    latest_handoff(connection, view, now_ms())?
-        .map(|handoff| {
-            acknowledged(connection, &handoff, now_ms())
-                .map(|ack| !ack)
-                .map_err(internal)
-        })
+    let handoff = latest_handoff(connection, view, now_ms())?;
+    handoff_pending(connection, handoff, now_ms())
+}
+
+fn handoff_pending(
+    connection: &Connection,
+    handoff: Option<ClaimRecord>,
+    at: u128,
+) -> Result<bool, FractalError> {
+    handoff
+        .map(|handoff| acknowledged(connection, &handoff, at).map(|ack| !ack).map_err(internal))
         .transpose()
         .map(|pending| pending.unwrap_or(false))
+}
+
+impl Store {
+    /// Ready demand for declared seats. Call only while pinned to the publication's graph cut.
+    pub fn ready_work_cohort_count<'a>(
+        &self,
+        work: impl IntoIterator<Item = &'a StepRunView>,
+        cohort: &[String],
+        at: u128,
+    ) -> Result<Option<usize>> {
+        use super::identities::{IdentityKind, resolve_identity_conn};
+
+        let connection = self.readers.get();
+        let mut seats = BTreeSet::new();
+        for agent in cohort {
+            let Ok(identity) = resolve_identity_conn(&connection, IdentityKind::Agent, agent) else {
+                return Ok(None);
+            };
+            if !person_work::declaration_live(&connection, &identity.identity)? {
+                return Ok(None);
+            }
+            seats.insert(identity.identity);
+        }
+        let mut count = 0;
+        for step in work {
+            if step.status != "ready"
+                || step.agentless
+                || step.claimant.is_some()
+                || step.blocked_reason.is_some()
+                || !step.blockers.is_empty()
+                || step.not_before_unix_ms.is_some_and(|due| due > at)
+                || !step.assigned_to.iter().chain(&step.available_to).any(|agent| seats.contains(agent))
+            {
+                continue;
+            }
+            let handoff = latest_handoff(&connection, step, at)?;
+            if !handoff_pending(&connection, handoff, at)? {
+                count += 1;
+            }
+        }
+        Ok(Some(count))
+    }
 }
 
 pub fn enrich_handoff(
