@@ -221,7 +221,7 @@ fn policy(html: &str, port: u16) -> String {
         }
         hashes.join(" ")
     };
-    format!("default-src 'self'; script-src 'self' 'wasm-unsafe-eval' {}; style-src 'self' 'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUcjky8QOOrQx6o=' 'sha256-gYiS/BvZvRcK27JIXTuwhZ3hs2+VJ1X+2gUlE+farlg=' {}; style-src-attr 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' ws://127.0.0.1:{port} ws://localhost:{port}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'", hashes("script"), hashes("style"))
+    format!("default-src 'self'; script-src 'self' 'wasm-unsafe-eval' {}; style-src 'self' 'sha256-38RhXrc7EdReTKsOm23ZPOCUgniTUUcjky8QOOrQx6o=' 'sha256-gYiS/BvZvRcK27JIXTuwhZ3hs2+VJ1X+2gUlE+farlg=' {}; style-src-attr 'unsafe-inline'; img-src 'self' data: blob: https://avatars.githubusercontent.com; font-src 'self'; connect-src 'self' ws://127.0.0.1:{port} ws://localhost:{port}; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'", hashes("script"), hashes("style"))
 }
 
 #[cfg(test)]

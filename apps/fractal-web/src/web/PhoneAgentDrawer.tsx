@@ -4,24 +4,28 @@ import { FocusScope, mergeProps, UNSAFE_PortalProvider, useDialog, useModalOverl
 import { useOverlayTriggerState } from 'react-stately'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout'
 import { borderVars as border, colorVars as c, elevationVars as elevation, geometryVars as g, surfaceVars as surface, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex'
-import { SidebarHeader, useCoarsePointer } from './ResponsiveAgentSidebar.tsx'
+import { SidebarFooter, SidebarHeader, useCoarsePointer } from './ResponsiveAgentSidebar.tsx'
 
 export interface PhoneAgentDrawerHandle { open: () => void; close: () => void; toggle: () => void }
 
 /**
  * React Aria's modal hooks keep one roster mounted. Drawer state never reaches the thread.
- * The drawer is the dock in a modal: the same header (collapse, wordmark, alerts) and the dock's density unless the
- * primary pointer is coarse. Closing returns focus to `triggerRef`, the header control that opens it, with a focus
- * ring only when the drawer was dismissed from the keyboard.
+ * The drawer is the dock in a modal, the phone's whole global area: the same header (close, space, palette, settings),
+ * notice and footer, and the dock's density unless the primary pointer is coarse. Closing returns focus to `triggerRef`,
+ * the header control that opens it, with a focus ring only when the drawer was dismissed from the keyboard.
  */
-export function PhoneAgentDrawer({ ref, triggerRef, headerActions, headerTitle, children, header, onSheetChange }: {
+export function PhoneAgentDrawer({ ref, triggerRef, headerActions, headerTitle, notice, footer, children, header, onSheetChange }: {
   readonly ref: React.Ref<PhoneAgentDrawerHandle>
   /** The control that opens the drawer; it gets focus back on every close. */
   readonly triggerRef: React.RefObject<HTMLElement | null>
-  /** The dock header's trailing actions, the alerts. */
+  /** The dock header's trailing actions: the palette and Settings. */
   readonly headerActions?: React.ReactNode
   /** In place of the wordmark: the space switcher. */
   readonly headerTitle?: React.ReactNode
+  /** Under the header, as on the dock. */
+  readonly notice?: React.ReactNode
+  /** Pinned under the body, as on the dock: the connection and Usage. */
+  readonly footer?: React.ReactNode
   readonly children: React.ReactNode
   /** Drawn before the drawer; a host whose trigger lives elsewhere (the workspace's top bar) leaves it out and follows `onSheetChange`. */
   readonly header?: (open: () => void, sheet: { readonly open: boolean; readonly id: string }) => React.ReactNode
@@ -59,7 +63,9 @@ export function PhoneAgentDrawer({ ref, triggerRef, headerActions, headerTitle, 
             <aside aria-label="Agents" data-sidebar-presentation="drawer" data-sidebar-density={coarse ? 'touch' : 'dock'} {...stylex.props(styles.sidebar)}>
               <UNSAFE_PortalProvider getContainer={getContainer}>
                 <SidebarHeader ref={closeButton} label="Close agents" onCollapse={close} actions={headerActions} title={headerTitle} />
+                {notice}
                 {children}
+                {footer === undefined ? null : <SidebarFooter>{footer}</SidebarFooter>}
                 <div ref={portalHost} />
               </UNSAFE_PortalProvider>
             </aside>

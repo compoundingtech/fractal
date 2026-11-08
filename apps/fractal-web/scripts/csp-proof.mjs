@@ -51,7 +51,7 @@ const proveHeaders = async (url, mode) => {
   const response = await fetch(url)
   const html = await response.text()
   const policy = response.headers.get('content-security-policy')
-  assert(policy?.includes("img-src 'self' data: blob:"), `${mode}: HTML policy`)
+  assert(policy?.includes("img-src 'self' data: blob: https://avatars.githubusercontent.com"), `${mode}: HTML policy`)
   assert(policy?.includes("script-src 'self' 'wasm-unsafe-eval'"), `${mode}: Highlights WebAssembly compilation policy`)
   console.log(JSON.stringify({ mode, wasmDirective: "script-src 'self' 'wasm-unsafe-eval'" }))
   const head = await fetch(url, { method: 'HEAD' })
@@ -63,7 +63,7 @@ const proveHeaders = async (url, mode) => {
   assert(asset, `${mode}: real module asset`)
   const assetResponse = await fetch(new URL(asset, url))
   await assetResponse.arrayBuffer()
-  assert(assetResponse.headers.get('content-security-policy')?.includes("img-src 'self' data: blob:"), `${mode}: asset policy`)
+  assert(assetResponse.headers.get('content-security-policy')?.includes("img-src 'self' data: blob: https://avatars.githubusercontent.com"), `${mode}: asset policy`)
   console.log(JSON.stringify({ mode, headers: 'PASS HTML, HEAD, 304 and module asset' }))
 }
 const prove = async (url, enforced, mode) => {
@@ -175,7 +175,7 @@ const prove = async (url, enforced, mode) => {
     opens: [['https://example.invalid/x.png', '_blank', 'noopener,noreferrer']],
   }, 'Transcript image consent must hand off without an inline image request')
   if (enforced) {
-    assert(result.policy?.includes("img-src 'self' data: blob:"), 'response must carry the image policy')
+    assert(result.policy?.includes("img-src 'self' data: blob: https://avatars.githubusercontent.com"), 'response must carry the image policy')
     await proveHeaders(url, mode)
     assert.equal(result.imageAttempts, 0, 'remote image must not reach the network boundary')
     assert.deepEqual(result.violations, [{ directive: 'img-src', blockedURI: 'https://example.invalid/x.png', disposition: 'enforce' }])

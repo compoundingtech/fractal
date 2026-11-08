@@ -68,14 +68,31 @@ export const visibleTabIds = (layout: Layout): ReadonlySet<string> =>
 
 export const minimumSize = 0.05
 
-/** Shares that sum to 1 with every child at least `minimumSize`; `undefined` for equal shares. */
+const isNormalized = (sizes: readonly number[]): boolean =>
+  sizes.every(size => size >= minimumSize) && Math.abs(sizes.reduce((sum, size) => sum + size, 0) - 1) < 1e-9
+
+/**
+ * Shares that sum to 1 with every child at least `minimumSize`; `undefined` for equal shares.
+ * Children under the minimum are held at it and the rest share what is left in proportion, so a
+ * normalized list comes back unchanged: a body received, kept and sent again compares equal.
+ */
 export const normalizeSizes = (sizes: readonly number[] | undefined, count: number): readonly number[] | undefined => {
   if (sizes === undefined || sizes.length !== count || count < 2) return undefined
   if (!sizes.every(size => Number.isFinite(size) && size > 0)) return undefined
-  const total = sizes.reduce((sum, size) => sum + size, 0)
-  const clamped = sizes.map(size => Math.max(minimumSize, size / total))
-  const sum = clamped.reduce((acc, size) => acc + size, 0)
-  return clamped.map(size => size / sum)
+  if (count * minimumSize >= 1) return sizes.map(() => 1 / count)
+  if (isNormalized(sizes)) return sizes
+  // Against the largest first, so neither huge nor subnormal sizes overflow or vanish in the sum.
+  const largest = Math.max(...sizes)
+  const total = sizes.reduce((sum, size) => sum + size / largest, 0)
+  const shares = sizes.map(size => size / largest / total)
+  const held = new Set<number>()
+  for (;;) {
+    const free = shares.reduce((sum, share, index) => held.has(index) ? sum : sum + share, 0)
+    const scale = (1 - held.size * minimumSize) / free
+    const under = shares.flatMap((share, index) => !held.has(index) && share * scale < minimumSize ? [index] : [])
+    if (under.length === 0) return shares.map((share, index) => held.has(index) ? minimumSize : share * scale)
+    under.forEach(index => held.add(index))
+  }
 }
 
 /** Each child's share, equal when the split has no sizes. */

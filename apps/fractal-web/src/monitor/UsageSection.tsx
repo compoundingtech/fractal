@@ -168,8 +168,8 @@ export const UsageSection = ({ view, onOpenUsage, storageKey = 'wf.sidebar.usage
   )
 }
 
-/** The section over the source's quota poll, which runs only while this is mounted and the page is visible. */
-export const LiveUsageSection = ({ onOpenUsage }: { readonly onOpenUsage: () => void }): React.ReactNode => {
+/** The source's quota poll as the section's view; the poll runs only while a reader is mounted and the page is visible. */
+const useLiveUsageView = (): UsageSectionView => {
   const state = useAtomValue(quotaStateAtom(useDataSource().usage))
   const now = useNow()
   const view = usageSectionView({ state, now })
@@ -177,8 +177,23 @@ export const LiveUsageSection = ({ onOpenUsage }: { readonly onOpenUsage: () => 
   // A slow read doesn't overturn a daemon's answer that it has no source, which only a real answer changes.
   const settled = React.useRef<UsageSectionView>(view)
   if (view._tag !== 'loading' && !(view._tag === 'failed' && settled.current._tag === 'not-configured')) settled.current = view
+  return settled.current
+}
+
+/** The section over the source's quota poll. */
+export const LiveUsageSection = ({ onOpenUsage }: { readonly onOpenUsage: () => void }): React.ReactNode => {
+  const view = useLiveUsageView()
   const [remembered, setRemembered] = useAtom(usageSection)
-  return <UsageSection view={settled.current} onOpenUsage={onOpenUsage} memory={{ ...remembered, onChange: setRemembered }} />
+  return <UsageSection view={view} onOpenUsage={onOpenUsage} memory={{ ...remembered, onChange: setRemembered }} />
+}
+
+/** The collapsed sidebar rail's Usage: the gauge opens the Usage tab, its tooltip says the worst account, and a dot marks one running short. */
+export const LiveUsageRailControl = ({ onOpenUsage }: { readonly onOpenUsage: () => void }): React.ReactNode => {
+  const view = useLiveUsageView()
+  const words = summaryWords(view)
+  const level = view._tag === 'ready' && view.old === undefined && view.worst.level !== 'ok' && view.worst.level !== 'unknown' ? view.worst.level : undefined
+  return <ChromeControl icon="gauge" label="Usage" tooltip={words} description={words} tooltipPlacement="right" onPress={onOpenUsage}
+    {...(level === undefined ? {} : { badge: <span data-usage-level={level} {...stylex.props(styles.railDot, fills[level])} /> })} />
 }
 
 const levels: Readonly<Record<UsageLevel, stylex.StyleXStyles>> = stylex.create({
@@ -220,4 +235,5 @@ const styles = stylex.create({
   fill: { display: 'block', blockSize: '100%', borderRadius: r.full },
   note: { margin: 0, paddingBlock: s.xs, paddingInline: s.md, color: c.sidebarFgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
   oldNote: { margin: 0, paddingBlockStart: s.xs, paddingInline: s.md, color: c.attention, fontSize: t.denseSize },
+  railDot: { display: 'block', width: s.sm, height: s.sm, borderRadius: r.full },
 })

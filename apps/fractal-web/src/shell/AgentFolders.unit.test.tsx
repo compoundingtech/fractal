@@ -271,7 +271,7 @@ describe('AgentFolders Filter menu counts', () => {
       })))
       await vi.waitFor(() => expect(counts()).toMatchObject({ 'Show ended': before['Show ended']! + 1, 'Show retired': before['Show retired']! + 1 }))
       // Two running agents left: the statuses they held lost them, with no filter change or remount.
-      const held = (now: Record<string, number>) => (now['Working'] ?? 0) + (now['Needs you'] ?? 0) + (now['Idle'] ?? 0) + (now['Failed'] ?? 0)
+      const held = (now: Record<string, number>) => (now['Working'] ?? 0) + (now['Waiting'] ?? 0) + (now['Idle'] ?? 0) + (now['Failed'] ?? 0)
       expect(held(counts())).toBe(held(before) - 2)
       expect(tree.container.querySelector(`[data-sidebar-tree-key="${row!.getAttribute('data-sidebar-tree-key')}"]`)).toBe(row)
     } finally { tree.unmount() }
@@ -290,8 +290,8 @@ describe('AgentFolders Filter menu counts', () => {
       await vi.waitFor(() => expect(counts()['Show ended']).toBe(1))
       unfiltered = counts()
     } finally { baseline.unmount() }
-    const selected = Object.keys(unfiltered).find((label) => label !== 'Show ended' && label !== 'Show retired' && !label.startsWith('Waiting') && (unfiltered[label] ?? 0) > 0 && ['Working', 'Idle', 'Needs you'].includes(label))!
-    const status = ({ Working: 'working', Idle: 'idle', 'Needs you': 'waiting' } as Record<string, string>)[selected]!
+    const selected = Object.keys(unfiltered).find((label) => label !== 'Show ended' && label !== 'Show retired' && label !== 'Waiting for answer' && (unfiltered[label] ?? 0) > 0 && ['Working', 'Idle', 'Waiting'].includes(label))!
+    const status = ({ Working: 'working', Idle: 'idle', Waiting: 'waiting' } as Record<string, string>)[selected]!
     const narrowed = mountWith({ ...defaultFilters, statuses: [status] })
     try {
       await openMenu(narrowed.container)
@@ -299,7 +299,7 @@ describe('AgentFolders Filter menu counts', () => {
         const now = counts()
         // The selected status still counts itself, and machines count only the agents it leaves.
         expect(now[selected]).toBe(unfiltered[selected])
-        const machineTotal = Object.entries(now).filter(([label]) => !['Waiting for answer', 'Working', 'Needs you', 'Idle', 'Failed', 'Show ended', 'Show retired'].includes(label)).reduce((sum, [, count]) => sum + count, 0)
+        const machineTotal = Object.entries(now).filter(([label]) => !['Waiting for answer', 'Working', 'Waiting', 'Idle', 'Failed', 'Show ended', 'Show retired'].includes(label)).reduce((sum, [, count]) => sum + count, 0)
         expect(machineTotal).toBe(unfiltered[selected])
         expect(now['Show ended']).toBe(0)
       })

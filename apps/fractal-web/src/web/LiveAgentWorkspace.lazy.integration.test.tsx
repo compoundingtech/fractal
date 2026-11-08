@@ -63,6 +63,7 @@ vi.mock('../data/react.tsx', () => ({
   useRosterDecode: () => ({ undecodable: [], decodeStale: false }),
   useAskingAgents: () => askingAgents,
   useAttention: () => ({ _tag: 'Waiting' }),
+  useMissions: () => ({ _tag: 'Waiting' }),
   useSubjectList: () => [],
   useConnection: () => ({ _tag: 'Live' }),
   useNow: () => 0,
@@ -249,31 +250,31 @@ describe('Alerts tab import boundary', () => {
 })
 
 
-describe('gateway connection banner', () => {
+describe('gateway connection line', () => {
   it('shows nothing while live and keeps connection wording out of the sidebar', async () => {
     await renderShell()
-    expect(container.querySelector('[data-connection-state]')).toBeNull()
+    expect(container.querySelector('[data-connection-state], [data-connection-line]')).toBeNull()
     const sidebar = container.querySelector('[aria-label="Agents"]')
     expect(sidebar?.textContent).not.toContain('Connected')
     expect(sidebar?.textContent).not.toContain('alpha.example')
   })
 
-  it('places one band under the thread header with the countdown and one reconnect action', async () => {
+  it('places one line in the sidebar footer with the countdown and one reconnect action, and no pane band while it recovers', async () => {
     gatewayObservation = {
       status: { _tag: 'Stale', reason: { _tag: 'Reconnecting', attempt: 2, nextAt: 3000, issue: 'Private diagnostic' } },
       observedAt: -2000,
     }
     await renderShell()
-    const bands = container.querySelectorAll('[data-connection-state]')
-    expect(bands).toHaveLength(1)
-    const band = bands[0]
-    expect(band?.getAttribute('data-connection-state')).toBe('reconnecting')
-    expect(band?.closest('section[aria-label="Agent workspace"]')).not.toBeNull()
-    expect(band?.textContent).toContain('Next try in 3s · attempt 2')
-    expect(band?.textContent).not.toContain('Reconnecting in')
-    expect(band?.textContent).not.toContain('Private diagnostic')
-    expect(container.querySelector('[aria-label="Agents"] [data-connection-state]')).toBeNull()
-    const buttons = band?.querySelectorAll('button') ?? []
+    const lines = container.querySelectorAll('[data-connection-line]')
+    expect(lines).toHaveLength(1)
+    const line = lines[0]
+    expect(line?.getAttribute('data-connection-line')).toBe('reconnecting')
+    expect(line?.closest('[aria-label="Agents"] footer')).not.toBeNull()
+    expect(line?.textContent).toContain('Next try in 3s · attempt 2')
+    expect(line?.textContent).not.toContain('Reconnecting in')
+    expect(line?.textContent).not.toContain('Private diagnostic')
+    expect(container.querySelector('[data-connection-state]')).toBeNull()
+    const buttons = line?.querySelectorAll('button') ?? []
     expect(buttons).toHaveLength(1)
     await act(async () => (buttons[0] as HTMLButtonElement | undefined)?.click())
     expect(reconnect).toHaveBeenCalledTimes(1)
