@@ -196,6 +196,7 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
         scopes: BTreeMap<&'a str, &'a str>,
         active: BTreeMap<&'a str, bool>,
         invalid: BTreeSet<&'a str>,
+        defective: BTreeSet<&'a str>,
         defects: Vec<String>,
     }
     impl Guards<'_> {
@@ -203,8 +204,8 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
             if self.active.contains_key(request.id.as_str()) { return; }
             let Some(request) = self.requests.iter().copied().find(|r| r.id == request.id) else { return; };
             let mut visiting = BTreeSet::from([request.id.as_str()]);
-            let mut stack = vec![(request, 0)];
-            while let Some(&(request, index)) = stack.last() {
+            let mut stack = vec![(request, 0, true)];
+            while let Some(&(request, index, prior_matches)) = stack.last() {
                 let guards = request.fields.get("applies_when").and_then(Value::as_array);
                 let guard = guards.and_then(|guards| guards.get(index));
                 let result = if self.invalid.contains(request.id.as_str()) {
@@ -218,7 +219,11 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
                         decision == Some(r.id.as_str()) || (decision.is_none() && q.is_some()
                         && r.fields.get("q").and_then(Value::as_i64) == q && self.scopes[r.id.as_str()] == scope));
                     if let Some(dependency) = dependency {
-                        if let Some(active) = self.active.get(dependency.id.as_str()) {
+                        if self.defective.contains(dependency.id.as_str()) {
+                            self.defective.insert(request.id.as_str());
+                            self.defects.push(format!("defective guard dependency: {} <- {}", request.id, dependency.id));
+                            false
+                        } else if let Some(active) = self.active.get(dependency.id.as_str()) {
                             let answer = self.answers[dependency.id.as_str()]
                                 .or(self.assumptions[dependency.id.as_str()]);
                             let withdrawn = *active && self.claims.iter().any(|c| c.is("withdrawn")
@@ -227,6 +232,7 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
                                 && answer.is_some_and(|answer|
                                     answer.fields.get("selection").is_some_and(|value| !value.is_array())) {
                                 self.defects.push(format!("invalid guard selection: {}", request.id));
+                                self.defective.insert(request.id.as_str());
                             }
                             let matches = *active && !withdrawn
                                 && answer.and_then(|answer| answer.fields.get("selection"))
@@ -244,19 +250,29 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
                             }
                             false
                         } else if visiting.insert(dependency.id.as_str()) {
-                            stack.push((dependency, 0));
+                            stack.push((dependency, 0, true));
                             continue;
                         } else {
                             self.defects.push(format!("guard cycle: {}", dependency.id));
+                            self.defective.extend([request.id.as_str(), dependency.id.as_str()]);
                             false
                         }
                     } else {
                         self.defects.push(format!("missing guard dependency: {}", request.id));
+                        self.defective.insert(request.id.as_str());
                         false
                     }
                 } else {
-                    true
+                    prior_matches
                 };
+                // Inspect later dependencies even after a non-matching predicate,
+                // retaining defect causes instead of hiding them behind AND short-circuiting.
+                if guard.is_some() && !self.invalid.contains(request.id.as_str()) {
+                    let frame = stack.last_mut().expect("current guard frame");
+                    frame.1 += 1;
+                    frame.2 &= result;
+                    continue;
+                }
                 self.active.insert(request.id.as_str(), result);
                 visiting.remove(request.id.as_str());
                 stack.pop();
@@ -265,6 +281,7 @@ pub fn fold<'a>(subject: &'a str, claims: &'a [Claim], basis: Value) -> Fold<'a>
     }
     let mut guards = Guards { requests: &requests, answers: &answers, assumptions: &assumptions, claims,
         scopes: requests.iter().map(|r| (r.id.as_str(), scope(r))).collect(),
+        defective: invalid_requests.union(&invalid_guards).copied().collect(),
         active: BTreeMap::new(), invalid: invalid_guards, defects: Vec::new() };
     for request in &requests { guards.evaluate(request); }
     let output = requests.iter().map(|request| {

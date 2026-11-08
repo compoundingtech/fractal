@@ -371,3 +371,37 @@ fn indexed_supersession_retains_cycle_fork_and_missing_predecessor_defects() {
     }
     assert!(!folded.requests[0].approval_gate);
 }
+
+#[test]
+fn defective_answers_cannot_activate_direct_or_transitive_guard_approvals() {
+    let mut claims = vec![request("q1", 1),
+        claim("a1", "answered", 5, json!({"request":"q1","selection":["no"]})),
+        claim("fork-no", "answered", 6,
+            json!({"request":"q1","selection":["no"],"supersedes":"a1"})),
+        claim("fork-yes", "answered", 7,
+            json!({"request":"q1","selection":["yes"],"supersedes":"a1"})),
+        claim("q2", "requested", 2, json!({"q":2,"applies_when":[{"q":1,"selection":["yes"]}]})),
+        claim("a2", "answered", 8, json!({"request":"q2","selection":["yes"]})),
+        request("q3", 3),
+        claim("a3", "answered", 9, json!({"request":"q3","selection":["yes"]})),
+        claim("q4", "requested", 4, json!({"q":4,"applies_when":[{"q":2,"selection":["yes"]}]})),
+        claim("a4", "answered", 10, json!({"request":"q4","selection":["yes"]}))];
+    for reverse in [false, true] {
+        if reverse {
+            claims.reverse();
+            // A prior non-match must not hide the later defective dependency's cause.
+            claims.iter_mut().find(|claim| claim.id == "q4").unwrap().fields["applies_when"]
+                .as_array_mut().unwrap().insert(0, json!({"q":3,"selection":["no"]}));
+        }
+        let folded = result(&claims);
+        for id in ["q1", "q2", "q4"] {
+            let request = folded.requests.iter().find(|request| request.request == id).unwrap();
+            assert!(!request.approval_gate, "{id}");
+            if id != "q1" { assert_eq!(request.status, Status::Moot, "{id}"); }
+        }
+        assert!(folded.requests.iter().find(|request| request.request == "q3").unwrap().approval_gate);
+        for cause in ["defective guard dependency: q2 <- q1", "defective guard dependency: q4 <- q2"] {
+            assert!(folded.defects.iter().any(|defect| defect == cause), "{cause}");
+        }
+    }
+}

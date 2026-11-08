@@ -324,7 +324,10 @@ selection; it does not search every imported tree for a matching number. A missi
 answer, an omitted optional response selection, or a withdrawn dependency leaves the guard
 inactive without a defect. Malformed guard predicates remain defects rather than guessed
 cross-tree links. Defects disqualify approval only for their affected requests, not unrelated
-person-answered requests. Inactive guarded requests are `moot`. A parent-linked reframe suppresses its
+person-answered requests. A defective request cannot satisfy a guard: direct and transitive
+dependents become inactive, with a dependency defect naming the cause. All guard dependencies
+are inspected even after a non-matching predicate. Independent branches retain their approvals.
+Inactive guarded requests are `moot`. A parent-linked reframe suppresses its
 parent only while the child's guards are active; an inactive branch cannot erase a pending
 parent. An active child still suppresses its parent when the child itself has been withdrawn.
 Guard evaluation uses an explicit traversal stack rather than recursive calls, so deep
