@@ -332,6 +332,8 @@ impl Device {
                 .map(|(name, value)| (name, serde_json::Value::from(value))),
         )
         .collect();
+        // Readers predating this version quarantine the signed claim during replication.
+        fields.push(("thread_reader_version", serde_json::Value::from(2)));
         fields.sort_unstable_by_key(|(name, _)| *name);
         self.sign_message_fields(&scoped_key, &fields, &nonce, signed_at_unix_ms, key)
     }
