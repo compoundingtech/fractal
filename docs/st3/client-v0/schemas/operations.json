@@ -75,7 +75,7 @@
     { "id": "launch-approvals.list", "method": "GET", "path": "/v1/client/launches/{id}/approvals", "response": "Page" },
     { "id": "schedules.list", "method": "GET", "path": "/v1/client/schedules", "response": "SchedulesPage", "scope": "read.declarations", "query": { "cursor": "optional host/process/session-bound next_cursor; expires after 15m or restart", "limit": "optional 1-200; default 50; must match cursor", "unheard_after_ms": "optional positive integer display threshold 1 through 9007199254740991 milliseconds; default 300000; must match cursor; never host health" } },
     { "id": "missions.list", "method": "GET", "path": "/v1/client/missions", "response": "Page" },
-    { "id": "missions.get", "method": "GET", "path": "/v1/client/missions/{id}", "response": "Resource" },
+    { "id": "missions.get", "method": "GET", "path": "/v1/client/missions/{id}", "response": "Resource", "query": {"run": "optional mission run id (mission-run/<id> or <id>); lifts the detail timing and step-history bound for that one run of this mission; a run of another mission is 404"} },
     { "id": "work.list", "method": "GET", "path": "/v1/client/work", "response": "Page", "query": { "fresh": "optional true: wait up to two seconds for a current work list published at least as new as the request" } },
     { "id": "work.get", "method": "GET", "path": "/v1/client/work/{id}", "response": "Resource" },
     { "id": "resources.list", "method": "GET", "path": "/v1/client/resources", "response": "ResourcesPage" },
