@@ -977,6 +977,30 @@ the rate was fitted to) and, only when the allowance would run out first, `runs_
 `explain` says the same in words. A budget with too little history has none of the three. The list is
 computed on each read from live windows and readings; it writes nothing.
 
+The same list includes observational credit objectives `CAM-R01/PROVIDER` (zero forfeited
+window-equivalents in rolling seven days, by expiry) and `CAM-R02/PROVIDER` (a documented
+planned/redeemed/declined disposition for every credit expiring within 24 hours). One durable
+credit is one window-equivalent. Their evidence comes from replicated, durable
+`usage.limits.observed` claims, folded by provider/account digest/credit ID across writers and
+hosts. Terminal states are absorbing: `redeemed` wins over `forfeited`, and `forfeited` wins over
+`available` or `unknown`, regardless of timestamp. Within the same state class (`available` and
+`unknown` share one), newest full-precision provider measurement time then claim ID wins, not
+delivery order. Missing/unknown/unreported/unsupported evidence is
+`no-data`, stale evidence is `stale`; neither proves success. These rows describe observed
+credits only and do not enforce quotas or redeem credits.
+
+The durable usage kind has no numeric retention bound. Opening a store never scans retained
+usage history or waits for credit initialization. A missing inventory remains uninitialized
+with no configured writers; configuring writers or directly reading the inventory starts
+asynchronous, bounded catch-up batches with a persisted resumable cursor and a released writer
+lock between batches. Until complete, **both** CAM rows have `status: "no-data"` and null
+`remaining_percent`, never success from partial evidence. Their `current` and `explain` display
+text explicitly say `catching-up through store index N of M`; these are claim-store progress
+indices, not counts of decoded credits. The status enum is unchanged. Clients show the supplied
+text rather than parsing it. An empty writer configuration still returns unknown credit rows
+without credit SQL. Once caught up, reads use incremental per-identity/per-writer heads rather
+than folding the retained observation history.
+
 `GET /v1/client/slo/history?id=…&since_ms=…&until_ms=…&steps=…` reads what was left of one row
 across a period, from the daemon's local observation log (one reading a minute, kept seven days;
 it is not in the graph and does not replicate). The period defaults to the 24 hours ending now,
@@ -988,8 +1012,8 @@ never "spent". A daemon that has run for less than the period has fewer readings
 id the daemon has no rows for answers with no readings (`samples` 0 and every step null), not an
 error: a client that remembers an id should check it against the list.
 
-The objectives are this daemon's own: each member reports the targets and limits it measures, and
-nothing replicates between members. The wording in `about`, `target`, `current`, `window` and
+The live-window objectives are this daemon's own: each member reports the targets and limits it
+measures; unlike credit evidence, live measurement windows do not replicate. The wording in `about`, `target`, `current`, `window` and
 `explain` is display text built by the daemon for a person to read; it may change between builds,
 so a client shows it and does not parse it. The pair of reads is experimental while the TUI,
 the phone and the web app settle on what they need. The `slo` capability (version 1) is granted to
