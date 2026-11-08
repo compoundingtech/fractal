@@ -18,9 +18,11 @@ pub(super) async fn prepare_managed_provider(
 ) -> Result<()> {
     let actor = client.person.as_deref().unwrap_or(subject);
     let gateway = generated_client(&client.endpoint, Some(actor))?;
-    let declaration = managed_declaration_result(
-        gateway.agent_declaration_get(subject, None, false).await.map(|reply| reply.value.tree),
-    )?;
+    let declaration = retry_while_daemon_unreachable(subject, || async {
+        managed_declaration_result(
+            gateway.agent_declaration_get(subject, None, false).await.map(|reply| reply.value.tree),
+        )
+    }).await?;
     fractal_drivers::managed_launch::resolve(harness, argv, &declaration, subject)
 }
 
@@ -45,7 +47,7 @@ mod managed_declaration_tests {
     #[test]
     fn confirmed_not_found_allows_persona_fallback() {
         assert_eq!(managed_declaration_result(Err(api_error(ClientErrorCode::NotFound))).unwrap(), Value::Null);
-        let spec = json!({"children": [{"name": "persona", "arguments": ["steward"]}]});
+        let spec = json!({"children": [{"name": "name", "arguments": ["Managed seat"]}]});
         assert_eq!(managed_declaration_result(Ok(spec.clone())).unwrap(), spec);
     }
 
@@ -240,13 +242,21 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         if let Some(drivers) = std::env::var_os("ST3_DRIVER_STATE_DIR") {
             fractal_drivers::run::use_harness_state_root(PathBuf::from(drivers).join("sessions"));
         }
+        let resume = fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV);
+        // Fresh drivers keep the existing runtime wait across daemon restarts. Adopting
+        // drivers cannot wait on a new incarnation, but their declaration read retries outages.
+        let incarnation = if resume.is_none() {
+            Some(wait_for_agent_incarnation(client, subject).await?)
+        } else {
+            None
+        };
         if matches!(args.driver.as_str(), "omp" | "claude" | "codex") {
             prepare_managed_provider(client, subject, &args.driver, &mut argv).await?;
         }
-        if let Some(state) = fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV) {
+        if let Some(state) = resume {
             return resume_native_driver(client, subject, &args.driver, argv, &state).await;
         }
-        let incarnation = wait_for_agent_incarnation(client, subject).await?;
+        let incarnation = incarnation.context("fresh driver has no runtime incarnation")?;
         let paths = NativePaths::prepare(subject, &args.driver)?;
         let sessions = paths.session_dir.join("provider-sessions");
         if let Some(session) = fractal_daemon::native_seed::first_launch(

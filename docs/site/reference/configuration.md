@@ -117,9 +117,9 @@ Supported `omp`, `claude`, and `codex` agent-seat driver launches read the absol
 `$HOME/.local/state/nix/profiles/coding-agent-runtime/share/coding-agents/profile.json`
 when that variable is unset. Each launch reads the current profile through its
 stable link and executes `<personas.launch.<persona>.harnessBin>/<harness>`
-directly. The Agent Spec's `persona` selects the persona; `AGENT_PERSONA` is next,
-and `generalist` is the last fallback. A declared persona that disagrees with
-`AGENT_PERSONA` refuses launch. The selected `harnessBin` is prepended to the
+directly. `AGENT_PERSONA`, when set, selects the persona; otherwise `generalist`
+is the internal lookup default. Fractal does not export that default as
+`AGENT_PERSONA`. The selected `harnessBin` is prepended to the
 provider child's PATH, so provider subprocesses also resolve managed wrappers;
 the driver's own PATH is unchanged. Before spawning a managed provider child,
 any present `ST_AGENT` or `FRACTAL_AGENT` must equal the fenced driver subject;
@@ -128,9 +128,11 @@ that subject. The profile publisher selects the
 directory; Fractal does not duplicate persona-to-path rules. A missing persona entry,
 `harnessBin`, or executable wrapper refuses launch, naming the missing key/path.
 There is no fallback to a raw provider or to a different persona.
-Only a confirmed missing Agent Spec permits the environment/default persona
-fallback; authorization, transport, malformed-response, and server errors refuse
-managed launch. Prelaunch contract capture measures the selected wrapper, not a
+Only a confirmed missing Agent Spec permits treating the declaration as absent.
+Authorization, malformed-response, and server errors refuse managed launch.
+During a classified daemon outage, startup waits without spawning a provider
+and retries the authenticated read; it never falls back to native execution.
+Prelaunch contract capture measures the selected wrapper, not a
 raw executable from login PATH. Driver re-exec uses the managed wrapper for helper
 commands while adopting, without restarting the running provider.
 

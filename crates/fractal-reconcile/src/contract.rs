@@ -239,19 +239,17 @@ mod tests {
     }
 
     #[test]
-    fn managed_contract_uses_raw_spec_persona_and_refuses_mismatch() {
+    fn managed_contract_uses_environment_persona_and_refuses_unknown_persona() {
         let (root, mut desired, bin) = managed_fixture("omp", false);
         let store = Store::open_memory("node").unwrap();
         std::fs::write(root.path().join("profile.json"), serde_json::to_vec(&serde_json::json!({
             "personas": {"launch": {"steward": {"harnessBin": bin}}},
         })).unwrap()).unwrap();
-        desired.desired["children"].as_array_mut().unwrap().push(serde_json::json!({
-            "name": "persona", "arguments": ["steward"], "properties": {}, "children": [],
-        }));
+        desired.member.as_mut().unwrap().environment.insert("AGENT_PERSONA".into(), "steward".into());
         isolated_capture(&store, &desired, false, &|_| Ok(())).unwrap().unwrap();
         desired.member.as_mut().unwrap().environment.insert("AGENT_PERSONA".into(), "generalist".into());
         assert!(format!("{:#}", isolated_capture(&store, &desired, false, &|_| Ok(())).unwrap_err())
-            .contains("disagrees with AGENT_PERSONA"));
+            .contains("personas.launch.generalist.harnessBin"));
     }
 
     #[test]

@@ -88,7 +88,7 @@ fn managed_startup_reads_its_declaration_over_authenticated_unix() {
         std::fs::write(&wrapper, "#!/bin/sh\nexit 99\n").unwrap();
         std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
         let profile = root.path().join("profile.json");
-        // Deliberately omit generalist: treating the declaration as missing cannot pass.
+        // Deliberately omit generalist: the environment must select the steward wrapper.
         std::fs::write(&profile, serde_json::to_vec(&json!({
             "personas": {"launch": {"steward": {"harnessBin": bin}}},
         })).unwrap()).unwrap();
@@ -100,7 +100,7 @@ fn managed_startup_reads_its_declaration_over_authenticated_unix() {
             ])
             .env(CHILD, root.path())
             .env("AGENT_RUNTIME_PROFILE", &profile)
-            .env_remove("AGENT_PERSONA")
+            .env("AGENT_PERSONA", "steward")
             .env("HOME", root.path())
             .output().unwrap();
         assert!(output.status.success(), "{}{}",
@@ -123,7 +123,7 @@ fn managed_startup_reads_its_declaration_over_authenticated_unix() {
             store.set_member_key(Some(key.clone())).unwrap();
             store.admit_fleet_anchor(FLEET, key.public(), "listening").unwrap();
             let source = format!(
-                "version 2\nagent \"example/managed\" {{ accountable \"person/operator\"; workspace {:?}; harness \"codex\" {{}}; persona \"steward\"; }}",
+                "version 2\nagent \"example/managed\" {{ accountable \"person/operator\"; workspace {:?}; harness \"codex\" {{}}; }}",
                 root,
             );
             let intent = fractal_daemon::graph::parse_intent(&source, NODE).unwrap();

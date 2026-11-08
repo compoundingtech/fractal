@@ -71,7 +71,7 @@ fn resolve_from_source(
     let environment_persona = env("AGENT_PERSONA")
         .map(|value| value.into_string().map_err(|_| anyhow::anyhow!("AGENT_PERSONA is not UTF-8")))
         .transpose()?;
-    let persona = selected_persona(spec, environment_persona.as_deref())?;
+    let persona = environment_persona.as_deref().unwrap_or("generalist");
     resolve_for_persona(harness, argv, &profile, persona)?;
     let bin = Path::new(&argv[0]).parent().context("managed wrapper has no parent")?;
     prefixed_path(bin, env("PATH").as_deref())
@@ -177,24 +177,6 @@ fn prefixed_path(bin: &Path, inherited: Option<&std::ffi::OsStr>) -> Result<std:
     std::env::join_paths(paths).context("prepend managed harness directory to provider PATH")
 }
 
-fn selected_persona<'a>(spec: &'a serde_json::Value, environment: Option<&'a str>) -> Result<&'a str> {
-    let mut nodes = spec.get("children").and_then(serde_json::Value::as_array)
-        .into_iter().flatten().filter(|node| node["name"] == "persona");
-    let declared = if let Some(node) = nodes.next() {
-        ensure!(nodes.next().is_none(), "Agent Spec declares multiple personas");
-        let arguments = node["arguments"].as_array().context("Agent Spec persona needs one string")?;
-        ensure!(arguments.len() == 1, "Agent Spec persona needs one string");
-        Some(arguments[0].as_str().filter(|value| !value.is_empty())
-            .context("Agent Spec persona needs one nonempty string")?)
-    } else {
-        None
-    };
-    if let (Some(declared), Some(environment)) = (declared, environment) {
-        ensure!(declared == environment,
-            "Agent Spec persona {declared} disagrees with AGENT_PERSONA {environment}");
-    }
-    Ok(declared.or(environment).unwrap_or("generalist"))
-}
 
 #[cfg(test)]
 mod tests {
@@ -282,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn declared_steward_selects_its_wrapper_without_environment_persona() {
+    fn environment_steward_selects_its_wrapper_without_a_spec_persona() {
         let (_root, bin, profile) = fixture();
         std::fs::write(&profile, serde_json::to_vec(&serde_json::json!({
             "personas": {"launch": {"steward": {"harnessBin": bin}}},
@@ -294,14 +276,13 @@ mod tests {
             use std::os::unix::fs::PermissionsExt as _;
             std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
-        let spec = serde_json::json!({"children": [{"name": "persona", "arguments": ["steward"]}]});
-        let persona = selected_persona(&spec, None).unwrap();
-        assert_eq!(persona, "steward");
+        let environment = std::collections::BTreeMap::from([
+            ("AGENT_RUNTIME_PROFILE".into(), profile.display().to_string()),
+            ("AGENT_PERSONA".into(), "steward".into()),
+        ]);
         let mut argv = ["omp".into()];
-        resolve_for_persona("omp", &mut argv, &profile, persona).unwrap();
+        resolve_with_environment("omp", &mut argv, &serde_json::json!({}), &environment).unwrap();
         assert_eq!(Path::new(&argv[0]), wrapper);
-        assert!(selected_persona(&spec, Some("generalist")).is_err());
-        assert_eq!(selected_persona(&serde_json::json!({}), None).unwrap(), "generalist");
     }
 
     #[test]
