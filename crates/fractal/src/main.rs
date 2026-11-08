@@ -7422,7 +7422,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -7713,8 +7713,13 @@ async fn run_up(args: UpArgs) -> Result<()> {
         }
     };
     let bound = std::sync::atomic::AtomicUsize::new(0);
+    let agents_request_slo = std::sync::OnceLock::new();
     let ready = || {
         if bound.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+            agents_request_slo.get_or_init(|| fractal_daemon::api::start_agents_request_slo(
+                config.state_dir.clone(),
+                config.node.clone(),
+            ));
             let activation_store = store.clone();
             // A member that trims locally still runs the pass, which only finishes a trim it had
             // already committed.
@@ -7788,8 +7793,13 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // then ends the process by that signal as it did before the daemon handled it.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let stop_agents_request_slo = || {
+        if let Some(slo) = agents_request_slo.get() {
+            slo.stop();
+        }
+    };
     let serving = async {
-        tokio::try_join!(
+        let served = tokio::try_join!(
             fractal_daemon::api::serve_reserved_unix_with_ready(
                 local_reserved,
                 fractal_daemon::api::worker_authenticated(router(state.clone()), worker_observer, config.worker_ingress_generation_check.unwrap_or_default()).layer(web_status.clone()),
@@ -7799,14 +7809,27 @@ async fn run_up(args: UpArgs) -> Result<()> {
             fractal_daemon::api::serve_reserved_unix_with_ready(
                 gateway_reserved, fabric_router(state).layer(web_status), None, ready,
             ),
-            web.serve(web_state, config.worker_ingress_generation_check.unwrap_or_default()),
-        )
+            async {
+                let result = web.serve(web_state, config.worker_ingress_generation_check.unwrap_or_default()).await;
+                // Stop before try_join drops the native listeners on a web error.
+                if result.is_err() {
+                    stop_agents_request_slo();
+                }
+                result
+            },
+        );
+        Err(served)
     };
-    let stopped = tokio::select! {
-        served = serving => Err(served),
-        _ = terminate.recv() => Ok(libc::SIGTERM),
-        _ = interrupt.recv() => Ok(libc::SIGINT),
+    let shutdown = async {
+        tokio::select! {
+            _ = terminate.recv() => Ok(libc::SIGTERM),
+            _ = interrupt.recv() => Ok(libc::SIGINT),
+        }
     };
+    let stopped = fractal_daemon::api::stop_before_listener_drop(
+        serving, shutdown, stop_agents_request_slo,
+    ).await;
+    drop(agents_request_slo);
     // Shutdown refuses receipts from connections still being served, then waits for the writer
     // to commit every admitted one however long it takes. Only a second stop signal, an
     // explicit forced stop, ends the daemon before they commit.
@@ -10505,6 +10528,9 @@ fn render_product_page_headed(
                 );
                 if let Some(usage) = &item.usage {
                     let _ = writeln!(output, "  usage {}", render_usage(usage));
+                }
+                if let Some(admission) = &item.declared_admission {
+                    render_declared_admission(&mut output, admission);
                 }
                 if item.runs_truncated {
                     let _ = writeln!(output, "  inspect: fractal missions show {}", item.header.id);
@@ -14615,7 +14641,36 @@ fn render_client_agent(
     for runtime in &agent.runtime_ids {
         let _ = writeln!(output, "RUNTIME      {runtime}");
     }
+    if let Some(admission) = &agent.declared_admission {
+        render_declared_admission(&mut output, admission);
+    }
     output
+}
+
+fn render_declared_admission(output: &mut String, admission: &fractal_client::DeclaredAdmission) {
+    use std::fmt::Write as _;
+    let _ = writeln!(output, "Declared admission — declared, not enforced.");
+    let _ = writeln!(output, "st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.");
+    if let Some(priority) = &admission.priority {
+        let _ = writeln!(output, "  priority: {priority}");
+    }
+    if let Some(lane) = &admission.lane {
+        let _ = writeln!(output, "  lane: {lane}");
+    }
+    if let Some(budgets) = &admission.budgets {
+        if let Some(seconds) = budgets.cpu_seconds {
+            let _ = writeln!(output, "  cpu_seconds: {seconds}");
+        }
+        if let Some(memory) = &budgets.memory_max {
+            let _ = writeln!(output, "  memory_max: {memory}");
+        }
+        if let Some(disk) = &budgets.disk_max {
+            let _ = writeln!(output, "  disk_max: {disk}");
+        }
+        if let Some(tokens) = budgets.token_budget {
+            let _ = writeln!(output, "  token_budget: {tokens}");
+        }
+    }
 }
 
 /// One line naming a running subagent: what it does, its type, and, given the time, when it

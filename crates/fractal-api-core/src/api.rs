@@ -109,6 +109,7 @@ pub mod client_v0;
 mod custom;
 use crate::delivery_presence;
 pub mod agent_harness;
+mod agents_request_slo;
 #[cfg(test)]
 mod harness_health_controls;
 #[cfg(test)]
@@ -558,6 +559,9 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let mut body =
             json!({ "code": self.code, "message": self.message, "details": self.details });
+        if matches!(self.code.as_str(), "invalid-declared-admission" | "declared-admission-feature-barrier") {
+            body["applied"] = json!("none");
+        }
         if let Some(applied) = body["details"].get("applied").cloned() {
             body["applied"] = applied;
         }
@@ -1073,8 +1077,10 @@ struct RequestDuration<'a> {
 
 impl Drop for RequestDuration<'_> {
     fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        agents_request_slo::record(self.method, self.route, self.outcome, elapsed);
         crate::otel::record_http_request_duration(
-            self.method, self.route, self.client_class, self.outcome, self.started.elapsed(),
+            self.method, self.route, self.client_class, self.outcome, elapsed,
         );
     }
 }
@@ -1669,6 +1675,8 @@ pub async fn run_cpu_minutes(store: Arc<Store>, workers: usize) {
     }
 }
 
+pub use agents_request_slo::{AgentsRequestSloServing, start_agents_request_slo, stop_before_listener_drop};
+
 pub use crate::peer::track_remote_reads;
 
 /// A query that asks the daemon to wait for a change makes the request a long poll.
@@ -2078,6 +2086,8 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "response-budget-exceeded"
         | "content-not-text"
         | "invalid-document-reference"
+        | "invalid-declared-admission"
+        | "declared-admission-feature-barrier"
         | "document-not-synced"
         | "internal" => code.unwrap_or("internal").to_owned(),
         "too-many-attachments" | "invalid-blob-reference" | "invalid-slo-period" => "validation-failed".into(),
@@ -4152,6 +4162,9 @@ fn client_agent_cards_presented(
                     None
                 },
             });
+            if let Some(admission) = subject.desired.as_ref().and_then(client_declared_admission) {
+                value["declared_admission"] = serde_json::to_value(admission)?;
+            }
             // Fold the point read into a cached card. Presentation of a warm roster page
             // must not repeat one retirement query for every retired row.
             if state == "retired"
@@ -4183,6 +4196,106 @@ fn client_agent_cards_presented(
             .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
     });
     Ok(agents.into_iter().map(|(_, value)| value).collect())
+}
+
+/// Project already-normalized declaration data without revalidating future enum strings.
+pub fn client_declared_admission(desired: &Value) -> Option<crate::model::DeclaredAdmission> {
+    fn child<'a>(node: &'a Value, name: &str) -> Option<&'a Value> {
+        node.get("children")?.as_array()?.iter()
+            .find(|child| child.get("name").and_then(Value::as_str) == Some(name))
+    }
+    fn argument(node: &Value) -> Option<&Value> {
+        node.get("arguments")?.as_array()?.first()
+    }
+    let priority = child(desired, "declared-priority").and_then(argument)
+        .and_then(Value::as_str)
+        .map(|value| match value {
+            "background" => crate::model::DeclaredPriority::Background,
+            "normal" => crate::model::DeclaredPriority::Normal,
+            raw => crate::model::DeclaredPriority::Unknown(raw.to_owned()),
+        });
+    let lane = child(desired, "declared-lane").and_then(argument)
+        .and_then(Value::as_str)
+        .map(|value| match value {
+            "check" => crate::model::DeclaredLane::Check,
+            "build" => crate::model::DeclaredLane::Build,
+            raw => crate::model::DeclaredLane::Unknown(raw.to_owned()),
+        });
+    let budgets = child(desired, "declared-budgets").map(|node| crate::model::DeclaredBudgets {
+        cpu_seconds: child(node, "cpu-seconds").and_then(argument).and_then(Value::as_u64),
+        memory_max: child(node, "memory-max").and_then(argument).and_then(Value::as_str).map(str::to_owned),
+        disk_max: child(node, "disk-max").and_then(argument).and_then(Value::as_str).map(str::to_owned),
+        token_budget: child(node, "token-budget").and_then(argument).and_then(Value::as_u64),
+    });
+    crate::model::DeclaredAdmission::from_declaration(priority.as_ref(), lane.as_ref(), budgets.as_ref())
+}
+
+#[cfg(test)]
+mod declared_admission_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn declared_admission_barrier_refusal_has_no_write_envelope() {
+        let response = ApiError::bad(FractalError::new(
+            "declared-admission-feature-barrier",
+            "upgrade every active member before publication",
+        )).into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let raw: Value = serde_json::from_slice(&bytes).unwrap();
+        let envelope = client_error_envelope(StatusCode::UNPROCESSABLE_ENTITY, &raw, "request/test");
+        assert_eq!(envelope["code"], "declared-admission-feature-barrier");
+        assert_eq!(envelope["retryable"], false);
+        assert_eq!(envelope["applied"], "none");
+    }
+
+    #[tokio::test]
+    async fn declared_admission_refusal_keeps_stable_envelope_fields() {
+        let error = ApiError::bad(FractalError::new(
+            "invalid-declared-admission",
+            "agent 'agent/example' declared_budgets.cpu_seconds must be an integer from 1 to 9007199254740991",
+        ).with_detail("subject", "agent/example")
+            .with_detail("field", "declared_budgets.cpu_seconds"));
+        assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+        let response = error.into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let raw: Value = serde_json::from_slice(&bytes).unwrap();
+        let envelope = client_error_envelope(StatusCode::UNPROCESSABLE_ENTITY, &raw, "request/test");
+        assert_eq!(envelope["code"], "invalid-declared-admission");
+        assert_eq!(envelope["retryable"], false);
+        assert_eq!(envelope["applied"], "none");
+        assert_eq!(envelope["details"]["subject"], "agent/example");
+        assert_eq!(envelope["details"]["field"], "declared_budgets.cpu_seconds");
+    }
+
+    #[test]
+    fn desired_projection_omits_empty_and_retains_future_enums() {
+        assert!(client_declared_admission(&json!({})).is_none());
+        assert!(client_declared_admission(&json!({"children": [
+            {"name": "declared-budgets", "children": []}
+        ]})).is_none());
+        let desired = json!({"children": [
+            {"name": "declared-priority", "arguments": ["future-level"]},
+            {"name": "declared-lane", "arguments": ["future-lane"]},
+            {"name": "declared-budgets", "children": [
+                {"name": "cpu-seconds", "arguments": [300]},
+                {"name": "memory-max", "arguments": ["8G"]},
+                {"name": "disk-max", "arguments": ["20G"]},
+                {"name": "token-budget", "arguments": [100000]}
+            ]}
+        ]});
+        let admission = client_declared_admission(&desired).unwrap();
+        assert_eq!(admission.priority, Some(crate::model::DeclaredPriority::Unknown("future-level".into())));
+        assert_eq!(admission.lane, Some(crate::model::DeclaredLane::Unknown("future-lane".into())));
+        assert_eq!(serde_json::to_value(admission).unwrap(), json!({
+            "priority": "future-level", "lane": "future-lane",
+            "budgets": {"cpu_seconds": 300, "memory_max": "8G", "disk_max": "20G", "token_budget": 100000}
+        }));
+        assert_eq!(serde_json::to_value(client_declared_admission(&json!({"children": [
+            {"name": "declared-priority", "arguments": ["background"]},
+            {"name": "declared-lane", "arguments": ["build"]},
+            {"name": "declared-budgets", "children": []}
+        ]})).unwrap()).unwrap(), json!({"priority": "background", "lane": "build"}));
+    }
 }
 
 /// Read-only edges with an explicit authored kind and URI resolution state.
@@ -8044,7 +8157,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":2},
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"github_plugin":2},
     });
     // How far this member's messages stream has come. Absent when it holds no shard, so a
     // client that waits on both indexes knows there is only the graph to wait on.
@@ -10107,6 +10220,7 @@ fn doctor_report_within(
     let report_status = doctor_status(&checks);
     let mut performance = crate::performance::snapshot();
     performance["seatAdmission"] = admission;
+    performance["agentsRequestSloShadow"] = json!(agents_request_slo::read());
     Ok(Json(DoctorReport {
         machine_version: Some(fractal_drivers::version::machine_version()),
         status: report_status.into(),

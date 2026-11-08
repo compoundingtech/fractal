@@ -5,32 +5,81 @@ use super::*;
 const GRANT: &str = "custom/client/pairing-order";
 const PERSON: &str = "person/avery";
 
-fn replicate(from: &AppState, to: &AppState) {
+#[tokio::test]
+async fn issuer_operation_withdrawal_accepts_another_local_person() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "pairing-issuer");
+    let completed = complete(&state, later());
+    let other = Store::open_memory("other-issuer").unwrap();
+    let copy = other.append_client_operation_claim(&ClaimInput {
+        subject:GRANT.into(),kind:completed.kind.clone(),actor:completed.actor.clone(),
+        fields:serde_json::from_value(completed.body["fields"].clone()).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    let withdrawal = other.append_client_operation_claim(&ClaimInput {
+        subject:GRANT.into(),kind:"custom.client.pairing-revoked".into(),
+        actor:Some("person/alex".into()),fields:BTreeMap::new(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    assert!(!state.store.pairing_revocation_is_trusted(&withdrawal, &completed).unwrap());
+    assert!(other.pairing_revocation_is_trusted(&withdrawal, &copy).unwrap());
+    let mut fields = completed.body["fields"].clone();
+    fields["credential_hash"] = json!(credential_digest("issuer-withdrawal"));
+    let replacement = state.store.append_client_operation_claim(&ClaimInput {
+        subject:GRANT.into(),kind:completed.kind.clone(),actor:completed.actor.clone(),
+        fields:serde_json::from_value(fields).unwrap(),evidence:vec![],
+        expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    let request = || Request::builder().uri("/v1/client/capabilities")
+        .header(AUTHORIZATION, "Bearer issuer-withdrawal").body(Body::empty()).unwrap();
+    assert!(authenticate(&state, &request(), "fabric-loopback").is_ok());
+    state.store.append_client_operation_claim(&ClaimInput {
+        subject:GRANT.into(),kind:"custom.client.pairing-revoked".into(),
+        actor:Some("person/alex".into()),fields:BTreeMap::new(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    assert!(!state.store.pairing_completion_is_revoked(&completed).unwrap());
+    assert!(state.store.pairing_completion_is_revoked(&replacement).unwrap());
+    assert_eq!(authenticate(&state, &request(), "fabric-loopback").unwrap_err().status, StatusCode::FORBIDDEN);
+    assert!(paired_client_session(&state, &replacement, "fabric-loopback", false).is_err());
+}
+
+pub(super) fn replicate(from: &AppState, to: &AppState) {
+    const FLEET: &str = "549d4b9d-f23c-41e9-9e0b-15f13ab837e6";
     if from.store.member_key.read().unwrap().is_none() {
         let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
         let peer = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
         for state in [from, to] {
-            state.store.bind_fleet("pairing-fleet").unwrap();
+            state.store.bind_fleet(FLEET).unwrap();
             state.store.pin_fleet_anchor(anchor.public()).unwrap();
         }
         from.store.set_member_key(Some(anchor.clone())).unwrap();
         to.store.set_member_key(Some(peer.clone())).unwrap();
-        from.store.admit_fleet_anchor("pairing-fleet", anchor.public(), "listening").unwrap();
-        from.store.append_claim(&ClaimInput {
-            subject:format!("host/{}", to.store.origin()),kind:"fleet.member-admitted".into(),actor:None,
-            fields:serde_json::from_value(json!({
-                "member_key":peer.public(),"via":"member","sponsor":from.store.origin(),
-                "writer_floor":0,"mode":"listening",
-            })).unwrap(),
-            evidence:vec![],expected_subject:None,idempotency_key:None,
-        }).unwrap();
+        from.store.admit_fleet_anchor(FLEET, anchor.public(), "listening").unwrap();
+        let invitation = from.store.create_fleet_invite(
+            Some(to.store.origin()), std::time::Duration::from_secs(600),
+            &["fabric".into()], "person/alex", false,
+        ).unwrap();
+        let code = smallclaims::fleet::code::JoinCode {
+            fleet_id: FLEET.parse().unwrap(),
+            invite: hex::decode(invitation.invite).unwrap().try_into().unwrap(),
+            token: invitation.token,
+            fingerprint: smallclaims::fleet::code::fingerprint(anchor.public()),
+            expires_at: invitation.expires_at_unix_ms / 1000,
+            name: Some(to.store.origin().into()),
+            migrate: false, endpoints: Vec::new(), pairing: None,
+        };
+        let joiner = smallclaims::fleet::handshake::Joiner::start(
+            &code, &peer, to.store.origin(), "listening", None, "test",
+        ).unwrap();
+        from.store.append_fleet_admission(joiner.request(), false, Some(0), None).unwrap();
     }
     let exchange = from
         .store
-        .export_replication_exchange("pairing-fleet", &to.store.replication_inventory().unwrap())
+        .export_replication_exchange(FLEET, &to.store.replication_inventory().unwrap())
         .unwrap();
     to.store
-        .receive_replication_exchange(from.store.origin(), "pairing-fleet", &exchange)
+        .receive_replication_exchange(from.store.origin(), FLEET, &exchange)
         .unwrap();
     to.store.validate_replication_backlog().unwrap();
     to.store.apply_replication_repairs().unwrap();

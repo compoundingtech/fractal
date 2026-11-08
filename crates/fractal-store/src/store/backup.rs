@@ -437,7 +437,7 @@ impl Store {
             while let Some(row) = rows.next()? {
                 let payload: Vec<u8> = row.get(2)?;
                 let payload: smallclaims::claim::ReplicaEnvelopePayload =
-                    ciborium::from_reader(payload.as_slice())?;
+                    ciborium::from_reader(payload.as_slice()).map_err(|error| anyhow::anyhow!("backup contains unadmitted envelopes: {error}"))?;
                 anyhow::ensure!(row.get::<_, Option<String>>(3)?.as_deref() == Some("unsigned")
                     && payload.batch.claims.iter().any(|claim| claim.kind == crate::pairing::OPERATION_AUTHORIZED),
                     "backup contains an unadmitted envelope");
@@ -706,9 +706,9 @@ mod tests {
                 "custom.client.terminal-attached", "custom.client.terminal-consumed",
                 "custom.client.terminal-detached"] {
                 operations.push(source.append_client_operation_claim(&ClaimInput {
-                    subject:format!("custom/client/archive-{kind}"),kind:kind.into(),
-                    actor:Some("person/archive".into()),fields:serde_json::from_value(json!({
-                        "person_id":"person/archive","expires_at_unix_ms":u64::MAX,
+                    subject:format!("custom/client/archive-{}", kind.rsplit('.').next().unwrap()),kind:kind.into(),
+                    actor:Some("person/example".into()),fields:serde_json::from_value(json!({
+                        "person_id":"person/example","expires_at_unix_ms":u64::MAX,
                     })).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None,
                 }).unwrap());
             }
@@ -1817,9 +1817,9 @@ mod tests {
                     header.shards.insert("notes".into(), digest);
                 }
             })),
-            ("unsupported claim backup format/version: \"st3.claim-backup\" version 6", Box::new(|records| {
+            ("unsupported claim backup format/version: \"st3.claim-backup\" version 7", Box::new(|records| {
                 if let Record::Header(header) = &mut records[0] {
-                    header.version = 6;
+                    header.version = 7;
                 }
             })),
         ];

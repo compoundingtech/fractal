@@ -333,6 +333,41 @@ mod tests {
     }
 
     #[test]
+    fn service_profile_cannot_issue_or_authenticate_as_an_assistant() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = crate::api::tests_shared::state(root.path());
+        state.owning_person = Some("person/owner".into());
+        for (number, requested_principal) in [
+            (1, "plugin/issuer/service"), (2, PRINCIPAL),
+        ] {
+            let id = format!("{number:024x}");
+            let source = json!({"profile":"service", "principal":requested_principal,
+                "grant_id":id, "issuer":"person/owner",
+                "session_actor":format!("{requested_principal}/session/{id}"),
+                "expires_at_unix_ms":4_102_444_800_000_u64,
+                "credential_hash":credential_digest(&id),
+                "scopes":["read.assistant.summary"], "minimal_read_mode":"approval-once",
+                "disclosure_consent":true});
+            let subject = subject(&id).unwrap();
+            // In particular, assistant/chatgpt + service is never an issuable shape.
+            assert!(append(&state, subject.clone(), GRANTED, "person/owner", source.clone(), None).is_err());
+            assert!(latest(&state, &subject, GRANTED).unwrap().is_none());
+            // Generic claim retention must not turn that same shape into API authority.
+            let granted = state.store.append_claim(&ClaimInput {
+                subject:subject.clone(), kind:GRANTED.into(), actor:Some("person/owner".into()),
+                fields:serde_json::from_value(source.clone()).unwrap(), evidence:Vec::new(),
+                expected_subject:Some(None), idempotency_key:None,
+            }).unwrap();
+            state.store.append_claim(&ClaimInput {
+                subject, kind:POLICY.into(), actor:Some("person/owner".into()),
+                fields:serde_json::from_value(source).unwrap(), evidence:vec![granted.id.clone()],
+                expected_subject:Some(Some(granted.id)), idempotency_key:None,
+            }).unwrap();
+            assert!(authenticate(&state, &credential_digest(&id), "unix").is_err());
+        }
+    }
+
+    #[test]
     fn grant_claims_accept_digests_never_bearer_or_pairing_code_material() {
         let digest = credential_digest("a private credential");
         assert!(digest_only(&json!({"credential_hash":digest,"code_hash":digest})).is_ok());
