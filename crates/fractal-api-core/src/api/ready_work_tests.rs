@@ -334,7 +334,7 @@ fn ready_work_store_count_excludes_blockers_independently() {
     let (_root, state, step) = fixture();
     publish_work(&state);
     let publication = state.store.published_work().unwrap();
-    let mut view = publication.rows.rows[&step].view.clone();
+    let mut view = publication.rows.rows[&step].view.as_ref().clone();
     otherwise_ready(&view);
     let cohort = [ASH.to_owned()];
     let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
