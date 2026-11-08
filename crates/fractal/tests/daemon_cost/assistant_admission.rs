@@ -118,7 +118,12 @@ fn proof(paired: &Value, signer: &Ed25519KeyPair, sequence: usize) -> String {
 }
 
 fn explain(connection: &rusqlite::Connection, query: &str) -> Vec<String> {
-    let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {query}")).unwrap();
+    // The production query names its indexes (INDEXED BY); before the probe recreates
+    // one, SQLite refuses to plan it. Record that instead of a plan.
+    let mut statement = match connection.prepare(&format!("EXPLAIN QUERY PLAN {query}")) {
+        Ok(statement) => statement,
+        Err(error) => return vec![format!("not plannable: {error}")],
+    };
     let mut rows = if query == A_QUERY {
         statement.query(rusqlite::params![GRANTED, "assistant/chatgpt"]).unwrap()
     } else {
