@@ -7,7 +7,7 @@ import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import { Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
 
-import { borderVars as border, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as text, typeVars as type } from '../../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars as border, interactionVars as interaction, radiusVars as radius, spaceVars as space, statusVars as status, surfaceVars as surface, textVars as text, typeVars as type } from '../../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { initials, readProblem, type Tone } from '../model.ts'
 import type { GithubRef } from '../refs.ts'
 import { refOf } from '../refs.ts'
@@ -206,7 +206,7 @@ const styles = stylex.create({
   labels: { listStyle: 'none', margin: space.zero, padding: space.zero, display: 'flex', flexWrap: 'wrap', gap: space.xs },
   label: { display: 'inline-flex', alignItems: 'center', gap: space.xs, paddingInline: space.md, paddingBlock: space.xs2, borderRadius: radius.full, backgroundColor: surface.controlFill, borderWidth: space.hairline, borderStyle: 'solid', borderColor: border.border, fontSize: type.metaSize, lineHeight: type.metaLeading, color: text.fgSoft },
   labelDot: { width: space.md, height: space.md, borderRadius: radius.full, backgroundColor: text.fgMuted },
-  link: { color: text.fgSoft, fontSize: type.metaSize, lineHeight: type.metaLeading, textDecorationLine: 'underline', textUnderlineOffset: '2px', textDecorationColor: border.railStrong, whiteSpace: 'nowrap', ':hover': { color: text.fg } },
+  link: { color: { default: text.fgSoft, ':hover': text.fg }, fontSize: type.metaSize, lineHeight: type.metaLeading, textDecorationLine: 'underline', textUnderlineOffset: '2px', textDecorationColor: border.railStrong, whiteSpace: 'nowrap' },
   linked: { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: space.md, paddingInline: space.xl, paddingBottom: space.lg, flexShrink: 0 },
   eyebrow: { fontSize: type.denseSize, letterSpacing: type.trackingWide, textTransform: 'uppercase', color: text.fgMuted },
   linkedList: { listStyle: 'none', margin: space.zero, padding: space.zero, display: 'flex', flexWrap: 'wrap', gap: space.xs },
@@ -214,10 +214,10 @@ const styles = stylex.create({
   linkedKind: { color: text.fgMuted },
   tabs: { display: 'flex', flexDirection: 'column', flexGrow: 1, minHeight: 0 },
   tabList: { display: 'flex', gap: space.xs, paddingInline: space.xl, borderBottomWidth: space.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border, overflowX: 'auto', flexShrink: 0, scrollbarWidth: 'none' },
-  tab: { paddingTop: space.xs, cursor: 'pointer', outlineStyle: 'none', color: { default: text.fgMuted, ':hover': text.fg }, whiteSpace: 'nowrap', borderRadius: radius.sm },
+  tab: { paddingTop: space.xs, cursor: 'pointer', outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: space.xs2, outlineColor: interaction.focusRing, outlineOffset: '-2px', color: { default: text.fgMuted, ':hover': text.fg }, whiteSpace: 'nowrap', borderRadius: radius.sm },
   tabInner: { display: 'inline-flex', alignItems: 'center', minHeight: space.panel, paddingInline: space.md, borderBottomWidth: space.xs2, borderBottomStyle: 'solid', borderBottomColor: 'transparent', fontSize: type.uiSize },
   tabSelected: { color: text.fg, borderBottomColor: status.running, fontWeight: type.weightMedium },
-  panel: { flexGrow: 1, minHeight: 0, overflowY: 'auto', paddingInline: space.xl, paddingBlock: space.lg, outlineStyle: 'none' },
+  panel: { flexGrow: 1, minHeight: 0, overflowY: 'auto', paddingInline: space.xl, paddingBlock: space.lg, outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: space.xs2, outlineColor: interaction.focusRing, outlineOffset: '-2px' },
   panelFill: { overflowY: 'hidden', display: 'flex', flexDirection: 'column', gap: space.md, paddingInline: space.zero, paddingBlock: space.zero },
   state: { display: 'flex', flexDirection: 'column', gap: space.md, padding: space.xl },
   stateTitle: { margin: space.zero, fontSize: type.uiSize, fontWeight: type.weightMedium, color: text.fg },
