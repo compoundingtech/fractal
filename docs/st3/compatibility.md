@@ -32,6 +32,34 @@ keeps its current build while new CLI invocations use the installed build. Follo
 the [upgrade procedure](../site/guides/upgrading.md) rather than treating installation
 alone as a daemon upgrade.
 
+### Service-grant refusal on the pinned baseline
+
+The service downgrade fixtures target the baseline in
+`.github/fleet-compat-baseline.json` (v0.3.30, commit
+`9146398018b0835728266cf8269f0d96f02ad652`). Service credentials remain disabled
+in production. A service grant must use a `plugin/<host>/<name>` principal,
+never an assistant principal. The candidate refuses service-profile issuance
+and authentication, including the counterexample `assistant/chatgpt` plus
+`profile=service`; the closed assistant pairing grammar cannot issue that shape.
+
+The old binary ignores the profile field, but refuses plugin service grants
+through its exact `assistant/chatgpt` principal check and refuses non-assistant
+scopes through its closed assistant scope set. Replicated grants additionally
+fail its authoritative-origin check. The ignored fleet tests exercise both
+issuer roles and a candidate → old → candidate restart on the same database,
+with retained GRANTED/POLICY claims and live, expired, and revoked assistant
+controls. The rollback fixture also characterizes owner inspection: the old
+binary labels a plugin service record as an assistant grant even though its
+credential cannot authenticate.
+
+This is only a service-credential refusal boundary, **not a general rollback
+guarantee**. In particular, the old binary can authenticate the deliberately
+seeded, unissuable `assistant/chatgpt` plus service-profile counterexample when
+it has assistant scopes. Unknown-field retention or a successful owner inspect
+is not evidence of safe authorization. Any future service issuance must retain
+the plugin-principal invariant and revisit compatibility before enabling it.
+
+
 ### Additive claims and unknown-field retention
 
 During the window, optional claim fields must be additive: absence preserves old
