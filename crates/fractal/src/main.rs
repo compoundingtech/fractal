@@ -9507,9 +9507,11 @@ async fn run_devices(
             if let Some(gateway) = &gateway {
                 let local_member = client.capabilities().await?.snapshot.host_id;
                 pairing_qr::check_begin_member(gateway, &local_member, &config.peers)?;
-                eprintln!(
-                    "Warning: the gateway's final member cannot be verified; this pairing must be completed on {local_member}. Run the pair command on the gateway member if it is different."
-                );
+                if !pairing_qr::gateway_is_begin_member(gateway, &local_member).await? {
+                    eprintln!(
+                        "Warning: the gateway's final member cannot be verified; this pairing must be completed on {local_member}. Run the pair command on the gateway member if it is different."
+                    );
+                }
             }
             let response = client
                 .pairing_begin_person(&PersonPairingBegin {

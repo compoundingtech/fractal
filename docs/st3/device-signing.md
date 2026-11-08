@@ -98,8 +98,12 @@ the trusted machine. A scan fills a candidate, not a trusted root or an automati
 No QR or QR payload is emitted with `--json` or redirected stdout; JSON output is unchanged.
 Without `--gateway`, the CLI prints the usual manual instructions and a QR hint.
 The pair command always begins on its local member. A gateway URL matching a different
-configured member is refused before creating a challenge; otherwise the CLI warns that the
-gateway's final member cannot be verified. Forwarders must reach the beginning member.
+configured member is refused offline before creating a challenge. Otherwise an anonymous
+`GET <gateway>/v1/health` checks the serving node, retaining the gateway's base path.
+A different node is refused; a matching node continues without a warning. The request's
+three-second timeout bounds reachability, not pairing completion. Only an unreachable
+gateway or a response without a node leaves identity unverified and produces a warning.
+Forwarders must reach the beginning member.
 Completion on any other member returns `pairing-origin-required` without consuming the code.
 
 On the device, complete it using the member gateway's HTTP or HTTPS origin and the returned
