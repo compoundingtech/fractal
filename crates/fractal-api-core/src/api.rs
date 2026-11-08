@@ -7373,8 +7373,8 @@ impl AncestryUnavailableCause {
     }
 
     fn record(&self) {
-        eprintln!("st3: local caller ancestry unavailable pid={:?} reason={} detail={:?}",
-            self.pid, self.reason_code(), self.reason);
+        tracing::warn!(pid = ?self.pid, reason = self.reason_code(), detail = ?self.reason,
+            "local caller ancestry unavailable");
     }
 }
 
