@@ -590,6 +590,7 @@ pub(crate) fn run_provider_observed_with_env_removals(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     apply_provider_environment(&mut command, env, removed_env);
+    crate::managed_launch::apply_provider_environment(&mut command)?;
     unsafe {
         command.pre_exec(|| {
             libc::signal(libc::SIGINT, libc::SIG_DFL);
