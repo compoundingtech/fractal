@@ -71,7 +71,7 @@ Each `SpaceSync` is an external store that keeps spaces as whole bodies. The sto
 - **Scrolling stays inside panes.**
   - Panes and their slots are `position: relative`, with `min-width: 0` and `min-height: 0`.
   - Panes are `overflow: clip`, so they cannot be scrolled programmatically.
-  - The only scroll containers are `PaneContent` and the aside body (`overflow: auto`, `overscroll-behavior: contain`).
+  - The only scroll containers are `PaneContent` and the aside body (`overflow: auto`, `overscroll-behavior: contain`). The aside body is a flex column: a panel that grows (`flex-grow: 1`) fills it, and one taller than the aside scrolls in it.
   - Nothing uses CSS `contain`, so `position: fixed` overlays still escape.
 - **Tabs.**
   - `TabStrip` and `Tab` are a React Aria tab list: selection follows focus, and the arrows, Home and End move.

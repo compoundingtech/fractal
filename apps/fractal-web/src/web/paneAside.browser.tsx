@@ -10,7 +10,7 @@ import { type Feed, observed } from '../data/source.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 
 // Executable browser fixture for scripts/pane-aside-proof.mjs: each pane owns its side panel. It opens by default
-// when the pane is wide enough, an explicit toggle holds only within the pane's width band, splitting gives each pane
+// when the pane is wide enough and its panel fills it, an explicit toggle holds only within the pane's width band, splitting gives each pane
 // its own, the panel's tab is remembered per kind, and a phone opens it as a bottom sheet. Nothing global is docked.
 const scheme = new URLSearchParams(location.search).get('scheme') === 'light' ? 'light' : 'dark'
 const now = Date.parse('2026-10-08T12:00:00.000Z')
@@ -63,8 +63,15 @@ try {
     facts.wide = { pane: pane.width, aside: aside.width }
     expect(aside.right <= pane.right + 1 && aside.left >= pane.left - 1, 'the aside is not inside its pane')
     expect(toggleOf(first!)!.getAttribute('aria-pressed') === 'true', 'the toggle does not say the panel is open')
-    // The panel's tab is remembered per kind: choose Changes here.
     await until(() => tab(asideOf(first!)!, 'Changes') !== undefined, 'the Changes tab')
+    // The panel fills its aside: its tab row is on screen, not clipped away, and the selected tab's content has height.
+    const shown = asideOf(first!)!, box = shown.getBoundingClientRect()
+    const list = shown.querySelector<HTMLElement>('[role="tablist"]')!, row = list.getBoundingClientRect()
+    const panel = shown.querySelector<HTMLElement>('[role="tabpanel"]')?.getBoundingClientRect()
+    facts.asideContent = { aside: box.height, tabs: row.height, panel: panel?.height ?? 0 }
+    expect(list.contains(document.elementFromPoint(row.left + row.width / 2, row.top + row.height / 2)), 'the side panel tab row is clipped')
+    expect(panel !== undefined && panel.height >= box.height / 2 && panel.top >= box.top - 1 && panel.bottom <= box.bottom + 1, 'the side panel content does not fill its aside')
+    // The panel's tab is remembered per kind: choose Changes here.
     press(tab(asideOf(first!)!, 'Changes'), 'Changes tab')
     await afterPaint()
     // An explicit close holds in this band.

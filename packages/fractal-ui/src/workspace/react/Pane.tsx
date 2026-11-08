@@ -378,7 +378,8 @@ export const PaneAside = ({ side = 'end', threshold, hysteresis, defaultSize = 3
     style={resolveStyle(style, values, { display: 'flex', flexDirection: side === 'start' ? 'row-reverse' : 'row', flex: `0 0 ${size}px`, minWidth: 0, minHeight: 0, position: 'relative', overflow: 'clip', order: side === 'start' ? -1 : 1 })}
   >
     <AsideResizer pane={pane.id} side={side} size={size} minSize={minSize} maxSize={available} className={resizerClassName} style={resizerStyle} />
-    <div data-pane-aside-body="" style={{ flex: '1 1 0px', minWidth: 0, minHeight: 0, position: 'relative', overflow: 'auto', overscrollBehavior: 'contain' }}>
+    {/* A column, so a panel that grows fills the aside; one taller than the aside scrolls here. */}
+    <div data-pane-aside-body="" style={{ display: 'flex', flexDirection: 'column', flex: '1 1 0px', minWidth: 0, minHeight: 0, position: 'relative', overflow: 'auto', overscrollBehavior: 'contain' }}>
       {resolveChildren(children, values)}
     </div>
   </div>
