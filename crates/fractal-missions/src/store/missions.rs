@@ -3,7 +3,6 @@
 use super::*;
 pub use fractal_delivery::store::missions::*;
 use fractal_store::store::identities::resolve_reference_conn;
-use fractal_store::store::missions::seat_step_rows_literal_tx;
 use fractal_store::store::{work_actor_matches, work_actor_spellings_json};
 
 mod run_review;
@@ -930,7 +929,7 @@ fn seat_order_conflict_tx(
         .remove(agent)
         .unwrap_or_default()
         .live_order();
-    let rows = seat_step_rows_literal_tx(connection, agent)?;
+    let rows = fractal_store::store::missions::seat_step_rows_literal_tx(connection, agent)?;
     let steps = rows
         .iter()
         .map(RosterStepRow::seat_step)
