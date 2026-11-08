@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Derive native claim attribution from the connected writer and align native mutation scopes with client actions.",
+  "replay": { "status": "none", "detail": "Existing retained claims and replay behavior are unchanged." },
+  "schema": { "status": "none", "detail": "No persisted schema changes." },
+  "rules": { "status": "none", "detail": "Existing dedicated claim-kind policies remain in force." },
+  "compatibility": { "status": "changed", "detail": "Connected agent, native and paired writers use their derived actor and matching sender attribution. Paired native mutations require the corresponding control scope; legacy ask completion and custom replies use control.attention. Ordinary local actor omission remains nullable." },
+  "downtime": { "status": "none", "detail": "No additional interruption beyond the normal binary rollout." },
+  "manual": { "status": "none", "detail": "No data migration is required. Clients continue using their existing concrete writer identity and applicable action scopes." },
+  "recovery": { "status": "none", "detail": "Normal binary rollback requires no retained-data conversion." }
+}
