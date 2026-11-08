@@ -611,6 +611,35 @@ mod tests {
     }
 
     #[test]
+    fn latest_at_preserves_main_reader_result_for_the_same_bundle() {
+        let anchor = reading(10, MINUTES, MINUTES);
+        let bundle: RetainedPairs = serde_json::from_value(json!({
+            "version": 1,
+            "pairs": (8..=11).map(|minute| {
+                retained_pair(&reading(minute, MINUTES, MINUTES), minute % 4)
+            }).collect::<Vec<_>>(),
+        })).unwrap();
+        for minute in [11, 12, 14] {
+            let now = reading(minute, MINUTES, MINUTES).end_ms;
+            // Main's reader replaces the latest summary for each eligible pair.
+            let mut main_latest = None;
+            for pair in &bundle.pairs {
+                let summary = pair.short.summary(&pair.weekly).unwrap();
+                if pair.weekly.end_ms <= anchor.end_ms
+                    && now - pair.weekly.end_ms <= MAX_AGE_MS
+                {
+                    main_latest = Some(summary);
+                }
+            }
+            let values = |summary: ShortSummary| (summary.end_ms, summary.known, summary.failed);
+            assert_eq!(
+                bundle.latest_at(&anchor, now).unwrap().map(values),
+                main_latest.map(values),
+            );
+        }
+    }
+
+    #[test]
     fn usage_observes_last_fresh_pair_without_writing_the_weekly_state() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("graph.db"), "node").unwrap();

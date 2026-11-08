@@ -49,6 +49,12 @@ export default githubWorkflow(auditCaches({
           required: false,
           type: 'string',
         },
+        recover_draft: {
+          description: 'Opt in to one minimal draft POST and exact-match recovery; requires explicit tag, sha and run',
+          required: false,
+          type: 'boolean',
+          default: false,
+        },
       },
     },
   },
@@ -56,7 +62,7 @@ export default githubWorkflow(auditCaches({
   jobs: {
     build: {
       name: 'build-exact-release-candidate',
-      if: "github.event_name == 'workflow_dispatch' && inputs.mode == 'candidate' && inputs.sha != '' && inputs.run == '' && github.ref == 'refs/heads/main'",
+      if: "github.event_name == 'workflow_dispatch' && inputs.mode == 'candidate' && inputs.sha != '' && inputs.run == '' && github.ref == 'refs/heads/main' && inputs.recover_draft != true",
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 180,
       concurrency: {
@@ -97,12 +103,13 @@ export default githubWorkflow(auditCaches({
         RUN: '${{ needs.build.outputs.build_run || inputs.run }}',
         SUMMARY: '${{ inputs.summary }}',
         SOURCE_SHA: '${{ inputs.sha }}',
+        RECOVER_DRAFT: '${{ inputs.recover_draft }}',
       },
       steps: [
         ...fullHistoryCheckoutSteps(),
         {
           name: 'Prepare a draft candidate from verified main archives',
-          run: 'scripts/release-fractal-daily ${TAG:+--tag "$TAG"} ${RUN:+--run "$RUN"} --summary "$SUMMARY" --sha "$SOURCE_SHA"',
+          run: 'if [ "$RECOVER_DRAFT" = true ]; then set -- --recover-draft; else set --; fi\nscripts/release-fractal-daily "$@" ${TAG:+--tag "$TAG"} ${RUN:+--run "$RUN"} --summary "$SUMMARY" --sha "$SOURCE_SHA"',
         },
       ],
     },
