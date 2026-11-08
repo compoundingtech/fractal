@@ -9604,6 +9604,15 @@ fn carried_claim_successor_matches_legacy_and_canonical_holders() {
                 &store.readers.get(),
                 &smallclaims::store::normalize_actor(actor, "agent"),
             ).unwrap();
+            if main_actor != holder {
+                let error = store.work_action(old, "renew", &renew).unwrap_err();
+                assert_eq!(error.code, "work-already-claimed");
+                assert_eq!(
+                    store.step_run(carried).unwrap().unwrap().claimant.as_deref(),
+                    Some(holder),
+                );
+                continue;
+            }
             let renewed = store.work_action(old, "renew", &renew).unwrap();
             assert_eq!(&renewed.subject, carried);
             // The carried subject has no replicated lease anchor. Main publishes this

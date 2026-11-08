@@ -570,7 +570,7 @@ fn work_claim_rejects_raw_actor_and_retains_main_spelling_independent_of_assignm
 }
 
 #[test]
-fn replicated_legacy_claimant_waits_for_row_and_checks_projected_eligibility() {
+fn replicated_legacy_claimant_refuses_alias_renewal_without_replay_loss() {
     use fractal_store::store::{classify_replicated_claim_with_registry,
         project_claim_isolated_tx, project_mission_run_update};
 
@@ -597,6 +597,8 @@ fn replicated_legacy_claimant_waits_for_row_and_checks_projected_eligibility() {
     let historical = replication.batches.iter_mut().flat_map(|batch| &mut batch.claims)
         .find(|claim| claim.subject == *subject && claim.kind == "work.claimed").unwrap();
     historical.body["fields"]["claimant"] = json!("node/worker");
+    let anchored_expiry = now_ms() + 540_000;
+    historical.body["fields"]["claim_expires_at_unix_ms"] = json!(anchored_expiry);
     historical.id = claim_hash(
         &historical.batch_id, &historical.subject, &historical.kind, &historical.origin,
         historical.actor.as_deref(), &historical.body, &historical.predecessors,
@@ -610,8 +612,35 @@ fn replicated_legacy_claimant_waits_for_row_and_checks_projected_eligibility() {
     let projected = replica.step_run(subject).unwrap().unwrap();
     assert_eq!(projected.claimant.as_deref(), Some("node/worker"));
     assert_eq!(replica.claims_for(subject, Some("work.claimed")).unwrap()[0].body, claim.body);
+    assert_eq!(projected.claim_incarnation, claim_request.incarnation);
+    assert_eq!(projected.claim_expires_at_unix_ms, Some(anchored_expiry));
+    assert!(anchored_expiry > now_ms() + 300_000, "the anchor would allow a quiet renewal");
+    let before_index = replica.index().unwrap();
+    let mut renew = claim_request.clone();
+    renew.idempotency_key = "legacy-owner-alias-renew".into();
+    let error = replica.work_action(subject, "renew", &renew).unwrap_err();
+    assert_eq!(error.code, "work-already-claimed", "main's literal ownership fence");
+    assert_eq!(replica.index().unwrap(), before_index);
+    let after = replica.step_run(subject).unwrap().unwrap();
+    assert_eq!(after.claimant, projected.claimant);
+    assert_eq!(after.claim_incarnation, projected.claim_incarnation);
+    assert_eq!(after.claim_expires_at_unix_ms, projected.claim_expires_at_unix_ms);
+    let local_renewals: u64 = replica.readers.get().query_row(
+        "SELECT COUNT(*) FROM local_work_lease_renewals WHERE subject=?1",
+        [subject], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(local_renewals, 0);
     replica.rebuild_claim_projections().unwrap();
     assert_eq!(replica.step_run(subject).unwrap().unwrap().claimant.as_deref(), Some("node/worker"));
+    let replayed = replica.step_run(subject).unwrap().unwrap();
+    assert_eq!(replayed.status, projected.status);
+    assert_eq!(replayed.claim_incarnation, projected.claim_incarnation);
+    assert_eq!(replayed.claim_expires_at_unix_ms, projected.claim_expires_at_unix_ms);
+    let replayed_local_renewals: u64 = replica.readers.get().query_row(
+        "SELECT COUNT(*) FROM local_work_lease_renewals WHERE subject=?1",
+        [subject], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(replayed_local_renewals, 0);
     assert_eq!(replica.claims_for(subject, Some("work.claimed")).unwrap()[0].body, claim.body);
 
     let mut connection = replica.connection.write();
@@ -782,6 +811,11 @@ fn work_renewal_matches_legacy_and_canonical_holders() {
                 assert_eq!(step.store.claims_for(&step.subject, None).unwrap().len(), before);
                 continue;
             }
+            if actor != holder {
+                let error = step.store.work_action(&step.subject, "renew", &renew).unwrap_err();
+                assert_eq!(error.code, "work-already-claimed");
+                continue;
+            }
             let renewed = step.store.work_action(&step.subject, "renew", &renew).unwrap();
             // Main's quiet renewal writes only the operational lease, not a new claim
             // or a replacement claimant spelling in the projected step.
@@ -817,6 +851,11 @@ fn work_renew_release_and_completion_match_legacy_and_canonical_holders() {
                     assert_eq!(error.code, "invalid-work-actor");
                     assert_eq!(step.store.claims_for(&step.subject, None).unwrap().len(), before);
                     assert_eq!(step.store.step_run(&step.subject).unwrap().unwrap().claimant.as_deref(), Some(holder));
+                    continue;
+                }
+                if action == "renew" && actor != holder {
+                    let error = step.store.work_action(&step.subject, action, &finish).unwrap_err();
+                    assert_eq!(error.code, "work-already-claimed");
                     continue;
                 }
                 let finished = step.store.work_action(&step.subject, action, &finish).unwrap();
