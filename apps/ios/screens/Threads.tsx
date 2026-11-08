@@ -1,14 +1,20 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type Ref } from 'react';
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type Ref } from 'react';
 import * as Crypto from 'expo-crypto';
 import { Alert, Pressable, ScrollView, TextInput, useWindowDimensions, View } from 'react-native';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { BottomTabBarHeightContext } from '@react-navigation/bottom-tabs';
+import { useHeaderHeight } from '@react-navigation/elements';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ago, INLINE_MAX_BYTES, threadTitleFromAsk, utf8Bytes } from '@fractal/views';
 import { ClientError, type CollectionWindow, type ThreadCollectionContext, type ThreadSummary, type ThreadTimelineEvent } from '../../../clients/typescript/fractal-client';
 import { THREAD_WINDOW_SIZE, type ThreadWindowHandlers } from '../feed';
 import { rememberBounded } from '../boundedCache';
 import { agentName } from '../agentsView';
+import { ContextMenu } from '../menu';
 import type { RootScreen } from '../navigation';
 import { errorText, threadDraftKey, threadStartScope, useStore, type ThreadEditResult, type ThreadStartOrigin } from '../store';
+import { visibleThreadMessages } from '../threadVisibility';
+import { measureThreadBounds, measureThreadViewport, ThreadViewport, useThreadViewports } from '../threadViewport';
 import { theme } from '../theme';
 import { Button, Field, Markdown, SchemeScreen, T, useTextAppearance } from '../ui';
 
@@ -165,6 +171,7 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
       onLayout={event => { viewportHeight.current = event.nativeEvent.layout.height; }}
       onScroll={event => { offset.current = event.nativeEvent.contentOffset.y; }}
       style={{ maxHeight: Math.round(height * 0.4), flexGrow: 0 }} contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 8 }}>
+      <ThreadViewport viewport={scroll}>
       {threads.map(thread => {
         const open = expanded.has(thread.id);
         return <View key={thread.id}>
@@ -186,6 +193,7 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
           {open ? <ThreadBody client={client} thread={thread} onOpen={() => openThread(thread.id)} revealComposer={revealComposer} /> : null}
         </View>;
       })}
+      </ThreadViewport>
       {page.issue ? <T color={theme.waiting}>{page.issue}</T> : null}
       <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
         <Button label="Refresh threads" onPress={page.reload} disabled={page.loading} />
@@ -204,13 +212,14 @@ export function ThreadScreen({ route }: RootScreen<'Thread'>) {
 
 function ThreadDetail({ client, id }: { client: ThreadClient; id: string }) {
   const { threadRefresh } = useStore();
-  return <ScrollView contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 8 }}>
-    <InlineThread client={client} id={id} refresh={threadRefresh} />
+  const viewport = useRef<ScrollView>(null);
+  return <ScrollView ref={viewport} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 8 }}>
+    <ThreadViewport viewport={viewport}><InlineThread client={client} id={id} refresh={threadRefresh} /></ThreadViewport>
   </ScrollView>;
 }
 
 function ThreadDetailContent({ thread, issue, loading, reload, client, onOpen, onTimelineChange }: {
-  thread?: ThreadSummary; issue?: string; loading: boolean; reload: () => void; client: ThreadClient; onOpen?: () => void; onTimelineChange: () => void;
+  thread?: ThreadSummary; issue?: string; loading: boolean; reload: () => void; client: ThreadClient; onOpen?: () => void; onTimelineChange?: () => void;
 }) {
   const [expanded, setExpanded] = useState(true);
   if (thread) return <>
@@ -311,15 +320,20 @@ function AskThreadStart({ client, origin, initialTitle, onOpen, canStart }: {
 }
 
 function InlineThread({ client, id, refresh, onOpen }: { client: ThreadClient; id: string; refresh: number; onOpen?: () => void }) {
+  const { caps, feed } = useStore();
   const read = useCallback(async (_cursor: string | undefined, signal: AbortSignal) => {
     const { value } = await client.threadGet(id, { signal });
     return { value: { items: [value], next_cursor: null } };
   }, [client, id]);
   const [timelineRevision, bumpTimelineRevision] = useState(0);
   const onTimelineChange = useCallback(() => bumpTimelineRevision(previous => previous + 1), []);
-  const page = useThreadPage<ThreadSummary>(read, refresh + timelineRevision);
+  const exactFeed = feed?.belongsTo(client) && caps?.capabilities.some(capability =>
+    capability.id === 'thread-summary-feed' && capability.state === 'granted');
+  const follow = useCallback((handlers: ThreadWindowHandlers<ThreadSummary>) =>
+    feed?.followThreadSummary(id, handlers), [feed, id]);
+  const page = useThreadPage<ThreadSummary>(read, refresh + timelineRevision, exactFeed ? follow : undefined);
   return <ThreadDetailContent thread={page.items[0]} issue={page.issue} loading={page.loading} reload={page.reload} client={client} onOpen={onOpen}
-    onTimelineChange={onTimelineChange} />;
+    onTimelineChange={exactFeed ? undefined : onTimelineChange} />;
 }
 
 function threadTextIssue(content: string): string | undefined {
@@ -356,10 +370,18 @@ function ThreadBody({ client, thread, onOpen, onTimelineChange, revealComposer }
   const follow = useCallback((handlers: ThreadWindowHandlers<ThreadTimelineEvent>) =>
     feed?.belongsTo(client) ? feed.followThreadTimeline(thread.id, handlers) : undefined, [client, feed, thread.id]);
   const page = useThreadPage<ThreadTimelineEvent>(read, threadRefresh, follow, onTimelineChange);
+  const { width, height } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const headerHeight = useHeaderHeight();
+  const tabBarHeight = useContext(BottomTabBarHeightContext) ?? 0;
+  const navigation = useNavigation();
+  const viewports = useThreadViewports();
+  const messageViews = useRef(new Map<string, View>());
   const [quote, setQuote] = useState<ThreadMessage>();
   const [quoteFocus, setQuoteFocus] = useState(0);
+  const ownMessage = (id: string) => actor === id || actor?.startsWith(`${id}/`);
   const actorLabel = (id: string) => {
-    if (actor === id || actor?.startsWith(`${id}/`)) return 'You';
+    if (ownMessage(id)) return 'You';
     const agent = data.agents.find(candidate => candidate.id === id);
     return agent ? agentName(agent) : id;
   };
@@ -377,6 +399,20 @@ function ThreadBody({ client, thread, onOpen, onTimelineChange, revealComposer }
     try { setEditResult(await send()); }
     finally { setEditing(false); }
   };
+  const canMarkRead = thread.unread === true && !!actor && threadActions.has('thread.read');
+  const readCandidates = canMarkRead ? page.items.filter((event): event is ThreadMessage =>
+    event.kind === 'message' && !ownMessage(event.actor_id)) : [];
+  const markVisibleRead = () => void runEdit(async () => {
+    const top = Math.max(headerHeight, insets.top);
+    const [viewport, rows] = await Promise.all([
+      measureThreadViewport(viewports, { x: insets.left, y: top, width: width - insets.left - insets.right, height: height - top - Math.max(tabBarHeight, insets.bottom) }),
+      Promise.all(readCandidates.map(async ({ id }) => ({ id, bounds: await measureThreadBounds(messageViews.current.get(id)) }))),
+    ]);
+    if (!navigation.isFocused() || !viewport) return { how: 'failed', error: 'The visible replies could not be verified.' };
+    const ids = visibleThreadMessages(viewport, rows, THREAD_WINDOW_SIZE);
+    if (!ids.length) return { how: 'failed', error: 'Scroll a reply into view to mark it read.' };
+    return actions.markThreadRead(thread, ids);
+  });
   const rename = () => Alert.prompt('Rename thread', undefined, title => {
     const trimmed = title.trim();
     if (trimmed && trimmed !== thread.title) void runEdit(() => actions.editThread(thread, { kind: 'rename', title: trimmed }));
@@ -390,15 +426,32 @@ function ThreadBody({ client, thread, onOpen, onTimelineChange, revealComposer }
       if (event.kind !== 'message') return <T key={event.id} dim><T bold>{name}</T> {eventLine(event)} · {age} ago</T>;
       const quoted = event.thread_quote_id ? messages.get(event.thread_quote_id) : undefined;
       const reply = canReply ? () => chooseQuote(event) : undefined;
-      return <Pressable key={event.id} onLongPress={reply} accessible={!!reply}
-        accessibilityActions={reply ? [{ name: 'reply', label: 'Reply to this message' }] : undefined}
-        onAccessibilityAction={reply ? action => { if (action.nativeEvent.actionName === 'reply') reply(); } : undefined}>
+      const readHere = canMarkRead && !ownMessage(event.actor_id) && editable;
+      const row = <Pressable key={event.id} onLongPress={reply} accessible={!!reply || readHere}
+        collapsable={canMarkRead ? false : undefined}
+        ref={canMarkRead ? view => {
+          if (view) messageViews.current.set(event.id, view);
+          else messageViews.current.delete(event.id);
+        } : undefined}
+        accessibilityActions={[
+          ...(reply ? [{ name: 'reply', label: 'Reply to this message' }] : []),
+          ...(readHere ? [{ name: 'markRead', label: 'Mark visible replies read' }] : []),
+        ]}
+        onAccessibilityAction={action => {
+          if (action.nativeEvent.actionName === 'reply') reply?.();
+          if (action.nativeEvent.actionName === 'markRead' && readHere) markVisibleRead();
+        }}>
         <T bold>{name}<T dim> · {age} ago</T></T>
         {event.thread_quote_id ? <T dim numberOfLines={1}>{quoted ? `Reply to ${actorLabel(quoted.actor_id)} · ${quoted.content}` : 'Reply to an earlier message'}</T> : null}
         <Markdown text={event.content} selectable={!reply} />
       </Pressable>;
+      return <ContextMenu key={event.id} actions={readHere ? [
+        ...(reply ? [{ id: 'reply', title: 'Reply to this message', run: reply }] : []),
+        { id: 'markRead', title: 'Mark visible replies read', run: markVisibleRead },
+      ] : []}>{row}</ContextMenu>;
     })}
     {page.issue ? <T color={theme.waiting}>{page.issue}</T> : !page.items.length ? <T dim>{page.loading ? 'Loading history…' : 'No thread messages yet.'}</T> : null}
+    {readCandidates.length ? <Button label="Mark visible replies read" disabled={!editable} onPress={markVisibleRead} /> : null}
     {canReply || threadDeliveries?.has(thread.id) ? <ThreadComposer key={thread.id} thread={thread} canReply={canReply}
       selection={quote ? { id: quote.id, from: actorLabel(quote.actor_id), text: quote.content } : undefined} selectionVersion={quoteFocus} revealComposer={revealComposer}
     /> : null}

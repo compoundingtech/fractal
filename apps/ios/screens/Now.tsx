@@ -14,6 +14,7 @@ import { missionTitle } from '../missionsView';
 import { useStore } from '../store';
 import { randomName } from '../launcher';
 import { AlertBody, RequestAnswers, RequestQuestion, StructuredRequestView } from './Alerts';
+import { ThreadViewport } from '../threadViewport';
 import { AskThread, ThreadGroup } from './Threads';
 import { theme } from '../theme';
 import { Button, GroupedHeader, GroupedRow, Markdown, Note, SystemScreen as Screen, T } from '../ui';
@@ -24,6 +25,7 @@ export function NowScreen() {
   const { data, caps, hasSynced, truncated, loadErrors, busy, status, sync, actions } = useStore();
   const navigation = useNavigation<NativeStackNavigationProp<RootParams>>();
   const list = useRef<SectionList<HomeRow>>(null);
+  const threadViewport = useMemo(() => ({ get current() { return list.current?.getScrollResponder() ?? null; } }), []);
   useDebugScroll(list as never);
   const refresh = useRefresh();
   const agentOf = (row: HomeRow) => [row.item.requester_id, row.item.source_id].find(id => id?.startsWith('agent/'));
@@ -83,7 +85,7 @@ export function NowScreen() {
       ]}>
         <GroupedRow
           title={row.title}
-          context={[`Kind: ${row.kind}`, `From: ${requesterOf(row)}`, row.waiting, `Waited ${row.age}`].filter(Boolean).join(' · ')}
+          context={[`Kind: ${row.kind}`, `From: ${requesterOf(row)}`, row.waiting, !row.item.closedElsewhere && row.item.thread_unread ? 'Unread thread replies' : undefined, `Waited ${row.age}`].filter(Boolean).join(' · ')}
           onPress={() => navigation.navigate('Attention', { id: row.item.id })}
         />
       </ContextMenu>}
@@ -92,7 +94,9 @@ export function NowScreen() {
       ListEmptyComponent={<Empty text={alertsEmptyText({ loadError: loadErrors.attention, status, hasSynced, sync })} />}
       ListFooterComponent={<View>
         {truncated.attention ? <Note tone="warning">More items exist beyond these 200. `fractal now` lists them all.</Note> : null}
-        <ThreadGroup title="Recently closed threads" context={{ recently_closed: true }} openThread={id => navigation.navigate('Thread', { id })} />
+        <ThreadViewport viewport={threadViewport}>
+          <ThreadGroup title="Recently closed threads" context={{ recently_closed: true }} openThread={id => navigation.navigate('Thread', { id })} />
+        </ThreadViewport>
       </View>}
       style={{ flex: 1 }}
     />
@@ -138,12 +142,12 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   if (item.closedElsewhere && !item.update) {
     return <Screen>
       <Banners />
-      <ScrollView contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
+      <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
         <T><T bold color={theme[row.color]}>{row.glyph} {row.kind}</T><T dim>  {row.age} ago</T></T>
         <T bold selectable>{row.title}</T>
         {item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
         <T dim>This was closed. It stays under Recently closed until you clear it.</T>
-        {askOrigin ? <AskThread origin={askOrigin} initialTitle={item.title} allowStart={false} onOpen={id => navigation.navigate('Thread', { id })} /> : null}
+        {askOrigin ? <ThreadViewport viewport={requestScroll}><AskThread origin={askOrigin} initialTitle={item.title} allowStart={false} onOpen={id => navigation.navigate('Thread', { id })} /></ThreadViewport> : null}
         <Button label="clear from Now" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
         <T dim selectable>{item.id}</T>
       </ScrollView>
@@ -188,7 +192,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
           </>}
           {blockedLine(item) ? <T dim selectable>{blockedLine(item)}</T> : <T dim>Answer it, or Nothing to do if there is nothing for you to do. Either way the step it waits on continues.</T>}
           {mission ? <Button label={`mission ${missionTitle(mission)}`} onPress={() => navigation.navigate('Mission', { id: mission.id })} /> : item.mission_id ? <T dim>mission {item.mission_id}</T> : null}
-          {askOrigin ? <AskThread origin={askOrigin} initialTitle={item.title} onOpen={id => navigation.navigate('Thread', { id })} /> : null}
+          {askOrigin ? <ThreadViewport viewport={requestScroll}><AskThread origin={askOrigin} initialTitle={item.title} onOpen={id => navigation.navigate('Thread', { id })} /></ThreadViewport> : null}
           {agentId ? <Button label="Open agent conversation" onPress={() => navigation.navigate('Conversation', { target: agentId, title: from })} /> : null}
           <T dim selectable>{item.id}</T>
         </ScrollView>

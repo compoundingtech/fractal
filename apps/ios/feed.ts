@@ -151,6 +151,7 @@ export class Feed {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stream: CollectionStream | undefined;
   private nextThreadSubscription = 0;
+  private attentionThreadHints = false;
   private readonly threadFollows = new Map<string, ThreadFollow>();
   private windows: Partial<Record<FeedWindow, CollectionWindow>> = {};
   private terminal: TerminalFollow | undefined;
@@ -253,6 +254,14 @@ export class Feed {
     );
   }
 
+  followThreadSummary(subject: string, handlers: ThreadWindowHandlers<ThreadSummary>): Follow {
+    return this.followThreadWindow(
+      (stream, id) => stream.subscribe(id, 'threads', 1, { subject }),
+      (window, frame) => frame.collection === 'threads' ? applyWindow(window, frame) : undefined,
+      handlers,
+    );
+  }
+
   followThreadTimeline(subject: string, handlers: ThreadWindowHandlers<ThreadTimelineEvent>): Follow {
     return this.followThreadWindow(
       (stream, id) => stream.subscribe(id, 'thread-timeline', THREAD_WINDOW_SIZE, { subject }),
@@ -333,6 +342,7 @@ export class Feed {
   }
 
   private suspend(unexpected = false): void {
+    this.attentionThreadHints = false;
     this.attempt++;
     clearTimeout(this.timer);
     this.timer = undefined;
@@ -360,6 +370,12 @@ export class Feed {
   }
 
   setInventoryGranted(granted: boolean): void { this.inventory.setGranted(granted); }
+
+  setAttentionThreadHints(granted: boolean): void {
+    if (!this.live || this.attentionThreadHints === granted) return;
+    this.attentionThreadHints = granted;
+    this.subscribeWindow('attention');
+  }
   watchInventory<K extends InventoryName>(name: K, handlers: InventoryHandlers<K>, hours?: 24 | 168 | 720): () => void {
     return this.inventory.watch(name, handlers, hours);
   }
@@ -462,7 +478,11 @@ export class Feed {
   private subscribeWindow(name: FeedWindow): void {
     if (name === 'missions' && !this.missions) return;
     delete this.windows[name];
-    this.stream?.subscribe(name, FEED_WINDOWS[name].collection, FEED_WINDOWS[name].limit);
+    if (name === 'attention' && this.attentionThreadHints) {
+      this.stream?.subscribe(name, 'attention', FEED_WINDOWS.attention.limit, { attention_thread_hints: true });
+    } else {
+      this.stream?.subscribe(name, FEED_WINDOWS[name].collection, FEED_WINDOWS[name].limit);
+    }
   }
 
   private dropped(error: unknown): void {

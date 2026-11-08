@@ -35,6 +35,14 @@ test('thread actions require a completed receipt for the exact action, thread an
   await threadReceiptCheck({ actionId, targetId })(async () => result({ ...lifecycle, metadata_revision: 'claim/reopen' }));
 });
 
+test('thread read accepts only receipts for the exact action and a subset of visible replies', async () => {
+  const confirm = threadReceiptCheck({ actionId, readMessageIds: [messageId] });
+  await confirm(async () => result({ ...value, affected_ids: [] }));
+  await confirm(async () => result({ ...value, affected_ids: [messageId] }));
+  await assert.rejects(confirm(async () => result({ ...value, affected_ids: [targetId] })), outcomeUnknown);
+  await assert.rejects(confirm(async () => result({ ...value, affected_ids: [messageId], action_id: 'action/other' })), outcomeUnknown);
+});
+
 test('an ambiguous reply keeps the signed action and key until its matching receipt arrives', async () => {
   const received = [];
   const sdk = new FractalClient({

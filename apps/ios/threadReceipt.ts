@@ -1,6 +1,6 @@
 import { API_VERSION, ClientError, appliedAnswer, outcomeUnknown, type ActionResult, type EnvelopeOf } from '../../clients/typescript/fractal-client';
 
-type ExpectedReceipt = { actionId: string; targetId: string; messageId?: string };
+type ExpectedReceipt = { actionId: string } & ({ targetId: string; messageId?: string } | { readMessageIds: readonly string[] });
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
 
 function unconfirmed(actionId: string): ClientError {
@@ -26,8 +26,11 @@ async function confirmThreadReceipt(send: () => Promise<EnvelopeOf<ActionResult>
   const value = response?.value;
   if (value?.kind !== 'action-result' || value.status !== 'completed' || value.action_id !== expected.actionId
     || !nonempty(value.operation_id) || !nonempty(value.snapshot_id)
-    || !Array.isArray(value.affected_ids) || !value.affected_ids.every(nonempty) || !value.affected_ids.includes(expected.targetId)
-    || !(expected.messageId ? value.affected_ids.includes(expected.messageId) : nonempty(value.metadata_revision))) {
+    || !Array.isArray(value.affected_ids) || !value.affected_ids.every(nonempty)
+    || ('readMessageIds' in expected
+      ? !value.affected_ids.every(id => expected.readMessageIds.includes(id))
+      : !value.affected_ids.includes(expected.targetId)
+        || !(expected.messageId ? value.affected_ids.includes(expected.messageId) : nonempty(value.metadata_revision)))) {
     throw unconfirmed(expected.actionId);
   }
 }

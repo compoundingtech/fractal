@@ -35,7 +35,7 @@ function render(item, enabled = true, start = true) {
     useMissionsOnFocus() {}, useFocusEffect() {}, useHeaderHeight: () => 0, useCallback: callback => callback, useRef: current => ({ current }), detailRow: () => ({}),
     cleanMessageText: text => text, blockedLine: () => undefined, theme: {},
     Screen: 'Screen', Banners: 'Banners', ScrollView: 'ScrollView', KeyboardAvoidingView: 'KeyboardAvoidingView', T: 'Text',
-    Button: 'Button', Markdown: 'Markdown', RequestQuestion: 'RequestQuestion', RequestAnswers: 'RequestAnswers', isRequest, AskThread,
+    Button: 'Button', Markdown: 'Markdown', RequestQuestion: 'RequestQuestion', RequestAnswers: 'RequestAnswers', ThreadViewport: 'ThreadViewport', isRequest, AskThread,
   };
   const AttentionScreen = component('./screens/Now.tsx', 'AttentionScreen', undefined, dependencies);
   const screen = AttentionScreen({ route: { params: { id: item.id } }, navigation });

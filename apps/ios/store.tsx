@@ -606,6 +606,9 @@ function useAppStore(proof?: FabricProfile) {
 
   const inventoryGranted = caps === null ? undefined : caps.capabilities.some(capability => capability.id === 'inventory-collections' && capability.version >= 1 && capability.state === 'granted');
   useEffect(() => { feed?.setInventoryGranted(inventoryGranted === true); }, [feed, inventoryGranted]);
+  const attentionThreadHints = capsClient.current === client && caps?.capabilities.some(capability =>
+    capability.id === 'collection.attention.thread-hints' && capability.version >= 1 && capability.state === 'granted') === true;
+  useEffect(() => { if (client && feed?.belongsTo(client)) feed.setAttentionThreadHints(attentionThreadHints); }, [client, feed, attentionThreadHints]);
 
   // Spaces: followed on the feed's socket when the gateway grants them.
   useEffect(() => { void AsyncStorage.getItem(SIMPLE_KEY).then(value => setSimpleOn(value !== '0')).catch(() => {}); }, []);
@@ -854,10 +857,11 @@ function useAppStore(proof?: FabricProfile) {
   type PreparedThreadAction = {
     send: (request: ThreadRequest) => ReturnType<FractalClient['threadReply']>;
     messageId?: string;
+    readMessageIds?: readonly string[];
   };
   async function submitThreadAction(
     targetId: string,
-    kind: ThreadEdit['kind'] | 'start' | 'reply',
+    kind: ThreadEdit['kind'] | 'start' | 'reply' | 'read',
     revisions: Record<string, string>,
     prepare: (client: FractalClient, key: string) => Promise<PreparedThreadAction>,
   ): Promise<ThreadEditResult> {
@@ -889,7 +893,9 @@ function useAppStore(proof?: FabricProfile) {
         ensureOriginalConnection();
         if (!submit) {
           const prepared = await prepare(threadClient, id);
-          const confirm = threadReceiptCheck({ actionId: id, targetId, messageId: prepared.messageId });
+          const confirm = threadReceiptCheck(prepared.readMessageIds
+            ? { actionId: id, readMessageIds: prepared.readMessageIds }
+            : { actionId: id, targetId, messageId: prepared.messageId });
           submit = request => confirm(() => prepared.send(request));
         }
         return { id, idempotency_key: id, fence: await readFence() };
@@ -945,6 +951,17 @@ function useAppStore(proof?: FabricProfile) {
           ? member.threadClose({ ...request, parameters })
           : member.threadReopen({ ...request, parameters });
       } }));
+    },
+    markThreadRead(thread: ThreadSummary, visibleIds: readonly string[]): Promise<ThreadEditResult> {
+      const [through] = visibleIds;
+      if (!through) return Promise.resolve({ how: 'failed', error: 'There are no visible replies to mark read.' });
+      const seen = [...visibleIds];
+      return submitThreadAction(thread.id, 'read', {}, async member => ({
+        readMessageIds: seen,
+        send: request => member.threadRead({
+          ...request, parameters: { target_id: thread.id, through_message_id: through, seen_message_ids: seen },
+        }),
+      }));
     },
     startThread(thread: string, origin: ThreadStartOrigin, title: string, content: string): Promise<ThreadEditResult> {
       const signingProfile = signingKeyRef.current;
