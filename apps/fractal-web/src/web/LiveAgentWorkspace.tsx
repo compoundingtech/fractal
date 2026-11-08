@@ -36,6 +36,8 @@ import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
 import { MilestoneAgentRow } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/MilestoneAgentRow.tsx'
+import { AgentHoverCard } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/DeferredRowActions.tsx'
+import { EntityCardSource, type EntityCardResolver } from '../../../../packages/fractal-ui/src/assistant-ui/entity/EntityHoverCard.tsx'
 import { SidebarMissionChildRow, missionChildAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarMissionLine.tsx'
 import { SidebarQueryContext, sidebarRowAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/rowPresentation.tsx'
 import { SystemNotice, ConnectionStatus } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
@@ -88,6 +90,30 @@ const emptyAgents: readonly Agent[] = []
 /** A last-observed roster's observation instant: its row times stop there instead of ticking on as if live. */
 const RosterFrozenAt = React.createContext<number | undefined>(undefined)
 
+/** One agent's sidebar row from the live feeds: the sidebar row and every other surface's hover card read this. */
+const useLiveAgentRow = (agentRef: string, needsMe: boolean, childId?: string) => {
+  const feed = useAgent(agentRef)
+  const source = useDataSource()
+  const missionAtom = React.useMemo(() => sidebarMissionFeedsAtom(source), [source])
+  const mission = useAtomValue(missionAtom)
+  const connection = useConnection()
+  const agent = feed._tag === 'Observed' ? feed.value : undefined
+  const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
+  const item = React.useMemo(() => {
+    if (agent === undefined) return undefined
+    if (childId === undefined) return sidebarRow({ agent, stale, needsMe, ...mission })
+    const child = agent.subagents?.find(child => child.id === childId)
+    return child === undefined ? undefined : sidebarSubagentRow({ parent: agent, child, stale })
+  }, [agent, stale, needsMe, childId, mission])
+  return { item, stale }
+}
+
+/** The agent's canonical hover card, identical to its sidebar row's: same row, `reportedStatusOnly`, frozen clock. */
+const LiveAgentCard = ({ agentRef, needsMe, frozenAt }: { readonly agentRef: string; readonly needsMe: boolean; readonly frozenAt: number | undefined }) => {
+  const { item } = useLiveAgentRow(agentRef, needsMe)
+  return item === undefined ? null : <AgentHoverCard row={item} reportedStatusOnly now={frozenAt} />
+}
+
 /** Clock ticks reach SidebarTime leaves, never the Aria row or its collection. */
 const LiveSidebarAgentRow = React.memo((props: {
   readonly agentRef: string
@@ -100,21 +126,9 @@ const LiveSidebarAgentRow = React.memo((props: {
   readonly openMission?: (mission: string) => void
   readonly actions: SidebarActions
 }) => {
-  const feed = useAgent(props.agentRef)
-  const source = useDataSource()
-  const missionAtom = React.useMemo(() => sidebarMissionFeedsAtom(source), [source])
-  const mission = useAtomValue(missionAtom)
-  const connection = useConnection()
-  const agent = feed._tag === 'Observed' ? feed.value : undefined
-  const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
+  const { item, stale } = useLiveAgentRow(props.agentRef, props.needsMe, props.childId)
   const frozenAt = React.useContext(RosterFrozenAt)
   const [, requestThreadFocus] = useAtom(subagentThreadFocus(props.agentRef))
-  const item = React.useMemo(() => {
-    if (agent === undefined) return undefined
-    if (props.childId === undefined) return sidebarRow({ agent, stale, needsMe: props.needsMe, ...mission })
-    const child = agent.subagents?.find(child => child.id === props.childId)
-    return child === undefined ? undefined : sidebarSubagentRow({ parent: agent, child, stale })
-  }, [agent, stale, props.needsMe, props.childId, mission])
   const onOpen = React.useCallback(() => { if (props.openRef !== undefined) props.select(props.openRef) }, [props.openRef, props.select])
   const onSubagentsPress = React.useCallback(() => {
     props.select(props.agentRef)
@@ -509,6 +523,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const byRef = React.useMemo(() => new Map(subjects.map((subject) => [subject.ref, subject])), [subjects])
   const allTabs = React.useMemo(() => tabsOf(workspace.layout), [workspace.layout])
   const stripTabs = focusedGroup(workspace)?.tabs ?? allTabs
+  // Every surface that names an agent (a tab, a mention, a resource row) resolves the sidebar row's own card.
+  const resolveEntityCard = React.useCallback<EntityCardResolver>(entity =>
+    entity.kind === 'agent' ? <LiveAgentCard agentRef={entity.id} needsMe={needsYou.has(entity.id)} frozenAt={frozenAt} /> : undefined, [needsYou, frozenAt])
   const tabItems = React.useMemo(() => stripTabs.map(tab => ({ ...tabPresentation({ tab, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef }), ...(workspace.views[tab.id]?.dirty === true ? { dirty: true } : {}) })), [stripTabs, workspace.views, agents, fleet._tag, needsYou, attention, byRef])
   const activeLabel = tabItems.find(item => item.id === activeRow?.id)?.title
   const previousNames = React.useRef<ReadonlyMap<string, string>>(new Map())
@@ -587,7 +604,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   </SidebarTabs>
   // The panes stay outside changing shell providers, whose context propagation would scan every retained turn.
   // Only the stable header DOM host and narrow geometry cross that boundary.
-  return (<OpenProvider value={openRef}><NarrowLayoutContext.Provider value={narrow}>
+  return (<EntityCardSource resolve={resolveEntityCard}><OpenProvider value={openRef}><NarrowLayoutContext.Provider value={narrow}>
     <ThreadHeaderSlotContext.Provider value={headerSlot}>
     <WorkbenchContextProvider value={{ open, focusedRef: activeSubject === undefined ? null : subjectRef(activeSubject), subjects: byRef, platform: navigator.platform.includes('Mac') ? 'mac' : 'other' }}>
       <ResourcePanelProvider value={{ state: resourcePanel, onChange: (change) => setResourcePanel((value) => ({ ...value, ...change })) }}>
@@ -643,7 +660,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     </WorkbenchContextProvider>
     {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody tabs={allTabs} active={activeRow?.id ?? null} tiers={tiers} views={workspace.views} names={names} onOpenTool={onOpenTool} onOpen={openRef} onReplace={onReplaceTab} onClose={onCloseTab} onBackToAlerts={backToAlerts} onView={onTabView} focusShownFace={focusShownFace} {...(ux === undefined ? {} : { ux })} empty={<WorkspaceEmpty open={openRef} />} /></RegisteredPortal>}
     </ThreadHeaderSlotContext.Provider>
-  </NarrowLayoutContext.Provider></OpenProvider>)
+  </NarrowLayoutContext.Provider></OpenProvider></EntityCardSource>)
 }
 
 

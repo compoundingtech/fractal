@@ -1,5 +1,5 @@
 import type { Attention } from '@fractal/client/schema'
-import { AgentHoverCard } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/DeferredRowActions.tsx'
+import { EntityHoverCard } from '../../../../packages/fractal-ui/src/assistant-ui/entity/EntityHoverCard.tsx'
 import { SidebarStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarStatus.tsx'
 import { rowStatusLabel } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { sidebarRow } from '../web/sidebarRow.ts'
@@ -40,7 +40,7 @@ export const tabPresentation = ({ tab, agents, rosterKnown, needsYou, attention,
         title: tab.title ?? agent?.name ?? lastSegment(subject.agent),
         ...(row === undefined ? {} : {
           icon: <SidebarStatus status={row.status} statusLabel={rowStatusLabel(row)} variant="Marks" needsYou={needsMe} iconOnly decorative freshness="live" />,
-          hoverCard: <AgentHoverCard row={row} />,
+          hoverCard: <EntityHoverCard entity={{ kind: 'agent', id: subject.agent }} />,
         }),
         ...(needsMe ? { attention: true } : {}),
         ...(rosterKnown && agent === undefined ? { status: 'unavailable' as const } : {}),
