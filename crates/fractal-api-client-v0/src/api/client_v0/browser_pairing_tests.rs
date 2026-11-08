@@ -202,7 +202,7 @@ async fn browser_pairing_requires_operation_provenance_for_request_and_approver(
     let key = "a".repeat(64);
     let started = start(&state,&owner,&key).await;
     let mut request = begun(&state,&started);
-    request.body["fields"].as_object_mut().unwrap().remove(fractal_store::PAIRING_OPERATION_VERSION);
+    request.body["fields"].as_object_mut().unwrap().remove(crate::PAIRING_OPERATION_VERSION);
     assert!(approval(&state,&request).is_err());
     state.store.append_claim(&ClaimInput {
         subject:request.subject,kind:request.kind,actor:request.actor,
@@ -213,7 +213,7 @@ async fn browser_pairing_requires_operation_provenance_for_request_and_approver(
     let another = start(&state,&owner,&key).await;
     let grant = owner.pairing_grant.as_deref().unwrap();
     let mut paired = state.store.claims_for_subject_kind_at(grant,"custom.client.pairing-completed",None,true,1).unwrap().claims.remove(0);
-    paired.body["fields"].as_object_mut().unwrap().remove(fractal_store::PAIRING_OPERATION_VERSION);
+    paired.body["fields"].as_object_mut().unwrap().remove(crate::PAIRING_OPERATION_VERSION);
     paired.body["fields"].as_object_mut().unwrap().remove("delegated_scopes");
     let legacy = state.store.append_claim(&ClaimInput {
         subject:paired.subject,kind:paired.kind,actor:paired.actor,
@@ -221,9 +221,9 @@ async fn browser_pairing_requires_operation_provenance_for_request_and_approver(
         evidence:vec![],expected_subject:None,idempotency_key:None,
     }).unwrap();
     assert!(answer(&state,&owner,&another,"approve").is_err());
-    let mut allowance = fractal_store::config::LegacyPairingAllowance {
+    let mut allowance = crate::config::LegacyPairingAllowance {
         completion_id:legacy.id.clone(),
-        record_hash:fractal_store::pairing::record_hash(&legacy.origin,legacy.actor.as_deref(),&legacy.body["fields"]).unwrap(),
+        record_hash:crate::pairing::record_hash(&legacy.origin,legacy.actor.as_deref(),&legacy.body["fields"]).unwrap(),
         until_unix_ms:(client_now_ms()+60_000) as u64,
     };
     state.store.configure_pairing_legacy_allowances(&[allowance.clone()]).unwrap();

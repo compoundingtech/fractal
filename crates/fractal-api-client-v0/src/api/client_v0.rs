@@ -5690,7 +5690,7 @@ pub async fn pairing_begin(
         }
     };
     let mut begun_fields = BTreeMap::from([
-        (fractal_store::PAIRING_OPERATION_VERSION.into(), json!(1)),
+        (crate::PAIRING_OPERATION_VERSION.into(), json!(1)),
         ("pairing_id".into(), Value::String(pairing_id.clone())),
         ("device_name".into(), Value::String(request.device_name)),
         ("person_id".into(), Value::String(person_id.clone())),
@@ -5920,7 +5920,7 @@ pub async fn pairing_complete(
             details: Box::default(),
         });
     }
-    if !fractal_store::trusted_pairing_fields(begun.actor.as_deref(), &begun.body["fields"]) {
+    if !crate::trusted_pairing_fields(begun.actor.as_deref(), &begun.body["fields"]) {
         return Err(forbidden("the pairing challenge requires a new pairing"));
     }
     let used = !state
@@ -6038,7 +6038,7 @@ pub async fn pairing_complete(
         None
     };
     let mut fields = BTreeMap::from([
-            (fractal_store::PAIRING_OPERATION_VERSION.into(), json!(1)),
+            (crate::PAIRING_OPERATION_VERSION.into(), json!(1)),
             ("pairing_id".into(), Value::String(pairing_id)),
             ("device_id".into(), Value::String(device_id.clone())),
             ("session_actor".into(), Value::String(session_actor.clone())),
@@ -16359,7 +16359,7 @@ subscription "watch/source" {
     fn temporary_pairing_allowance_preserves_scope_expiry_and_revocation() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
-        let cap = fractal_store::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS;
+        let cap = crate::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS;
         let now = cap - 60_000;
         let claim = state.store.append_claim(&ClaimInput {
             subject:"custom/client/pairing-existing".into(), kind:"custom.client.pairing-completed".into(),
@@ -16374,7 +16374,7 @@ subscription "watch/source" {
         assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());
         state.store.configure_pairing_legacy_allowances(&[crate::config::LegacyPairingAllowance {
             completion_id:claim.id.clone(),
-            record_hash:fractal_store::pairing::record_hash(
+            record_hash:crate::pairing::record_hash(
                 &claim.origin, claim.actor.as_deref(), &claim.body["fields"],
             ).unwrap(),
             until_unix_ms:(cap + 60_000) as u64,
@@ -16435,7 +16435,7 @@ subscription "watch/source" {
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/alex".into()),
                 fields: BTreeMap::from([
-                    (fractal_store::PAIRING_OPERATION_VERSION.into(), json!(1)),
+                    (crate::PAIRING_OPERATION_VERSION.into(), json!(1)),
                     (
                         "credential_hash".into(),
                         Value::String(credential_digest(credential)),
