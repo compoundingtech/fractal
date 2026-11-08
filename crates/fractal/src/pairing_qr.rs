@@ -53,7 +53,7 @@ pub(super) async fn gateway_is_begin_member(
     let Some(node) = health["node"].as_str().filter(|node| !node.is_empty()) else {
         return Ok(false);
     };
-    if node.trim_start_matches("host/") != local_member.trim_start_matches("host/") {
+    if fractal_daemon::api::client_host_id(node) != local_member {
         anyhow::bail!(
             "pairing would begin on {local_member}, but the gateway serves member {node}; run the pair command on {node}",
         );
@@ -154,6 +154,13 @@ mod tests {
     async fn gateway_health_matching_member_continues_without_warning() {
         let (gateway, served) = health_server(r#"{"node":"member-a"}"#).await;
         assert!(gateway_is_begin_member(&gateway, "host/member-a").await.unwrap());
+        served.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gateway_health_normalizes_whitespace_with_the_shared_host_identity() {
+        let (gateway, served) = health_server(r#"{"node":"member a\twest"}"#).await;
+        assert!(gateway_is_begin_member(&gateway, "host/member-a-west").await.unwrap());
         served.await.unwrap();
     }
 
