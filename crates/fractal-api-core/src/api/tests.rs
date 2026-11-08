@@ -12731,7 +12731,7 @@ async fn writer_binding_pairing_records_retain_dedicated_writer_admission() {
                         "scopes":["control.work"], "expires_at_unix_ms":u64::MAX,
                         "pairing_operation_version":1}}),
             ).await;
-            assert_eq!(status, StatusCode::FORBIDDEN, "{bound}/{kind}: {response}");
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bound}/{kind}: {response}");
             assert_eq!(response["code"], "claim-write-forbidden");
             assert_eq!(state.store.index().unwrap(), before);
         }
