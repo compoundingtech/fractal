@@ -133,6 +133,24 @@ export const sidebarMissionContext = ({ agent, missions = [], attention = [] }: 
   }
 }
 
+/**
+ * A mission as its hover card shows it, from the missions feed: its reader title (never a content hash), progress and current
+ * step from its open run (else its latest), and the agents whose current work is on it.
+ */
+export const missionCardOf = ({ mission, agents }: { readonly mission: Mission; readonly agents: readonly Agent[] }): { readonly mission: SidebarOtherMission; readonly agents: readonly string[] } => {
+  const runs = mission.run_details ?? []
+  const run = runs.find(each => Option.isNone(each.completed_at)) ?? runs.at(-1)
+  const step = run?.current_steps.map(current => Option.getOrUndefined(current.title)).find(title => title !== undefined && title !== '')
+  return {
+    mission: {
+      id: mission.id, slug: missionSlug(mission.id), title: missionDisplayTitle({ title: mission.title, work: undefined }),
+      progress: run === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', ...run.progress },
+      step: step === undefined ? { _tag: 'Unknown' } : { _tag: 'Step', name: step },
+    },
+    agents: agents.filter(agent => agent.currentWork?.some(work => work.missionId === mission.id) === true || agent.mission === mission.id).map(agent => agent.name),
+  }
+}
+
 /** Harness IDs are only unique within their parent seat; never use them as graph subjects. */
 export const subagentRowId = ({ parent, id }: { readonly parent: string; readonly id: string }): string =>
   `wf/subagent/${encodeURIComponent(parent)}/${encodeURIComponent(id)}`

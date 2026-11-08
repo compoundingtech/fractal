@@ -427,3 +427,24 @@ describe('the row system', () => {
     expect(sidebarRowAccessibleName(adHoc)).not.toContain(hash)
   })
 })
+
+describe('mission hover card data', () => {
+  it('titles the mission, takes progress and the step from its open run, and lists the agents on it', async () => {
+    const { missionCardOf } = await import('./sidebarRow.ts')
+    const mission = fixtureMissions[0]!
+    const run = { ...(mission.run_details?.[0] ?? {}), id: 'mission-run/example/open', progress: { done: 2, total: 5 }, completed_at: Option.none(),
+      current_steps: [{ id: 'step-run/example/review', title: Option.some('Review the rename'), since: '2026-10-20T12:00:00Z', state: 'claimed', assignee: Option.none(), claimant: Option.none(), progress_at: Option.none() }] } as unknown as MissionRunSummary
+    const on = { ...agent, ref: 'agent/example-on', name: 'On it', currentWork: [{ id: 'work/x', missionId: mission.id, runId: run.id, path: 'review', state: 'claimed' }] }
+    const off = { ...agent, ref: 'agent/example-off', name: 'Elsewhere' }
+    const card = missionCardOf({ mission: { ...mission, run_details: [run] }, agents: [on, off] })
+    expect(card.mission).toMatchObject({ id: mission.id, progress: { _tag: 'Known', done: 2, total: 5 }, step: { _tag: 'Step', name: 'Review the rename' } })
+    expect(card.agents).toEqual(['On it'])
+  })
+  it('never titles a mission by its content hash', async () => {
+    const { missionCardOf } = await import('./sidebarRow.ts')
+    const hash = 'd45524b5ff5388299cd145fd8bef8c7e'
+    const card = missionCardOf({ mission: { ...fixtureMissions[0]!, id: `mission/person-ask/${hash}`, title: `person-ask/${hash}`, run_details: [] } as never, agents: [] })
+    expect(card.mission.title).not.toContain(hash)
+    expect(card.mission.progress).toEqual({ _tag: 'Unknown' })
+  })
+})
