@@ -49,6 +49,38 @@ Every client's tests check against that file.
    Anything that key signs after the revocation is invalid on every member. What it signed
    before stays verified.
 
+### Person pairing verifier and recovery
+
+Person pairing codes contain 40 bits of randomness, expire after 300 seconds, and are
+single-use. Pairing IDs and the begin-claim subjects use independent random 128-bit
+values; neither reveals the code. New challenges store an HMAC-SHA-256 verifier in
+`code_hash`, with `verifier: "hmac-sha256-v1"` and the secret's SHA-256 fingerprint
+in `verifier_key_id`.
+Claims never contain the code or verifier secret. Possession of replicated claims alone
+does not permit offline code guessing against the keyed verifier. This does not increase
+the code's 40-bit entropy or replace its 300-second lifetime, an encrypted transport,
+or the independently obtained person-root fingerprint.
+
+The beginning member keeps the verifier secret at `state_dir/pairing-verifier/key`
+with mode 0600, in a mode-0700 `pairing-verifier` directory. This member-local secret
+is not replicated in claims or included in backups. Keep it private; a normal restart
+with the same secret preserves still-live challenges.
+
+A claim-only restore, a missing secret, or a newly generated or rotated secret cannot
+complete challenges created with the old secret. Completion returns HTTP 403,
+`pairing-restart-required`, with `retryable: false` and message `start pairing again`;
+begin a fresh pairing on the intended member instead of retrying that challenge.
+A wrong code against a challenge whose verifier key is still available remains
+`forbidden`. Historical challenges without the verifier marker are accepted only
+while unexpired and when their expiry is at most 300,000 ms after the claim timestamp;
+a longer legacy lifetime requires a fresh pairing, even if its expiry is still in
+the future. Already paired devices do not need to pair again solely for this change.
+
+There is no rollback protection if both the verifier secret and claims are restored
+to an earlier state together: a restored challenge may become usable again while
+its expiry remains in the future. This limitation is accepted; do not treat a
+coordinated secret-and-claims restore as preserving single-use history.
+
 ## CLI and terminal client pairing
 
 On the trusted member whose paired-only gateway the device will use, begin a pairing as the person:
