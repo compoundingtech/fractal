@@ -6559,14 +6559,23 @@ async fn previous_release_refuses_a_stream_cursor_and_lists_each_subject_once_ac
         assert_eq!(subjects(&walk(rollback, Some(release_cursor.clone())).await), graph[2..]);
     }
     let release_cursors = rolled_back.iter().filter_map(|(_, cursor)| cursor.as_deref()).map(decoded).collect::<Vec<_>>();
-    if release_cursors.iter().any(|cursor| cursor.get("stream_after").is_some()) {
+    if restored.is_none() && release_cursors.iter().any(|cursor| cursor.get("stream_after").is_some()) {
         // A release with stream_after cursors reads this build's.
         assert_eq!(subjects(&walk(rollback, Some(stream_cursor.clone())).await), expected[6..]);
     } else {
-        let refused = page(rollback, Some(stream_cursor.clone())).await.unwrap_err();
-        let (status, code, message, _) =
-            fractal_daemon::client::api_error_parts(&refused).unwrap_or_else(|| panic!("{refused:#}"));
-        assert_eq!((status, code, message), (422, "validation-failed", "invalid message cursor"));
+        match page(rollback, Some(stream_cursor.clone())).await {
+            // A restored archive has no stream data. A reader that knows the cursor can
+            // report an exhausted stream, and must never replay graph mail from it.
+            Ok(page) if restored.is_some() => {
+                assert!(page.items.is_empty() && !page.has_more && page.next_cursor.is_none(), "{page:?}");
+            }
+            Err(refused) => {
+                let (status, code, message, _) =
+                    fractal_daemon::client::api_error_parts(&refused).unwrap_or_else(|| panic!("{refused:#}"));
+                assert_eq!((status, code, message), (422, "validation-failed", "invalid message cursor"));
+            }
+            Ok(page) => panic!("the release unexpectedly accepted the stream cursor: {page:?}"),
+        }
     }
     // A cursor the release gives into the stream, if it lists the stream, names it in `after`.
     let release_stream_cursor = rolled_back
@@ -8048,13 +8057,29 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
     // Roll back. An older release asks for a full read on this build's cursor; one that reads
     // stream items resumes it, with the stream and graph mail since. The release's mail and the
     // graph reply read as before.
-    let restored = previous_release_rollback(&mut o, &old, &recovery).await;
-    let rollback = restored.as_ref().unwrap_or(&o);
-    if restored.is_some() {
-        let (_, archived) = changes(rollback, None).await;
-        assert!(archived.iter().any(|(id, _)| id == &first));
-        assert!(!archived.iter().any(|(id, _)| id == stream || id == &unseen));
-    } else if release_reads_stream {
+    if let Some(restored) = previous_release_rollback(&mut o, &old, &recovery).await {
+        let page: MessagePage = restored.client()
+            .get("/v1/messages/page?to=agent/fleet-reader&include_closed=true").await.unwrap();
+        let archived = page.items.iter().map(|item| item.subject.as_str()).collect::<Vec<_>>();
+        assert_eq!(archived, [first.as_str()], "the archive contains the pre-upgrade conversation mail");
+        let unavailable = person(&restored).get::<Value>(&changes_path(None)).await.unwrap_err();
+        let (status, code, message, _) =
+            fractal_daemon::client::api_error_parts(&unavailable).unwrap_or_else(|| panic!("{unavailable:#}"));
+        assert_eq!((status, code), (503, "remote-unavailable"));
+        assert!(message.contains("host/o"), "{message}");
+
+        o.binary = new;
+        o.start().await;
+        let (resumed_cursor, resumed) = changes(&o, Some(upgraded_cursor)).await;
+        assert_eq!(resumed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            [this_reply, graph_reply.as_str(), release_reply, unseen.as_str()]);
+        let later = send(&o, "after-reader-reopen", PERSON, reader).await;
+        let (_, after_reopen) = changes(&o, Some(resumed_cursor)).await;
+        assert_eq!(after_reopen.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), [later.as_str()]);
+        return;
+    }
+    let rollback = &o;
+    if release_reads_stream {
         let (_, resumed) = changes(rollback, Some(upgraded_cursor.clone())).await;
         assert_eq!(
             resumed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
@@ -8071,14 +8096,6 @@ async fn previous_release_conversation_and_waits_read_stream_items_across_upgrad
     assert_eq!(after_rollback.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), [later]);
     // Either build's CLI waits on the release. An older release's CLI finds the graph reply it
     // missed; one that reads stream items found that reply already, and finds the stream reply.
-    if restored.is_some() {
-        o.binary = new;
-        o.start().await;
-        let (_, resumed) = changes(&o, Some(upgraded_cursor)).await;
-        assert_eq!(resumed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
-            [this_reply, graph_reply.as_str(), release_reply, unseen.as_str()]);
-        return;
-    }
     let release = wait(&o, &old, &["--after", &first]);
     let expected = if release_reads_stream { release_reply } else { unseen.as_str() };
     assert_eq!(release["message"]["subject"], expected, "{release}");
@@ -8528,10 +8545,12 @@ async fn previous_release_beside_members_that_count_stream_mail_alike() {
     assert!(append_keyed_stream_item(&b, late, "agent/fleet-other", late).await);
     if restored.is_none() {
         wait_until("the rolled-back member holds the late item", 90, || async { shard_file_claims(&o, late) == 1 }).await;
-        assert_eq!(agent_mail_counted(&o).await, if release_mirrors { 4 } else { 3 });
     }
     for node in [&a, &b] {
         wait_until("each member of this build counts the late item", 60, || async { agent_mail_counted(node).await == 4 }).await;
+    }
+    if restored.is_none() {
+        assert_eq!(agent_mail_counted(&o).await, if release_mirrors { 4 } else { 3 });
     }
     o.stop();
     o.binary = PathBuf::from(st3());
