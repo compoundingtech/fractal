@@ -567,6 +567,7 @@ impl PersonWorkStore for Store {
                 }
                 let (grant, session_actor) = device.ok_or_else(refused)?;
                 let paired = tx.query_row(
+                    /* sqlite-large-value: allow-for-now lv-h782476474caf owner=fractal_missions::store::person_work TODO=trace-statement-and-value-representation */
                     &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='custom.client.pairing-completed' ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
                     [grant], claim_from_row).optional().map_err(internal)?.ok_or_else(refused)?;
                 let fields = &paired.body["fields"];
