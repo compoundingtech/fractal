@@ -199,8 +199,8 @@ export const Notes: Story = {
     const canvas = within(canvasElement)
     const overload = canvas.getByRole('radio', { name: /Keep an overload/ })
     // Pointer: the chosen answer offers a note; the others do not until chosen.
-    await expect(canvas.queryByRole('button', { name: 'Add a note to Keep an overload' })).toBeNull()
-    await userEvent.click(canvas.getByRole('button', { name: 'Add a note to Thread the session through' }))
+    await expect(canvas.queryByRole('button', { name: 'Add note to Keep an overload' })).toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: 'Add note to Thread the session through' }))
     const threadNote = canvas.getByRole('textbox', { name: 'Note for Thread the session through' })
     await expect(threadNote).toHaveFocus()
     await userEvent.keyboard('only in the worker')
