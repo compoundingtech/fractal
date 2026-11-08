@@ -74,6 +74,7 @@ import type { ArrangementActionPort } from './edit.ts'
 import { followArrangementInventory, readArrangementInventory, reservedSidebarSubject, sidebarCandidates, sidebarWinner, fractalInventoryGateway, type ArrangementInventoryGateway, type InventoryFollow } from '../data/arrangements.ts'
 import { emptyDoc, type FolderDoc, type Stamp } from './core.mts'
 import { createArrangementEditor, refusalText, type ArrangementEditor, type ArrangementRefusal, type EditOutcome, type SidebarOperation, type StructuralIntent } from './edit.ts'
+import { browserSocket } from '../data/sdk-browser/trace.ts'
 export interface FolderState {
   readonly doc: FolderDoc
   readonly phase: 'fixture' | 'connecting' | 'synced' | 'pending' | 'unavailable'
@@ -219,9 +220,15 @@ export const sidebarFolders = ({ gateway, socket }: {
 })
 /** Same-origin paired client API, scoped to the discovered person. */
 const pageHotData = import.meta.hot?.data
+let pageClientName: string | undefined = pageHotData?.pageClientName
+/** The page root supplies its build identity; reusable workspace stories never import it. */
+export const setPageFoldersClientName = (client: string): void => {
+  pageClientName = client
+  if (pageHotData !== undefined) pageHotData.pageClientName = client
+}
 export let folders: Atom.Atom<FolderState> = pageHotData?.pageFolders ?? sidebarFolders({
   gateway: () => {
-    const options = { baseUrl: globalThis.location.origin, fetchImpl: globalThis.fetch.bind(globalThis) }
+    const options = { baseUrl: globalThis.location.origin, fetchImpl: globalThis.fetch.bind(globalThis), socket: browserSocket, ...(pageClientName === undefined ? {} : { client: pageClientName }) }
     const client = new FractalClient(options)
     const actions = loadMutations.pipe(Effect.map(({ arrangementActions }) => arrangementActions(client)))
     return {

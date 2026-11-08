@@ -63,6 +63,7 @@
   "fractal-api-core": {
    "extra": [
     ".github/workflows/fleet.yml",
+    "claude-channel",
     "scripts/ci-test-paths.rs"
    ]
   },

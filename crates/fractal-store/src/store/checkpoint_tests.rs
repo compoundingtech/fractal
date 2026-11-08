@@ -2882,6 +2882,11 @@ fn the_policy_groups_claims_into_the_slots_the_rules_did() {
     let mut old_to_new = BTreeMap::new();
     let mut new_to_old = BTreeMap::new();
     for claim in &claims {
+        // Usage snapshots include durable credit events, never a newest-only slot.
+        if claim.kind == fractal_schema::usage_limits::KIND {
+            assert!(slot_of(claim).is_none());
+            continue;
+        }
         // Rules version 16 added the harness question rule.
         if claim.kind == fractal_schema::harness_questions::OBSERVED {
             let slot = vec![claim.subject.clone(), claim.kind.clone()];

@@ -18,7 +18,15 @@ body,
   outline-offset: -2px;
 }
 
-/* Reserve the HUD's own strip without subscribing the workbench to its preference. */
+/*
+ * Reserve the HUD's own strip without subscribing the workbench to its preference. The bar publishes its
+ * measured height (telemetry/devbarSpace.ts); this covers the frame before it mounts and the diagnostics fallback.
+ */
+/* Without a strip, today's kit still renders its growing slot, which would push the meters right. Remove once the kit omits it (effect-utils#2458). */
+[data-testid='wf-devbar'] [aria-label='Developer bar'] > :nth-child(2) {
+  display: none !important;
+}
+
 body:has([data-testid='wf-devbar']:not([hidden])) {
-  --wf-devbar-space: 24px;
+  --wf-devbar-space: 32px;
 }
