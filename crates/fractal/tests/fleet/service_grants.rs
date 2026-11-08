@@ -85,8 +85,9 @@ async fn assert_status(node: &Node, grant: &Grant, expected: u16) {
 
 // With the counterexample, assistant grant 4 (index 3) and service grant 7 (index 6)
 // are active, well-formed opposite-profile grants for assistant/chatgpt. The
-// candidate suspends both with 409 grant-profile-conflict; the conflict fold runs
-// before the service-profile refusal. Grant 3 (index 2) has a non-assistant scope,
+// candidate suspends both: it refuses with the conflict (409 grant-profile-conflict)
+// before the service-profile refusal (403), so grant 7 answers 409, not 403.
+// Grant 3 (index 2) has a non-assistant scope,
 // so it is malformed for conflicts and stays a plain 403 service refusal.
 fn candidate_counterexample_status(index: usize) -> u16 {
     if index == 3 || index == 6 { 409 } else { 403 }
