@@ -39,7 +39,7 @@ const styles = stylex.create({
   header: { height: g.band, minHeight: g.band, position: 'relative', display: 'flex', alignItems: 'center', gap: s.md, paddingInlineStart: `max(${s.lg}, env(safe-area-inset-left, 0px))`, paddingInlineEnd: `max(${s.lg}, env(safe-area-inset-right, 0px))`, flexShrink: 0, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   title: { flex: '1 1 0', minWidth: 0, fontWeight: t.weightMedium, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   lane: { outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset, flex: '1 1 0', minHeight: 0, minWidth: 0, overflowY: 'auto', overflowX: 'hidden', overflowAnchor: 'none' },
-  content: { paddingBlock: s.lg },
+  content: { paddingTop: s.lg, paddingBottom: `calc(${s.lg} + var(--transcript-end-inset, 0px))` },
   placeholder: { display: 'flex', flexDirection: 'column', gap: s.lg },
   turn: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   skeletonPrompt: { width: '100%', height: `calc(${t.bodyLeading} + ${s.md})`, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, backgroundColor: surface.rowActive },

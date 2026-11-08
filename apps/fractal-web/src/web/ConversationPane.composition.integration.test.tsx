@@ -303,6 +303,30 @@ describe('ConversationPane composition activation', () => {
     expect([...container.querySelectorAll('[data-testid="thinking-entry"] [data-conversation-entry-id]')].map(element => element.textContent))
       .toEqual(reasoning.map(item => item._tag === 'Reasoning' ? item.text : ''))
   })
+  it('gives a read-only thread no bottom dock to clear: no fade, no end inset, the lane runs to the pane end', async () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
+    await act(async () => {
+      root!.render(<HumanClockProvider clock={clock}><ConversationPane agentRef="session/read-only-child" agentName="Reviewer" onOpenTool={() => {}} readOnly /></HumanClockProvider>)
+    })
+    expect(container.querySelector('[data-testid="conversation-composer-dock"]')).toBeNull()
+    const dock = container.querySelector<HTMLElement>('[data-testid="conversation-bottom-dock"]')!
+    expect(dock.style.paddingTop).toBe('')
+    expect(dock.style.backgroundImage).toBe('')
+    // jsdom has no layout, so the measured dock is 0px: the transcript's end padding gains nothing.
+    expect(container.querySelector<HTMLElement>('[data-testid="conversation-stage"]')!.style.getPropertyValue('--transcript-end-inset')).toBe('0px')
+  })
+
+  it('fades the transcript under the composer dock and publishes its height as the lane end inset', async () => {
+    source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
+    await mount()
+    const dock = container.querySelector<HTMLElement>('[data-testid="conversation-bottom-dock"]')!
+    expect(dock.style.position).toBe('absolute')
+    expect(dock.style.pointerEvents).toBe('none')
+    expect(dock.style.backgroundImage).toContain('linear-gradient')
+    expect(dock.querySelector('[data-testid="conversation-composer-dock"]')).not.toBeNull()
+    expect(container.querySelector<HTMLElement>('[data-testid="conversation-stage"]')!.style.getPropertyValue('--transcript-end-inset')).toMatch(/^\d+px$/)
+  })
+
   it('insets the composer dock so its focus outline stays inside the viewport', async () => {
     source.feed = { _tag: 'Observed', freshness: 'live', value: { items: scenario, hasOlder: false, observation: { empty: false } } }
     await mount()

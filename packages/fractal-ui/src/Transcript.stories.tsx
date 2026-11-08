@@ -945,7 +945,8 @@ export const LoadEarlierPaging: Story = { tags: ['critical'], render: args => <L
   await nextFrame()
   await expect(Math.abs(laneOffset(lane, 'tail-0/prompt') - before), 'prepend moved the first visible message').toBeLessThanOrEqual(2)
   await expect(lane.scrollTop).toBeGreaterThan(0)
-  await expect(canvas.getByTestId('jump-to-latest'), 'older history is not news').not.toBeVisible()
+  // The reader is away from the end, so the jump is there, but older history is not counted as new.
+  await expect(canvas.getByTestId('jump-to-latest'), 'older history is not news').toHaveTextContent(/^(Working · )?Jump to latest$/)
 } }
 export const LoadEarlierPagingLight: Story = { ...LoadEarlierPaging, args: { scheme: 'light' } }
 /** Reset outside the measurement so each repetition starts with the same fully mounted tail. */

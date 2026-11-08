@@ -250,8 +250,9 @@ describe('ConversationPane kit composition', () => {
       ts.forEachChild(node, visit)
     }
     visit(tree)
-    // The retained parent host and empty-publication placeholder are structural, not transcript presentation.
-    expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div', 'div'])
+    // The retained parent host, empty-publication placeholder and the stage whose bottom dock floats over the history's end
+    // (the dock, and its pointer-taking body under a pass-through fade) are structural, not transcript presentation.
+    expect(intrinsicElements).toEqual(['div', 'div', 'div', 'div', 'div', 'div', 'div', 'div'])
     expect(pane).toContain("style={{ display: 'contents' }}")
     const body = readFileSync(new URL('../workspace/WorkspaceBody.tsx', import.meta.url), 'utf8')
     const surfaces = readFileSync(new URL('../workspace/surfaces.tsx', import.meta.url), 'utf8')

@@ -57,10 +57,12 @@ export const SameRowsScrolledUp: Story = { ...scenarioPress, play: async ({ canv
   await readerScrollsUp(viewport)
   await userEvent.click(canvas.getByRole('button', { name: 'Republish snapshot' }))
   await settleFrames()
-  await expect(jump, 'same rows marked unread').not.toBeVisible()
-  // Positive control: a new row still marks unread.
+  // A reader away from the end always has the jump; the same rows republished are not counted as new.
+  await expect(jump).toBeVisible()
+  await expect(jump, 'same rows marked unread').toHaveTextContent(/^Jump to latest$/)
+  // Positive control: a new row is counted.
   await userEvent.click(canvas.getByRole('button', { name: 'Append agent reply' }))
-  await waitFor(() => expect(jump).toBeVisible())
+  await waitFor(() => expect(jump).toHaveTextContent('Jump to latest · 1 new'))
 } }
 export const SameRowsScrolledUpLight: Story = { ...SameRowsScrolledUp, args: { ...scenarioPress.args, scheme: 'light' } }
 
