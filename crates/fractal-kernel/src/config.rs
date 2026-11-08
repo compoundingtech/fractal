@@ -1279,7 +1279,7 @@ mod tests {
         configured.usage_limits.as_ref().unwrap().validate().unwrap();
         let roundtrip: super::Config = toml::from_str(&toml::to_string(&configured).unwrap()).unwrap();
         assert_eq!(roundtrip.usage_limits, configured.usage_limits);
-        for writer in ["person/sample", "harness/sample", "agent/"] {
+        for writer in ["person/ada", "harness/sample", "agent/"] {
             let config: super::Config = toml::from_str(&format!("[usage_limits]\nwriters=['{writer}']")).unwrap();
             assert!(config.usage_limits.unwrap().validate().is_err());
         }

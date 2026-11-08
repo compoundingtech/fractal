@@ -185,7 +185,7 @@ mod tests {
         json!({
             "account": "digest", "account_ref": "account/one", "provider": "anthropic",
             "credit_id": id, "expires_at": time(expires), "measured_at": time(NOW),
-            "state": state, "coverage": "reported", "source": "omp-usage", "host": "dev3",
+            "state": state, "coverage": "reported", "source": "omp-usage", "host": "alder",
             "disposition": {"kind": "unknown", "at": null, "evidence_ref": null},
         })
     }
@@ -193,7 +193,7 @@ mod tests {
     fn claim(id: &str, readings: Value) -> ClaimRecord {
         serde_json::from_value(json!({
             "id": id, "store_index": 1, "batch_id": "batch", "subject": PRODUCER,
-            "kind": "usage.limits.observed", "origin": "dev3", "actor": PRODUCER,
+            "kind": "usage.limits.observed", "origin": "alder", "actor": PRODUCER,
             "body": {"fields": {"readings": [], "credit_readings": readings}},
             "predecessors": [], "accepted_at_unix_ms": NOW,
         })).unwrap()

@@ -121,8 +121,8 @@ mod tests {
 
     fn fields() -> BTreeMap<String, Value> {
         BTreeMap::from([
-            ("readings".into(), json!([{"account":"digest", "account_ref":"ada/claude", "provider":"anthropic", "window":"five_hour", "used_percent":45, "resets_at":null, "measured_at":"2026-11-07T10:00:00Z", "coverage":"reported", "source":"omp-usage", "host":"dev3"}])),
-            ("credit_readings".into(), json!([{"account":"digest", "account_ref":"ada/claude", "provider":"anthropic", "credit_id":"credit-1", "expires_at":"2026-11-08T10:00:00Z", "measured_at":"2026-11-07T10:00:00Z", "state":"available", "disposition":{"kind":"planned", "at":null, "evidence_ref":null}, "coverage":"reported", "source":"omp-usage", "host":"dev3"}])),
+            ("readings".into(), json!([{"account":"digest", "account_ref":"ada/claude", "provider":"anthropic", "window":"5h", "used_percent":45, "resets_at":null, "measured_at":"2026-11-07T10:00:00Z", "coverage":"reported", "source":"omp-usage", "host":"alder"}])),
+            ("credit_readings".into(), json!([{"account":"digest", "account_ref":"ada/claude", "provider":"anthropic", "credit_id":"credit-1", "expires_at":"2026-11-08T10:00:00Z", "measured_at":"2026-11-07T10:00:00Z", "state":"available", "disposition":{"kind":"planned", "at":null, "evidence_ref":null}, "coverage":"reported", "source":"omp-usage", "host":"alder"}])),
         ])
     }
 

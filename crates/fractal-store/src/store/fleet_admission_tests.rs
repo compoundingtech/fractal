@@ -174,7 +174,7 @@ fn trusted_usage_admission_also_requires_the_allowlisted_writer() {
     assert!(store.append_client_claim(&input).is_err(), "absent config denies public append");
     store.set_usage_limits_writers(Vec::new()).unwrap();
     assert!(store.append_claim(&input).is_err(), "empty config denies");
-    for writer in ["person/sample", "harness/sample", "agent/"] {
+    for writer in ["person/ada", "harness/sample", "agent/"] {
         assert!(store.set_usage_limits_writers(vec![writer.into()]).is_err());
     }
     store.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
