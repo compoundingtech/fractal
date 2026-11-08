@@ -1,4 +1,5 @@
 use super::*;
+use super::desired_batch::DesiredBatchRequest;
 
 #[test]
 fn kind_filtered_desired_pages_seek_the_kind_subject_index() {
