@@ -180,8 +180,21 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen,
           summary: `Subagent activity may be out of date${receivedAt === undefined ? '' : ` (last updated ${formatRelative(receivedAt, now)})`}.`,
           reasons: [supplement.error === undefined ? 'An update is still loading, so earlier activity is shown.' : supplementStaleReason[supplement.error.reason]],
         } : undefined
+  // The Missions read section leaves Details once its queue read settles. Focus inside it (the kit hands a settled
+  // action's focus to the section's heading) would fall to the body, so it moves to the selected tab, as after a
+  // pane Retry. Only focus this section held moves; a background settle never takes focus.
+  const missionsRead = suppliedSections.some(section => section.title === 'Missions')
+  const contentRef = React.useRef<HTMLDivElement>(null)
+  const focusInMissionsRead = React.useRef(false)
+  React.useLayoutEffect(() => {
+    if (missionsRead || !focusInMissionsRead.current) return
+    focusInMissionsRead.current = false
+    const content = contentRef.current, doc = content?.ownerDocument
+    if (doc === undefined || (doc.activeElement !== null && doc.activeElement !== doc.body)) return
+    content?.closest('[data-testid="tab-group"]')?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus({ preventScroll: true })
+  }, [missionsRead])
   if (native.credentialNotice) return <SystemNotice kind="error" connection title={native.credentialNotice} />
-  return <div {...stylex.props(styles.content)}>
+  return <div ref={contentRef} onFocus={event => { focusInMissionsRead.current = isMissionsRead(event.target) }} onBlur={event => { if (event.relatedTarget !== null && !event.currentTarget.contains(event.relatedTarget)) focusInMissionsRead.current = false }} {...stylex.props(styles.content)}>
     {activity !== undefined && <div data-details-supplement data-details-supplement-state={supplement._tag} {...stylex.props(styles.note)}>
       <span role="status" data-details-supplement-summary {...stylex.props(styles.noteSummary)}>{activity.summary}</span>
       <DetailsWhy explains="Subagent activity" reasons={activity.reasons} />
@@ -201,6 +214,12 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen,
       sessionPending={native.sessionPending}
     />
   </div>
+}
+
+/** Inside the reported Missions read section (a Details section titled Missions), not the agent's mission rows. */
+const isMissionsRead = (target: Element): boolean => {
+  const section = target.closest('section')
+  return section !== null && !section.hasAttribute('data-agent-missions') && section.querySelector('[data-details-heading]')?.textContent === 'Missions'
 }
 
 const styles = stylex.create({

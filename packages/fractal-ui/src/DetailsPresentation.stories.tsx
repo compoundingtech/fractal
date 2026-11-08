@@ -1117,7 +1117,8 @@ async function checkSpendFocus(panel:HTMLElement,state:OmpSupplementState){
 /**
  * A section's Try again through a held retry: pending keeps the line, its sentence and the focused action; a repeated
  * failure keeps focus on the action; success moves focus to the section's heading control, then removes the line.
- * Every other section keeps its own read line meanwhile.
+ * Missions instead leaves Details once its queue read settles, and focus moves to the selected tab. Every other
+ * section keeps its own read line meanwhile.
  */
 async function checkSectionRetryFocus(panel:HTMLElement,read:'session'|'queue'){
   const transport=ompTransport(),name=read==='session'?'Overview':'Missions',section=ompSection(panel,name)
@@ -1139,10 +1140,16 @@ async function checkSectionRetryFocus(panel:HTMLElement,read:'session'|'queue'){
   await waitFor(()=>assertReadAction(action,'Trying again…',true,copy))
   await assertPendingDedup(action,read)
   transport.release(read,'ok')
+  if(read==='queue'){await waitFor(()=>assertMissionsLeft(panel,section,'success'));return}
   await waitFor(()=>{
     const heading=section.querySelector<HTMLElement>('[data-details-section-control]'),active=panel.ownerDocument.activeElement
     requireContract(section.isConnected&&heading!==null&&active===heading&&!action.isConnected&&!section.querySelector('[data-details-read-failure]'),`${readFocus}: ${name} success left focus on ${focusName(active)}${action.isConnected?' with its action mounted':''}`)
   })
+}
+/** The Missions read section exists only while the agent queue read fails or runs; settled, focus it held moves to the selected tab. */
+function assertMissionsLeft(panel:HTMLElement,section:HTMLElement,outcome:string){
+  const active=panel.ownerDocument.activeElement,tab=panel.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+  requireContract(!section.isConnected&&tab!==null&&active===tab,`${readFocus}: Missions ${outcome} left focus on ${focusName(active)}${section.isConnected?' with its section mounted':''}`)
 }
 async function resetOmpInspector(canvasElement:HTMLElement,narrow:boolean,panel:HTMLElement,state:OmpSupplementState='unavailable'){
   const seen=new Map<Element,string>()
@@ -1158,7 +1165,7 @@ async function resetOmpInspector(canvasElement:HTMLElement,narrow:boolean,panel:
     return remounted
   }finally{observer.disconnect()}
 }
-/** A terminal refusal must hand off focus before removing an action, never discard its section. */
+/** A terminal refusal must hand off focus before removing an action, never discard its section; Missions leaves as on success. */
 async function checkRefusedRead(panel:HTMLElement,read:OmpRead,outcome:'refused'|'unsupported',refresh=false){
   const transport=ompTransport(),name=read==='usage'?'Spend':read==='session'?'Overview':'Missions',section=ompSection(panel,name)
   const heading=section.querySelector<HTMLElement>('[data-details-section-control]');requireContract(heading,`${readFocus}: ${name} lacks its stable heading`)
@@ -1168,6 +1175,7 @@ async function checkRefusedRead(panel:HTMLElement,read:OmpRead,outcome:'refused'
   await waitFor(()=>assertReadAction(action,refresh?'Refreshing…':'Trying again…',true))
   await assertPendingDedup(action,read)
   transport.release(read,outcome)
+  if(read==='queue'){await waitFor(()=>assertMissionsLeft(panel,section,outcome));return}
   await waitFor(()=>requireContract(section.isConnected&&heading.isConnected&&section.querySelector('[data-details-section-control]')===heading&&panel.ownerDocument.activeElement===heading&&!action.isConnected,`${readFocus}: ${name} ${outcome} lost its stable same-section focus target`))
   requireContract(!section.querySelector('[data-details-read-action]'),`${readFocus}: ${name} ${outcome} still offers a read action`)
 }
