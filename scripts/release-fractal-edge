@@ -12,6 +12,7 @@ versioned release (which reads the latest release) ignore it. Publication only m
 both the current tag and manifest; equal-source retries finish interrupted cleanup and notes.
 """
 import argparse
+import hashlib
 import json
 import os
 import pathlib
@@ -129,6 +130,48 @@ def stale(repo, source, tag, manifest):
     return any(value and not is_ancestor(repo, value, source) for value in (tag, manifest))
 
 
+def download_asset(repository, name, path):
+    gh('release', 'download', TAG, '--repo', repository, '--pattern', name,
+       '--output', str(path), '--clobber')
+    return hashlib.sha256(path.read_bytes()).digest()
+
+
+def publish_existing(repository, dist, names, source, existing):
+    # Source markers alone do not prove aliases survived an interrupted clobber.
+    # Keep staged bytes until every fixed asset has been compared and repaired.
+    with tempfile.TemporaryDirectory(prefix='fractal-edge-assets-') as directory:
+        root = pathlib.Path(directory)
+        expected, staged, restage = {}, {}, []
+        for name in names:
+            staged_name = f'{source}-{name}'
+            path = root / staged_name
+            if staged_name in existing:
+                expected[name] = download_asset(repository, staged_name, path)
+            else:
+                path.symlink_to(dist / name)
+                expected[name] = hashlib.sha256(path.read_bytes()).digest()
+                restage.append(str(path))
+            staged[name] = path
+        if restage:
+            gh('release', 'upload', TAG, '--repo', repository, '--clobber', *restage)
+        if tag_commit(repository) != source:
+            gh('api', '--method', 'PATCH', f'repos/{repository}/git/refs/tags/{TAG}',
+               '-f', f'sha={source}', '-F', 'force=true', done=lambda: tag_commit(repository) == source)
+        repaired = False
+        for name in names:
+            path = root / name
+            actual = download_asset(repository, name, path) if name in existing else None
+            # Republish the manifest last whenever any alias/checksum needed repair.
+            if actual != expected[name] or (name == 'RELEASE.json' and repaired):
+                if path.exists():
+                    path.unlink()
+                path.symlink_to(staged[name])
+                gh('release', 'upload', TAG, '--repo', repository, '--clobber', str(path))
+                repaired = True
+            if download_asset(repository, name, root / f'verified-{name}') != expected[name]:
+                raise SystemExit(f'release-fractal-edge: asset verification failed for {name}')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
     parser.add_argument('--source', required=True)
@@ -155,17 +198,12 @@ def main():
         return 0
     body = notes(args.source, previous, repo, args.run_url)
     title = f'Fractal edge ({args.source[:9]})'
-    complete_source = previous == published_source == args.source
-    if complete_source:
+    if previous == published_source == args.source:
         metadata = json.loads(gh('release', 'view', TAG, '--repo', repository,
                                  '--json', 'body,name,isPrerelease').stdout)
-        notes_complete = (metadata['name'] == title and metadata['isPrerelease']
-                          and f'Exact source: `{args.source}`.' in metadata['body'])
-        if notes_complete:
+        if (metadata['name'] == title and metadata['isPrerelease']
+                and f'Exact source: `{args.source}`.' in metadata['body']):
             body = metadata['body']
-            if existing == set(names):
-                say(f'{TAG} already verified at {args.source}; leaving it unchanged')
-                return 0
     if args.dry_run:
         print(body)
         say(f'dry run: would publish {len(names)} assets as {TAG} at {args.source}')
@@ -184,28 +222,8 @@ def main():
         lacking = [str(dist / n) for n in names if n not in present]
         if lacking:
             gh('release', 'upload', TAG, '--repo', repository, '--clobber', *lacking)
-    elif not complete_source:
-        # Existing installers require fixed archive names. Stage immutable copies without
-        # touching those aliases or the manifest until the tag update has succeeded.
-        with tempfile.TemporaryDirectory(prefix='fractal-edge-assets-') as directory:
-            staged = []
-            for name in names:
-                if name in ('RELEASE.json', 'SHA256SUMS'):
-                    continue
-                path = pathlib.Path(directory) / f'{args.source}-{name}'
-                path.symlink_to(dist / name)
-                staged.append(str(path))
-            gh('release', 'upload', TAG, '--repo', repository, '--clobber', *staged)
-        if tag_commit(repository) != args.source:
-            gh('api', '--method', 'PATCH', f'repos/{repository}/git/refs/tags/{TAG}',
-               '-f', f'sha={args.source}', '-F', 'force=true', done=lambda: tag_commit(repository) == args.source)
-        for name in names:
-            if name not in ('SHA256SUMS', 'RELEASE.json'):
-                gh('release', 'upload', TAG, '--repo', repository, '--clobber', str(dist / name))
-        gh('release', 'upload', TAG, '--repo', repository, '--clobber', str(dist / 'SHA256SUMS'))
-        # gh may upload multiple files concurrently: publish the manifest alone, last,
-        # so it cannot declare a complete source while fixed aliases are still uploading.
-        gh('release', 'upload', TAG, '--repo', repository, '--clobber', str(dist / 'RELEASE.json'))
+    else:
+        publish_existing(repository, dist, names, args.source, existing)
     for leftover in sorted((release_assets(repository) or set()) - set(names)):
         gh('release', 'delete-asset', TAG, leftover, '--repo', repository, '--yes',
            done=lambda leftover=leftover: leftover not in (release_assets(repository) or set()))
@@ -215,6 +233,10 @@ def main():
     final = tag_commit(repository)
     published = release_assets(repository)
     final_source = manifest_source(repository, published)
+    metadata = json.loads(gh('release', 'view', TAG, '--repo', repository,
+                             '--json', 'body,name,isPrerelease').stdout)
+    if metadata['body'] != body or metadata['name'] != title or not metadata['isPrerelease']:
+        raise SystemExit('release-fractal-edge: release notes verification failed')
     if final != args.source or published != set(names) or final_source != args.source:
         raise SystemExit(f'release-fractal-edge: {TAG} is at {final} with assets {sorted(published or [])}, '
                          f'expected {args.source} with {names}')
