@@ -1,14 +1,27 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { openAgent } from '@fractal/sdk/read'
+import { agentDescriptor, missionStatus } from '@fractal/ui/assistant-ui'
 import { attentionAnswerFixtures } from '../data/attention.fixtures.ts'
+import { fleetFromAgents } from '../data/projections.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
-import { paletteWorld } from './live.ts'
+import { missionChildOf } from '../missions/rowData.ts'
+import { presentMission } from '../missions/presentation.ts'
+import { sidebarRow } from '../web/sidebarRow.ts'
+import { opensInWeb, paletteWorld } from './live.ts'
+
+// The kind registry brings each kind's surface, and their styles.
+vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
+
+const decoded = fixtureProjections.agents.map(openAgent)
+const fleet = fleetFromAgents(decoded)
+const open = fixtureProjections.attention.filter(item => item.state === 'open')
+const missionRows = fixtureProjections.missions.map(mission => ({ mission, presentation: presentMission({ mission, agents: decoded, attention: open }) }))
+const needsMe = new Set([fleet.agents[0]!.ref])
 
 describe('the live palette world', () => {
-  const agents = fixtureProjections.agents
   const world = paletteWorld({
-    fleet: { hosts: [{ id: 'juniper', connected: true }], agents: agents as never },
-    missions: fixtureProjections.missions as never,
-    attention: fixtureProjections.attention as never,
+    fleet, needsMe, missionRows,
+    attention: fixtureProjections.attention,
     resources: [
       { ref: 'github/pr/compoundingtech/fractal/12', title: 'Fix it', icon: 'pull-request' },
       { ref: 'doc/notes/plan', title: 'Plan', icon: 'document' },
@@ -16,10 +29,20 @@ describe('the live palette world', () => {
   })
 
   it('carries every agent, mission and open alert the gateway observed', () => {
-    expect(world.agents.length).toBe(agents.length)
+    expect(world.agents.length).toBe(fleet.agents.length)
     expect(world.missions.length).toBe(fixtureProjections.missions.length)
-    expect(world.alerts.length).toBe(fixtureProjections.attention.filter(item => item.state === 'open').length)
-    expect(world.machines).toEqual([{ id: 'juniper', connected: true }])
+    expect(world.alerts.length).toBe(open.length)
+  })
+
+  it('shows each agent’s status exactly as the sidebar ring does', () => {
+    for (const [index, agent] of fleet.agents.entries()) {
+      expect(world.agents[index]!.status).toEqual(agentDescriptor(sidebarRow({ agent, stale: false, needsMe: needsMe.has(agent.ref) })).status)
+    }
+    expect(world.agents[0]!.status?.tone).toBe('needs-you')
+  })
+
+  it('shows each mission’s status exactly as its sidebar row does', () => {
+    for (const [index, row] of missionRows.entries()) expect(world.missions[index]!.status).toEqual(missionStatus(missionChildOf(row)))
   })
 
   it('names resources by kind and opens a document as a document', () => {
@@ -29,11 +52,15 @@ describe('the live palette world', () => {
     ])
   })
 
-  it('marks an alert, and the agent it asks for, as needing you while it waits for an answer', () => {
+  it('marks an alert that waits for an answer as needing you', () => {
     const asking = attentionAnswerFixtures.find(fixture => fixture.waiting)!.item
-    const agent = agents[0]!
-    const marked = paletteWorld({ fleet: { hosts: [], agents: [{ ...agent, ref: asking.source_id }] as never }, attention: [asking] })
-    expect(marked.alerts[0]?.status?.tone).toBe('needs-you')
-    expect(marked.agents[0]?.status?.tone).toBe('needs-you')
+    expect(paletteWorld({ attention: [asking] }).alerts[0]?.status?.tone).toBe('needs-you')
+  })
+})
+
+describe('what the web can open', () => {
+  it('follows the kind registry: kinds without a surface stay hidden', () => {
+    for (const ref of ['agent:agent/example/atlas', 'mission:mission/release', 'list:home', 'usage:', 'home:attention/1', 'resource:github/pr/o/r/1']) expect(opensInWeb(ref)).toBe(true)
+    for (const ref of ['list:fleet', 'machine:machine/juniper', 'new-mission:']) expect(opensInWeb(ref)).toBe(false)
   })
 })
