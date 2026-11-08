@@ -61,7 +61,9 @@ const GlobalAreaSpecimen = ({ connection, toast, unsynced }: Pick<GlobalAreaArgs
  */
 const meta = {
   excludeStories: ['scenarioExemptions'],
-  title: 'Fractal/App/GlobalArea',
+  // A workspace composition, not a standalone Fractal/App production module. Preserve existing links and gate ids.
+  id: 'fractal-app-globalarea',
+  title: 'Surfaces/Shell/Global area',
   args: { scheme: 'dark', connection: 'live', collapsed: false, toast: false, unsynced: false },
   argTypes: {
     scheme: { control: 'radio', options: ['dark', 'light'] },
