@@ -314,7 +314,7 @@ fn terminal_capability_lookup_fences_the_subject_head_after_reopen() {
     let path = directory.path().join("graph.db");
     let store = Store::open(&path, "node").unwrap();
     let append = |subject: &str, kind: &str| {
-        store.append_claim(&ClaimInput {
+        let input = ClaimInput {
             subject: subject.into(),
             kind: kind.into(),
             actor: None,
@@ -322,7 +322,12 @@ fn terminal_capability_lookup_fences_the_subject_head_after_reopen() {
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: None,
-        }).unwrap()
+        };
+        if kind.starts_with("custom.client.terminal") {
+            store.append_client_operation_claim(&input)
+        } else {
+            store.append_claim(&input)
+        }.unwrap()
     };
     let attached = append("custom/client/attachment-a", "custom.client.terminal-attached");
     append("custom/client/decoy", "custom.client.other");
@@ -355,8 +360,13 @@ proptest! {
         copies in 1usize..3,
     ) {
         let source = Store::open_memory("alder").unwrap();
+        let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        source.bind_fleet(TEST_FLEET).unwrap();
+        source.pin_fleet_anchor(key.public()).unwrap();
+        source.set_member_key(Some(key.clone())).unwrap();
+        source.admit_fleet_anchor(TEST_FLEET, key.public(), "listening").unwrap();
         let append = |subject: &str, kind: &str, hash: &str| {
-            source.append_claim(&ClaimInput {
+            source.append_client_operation_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: kind.into(),
                 actor: None,
@@ -374,6 +384,8 @@ proptest! {
         let mut order = (0..exchange.envelopes.len()).collect::<Vec<_>>();
         order.sort_by_key(|&index| (ranks[index], index));
         let target = Store::open_memory("birch").unwrap();
+        target.bind_fleet(TEST_FLEET).unwrap();
+        target.pin_fleet_anchor(key.public()).unwrap();
         for chunk in order.chunks(width) {
             let envelopes = chunk.iter().flat_map(|&index|
                 std::iter::repeat_n(exchange.envelopes[index].clone(), copies)).collect();

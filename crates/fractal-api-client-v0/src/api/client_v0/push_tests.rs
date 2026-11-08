@@ -9,7 +9,7 @@ const TOKEN: &str = "a1b2c3d4e5f60123456789abcdef00112";
 fn pair(state: &AppState) {
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: GRANT.into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some(PERSON.into()),

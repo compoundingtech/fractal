@@ -799,7 +799,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "arrangement-grants");
         let read_slots = Arc::new(tokio::sync::Semaphore::new(1));
-        let append = |kind: &str, fields: Value| state.store.append_claim(&ClaimInput {
+        let append = |kind: &str, fields: Value| state.store.append_client_operation_claim(&ClaimInput {
             subject:"custom/client/pairing-arrangement-test".into(), kind:kind.into(),
             actor:Some("person/ada".into()),
             fields:serde_json::from_value(fields).unwrap(), evidence:vec![],
@@ -1038,6 +1038,7 @@ mod tests {
     fn membership_repair_state(node: &str) -> AppState {
         let root = std::path::PathBuf::from("/unused-membership-repair");
         AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             store: Arc::new(Store::open_memory(node).unwrap()),
             notify: Arc::new(Notify::new()),

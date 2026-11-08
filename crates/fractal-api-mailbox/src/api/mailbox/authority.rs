@@ -2032,6 +2032,7 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
             .unwrap();
         crate::store::mailbox_tests::ready(&store, "current");
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
