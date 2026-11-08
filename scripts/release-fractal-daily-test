@@ -310,7 +310,7 @@ with tempfile.TemporaryDirectory() as temporary:
     done = daily(notes=large, impact=impact)
     published = json.loads(receipt.read_text())
     body = published['body'].removesuffix('\n\n<!-- fractal-daily-candidate -->\n')
-    assert len(body) <= 120000, len(body)
+    assert len(published['body'].encode()) <= 24 * 1024, len(published['body'].encode())
     assert body.startswith('Fractal v0.3.18 headline\n'), body
     assert body.index('ACTION REQUIRED') < body.index('BREAKING CHANGE') < body.index('Change 0')
     assert '2000 changed, 0 unknown, 0 none' in body, body
@@ -322,6 +322,13 @@ with tempfile.TemporaryDirectory() as temporary:
     assert done.returncode == 0 and 'release body shortened:' in done.stdout, done
     assert f'{len(body)} characters' in done.stdout, done
     assert f'full notes: {len(large)}' in done.stdout, done
+    multibyte = 'Fractal v0.3.18 headline\n\n## Upgrade impact\n\n' + 'ü' * 13000
+    assert len(multibyte) < 24 * 1024 < len(multibyte.encode())
+    done = daily(notes=multibyte)
+    assert done.returncode == 0 and 'draft create metadata:' in done.stdout, done
+    published = json.loads(receipt.read_text())
+    assert len(published['body'].encode()) <= 24 * 1024
+    assert published['assets']['RELEASE-NOTES.md'] == multibyte
     done = daily(notes='x' * 120001)
     assert done.returncode == 1 and 'cannot build bounded release body' in done.stdout, done
     assert not receipt.exists()
@@ -436,9 +443,10 @@ with mock.patch.dict(os.environ, GH_REPO='example/project'), \
         mock.call('gh', 'api', 'repos/example/project/releases/19')]
 
 # Pure sizing never cuts a generated Markdown link and leaves small bodies unchanged.
-assert module.release_body('x' * module.RELEASE_BODY_LIMIT, {}) == 'x' * module.RELEASE_BODY_LIMIT
+limit = module.RELEASE_BODY_BYTES - len(module.DRAFT_MARKER.encode())
+assert module.release_body('x' * limit, {}) == 'x' * limit
 shortened = module.release_body(large, impact)
-assert len(shortened) <= module.RELEASE_BODY_LIMIT
+assert len((shortened + module.DRAFT_MARKER).encode()) <= module.RELEASE_BODY_BYTES
 assert shortened.index('ACTION REQUIRED') < shortened.index('BREAKING CHANGE') < shortened.index('Change 0')
 assert shortened.endswith(module.FULL_NOTES_POINTER + '\n')
 assert module.release_body('notes\n', {}) == 'notes\n'
