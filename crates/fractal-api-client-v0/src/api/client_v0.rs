@@ -37,6 +37,7 @@ pub use fractal_api_core::api::client_v0::{authenticate, bound_mission_cards, ca
 pub use fractal_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
 pub mod arrangements;
 pub mod assistant;
+pub mod pairing_verifier;
 pub mod collection_ivm;
 pub mod collection_windows;
 pub mod conversation_blocks;
@@ -5591,19 +5592,18 @@ pub async fn pairing_begin(
             "the pairing request requires a valid version, device name, and concrete initiating person",
         ));
     }
-    let mut random = [0_u8; 10];
+    let mut random = [0_u8; 8];
     getrandom::fill(&mut random).map_err(ApiError::internal)?;
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let code = random[..8]
         .iter()
         .map(|byte| ALPHABET[*byte as usize % ALPHABET.len()] as char)
         .collect::<String>();
-    let stable = hex::encode(Sha256::digest(
-        format!("{}:{code}", request.device_name).as_bytes(),
-    ));
-    let pairing_id = format!("pairing/{}", &stable[..24]);
-    let subject = format!("custom/client/pairing-{}", &stable[..24]);
-    let expires_at = client_now_ms() + 300_000;
+    let stable = pairing_verifier::random_id().map_err(ApiError::internal)?;
+    let pairing_id = format!("pairing/{stable}");
+    let subject = format!("custom/client/pairing-{stable}");
+    let expires_at = client_now_ms() + pairing_verifier::PERSON_TTL_MS;
+    let verifier_key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
     let person_id = request.person_id;
     let fabric_gateway = request.fabric_gateway == Some(true);
     let scopes: Vec<&str> = match (request.full_control.unwrap_or(false), request.scopes) {
@@ -5640,7 +5640,9 @@ pub async fn pairing_begin(
         ("device_name".into(), Value::String(request.device_name)),
         ("person_id".into(), Value::String(person_id.clone())),
         ("scopes".into(), json!(scopes)),
-        ("code_hash".into(), Value::String(credential_digest(&code))),
+        ("code_hash".into(), Value::String(pairing_verifier::digest(&verifier_key, &code))),
+        ("verifier".into(), Value::String(pairing_verifier::MARKER.into())),
+        ("verifier_key_id".into(), Value::String(pairing_verifier::key_id(&verifier_key))),
         ("expires_at_unix_ms".into(), json!(expires_at)),
     ]);
     if fabric_gateway {
@@ -5864,18 +5866,41 @@ pub async fn pairing_complete(
         .map_err(ApiError::internal)?
         .claims
         .is_empty();
-    let valid_code = begun
-        .body
-        .pointer("/fields/code_hash")
-        .and_then(Value::as_str)
-        == Some(credential_digest(&request.code).as_str());
+    let restart = || ApiError {
+        status: StatusCode::FORBIDDEN,
+        code: "pairing-restart-required".into(),
+        message: "start pairing again".into(),
+        details: Box::default(),
+    };
     let expires = begun
         .body
         .pointer("/fields/expires_at_unix_ms")
         .and_then(Value::as_u64)
         .map(u128::from)
         .unwrap_or_default();
-    if used || !valid_code || expires <= client_now_ms() {
+    let now = client_now_ms();
+    let expected = begun.body.pointer("/fields/code_hash").and_then(Value::as_str).unwrap_or_default();
+    let valid_code = match begun.body.pointer("/fields/verifier") {
+        Some(Value::String(marker)) if marker == pairing_verifier::MARKER => {
+            let key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
+            if begun.body.pointer("/fields/verifier_key_id").and_then(Value::as_str)
+                != Some(pairing_verifier::key_id(&key).as_str())
+            {
+                return Err(restart());
+            }
+            pairing_verifier::verify(&key, &request.code, expected)
+        }
+        Some(_) => return Err(restart()),
+        None => {
+            if expires <= now || expires.checked_sub(begun.accepted_at_unix_ms)
+                .is_none_or(|lifetime| lifetime > pairing_verifier::PERSON_TTL_MS)
+            {
+                return Err(restart());
+            }
+            expected == credential_digest(&request.code)
+        }
+    };
+    if used || !valid_code || expires <= now {
         return Err(forbidden(
             "the pairing code is invalid, expired, or already used",
         ));
