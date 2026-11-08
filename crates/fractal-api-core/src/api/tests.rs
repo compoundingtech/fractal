@@ -512,6 +512,23 @@ agent "eval/named" { name "Quartz"; workspace "/tmp"; harness "claude" {} }
     let (status, missing) = get_request(app, "/v1/desired/agent/eval/absent").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
 }
+#[tokio::test]
+async fn status_preserves_claim_provenance_even_with_an_unknown_omit_claims_query() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.apply_internal(
+        &parse_intent("version 2\nagent \"eval/named\" { workspace \"/tmp\"; harness \"claude\" {} }\n", "node").unwrap(),
+        "status-summary-fixture",
+    ).unwrap();
+    let app = router(state);
+    let (code, full) = get_request(app.clone(), "/v1/status?subject=agent/eval/named").await;
+    assert_eq!(code, StatusCode::OK, "{full}");
+    let (code, legacy_query) = get_request(app, "/v1/status?subject=agent/eval/named&omit_claims=true").await;
+    assert_eq!(code, StatusCode::OK, "{legacy_query}");
+    assert!(!full["subjects"][0]["claims"].as_array().unwrap().is_empty());
+    assert_eq!(legacy_query["subjects"][0]["claims"], full["subjects"][0]["claims"]);
+}
+
 
 #[tokio::test]
 async fn delivery_hold_api_enforces_authority_and_keeps_presence_separate() {
@@ -14834,4 +14851,115 @@ async fn a_restart_that_ignores_a_lanes_fit_needs_a_reason_and_records_who_asked
         "subject": "agent/example/operations", "actor": "person/avery", "idempotency_key": "plain"
     })).await;
     assert!(plain["body"]["fields"].get("ignore_fit").is_none(), "{plain}");
+}
+
+#[test]
+fn population_repository_observations_require_current_host_and_workspace() {
+    let store = Store::open_memory("node").unwrap();
+    let source = "version 2\nagent \"example/workspace\" { workspace \"/tmp\"; command \"true\" }\n";
+    store.apply_internal(&parse_intent(source, "node").unwrap(), "workspace-overlay").unwrap();
+    let subject = "agent/example/workspace";
+    for (host, workspace, repository, expected) in [
+        ("node", "/tmp", Some("example/current"), Some(json!("example/current"))),
+        ("remote", "/tmp", Some("example/wrong-host"), None),
+        ("node", "/previous", Some("example/wrong-workspace"), None),
+        ("node", "/tmp", None, Some(Value::Null)),
+    ] {
+        let mut fields = BTreeMap::from([
+            ("host".into(), json!(host)),
+            ("workspace".into(), json!(workspace)),
+        ]);
+        if let Some(repository) = repository {
+            fields.insert("repository".into(), json!(repository));
+        }
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "workspace.observed".into(), actor: None,
+            fields, evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let mut rows = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+        assert!(rows.iter().all(|card| card.get("observed_repository").is_none()));
+        overlay_population_repositories(&store, &mut rows).unwrap();
+        let card = rows.iter().find(|card| card["id"] == subject).unwrap();
+        assert_eq!(card.get("observed_repository"), expected.as_ref(), "{host} {workspace}");
+    }
+    // Reusing a presented card must erase evidence that no longer matches its location.
+    let mut rows = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+    rows[0]["workspace"] = json!("/moved");
+    overlay_population_repositories(&store, &mut rows).unwrap();
+    assert!(rows[0].get("observed_repository").is_none());
+}
+
+#[test]
+fn ordinary_agent_list_workspace_reads_do_not_add_statements_per_card() {
+    for (count, enabled) in [(1, false), (32, false), (1, true), (32, true)] {
+        let store = Store::open_memory("node").unwrap();
+        store.extension::<crate::config::AgentPopulationEnabled>().0.set(enabled).unwrap();
+        let mut source = String::from("version 2\n");
+        for i in 0..count {
+            source.push_str(&format!(
+                "agent \"example/seat-{i}\" {{ workspace \"/tmp\"; command \"true\" }}\n"
+            ));
+        }
+        store.apply_internal(&parse_intent(&source, "node").unwrap(), "workspace-query-growth").unwrap();
+        for i in 0..count {
+            store.append_claim(&ClaimInput {
+                subject: format!("agent/example/seat-{i}"), kind: "workspace.observed".into(), actor: None,
+                fields: BTreeMap::from([
+                    ("host".into(), json!("node")),
+                    ("workspace".into(), json!("/tmp")),
+                    ("repository".into(), json!("example/current")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let index = store.index().unwrap();
+        let rows = client_agent_resources(&store, false, "warm", index).unwrap();
+        assert_eq!(rows.len(), count);
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let rows = client_agent_resources(&store, false, "again", index).unwrap();
+        let work = scope.finish();
+        assert_eq!(rows.len(), count);
+        assert!(rows.iter().all(|card| ["runtime_state", "_runtime_state", "observed_repository"]
+            .iter().all(|field| card.get(*field).is_none())),
+            "population-only evidence leaked into ordinary agent resources");
+        // The identical fixture at pinned base b0bbc6dc uses six statements
+        // for both cardinalities: population evidence must add no request reads.
+        assert_eq!(work.statements, 6, "ordinary roster query count changed for {count} seats: {work:?}");
+    }
+}
+
+#[test]
+fn population_repository_normalizes_production_shaped_checkout_paths() {
+    let store = Store::open_memory("node").unwrap();
+    let mut rows = vec![json!({
+        "id":"agent/example.workspace", "workspace":"/work/tree", "host_id":"host/node",
+        "checkout":{"repository":"/srv/checkouts/github.com/Example/Repo/refs/heads/main"}
+    })];
+    overlay_population_repositories(&store, &mut rows).unwrap();
+    assert_eq!(rows[0]["checkout"]["repository"], "example/repo");
+    for (raw, expected) in [
+        ("/srv/checkouts/github.com/example/repo", Some("example/repo")),
+        ("/srv/checkouts/github.com/example/repo/refs/heads/feature/topic", Some("example/repo")),
+        ("example/repo", Some("example/repo")),
+        ("/srv/work/repo", None),
+        ("/srv/github.com/example/repo/../other", None),
+        ("/srv/github.com/example/repo/arbitrary", None),
+        ("example/repo/extra", None),
+        ("https://github.com/example/repo", None),
+    ] {
+        assert_eq!(canonical_population_repository(raw).as_deref(), expected, "{raw}");
+    }
+    let source = "version 2\nagent \"example/workspace\" { workspace \"/tmp\"; command \"true\" }\n";
+    store.apply_internal(&parse_intent(source, "node").unwrap(), "population-repository-path").unwrap();
+    store.append_claim(&ClaimInput {
+        subject:"agent/example/workspace".into(), kind:"workspace.observed".into(), actor:None,
+        fields:BTreeMap::from([
+            ("host".into(), json!("node")), ("workspace".into(), json!("/tmp")),
+            ("repository".into(), json!("/srv/checkouts/github.com/example/repo/refs/heads/main")),
+        ]),
+        evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    let mut cards = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+    overlay_population_repositories(&store, &mut cards).unwrap();
+    assert_eq!(cards[0]["observed_repository"], "example/repo");
 }
