@@ -798,6 +798,16 @@ WHERE kind='thread.created';
 CREATE INDEX IF NOT EXISTS claims_thread_message_accepted_index
 ON claims(json_extract(body, '$.fields.thread_id'), length(accepted_at_unix_ms), accepted_at_unix_ms)
 WHERE kind='message.sent' AND json_extract(body, '$.fields.thread_id') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS claims_thread_origin_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.origin_ask'),
+          json_extract(body, '$.fields.origin_ask_episode'), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_mission_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.mission'), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_closed_owner_index
+ON claims(actor, store_index DESC)
+WHERE kind='thread.state-set' AND json_extract(body, '$.fields.state')='closed';
 CREATE INDEX IF NOT EXISTS claims_message_to_index
 ON claims(json_extract(body, '$.fields.to'), subject)
 WHERE kind='message.sent';
@@ -5404,7 +5414,7 @@ impl Store {
     ) -> Result<StatusResponse> {
         let subjects = self.generic_status_subject_names_at(subjects, index)?;
         let mut response = self.status_for_subject_names_at(subjects, index, history, claims)?;
-        redact_generic_status_message_relations(&mut response);
+        hide_thread_messages_from_generic_status(&mut response);
         Ok(response)
     }
 
@@ -5567,7 +5577,7 @@ impl Store {
                 selected, owner, at, history,
                 StatusSubjects { names: None, excluded: Some(&excluded) }, ClaimsReduction::Full,
             )?;
-            redact_generic_status_message_relations(&mut response);
+            hide_thread_messages_from_generic_status(&mut response);
             Ok(response)
         })
     }
@@ -11791,6 +11801,7 @@ pub(crate) fn message_view_from(
         status: field("status").unwrap_or_else(|| "sent".into()),
         title: field("title").or_else(|| child("title")),
         in_reply_to: field("in_reply_to").or_else(|| child("in-reply-to")),
+        delivery_thread: None,
         tags: actual
             .get("tags")
             .and_then(Value::as_array)
@@ -12185,16 +12196,13 @@ fn fold_latest_parsed_values(
     Ok(any.then_some(Value::Object(merged)))
 }
 
-/// Keep thread routing out of generic status without altering the internal status fold.
-pub fn redact_generic_status_message_relations(response: &mut StatusResponse) {
-    for subject in &mut response.subjects {
-        if !subject.subject.starts_with("message/") {
-            continue;
-        }
-        for body in [&mut subject.actual, &mut subject.desired].into_iter().flatten() {
-            fractal_schema::threads::redact_message_relations(body);
-        }
-    }
+/// Keep private thread messages out of serving projections of the generic status fold.
+pub fn hide_thread_messages_from_generic_status(response: &mut StatusResponse) {
+    response.subjects.retain(|subject| {
+        !subject.subject.starts_with("message/")
+            || ![&subject.actual, &subject.desired].into_iter().flatten()
+                .any(fractal_schema::threads::message_has_relation)
+    });
 }
 
 /// Apply one eligible claim in canonical order, shared by history folds and the

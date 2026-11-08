@@ -1281,6 +1281,7 @@ mod tests {
              To stop watching: st gh unwatch acme/garden#12"
         );
         let mut message = MessageView {
+            delivery_thread: None,
             subject: comment.subject.clone(),
             from: "daemon/node".into(),
             to: "agent/example/planner".into(),
@@ -1365,6 +1366,7 @@ mod tests {
     fn a_seats_post_in_flight_holds_only_its_wakes_on_that_thread() {
         let thread = ThreadRef::parse("acme/garden#12").unwrap();
         let message = |thread: &str| MessageView {
+            delivery_thread: None,
             subject: "message/watch-one".into(),
             from: "daemon/node".into(),
             to: "agent/example.planner".into(),

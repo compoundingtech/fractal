@@ -502,6 +502,7 @@ mod tests {
             "from": person, "to": agent, "status": "sent", "content": "ordinary visible text",
             "thread_id": thread, "thread_quote_id": quoted,
             "thread_origin_ask": private_ask, "thread_origin_episode": private_episode,
+            "thread_reader_version": 2,
         }});
         let refused = state.store.append_client_claim(&ClaimInput {
             subject: "message/local-generic-thread-send".into(), kind: "message.sent".into(),
@@ -570,7 +571,7 @@ mod tests {
         let state = test_state(receiver_root.path());
         let floor: u32 = state.store.readers.get().pragma_query_value(None, "user_version",
             |row| row.get(0)).unwrap();
-        assert_eq!(floor, 21);
+        assert_eq!(floor, fractal_schema::STORAGE_VERSION);
         let upgraded_admission = state.store.validate_replication_backlog().unwrap();
         assert!(upgraded_admission.valid > 0);
         assert_eq!(upgraded_admission.invalid, 0);
@@ -597,23 +598,41 @@ mod tests {
             "/v1/claims?subject=message/visible-thread-message").await;
         assert_eq!(status, StatusCode::OK, "{claims}");
         assert_eq!(claims["claims"], json!([]));
-        let (status, events) = client_json(app.clone(),
+        // The local serving boundary permits these generic reads for a bound agent.
+        // They must hide private message bodies in addition to routing metadata.
+        let bound_app = app.clone()
+            .layer(from_fn_with_state(state.store.clone(), guard_bound_actor))
+            .layer(Extension(BoundAgent("agent/example/outsider".into())));
+        let (status, events) = client_json(bound_app.clone(),
             "/v1/events/page?after=0&subject=message/visible-thread-message").await;
         assert_eq!(status, StatusCode::OK, "{events}");
-        for event in events["items"].as_array().unwrap() {
-            assert_eq!(event["body"]["fields"]["content"], "ordinary visible text");
-        }
-        let (status, status_body) = client_json(app.clone(),
+        assert_eq!(events["items"], json!([]));
+        let (status, ordinary_events) = client_json(bound_app.clone(),
+            "/v1/events/page?after=0&subject=message/ordinary-unlinked").await;
+        assert_eq!(status, StatusCode::OK, "{ordinary_events}");
+        assert_eq!(ordinary_events["items"][0]["body"]["fields"]["content"], "ordinary control");
+        let (status, status_body) = client_json(bound_app.clone(),
             "/v1/status?subject=message/visible-thread-message&history=true").await;
         assert_eq!(status, StatusCode::OK, "{status_body}");
-        assert_eq!(status_body["subjects"][0]["actual"]["content"], "ordinary visible text");
-        let (status, harness_status) = client_json(app.clone(),
+        assert_eq!(status_body["subjects"], json!([]));
+        let (status, harness_status) = client_json(bound_app.clone(),
             "/v1/status?subject=message/visible-thread-message&harness_only=true").await;
         assert_eq!(status, StatusCode::OK, "{harness_status}");
-        let (status, message) = client_json(app,
+        // The harness-only shortcut gives the same empty-facts placeholder as an
+        // unknown message. It does not read conversation content.
+        assert_eq!(harness_status["subjects"][0]["actual"], Value::Null);
+        assert_eq!(harness_status["subjects"][0]["claims"], json!([]));
+        let (status, ordinary_status) = client_json(bound_app.clone(),
+            "/v1/status?subject=message/ordinary-unlinked&history=true").await;
+        assert_eq!(status, StatusCode::OK, "{ordinary_status}");
+        assert_eq!(ordinary_status["subjects"][0]["actual"]["content"], "ordinary control");
+        let (status, message) = client_json(bound_app.clone(),
             "/v1/messages/read/visible-thread-message").await;
-        assert_eq!(status, StatusCode::OK, "{message}");
-        assert_eq!(message["content"], "ordinary visible text");
+        assert_eq!(status, StatusCode::NOT_FOUND, "{message}");
+        let (status, ordinary_message) = client_json(bound_app,
+            "/v1/messages/read/ordinary-unlinked").await;
+        assert_eq!(status, StatusCode::OK, "{ordinary_message}");
+        assert_eq!(ordinary_message["content"], "ordinary control");
 
         let raw = reply;
         assert_eq!(raw.body["fields"]["thread_id"], thread);
@@ -636,25 +655,112 @@ mod tests {
     }
 
     #[test]
+    fn version_one_replica_holds_initial_and_incremental_thread_messages_until_upgrade() {
+        use crate::store::thread_metadata::{self, Edit, PersonAuthority};
+        use fractal_schema::threads::{MESSAGE_READER_VERSION, MESSAGE_READER_VERSION_FIELD};
+
+        const FLEET: &str = "af599eec-4f67-43b7-82c9-13f042f7d77c";
+        const THREAD: &str = "thread/reader-floor";
+        const PERSON: &str = "person/reader-floor";
+        const AGENT: &str = "agent/reader-floor";
+        let source_root = tempfile::tempdir().unwrap();
+        let receiver_root = tempfile::tempdir().unwrap();
+        let source = Store::open(&source_root.path().join("source.db"), "writer").unwrap();
+        source.bind_fleet(FLEET).unwrap();
+        source.set_member_key(Some(Arc::new(crate::fleet::MemberKey::generate().unwrap().0))).unwrap();
+        source.configure_thread_write_rollout([]);
+        thread_metadata::apply(&source, PERSON, THREAD, "create-reader-floor",
+            Edit::Create { agent: AGENT, title: "Reader floor" }).unwrap();
+
+        let receiver = test_state(receiver_root.path());
+        receiver.store.bind_fleet(FLEET).unwrap();
+        let mut v1_registry = fractal_schema::registry().clone();
+        let fields = &mut v1_registry.claims.get_mut("message.sent").unwrap().fields;
+        assert!(fields.remove(MESSAGE_READER_VERSION_FIELD).is_some());
+        assert!(fields.contains_key("thread_id"));
+        receiver.store.set_claim_registry(v1_registry);
+
+        let message = |subject: &str, content: &str| ClaimInput {
+            subject: subject.into(), kind: "message.sent".into(), actor: Some(PERSON.into()),
+            fields: serde_json::from_value(json!({
+                "from": PERSON, "to": AGENT, "status": "sent", "content": content,
+            })).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some(subject.into()),
+        };
+        let send = |subject: &str, content: &str| {
+            let mut input = message(subject, content);
+            input.fields.insert("thread_id".into(), json!(THREAD));
+            let (claim, appended) = crate::store::thread_delivery::append_reply(
+                &source, &input, PersonAuthority::TrustedLocal, None,
+            ).unwrap();
+            assert!(appended);
+            assert_eq!(claim.body["fields"][MESSAGE_READER_VERSION_FIELD], MESSAGE_READER_VERSION);
+            claim
+        };
+        let receive = |target: &Store| {
+            let inventory = target.replication_inventory().unwrap();
+            let exchange = source.export_replication_exchange(FLEET, &inventory).unwrap();
+            assert!(exchange.envelopes.iter().any(|envelope| envelope.signature.is_some()));
+            target.receive_replication_exchange(source.origin(), FLEET, &exchange).unwrap();
+            let admission = target.validate_replication_backlog().unwrap();
+            target.project_replication_backlog().unwrap();
+            admission
+        };
+
+        let first = send("message/initial-v2", "private initial history");
+        let ordinary = source.append_client_claim(&message("message/ordinary-control", "ordinary control")).unwrap();
+        assert_eq!(receive(&receiver.store).unknown, 1);
+        assert!(receiver.store.claim_by_id(&ordinary.id).unwrap().is_some());
+        assert!(receiver.store.claim_by_id(&first.id).unwrap().is_none());
+        let second = send("message/catch-up-v2", "private catch-up history");
+        receive(&receiver.store);
+        assert!(receiver.store.claim_by_id(&second.id).unwrap().is_none());
+        let quarantined = receiver.store.replica_records(true).unwrap();
+        for claim in [&first, &second] {
+            let record = quarantined.iter().find(|record| record.claim_id.as_deref() == Some(claim.id.as_str())).unwrap();
+            assert_eq!(record.state, "unknown");
+            assert_eq!(record.error_code.as_deref(), Some("unknown-claim-field"));
+            assert!(!serde_json::to_string(record).unwrap().contains("private "));
+        }
+
+        receiver.store.connection.write().pragma_update(None, "user_version", 21).unwrap();
+        drop(receiver);
+        let upgraded = test_state(receiver_root.path());
+        assert_eq!(upgraded.store.readers.get().pragma_query_value(None, "user_version",
+            |row| row.get::<_, u32>(0)).unwrap(), 22);
+        let report = upgraded.store.validate_replication_backlog().unwrap();
+        assert_eq!(report.valid, 2);
+        assert_eq!(report.invalid, 0);
+        upgraded.store.project_replication_backlog().unwrap();
+        for claim in [&first, &second] {
+            let admitted = upgraded.store.claim_by_id(&claim.id).unwrap().unwrap();
+            assert_eq!(admitted.body, claim.body);
+        }
+        assert_eq!(upgraded.store.validate_replication_backlog().unwrap().valid, 0);
+
+        // A preview-only sender's unmarked private message is invalid on the final reader.
+        let mut unmarked = message("message/unsafe-preview", "preview private");
+        unmarked.fields.insert("thread_id".into(), json!(THREAD));
+        let unmarked = source.connection.batched(|tx| smallclaims::store::append_claim_record_tx(
+            tx, source.origin(), &unmarked.subject, &unmarked.kind, unmarked.actor.as_deref(),
+            &json!({"fields": unmarked.fields}), &[], None,
+        )).unwrap().unwrap();
+        source.committed_index.fetch_max(unmarked.store_index, std::sync::atomic::Ordering::Release);
+        assert_eq!(receive(&upgraded.store).invalid, 1);
+        assert!(upgraded.store.claim_by_id(&unmarked.id).unwrap().is_none());
+    }
+
+    #[test]
     fn generic_message_events_keep_ordinary_reply_metadata() {
         let mut event = EventRecord {
             store_index: 1, kind: "message.sent".into(), subject: "message/reply".into(),
-            body: json!({
-                "thread_origin_episode": "private-old-shape",
-                "fields": {
-                    "thread_id": "thread/example",
-                    "thread_quote_id": "message/private-quote",
-                    "thread_origin_ask": "step-run/example",
-                    "thread_origin_episode": "private-episode",
-                    "in_reply_to": "message/ordinary",
-                    "content": "Reply",
-                }
-            }),
+            body: json!({"fields": {"in_reply_to": "message/ordinary", "content": "Reply"}}),
         };
-        redact_event_message_thread_relations(&mut event);
-        assert_eq!(event.body, json!({
-            "fields": { "in_reply_to": "message/ordinary", "content": "Reply" }
-        }));
+        assert!(generic_event_visible(&event));
+        event.body["fields"]["thread_id"] = json!("thread/example");
+        assert!(!generic_event_visible(&event));
+        event.body = json!({"thread_origin_episode": "private-old-shape"});
+        assert!(!generic_event_visible(&event));
     }
 
     #[tokio::test]

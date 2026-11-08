@@ -962,6 +962,23 @@ fn native_delivery_correlation(driver: ExternalDriver, value: &Value) -> Option<
             }
             ("message", id)
         }
+        ExternalDriver::Omp | ExternalDriver::Pi
+            if value["type"] == "message" && value["message"]["role"] == "user" =>
+        {
+            let content = &value["message"]["content"];
+            let text = match content {
+                Value::String(text) => text.as_str(),
+                Value::Array(parts) => {
+                    let first = parts.first()?;
+                    if first["type"] != "text" {
+                        return None;
+                    }
+                    first["text"].as_str()?
+                }
+                _ => return None,
+            };
+            ("topic-message", pi_family_graph_message(text)?)
+        }
         ExternalDriver::Codex
             if value["type"] == "response_item"
                 && value["payload"]["type"] == "message"
@@ -984,6 +1001,43 @@ fn native_delivery_correlation(driver: ExternalDriver, value: &Value) -> Option<
         return None;
     }
     Some(json!({"kind":kind, "id":id}))
+}
+
+/// The shared channel sends a fixed, escaped envelope as the first user text.
+fn pi_family_graph_message(text: &str) -> Option<&str> {
+    let text = text.strip_prefix("(dictated by voice; it may contain transcription mistakes)\n").unwrap_or(text);
+    let text = text.strip_prefix('(')
+        .and_then(|prefix| prefix.split_once(" older silent held; st conversations ls)\n"))
+        .filter(|(count, _)| !count.is_empty() && count.bytes().all(|byte| byte.is_ascii_digit()))
+        .map_or(text, |(_, rest)| rest);
+    let text = text.strip_prefix("(silent: held without waking you until this turn)\n").unwrap_or(text);
+    let (header, body) = text.strip_prefix("<smalltalk-message ")?.split_once(">\n")?;
+    let mut attributes = header;
+    let mut read = |prefix| {
+        let (value, rest) = attributes.strip_prefix(prefix)?.split_once('"')?;
+        attributes = rest;
+        Some(value)
+    };
+    let id = read("id=\"")?;
+    read(" from=\"")?;
+    read(" to=\"")?;
+    read(" subject=\"")?;
+    let digest = read(" sha256=\"")?;
+    let graph = read(" graph=\"")?;
+    let (_, suffix) = body.split_once("\n</smalltalk-message>").or_else(|| {
+        body.strip_prefix("</smalltalk-message>").map(|suffix| ("", suffix))
+    })?;
+    if !attributes.is_empty()
+        || digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !suffix.is_empty() && !suffix.starts_with('\n')
+        || graph.strip_prefix("message/")? != id
+        || id.is_empty()
+        || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return None;
+    }
+    Some(graph)
 }
 
 /// Recover a whole record glued behind a torn one.
@@ -2885,6 +2939,40 @@ use super::*;
                 entries[0]["body"].as_object_mut().unwrap().remove("blocks");
             }
             assert_eq!(entries, projection);
+        }
+    }
+
+    #[test]
+    fn pi_family_user_delivery_correlates_only_an_exact_first_envelope() {
+        let message = "message/client-send";
+        let envelope = format!(
+            "<smalltalk-message id=\"client-send\" from=\"person/avery\" to=\"agent/reviewer\" subject=\"Review &amp; check\" sha256=\"{}\" graph=\"{message}\">\nExact thread text\n</smalltalk-message>\nReply in this topic.",
+            "0".repeat(64)
+        );
+        let prefixed = format!("(dictated by voice; it may contain transcription mistakes)\n(2 older silent held; st conversations ls)\n(silent: held without waking you until this turn)\n{envelope}");
+        for driver in [ExternalDriver::Pi, ExternalDriver::Omp] {
+            for content in [
+                json!([{"type":"text","text":envelope},{"type":"image","data":"image","mimeType":"image/png"}]),
+                json!(prefixed),
+            ] {
+                let mut entries = Vec::new();
+                normalize_native_line(driver, &json!({"type":"message","message":{"role":"user","content":content}}), 16, &timestamp(0), &mut entries);
+                assert!(!entries.is_empty());
+                assert!(entries.iter().all(|entry| entry["_delivery_correlation"] == json!({"kind":"topic-message","id":message})));
+            }
+            for (role, content) in [
+                ("assistant", json!(envelope)),
+                ("user", json!(format!("I quoted this envelope:\n{envelope}"))),
+                ("user", json!([{"type":"text","text":"ordinary first part"},{"type":"text","text":envelope}])),
+                ("user", json!(envelope.replace("graph=\"message/client-send\"", "graph=\"message/foreign\""))),
+                ("user", json!(envelope.replace("</smalltalk-message>", "ordinary text"))),
+                ("user", json!("Ordinary user message")),
+            ] {
+                let mut entries = Vec::new();
+                normalize_native_line(driver, &json!({"type":"message","message":{"role":role,"content":content}}), 16, &timestamp(0), &mut entries);
+                assert!(!entries.is_empty());
+                assert!(entries.iter().all(|entry| entry.get("_delivery_correlation").is_none()));
+            }
         }
     }
 

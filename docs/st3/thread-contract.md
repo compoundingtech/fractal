@@ -39,6 +39,12 @@ and show its full history without reopening it. A related ask can record an expl
 and the reason for revisiting a decision. The initial release presents this history. Any
 conditional activation continues to use existing mission step gates.
 
+A bound agent can create an ask with `fractal work ask`, then run
+`fractal work link-thread ASK --thread THREAD --episode CLAIM --as "$ST_AGENT"`.
+The `work.person-asked` claim ID is available in `fractal --json trace show ASK`. Repeating
+the same link returns the original operation receipt. An attachment failure leaves the
+ask available to retry with its exact episode.
+
 The initial lifecycle is Open, Close and Reopen. Closing moves a thread into Recently closed
 threads, leaves history readable and keeps any linked ask answerable. An ordinary incoming reply
 from the agent joins closed history without reopening the thread, adding an alert or resurrecting

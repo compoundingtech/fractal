@@ -27,6 +27,62 @@ pub struct TimelinePage {
     pub next_cursor: Option<String>,
 }
 
+/// Count admitted messages and determine whether a person still has an incoming reply to read.
+/// The ordinary recipient's message.read/closed claims are durable and apply in both views.
+pub(super) fn message_summary(
+    connection: &Connection,
+    person: &str,
+    agent: &str,
+    thread: &str,
+    creation: &ClaimRecord,
+) -> Result<(u64, bool), FractalError> {
+    let person = identities::resolve_reference_conn(connection, person)?;
+    let agent = identities::resolve_reference_conn(connection, agent)?;
+    let first = creation.body["fields"]["first_message"].as_str();
+    let sql = canonical_sql(&format!(
+        "WITH explicit AS (
+            SELECT claims.subject, claims.actor, claims.body
+            FROM claims INDEXED BY claims_thread_message_accepted_index
+            WHERE claims.kind='message.sent' AND json_extract(claims.body, '$.fields.thread_id')=?1
+              AND json_extract(claims.body, '$.fields.thread_id') IS NOT NULL
+              AND {ACTIVE_MESSAGE} AND {UNREPAIRED_CLAIM}
+        ), legacy AS (
+            SELECT claims.subject, claims.actor, claims.body FROM claims
+            WHERE claims.subject=?2 AND claims.batch_id=?3 AND claims.kind='message.sent'
+              AND json_extract(claims.body, '$.fields.thread_id') IS NULL
+              AND {ACTIVE_MESSAGE} AND {UNREPAIRED_CLAIM}
+        ), participants AS (
+            SELECT messages.subject,
+                   COALESCE(actor.identity, messages.actor) AS actor_id,
+                   COALESCE(sender.identity, json_extract(messages.body, '$.fields.from')) AS sender_id,
+                   COALESCE(recipient.identity, json_extract(messages.body, '$.fields.to')) AS recipient_id
+            FROM (SELECT * FROM explicit UNION ALL SELECT * FROM legacy) messages
+            LEFT JOIN identity_names actor ON actor.name=messages.actor
+            LEFT JOIN identity_names sender ON sender.name=json_extract(messages.body, '$.fields.from')
+            LEFT JOIN identity_names recipient ON recipient.name=json_extract(messages.body, '$.fields.to')
+        )
+        SELECT count(*), coalesce(max(recipient_id=?4 AND NOT EXISTS (
+            SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+            WHERE claims.subject=participants.subject
+              AND ((claims.kind='message.read' AND claims.actor=?4) OR claims.kind='message.closed')
+              AND {UNREPAIRED_CLAIM}
+        )), 0)
+        FROM participants
+        WHERE actor_id=sender_id AND ((sender_id=?4 AND recipient_id=?5) OR (sender_id=?5 AND recipient_id=?4))",
+    ));
+    connection
+        .query_row(
+            &sql,
+            params![thread, first, creation.batch_id, person, agent],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(internal)
+}
+
+const ACTIVE_MESSAGE: &str = "EXISTS (SELECT 1 FROM operations
+  WHERE operations.id=json_extract(claims.body, '$._operation.id')
+    AND operations.canonical_claim_id=claims.id AND operations.state='active')";
+
 /// Newest-first page over admitted messages and lifecycle events. The caller authenticates the person.
 pub fn mixed_timeline(
     store: &Store,
@@ -94,10 +150,7 @@ fn read(
 
     // The explicit membership arm seeks the thread's own message index. The legacy
     // first-message arm reads exactly the atomic start batch and skips a duplicate.
-    let selection = "AND claims.store_index <= ?4
-        AND EXISTS (SELECT 1 FROM operations
-          WHERE operations.id=json_extract(claims.body, '$._operation.id')
-            AND operations.canonical_claim_id=claims.id AND operations.state='active')";
+    let selection = format!("AND claims.store_index <= ?4 AND {ACTIVE_MESSAGE}");
     let after = smallclaims::store::canonical::after_sql("anchor", "claims");
     let cursor_range = format!(
         "AND (?5 IS NULL OR (length(claims.accepted_at_unix_ms), claims.accepted_at_unix_ms) <= (length(?6), ?6))
