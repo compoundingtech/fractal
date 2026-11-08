@@ -2131,6 +2131,20 @@ const ASSISTANT_GRANT_MAX_SECONDS: u64 = 2_592_000;
 enum DevicesCommand {
     /// List paired devices visible to the authenticated person.
     Ls,
+    /// Stage renewal of an audited device grant over the trusted local Unix socket.
+    RenewStage {
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Device)))]
+        device_id: String,
+        /// Migration epoch authorized for this renewal.
+        #[arg(long)]
+        migration_epoch: String,
+        /// Explicit audited historical grant digest.
+        #[arg(long = "allow", value_name = "SHA256")]
+        allow_digest: String,
+        /// Renewal approval window in hours (maximum 168).
+        #[arg(long, default_value_t = 72, value_parser = clap::value_parser!(u64).range(1..=168))]
+        expires_in_hours: u64,
+    },
     /// Begin local pairing for one named person and device, or one assistant grant.
     Pair {
         /// Device name; optional only for `--assistant`, which defaults to the assistant name.
@@ -9432,6 +9446,38 @@ async fn run_devices_fabric(
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct DeviceRenewalStageRequest {
+    api_version: &'static str,
+    device_id: String,
+    migration_epoch: String,
+    allow_digest: String,
+    expires_in_hours: u64,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct DeviceRenewalStageReceipt {
+    kind: String,
+    renewal_id: String,
+    expires_at: String,
+    allow_digest: String,
+}
+
+async fn stage_device_renewal(
+    endpoint: &Endpoint,
+    person: &str,
+    request: DeviceRenewalStageRequest,
+) -> Result<DeviceRenewalStageReceipt> {
+    anyhow::ensure!(
+        matches!(endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)),
+        "device renewal staging requires the trusted local Unix socket"
+    );
+    let client = execution_client(endpoint, person.to_owned())?;
+    client
+        .post("/v1/client/pairings/renewals/stage", &request)
+        .await
+}
+
 async fn run_devices(
     endpoint: Endpoint,
     config: &Config,
@@ -9447,10 +9493,38 @@ async fn run_devices(
     } = args;
     let configured_person = config.person.as_deref();
     let person = configured_human(person.as_deref(), configured_person, "devices")?;
+    // Refuse nonlocal staging before constructing a product client or issuing any request.
+    if let Some(DevicesCommand::RenewStage {
+        device_id,
+        migration_epoch,
+        allow_digest,
+        expires_in_hours,
+    }) = command {
+        let receipt = stage_device_renewal(
+            &endpoint,
+            &person,
+            DeviceRenewalStageRequest {
+                api_version: CLIENT_V0_API_VERSION,
+                device_id,
+                migration_epoch,
+                allow_digest,
+                expires_in_hours,
+            },
+        )
+        .await?;
+        if json_output {
+            print_value(&receipt, true)?;
+        } else {
+            println!("Renewal staged: {}", receipt.renewal_id);
+            println!("Expires at: {}", receipt.expires_at);
+        }
+        return Ok(());
+    }
     let client = generated_client(&endpoint, Some(&person))?;
     match command.unwrap_or(DevicesCommand::Ls) {
         DevicesCommand::Complete { .. } => unreachable!("handled before loading local config"),
         DevicesCommand::Fabric { .. } => unreachable!("handled without a client"),
+        DevicesCommand::RenewStage { .. } => unreachable!("handled before product client requests"),
         DevicesCommand::Ls => {
             anyhow::ensure!(
                 limit > 0 && limit <= 200,

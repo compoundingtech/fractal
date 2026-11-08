@@ -65,6 +65,32 @@ For small independent authorized work, use `fractal work start`. Claim before ex
 
 The daemon serves installed web assets on loopback port 7410 by default. `fractal web` reads its protected `web-launch-url` rendezvous; `FRACTAL_WEB_URL` explicitly overrides that URL. Keep launch URLs private. Use `fractal doctor` to diagnose missing assets or person configuration. Remote publishing is a separate opt-in setup; do not expose the local browser listener.
 
+### Device renewal
+
+Stage an audited historical device grant on the member's trusted local Unix socket:
+
+```sh
+fractal devices renew-stage device/DEVICE_ID \
+  --as person/NAME \
+  --migration-epoch EPOCH \
+  --allow SHA256
+```
+
+`--allow` is required: supply the audited exact source record body's digest, encoded
+as 64 lowercase hexadecimal SHA-256 characters. The source is the historical
+`pairing-completed` claim's `ClaimRecord.body`; hash its canonical JSON bytes as
+serialized by `serde_json::to_vec`, not a pretty-printed document or the whole claim.
+The member validates the digest and migration epoch before staging.
+
+The approval window defaults to 72 hours. Set `--expires-in-hours HOURS` to choose
+1–168 hours. Staging accepts no scope or candidate-key overrides and is unavailable
+over HTTP or Fabric endpoints. It prints only the renewal ID and expiry; `--json`
+returns the stage receipt, including its audited digest, without a credential.
+The saved phone profile discovers its renewal when the app starts or returns to
+the foreground. Review the displayed member, person, and scopes there, then tap
+**Approve** to finish with native user presence. No pairing code or QR scan is
+needed.
+
 ## Identity and automation
 
 Use `--as person/NAME` where a person operation requires an actor. A managed agent uses its bound identity; a flag is not permission to impersonate someone. Person-only setup and scripted demos must run outside a bound agent session.
