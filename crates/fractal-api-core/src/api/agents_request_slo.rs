@@ -371,10 +371,10 @@ async fn run(
                     true
                 };
                 let mut blocked = false;
-                if let Some(reviewer) = reviewer {
-                    if ledger.fence_if_full(invalidate_from, reviewer)? {
-                        blocked = !drain(&mut ledger);
-                    }
+                if let Some(reviewer) = reviewer
+                    && ledger.fence_if_full(invalidate_from, reviewer)?
+                {
+                    blocked = !drain(&mut ledger);
                 }
                 // A rewind detected during pre-drain invalidates this receipt. If a
                 // rewind races the commit itself, the routing epoch check defers it.
