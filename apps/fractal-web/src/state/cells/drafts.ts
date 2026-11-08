@@ -17,6 +17,11 @@ export const composerDraft = StateCell.make({
   scope: 'person', key: 'composer.draft', version: 1, schema: Draft, default: empty, tier: 'sensitive', retain: maxComposerDrafts,
 })
 
+/** A decision card's typed answer, kept like a composer draft until it is sent. Keyed `<gateway>/<alert>`. */
+export const decisionWords = StateCell.make({
+  scope: 'person', key: 'decision.words', version: 1, schema: Schema.String, default: '', tier: 'sensitive', retain: maxComposerDrafts,
+})
+
 /** The person the last session in this browser belonged to, so a revoke noticed after a reload still clears them. */
 export const lastPerson = StateCell.make({
   scope: 'global', key: 'session.person', version: 1, schema: Schema.NullOr(Schema.String), default: null,
