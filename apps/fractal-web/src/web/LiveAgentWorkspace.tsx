@@ -14,6 +14,7 @@ import { paneKey, parsePane, subjectAgent, subjectOfRef, subjectRef } from '../w
 import { AlertsTabCodeBoundary } from '../workspace/surfaces.tsx'
 import { prefetchConversationPane, prefetchTerminalDetail } from '../workspace/chunks.ts'
 import { tabPresentation } from '../workspace/tabPresentation.tsx'
+import { useMarkRead, useUnreadMarks } from './readPosition.ts'
 import { useWorkspaceResources, useWorkspaceRoute, useWorkspaceState, useWorkspaceStore, type WorkspaceNavigation } from '../workspace/useWorkspace.ts'
 import { useWorkspaceKeys } from '../workspace/useWorkspaceKeys.ts'
 import { WorkspaceBody } from '../workspace/WorkspaceBody.tsx'
@@ -111,18 +112,21 @@ const LiveSidebarAgentRow = React.memo((props: {
   const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
   const frozenAt = React.useContext(RosterFrozenAt)
   const [, requestThreadFocus] = useAtom(subagentThreadFocus(props.agentRef))
+  const unreadAgents = React.useMemo(() => agent === undefined || props.childId !== undefined ? [] : [agent], [agent, props.childId])
+  const unread = useUnreadMarks(unreadAgents).get(props.agentRef)
+  const markRead = useMarkRead(props.childId === undefined ? agent : undefined)
   const item = React.useMemo(() => {
     if (agent === undefined) return undefined
-    if (props.childId === undefined) return sidebarRow({ agent, stale, needsMe: props.needsMe, ...mission })
+    if (props.childId === undefined) return sidebarRow({ agent, stale, needsMe: props.needsMe, ...mission, ...(unread === undefined ? {} : { unread }) })
     const child = agent.subagents?.find(child => child.id === props.childId)
     return child === undefined ? undefined : sidebarSubagentRow({ parent: agent, child, stale })
-  }, [agent, stale, props.needsMe, props.childId, mission])
+  }, [agent, stale, props.needsMe, props.childId, mission, unread])
   const onOpen = React.useCallback(() => { if (props.openRef !== undefined) props.select(props.openRef) }, [props.openRef, props.select])
   const onSubagentsPress = React.useCallback(() => {
     props.select(props.agentRef)
     requestThreadFocus(value => value + 1)
   }, [props.select, props.agentRef, requestThreadFocus])
-  return item === undefined ? null : <MilestoneAgentRow row={item} reportedStatusOnly displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} touchDisclosure={props.touchDisclosure} onOpenMission={props.childId === undefined ? props.openMission : undefined} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} onSubagentsPress={props.childId === undefined ? onSubagentsPress : undefined} />
+  return item === undefined ? null : <MilestoneAgentRow row={item} reportedStatusOnly displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} touchDisclosure={props.touchDisclosure} onOpenMission={props.childId === undefined ? props.openMission : undefined} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} onSubagentsPress={props.childId === undefined ? onSubagentsPress : undefined} onMarkRead={markRead} />
 })
 LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
 
@@ -517,7 +521,8 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const byRef = React.useMemo(() => new Map(subjects.map((subject) => [subject.ref, subject])), [subjects])
   const allTabs = React.useMemo(() => tabsOf(workspace.layout), [workspace.layout])
   const stripTabs = focusedGroup(workspace)?.tabs ?? allTabs
-  const tabItems = React.useMemo(() => stripTabs.map(tab => ({ ...tabPresentation({ tab, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef }), ...(workspace.views[tab.id]?.dirty === true ? { dirty: true } : {}) })), [stripTabs, workspace.views, agents, fleet._tag, needsYou, attention, byRef])
+  const unread = useUnreadMarks(agents)
+  const tabItems = React.useMemo(() => stripTabs.map(tab => ({ ...tabPresentation({ tab, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef, unread }), ...(workspace.views[tab.id]?.dirty === true ? { dirty: true } : {}) })), [stripTabs, workspace.views, agents, fleet._tag, needsYou, attention, byRef, unread])
   const activeLabel = tabItems.find(item => item.id === activeRow?.id)?.title
   const previousNames = React.useRef<ReadonlyMap<string, string>>(new Map())
   const names = React.useMemo(() => {

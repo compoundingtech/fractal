@@ -27,6 +27,7 @@ import { recordedToolDetail } from './semanticTool.tsx'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { AgentThreadTabs, type AgentThreadTabsHandle } from '../../../../packages/fractal-ui/src/assistant-ui/composition/AgentThreadTabs.tsx'
 import { subagentThreadFocus } from './subagentThreadFocus.ts'
+import { useReadPosition } from './readPosition.ts'
 
 /** Roster display names by agent ref: mail headers read names, not graph paths. */
 const selectRosterNames = (feed: Feed<Fleet>): ReadonlyMap<string, string> =>
@@ -235,6 +236,10 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   // Recorded semantic evidence stands in for the kit summary line; the kit keeps raw input/output and Open beside it.
   const renderSemanticDetail = React.useCallback((item: ToolCallItem, call: WorkLogCall) => recordedToolDetail(item, call, () => onOpenTool(call)), [onOpenTool])
   const draftPort = useComposerDraftPort(agentRef)
+  const readPosition = useReadPosition({
+    conversation: agentRef, items: state._tag === 'Observed' ? state.items : undefined, visible, enabled: !readOnly,
+    ...(feed._tag === 'Observed' && feed.value.lastSendId !== undefined ? { sendKey: feed.value.lastSendId } : {}),
+  })
   return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: running, ...(onCancel === undefined ? {} : { onCancel }) }}>
     {/* Bound the 100%-height kit frame to the space left above the composer. */}
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
@@ -246,6 +251,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       turns={frozen?.turns ?? (state._tag === 'Observed' ? state.turns : [])}
       scrollToBottomKey={feed._tag === 'Observed' ? feed.value.lastSendId : undefined}
       tailRef={tailRef}
+      {...readPosition}
       title={agentName}
       loadingState={<div data-testid="transcript-placeholder" role="status" aria-label="Loading conversation" />}
       onOpenTool={onOpenTool}

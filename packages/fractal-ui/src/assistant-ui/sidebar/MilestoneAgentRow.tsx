@@ -5,7 +5,7 @@ import { Button, Focusable } from 'react-aria-components'
 import { Tooltip } from '../composition/Controls'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
-import { rowAttention, rowStatusLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
+import { rowAttention, rowHasUnread, rowStatusLabel, rowUnreadLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
 import { AgentHoverCard, AgentRowActions } from './DeferredRowActions.tsx'
 import { Highlight } from './rowPresentation.tsx'
 import { SidebarMissionLine, missionLineHasTrigger } from './SidebarMissionLine'
@@ -104,7 +104,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
   const statusLabel = rowStatusLabel(row)
   const signal = row.needsMe === true && attention === 'failed'
     ? <span data-row-column="attention" role="img" aria-label="Needs your attention" {...stylex.props(styles.needs, frozen && styles.frozenNeeds)} />
-    : (row.unread ?? 0) > 0 ? <span data-row-signal="unread" aria-label={`${row.unread} unread`} {...stylex.props(styles.unread)}>{row.unread}</span> : null
+    : row.unread !== undefined && rowHasUnread(row) ? <span data-row-signal="unread" aria-label={rowUnreadLabel(row.unread)} {...stylex.props(styles.unread)}>{row.unread === 'some' ? '•' : row.unread}</span> : null
   const hasTrailing = row.lastTurn._tag === 'Known' || signal !== null
   return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-display-only={displayOnly || undefined} data-narrow={narrow || undefined} data-touch={touchRow || undefined} data-touch-mission={touchMission || undefined} data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
     onMouseEnter={displayOnly ? undefined : event => { setRowHovered(true); if ((event.target as Element).closest('[data-count-scope]') === null) card.intend(true) }} onMouseLeave={displayOnly ? undefined : () => { setRowHovered(false); card.intend(false) }}

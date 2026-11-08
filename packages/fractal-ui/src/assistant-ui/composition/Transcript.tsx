@@ -108,6 +108,10 @@ export interface TranscriptProps {
   readonly showSeatHeader?: boolean
   /** False for a retained pane the host keeps mounted but hidden: viewport work and prompt measurement pause until it is shown again. */
   readonly active?: boolean
+  /** The first item the person has not seen yet: a "New since you last looked" line goes right before it. */
+  readonly unreadFrom?: string
+  /** Items of turns that came into view while this transcript is active, the document visible and Find closed. */
+  readonly onSeen?: (itemIds: readonly string[]) => void
 }
 const SenderCaption = React.createContext<string | undefined>(undefined)
 const MailNames = React.createContext<MailParticipants | undefined>(undefined)
@@ -317,7 +321,11 @@ const dayKey = (time: number) => Number.isFinite(time) ? new Date(time).toDateSt
 function DaySeparator({ time }: { readonly time: number }) {
   return <div role="separator" data-testid="transcript-day" {...stylex.props(styles.day)}><time dateTime={new Date(time).toISOString().slice(0, 10)}>{dayFormatter.format(time)}</time></div>
 }
-const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef, newDay }: { turn: TranscriptTurn; summaryMemberIds?: readonly string[]; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement>; newDay?: boolean }) {
+/** Where unread begins; never focusable, and it leaves every row's own id alone. */
+function UnreadSeparator() {
+  return <div role="separator" aria-label="New since you last looked" data-testid="transcript-unread" {...stylex.props(styles.day, styles.unread)}>New since you last looked</div>
+}
+const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, now, stranded, onOpenTool, onRetryRun, landmarkContext, tailRef, newDay, unreadFrom }: { turn: TranscriptTurn; summaryMemberIds?: readonly string[]; now?: number; stranded?: ReadonlySet<string>; onOpenTool: TranscriptProps['onOpenTool']; onRetryRun?: () => void; landmarkContext?: string; tailRef?: React.Ref<HTMLElement>; newDay?: boolean; unreadFrom?: string }) {
   const renderFooter = React.useContext(TurnFooterRenderer)
 
   const renderToolDetail = React.useContext(ToolDetailRenderer)
@@ -344,16 +352,52 @@ const PreparedTurn = React.memo(function PreparedTurn({ turn, summaryMemberIds, 
     : trigger === undefined ? undefined : renderItem(trigger)
   return <section ref={tailRef} data-testid="transcript-turn" data-item-id={turn.id} data-source-ids={[...(turn.prompt === undefined ? [] : [turn.prompt.id]), ...turn.items.map(item => item.id)].join(' ')} data-scroll-anchor-container {...stylex.props(styles.turn)}><RowTimes.Provider value={false}>
     {newDay === true && Number.isFinite(started) && <DaySeparator time={started} />}
+    {unreadFrom !== undefined && (unreadFrom === turn.prompt?.id || unreadFrom === trigger?.id || !shown.some(item => item.id === unreadFrom)) && <UnreadSeparator />}
     <div data-testid="turn-head" {...stylex.props(styles.turnHead)}>
       <div {...stylex.props(styles.turnLead)}>{head}</div>
       {Number.isFinite(started) && <time data-testid="turn-time" dateTime={new Date(started).toISOString()} {...stylex.props(styles.turnTime)}>{messageTimeFormatter.format(started)}</time>}
     </div>
     {(turn.work.calls.length > 0 || reasoning.length > 0) && <WorkLogV1 turn={turn.work} summaryAnchorId={workSummaryId(turn.id)} summaryMemberIds={summaryMemberIds} ariaLabel={`Work log${Number.isFinite(started) ? `, started ${messageTimeFormatter.format(started)}` : ''}${landmarkContext ? `, ${landmarkContext}` : ''}`} listStyle={styles.workList} renderCallDetail={detail} previewCallDetail={!turn.work.running} interactiveCalls={onOpenTool !== undefined} hideLiveRow hideTime onRetry={onRetryRun} onOpenOutput={onOpenTool} expandedBody={reasoning.length > 0 ? <ThinkingRun key="thinking" items={reasoning} /> : undefined} />}
-    {shown.map((item, index) => renderItem(item, continues[index]!, runTexts[index]))}
+    {shown.map((item, index) => item.id === unreadFrom ? <React.Fragment key={item.id}><UnreadSeparator />{renderItem(item, continues[index]!, runTexts[index])}</React.Fragment> : renderItem(item, continues[index]!, runTexts[index]))}
     {turn.work.running && <LiveActivity state={turn.activity ?? { _tag: 'Working' }} startedAt={turn.work.startedAt} now={now} />}
     {!turn.work.running && renderFooter?.(turn)}
   </RowTimes.Provider></section>
 })
+/**
+ * Reports the source items of every turn in the viewport as seen: on scroll into view, and again when
+ * the pane becomes active or the document visible. Nothing counts while the pane is hidden, the
+ * document is in the background, or Find is open (stepping through matches is not reading).
+ */
+function useSeenTurns(scrollId: string, active: boolean, onSeen: TranscriptProps['onSeen']) {
+  const report = React.useRef(onSeen)
+  report.current = onSeen
+  const enabled = onSeen !== undefined
+  React.useEffect(() => {
+    if (!enabled || !active || typeof IntersectionObserver === 'undefined') return
+    const lane = document.getElementById(scrollId)
+    if (lane === null) return
+    const inView = new Set<Element>()
+    const flush = () => {
+      if (document.visibilityState === 'hidden' || lane.querySelector('[data-testid="transcript-find"]') !== null || inView.size === 0) return
+      const ids = [...inView].flatMap(element => (element.getAttribute('data-source-ids') ?? '').split(' ').filter(id => id !== ''))
+      if (ids.length > 0) report.current?.(ids)
+    }
+    const observer = new IntersectionObserver(entries => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) inView.add(entry.target)
+        else inView.delete(entry.target)
+      }
+      flush()
+    }, { root: lane })
+    const watch = () => { for (const turn of lane.querySelectorAll('[data-testid="transcript-turn"]')) observer.observe(turn) }
+    watch()
+    // Turns mount as history reveals and new turns arrive.
+    const mutations = typeof MutationObserver === 'undefined' ? undefined : new MutationObserver(watch)
+    mutations?.observe(lane, { childList: true, subtree: true })
+    document.addEventListener('visibilitychange', flush)
+    return () => { observer.disconnect(); mutations?.disconnect(); document.removeEventListener('visibilitychange', flush) }
+  }, [scrollId, active, enabled])
+}
 /** Host clock keeps elapsed labels deterministic and pauses with the conversation clock. */
 export function LiveActivity({ state, startedAt, now }: { readonly state: LiveActivityState; readonly startedAt?: string; readonly now?: number }) {
   const duration = useClockLabel(now => {
@@ -391,7 +435,7 @@ function sourceWindow(rows: readonly SourceRow[], startIndex: number): { readonl
   return { start, shown: rows.length - start + pinnedReasoning.length + (pinnedPrompt === undefined ? 0 : 1), pinnedPrompt, pinnedReasoning }
 }
 /** Turns trimmed to the mounted source rows, with work-log calls trimmed alike so hidden tool rows never mount. Whole turns keep their identity, and every turn keeps its key, so revealing history only adds rows. */
-function MountedTurns({ turns, sourceTurns, rowIds, start, pinnedPrompt, pinnedReasoning, stranded, now, tailRef, onOpenTool, onRetryRun, landmarkContext }: { readonly turns: readonly TranscriptTurn[]; readonly sourceTurns: ReadonlyMap<string, TranscriptTurn>; readonly rowIds: readonly string[]; readonly start: number; readonly pinnedPrompt?: string; readonly pinnedReasoning: readonly string[]; readonly stranded: ReadonlySet<string>; readonly now?: number; readonly tailRef?: React.Ref<HTMLElement>; readonly onOpenTool: TranscriptProps['onOpenTool']; readonly onRetryRun?: () => void; readonly landmarkContext?: string }) {
+function MountedTurns({ turns, sourceTurns, rowIds, start, pinnedPrompt, pinnedReasoning, stranded, now, tailRef, onOpenTool, onRetryRun, landmarkContext, unreadFrom }: { readonly turns: readonly TranscriptTurn[]; readonly sourceTurns: ReadonlyMap<string, TranscriptTurn>; readonly rowIds: readonly string[]; readonly start: number; readonly pinnedPrompt?: string; readonly pinnedReasoning: readonly string[]; readonly stranded: ReadonlySet<string>; readonly now?: number; readonly tailRef?: React.Ref<HTMLElement>; readonly onOpenTool: TranscriptProps['onOpenTool']; readonly onRetryRun?: () => void; readonly landmarkContext?: string; readonly unreadFrom?: string }) {
   const mounted = React.useMemo(() => {
     const ids = new Set(rowIds.slice(start))
     if (pinnedPrompt !== undefined) ids.add(pinnedPrompt)
@@ -415,7 +459,9 @@ function MountedTurns({ turns, sourceTurns, rowIds, start, pinnedPrompt, pinnedR
     days.set(turn.id, previousDay !== undefined && day !== previousDay)
     previousDay = day
   }
-  return mounted.map(turn => <PreparedTurn key={turn.id} newDay={days.get(turn.id)} turn={turn} summaryMemberIds={workMembers(sourceTurns.get(turn.id) ?? turn)} tailRef={turn.id === last?.id ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)
+  // Only the turn holding the first unread item learns of it, so other turns keep their memo.
+  const holdsUnread = (turn: TranscriptTurn) => unreadFrom !== undefined && (turn.prompt?.id === unreadFrom || turn.items.some(item => item.id === unreadFrom))
+  return mounted.map(turn => <PreparedTurn key={turn.id} newDay={days.get(turn.id)} unreadFrom={holdsUnread(turn) ? unreadFrom : undefined} turn={turn} summaryMemberIds={workMembers(sourceTurns.get(turn.id) ?? turn)} tailRef={turn.id === last?.id ? tailRef : undefined} now={turn.work.running ? now : 0} stranded={turn.prompt !== undefined && stranded.has(turn.prompt.id) || turn.items.some(item => stranded.has(item.id)) ? stranded : undefined} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />)
 }
 /**
  * The window of rendered source rows takes no height: scrolling up prepends earlier rows, and this polite status tells
@@ -474,8 +520,9 @@ function HistoryBoundary({ history }: { readonly history: Extract<TranscriptHist
   </div>
 }
 /** Locked U2·F3·Y3 presentation under the host's AssistantRuntimeProvider. */
-export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, renderToolDetail, onRetrySync, onRetryRun, onRetrySend, sendAvailability, resolveImage, onLoadImage, renderInlineReference, attachmentImages, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, renderTurnFooter, showSeatHeader = true, active = true, tailRef }: TranscriptProps) {
+export function Transcript({ turns, title, showHeader = true, headerActionsHost, sync, now, observedAt, onOpenTool, renderToolDetail, onRetrySync, onRetryRun, onRetrySend, sendAvailability, resolveImage, onLoadImage, renderInlineReference, attachmentImages, availability = { _tag: 'Available' }, history = { _tag: 'Complete' }, emptyState, loadingState, viewportKey, scrollToBottomKey, landmarkContext, renderTurnFooter, showSeatHeader = true, active = true, tailRef, unreadFrom, onSeen }: TranscriptProps) {
   const scrollId = React.useId()
+  useSeenTurns(scrollId, active, onSeen)
   const [reveal] = React.useState(createTranscriptRevealStore)
   const [findMemory] = React.useState<TranscriptFindMemory>(() => new Map())
   const messages = useAuiState(state => state.thread.messages)
@@ -580,7 +627,7 @@ export function Transcript({ turns, title, showHeader = true, headerActionsHost,
         return <>
           {history._tag === 'HasOlder' && bound.start === 0 && <HistoryBoundary history={history} />}
           {committed.length === 0 ? empty : <TranscriptSearch turns={committed} rowIds={rowIds} startIndex={bound.start} revealRow={revealRow} {...stylex.props(styles.timeline)}>
-            <MountedTurns turns={committed} sourceTurns={sourceTurns} rowIds={rowIds} start={bound.start} pinnedPrompt={bound.pinnedPrompt} pinnedReasoning={bound.pinnedReasoning} stranded={stranded} now={now} tailRef={tailRef} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} />
+            <MountedTurns turns={committed} sourceTurns={sourceTurns} rowIds={rowIds} start={bound.start} pinnedPrompt={bound.pinnedPrompt} pinnedReasoning={bound.pinnedReasoning} stranded={stranded} now={now} tailRef={tailRef} onOpenTool={onOpenTool} onRetryRun={onRetryRun} landmarkContext={landmarkContext} unreadFrom={unreadFrom} />
           </TranscriptSearch>}
         </>
       }}
@@ -605,6 +652,7 @@ const styles = stylex.create({
   turnHead: { display: 'flex', alignItems: 'flex-start', gap: s.md, minWidth: 0 },
   turnLead: { flex: '1 1 0', minWidth: 0 },
   turnTime: { flexShrink: 0, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums' },
+  unread: { color: statusTone.attention },
   day: { display: 'flex', alignItems: 'center', gap: s.md, color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, '::before': { content: '""', flex: '1 1 0', height: g.hairline, backgroundColor: border.border }, '::after': { content: '""', flex: '1 1 0', height: g.hairline, backgroundColor: border.border } },
   answerHeader: { display: 'flex', alignItems: 'center', gap: s.sm, height: t.metaLeading, minWidth: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted },
   sender: { margin: 0, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, color: ink.fgMuted },

@@ -6,6 +6,7 @@ import { sidebarRow } from '../web/sidebarRow.ts'
 import type { Agent, Feed } from '../data/source.ts'
 import { alertTabMarkers } from '../web/alertsTab.ts'
 import type { EditorTabItem } from '../workbench-kit/EditorTabs.tsx'
+import { unreadLabel } from '../conversation/unread.ts'
 import { workspaceKinds } from './kinds.ts'
 import type { Tab } from './model.ts'
 import { parsePane } from './subject.ts'
@@ -18,13 +19,15 @@ const suffix = ({ questions, others }: { readonly questions: number; readonly ot
   questions > 0 ? `?${questions > 1 ? questions : ''}` : others > 0 ? `◆${others > 1 ? others : ''}` : undefined
 
 /** Presentation is derived on every observation, never stored: only the pane key is the tab's identity. */
-export const tabPresentation = ({ tab, agents, rosterKnown, needsYou, attention, subjects }: {
+export const tabPresentation = ({ tab, agents, rosterKnown, needsYou, attention, subjects, unread }: {
   readonly tab: Tab
   readonly agents: readonly Agent[]
   readonly rosterKnown: boolean
   readonly needsYou: ReadonlySet<string>
   readonly attention: Feed<readonly Attention[]>
   readonly subjects: ReadonlyMap<string, { readonly title?: string }>
+  /** New prose since the person last looked, by agent ref: a count, or `some` when only a newer time is known. */
+  readonly unread?: ReadonlyMap<string, number | 'some'>
 }): EditorTabItem => {
   const subject = parsePane(tab.pane)
   const base = { id: tab.id, kind: workspaceKinds.kindOf(subject).id }
@@ -43,6 +46,8 @@ export const tabPresentation = ({ tab, agents, rosterKnown, needsYou, attention,
           hoverCard: <AgentHoverCard row={row} />,
         }),
         ...(needsMe ? { attention: true } : {}),
+        // Needs-you keeps the slot; unread shows only on the conversation itself.
+        ...(!needsMe && subject._tag === 'Conversation' && unread?.get(subject.agent) !== undefined ? { detail: unreadLabel(unread.get(subject.agent)!) } : {}),
         ...(rosterKnown && agent === undefined ? { status: 'unavailable' as const } : {}),
       }
     }

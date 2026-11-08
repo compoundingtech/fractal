@@ -151,8 +151,10 @@ export const sidebarSubagentRow = ({ parent, child, stale }: {
 })
 
 /** Presentation of one actual roster observation. A stale roster retains its last-observed status. */
-export const sidebarRow = ({ agent, stale, needsMe, missions, attention, missionInfo, missionUnavailable = false, now = Date.now() }: {
+export const sidebarRow = ({ agent, stale, needsMe, missions, attention, missionInfo, missionUnavailable = false, now = Date.now(), unread }: {
   readonly agent: Agent; readonly stale: boolean; readonly needsMe?: boolean
+  /** New prose since the person last looked (read positions), when there is any. */
+  readonly unread?: number | 'some'
   readonly missions?: readonly Mission[]; readonly attention?: readonly Attention[]
   readonly missionInfo?: SidebarMissionInfo; readonly missionUnavailable?: boolean
   /** Only fences out future-dated occupancy; rows stay off the ticking clock, which reaches time leaves. */
@@ -186,6 +188,7 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention, mission
       ? { _tag: 'Unavailable' } : sidebarMissionContext({ agent, missions, attention }),
     missionInfo,
     needsMe,
+    ...(unread === undefined ? {} : { unread }),
     asking: agent.ask._tag === 'Known' ? agent.ask.value === 'question' : undefined,
     subagentCount: subagentsKnown ? agent.subagents!.length : undefined,
     subagentObservation: subagentsKnown ? { _tag: 'Reported' } : awaitingFirstReport ? { _tag: 'Unavailable' } :

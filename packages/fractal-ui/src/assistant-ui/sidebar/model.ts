@@ -71,7 +71,8 @@ export interface SidebarAgentRow extends SidebarReported {
   /** Only a reported harness question, not general open attention. */
   readonly asking?: boolean
   readonly freshness: 'live' | 'stale' | 'unobserved'
-  readonly unread?: number
+  /** New prose since the person last looked: a count, or `some` when only a newer time is known. */
+  readonly unread?: number | 'some'
   readonly usage: SidebarUsage
   readonly duration: SidebarDuration
   readonly lastTurn: SidebarLastTurn
@@ -132,3 +133,8 @@ export const compactTime = ({ at, now }: { readonly at: number; readonly now: nu
         ? `${Math.floor(seconds / 3600)}h`
         : `${Math.floor(seconds / 86400)}d`
 }
+
+/** Whether a row has anything new for the person. */
+export const rowHasUnread = (row: { readonly unread?: number | 'some' }): boolean => row.unread === 'some' || (row.unread ?? 0) > 0
+/** The unread mark's accessible name. */
+export const rowUnreadLabel = (unread: number | 'some'): string => unread === 'some' ? 'New since you last looked' : `${unread} unread`
