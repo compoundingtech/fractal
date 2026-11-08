@@ -4,6 +4,7 @@ import { Button as AriaButton } from 'react-aria-components'
 import { interactionVars as interaction, textVars as text, borderVars as border, surfaceVars as surface, spaceVars as s, geometryVars as g, typeVars as t, radiusVars as r, motionVars as m } from '../composition-tokens.stylex'
 import { Markdown } from './Markdown'
 import { Icon } from './Icons'
+import { LiveRing } from './LiveRing'
 import type { ReasoningItem } from '../embrace-data/model'
 
 const reasoningType = stylex.createTheme(t, { bodySize: t.codeSize, bodyLeading: t.uiLeading })
@@ -26,7 +27,7 @@ function ThinkingDisclosure({ children, streaming }: { readonly children: React.
   return <div data-testid="thinking-entry" data-streaming={streaming} {...stylex.props(styles.thinking)}>
     <AriaButton aria-expanded={open} aria-controls={contentId} onPress={() => setOpen(value => !value)} {...stylex.props(stylex.defaultMarker(), styles.thinkingControl)}>
       <span aria-hidden="true" data-row-disclosure={open ? 'open' : 'closed'} {...stylex.props(styles.slot, styles.disclosure)}><span {...stylex.props(styles.chevron, open && styles.disclosureOpen)}><Icon name="chevron-right" size={12} /></span></span>
-      <span aria-hidden="true" {...stylex.props(styles.slot)}><Icon name={streaming ? 'spinner' : 'thought'} spinning={streaming} size={14} /></span>
+      <span aria-hidden="true" {...stylex.props(styles.slot)}>{streaming ? <LiveRing /> : <Icon name="thought" size={14} />}</span>
       <span data-call-title {...stylex.props(styles.label)}>Thinking</span>
       <span data-call-meta />
     </AriaButton>

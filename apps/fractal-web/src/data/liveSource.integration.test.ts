@@ -2127,14 +2127,14 @@ describe('optimistic conversation sends', () => {
         const feed = live.registry.get(conversation)
         expect(feed).toMatchObject({ _tag: 'Observed' })
         if (feed._tag !== 'Observed') return
-        expect(feed.value.items.map((item) => item._tag)).toEqual(['Message', 'Text'])
+        // A person's mail reads as the person's one row; its header joins its body.
+        expect(feed.value.items.map((item) => item._tag)).toEqual(['Text'])
         resolvePost()
         expect((yield* Effect.promise(() => sending))._tag).toBe('Success')
         yield* settle
         expect(live.registry.get(conversation)).toMatchObject({
           _tag: 'Observed', value: { items: [
-            { _tag: 'Message', messageId: resent },
-            { _tag: 'Text', id: 'timeline-entry/resent/content' },
+            { _tag: 'Text', id: 'timeline-entry/resent/content', text: 'hello' },
           ] },
         })
       }),

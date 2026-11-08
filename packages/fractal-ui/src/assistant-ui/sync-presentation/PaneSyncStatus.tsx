@@ -6,9 +6,9 @@ import type { SyncStatus } from './sync-status'
 import { SyncFailureDetails } from './SyncLine'
 import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
+import { LiveRing } from '../composition/LiveRing'
+import { loadingGlyphDelayMs } from '../composition/loading-glyph-delay'
 
-/** A loading glyph only appears once the observation has lasted this long; fast loads show nothing. */
-export const loadingGlyphDelayMs = 300
 export interface PaneSyncStatusProps { readonly status: SyncStatus; readonly label: string; readonly now: number; readonly observedAt: number; readonly gateway?: string; readonly detailsOpen: boolean; readonly onDetailsOpenChange: (open: boolean) => void; readonly onRetry: () => void }
 type Phase = 'live' | 'loading' | 'failed'
 const phaseOf = (observation: SyncStatus): Phase => observation._tag === 'Failed' ? 'failed' : observation._tag === 'Live' || (observation._tag === 'Stale' && observation.reason._tag === 'Evicted') ? 'live' : 'loading'
@@ -16,7 +16,7 @@ const sentence = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(
 
 /**
  * The one sync status of a pane, rendered inside the pane's fixed-height header row.
- * Live renders nothing; loading is a muted glyph after a delay; failure is a glyph, a status
+ * Live renders nothing; loading is the live ring after a delay, held still while a stale snapshot is on screen; failure is a glyph, a status
  * word that never truncates and Details. Retry belongs to the body or its Details popover, never the header.
  */
 export const PaneSyncStatus = React.memo(function PaneSyncStatus({ status: observation, label, now, observedAt, gateway, detailsOpen, onDetailsOpenChange: setDetailsOpen, onRetry }: PaneSyncStatusProps) {
@@ -53,7 +53,7 @@ export const PaneSyncStatus = React.memo(function PaneSyncStatus({ status: obser
   // Inside a narrow (phone) host the status actions are 44px touch targets; the reserved twins keep the same footprint.
   const touch = React.useContext(NarrowLayoutContext)
   return <div data-pane-sync-status data-sync-state={observation._tag} data-pane-sync-phase={phase} {...stylex.props(styles.root, touch && styles.rootTouch)}>
-    {phase === 'loading' && <span data-pane-sync-glyph={glyphShown ? 'shown' : 'pending'} role="img" aria-label={line?.text ?? `Loading ${label}`} aria-hidden={!glyphShown || undefined} {...stylex.props(styles.glyphBox, !glyphShown && styles.pending)}><span {...stylex.props(styles.dot)} /></span>}
+    {phase === 'loading' && <span data-pane-sync-glyph={glyphShown ? 'shown' : 'pending'} role="img" aria-label={line?.text ?? `Loading ${label}`} aria-hidden={!glyphShown || undefined} {...stylex.props(styles.glyphBox, !glyphShown && styles.pending)}><LiveRing size="sm" spinning={observation._tag !== 'Stale'} /></span>}
     <span data-pane-sync-controls={reserved ? 'reserved' : 'shown'} aria-hidden={reserved || undefined} inert={reserved} {...stylex.props(styles.controls, reserved && styles.pending)}>
       {reserved ? <span {...stylex.props(styles.word, styles.wordStatic)}><span {...stylex.props(styles.dot)} />Load failed</span> : <span data-pane-sync-word {...stylex.props(styles.word, styles.wordStatic)}><span {...stylex.props(styles.dot, styles.dangerDot)} />Load failed</span>}
       {reserved ? <span {...stylex.props(styles.word, styles.wordTrigger, touch && styles.touch)}><span {...stylex.props(styles.dot)} /><span data-pane-sync-word-label {...stylex.props(styles.wordLabel)}>Load failed</span></span> : <TooltipTrigger delay={150}><Button ref={wordTrigger} data-pane-sync-word-trigger aria-label={retryable ? 'Load failed. Open details to retry.' : 'Load failed. Open details for recovery information.'} aria-haspopup="dialog" aria-expanded={detailsOpen && anchor === 'word'} onPress={() => openDetails('word')} {...stylex.props(styles.word, styles.wordTrigger, touch && styles.touch)}><span {...stylex.props(styles.dot, styles.dangerDot)} /><span data-pane-sync-word-label {...stylex.props(styles.wordLabel)}>Load failed</span></Button><Tooltip {...stylex.props(styles.tooltip)}>Load failed</Tooltip></TooltipTrigger>}

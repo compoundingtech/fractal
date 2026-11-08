@@ -562,6 +562,10 @@ fn shared_transcripts_match_without_a_renderer() {
             include_str!("../../../fixtures/clients/transcripts/omp-parity.json"),
             include_str!("../../../fixtures/clients/transcripts/omp-parity.expected.json"),
         ),
+        (
+            include_str!("../../../fixtures/clients/transcripts/wakes.json"),
+            include_str!("../../../fixtures/clients/transcripts/wakes.expected.json"),
+        ),
     ] {
         // A page also carries its conversation header; the rows are its items.
         let input = serde_json::from_str::<serde_json::Value>(input).unwrap();

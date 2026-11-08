@@ -140,7 +140,7 @@
     "fixtures/clients/transcripts/native-omp-run.json",
     "fixtures/clients/transcripts/noise.json",
     "fixtures/clients/transcripts/omp-parity.expected.json",
-    "fixtures/clients/transcripts/omp-parity.json"
+    "fixtures/clients/transcripts/omp-parity.json", "fixtures/clients/transcripts/wakes.expected.json", "fixtures/clients/transcripts/wakes.json"
    ]
   },
   "fractal-daemon": {

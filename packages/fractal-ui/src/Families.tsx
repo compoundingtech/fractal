@@ -56,7 +56,7 @@ export function Families({ direction = 'folio', scheme = 'light', density = 'com
       </Family>
       <Family name="StatusDot / Spinner / Progress">
         <div className="flex flex-wrap gap-x-5 gap-y-2">{actorStates.map((state, index) => <StatusDot key={index} {...state} />)}</div>
-        <div className="mt-3"><Spinner label="Fetching preview" /></div>
+        <div className="mt-3 flex flex-wrap gap-x-5 gap-y-2"><Spinner label="Fetching preview" /><Spinner label="Fetching preview" size="sm" /></div>
         <div className="mt-3 space-y-3"><Progress label="Checks" value={4} maxValue={6} tone="warning" /><Progress label="Upload" value={100} tone="good" size="sm" /></div>
       </Family>
       <Family name="CodeBlock" note="Plain text and JSON with filename plus copy; language chip; horizontal scroll for long lines.">
