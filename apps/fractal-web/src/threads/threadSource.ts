@@ -42,6 +42,12 @@ interface ThreadWatches {
   readonly timeline: (id: string) => Watch<ThreadTimelineEvent>
 }
 
+// Older daemons may grant the paired native actions, which require a device signature.
+const canSendUnsignedThread = (caps: Pick<Native.Capabilities, 'transport' | 'capabilities'>): boolean =>
+  caps.transport === 'local-web' || caps.capabilities.some(capability =>
+    capability.id === 'thread-browser-send' && capability.version >= 1 && capability.state === 'granted',
+  )
+
 const noAccess: ThreadAccess = { read: false, actions: new Set() }
 const refused = (error: unknown): Feed<never> => unavailable({
   reason: error instanceof ClientError && (error.status === 401 || error.status === 403) ? 'ungranted' : 'failed',
@@ -59,7 +65,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         if (!read && registry.get(titles).size > 0) registry.set(titles, new Map())
         const actions = new Set(read ? caps.capabilities.filter(capability =>
           capability.state === 'granted' && capability.id.startsWith('thread.')
-          && (caps.transport === 'local-web' || (capability.id !== 'thread.start' && capability.id !== 'thread.reply'))
+          && (canSendUnsignedThread(caps) || (capability.id !== 'thread.start' && capability.id !== 'thread.reply'))
         ).map(capability => capability.id) : [])
         get.setSelf({ read, exactSummary: read && hasConversationCapability(caps, 'thread-summary-feed'), actions, actor: caps.session_actor })
       }
@@ -211,6 +217,10 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         if (value.session_actor !== grant.actor) {
           attempts.delete(destination)
           return reject('The connected account changed. Open the thread again.')
+        }
+        if (!canSendUnsignedThread(value) || !value.capabilities.some(capability => capability.id === kind && capability.state === 'granted')) {
+          if (previous === undefined) attempts.delete(destination)
+          return reject('This connection cannot send to threads.')
         }
         const request = { id: `action/${attempt.key}`, idempotency_key: attempt.key, fence: { snapshot_id: snapshot.id, subject_revisions: {} } }
         const result = 'target_id' in parameters

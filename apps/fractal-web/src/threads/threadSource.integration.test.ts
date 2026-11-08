@@ -197,3 +197,51 @@ it('observes exact summary receipt updates without a write grant or a follow-up 
     expect(unsubscribe).toHaveBeenCalledOnce()
   }
 })
+
+
+it('sends the same typed actions for approved browsers and blocks writes if the fresh grant changes', async () => {
+  const writes: Array<{ readonly type: string; readonly id: string; readonly parameters: Record<string, unknown> }> = []
+  let browserGrant = true
+  let replyGrant = true
+  const client = new FractalClient({ baseUrl: 'http://example.test', fetchImpl: async (input, init) => {
+    if (String(input).endsWith('/capabilities')) return Response.json({
+      ...base, value: { ...base.value, capabilities: [
+        ...base.value.capabilities,
+        { id: 'threads-v1', version: 1, state: 'granted' },
+        { id: 'thread-browser-send', version: 1, state: browserGrant ? 'granted' : 'ungranted' },
+        { id: 'thread.start', version: 0, state: 'granted' },
+        { id: 'thread.reply', version: 0, state: replyGrant ? 'granted' : 'ungranted' },
+      ] },
+    })
+    const action = JSON.parse(String(init?.body)) as typeof writes[number]
+    writes.push(action)
+    return Response.json({ ...base, value: {
+      kind: 'action-result', status: 'completed', action_id: action.id, operation_id: 'operation/browser-send',
+      affected_ids: [action.parameters.target_id, 'message/browser-send'], snapshot_id: base.snapshot.id,
+    } })
+  } })
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(client, registry)
+  const stop = registry.mount(source.access)
+  const start = { agent_id: agent, origin_ask: 'step-run/review', origin_ask_episode: 'claim/ask', title: 'PR #42', content: 'Can we run the worker test?' }
+  const reply = { target_id: id, content: 'Please include cancellation.', thread_quote_id: 'message/worker-tests' }
+  try {
+    await vi.waitFor(() => expect(registry.get(source.access).actions).toEqual(new Set(['thread.start', 'thread.reply'])))
+    expect((await source.start('ask/review', start))._tag).toBe('Sent')
+    expect((await source.reply(reply))._tag).toBe('Sent')
+    expect(writes).toMatchObject([
+      { type: 'thread.start', parameters: { ...start, target_id: expect.stringMatching(/^thread\//) } },
+      { type: 'thread.reply', parameters: reply },
+    ])
+    for (const write of writes) expect(write.parameters).not.toHaveProperty('signature')
+    replyGrant = false
+    expect((await source.reply(reply))._tag).toBe('Refused')
+    replyGrant = true
+    browserGrant = false
+    expect((await source.reply(reply))._tag).toBe('Refused')
+    expect(writes).toHaveLength(2)
+  } finally {
+    stop()
+    registry.dispose()
+  }
+})

@@ -13,7 +13,11 @@ import { gatewayThreads } from './threadSource.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
-it('opens an active Inbox ask’s first composer inline with the ordinary Send control', async () => {
+it.each([
+  { connection: 'local browser', local: true, browserGrant: false, canStart: true },
+  { connection: 'approved paired browser', local: false, browserGrant: true, canStart: true },
+  { connection: 'legacy paired device', local: false, browserGrant: false, canStart: false },
+])('offers an inline Inbox composer only when $connection supports unsigned sends', async ({ local, browserGrant, canStart }) => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {}; unobserve() {}; disconnect() {} })
   const base = fixture.capabilities
@@ -36,10 +40,11 @@ it('opens an active Inbox ask’s first composer inline with the ordinary Send c
     const url = new URL(String(input))
     requests.push(url)
     if (url.pathname.endsWith('/capabilities')) return Response.json({
-      ...base, value: { ...base.value, transport: 'local-web', capabilities: [
+      ...base, value: { ...base.value, transport: local ? 'local-web' : base.value.transport, capabilities: [
         ...base.value.capabilities,
         { id: 'threads-v1', version: 1, state: 'granted' },
         { id: 'thread.start', version: 0, state: 'granted' },
+        ...(browserGrant ? [{ id: 'thread-browser-send', version: 1, state: 'granted' }] : []),
       ] },
     })
     return Response.json({ ...base, value: { items: [], next_cursor: null } })
@@ -64,6 +69,11 @@ it('opens an active Inbox ask’s first composer inline with the ordinary Send c
     await vi.waitFor(() => expect(requests.some(url =>
       url.searchParams.get('origin_ask') === 'step-run/review' && url.searchParams.get('origin_ask_episode') === 'claim/episode')).toBe(true))
     const button = Array.from(host.querySelectorAll('button')).find(each => each.textContent === 'Start thread')
+    if (!canStart) {
+      expect(button).toBeUndefined()
+      expect(host.querySelector('[aria-label="Message composer, Review PR #42"]')).toBeNull()
+      return
+    }
     expect(button).toBeDefined()
     await act(async () => button?.click())
     const composer = host.querySelector('[data-alert-id="attention/review"] [aria-label="Message composer, Review PR #42"]')
