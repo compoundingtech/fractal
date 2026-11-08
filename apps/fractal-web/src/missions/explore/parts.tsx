@@ -202,6 +202,8 @@ export const SmallButton = ({ label, onPress, children, pressed }: { readonly la
 // Trace: wall-clock Gantt. Bars per attempt; waits hatched (amber on you); failures marked with their reason.
 
 const ZOOMS = [{ id: 'all', label: 'All', ms: 0 }, { id: '12h', label: '12h', ms: 12 * 3_600_000 }, { id: '2h', label: '2h', ms: 2 * 3_600_000 }] as const
+/** Narrowest time track; below it the trace scrolls horizontally instead of collapsing beside the step labels. */
+export const MIN_TRACK_WIDTH = 240
 
 export const Trace = ({ mission, selected, onSelect, rowHeight = 26, labelWidth = 200, groupByAgent = false, projected = true }: {
   readonly mission: ExploreMission
@@ -241,7 +243,7 @@ export const Trace = ({ mission, selected, onSelect, rowHeight = 26, labelWidth 
   React.useEffect(() => {
     const element = scrollRef.current
     if (element === null) return
-    const observer = new ResizeObserver(() => setWidth(element.clientWidth - labelWidth))
+    const observer = new ResizeObserver(() => setWidth(Math.max(MIN_TRACK_WIDTH, element.clientWidth - labelWidth)))
     observer.observe(element)
     return () => observer.disconnect()
   }, [labelWidth])
@@ -269,8 +271,8 @@ export const Trace = ({ mission, selected, onSelect, rowHeight = 26, labelWidth 
     <div ref={scrollRef} style={{ overflowX: 'auto', position: 'relative' }}>
       <div role="grid" aria-label={`${mission.title} trace`} style={{ position: 'relative', width: labelWidth + total, fontSize: 12 }}>
         <div role="row" style={{ display: 'flex', height: 20, position: 'sticky', top: 0, borderBottom: `1px solid ${C.line}` }}>
-          <div style={{ width: labelWidth, flexShrink: 0, position: 'sticky', left: 0, background: C.canvas, zIndex: 2 }} />
-          <div style={{ position: 'relative', flex: 1 }}>{ticks.map(t => <span key={t} style={{ position: 'absolute', left: x(t) + 3, top: 3, fontSize: 10, color: C.muted, whiteSpace: 'nowrap' }}>{clock(t)}</span>)}</div>
+          <div role="columnheader" aria-label="Step" style={{ width: labelWidth, flexShrink: 0, position: 'sticky', left: 0, background: C.canvas, zIndex: 2 }} />
+          <div role="columnheader" aria-label="Time" style={{ position: 'relative', flex: 1 }}>{ticks.map(t => <span key={t} aria-hidden="true" style={{ position: 'absolute', left: x(t) + 3, top: 3, fontSize: 10, color: C.muted, whiteSpace: 'nowrap' }}>{clock(t)}</span>)}</div>
         </div>
         {ordered.map(step => {
           const isSel = selected === step.id
@@ -301,7 +303,7 @@ export const Trace = ({ mission, selected, onSelect, rowHeight = 26, labelWidth 
             </div>
           </React.Fragment>
         })}
-        <span aria-label="now" style={{ position: 'absolute', top: 0, bottom: 0, left: labelWidth + x(mission.now), width: 1.5, background: C.fg, opacity: 0.6, pointerEvents: 'none' }} />
+        <span aria-hidden="true" style={{ position: 'absolute', top: 0, bottom: 0, left: labelWidth + x(mission.now), width: 1.5, background: C.fg, opacity: 0.6, pointerEvents: 'none' }} />
       </div>
     </div>
   </div>

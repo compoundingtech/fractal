@@ -25,7 +25,7 @@ const elapsedText = (mission: ExploreMission) => {
 }
 
 const Row = ({ mission, children, trailing }: { readonly mission: ExploreMission; readonly children: React.ReactNode; readonly trailing: string }) =>
-  <div role="row" aria-label={`${mission.title}, ${progressOf(mission).done} of ${progressOf(mission).total} steps, ${trailing}`} style={{ display: 'grid', gridTemplateRows: '24px 20px', alignContent: 'center', height: 48, boxSizing: 'border-box', padding: '0 12px', color: C.fg, fontSize: 13, cursor: 'pointer' }}>
+  <div role="listitem" aria-label={`${mission.title}, ${progressOf(mission).done} of ${progressOf(mission).total} steps, ${trailing}`} style={{ display: 'grid', gridTemplateRows: '24px 20px', alignContent: 'center', height: 48, boxSizing: 'border-box', padding: '0 12px', color: C.fg, fontSize: 13, cursor: 'pointer' }}>
     <span style={{ display: 'flex', alignItems: 'center', gap: 8, minWidth: 0 }}>
       <Mark state={missionMark(mission)} />
       <span style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{mission.title}</span>

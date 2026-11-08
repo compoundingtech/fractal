@@ -4,7 +4,7 @@
 import * as React from 'react'
 
 import { HoverCardSurface } from '../../../../../packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx'
-import { C, Mark, SmallButton, STATE_LABEL } from './parts.tsx'
+import { C, Mark, MIN_TRACK_WIDTH, SmallButton, STATE_LABEL } from './parts.tsx'
 import { layered } from './layout.ts'
 import { clock, criticalPath, lineage, ranIn, runningMs, span, stateAt, stepEnd, stepStart, type ExploreMission, type PlanStep, type StepState } from './model.ts'
 
@@ -177,7 +177,7 @@ export const LinkedTrace = ({ mission, linked, rowHeight = 22, labelWidth = 190 
   React.useEffect(() => {
     const element = scrollRef.current
     if (element === null) return
-    const observer = new ResizeObserver(() => setWidth(element.clientWidth - labelWidth))
+    const observer = new ResizeObserver(() => setWidth(Math.max(MIN_TRACK_WIDTH, element.clientWidth - labelWidth)))
     observer.observe(element)
     return () => observer.disconnect()
   }, [labelWidth])
@@ -202,8 +202,8 @@ export const LinkedTrace = ({ mission, linked, rowHeight = 22, labelWidth = 190 
     <div ref={scrollRef} style={{ overflowX: 'auto', position: 'relative' }}>
       <div role="grid" aria-label={`${mission.title} trace`} style={{ position: 'relative', width: labelWidth + total, fontSize: 12, userSelect: 'none' }}>
         <div role="row" style={{ display: 'flex', height: 22, borderBottom: `1px solid ${C.line}` }}>
-          <div style={{ width: labelWidth, flexShrink: 0, position: 'sticky', left: 0, background: C.canvas, zIndex: 2 }} />
-          <div data-trace-axis aria-label="Time axis: drag to select a range" style={{ position: 'relative', flex: 1, cursor: 'col-resize', background: C.hover }}
+          <div role="columnheader" aria-label="Step" style={{ width: labelWidth, flexShrink: 0, position: 'sticky', left: 0, background: C.canvas, zIndex: 2 }} />
+          <div role="columnheader" data-trace-axis aria-label="Time axis: drag to select a range" style={{ position: 'relative', flex: 1, cursor: 'col-resize', background: C.hover }}
             onPointerDown={event => { brushing.current = tAt(axisX(event)); (event.currentTarget as Element).setPointerCapture(event.pointerId) }}
             onPointerMove={event => { const a = brushing.current; if (a === undefined) return; const b = tAt(axisX(event)); if (Math.abs(x(b) - x(a)) > 4) linked.setBrush(a < b ? [a, b] : [b, a]) }}
             onPointerUp={event => { const a = brushing.current; brushing.current = undefined; if (a !== undefined && Math.abs(x(tAt(axisX(event))) - x(a)) <= 4) linked.setBrush(undefined) }}>
