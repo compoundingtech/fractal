@@ -2004,7 +2004,7 @@
         "nudged_at": { "oneOf": [{ "$ref": "#/$defs/Timestamp" }, { "type": "null" }], "description": "When st last nudged this held step's holder for idling with nothing set to wake it." },
         "attempts": { "type": "array", "items": { "$ref": "#/$defs/MissionStepAttempt" }, "description": "Mission detail only, on the runs it enriches (open runs, the latest finished run and a `?run=` run): each attempt of this step, oldest first, folded from its lifecycle claims. Absent elsewhere and on older daemons, which is not proof of one attempt." },
         "waits": { "type": "array", "items": { "$ref": "#/$defs/MissionStepWait" }, "description": "Mission detail only, like attempts: the intervals this step waited, by start." },
-        "transitions": { "type": "array", "items": { "$ref": "#/$defs/MissionStepTransition" }, "description": "Mission detail only, like attempts: the step's state changes and stall markers, oldest first." },
+        "transitions": { "type": "array", "items": { "$ref": "#/$defs/MissionStepTransition" }, "description": "Mission detail only, like attempts: the step's state changes and stall markers (consecutive nudges as one), oldest first." },
         "history_complete": { "type": "boolean", "description": "Present with attempts, waits and transitions. False when the per-step caps (20 attempts, 40 waits, 60 transitions; the newest are kept) dropped older entries. The claims are durable, so nothing else shortens a history." },
         "eta": { "$ref": "#/$defs/MissionStepEta" }
       }
@@ -2038,7 +2038,7 @@
       "required": ["at", "status", "attempt", "event"],
       "properties": {
         "at": { "type": "integer", "minimum": 0, "description": "Unix milliseconds." },
-        "status": { "$ref": "#/$defs/WorkState", "description": "The step's state after the event, in the vocabulary of `state`. A repeat of the previous state and attempt is not listed again." },
+        "status": { "anyOf": [{ "enum": ["waiting-person", "waiting", "ready", "claimed", "blocked", "verifying", "completed", "failed", "cancelled"] }, { "type": "string" }], "description": "The step's state after the event, in the WorkState vocabulary of `state`. Open, because it replays durable claims: a status word an older or newer writer recorded passes through. A repeat of the previous state and attempt is not listed again." },
         "attempt": { "type": "integer", "minimum": 1 },
         "event": { "anyOf": [{ "enum": ["state", "carried", "retried", "claimed", "submitted", "failed", "released", "nudged"] }, { "type": "string" }], "description": "The claim behind it. nudged is a stall marker: st nudged an idle holder, and status repeats the state it found. Clients treat an unknown event as state." },
         "reason": { "type": "string" },

@@ -348,7 +348,7 @@ pub fn fold_step_history(
                 }
             }
             "work.nudged" => {
-                transitions.push(StepTransition {
+                let nudge = StepTransition {
                     at,
                     status: if status.is_empty() {
                         client_state("claimed")
@@ -359,7 +359,21 @@ pub fn fold_step_history(
                     event: "nudged",
                     reason: reason.clone(),
                     idle_since: fields.get("idle_since_unix_ms").and_then(millis),
-                });
+                };
+                // Nudges of one idle stretch stand as one marker, so they never crowd the
+                // state edges out of the cap: the latest nudge, since the earliest idle time.
+                match transitions.last_mut() {
+                    Some(last)
+                        if last.event == "nudged"
+                            && last.status == nudge.status
+                            && last.attempt == nudge.attempt =>
+                    {
+                        last.at = nudge.at;
+                        last.reason = nudge.reason.or(last.reason.take());
+                        last.idle_since = last.idle_since.or(nudge.idle_since);
+                    }
+                    _ => transitions.push(nudge),
+                }
             }
             _ => {}
         }
@@ -816,6 +830,38 @@ mod tests {
         assert_eq!(
             history.attempts.last().unwrap().reason.as_deref(),
             Some("failure 25")
+        );
+    }
+
+    #[test]
+    fn repeated_nudges_coalesce_and_keep_the_state_edges_within_the_cap() {
+        let mut events = vec![event(
+            "work.claimed",
+            json!({"attempt": 1, "claimant": "agent/one"}),
+            10,
+        )];
+        for n in 0..80_u128 {
+            events.push(event(
+                "work.nudged",
+                json!({"attempt": 1, "idle_since_unix_ms": (15 + n).to_string(), "reason": "idle"}),
+                20 + n,
+            ));
+        }
+        events.push(event("work.submitted", json!({"attempt": 1}), 200));
+        let history = fold_step_history(&events, &[], 300);
+        assert!(history.complete);
+        let shown = history
+            .transitions
+            .iter()
+            .map(|transition| (transition.event, transition.at, transition.idle_since))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            shown,
+            vec![
+                ("claimed", 10, None),
+                ("nudged", 99, Some(15)),
+                ("submitted", 200, None)
+            ]
         );
     }
 

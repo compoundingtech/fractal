@@ -486,7 +486,6 @@ fn mission_detail_step_history_eta_and_declaration_provenance_conform() {
         assert_conforms(&validator, "a step without history", &older);
         for (path, value) in [
             ("/run_details/0/steps/0/waits/0/start", serde_json::json!("2026-11-08T10:00:00Z")),
-            ("/run_details/0/steps/0/transitions/0/status", serde_json::json!("pending")),
             ("/run_details/0/steps/1/eta/samples", serde_json::json!(0)),
         ] {
             let mut invalid = mission.clone();
@@ -499,6 +498,7 @@ fn mission_detail_step_history_eta_and_declaration_provenance_conform() {
         "/run_details/0/steps/0/attempts/0/outcome",
         "/run_details/0/steps/0/waits/0/kind",
         "/run_details/0/steps/0/transitions/0/event",
+        "/run_details/0/steps/0/transitions/0/status",
     ] {
         let mut future = mission.clone();
         *future.pointer_mut(path).unwrap() = serde_json::json!("future-word");

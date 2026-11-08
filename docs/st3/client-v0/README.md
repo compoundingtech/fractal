@@ -296,13 +296,15 @@ fields, and other runs' steps omit them: absence is not proof of a single attemp
   the claim. Waits of different kinds may overlap.
 - `transitions[]`: `{at, status, attempt, event, reason?, idle_since?}`, oldest first, from
   `step-run.state`, `step-run.carried`, `step-run.retried` and the `work.*` claims that move a step,
-  in the `state` vocabulary. A repeated state of the same attempt is listed once. `event: nudged`
-  is a stall marker from `work.nudged`; its `status` repeats the state st found and `idle_since`
-  says since when the holder was idle.
+  in the `state` vocabulary (an open word: it replays durable claims). A repeated state of the same
+  attempt is listed once. `event: nudged` is a stall marker from `work.nudged`; its `status` repeats
+  the state st found, and consecutive nudges at that state stand as one marker with the latest
+  `at` and the earliest `idle_since`, since when the holder was idle.
 
 The fold reads the lifecycle claims of the enriched runs' current-generation steps in one batch,
-as step timing does, but never `work.renewed` or a `work.progress` without a `clock`, so its cost
-follows a step's claims, attempts and waits, not its lease renewals. It keeps the newest 20
+as step timing does. It never reads `work.renewed`, and a `work.progress` without a `clock` is
+filtered inside SQLite and never returned, so its cost follows a step's lifecycle and progress
+claims, not its lease renewals. It keeps the newest 20
 attempts, 40 waits and 60 transitions per step and sets `history_complete: false` when it dropped
 older ones; every kind it reads is `durable`, so checkpoints never shorten a history. A step
 carried from an earlier generation shows the history of its current `step-run` subject only.
