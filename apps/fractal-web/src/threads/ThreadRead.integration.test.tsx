@@ -75,7 +75,7 @@ it('marks only the current visible message rows through their newest message', a
   const host = document.createElement('div')
   document.body.append(host)
   const root = createRoot(host)
-  const mark = () => [...host.querySelectorAll('button')].find(row => row.textContent === 'Mark visible replies read')
+  const mark = () => [...host.querySelectorAll('button')].find(row => row.getAttribute('aria-label') === 'Mark visible replies read')
   try {
     await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveThreadPane threadId={id} /></DataSourceProvider>))
     await vi.waitFor(() => expect(observations.at(-1)?.rows.size).toBe(1))

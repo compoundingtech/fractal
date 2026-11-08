@@ -54,22 +54,29 @@ export function ThreadPanel({
   }
   const titleRevision = thread.title_revision
   const metadata = <span {...stylex.props(styles.metadata)}>
-    {messageCount === undefined ? null : `${messageCount} ${messageCount === 1 ? 'message' : 'messages'}`}
+    {messageCount === undefined ? null : <>
+      <span {...stylex.props(styles.wideLabel)}>{messageCount} {messageCount === 1 ? 'message' : 'messages'}</span>
+      <span aria-label={`${messageCount} ${messageCount === 1 ? 'message' : 'messages'}`} {...stylex.props(styles.compactLabel)}>{messageCount}</span>
+    </>}
     {messageCount !== undefined && thread.state === 'closed' ? ' · ' : null}
     {thread.state === 'closed' ? 'Closed' : onHideDraft === undefined ? null : 'Draft'}
   </span>
   const feedback = error === undefined ? null : <p role="alert">{error}</p>
+  const title = <span {...stylex.props(styles.title)} title={thread.title}>{thread.title}</span>
+  const unreadDot = unread ? <span aria-label="Unread" {...stylex.props(styles.unread)}>●</span> : null
   const heading = embedded ? <Button aria-expanded={open} aria-controls={open ? contentId : undefined} onPress={() => { setExpanded(!open); onExpansionChange?.(!open) }} {...stylex.props(styles.header)}>
       <span aria-hidden="true">{open ? '▾' : '▸'}</span>
-      <span {...stylex.props(styles.title)}>{thread.title}</span>
-      {metadata}
-      {unread ? <span aria-label="Unread" {...stylex.props(styles.unread)}>●</span> : null}
-    </Button> : <h2 {...stylex.props(styles.header)}>{thread.title}{metadata}</h2>
+      {title}{metadata}{unreadDot}
+    </Button> : <h2 {...stylex.props(styles.header)}>{title}{metadata}{unreadDot}</h2>
   return <section data-thread-panel="" aria-label={thread.title} {...stylex.props(styles.panel)}>
     {open && onMarkRead !== undefined ? <div data-thread-read-heading="" {...stylex.props(styles.readHeader)}>
       <div {...stylex.props(styles.readHeadingRow)}>
         {heading}
-        <Button isDisabled={pending || !canMarkRead} onPress={() => { void run(onMarkRead) }} {...stylex.props(styles.readButton)}>Mark visible replies read</Button>
+        <Button aria-label="Mark visible replies read"
+          isDisabled={pending || !canMarkRead} onPress={() => { void run(onMarkRead) }} {...stylex.props(styles.readButton)}>
+          <span {...stylex.props(styles.wideLabel)}>Mark visible replies read</span>
+          <span {...stylex.props(styles.compactLabel)}>Mark read</span>
+        </Button>
       </div>
       {feedback}
     </div> : heading}
@@ -98,11 +105,16 @@ export function ThreadPanel({
 }
 
 const styles = stylex.create({
-  panel: { minWidth: 0, borderColor: c.border, borderWidth: 1, borderStyle: 'solid', borderRadius: 6 },
+  panel: { containerName: 'thread-panel', containerType: 'inline-size', minWidth: 0, borderColor: c.border, borderWidth: 1, borderStyle: 'solid', borderRadius: 6 },
   header: { display: 'flex', alignItems: 'baseline', gap: s.sm, width: '100%', minWidth: 0, textAlign: 'start', borderWidth: 0, backgroundColor: 'transparent', color: c.fg, padding: s.sm, margin: 0, fontSize: t.metaSize },
   readHeader: { position: 'sticky', top: 0, zIndex: 1, backgroundColor: c.canvas },
   readHeadingRow: { display: 'flex', alignItems: 'center', paddingInlineEnd: s.sm },
-  readButton: { flexShrink: 0, whiteSpace: 'nowrap' },
+  readButton: { flexShrink: 0, whiteSpace: 'nowrap', color: c.fgMuted, fontSize: t.metaSize,
+    borderRadius: 6, paddingInline: s.sm, paddingBlock: s.xs, cursor: 'pointer',
+    ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outline: `2px solid ${c.primary}` },
+    ':disabled': { opacity: 0.5, cursor: 'default' } },
+  wideLabel: { display: { default: 'inline', '@container thread-panel (max-width: 360px)': 'none' } },
+  compactLabel: { display: { default: 'none', '@container thread-panel (max-width: 360px)': 'inline' } },
   title: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   metadata: { flexShrink: 0, color: c.fgMuted },
   unread: { flexShrink: 0, color: c.primary },
