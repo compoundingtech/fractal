@@ -82,6 +82,9 @@ const servedPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   await expect(sidebar.getBoundingClientRect().width).toBe(256)
   const all = rows(canvasElement)
   await expect(all.map((row) => row.dataset.alertGlyph).sort()).toEqual(['?', '◆', '◆', '◆'])
+  // A harness question is attention like any other ask: the same amber as ◆, told apart by its glyph, never the accent.
+  const glyphColor = (glyph: string) => getComputedStyle(canvasElement.querySelector(`[data-alert-row-glyph="${glyph}"]`)!).color
+  await expect(glyphColor('?')).toBe(glyphColor('◆'))
   // SR-2 geometry: every row is 48px; the actions button takes a touch target only in the drawer layout.
   for (const row of all) {
     await expect(rowButton(row).getBoundingClientRect().height).toBe(48)
