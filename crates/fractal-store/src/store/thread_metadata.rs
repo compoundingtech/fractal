@@ -228,7 +228,15 @@ fn owned_creation(
     person: &str,
     creating: bool,
 ) -> Result<Option<ClaimRecord>, FractalError> {
-    let Some(creator) = latest_applied_claim(connection, subject, "thread.created")? else {
+    // A conflicting creation does not establish ownership.
+    let creation = latest_applied_claim(connection, subject, "thread.created").map_err(|error| {
+        if error.code == "idempotency-conflict" {
+            unavailable()
+        } else {
+            error
+        }
+    })?;
+    let Some(creator) = creation else {
         return if creating {
             Ok(None)
         } else {
