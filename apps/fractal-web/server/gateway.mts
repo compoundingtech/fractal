@@ -8,6 +8,7 @@ import type { Tracer } from 'effect'
 import { BoundaryError, reject } from './boundary.mts'
 import { spanOptions, traceHeaders } from './tracing.mts'
 import { encodingQualities } from './static.mts'
+import { browserAuthorization } from './browserCookie.mts'
 
 const responseCodings = ['br', 'gzip', 'identity'] as const
 
@@ -79,7 +80,7 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
         settled = true; cleanup(); resume(Effect.succeed(reply?.statusCode ?? 502))
       }
       const upstream = request({ socketPath, path: req.url, method: req.method, headers: {
-        ...cleanHeaders(req.headers), host, authorization, ...traceHeaders(span),
+        ...cleanHeaders(req.headers), host, authorization: browserAuthorization(req.headers, authorization), ...traceHeaders(span),
       }, agent: false }, (incoming) => {
         reply = incoming
         const headers = cleanHeaders(incoming.headers)
@@ -140,7 +141,7 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
       const clientClosed = () => fail()
       const cleanup = () => { socket.off('error', error); socket.off('close', clientClosed) }
       const upstream = request({ socketPath, path: withoutTraceQuery(req.url), method: req.method, headers: {
-        ...cleanHeaders(req.headers, true), host, authorization, ...traceHeaders(span),
+        ...cleanHeaders(req.headers, true), host, authorization: browserAuthorization(req.headers, authorization), ...traceHeaders(span),
         ...upgradeClientHeaders(req),
         // Browser WebSocket cannot send SDK headers, including on the early socket.
         // Old daemons ignore this additive feature; readers still detect optional blocks.
