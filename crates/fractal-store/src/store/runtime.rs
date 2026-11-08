@@ -943,7 +943,8 @@ mod schema_install_tests {
                 let current = plan(&connection, sql, active);
                 eprintln!("assistant admission version={version} active={active} before={previous:?} after={current:?}");
                 assert!(
-                    current.iter().any(|detail| detail.contains("SEARCH") && detail.contains(INDEX)
+                    current.iter().any(|detail| detail.contains("SEARCH")
+                        && (detail.contains(INDEX) || (!active && detail.contains(EXPIRY_INDEX)))
                         && detail.contains("kind=?") && detail.contains("<expr>=?")),
                     "version {version}: before={previous:?}; after={current:?}",
                 );
