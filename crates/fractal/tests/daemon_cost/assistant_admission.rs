@@ -210,11 +210,13 @@ fn foreign_same_profile(store: &Store, anchor: Arc<smallclaims::fleet::MemberKey
             ids.push(overlay.id);
         }
     }
-    sync(&peer, store);
-    for id in ids {
-        assert!(revision_api::verified_writer(store, &id),
-            "the foreign-grant scenario must exercise verified provenance");
+    // Exchanges are cut to a body budget, so overlay histories need several rounds.
+    peer.seal_local_batches().unwrap();
+    for _ in 0..256 {
+        sync(&peer, store);
+        if ids.iter().all(|id| revision_api::verified_writer(store, id)) { return; }
     }
+    panic!("the foreign-grant scenario must exercise verified provenance");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
