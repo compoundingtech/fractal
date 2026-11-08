@@ -63,7 +63,7 @@ export async function pendingRenewals(profile: RenewalProfile, url: string, apiV
 }
 
 /** The single secure profile write is the commit; failed proofs and writes retain the old profile. */
-export async function approveRenewal(profileKey: string, previous: RenewalProfile, url: string, offer: RenewalOffer, apiVersion: string, ports: RenewalPorts): Promise<RenewalProfile> {
+export async function approveRenewal(profileKey: string, previous: RenewalProfile, url: string | (() => Promise<string>), offer: RenewalOffer, apiVersion: string, ports: RenewalPorts): Promise<RenewalProfile> {
   requireValue(previous.personRootFingerprint && previous.signing && offer.old_public_key === previous.signing.key && offer.person_id === previous.signing.person && offer.expires_at_unix_ms > ports.now(), 'Renewal is no longer available');
   const root = await verifyPersonRoot(offer.person_root_key_proof, offer.person_id, previous.personRootFingerprint!, ports.crypto);
   requireValue(await ports.crypto.verify(root, renewalOfferText(offer), offer.issuer_signature), 'Renewal offer signature does not verify');
@@ -74,8 +74,9 @@ export async function approveRenewal(profileKey: string, previous: RenewalProfil
     const text = renewalApprovalText(offer, candidate.key);
     const candidateSignature = await ports.approve(text, candidate.handle);
     const oldSignature = await ports.sign(text, previous.signing!.handle);
+    const completionUrl = typeof url === 'string' ? url : await url();
     requireValue(offer.expires_at_unix_ms > ports.now(), 'Renewal expired; reopen the app to refresh it');
-    const session = await ports.post(url, '/v1/client/pairings/renewals/complete', { api_version: apiVersion, renewal_id: offer.renewal_id, nonce: offer.nonce, expires_at_unix_ms: offer.expires_at_unix_ms, device_public_key: previous.signing!.key, candidate_public_key: candidate.key, key_storage: candidate.storage, old_signature: oldSignature, candidate_signature: candidateSignature }) as PersonPairedSession;
+    const session = await ports.post(completionUrl, '/v1/client/pairings/renewals/complete', { api_version: apiVersion, renewal_id: offer.renewal_id, nonce: offer.nonce, expires_at_unix_ms: offer.expires_at_unix_ms, device_public_key: previous.signing!.key, candidate_public_key: candidate.key, key_storage: candidate.storage, old_signature: oldSignature, candidate_signature: candidateSignature }) as PersonPairedSession;
     requireValue(session.kind === 'paired-session' && session.person_id === offer.person_id && JSON.stringify(session.scopes) === JSON.stringify(offer.scopes), 'Renewal returned a different person or scopes');
     await verifyPairing(session, candidate.key, previous.personRootFingerprint, ports.crypto);
     requireValue(JSON.stringify(await ports.read(profileKey)) === JSON.stringify(previous), 'The saved pairing changed; renewal was not saved');

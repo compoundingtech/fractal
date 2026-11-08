@@ -97,6 +97,14 @@ test('approval binds both signatures to all tuple fields and candidate then comm
   assert.equal(JSON.stringify(t.requests).includes(t.previous.credential), false);
 });
 
+test('completion resolves the current member route after native approval redials Fabric', async () => {
+  const t = setup();
+  let route = 'http://127.0.0.1:41001';
+  t.ports.approve = async () => { route = 'http://127.0.0.1:41002'; return 'candidate-signature'; };
+  await approveRenewal('profile', t.previous, async () => route, t.challenge, 'st3.client.v0', t.ports);
+  assert.equal(t.requests[0].url, 'http://127.0.0.1:41002');
+});
+
 test('cancellation, unavailable enclave, protocol refusal, changed grants and secure-write failure retain the previous profile', async () => {
   const cases = [
     ports => { ports.approve = async () => { throw new Error('cancelled'); }; },

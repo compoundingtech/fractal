@@ -431,6 +431,19 @@ function useAppStore(proof?: FabricProfile) {
     if (!isFabricGatewayId(profile.url)) return profile.url;
     return fabricSnapshot.phase === 'ready' && fabricMember && fabricGatewayId(fabricMember) === profile.url ? fabricSnapshot.bridgeUrl : undefined;
   };
+  const renewalRouteRef = useRef(renewalRoute);
+  renewalRouteRef.current = renewalRoute;
+  const currentRenewalRoute = async (profile: PhoneProfile, expires: number): Promise<string> => {
+    const until = Math.min(expires, Date.now() + 15_000);
+    do {
+      const route = renewalRouteRef.current(profile);
+      if (route) return route;
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 100);
+      await promise;
+    } while (Date.now() < until);
+    throw new Error('The paired member is not connected.');
+  };
   const pollRenewals = async () => {
     if (proof || renewalWorking.current || !foreground.current.active) return;
     renewalWorking.current = true;
@@ -872,7 +885,7 @@ function useAppStore(proof?: FabricProfile) {
       renewalWorking.current = true; setRenewalBusy(true); setRenewalIssue('');
       try {
         if (!await push.forgetIssuer(renewal.profileKey)) throw new Error('Notification cleanup is incomplete.');
-        const next = await approveRenewal(renewal.profileKey, renewal.profile, route, renewal.offer, API_VERSION, renewalPorts) as PhoneProfile;
+        const next = await approveRenewal(renewal.profileKey, renewal.profile, () => currentRenewalRoute(renewal.profile, renewal.offer.expires_at_unix_ms), renewal.offer, API_VERSION, renewalPorts) as PhoneProfile;
         if (renewal.profileKey === PROFILE_KEY) {
           setCredential(next.credential); setCaps(null); setPairDraft(null); setPairingIssue('');
         } else setOwnProfiles(held => new Map(held).set(renewal.profileKey, next));
