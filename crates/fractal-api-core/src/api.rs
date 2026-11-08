@@ -10930,12 +10930,15 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
         .and_then(|reloaded| reloaded.ok())
         .and_then(|config| crate::store::LimitsPolicy::from_config(&config))
         .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |policy| policy.fresh_ms);
+    let now = client_now_ms() as u64;
     let mut rows = crate::objectives::rows(
         &request_latency_target_windows(),
         &limits,
-        client_now_ms() as u64,
+        now,
         fresh_ms,
     );
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, crate::credit_objectives::rows(store, now, fresh_ms)?));
     if let Some(open) = store.open_divergences_at_last_check() {
         // Objectives come before budgets.
         let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());

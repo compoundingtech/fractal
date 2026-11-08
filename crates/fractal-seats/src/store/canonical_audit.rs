@@ -153,6 +153,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_seat_accounts",
         "account_limit_readings",
         "account_limit_seats",
+        "local_usage_credit_heads",
+        "local_usage_credit_pending",
+        "local_usage_credit_progress",
         "local_latest_slots",
         "local_resource_projection_pending",
         // Member-local duration windows and dirty runs, rebuilt from canonical claims.
@@ -216,6 +219,8 @@ fn every_persistent_table_has_a_projection_scope() {
         .map(str::to_owned)
         .collect::<BTreeSet<_>>();
     let store = Store::open_memory("alder").unwrap();
+    // Exercise the lazily installed credit tables as well as the always-present schema.
+    store.wait_for_usage_credit_backfill().unwrap();
     let connection = store.readers.get();
     assert_eq!(
         SHARED_TABLES,
