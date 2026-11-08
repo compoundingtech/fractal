@@ -142,6 +142,10 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "GET /v1/client/ready-work",
+        "requires a declared cohort and a current work publication matching both graph head and healthy attention frontier, with at most 5,000 work rows; this census mutates the store between probes, so a plain GET would measure stale-cut refusal rather than ready-demand handoff reads; populated same-cut cost probe follow-up: #5776",
+    ),
+    (
         "POST /v1/fleet/admission-override",
         "an operator's rare release of a waiting member; it reads this member's peers and its newest daemon.started claim and appends one claim, none of which grows with claim history; placement_handoff::a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_override covers the real route through the CLI",
     ),

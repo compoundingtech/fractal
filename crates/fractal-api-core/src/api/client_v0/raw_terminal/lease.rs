@@ -68,6 +68,10 @@ fn latest(
     subject: &str,
     kind: &str,
 ) -> anyhow::Result<Option<(String, String, Option<String>, Value)>> {
+    if kind == "custom.client.pairing-completed" {
+        return Ok(fractal_store::pairing::latest_completion(connection, subject, None, client_now_ms())?
+            .map(|claim| (claim.id, claim.origin, claim.actor, claim.body)));
+    }
     let query = smallclaims::store::canonical_sql(
         "SELECT id,origin,actor,body FROM claims WHERE subject=?1 AND kind=?2 ORDER BY CANONICAL_DESC(claims) LIMIT 1",
     );
