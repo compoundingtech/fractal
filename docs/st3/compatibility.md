@@ -82,6 +82,13 @@ false, conflicted, unsigned, or unanchored capability evidence and unfenced lega
 writers. A refusal rejects the full publication before any declaration is written;
 an old member never receives a new-child publication through a refused write.
 Upgrade all active members or fence legacy peers before publishing the metadata.
+Keep every member on a supporting binary while populated metadata exists.
+This is an ongoing requirement. The gate checks support only at write time.
+It does not prevent a member from starting an old binary later.
+It does not prevent an old member from joining later.
+An old member drops agent metadata and fails mission revision validation.
+Remove the metadata with upgraded readers before a rollback.
+
 This per-feature gate does not establish the general adjacent-release guarantee
 described above. See [declared admission](priority.md#declared-admission).
 
