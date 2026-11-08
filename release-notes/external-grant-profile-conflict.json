@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "summary": "Suspend external-grant authentication when replicated grants assign opposite profiles to one principal",
+  "replay": {
+    "status": "changed",
+    "detail": "Existing append-only grant and revocation claims are read without rewriting history. Active opposite-profile grants conflict regardless of replication arrival order; revoked and expired grants do not contribute to the conflict."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Adds the typed client error grant-profile-conflict (GrantProfileConflict in Rust), returned as HTTP 409, plus optional AssistantGrant conflict and cleared_conflicts projection witnesses with typed assistant/service profiles and revoked/expired causes. No grant claim shape or storage migration changes."
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "If a principal has active grants in both assistant and service profiles, all of that principal's external grants are suspended, not just the losing or newest profile. Multiple same-profile grants remain allowed. Authentication resumes after replicated append-only revocations or expiry remove the opposite-profile conflict from the local view; service issuance remains disabled. Inspect computes active witnesses and cleared_conflicts witnesses with revoked or expired causes; no conflict state is persisted."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Conflict admission counts only well-formed foreign owner grants and matching effective policies with authenticated envelope provenance from a keyed, admitted fleet writer. Unverifiable or malformed replicated custom claims cannot acquire suspension authority by naming an owner. Tokens remain issuer-local. Older members do not enforce this suspension rule, so upgrade all serving members before relying on it."
+  },
+  "downtime": {
+    "status": "changed",
+    "detail": "No migration downtime is required. Affected people cannot authenticate with any external grant while a profile conflict remains visible; a partition can extend this interruption until revocations replicate. Unaffected people retain existing authentication behavior."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "For a conflicted principal, choose the intended profile and append revocations for every active grant in the opposite profile. Let those revocations replicate to each serving issuer; do not delete claims or replace tokens to resolve the conflict."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "After revocations replicate, remaining otherwise-valid grants in the intended profile can authenticate again without reissuance. Expiry of every remaining active opposite-profile grant also clears the conflict; expired and revoked grants remain unusable. If authentication is still suspended on an issuer after revocation, restore replication so it receives the revocations; restarting or changing claim arrival order does not resolve the conflict."
+  },
+  "commits": []
+}

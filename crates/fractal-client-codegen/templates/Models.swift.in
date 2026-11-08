@@ -153,6 +153,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case peerTooOld
     case validationFailed
     case idempotencyConflict
+    case grantProfileConflict
     case agentsPublicationRowTooLarge
     case attentionMigrated
     case invalidAnswer, notAnswerable
@@ -243,6 +244,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "peer-too-old": .peerTooOld
         case "validation-failed": .validationFailed
         case "idempotency-conflict": .idempotencyConflict
+        case "grant-profile-conflict": .grantProfileConflict
         case "stale-fence": .staleFence
         case "issuer-required": .issuerRequired
         case "invalid-answer": .invalidAnswer; case "not-answerable": .notAnswerable
@@ -333,6 +335,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .peerTooOld: "peer-too-old"
         case .validationFailed: "validation-failed"
         case .idempotencyConflict: "idempotency-conflict"
+        case .grantProfileConflict: "grant-profile-conflict"
         case .staleFence: "stale-fence"
         case .issuerRequired: "issuer-required"
         case .invalidAnswer: "invalid-answer"; case .notAnswerable: "not-answerable"
@@ -1427,7 +1430,21 @@ public struct AssistantGrant: Codable, Sendable {
     public let kind, id, sessionActor, deviceID, keyID, issuer, expiresAt, consentEvidence: String; public let principal: AssistantPrincipal; public let senderClass: AssistantSenderClass; public let scopes: [AssistantScope]; public let policyRevision: UInt64; public let minimalReadMode: AssistantMinimalReadMode; public let recipientAllowlist: [String]; public let disclosureConsent, revoked: Bool
     /// Owner-provisioned SCG read pins; absent means every assistant read is denied.
     public let readTrust: AssistantReadTrust?
-    enum CodingKeys: String, CodingKey { case kind, id, sessionActor = "session_actor", deviceID = "device_id", keyID = "key_id", issuer, expiresAt = "expires_at", consentEvidence = "consent_evidence", principal, senderClass = "sender_class", scopes, policyRevision = "policy_revision", minimalReadMode = "minimal_read_mode", recipientAllowlist = "recipient_allowlist", disclosureConsent = "disclosure_consent", revoked, readTrust = "read_trust" }
+    public let conflict: GrantProfileConflictWitness?
+    public let clearedConflicts: [ClearedGrantProfileConflictWitness]?
+    enum CodingKeys: String, CodingKey { case kind, id, sessionActor = "session_actor", deviceID = "device_id", keyID = "key_id", issuer, expiresAt = "expires_at", consentEvidence = "consent_evidence", principal, senderClass = "sender_class", scopes, policyRevision = "policy_revision", minimalReadMode = "minimal_read_mode", recipientAllowlist = "recipient_allowlist", disclosureConsent = "disclosure_consent", revoked, readTrust = "read_trust", conflict, clearedConflicts = "cleared_conflicts" }
+}
+public enum ExternalGrantProfile: String, Codable, Sendable { case assistant, service }
+public enum GrantProfileConflictCause: String, Codable, Sendable { case revoked, expired }
+public struct GrantProfileWitness: Codable, Sendable {
+    public let grantID: String?; public let origin: String; public let profile: ExternalGrantProfile
+    enum CodingKeys: String, CodingKey { case grantID = "grant_id", origin, profile }
+}
+public struct GrantProfileConflictWitness: Codable, Sendable {
+    public let grants: [GrantProfileWitness]
+}
+public struct ClearedGrantProfileConflictWitness: Codable, Sendable {
+    public let grants: [GrantProfileWitness]; public let cause: GrantProfileConflictCause
 }
 public struct AssistantGrantPolicy: Codable, Sendable {
     public let apiVersion, consentEvidence: String; public let scopes: [AssistantScope]; public let expiresInSeconds: UInt64?; public let disclosureConsent: Bool; public let minimalReadMode: AssistantMinimalReadMode; public let recipientAllowlist: [String]?

@@ -2935,6 +2935,55 @@ impl Store {
         Ok(false)
     }
 
+    /// Whether an accepted copy was signed by a keyed fleet member acting as its origin.
+    /// Requires a valid record in a validated envelope, a signature key authorized for that
+    /// writer's sequence, and a cryptographically valid signature in this store's fleet/shard
+    /// domain. Legacy and unkeyed writers do not authenticate provenance. Reads only sealed
+    /// membership; this query never seals local batches or scans the replication log.
+    pub fn claim_has_authenticated_member_writer(&self, claim_id: &str) -> Result<bool> {
+        self.read_snapshot(|_| {
+            let membership = self.fleet_membership_sealed()?;
+            let connection = self.readers.get();
+            let Some(fleet_id) = self.signing_fleet_id(&connection)? else {
+                return Ok(false);
+            };
+            let shard = fleet_meta(&connection, "shard_id")?;
+            let mut statement = connection.prepare_cached(
+                "SELECT records.writer, records.sequence, records.envelope_hash,
+                        signatures.member_key, signatures.signature
+                 FROM replica_records AS records
+                 JOIN claims ON claims.id=records.claim_id AND claims.origin=records.writer
+                 JOIN replica_envelopes AS envelopes
+                   USING (writer, sequence, envelope_hash)
+                 JOIN replica_envelope_signatures AS signatures
+                   USING (writer, sequence, envelope_hash)
+                 WHERE records.claim_id=?1 AND records.state='valid'
+                   AND envelopes.receipt_state='validated'",
+            )?;
+            let rows = statement.query_map([claim_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (writer, sequence, hash, key, signature) = row?;
+                if matches!(
+                    membership.window(&writer, sequence),
+                    crate::fleet::Window::Keyed(keys) if keys.contains(&key)
+                ) && VerifiedEnvelopeSignature::verify(
+                    shard.as_deref(), &fleet_id, &writer, sequence, &hash, &key, &signature,
+                ).is_some() {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+    }
+
 
     /// Envelopes this node admitted before it knew that their writer is keyed or that their
     /// incarnation had ended. Admission decisions are not revisited, so these stay admitted;

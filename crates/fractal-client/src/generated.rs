@@ -134,6 +134,7 @@ pub enum ErrorCode {
     PeerTooOld,
     ValidationFailed,
     IdempotencyConflict,
+    GrantProfileConflict,
     LegacyActionReceiptUntrusted,
     IssuerRequired,
     SuspendAuthoredSessionSelection,
@@ -5155,6 +5156,40 @@ pub struct AssistantGrant {
     pub revoked: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_trust: Option<AssistantReadTrust>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<GrantProfileConflictWitness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleared_conflicts: Option<Vec<ClearedGrantProfileConflictWitness>>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExternalGrantProfile {
+    Assistant,
+    Service,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum GrantProfileConflictCause {
+    Revoked,
+    Expired,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GrantProfileWitness {
+    pub grant_id: Option<String>,
+    pub origin: String,
+    pub profile: ExternalGrantProfile,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct GrantProfileConflictWitness {
+    pub grants: Vec<GrantProfileWitness>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ClearedGrantProfileConflictWitness {
+    pub grants: Vec<GrantProfileWitness>,
+    pub cause: GrantProfileConflictCause,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]

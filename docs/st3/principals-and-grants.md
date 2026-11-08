@@ -113,9 +113,31 @@ The claim-backed external-grant core is
 `crates/fractal-api-core/src/api/client_v0/external_grants.rs`. Its closed profiles
 keep `assistant/chatgpt` and `assistant/mcp` in the same assistant profile; service
 issuance is disabled and service has no assistant route or disclosure rights.
-Several active grants of a principal's own profile are allowed, but a different
-active profile is refused. Historical `custom.client.assistant.v1.*` claim kinds
-and absent-principal legacy ChatGPT grants retain their existing meaning.
+Several active grants of a principal's own profile are allowed. Admission refuses
+a known opposite-profile grant, including one replicated from another issuer.
+If disconnected issuers create opposite-profile grants, authentication suspends
+every conflicting grant with `grant-profile-conflict`; there is no winner.
+Inspect exposes a `conflict.grants` witness with both grant IDs, origins and
+profiles. Once an owner's revoke replicates (or the opposite grant expires),
+the remaining grant works again on its authoritative issuer; replication never
+makes foreign credentials authenticate on another member.
+While opposite-profile records remain visible, inspect also computes
+`cleared_conflicts` witnesses naming the `revoked` or `expired` clearing cause.
+Conflict state is never persisted. Admission and authentication use the same
+millisecond clock and strict `expires_at_unix_ms > now` active boundary; a newly
+issued opposite-profile grant reintroduces the conflict by computation.
+
+Only well-formed foreign grants attributed to the configured concrete owner
+count as witnesses. Their grant and effective policy must have matching immutable
+identity/profile, and each must have validated envelope provenance signed by a
+key in its writer's admitted fleet membership window. Legacy unsigned,
+unverifiable and malformed custom claims do not gain suspension authority merely
+by naming an owner or origin. This intentionally favors verifiable issuer claims
+over allowing arbitrary replicated custom fields to deny service. The fold uses
+the principal expression index and removes expired/revoked history in SQL on
+every admission/authentication/inspect read, including after replication catches
+up. Historical `custom.client.assistant.v1.*` claim kinds and absent-principal
+legacy ChatGPT grants retain their existing meaning.
 Claims persist credential/code digests, never bearer tokens or pairing codes;
 grant projections expose neither credential material nor its digests.
 

@@ -1278,6 +1278,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::LegacyActionReceiptUntrusted
         | ErrorCode::RuntimeNotLocal
         | ErrorCode::PrivateNotesCarrierConflict
+        | ErrorCode::GrantProfileConflict
         | ErrorCode::PrivateNotesUnreachable
         | ErrorCode::PrivateNotesIndeterminate
         | ErrorCode::ArrangementExists

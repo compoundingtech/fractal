@@ -68,11 +68,10 @@ fn digest_only(source: &Value) -> Result<(), ApiError> {
     Ok(())
 }
 
-// Issuance-only scan: authentication retains its existing indexed lookup and reads.
+// Admission and authentication share the principal-indexed active-grant fold.
 // append owns the admission lock; several grants of the same profile are allowed.
 // Filter revoked/expired history before loading claim bodies into Rust. Expiry
-// uses the latest policy, not the original grant. Keep malformed missing fields
-// in the result so the existing validation below still reports them.
+// uses the latest policy, not the original grant.
 const ADMISSION_QUERY: &str =
     "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
      AND (?5 IS NULL OR NOT EXISTS (SELECT 1 FROM claims AS revoked WHERE revoked.subject=claims.subject AND revoked.kind=?3))
@@ -84,30 +83,112 @@ const ADMISSION_QUERY: &str =
          CASE WHEN json_type(body,'$.fields') IS NULL THEN 1 ELSE
              COALESCE(json_type(body,'$.fields.expires_at_unix_ms')='integer'
                  AND json_extract(body,'$.fields.expires_at_unix_ms')>?5,0) END))";
-fn admit_profile(state: &AppState, source: &Value) -> Result<(), ApiError> {
-    let profile = Profile::stored(source)?;
-    let principal = principal(source)?;
-    // Without a valid owner the old scan must still surface its configuration
-    // error before examining expiry; do not prefilter those rows.
-    let expiry_cut = owning_person(state).ok().map(|_| client_now_ms() as u64);
+fn candidate_grants(state: &AppState, principal: &str, expiry_cut: Option<u64>) -> Result<Vec<(ClaimRecord, Profile)>, ApiError> {
+    let owner = owning_person(state)?;
     let ids = {
         let connection = state.store.readers.get();
         let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h99f1a302c7b1 owner=fractal_api_core::api::client_v0::external_grants TODO=trace-statement-and-value-representation */ ADMISSION_QUERY).map_err(ApiError::internal)?;
         query.query_map(rusqlite::params![GRANTED, principal, REVOKED, POLICY, expiry_cut], |row| row.get::<_, String>(0))
             .map_err(ApiError::internal)?.collect::<Result<Vec<_>, _>>().map_err(ApiError::internal)?
     };
+    let mut active = Vec::new();
     for id in ids {
         let grant = state.store.claim_by_id(&id).map_err(ApiError::internal)?
             .ok_or_else(|| forbidden("external grant is absent"))?;
-        if grant.origin != state.store.origin() || grant.actor.as_deref() != Some(owning_person(state)?)
-            || latest(state, &grant.subject, REVOKED)?.is_some() {
+        if grant.actor.as_deref() != Some(owner)
+            || (expiry_cut.is_some() && latest(state, &grant.subject, REVOKED)?.is_some()) {
             continue;
         }
         let policy = effective(state, &grant)?;
-        let active = fields(&policy)?;
-        if active["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) > client_now_ms() {
-            profile.compatible(Profile::stored(fields(&grant)?)?)?;
-            profile.compatible(Profile::stored(active)?)?;
+        let foreign = grant.origin != state.store.origin();
+        // Custom fields are open at replication admission. Actor/origin strings
+        // alone therefore confer no authority to suspend another credential.
+        // Only well-formed owner grants carried by a signed, admitted issuer
+        // count; policies must have the same provenance and immutable identity.
+        if foreign && (!valid_foreign_grant(state, &grant, &policy)?
+            || !state.store.claim_has_authenticated_member_writer(&grant.id).map_err(ApiError::internal)?
+            || (policy.id != grant.id && !state.store.claim_has_authenticated_member_writer(&policy.id).map_err(ApiError::internal)?)) {
+            continue;
+        }
+        let source = fields(&policy)?;
+        if expiry_cut.is_none_or(|now| unexpired(source, now)) {
+            let profile = Profile::stored(fields(&grant)?)?;
+            profile.compatible(Profile::stored(source)?)?;
+            active.push((grant, profile));
+        }
+    }
+    Ok(active)
+}
+
+fn unexpired(source: &Value, now: u64) -> bool {
+    source["expires_at_unix_ms"].as_u64().is_some_and(|expires| expires > now)
+}
+
+fn valid_foreign_grant(state: &AppState, grant: &ClaimRecord, policy: &ClaimRecord) -> Result<bool, ApiError> {
+    let validate = || -> Result<(), ApiError> {
+        let original = fields(grant)?;
+        let source = fields(policy)?;
+        let principal = principal(original)?;
+        let id = original["grant_id"].as_str().ok_or_else(|| forbidden("grant ID absent"))?;
+        if subject(id)? != grant.subject || policy.origin != grant.origin
+            || policy.actor.as_deref() != Some(owning_person(state)?)
+            || self::principal(source)? != principal
+            || ["grant_id", "session_actor", "issuer", "profile"].iter().any(|key| source[*key] != original[*key])
+            || source["issuer"] != owning_person(state)?
+            || source["session_actor"].as_str().and_then(|actor| actor.strip_prefix(principal))
+                .and_then(|suffix| suffix.strip_prefix("/session/")) != Some(id)
+            || !matches!(source["minimal_read_mode"].as_str(), Some("approval-once" | "caller-bound-allow"))
+            || source["disclosure_consent"] != true
+            || !original["credential_hash"].as_str().is_some_and(|digest| digest.len() == 64
+                && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            || !source["scopes"].as_array().is_some_and(|scopes|
+                scopes.iter().all(|scope| scope.as_str().is_some_and(|scope| SCOPES.contains(&scope)))) {
+            return Err(forbidden("invalid foreign external grant"));
+        }
+        digest_only(original)?;
+        digest_only(source)?;
+        Profile::stored(original)?.compatible(Profile::stored(source)?)?;
+        Ok(())
+    };
+    Ok(validate().is_ok())
+}
+
+fn witness(grant: &ClaimRecord, profile: Profile) -> Value {
+    json!({"grant_id":fields(grant).ok().and_then(|source| source.get("grant_id")),
+        "origin":grant.origin,"profile":match profile { Profile::Assistant => "assistant", Profile::Service => "service" }})
+}
+
+fn conflict_error(witness: Value) -> ApiError {
+    ApiError {
+        status: StatusCode::CONFLICT,
+        code: "grant-profile-conflict".into(),
+        message: "principal has active grants of opposite profiles; revoke one to clear the conflict".into(),
+        details: Box::new(serde_json::Map::from_iter([("conflict".into(), witness)])),
+    }
+}
+
+#[cfg(test)]
+pub fn profile_conflict(state: &AppState, granted: &ClaimRecord) -> Result<Option<Value>, ApiError> {
+    profile_conflict_at(state, granted, client_now_ms() as u64)
+}
+
+fn profile_conflict_at(state: &AppState, granted: &ClaimRecord, now: u64) -> Result<Option<Value>, ApiError> {
+    let active = candidate_grants(state, principal(fields(granted)?)?, Some(now))?;
+    let Some((grant, profile)) = active.iter().find(|(grant, _)| grant.id == granted.id) else {
+        return Ok(None);
+    };
+    Ok(active.iter().find(|(_, other)| other != profile).map(|(other, other_profile)|
+        json!({"grants":[witness(grant, *profile),witness(other, *other_profile)]})))
+}
+
+fn admit_profile(state: &AppState, source: &Value) -> Result<(), ApiError> {
+    let profile = Profile::stored(source)?;
+    for (grant, other) in candidate_grants(state, principal(source)?, Some(client_now_ms() as u64))? {
+        if profile != other {
+            return Err(conflict_error(json!({"grants":[
+                {"grant_id":source["grant_id"],"origin":state.store.origin(),
+                 "profile":match profile { Profile::Assistant => "assistant", Profile::Service => "service" }},
+                witness(&grant, other)]})));
         }
     }
     Ok(())
@@ -235,6 +316,23 @@ pub fn projection(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiE
     if let Some(trust) = source.get("read_trust") {
         value["read_trust"] = trust.clone();
     }
+    let now = client_now_ms() as u64;
+    value["conflict"] = profile_conflict_at(state, granted, now)?.unwrap_or(Value::Null);
+    if value["conflict"].is_null() {
+        let profile = Profile::stored(fields(granted)?)?;
+        let mut cleared = Vec::new();
+        for (other, other_profile) in candidate_grants(state, principal(source)?, None)? {
+            if profile == other_profile { continue; }
+            let policy = effective(state, &other)?;
+            let cause = if latest(state, &other.subject, REVOKED)?.is_some()
+                || latest(state, &granted.subject, REVOKED)?.is_some() { Some("revoked") }
+                else if !unexpired(fields(&policy)?, now) || !unexpired(source, now) { Some("expired") } else { None };
+            if let Some(cause) = cause {
+                cleared.push(json!({"grants":[witness(granted, profile),witness(&other, other_profile)],"cause":cause}));
+            }
+        }
+        value["cleared_conflicts"] = json!(cleared);
+    }
     Ok(value)
 }
 
@@ -251,6 +349,10 @@ pub fn authenticate(state: &AppState, digest: &str, transport: &'static str)
 }
 pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
     -> Result<ClientSession, ApiError> {
+    let now = client_now_ms() as u64;
+    if let Some(witness) = profile_conflict_at(state, granted, now)? {
+        return Err(conflict_error(witness));
+    }
     let policy = effective(state, granted)?;
     let source = fields(&policy)?;
     let principal = principal(source)?;
@@ -268,7 +370,7 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         return Err(forbidden("assistant requests require the authoritative grant issuer"));
     }
     if latest(state, &granted.subject, REVOKED)?.is_some()
-        || source["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) <= client_now_ms()
+        || !unexpired(source, now)
         || source["issuer"] != owning_person(state)?
         || !matches!(source["minimal_read_mode"].as_str(), Some("approval-once" | "caller-bound-allow")) || source["disclosure_consent"] != true {
         return Err(forbidden("assistant grant was revoked, expired, or has invalid policy"));
@@ -302,6 +404,9 @@ pub fn authorize_route(session: &ClientSession, request: &Request<Body>) -> Resu
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod conflict_tests;
 
 #[cfg(test)]
 mod tests {
