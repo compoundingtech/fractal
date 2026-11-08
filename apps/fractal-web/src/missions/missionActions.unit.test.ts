@@ -7,10 +7,10 @@ const mission = { id: 'mission/release', run_generations: { 'mission-run/release
 const ok = { value: { status: 'accepted' } }
 
 /** Records every call; reads answer from the given rows. */
-const fakeClient = (overrides: Partial<MissionActionClient> = {}) => {
+const fakeClient = (overrides: Record<string, unknown> = {}) => {
   const calls: Array<{ readonly method: string; readonly input: unknown }> = []
   const record = (method: string) => async (input: unknown) => { calls.push({ method, input }); return ok }
-  const client: MissionActionClient = {
+  const client = {
     capabilities: async () => ({ snapshot: { id: 'snapshot/7' } }),
     workGet: async () => ({ value: { id: 'step-run/release/3/g2/deploy', generation_id: 'run-generation/release/3/g2', definition_id: 'sha256:def', attempt: 2, readiness_epoch: 5 } }),
     subjectDefinition: async () => ({ snapshot: { id: 'snapshot/8' }, value: { desired_token: 'desired/42' } }),
@@ -21,7 +21,7 @@ const fakeClient = (overrides: Partial<MissionActionClient> = {}) => {
     agentStart: record('agentStart'),
     runtimeRestart: record('runtimeRestart'),
     ...overrides,
-  }
+  } as unknown as MissionActionClient
   return { client, calls }
 }
 
