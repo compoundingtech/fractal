@@ -942,7 +942,15 @@ export class LiveTimeline {
       if (key !== undefined) userMailContent.add(key)
     }
     const pairs = this.mailPairs(mailboxHeaders)
-    const shownBodies = pairs.bodies
+    // A paired body counts as shown only when it projects to the message; a hidden body keeps its
+    // header row instead, so a delivery repeating it is the only readable copy and must stay.
+    const shownBodies = new Map(pairs.bodies)
+    for (const entry of this.ordered) {
+      if (entry.type !== 'content') continue
+      const mailbox = pairs.headerOf.get(entry.id)
+      if (mailbox === undefined) continue
+      if (!this.cached({ entry, result: undefined, active: true, mailbox }).some(isMailBody)) shownBodies.delete(mailbox.body.message_id)
+    }
     for (let at = from; at < this.ordered.length; at += 1) {
       const entry = this.ordered[at]!
       this.itemsBefore.push(items.length)
