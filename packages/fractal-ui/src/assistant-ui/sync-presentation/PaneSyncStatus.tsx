@@ -1,6 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Dialog, Heading, Popover, Tooltip, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
+import { Button, Dialog, Heading, Popover, TooltipTrigger, VisuallyHidden } from 'react-aria-components'
+import { TooltipSurface } from '../composition/Controls'
 import { syncLine, canRetrySyncFailure, syncFailureRecovery } from './sync-line'
 import type { SyncStatus } from './sync-status'
 import { SyncFailureDetails } from './SyncLine'
@@ -56,7 +57,7 @@ export const PaneSyncStatus = React.memo(function PaneSyncStatus({ status: obser
     {phase === 'loading' && <span data-pane-sync-glyph={glyphShown ? 'shown' : 'pending'} role="img" aria-label={line?.text ?? `Loading ${label}`} aria-hidden={!glyphShown || undefined} {...stylex.props(styles.glyphBox, !glyphShown && styles.pending)}><LiveRing size="sm" spinning={observation._tag !== 'Stale'} /></span>}
     <span data-pane-sync-controls={reserved ? 'reserved' : 'shown'} aria-hidden={reserved || undefined} inert={reserved} {...stylex.props(styles.controls, reserved && styles.pending)}>
       {reserved ? <span {...stylex.props(styles.word, styles.wordStatic)}><span {...stylex.props(styles.dot)} />Load failed</span> : <span data-pane-sync-word {...stylex.props(styles.word, styles.wordStatic)}><span {...stylex.props(styles.dot, styles.dangerDot)} />Load failed</span>}
-      {reserved ? <span {...stylex.props(styles.word, styles.wordTrigger, touch && styles.touch)}><span {...stylex.props(styles.dot)} /><span data-pane-sync-word-label {...stylex.props(styles.wordLabel)}>Load failed</span></span> : <TooltipTrigger delay={150}><Button ref={wordTrigger} data-pane-sync-word-trigger aria-label={retryable ? 'Load failed. Open details to retry.' : 'Load failed. Open details for recovery information.'} aria-haspopup="dialog" aria-expanded={detailsOpen && anchor === 'word'} onPress={() => openDetails('word')} {...stylex.props(styles.word, styles.wordTrigger, touch && styles.touch)}><span {...stylex.props(styles.dot, styles.dangerDot)} /><span data-pane-sync-word-label {...stylex.props(styles.wordLabel)}>Load failed</span></Button><Tooltip {...stylex.props(styles.tooltip)}>Load failed</Tooltip></TooltipTrigger>}
+      {reserved ? <span {...stylex.props(styles.word, styles.wordTrigger, touch && styles.touch)}><span {...stylex.props(styles.dot)} /><span data-pane-sync-word-label {...stylex.props(styles.wordLabel)}>Load failed</span></span> : <TooltipTrigger delay={150}><Button ref={wordTrigger} data-pane-sync-word-trigger aria-label={retryable ? 'Load failed. Open details to retry.' : 'Load failed. Open details for recovery information.'} aria-haspopup="dialog" aria-expanded={detailsOpen && anchor === 'word'} onPress={() => openDetails('word')} {...stylex.props(styles.word, styles.wordTrigger, touch && styles.touch)}><span {...stylex.props(styles.dot, styles.dangerDot)} /><span data-pane-sync-word-label {...stylex.props(styles.wordLabel)}>Load failed</span></Button><TooltipSurface>Load failed</TooltipSurface></TooltipTrigger>}
       {reserved ? <span {...stylex.props(styles.action, styles.detailsAction, touch && styles.touch)}><span {...stylex.props(styles.actionIcon)}>⋯</span><span {...stylex.props(styles.actionLabel)}>Details</span></span> : <Button ref={detailsTrigger} data-pane-sync-details-trigger aria-label={`Details for ${label}`} aria-expanded={detailsOpen} onPress={() => openDetails('details')} {...stylex.props(styles.action, styles.detailsAction, touch && styles.touch)}><span aria-hidden="true" {...stylex.props(styles.actionIcon)}>⋯</span><span aria-hidden="true" {...stylex.props(styles.actionLabel)}>Details</span></Button>}
     </span>
     {failure !== undefined && <>
@@ -99,7 +100,6 @@ const styles = stylex.create({
   actionLabel: { display: { default: 'inline', [narrow]: 'none' } },
   // max-content: anywhere-wrapping text would otherwise shrink-to-fit the popover to one word per line.
   popover: { width: 'max-content', maxWidth: g.tooltipMax, boxSizing: 'border-box', backgroundColor: surface.raised, color: ink.fg, borderRadius: r.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, padding: s.md },
-  tooltip: { maxWidth: g.tooltipMax, paddingInline: s.md, paddingBlock: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.raised, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   dialog: { display: 'flex', flexDirection: 'column', gap: s.xs, outline: 'none', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, whiteSpace: 'normal' },
   heading: { margin: s.zero, color: status.dangerFg, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightSemibold },
   paragraph: { margin: s.zero, overflowWrap: 'anywhere' },

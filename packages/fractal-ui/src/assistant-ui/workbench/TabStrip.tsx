@@ -1,10 +1,11 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { TabList, Tab, TooltipTrigger, Tooltip, Focusable } from 'react-aria-components'
+import { TabList, Tab, TooltipTrigger, Focusable } from 'react-aria-components'
+import { TooltipSurface } from '../composition/Controls'
 import { useFocusVisible } from 'react-aria'
 import { Icon, type IconName } from '../composition/Icons'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
-import { surfaceVars as sf, textVars as tx, accentVars as ac, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, geometryNumbers as geo, interactionVars } from '../composition-tokens.stylex'
+import { surfaceVars as sf, textVars as tx, accentVars as ac, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, interactionVars } from '../composition-tokens.stylex'
 import { paneKey, paneKind, type WorkbenchPane } from './workbench-model'
 import { layoutTabStrip, layoutTabStripViewport, type TabStripMode } from './tab-strip-layout'
 
@@ -240,7 +241,7 @@ const TabTooltipBridge = React.forwardRef<HTMLDivElement, TabTooltipBridgeProps>
     else tab?.removeAttribute('aria-describedby')
     return () => { if (handlersRef.current === triggerProps) handlersRef.current = null; tab?.removeAttribute('aria-describedby') }
   }, [handlersRef, triggerRef, triggerProps])
-  return <Tooltip placement="bottom" offset={geo.tooltipOffset} {...stylex.props(styles.tooltip)}>{title}</Tooltip>
+  return <TooltipSurface placement="bottom">{title}</TooltipSurface>
 })
 
 const styles = stylex.create({
@@ -260,5 +261,4 @@ const styles = stylex.create({
   maxMetric: { width: g.tabMax },
   minimum: { width: 'max-content', whiteSpace: 'nowrap' },
   // RAC supplies placement only after measuring the real mounted anchor.
-  tooltip: { visibility: { default: 'hidden', ':is([data-placement])': 'visible' }, zIndex: 50, borderRadius: r.control, backgroundColor: tx.fg, color: sf.raised, paddingInline: s.row, paddingBlock: s.sm, fontSize: t.denseSize, fontFamily: t.fontSans },
 })

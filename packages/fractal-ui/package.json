@@ -42,6 +42,7 @@
     "test:sidebar-tabs": "node --test --test-force-exit src/assistant-ui/sidebar/SidebarTabs.unit.test.mjs",
     "test:work-log": "node --test --test-force-exit src/assistant-ui/taste/work-log.unit.test.mjs",
     "test:focus-styles": "node --test scripts/check-focus-styles.unit.test.mjs",
+    "test:tooltips": "node --test scripts/check-tooltips.unit.test.mjs",
     "test:focus-modality": "node --experimental-strip-types --test src/focus-modality.unit.test.ts",
     "test:tab-strip": "node --experimental-strip-types src/assistant-ui/workbench/tab-strip-layout.unit.test.ts",
     "check:details": "node scripts/details-run-gates.mjs",

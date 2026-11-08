@@ -4,7 +4,8 @@ import type { ReactNode } from 'react'
 import { accentVars as accent, borderVars as border, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type, interactionVars } from '../composition-tokens.stylex.ts'
 import type { TraceSeries } from './trace-series.ts'
 import { contextOccupancy, estimatedOccupancyExplanation, traceCoverageState, type ContextOccupancy, type TraceAccumulationWindow, type TraceCoverage, type TraceCoverageState, type TraceFact, type TraceSpendScope } from './trace-series.ts'
-import { Button, Tooltip, TooltipTrigger } from 'react-aria-components'
+import { Button, TooltipTrigger } from 'react-aria-components'
+import { TooltipSurface } from '../composition/Controls'
 import type { DetailsEmptyRule } from './DetailsResources.tsx'
 import { compactNumber, money, clock } from './trace/chart.ts'
 import { adaptTrace } from './trace/adapter.ts'
@@ -61,7 +62,7 @@ const OccupancyValue = ({ occupancy }: { readonly occupancy: ContextOccupancy })
     <strong>{Math.round(occupancy.percent)}%</strong>
     {occupancy.estimated && (narrow
       ? <><span data-details-occupancy-estimated {...stylex.props(styles.estimateText)}>est.</span><DetailsInlineReason block>{estimatedOccupancyExplanation}</DetailsInlineReason></>
-      : <TooltipTrigger delay={0}><Button data-details-occupancy-estimated aria-label="est., estimated from tokens" {...stylex.props(styles.estimate)}>est.</Button><Tooltip {...stylex.props(styles.coverageTooltip)}>{estimatedOccupancyExplanation}</Tooltip></TooltipTrigger>)}
+      : <TooltipTrigger delay={0}><Button data-details-occupancy-estimated aria-label="est., estimated from tokens" {...stylex.props(styles.estimate)}>est.</Button><TooltipSurface>{estimatedOccupancyExplanation}</TooltipSurface></TooltipTrigger>)}
   </span>
 }
 
@@ -431,7 +432,6 @@ const styles = stylex.create({
   // A coverage sentence on its own row; its Why? starts beneath it.
   coverageLine: { display: 'flex', flexWrap: 'wrap', alignItems: 'baseline', margin: 0, minWidth: 0, color: text.fgSoft, fontSize: type.denseSize, lineHeight: type.metaLeading },
   coverageSummary: { flexBasis: '100%', minWidth: 0, overflowWrap: 'normal' },
-  coverageTooltip: { backgroundColor:surface.canvas, color:text.fg, borderWidth:1, borderStyle:'solid', borderColor:border.borderStrong, padding:space.md, fontSize:type.metaSize, maxWidth:280 },
   occupancy: { display: 'inline-flex', alignItems: 'baseline', gap: space.xs },
   estimate: { appearance: 'none', borderWidth: 0, padding: 0, backgroundColor: surface.transparent, color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, cursor: 'help', borderRadius: radius.sm, ':focus-visible': { outlineWidth: geometry.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: geometry.focusOffset } },
   contextSnapshot: { display: 'flex', flexDirection: 'column', gap: space.xs, minWidth: 0 },

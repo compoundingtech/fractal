@@ -1,6 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button as AriaButton, Checkbox as AriaCheckbox, Menu as AriaMenu, MenuItem as AriaMenuItem, Popover as AriaPopover, Tooltip as AriaTooltip, TooltipTrigger, TooltipTriggerStateContext, type ButtonProps, type CheckboxProps as AriaCheckboxProps, type MenuProps as AriaMenuProps, type MenuItemProps as AriaMenuItemProps, type PopoverProps as AriaPopoverProps, type TooltipProps as AriaTooltipProps } from 'react-aria-components'
+import { Button as AriaButton, Checkbox as AriaCheckbox, Menu as AriaMenu, MenuItem as AriaMenuItem, Popover as AriaPopover, Tooltip as AriaTooltip, TooltipTrigger, Focusable, TooltipTriggerStateContext, type ButtonProps, type CheckboxProps as AriaCheckboxProps, type MenuProps as AriaMenuProps, type MenuItemProps as AriaMenuItemProps, type PopoverProps as AriaPopoverProps, type TooltipProps as AriaTooltipProps } from 'react-aria-components'
 import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, interactionVars as interaction, geometryVars as g, geometryNumbers, radiusVars as r, spaceVars as s, typeVars as t, elevationVars as elevation, motionVars as motion } from '../composition-tokens.stylex'
 import { Icon, type IconName } from './Icons'
 import { ThemePortal } from '../taste/ThemePortal'
@@ -148,6 +148,37 @@ export function Tooltip({ label, shortcut, placement = 'bottom', delay = 350, is
     focusFromNavigation.current = navigation?.target === event.target && navigation.userMoved
   }} onKeyDownCapture={event => { if (event.key === 'Escape') { reopenRequest.current++; lastScroll.current = Number.NEGATIVE_INFINITY; setSettling(false); setOpen(false) } }} {...stylex.props(styles.tooltipScope)}><TooltipTrigger delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={changeOpen}>{children}<TooltipSurface placement={placement} style={style}><span {...stylex.props(!shortcut && tooltipStyles.label)}>{label}</span>{shortcut && <>{' '}<kbd {...stylex.props(styles.shortcut, styles.tooltipShortcut)}>{shortcut}</kbd></>}</TooltipSurface></TooltipTrigger></span></ThemePortal>
 }
+const isTruncated = (element: HTMLElement | null) => element !== null && (element.scrollWidth > element.clientWidth + 1 || element.scrollHeight > element.clientHeight + 1)
+/**
+ * A label tooltip that opens only while its text is cut off. Spread `trigger` on the TooltipTrigger that owns the
+ * interactive element and put `ref` on the clipped text; pass `observe` when something must follow the clipping
+ * between hovers (a static row's tab stop), otherwise it is measured as the tooltip asks to open.
+ */
+export function useTruncatedTooltip<T extends HTMLElement = HTMLSpanElement>({ observe = false, text }: { observe?: boolean; text?: string } = {}) {
+  const ref = React.useRef<T>(null)
+  const [open, setOpen] = React.useState(false)
+  const [truncated, setTruncated] = React.useState(false)
+  React.useLayoutEffect(() => {
+    const element = ref.current
+    if (!observe || element === null) return
+    const measure = () => setTruncated(isTruncated(element))
+    measure()
+    const observer = new ResizeObserver(measure)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [observe, text])
+  const onOpenChange = React.useCallback((next: boolean) => setOpen(next && isTruncated(ref.current)), [])
+  return { ref, truncated, trigger: { delay: 150, closeDelay: 0, isOpen: open, onOpenChange } }
+}
+/**
+ * Single-line text that ends in an ellipsis and repeats itself in the kit tooltip only when cut off. A clipped label
+ * becomes a tab stop so keyboard users can read it too; use it only outside another interactive element, and use
+ * useTruncatedTooltip on the enclosing trigger otherwise. This replaces a native `title` on clipped text.
+ */
+export function TruncatedLabel({ text, children, style, ...rest }: { text: string; children?: React.ReactNode; style?: stylex.StyleXStyles } & Omit<React.HTMLAttributes<HTMLSpanElement>, 'children' | 'className' | 'style' | 'title'>) {
+  const { ref, truncated, trigger } = useTruncatedTooltip({ observe: true, text })
+  return <ThemePortal><TooltipTrigger {...trigger}><Focusable><span {...rest} ref={ref} tabIndex={truncated ? 0 : -1} {...stylex.props(styles.truncated, style)}>{children ?? text}</span></Focusable><TooltipSurface><span {...stylex.props(tooltipStyles.label)}>{text}</span></TooltipSurface></TooltipTrigger></ThemePortal>
+}
 export type TooltipSurfaceProps = Omit<AriaTooltipProps, 'className' | 'style'> & { style?: stylex.StyleXStyles }
 /** Use inside an existing TooltipTrigger and ThemePortal when its trigger is not a kit Button. */
 export const TooltipSurface = React.forwardRef<HTMLDivElement, TooltipSurfaceProps>(function TooltipSurface({ style, offset = geometryNumbers.tooltipOffset, ...props }, ref) {
@@ -175,6 +206,7 @@ const styles = stylex.create({
   checkboxMark: { width: g.checkbox, height: g.checkbox, boxSizing: 'border-box', flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.keyboard, backgroundColor: surface.raised },
   checkboxOn: { backgroundColor: accent.primary, borderColor: accent.primary, color: accent.onPrimary },
   tooltipScope: { display: 'contents' },
+  truncated: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusInset } },
   shortcut: { flexShrink: 0, color: text.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   tooltipShortcut: { color: 'inherit' },
   shortcutActive: { color: text.fgSoft },

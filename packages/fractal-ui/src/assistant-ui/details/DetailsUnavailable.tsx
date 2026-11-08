@@ -1,7 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Tooltip, TooltipTrigger, VisuallyHidden, type ButtonProps } from 'react-aria-components'
-import { accentVars as accent, borderVars as border, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type, interactionVars } from '../composition-tokens.stylex'
+import { Button, TooltipTrigger, VisuallyHidden, type ButtonProps } from 'react-aria-components'
+import { TooltipSurface } from '../composition/Controls'
+import { accentVars as accent, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type, interactionVars } from '../composition-tokens.stylex'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { Icon } from '../composition/Icons'
 import { detailsReasonText } from './trace-reasons'
@@ -11,7 +12,6 @@ type DescribedTooltipButtonProps = Omit<ButtonProps, 'aria-describedby' | 'child
   readonly description: string
   /** Painted tooltip content; defaults to the description. */
   readonly tooltip?: React.ReactNode
-  readonly tooltipStyle?: stylex.StyleXStyles
   readonly children: React.ReactNode
 }
 
@@ -20,10 +20,10 @@ type DescribedTooltipButtonProps = Omit<ButtonProps, 'aria-describedby' | 'child
  * accessible description, so assistive technology reads it without opening the tooltip. The description node is
  * `hidden`: it is reachable only through `aria-describedby`, never read a second time in browse mode.
  */
-export function DescribedTooltipButton({ description, tooltip = description, tooltipStyle, children, ...button }: DescribedTooltipButtonProps) {
+export function DescribedTooltipButton({ description, tooltip = description, children, ...button }: DescribedTooltipButtonProps) {
   const id = React.useId()
   return <>
-    <TooltipTrigger delay={0}><Button {...button} aria-describedby={id}>{children}</Button><Tooltip {...stylex.props(tooltipStyle ?? styles.tooltip)}>{tooltip}</Tooltip></TooltipTrigger>
+    <TooltipTrigger delay={0}><Button {...button} aria-describedby={id}>{children}</Button><TooltipSurface>{tooltip}</TooltipSurface></TooltipTrigger>
     <span hidden id={id} data-details-reason-description>{description}</span>
   </>
 }
@@ -197,5 +197,4 @@ const styles = stylex.create({
   line: { display: 'flex', alignItems: 'baseline', flexWrap: 'wrap', columnGap: space.xs, margin: space.zero, color: text.fgMuted, fontSize: type.metaSize, lineHeight: type.metaLeading },
   prose: { margin: space.zero, color: text.fgMuted, fontSize: type.metaSize, lineHeight: type.metaLeading, overflowWrap: 'normal' },
   subject: { minWidth: 0, overflowWrap: 'normal' },
-  tooltip: { maxWidth: geometry.tooltipMax, padding: space.md, color: text.fg, backgroundColor: surface.raised, borderWidth: geometry.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: radius.sm, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading },
 })
