@@ -784,3 +784,108 @@ describe('batched message measurements', () => {
     })
   })
 })
+
+describe('following the live end', () => {
+  // A host that appends rows on command, like a conversation receiving messages.
+  let append: () => void = () => {}
+  function Growing() {
+    const [count, setCount] = React.useState(6)
+    append = () => setCount(value => value + 1)
+    const items = rows.slice(0, count)
+    return <EmbraceScrollViewport items={items} data-testid="transcript-scroll">
+      {items.map(row => <div key={row.id} data-test-tail-row data-item-id={row.id}><span data-test-text>{row.id}</span><button aria-expanded="false">Details</button></div>)}
+    </EmbraceScrollViewport>
+  }
+  const distance = () => lane().scrollHeight - lane().clientHeight - lane().scrollTop
+  const jump = () => container.querySelector<HTMLButtonElement>('button[hidden], button:not([aria-expanded])')!
+  const appendRow = async () => {
+    await act(async () => append())
+    await flushFrames()
+  }
+  const dispatch = async (target: EventTarget, event: Event) => {
+    await act(async () => { target.dispatchEvent(event) })
+    await flushFrames()
+  }
+
+  it('keeps following when the reader wheels down at the end, as trackpad momentum does', async () => {
+    await render(<Growing />)
+    expect(distance()).toBe(0)
+    await dispatch(lane(), new WheelEvent('wheel', { deltaY: 120, bubbles: true }))
+    await appendRow()
+    expect(distance()).toBe(0)
+    expect(jump().hidden).toBe(true)
+  })
+
+  it.each([
+    ['a click on message text', () => new MouseEvent('pointerdown', { bubbles: true }), () => lane().querySelector('[data-test-text]')!],
+    ['focus moving into a row', () => new FocusEvent('focusin', { bubbles: true }), () => lane().querySelector('[data-test-text]')!],
+    ['ArrowDown', () => new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }), () => lane()],
+    ['End', () => new KeyboardEvent('keydown', { key: 'End', bubbles: true }), () => lane()],
+  ] as const)('keeps following after %s at the end', async (_, event, target) => {
+    await render(<Growing />)
+    await dispatch(target(), event())
+    // A press holds its row in place until release; following owns the lane again afterwards.
+    await dispatch(document, new MouseEvent('pointerup', { bubbles: true }))
+    await appendRow()
+    expect(distance()).toBe(0)
+  })
+
+  it('stops following on a deliberate scroll up and resumes from the jump control', async () => {
+    await render(<Growing />)
+    await scrollUp(120)
+    await appendRow()
+    expect(lane().scrollTop).toBe(120)
+    expect(jump().hidden).toBe(false)
+    await act(async () => { jump().click() })
+    await flushFrames(20)
+    expect(distance()).toBeLessThanOrEqual(1)
+    await appendRow()
+    expect(distance()).toBe(0)
+  })
+
+  it('stops following on a small upward wheel even within the end band', async () => {
+    await render(<Growing />)
+    await act(async () => {
+      lane().dispatchEvent(new WheelEvent('wheel', { deltaY: -10, bubbles: true }))
+      lane().scrollTop -= 10
+      lane().dispatchEvent(new Event('scroll'))
+    })
+    await flushFrames()
+    const top = lane().scrollTop
+    await appendRow()
+    expect(lane().scrollTop).toBe(top)
+  })
+
+  it('stops following on an upward scrollbar drag, which arrives only as scroll events', async () => {
+    await render(<Growing />)
+    await act(async () => {
+      lane().scrollTop = 100
+      lane().dispatchEvent(new Event('scroll'))
+    })
+    await flushFrames()
+    await appendRow()
+    expect(lane().scrollTop).toBe(100)
+  })
+
+  it('resumes following once the reader scrolls back within a line of the end', async () => {
+    await render(<Growing />)
+    await scrollUp(100)
+    await act(async () => {
+      lane().dispatchEvent(new WheelEvent('wheel', { deltaY: 400, bubbles: true }))
+      lane().scrollTop = lane().scrollHeight - lane().clientHeight - 30
+      lane().dispatchEvent(new Event('scroll'))
+    })
+    await flushFrames()
+    await appendRow()
+    expect(distance()).toBe(0)
+    expect(jump().hidden).toBe(true)
+  })
+
+  it('stops following when the reader expands a row, so the row stays put', async () => {
+    await render(<Growing />)
+    const top = lane().scrollTop
+    await dispatch(lane().querySelector('[aria-expanded]')!, new MouseEvent('pointerdown', { bubbles: true }))
+    await appendRow()
+    expect(lane().scrollTop).toBe(top)
+  })
+})
