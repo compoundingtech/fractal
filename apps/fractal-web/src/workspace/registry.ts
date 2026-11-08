@@ -125,3 +125,6 @@ export const makeKindRegistry = <View>({ views, contributions = [] }: {
 
 /** The registry as tier planning sees it, before any host supplies views. */
 export const corePolicyOf = (subject: Subject): KindPolicy => corePolicies[subject._tag]
+
+/** Whether a resolved kind is a core one rather than a contribution's, which brings its own cards and views. */
+export const isCoreKind = (id: string): id is SubjectKind => Object.hasOwn(corePolicies, id)

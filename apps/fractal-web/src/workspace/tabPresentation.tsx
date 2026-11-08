@@ -7,22 +7,22 @@ import { sidebarRow } from '../web/sidebarRow.ts'
 import { alertTabMarkers } from '../web/alertsTab.ts'
 import type { EditorTabItem } from '../workbench-kit/EditorTabs.tsx'
 import { unreadLabel } from '../conversation/unread.ts'
-import { workspaceKinds } from './kinds.ts'
+import { describe, workspaceKinds } from './kinds.ts'
 import type { Tab } from './model.ts'
 import { titleText, type KindDescriptor, type Mark, type PresentationWorld } from './presentation.ts'
-import { parsePane, type Subject } from './subject.ts'
+import { parsePane } from './subject.ts'
 
 /** A count only above one, as the TUI's tab suffix: `?`, `?2`, `◆`, `◆3`. */
 const suffix = ({ questions, others }: { readonly questions: number; readonly others: number }) =>
   questions > 0 ? `?${questions > 1 ? questions : ''}` : others > 0 ? `◆${others > 1 ? others : ''}` : undefined
 
-/** The one descriptor of a subject, through its kind. Every surface that names a subject asks here. */
-export const describe = (subject: Subject, world: PresentationWorld): KindDescriptor =>
-  workspaceKinds.kindOf(subject).present(subject, world)
+/** The printed title. A pending or gone title prints the last one this client saw, else its kind word. */
+export const describedTitle = (descriptor: KindDescriptor, seen?: string): string =>
+  descriptor.title._tag === 'Known' || descriptor.title._tag === 'Fixed' ? descriptor.title.text : seen ?? titleText(descriptor.title)
 
-/** The printed title: a pending one shows its kind word until the data arrives. */
-export const describedTitle = (descriptor: KindDescriptor): string =>
-  `${titleText(descriptor.title)}${descriptor.title._tag === 'Pending' ? '…' : ''}`
+/** The name worth remembering for a tab: only one observed in data, never a placeholder. */
+export const rememberedTitle = (descriptor: KindDescriptor): string | undefined =>
+  descriptor.title._tag === 'Known' ? descriptor.title.text : undefined
 
 /** The mark as drawn: an agent's own sidebar ring, a status mark, or the kind's icon. */
 const markNode = (mark: Mark, world: PresentationWorld) => {
@@ -40,9 +40,11 @@ const markNode = (mark: Mark, world: PresentationWorld) => {
 }
 
 /** Presentation is derived on every observation, never stored: only the pane key is the tab's identity. */
-export const tabPresentation = ({ tab, world, unread }: {
+export const tabPresentation = ({ tab, world, seen, unread }: {
   readonly tab: Tab
   readonly world: PresentationWorld
+  /** The last title this client saw for the tab (`TabView.seenTitle`): shown while loading and once gone. */
+  readonly seen?: string | undefined
   /** New prose since the person last looked, by agent ref: a count, or `some` when only a newer time is known. */
   readonly unread?: ReadonlyMap<string, number | 'some'>
 }): EditorTabItem => {
@@ -53,10 +55,12 @@ export const tabPresentation = ({ tab, world, unread }: {
     id: tab.id,
     kind: workspaceKinds.kindOf(subject).id,
     // A person's own name for the tab wins.
-    title: tab.title ?? describedTitle(descriptor),
+    title: tab.title ?? describedTitle(descriptor, seen),
     ...(icon === undefined ? {} : { icon }),
     // Only a named entity has a card to show: a loading or gone one would open an empty frame.
-    ...(descriptor.card === null || descriptor.title._tag !== 'Known' ? {} : { hoverCard: <EntityHoverCard entity={descriptor.card} /> }),
+    ...(descriptor.card === null || descriptor.title._tag === 'Pending' || descriptor.title._tag === 'Gone' ? {} : { hoverCard: <EntityHoverCard entity={descriptor.card} /> }),
+    // A first load, with nothing seen before, shimmers its kind word; a remembered title shows plainly.
+    ...(descriptor.title._tag === 'Pending' && seen === undefined && tab.title === undefined ? { loading: true } : {}),
     ...(descriptor.title._tag === 'Gone' ? { status: 'unavailable' as const } : {}),
   }
   switch (subject._tag) {

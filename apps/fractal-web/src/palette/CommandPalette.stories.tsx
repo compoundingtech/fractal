@@ -31,8 +31,8 @@ const world: PaletteWorld = {
   ],
   machines: [{ id: 'juniper', connected: true }, { id: 'dev3', connected: false }],
   resources: [
-    { ref: 'github/pr/compoundingtech/fractal/5120', title: 'Palette at TUI parity', kind: 'pull request' },
-    { ref: 'github/issue/compoundingtech/fractal/88', title: 'Spaces lose focus on rename', kind: 'issue' },
+    { ref: 'resource/github/compoundingtech/fractal/pull-request/5120', title: 'Palette at TUI parity', kind: 'pull request' },
+    { ref: 'resource/github/compoundingtech/fractal/issue/88', title: 'Spaces lose focus on rename', kind: 'issue' },
   ],
 }
 

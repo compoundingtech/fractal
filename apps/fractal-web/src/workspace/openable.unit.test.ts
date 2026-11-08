@@ -62,7 +62,7 @@ describe('openCommand', () => {
 describe('openableProps', () => {
   it('gives every surface click, and Cmd- or Ctrl-click into a split to the right', () => {
     const { calls, open } = recorder()
-    const props = openableProps('doc/x', open)
+    const props = openableProps('doc/x', open, { title: 'X' })
     props.onClick({ metaKey: false, ctrlKey: false })
     props.onClick({ metaKey: true, ctrlKey: false })
     props.onClick({ metaKey: false, ctrlKey: true })
@@ -71,7 +71,7 @@ describe('openableProps', () => {
 
   it('has a keyboard way to every gesture', () => {
     const { calls, open } = recorder()
-    const props = openableProps('doc/x', open)
+    const props = openableProps('doc/x', open, { title: 'X' })
     const presses = [key({}), key({ metaKey: true }), key({ altKey: true }), key({ altKey: true, shiftKey: true })]
     for (const press of presses) {
       props.onKeyDown(press.event)
@@ -83,9 +83,9 @@ describe('openableProps', () => {
   it('leaves other keys alone, and plain Enter to a control that already activates on it', () => {
     const { calls, open } = recorder()
     const other = key({ key: 'a' })
-    openableProps('doc/x', open).onKeyDown(other.event)
+    openableProps('doc/x', open, { title: 'X' }).onKeyDown(other.event)
     const plain = key({})
-    const props = openableProps('doc/x', open, { activatesOnEnter: true })
+    const props = openableProps('doc/x', open, { title: 'X', activatesOnEnter: true })
     props.onKeyDown(plain.event)
     expect(other.prevented()).toBe(false)
     expect(plain.prevented()).toBe(false)
@@ -97,11 +97,11 @@ describe('openableProps', () => {
   it('carries the subject as the shared entity descriptor', () => {
     const data = new Map<string, string>()
     const transfer = { effectAllowed: 'none' as DataTransfer['effectAllowed'], setData: (type: string, value: string) => { data.set(type, value) } }
-    const props = openableProps('agent/a', () => {})
+    const props = openableProps('agent/a', () => {}, { title: 'Agent A' })
     props.onDragStart({ dataTransfer: transfer })
     expect(props.draggable).toBe(true)
-    // The shared entity descriptor: an agent, by its ref.
-    expect(JSON.parse(data.get(openableDragType)!)).toEqual({ kind: 'agent', id: 'agent/a', title: 'agent/a' })
+    // The shared entity descriptor: an agent, by its ref, under the name its row shows.
+    expect(JSON.parse(data.get(openableDragType)!)).toEqual({ kind: 'agent', id: 'agent/a', title: 'Agent A' })
     expect(readOpenableDrag({ getData: type => data.get(type) ?? '' })).toBe('agent/a')
     expect(readOpenableDrag({ getData: () => '' })).toBeUndefined()
   })

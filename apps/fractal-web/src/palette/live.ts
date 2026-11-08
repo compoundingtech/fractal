@@ -12,7 +12,8 @@ import { missionChildOf } from '../missions/rowData.ts'
 import { useMissionRows, type MissionRow } from '../missions/useMissionRows.ts'
 import { sidebarAttention } from '../web/sidebarAttention.ts'
 import { sidebarRow } from '../web/sidebarRow.ts'
-import { workspaceKinds } from '../workspace/kinds.ts'
+import { describe, workspaceKinds } from '../workspace/kinds.ts'
+import type { PresentationWorld } from '../workspace/presentation.ts'
 import type { Fleet } from '../data/source.ts'
 import type { SubjectSummary } from '../shell/context.tsx'
 import { paneKey, parsePane, subjectOfRef } from '../workspace/subject.ts'
@@ -24,13 +25,6 @@ import { emptyWorld, type HostCommand, type PaletteWorld } from './items.ts'
 import { cellRecentStore } from './recent.ts'
 
 const needsYou: EntityStatus = { tone: 'needs-you', label: 'Waiting for you' }
-
-const resourceKind = (ref: string, icon: string): string =>
-  /\/pr\/|\/pull\//u.test(ref) || icon === 'pull-request' ? 'pull request'
-    : /\/issues?\//u.test(ref) ? 'issue'
-      : /\/runs?\//u.test(ref) ? 'run'
-        : ref.startsWith('doc/') ? 'document'
-          : 'resource'
 
 /**
  * What the gateway observed, as palette rows' input. A family not yet observed contributes nothing.
@@ -47,25 +41,42 @@ export const paletteWorld = ({ fleet, stale = false, needsMe = new Set(), missio
   readonly missionRows?: readonly MissionRow[] | undefined
   readonly attention?: readonly Fractal.Attention[] | undefined
   readonly resources?: readonly Pick<SubjectSummary, 'ref' | 'title' | 'icon'>[] | undefined
-}): PaletteWorld => ({
-  alerts: (attention ?? []).filter(item => item.state === 'open').map(item => ({
-    ref: item.id, title: item.title, kind: item.attention_kind, pane: paneKey(subjectOfRef(item.id)),
-    ...(isWaitingForAnswer(item) ? { status: needsYou } : {}),
-  })),
-  agents: (fleet?.agents ?? []).map(agent => {
-    const { status } = agentDescriptor(sidebarRow({ agent, stale, needsMe: needsMe.has(agent.ref) }))
-    return {
-      ref: agent.ref, name: agent.name, detail: [agent.harness, agent.host].filter(part => part !== undefined && part !== '').join(' · '),
-      terminal: agent.terminalDisabledReason === undefined, ...(status === undefined ? {} : { status }),
-    }
-  }),
-  missions: missionRows.map(row => {
-    const { title, status } = missionDescriptor(missionChildOf(row))
-    return { ref: row.mission.id, title, word: typeof row.mission.state === 'string' ? row.mission.state : row.mission.state.raw, ...(status === undefined ? {} : { status }) }
-  }),
-  machines: (fleet?.hosts ?? []).map(host => ({ id: host.id, connected: host.connected })),
-  resources: resources.map(resource => ({ ref: resource.ref, title: resource.title, kind: resourceKind(resource.ref, resource.icon), pane: paneKey(subjectOfRef(resource.ref)) })),
-})
+}): PaletteWorld => {
+  // Alerts and resources are named and kinded by their workspace kind, as their tabs are.
+  const world: PresentationWorld = {
+    agents: fleet?.agents ?? [], rosterKnown: fleet !== undefined, needsYou: needsMe,
+    attention: attention === undefined ? { _tag: 'Waiting' } : { _tag: 'Observed', value: attention, freshness: 'live' },
+    subjects: new Map([...resources, ...missionRows.map(row => row.mission)].map(row => [('ref' in row ? row.ref : row.id), { title: row.title }])),
+    missionsKnown: true,
+  }
+  const named = (ref: string, observed: string) => {
+    const subject = subjectOfRef(ref)
+    const descriptor = describe(subject, world)
+    return { title: descriptor.title._tag === 'Known' ? descriptor.title.text : observed, kind: descriptor.kind, pane: paneKey(subject) }
+  }
+  return {
+    alerts: (attention ?? []).filter(item => item.state === 'open').map(item => ({
+      ref: item.id, ...named(item.id, item.title),
+      ...(isWaitingForAnswer(item) ? { status: needsYou } : {}),
+    })),
+    agents: (fleet?.agents ?? []).map(agent => {
+      const { status } = agentDescriptor(sidebarRow({ agent, stale, needsMe: needsMe.has(agent.ref) }))
+      return {
+        ref: agent.ref, name: agent.name, detail: [agent.harness, agent.host].filter(part => part !== undefined && part !== '').join(' · '),
+        terminal: agent.terminalDisabledReason === undefined, ...(status === undefined ? {} : { status }),
+      }
+    }),
+    missions: missionRows.map(row => {
+      const { title, status } = missionDescriptor(missionChildOf(row))
+      return { ref: row.mission.id, title, word: typeof row.mission.state === 'string' ? row.mission.state : row.mission.state.raw, ...(status === undefined ? {} : { status }) }
+    }),
+    machines: (fleet?.hosts ?? []).map(host => ({ id: host.id, connected: host.connected })),
+    resources: resources.map(resource => {
+      const row = named(resource.ref, resource.title)
+      return { ref: resource.ref, ...row, kind: row.kind.toLowerCase() }
+    }),
+  }
+}
 
 /**
  * Whether this client has a surface for a pane key: one the kind registry resolves to anything but

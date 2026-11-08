@@ -16,13 +16,14 @@ const agent = ({ agent: ref }: { readonly agent: string }, world: PresentationWo
   return { title: Title.of('Agent', world.rosterKnown, row), kind: 'Agent', mark: { _tag: 'Agent', agent: ref }, card: { kind: 'agent', id: ref } }
 }
 
-const fixed = (text: string, icon: 'bell' | 'checklist' | 'gauge'): KindDescriptor =>
-  ({ title: { _tag: 'Fixed', text }, kind: text, mark: { _tag: 'Icon', name: icon }, card: null })
+/** A list or screen: named by its kind, by design, with a card summarising what it lists. */
+const fixed = (text: string, icon: 'bell' | 'checklist' | 'gauge', view: 'inbox' | 'missions' | 'usage'): KindDescriptor =>
+  ({ title: { _tag: 'Fixed', text }, kind: text, mark: { _tag: 'Icon', name: icon }, card: { kind: 'view', id: view } })
 
 export const corePresenters: { readonly [K in SubjectKind]: Presenter<K> } = {
   Conversation: agent,
   Terminal: agent,
-  Inbox: () => fixed('Inbox', 'bell'),
+  Inbox: () => fixed('Inbox', 'bell', 'inbox'),
   Alert: ({ id }, world) => {
     const items = world.attention._tag === 'Observed' ? world.attention.value : undefined
     const item = items?.find(each => each.id === id)
@@ -36,16 +37,16 @@ export const corePresenters: { readonly [K in SubjectKind]: Presenter<K> } = {
       detail: alertFrom(item, nameOf(world)),
     }
   },
-  Missions: () => fixed('Missions', 'checklist'),
+  Missions: () => fixed('Missions', 'checklist', 'missions'),
   Mission: ({ ref }, world) => ({ title: Title.of('Mission', world.missionsKnown, world.subjects.get(ref)), kind: 'Mission', mark: { _tag: 'Icon', name: 'checklist' }, card: { kind: 'mission', id: ref } }),
-  Usage: ({ group }) => group === undefined ? fixed('Usage', 'gauge') : { ...fixed('Usage', 'gauge'), detail: group },
+  Usage: ({ group }) => group === undefined ? fixed('Usage', 'gauge', 'usage') : { ...fixed('Usage', 'gauge', 'usage'), detail: group },
   // A document's ref ends in its name, which is what the person called it.
-  Document: ({ ref }, world) => ({ title: Title.known(world.subjects.get(ref) ?? { name: ref.slice(ref.lastIndexOf('/') + 1) }), kind: 'Document', mark: { _tag: 'Icon', name: 'attach' }, card: null }),
+  Document: ({ ref }, world) => ({ title: Title.known(world.subjects.get(ref) ?? { name: ref.slice(ref.lastIndexOf('/') + 1) }), kind: 'Document', mark: { _tag: 'Icon', name: 'attach' }, card: { kind: 'resource', id: ref } }),
   Declaration: ({ ref }, world) => {
     const name = nameOf(world)(ref) ?? world.subjects.get(ref)?.title
     return { title: name === undefined ? Title.of('Declaration', world.rosterKnown && world.missionsKnown, undefined) : Title.known({ name: `${name} KDL` }), kind: 'Declaration', mark: { _tag: 'Icon', name: 'pencil' }, card: ref.startsWith('agent/') ? { kind: 'agent', id: ref } : null }
   },
-  Resource: ({ ref }, world) => ({ title: Title.of('Resource', true, world.subjects.get(ref)), kind: 'Resource', mark: { _tag: 'Icon', name: 'folder' }, card: null, detail: ref }),
+  Resource: ({ ref }, world) => ({ title: Title.of('Resource', true, world.subjects.get(ref)), kind: 'Resource', mark: { _tag: 'Icon', name: 'folder' }, card: { kind: 'resource', id: ref }, detail: ref }),
   Unsupported: ({ key }) => ({ title: Title.gone('View'), kind: 'View', mark: { _tag: 'Icon', name: 'info' }, card: null, detail: key }),
 }
 

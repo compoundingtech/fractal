@@ -14,6 +14,8 @@ export const TabView = Schema.Struct({
   terminal: Schema.optional(Schema.Boolean),
   /** Holds an unsent draft. The kit keeps drafts only in the mounted composer, so this pins the surface. */
   dirty: Schema.optional(Schema.Boolean),
+  /** The last title this client observed for the tab's subject: named while it loads again, dimmed once gone. */
+  seenTitle: Schema.optional(Schema.String),
 })
 export type TabView = typeof TabView.Type
 

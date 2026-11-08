@@ -41,7 +41,8 @@ export const openableDragType = ENTITY_DRAG_TYPE
 const entityKindOf = (subject: Subject): EntityKind =>
   subject._tag === 'Conversation' || subject._tag === 'Terminal' ? 'agent' : subject._tag === 'Mission' ? 'mission' : subject._tag === 'Alert' ? 'alert' : 'resource'
 
-export const openableDragItems = (ref: string, title = ref): Record<string, string> =>
+/** `title` is what the row shows, the subject's described name: never its ref. */
+export const openableDragItems = (ref: string, title: string): Record<string, string> =>
   entityDragPayload({ kind: entityKindOf(subjectOfRef(ref)), id: subjectRef(subjectOfRef(ref)), title })
 
 export const readOpenableDrag = (data: Pick<DataTransfer, 'getData'>): string | undefined =>
@@ -78,7 +79,7 @@ export interface OpenableProps {
  * Alt+Enter opens in a split to the right and Alt+Shift+Enter in one below, the keyboard's answer to
  * dragging onto an edge. Enter without Alt is left to a host whose control already activates on it.
  */
-export const openableProps = (ref: string, open: Open, options?: { readonly activatesOnEnter?: boolean }): OpenableProps => ({
+export const openableProps = (ref: string, open: Open, options: { readonly title: string; readonly activatesOnEnter?: boolean }): OpenableProps => ({
   draggable: true,
   onClick: event => open(ref, event.metaKey || event.ctrlKey ? { split: 'right' } : {}),
   onKeyDown: event => {
@@ -86,13 +87,13 @@ export const openableProps = (ref: string, open: Open, options?: { readonly acti
     if (event.altKey) {
       event.preventDefault()
       open(ref, { split: event.shiftKey ? 'bottom' : 'right' })
-    } else if (options?.activatesOnEnter !== true) {
+    } else if (options.activatesOnEnter !== true) {
       event.preventDefault()
       open(ref, event.metaKey || event.ctrlKey ? { background: true } : {})
     }
   },
   onDragStart: event => {
-    for (const [type, value] of Object.entries(openableDragItems(ref))) event.dataTransfer.setData(type, value)
+    for (const [type, value] of Object.entries(openableDragItems(ref, options.title))) event.dataTransfer.setData(type, value)
     event.dataTransfer.effectAllowed = 'copyMove'
   },
 })
@@ -110,8 +111,8 @@ export const useOpen = (): Open => {
 }
 
 /** Spread onto whatever shows a ref. */
-export const useOpenable = (ref: string, options?: { readonly activatesOnEnter?: boolean }): OpenableProps => {
+export const useOpenable = (ref: string, options: { readonly title: string; readonly activatesOnEnter?: boolean }): OpenableProps => {
   const open = useOpen()
-  const activatesOnEnter = options?.activatesOnEnter
-  return React.useMemo(() => openableProps(ref, open, activatesOnEnter === undefined ? undefined : { activatesOnEnter }), [ref, open, activatesOnEnter])
+  const { title, activatesOnEnter } = options
+  return React.useMemo(() => openableProps(ref, open, activatesOnEnter === undefined ? { title } : { title, activatesOnEnter }), [ref, open, title, activatesOnEnter])
 }

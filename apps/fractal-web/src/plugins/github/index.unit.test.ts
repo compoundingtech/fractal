@@ -19,6 +19,6 @@ describe('GitHub plugin entry', () => {
         expect(contributions.filter(other => other.claims(ref)).map(other => other.id)).toEqual([contribution.id])
       }
     }
-    expect(contributions[0]!.policy.resources({ _tag: 'Resource', ref: 'resource/github/acme/garden/pull/7' })).toEqual([{ _tag: 'Contributed', kind: 'github.pull-request', ref: 'resource/github/acme/garden/pull/7' }])
+    expect(contributions[0]!.policy.resources({ _tag: 'Resource', ref: 'resource/github/acme/garden/pull-request/7' })).toEqual([{ _tag: 'Contributed', kind: 'github.pull-request', ref: 'resource/github/acme/garden/pull-request/7' }])
   })
 })

@@ -39,7 +39,7 @@ const shellAgent = pick({
   what: 'agent/build-host-a/workbench-shell',
 })
 const pull = pick({
-  value: pullRequestByRef('resource/github/acme/webfractal/pull/214'),
+  value: pullRequestByRef('resource/github/acme/webfractal/pull-request/214'),
   what: 'acme/webfractal#214',
 })
 const run = pick({ value: ciRuns[0], what: 'ciRuns[0]' })

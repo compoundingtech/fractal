@@ -23,7 +23,7 @@ describe('the live palette world', () => {
     fleet, needsMe, missionRows,
     attention: fixtureProjections.attention,
     resources: [
-      { ref: 'github/pr/compoundingtech/fractal/12', title: 'Fix it', icon: 'pull-request' },
+      { ref: 'resource/github/compoundingtech/fractal/pull-request/12', title: 'Fix it', icon: 'pull-request' },
       { ref: 'doc/notes/plan', title: 'Plan', icon: 'document' },
     ],
   })
@@ -47,7 +47,7 @@ describe('the live palette world', () => {
 
   it('names resources by kind and opens a document as a document', () => {
     expect(world.resources).toEqual([
-      { ref: 'github/pr/compoundingtech/fractal/12', title: 'Fix it', kind: 'pull request', pane: 'resource:github/pr/compoundingtech/fractal/12' },
+      { ref: 'resource/github/compoundingtech/fractal/pull-request/12', title: 'Fix it', kind: 'pull request', pane: 'resource:resource/github/compoundingtech/fractal/pull-request/12' },
       { ref: 'doc/notes/plan', title: 'Plan', kind: 'document', pane: 'document:doc/notes/plan' },
     ])
   })
@@ -60,7 +60,7 @@ describe('the live palette world', () => {
 
 describe('what the web can open', () => {
   it('follows the kind registry: kinds without a surface stay hidden', () => {
-    for (const ref of ['agent:agent/example/atlas', 'mission:mission/release', 'list:home', 'usage:', 'home:attention/1', 'resource:github/pr/o/r/1']) expect(opensInWeb(ref)).toBe(true)
+    for (const ref of ['agent:agent/example/atlas', 'mission:mission/release', 'list:home', 'usage:', 'home:attention/1', 'resource:resource/github/o/r/pull-request/1']) expect(opensInWeb(ref)).toBe(true)
     for (const ref of ['list:fleet', 'machine:machine/juniper', 'new-mission:']) expect(opensInWeb(ref)).toBe(false)
   })
 })

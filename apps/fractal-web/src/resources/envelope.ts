@@ -15,7 +15,7 @@
  */
 import { Result, Schema } from 'effect'
 
-/** Subject reference: `family/rest`, e.g. `mission/m-7f2`, `resource/github/o/r/pull/403`. */
+/** Subject reference: `family/rest`, e.g. `mission/m-7f2`, `resource/github/o/r/pull-request/403`. */
 export const SubjectRef = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9-]*\/\S+$/u)).annotate(
   {
     identifier: 'SubjectRef',

@@ -30,7 +30,7 @@ type Story = StoryObj<typeof meta>
 export const scenarioExemptions: readonly string[] = ['CommentOnPullRequest:contract-fixture', 'PullRequest:contract-fixture', 'PullRequestNotFound:contract-fixture']
 
 export const PullRequest: Story = {
-  args: { subjectRef: 'resource/github/acme/garden/pull/7' },
+  args: { subjectRef: 'resource/github/acme/garden/pull-request/7' },
   play: async ({ canvasElement }) => {
     const page = within(canvasElement)
     await expect(await page.findByText('Water the beds on a schedule', {}, { timeout: 2000 })).toBeVisible()

@@ -159,7 +159,7 @@ describe('the Resources tab', () => {
   const row = (id: string, kind: string, facts: Record<string, unknown>) =>
     decodeUnknownSync(ResourceObservation)({ id, kind, facts, observed_at: '2026-10-04T12:00:00.000Z', opened_by: 'agent/example', opened_by_run: null })
   const items = [
-    row('resource/github/acme/garden/pull/5707', 'vcs.pull-request', { title: 'Wait for exec', state: 'in_progress' }),
+    row('resource/github/acme/garden/pull-request/5707', 'vcs.pull-request', { title: 'Wait for exec', state: 'in_progress' }),
     row('resource/custom/board/3', 'custom.acme.board', {}),
   ]
   const withItems = { ...source, resources: { ...source.resources, byAgent: () => Atom.make(observed({ value: { items, nextCursor: null } })) } }
@@ -183,7 +183,7 @@ describe('the Resources tab', () => {
     expect(rows()[1]!.textContent).toContain('Resource 3')
     expect(document.body.textContent).not.toMatch(/vcs\.pull-request|custom\.acme/)
     await act(async () => rows()[0]!.click())
-    expect(onOpen).toHaveBeenCalledWith('resource/github/acme/garden/pull/5707', false)
+    expect(onOpen).toHaveBeenCalledWith('resource/github/acme/garden/pull-request/5707', false)
     await act(async () => rows()[1]!.dispatchEvent(new MouseEvent('click', { bubbles: true, metaKey: true })))
     expect(onOpen).toHaveBeenLastCalledWith('resource/custom/board/3', true)
   })
@@ -201,7 +201,7 @@ describe('the Resources tab', () => {
     await act(async () => { rows()[0]!.dispatchEvent(new MouseEvent('pointerover', { bubbles: true })) })
     expect(card()).toBeNull()
     await vi.waitFor(() => expect(card()).not.toBeNull(), { timeout: 1000 })
-    expect(card()!.getAttribute('data-entity-id')).toBe('resource/github/acme/garden/pull/5707')
+    expect(card()!.getAttribute('data-entity-id')).toBe('resource/github/acme/garden/pull-request/5707')
     expect(card()!.textContent).toContain('Wait for exec')
     expect(card()!.textContent).toContain('Pull request')
     expect(card()!.textContent).toContain('in progress')

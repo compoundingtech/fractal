@@ -3,11 +3,12 @@ import { describe, expect, it } from 'vitest'
 import { claimsKind, githubSubjectRef, githubUrlOf, parseGithubUrl, parseSubjectRef, readPathOf, refOf } from './refs.ts'
 
 describe('GitHub subject refs', () => {
-  it('reads both PR spellings the graph uses and writes the canonical one', () => {
-    for (const ref of ['resource/github/acme/demo/pull/1', 'resource/github/acme/demo/pull-request/1']) {
-      expect(parseSubjectRef(ref)).toEqual({ kind: 'pull-request', owner: 'acme', repo: 'demo', number: 1 })
-      expect(githubSubjectRef(ref)).toBe('resource/github/acme/demo/pull-request/1')
-    }
+  it('reads the one PR shape the daemon writes, and only that', () => {
+    expect(parseSubjectRef('resource/github/acme/demo/pull-request/1')).toEqual({ kind: 'pull-request', owner: 'acme', repo: 'demo', number: 1 })
+    expect(githubSubjectRef('resource/github/acme/demo/pull-request/1')).toBe('resource/github/acme/demo/pull-request/1')
+    // GitHub's URL spelling is not a subject's.
+    expect(parseSubjectRef('resource/github/acme/demo/pull/1')).toBeUndefined()
+    expect(githubSubjectRef('https://github.com/acme/demo/pull/1')).toBe('resource/github/acme/demo/pull-request/1')
   })
 
   it('claims each kind exclusively and nothing else', () => {

@@ -3,7 +3,9 @@ import { describe as group, expect, it, vi } from 'vitest'
 import type { Agent } from '../data/source.ts'
 import { workspaceKinds } from './kinds.ts'
 import { corePresenters } from './present.ts'
+import { rememberedTitle, tabPresentation } from './tabPresentation.tsx'
 import type { KindDescriptor, PresentationWorld } from './presentation.ts'
+import { openableDragItems } from './openable.ts'
 import type { KindContribution } from './registry.ts'
 import { paneKey, subjectOfRef, type Subject, type SubjectKind } from './subject.ts'
 
@@ -44,7 +46,7 @@ const examples: { readonly [K in SubjectKind]: Extract<Subject, { _tag: K }> } =
 }
 
 /** Kinds that have no hover card by design. Every other kind must name one. */
-const noCard: ReadonlySet<SubjectKind> = new Set(['Inbox', 'Missions', 'Usage', 'Document', 'Resource', 'Unsupported'])
+const noCard: ReadonlySet<SubjectKind> = new Set(['Unsupported'])
 
 const describe = (subject: Subject, at: PresentationWorld = world): KindDescriptor => workspaceKinds.kindOf(subject).present(subject, at)
 const lastSegment = (subject: Subject) => paneKey(subject).split(/[/:]/u).at(-1)
@@ -86,6 +88,32 @@ group('an alert', () => {
   })
 })
 
+group('a tab remembers its last name', () => {
+  const tab = { id: 'tab-1', ref: paneKey(examples.Alert) }
+  const answered: PresentationWorld = { ...world, attention: { _tag: 'Observed', value: [], freshness: 'live' } }
+  const loading: PresentationWorld = { ...world, attention: { _tag: 'Waiting' } }
+
+  it('records only an observed name', () => {
+    expect(rememberedTitle(describe(examples.Alert))).toBe('Q24: Complexity skill interview')
+    expect(rememberedTitle(describe(examples.Alert, loading))).toBeUndefined()
+    expect(rememberedTitle(describe(examples.Inbox))).toBeUndefined()
+  })
+
+  it('shows it, dimmed and without a card, once the subject is gone', () => {
+    const item = tabPresentation({ tab, world: answered, seen: 'Q24: Complexity skill interview' })
+    expect(item).toMatchObject({ title: 'Q24: Complexity skill interview', status: 'unavailable' })
+    expect(item.hoverCard).toBeUndefined()
+    expect(tabPresentation({ tab, world: answered }).title).toBe('Alert')
+  })
+
+  it('shimmers the kind word only on a first load, with nothing seen before', () => {
+    expect(tabPresentation({ tab, world: loading })).toMatchObject({ title: 'Alert', loading: true })
+    const reload = tabPresentation({ tab, world: loading, seen: 'Q24: Complexity skill interview' })
+    expect(reload.title).toBe('Q24: Complexity skill interview')
+    expect(reload.loading).toBeUndefined()
+  })
+})
+
 group('the types refuse a kind without a presenter', () => {
   it('core kinds and contributions', () => {
     // @ts-expect-error: every SubjectKind needs a presenter.
@@ -96,6 +124,8 @@ group('the types refuse a kind without a presenter', () => {
     const bare: KindDescriptor = { title: 'Alert', kind: 'Alert', mark: { _tag: 'Icon', name: 'alert' }, card: null }
     // @ts-expect-error: the card is stated, even when there is none.
     const unstated: KindDescriptor = { title: { _tag: 'Fixed', text: 'Inbox' }, kind: 'Inbox', mark: { _tag: 'Icon', name: 'bell' } }
+    // @ts-expect-error: a dragged row says what it is called, never falls back to its ref.
+    openableDragItems('agent/a')
     expect([missing, silent, bare, unstated]).toHaveLength(4)
   })
 })
