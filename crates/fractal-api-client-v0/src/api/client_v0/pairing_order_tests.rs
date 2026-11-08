@@ -5,7 +5,66 @@ use super::*;
 const GRANT: &str = "custom/client/pairing-order";
 const PERSON: &str = "person/avery";
 
-fn replicate(from: &AppState, to: &AppState) {
+#[tokio::test]
+async fn issuer_operation_withdrawal_accepts_another_local_person() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests::test_state_named(root.path(), "pairing-issuer");
+    let completed = complete(&state, later());
+    let other = Store::open_memory("other-issuer").unwrap();
+    let copy = other.append_client_operation_claim(&ClaimInput {
+        subject:GRANT.into(),kind:completed.kind.clone(),actor:completed.actor.clone(),
+        fields:serde_json::from_value(completed.body["fields"].clone()).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    let withdrawal = other.append_client_operation_claim(&ClaimInput {
+        subject:GRANT.into(),kind:"custom.client.pairing-revoked".into(),
+        actor:Some("person/alex".into()),fields:BTreeMap::new(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    assert!(!state.store.pairing_revocation_is_trusted(&withdrawal, &completed).unwrap());
+    assert!(other.pairing_revocation_is_trusted(&withdrawal, &copy).unwrap());
+    let mut fields = completed.body["fields"].clone();
+    fields["credential_hash"] = json!(credential_digest("issuer-withdrawal"));
+    let replacement = state.store.append_client_operation_claim(&ClaimInput {
+        subject:GRANT.into(),kind:completed.kind.clone(),actor:completed.actor.clone(),
+        fields:serde_json::from_value(fields).unwrap(),evidence:vec![],
+        expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    let request = || Request::builder().uri("/v1/client/capabilities")
+        .header(AUTHORIZATION, "Bearer issuer-withdrawal").body(Body::empty()).unwrap();
+    assert!(authenticate(&state, &request(), "fabric-loopback").is_ok());
+    state.store.append_client_operation_claim(&ClaimInput {
+        subject:GRANT.into(),kind:"custom.client.pairing-revoked".into(),
+        actor:Some("person/alex".into()),fields:BTreeMap::new(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    assert!(!state.store.pairing_completion_is_revoked(&completed).unwrap());
+    assert!(state.store.pairing_completion_is_revoked(&replacement).unwrap());
+    assert_eq!(authenticate(&state, &request(), "fabric-loopback").unwrap_err().status, StatusCode::FORBIDDEN);
+    assert!(paired_client_session(&state, &replacement, "fabric-loopback", false).is_err());
+}
+
+pub(super) fn replicate(from: &AppState, to: &AppState) {
+    if from.store.member_key.read().unwrap().is_none() {
+        let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        let peer = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        for state in [from, to] {
+            state.store.bind_fleet("pairing-fleet").unwrap();
+            state.store.pin_fleet_anchor(anchor.public()).unwrap();
+        }
+        from.store.set_member_key(Some(anchor.clone())).unwrap();
+        to.store.set_member_key(Some(peer.clone())).unwrap();
+        from.store.admit_fleet_anchor("pairing-fleet", anchor.public(), "listening").unwrap();
+        from.store.append_claim(&ClaimInput {
+            subject:format!("host/{}", to.store.origin()),kind:"fleet.member-admitted".into(),actor:None,
+            fields:serde_json::from_value(json!({
+                "fleet_id":"pairing-fleet",
+                "member_key":peer.public(),"via":"member","sponsor":format!("host/{}", from.store.origin()),
+                "writer_floor":0,"mode":"listening",
+            })).unwrap(),
+            evidence:vec![],expected_subject:None,idempotency_key:None,
+        }).unwrap();
+    }
     let exchange = from
         .store
         .export_replication_exchange("pairing-fleet", &to.store.replication_inventory().unwrap())
@@ -21,12 +80,13 @@ fn replicate(from: &AppState, to: &AppState) {
 fn complete(state: &AppState, expires_at: u64) -> ClaimRecord {
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: GRANT.into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some(PERSON.into()),
             fields: serde_json::from_value(json!({
                 "session_actor": "person/avery/session/phone", "person_id": PERSON,
+                "device_id":"device/ordered-phone",
                 "credential_hash": "test-not-a-secret", "expires_at_unix_ms": expires_at,
                 "scopes": ["read.projections"],
             }))
@@ -41,7 +101,7 @@ fn complete(state: &AppState, expires_at: u64) -> ClaimRecord {
 fn revoke(state: &AppState) {
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: GRANT.into(),
             kind: "custom.client.pairing-revoked".into(),
             actor: Some(PERSON.into()),
@@ -61,28 +121,70 @@ fn later() -> u64 {
     client_now_ms() as u64 + 600_000
 }
 
-#[test]
-fn a_revocation_ends_the_grant_on_every_member_whatever_order_they_admitted_it() {
+#[tokio::test]
+async fn pairing_lifecycle_selection_uses_admitted_completions_before_ordering() {
     let (left_root, right_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let left = super::tests::test_state_named(left_root.path(), "pairing-left");
     let right = super::tests::test_state_named(right_root.path(), "pairing-right");
-    // Each member writes its own claim first: the left pairs the grant while the right, which
-    // has not seen the pairing yet, revokes it.
+    let completed = complete(&left, later());
+    let session = paired_client_session(&left, &completed, "fabric-loopback", false).unwrap();
+    for kind in ["custom.client.pairing-completed", "custom.client.pairing-revoked"] {
+        right.store.append_claim(&ClaimInput {
+            subject:GRANT.into(), kind:kind.into(), actor:Some(PERSON.into()),
+            fields:serde_json::from_value(completed.body["fields"].clone()).unwrap(),
+            evidence:vec![],expected_subject:None,idempotency_key:None,
+        }).unwrap();
+    }
+    replicate(&right, &left);
+    assert!(revalidate_session(&left, &session).is_ok());
+    let snapshot = new_client_snapshot(&left);
+    let devices = device_resources(&left, &snapshot, PERSON).unwrap();
+    assert_eq!(devices.len(), 1);
+    assert_eq!(devices[0]["revision"], completed.id);
+    assert_eq!(devices[0]["state"], "active");
+    // Expiry does not prevent the issuing operation from withdrawing an admitted grant.
+    let expired = complete(&left, 1);
+    right.store.append_claim(&ClaimInput {
+        subject:GRANT.into(),kind:"custom.client.pairing-completed".into(),actor:Some(PERSON.into()),
+        fields:serde_json::from_value(json!({
+            "device_id":"device/ordered-phone","person_id":PERSON,
+            "session_actor":"person/avery/session/retained","expires_at_unix_ms":u64::MAX,
+        })).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    replicate(&right, &left);
+    let local = ClientSession::local(Some(PERSON)).unwrap();
+    dispatch_action(&left, &new_client_snapshot(&left), &local, &ActionRequest {
+        api_version:CLIENT_API_VERSION.into(),id:"action/revoke-ordered".into(),
+        action_type:"pairing.revoke".into(),idempotency_key:"revoke-ordered".into(),
+        fence:Fence::default(),parameters:json!({"target_id":"device/ordered-phone"}),
+    }).await.unwrap();
+    assert!(left.store.pairing_completion_is_revoked(&expired).unwrap());
+}
+
+#[test]
+fn only_issuer_operation_revocations_end_grants_across_members() {
+    let (left_root, right_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let left = super::tests::test_state_named(left_root.path(), "pairing-left");
+    let right = super::tests::test_state_named(right_root.path(), "pairing-right");
     complete(&left, later());
-    revoke(&right);
+    right.store.append_claim(&ClaimInput {
+        subject:GRANT.into(),kind:"custom.client.pairing-revoked".into(),actor:Some(PERSON.into()),
+        fields:BTreeMap::new(),evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
     replicate(&left, &right);
     replicate(&right, &left);
-    for (name, state) in [("left", &left), ("right", &right)] {
+    for state in [&left, &right] {
+        let paired = newest_by_arrival(state, "custom.client.pairing-completed");
+        assert!(paired_client_session(state, &paired, "fabric-loopback", false).is_ok());
+    }
+    revoke(&left);
+    replicate(&left, &right);
+    for state in [&left, &right] {
         let paired = newest_by_arrival(state, "custom.client.pairing-completed");
         let refused = paired_client_session(state, &paired, "fabric-loopback", false).unwrap_err();
-        assert!(refused.message.contains("revoked or expired"), "{name}: {}", refused.message);
+        assert!(refused.message.contains("revoked or expired"));
     }
-    // Negative control: the arrival comparison used before answers differently on the two.
-    let revoked_by_arrival = |state: &AppState| {
-        newest_by_arrival(state, "custom.client.pairing-revoked").store_index
-            > newest_by_arrival(state, "custom.client.pairing-completed").store_index
-    };
-    assert_ne!(revoked_by_arrival(&left), revoked_by_arrival(&right), "the fixture orders arrival differently");
 }
 
 #[test]

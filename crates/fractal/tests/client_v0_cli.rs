@@ -2581,7 +2581,7 @@ mission "cli/child" state="ready" {
         .unwrap();
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: "custom/client/cli-device".into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some("person/alex".into()),

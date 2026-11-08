@@ -304,10 +304,10 @@ async fn membership_only_gateway_holds_raw_writers_and_fences_capabilities() {
     let credential = "scratch-raw-paired-credential";
     gateway
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: "custom/client/pairing-raw-fixture".into(),
             kind: "custom.client.pairing-completed".into(),
-            actor: None,
+            actor: Some("person/avery".into()),
             fields: BTreeMap::from([
                 (
                     "credential_hash".into(),
@@ -871,11 +871,11 @@ impl Drop for LeasePair {
 }
 
 fn lease_claim(store: &Store, subject: &str, kind: &str, fields: Value) {
-    store
-        .append_claim(&ClaimInput {
+    let input = ClaimInput {
             subject: subject.into(),
             kind: kind.into(),
-            actor: None,
+            actor: fields.get("person_id").and_then(Value::as_str)
+                .map(str::to_owned).or_else(|| (kind == "custom.client.pairing-revoked").then(|| "person/avery".into())),
             fields: fields
                 .as_object()
                 .unwrap()
@@ -885,8 +885,12 @@ fn lease_claim(store: &Store, subject: &str, kind: &str, fields: Value) {
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: None,
-        })
-        .unwrap();
+        };
+    if kind.starts_with("custom.client.pairing") {
+        store.append_client_operation_claim(&input)
+    } else {
+        store.append_claim(&input)
+    }.unwrap();
 }
 
 async fn socket_ready(socket: &Path) {

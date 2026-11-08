@@ -354,11 +354,16 @@ fn ready_work_store_count_excludes_blockers_independently() {
 }
 
 fn grant_claim(state: &AppState, subject: &str, kind: &str, fields: Value) {
-    state.store.append_claim(&ClaimInput {
+    let input = ClaimInput {
         subject: subject.into(), kind: kind.into(), actor: Some("person/operator".into()),
         fields: serde_json::from_value(fields).unwrap(), evidence: Vec::new(),
         expected_subject: None, idempotency_key: None,
-    }).unwrap();
+    };
+    if kind.starts_with("custom.client.pairing") {
+        state.store.append_client_operation_claim(&input)
+    } else {
+        state.store.append_claim(&input)
+    }.unwrap();
 }
 
 #[tokio::test]
