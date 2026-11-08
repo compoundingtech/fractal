@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "The web app and SDK apply 11 Effect language-service fixes with no behavior change, and the objectives reader runs through an Effect atom that aborts its request on unmount or refresh",
+  "summary": "The web app and SDK apply 11 Effect language-service fixes with no behavior change, and the objectives reader runs through an Effect atom with the same cancellation as before (a pending read aborts on unmount or refresh)",
   "replay": { "status": "none", "detail": "Web and SDK client modules only; no replay or rebuild." },
   "schema": { "status": "none", "detail": "No storage or schema changes." },
   "rules": { "status": "none", "detail": "No rules changes." },

@@ -60,3 +60,31 @@ it('shows the last reading as stale when a pane remounts after its atom was rele
     registry.dispose()
   }
 })
+
+it('aborts a pending read on refresh and on release, and a late answer never publishes', async () => {
+  const registry = AtomRegistry.make()
+  const pending: { readonly signal: AbortSignal; readonly answer: () => void }[] = []
+  const value = { as_of_unix_ms: 90_000_000, rows: [], otel_ui_url: 'https://otel.example.invalid' }
+  const options = { baseUrl: 'http://gateway.invalid', fetchImpl: (input: RequestInfo | URL, init?: RequestInit) => {
+    if (new URL(String(input)).pathname.endsWith('/capabilities')) return Promise.resolve(Response.json(recording.capabilities))
+    return new Promise<Response>(resolve => {
+      pending.push({ signal: init!.signal!, answer: () => resolve(Response.json({ ...recording.cases.agent.payload, value })) })
+    })
+  } }
+  const source = gatewayObjectives({ options, discovery: new FractalClient(options), registry, now: () => 90_000_000 })
+  try {
+    const release = registry.mount(source.list)
+    await vi.waitFor(() => expect(pending).toHaveLength(1))
+    source.refresh()
+    await vi.waitFor(() => expect(pending).toHaveLength(2))
+    expect(pending[0]!.signal.aborted).toBe(true)
+    expect(pending[1]!.signal.aborted).toBe(false)
+    release()
+    await vi.waitFor(() => expect(pending[1]!.signal.aborted).toBe(true))
+    pending.forEach(read => read.answer())
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(registry.get(source.list)).toEqual({ _tag: 'Waiting' })
+  } finally {
+    registry.dispose()
+  }
+})
