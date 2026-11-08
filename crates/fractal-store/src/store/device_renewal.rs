@@ -38,6 +38,10 @@ impl Store {
             "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.client.pairing-revoked' AND (subject=?1 OR json_extract(body,'$.fields.device_id')=?2))",
             params![source.subject, device], |row| row.get(0),
         )?;
+        let key_withdrawal: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='principal.key-revoked' AND subject=?1 AND json_extract(body,'$.fields.key') IN (?2,?3))",
+            params![person, old_key, candidate], |row| row.get(0),
+        )?;
         anyhow::ensure!(!raw_withdrawal && !key_withdrawal, FractalError::new("forbidden", "a renewal key or source was withdrawn"));
         anyhow::ensure!(consumed.kind == "custom.client.pairing-renewal-consumed"
             && consumed.subject == stage.subject && consumed.actor.as_deref() == Some(person)
