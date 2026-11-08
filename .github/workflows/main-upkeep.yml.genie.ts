@@ -1,3 +1,4 @@
+import { withCompatArchives } from './compat-archive.ts'
 import { scopeLinuxNixSandbox } from './nix-sandbox-scope.ts'
 import { buildSnapshotPrepare, buildSnapshotRestore, buildSnapshotSave } from './build-snapshot.ts'
 import { auditCaches } from './cache-audit.ts'
@@ -27,7 +28,8 @@ import {
 
 const proofId = (id: string) => `proof-${id}`
 const proofSelected = "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true'"
-const fleetWorkflow = buildFleetWorkflow({ topology: 'merge-group' })
+// Compose archive producers before projection so hosted proof retains the complete queue graph.
+const fleetWorkflow = withCompatArchives(buildFleetWorkflow({ topology: 'merge-group' }))
 // Queue-ref cancellation and PR-only advice cannot apply to a landed main commit.
 const proofOmissions: Record<string, string> = {
   'namespace-capacity': 'The ephemeral queue ref no longer controls landed proof.',
@@ -112,7 +114,7 @@ fi`,
   ],
 })
 
-const upkeepWorkflow = scopeLinuxNixSandbox(auditCaches({
+const upkeepWorkflow = withCompatArchives(scopeLinuxNixSandbox(auditCaches({
   name: 'Main upkeep',
   on: { push: { branches: ['main'] }, workflow_dispatch: {} },
   permissions: { contents: 'read', actions: 'read' },
@@ -246,6 +248,6 @@ fi`,
       before: [perfStoresCache('cost')],
     }),
   },
-}, {"main-checks": "Verifies exact queue checks through the API and builds nothing.", "hosted-proof-failure": "Reports a failed hosted proof and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."}))
+}, {"main-checks": "Verifies exact queue checks through the API and builds nothing.", "hosted-proof-failure": "Reports a failed hosted proof and builds nothing.", "cache-maintenance": "Cache maintenance uses live API data and builds nothing."})))
 
 export default githubWorkflow({ ...upkeepWorkflow, jobs: { ...upkeepWorkflow.jobs, ...proofJobs } })
