@@ -201,8 +201,19 @@ fn begun_person(state: &AppState, challenge: &Value) -> ClaimRecord {
 async fn keyed_person_pairing_is_private_and_wrong_code_does_not_consume_it() {
     let root = tempfile::tempdir().unwrap();
     let state = super::tests::test_state_named(root.path(), "keyed-person");
-    let first = begin_person(&state).await;
-    let second = begin_person(&state).await;
+    let fixed_begin = |code: &str| begin_person_challenge(
+        state.clone(), ClientSession::local(Some(PERSON)).unwrap(),
+        serde_json::from_value(json!({
+            "api_version": CLIENT_API_VERSION, "device_name": "Phone", "person_id": PERSON,
+        })).unwrap(), code.into(),
+    ).unwrap().0;
+    let first = fixed_begin("ABCDEFGH");
+    let same_code = fixed_begin("ABCDEFGH");
+    assert_ne!(first["pairing_id"], same_code["pairing_id"]);
+    assert_ne!(begun_person(&state, &first).subject, begun_person(&state, &same_code).subject);
+    assert_eq!(begun_person(&state, &first).body["fields"]["code_hash"],
+        begun_person(&state, &same_code).body["fields"]["code_hash"]);
+    let second = fixed_begin("ABCDEFGJ");
     let mut a = begun_person(&state, &first);
     let mut b = begun_person(&state, &second);
     assert_ne!(a.subject, b.subject);

@@ -5599,6 +5599,17 @@ pub async fn pairing_begin(
         .iter()
         .map(|byte| ALPHABET[*byte as usize % ALPHABET.len()] as char)
         .collect::<String>();
+    begin_person_challenge(state, session, request, code)
+}
+
+// Keep entropy generation separate from claim construction so the same-code case
+// can prove identities and all other stored fields are independent of the code.
+fn begin_person_challenge(
+    state: AppState,
+    session: ClientSession,
+    request: PairingBegin,
+    code: String,
+) -> Result<Json<Value>, ApiError> {
     let stable = pairing_verifier::random_id().map_err(ApiError::internal)?;
     let pairing_id = format!("pairing/{stable}");
     let subject = format!("custom/client/pairing-{stable}");
