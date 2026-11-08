@@ -21,6 +21,7 @@ const server = await createServer({
 after(() => server.close())
 const { completeStreamingTail, Markdown, InlineMarkdown } = await server.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
 const { splitMarkdownBlocks } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
+const { markdownBlock, markdownInline } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-text.ts')
 test('generated Pierre IDs and aliases match the installed package', async () => {
   assert.equal(await readFile(output, 'utf8'), await generatedLanguages())
 })
@@ -55,7 +56,8 @@ test('the CPU-time budget still catches a scan that restarts at every bracket', 
 })
 
 const parsed = source => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: [remarkGfm], skipHtml: false }, source)).replace(/<link rel="preload"[^>]*>/g, '').replace(/\n/g, '')
-const prompt = (text, props = {}) => renderToStaticMarkup(h(Markdown, { text, hardBreaks: true, ...props }))
+const prompt = (text, props = {}) => renderToStaticMarkup(h(Markdown, { text: markdownBlock(text), hardBreaks: true, ...props }))
+const block = text => renderToStaticMarkup(h(Markdown, { text: markdownBlock(text) }))
 
 const FRAGMENTS = [
   'A paragraph with `code` and *emphasis*.', 'Two lines\nof one paragraph.', '# Heading', 'Setext\n---', '---',
@@ -120,7 +122,7 @@ test('prompts load no remote image and drop unsafe link protocols', () => {
 })
 
 test('inline Markdown is phrasing only, with links as words by default', () => {
-  const inline = props => renderToStaticMarkup(h(InlineMarkdown, props))
+  const inline = props => renderToStaticMarkup(h(InlineMarkdown, { ...props, text: markdownInline(props.text) }))
   const html = inline({ text: '# Run `st x` **now** [here](https://example.test) ![alt](https://example.test/i.png)\n\nnext' })
   assert.doesNotMatch(html, /<(?:h1|p|div|img|a)\b/)
   assert.match(html, /<code[^>]*>st x<\/code>/)
@@ -137,4 +139,153 @@ test('plain text of inline Markdown keeps the words a label needs', async () => 
   assert.equal(markdownPlainText('## Ship snake_case_names and 2*3*4'), 'Ship snake_case_names and 2*3*4')
   assert.equal(markdownPlainText('- [x] done\nnext line'), 'done next line')
   assert.equal(markdownPlainText('escaped \\*star\\* and ~~gone~~'), 'escaped *star* and gone')
+})
+
+
+// HTML policy (markdown-html-policy.ts): one test per threat it names.
+test('policy: script, embeds and forms go with their content', () => {
+  const html = block('<script>alert(1)</script>\n\n<style>body{display:none}</style>\n\n<iframe src="https://example.test">frame text</iframe>\n\n<svg><text>svg text</text></svg>\n\n<form><input value="x"><button>Send</button></form>\n\nAfter')
+  assert.doesNotMatch(html, /<(?:script|style|iframe|svg|form|input|button)\b|alert\(1\)|display:none|frame text|svg text|Send/)
+  assert.match(html, /After/)
+})
+
+test('policy: event handlers and styling attributes never survive', () => {
+  const html = block('<div onclick="x()" style="position:fixed" class="evil" id="root">Text <b onmouseover="y()">bold</b></div>')
+  assert.doesNotMatch(html, /onclick|onmouseover|position:fixed|class="evil"|id="root"/)
+  assert.match(html, /<b>bold<\/b>/)
+})
+
+test('policy: links open only http(s)', () => {
+  for (const href of ['javascript:alert(1)', 'JaVaScRiPt:alert(1)', 'java&#x09;script:alert(1)', '&#106;avascript:alert(1)', ' javascript:alert(1)', 'data:text/html,<b>x</b>', 'vbscript:x', 'mailto:a@example.test', '/relative', '#anchor']) {
+    const raw = block(`<a href="${href}">raw link</a>`)
+    const markdown = block(`[md link](${href.replace(/ /g, '')})`)
+    assert.doesNotMatch(raw + markdown, /<a\b/, href)
+    assert.match(raw, /raw link/, href)
+    assert.match(markdown, /md link/, href)
+  }
+  assert.doesNotMatch(block('[ref][x]\n\n[x]: javascript:alert(1)'), /href="javascript/)
+  assert.match(block('<a href="https://example.test/a">ok</a> [md](https://example.test/b)'), /href="https:\/\/example.test\/a".*href="https:\/\/example.test\/b"/)
+  // A document reference is the one relative link: the document pane opens it in place.
+  assert.match(block('[plan](doc/garden-plan)'), /href="doc\/garden-plan"/)
+  for (const href of ['doc/../admin', 'doc/', '//evil.test/doc/x', 'doc/a%20b']) assert.doesNotMatch(block(`[x](${href})`), /<a\b/, href)
+})
+
+test('policy: comments disappear, and an unterminated one hides the rest of its block', () => {
+  assert.doesNotMatch(block('Shown <!-- hidden --> text'), /hidden/)
+  const open = block('Shown\n\n<!-- never closed\n\nstill hidden')
+  assert.match(open, /Shown/)
+  assert.doesNotMatch(open, /never closed|still hidden/)
+})
+
+test('policy: details is a disclosure whose body is Markdown', () => {
+  // As on GitHub, the summary line is an HTML block, so its words stay literal; the body between blank lines is Markdown.
+  const html = block('<details><summary>More info</summary>\n\nHidden *body* with `code`.\n\n</details>\n\nAfter')
+  assert.match(html, /<details[^>]*><summary[^>]*>More info<\/summary>/)
+  assert.match(html, /<em[^>]*>body<\/em>/)
+  assert.match(html, /<\/details>.*After/s)
+  assert.match(block('<details open><summary>S</summary>\n\nx\n\n</details>'), /<details open=""/)
+})
+
+test('policy: a raw image is the same consent-gated placeholder as a Markdown image', () => {
+  const html = block('<img src="https://example.test/pixel.png" alt="pixel" onerror="x()">\n\n<img src="javascript:x" alt="bad">')
+  assert.doesNotMatch(html, /<img|onerror/)
+  assert.match(html, /data-testid="deferred-image"/)
+  assert.match(html, /bad/)
+})
+
+test('policy: tables and formatting from the allowlist render, unsafe values do not', () => {
+  const html = block('<table><tr><th align="center">H</th><td colspan="2" rowspan="x">C</td></tr></table>\n\n<kbd>Ctrl</kbd> <sub>2</sub> <sup>3</sup>')
+  assert.match(html, /<table/)
+  assert.match(html, /colspan="2"/i)
+  assert.doesNotMatch(html, /rowspan/)
+  assert.match(html, /<kbd[^>]*>Ctrl<\/kbd>/)
+  assert.match(html, /<sub>2<\/sub>/)
+})
+
+test('policy: tag-like words and escaped markup stay text', () => {
+  const html = block('Use `<T>` or Array<string> and &lt;script&gt;')
+  assert.match(html, /Array&lt;string&gt;/)
+  assert.match(html, /&lt;script&gt;/)
+  assert.doesNotMatch(html, /<script/)
+})
+
+test('policy: deep nesting renders bounded, without overflowing the stack', () => {
+  for (const [name, text] of [['quotes', '>'.repeat(3000) + ' deep'], ['lists', Array.from({ length: 3000 }, (_, index) => '  '.repeat(index) + '- x').join('\n')], ['tags', '<div>'.repeat(3000) + 'deep'], ['emphasis', '*'.repeat(3000) + 'a' + '*'.repeat(3000)]]) {
+    const { result, milliseconds } = cpuMilliseconds(() => block(text))
+    assert.ok(milliseconds < 2000, `${name} took ${milliseconds}ms`)
+    assert.ok((result.match(/<blockquote/g) ?? []).length <= 33 && (result.match(/<div/g) ?? []).length <= 40, `${name} nests too deep`)
+  }
+})
+
+// Findings from the cross-family review of the policy, each kept as a regression test.
+test('policy review: mixed list and quote markers cannot overflow the stack', () => {
+  const { milliseconds } = cpuMilliseconds(() => block('- ' + '>'.repeat(4000) + ' x'))
+  assert.ok(milliseconds < 2000, `${milliseconds}ms`)
+  assert.doesNotThrow(() => block(Array.from({ length: 2000 }, () => '- >').join(' ') + ' x'))
+})
+
+test('policy review: unmatched closing tags cost linear time', () => {
+  const { milliseconds } = cpuMilliseconds(() => block('<div>'.repeat(20000) + '</span>'.repeat(20000)))
+  assert.ok(milliseconds < 1500, `${milliseconds}ms`)
+})
+
+test('policy review: a disclosure keeps its body across blank lines, however its tag is written', () => {
+  for (const source of ['<details\n><summary>S</summary>\n\nBODY\n\n</details>', '<blockquote>\n\nBODY\n\n</blockquote>']) {
+    const html = block(source + '\n\nAfter')
+    assert.match(html, /<(details|blockquote)\b[^>]*>(?:(?!<\/\1>)[\s\S])*BODY(?:(?!<\/\1>)[\s\S])*<\/\1>/, source)
+  }
+})
+
+test('policy review: spaces between inline elements stay', () => {
+  assert.match(block('<div><b>A</b> <i>B</i></div>'), /<b>A<\/b> <i>B<\/i>/)
+})
+
+test('policy review: entities decode once, in text and in links', () => {
+  assert.match(block('<div>&copy; 2026</div>'), /© 2026/)
+  assert.match(block('<a href="https://x.test/?q=&amp;colon;">x</a>'), /href="https:\/\/x.test\/\?q=&amp;colon;"/)
+})
+
+test('policy review: nested dropped elements drop all their content', () => {
+  assert.doesNotMatch(block('<svg><svg></svg>LEAK</svg> after'), /LEAK/)
+  assert.doesNotMatch(block('<script><script></script>LEAK</script>'), /LEAK/)
+})
+
+test('policy review: no attribute reaches React by a property name, and no image source set loads', () => {
+  const html = block('<div dangerouslySetInnerHTML="x" className="evil" style="color:red" background="https://example.test/b.png">T</div>\n\n<picture><source srcset="https://example.test/a.png"><img srcset="https://example.test/b.png 2x" alt="pic"></picture>')
+  assert.doesNotMatch(html, /dangerouslySetInnerHTML|class="evil"|color:red|background=|srcset|<source|<picture|<img/i)
+  assert.match(html, /T/)
+})
+
+test('policy follow-up: deep inline nesting shows as text, malformed tags tokenize in linear time', () => {
+  const deep = '*a '.repeat(5000) + 'b' + ' a*'.repeat(5000)
+  assert.match(block(deep), /\*a \*a/)
+  for (const n of [1000, 10000]) {
+    const { milliseconds } = cpuMilliseconds(() => block('<div>\n' + '<a '.repeat(n)))
+    assert.ok(milliseconds < 400, `${n}: ${milliseconds}ms`)
+  }
+})
+
+test('policy follow-up: block cuts never split dropped content or a disclosure', () => {
+  for (const source of ['<svg>\n\nLEAK\n\n</svg>', '<form>\n\nLEAK\n\n</form>']) assert.doesNotMatch(block(source + '\n\nAfter'), /LEAK/, source)
+  for (const source of ['<details a="</div>">\n\nBODY\n\n</details>', '<details>\n\n</table>\n\nBODY\n\n</details>']) {
+    assert.match(block(source + '\n\nAfter'), /<details[^>]*>(?:(?!<\/details>)[\s\S])*BODY(?:(?!<\/details>)[\s\S])*<\/details>/, source)
+  }
+})
+
+test('the nesting guard leaves long code and big tables alone', () => {
+  const code = '```python\n' + Array.from({ length: 400 }, (_, index) => `snake_case_${index} = items[index_${index}] * other_value_${index}  # __dunder__ ~x`).join('\n') + '\n```'
+  assert.match(block(code), /<pre/)
+  assert.match(renderToStaticMarkup(h(Markdown, { text: markdownBlock(code.slice(0, -4)), streaming: true })), /<pre/)
+  const table = '| link | path |\n| --- | --- |\n' + Array.from({ length: 150 }, (_, index) => `| [row_${index}](https://example.test/a_${index}) | \`src/some_dir/file_${index}.ts\` *note* |`).join('\n')
+  assert.match(block(table), /<table/)
+})
+
+test('policy final pass: fake fences, nested images, raw pre blocks and commented tags', () => {
+  for (const [name, source] of [['fake fence', '```not`fence\n' + '*a '.repeat(4000) + 'b' + ' a*'.repeat(4000)], ['images', '!['.repeat(2000) + 'x' + '](https://example.test)'.repeat(2000)]]) {
+    const { milliseconds } = cpuMilliseconds(() => block(source))
+    assert.ok(milliseconds < 300, `${name}: ${milliseconds}ms`)
+  }
+  assert.match(block('<div><pre>ordinary code</pre></div>'), /markdown-code-block[\s\S]*ordinary code/)
+  assert.match(block('<pre>\nordinary code\n</pre>'), /ordinary code/)
+  assert.doesNotMatch(block('<svg>\n<!-- </svg> -->\n\nLEAK\n\n</svg>'), /LEAK/)
 })
