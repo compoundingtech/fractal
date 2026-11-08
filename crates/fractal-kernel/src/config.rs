@@ -35,6 +35,9 @@ pub enum WorkerIngressGenerationCheck {
 pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_source: Option<QuotaSourceConfig>,
+    /// Local quota/credit append and fold writers; absent/empty excludes all, never storage.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage_limits: Option<UsageLimitsConfig>,
     /// Inactive host-envelope declaration; absent uses CONFIG/host-envelope.json if present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_envelope_file: Option<PathBuf>,
@@ -140,6 +143,24 @@ pub struct Config {
     /// `STATE/fleet/fleet.toml`, merged by `apply_fleet_file` after command-line overrides.
     #[serde(skip)]
     pub fleet: Option<FleetFile>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UsageLimitsConfig {
+    /// Agent identities admitted for local appends and included in read-time usage folds.
+    pub writers: Vec<String>,
+}
+
+impl UsageLimitsConfig {
+    pub fn validate(&self) -> Result<()> {
+        for writer in &self.writers {
+            let subject = fractal_schema::registry().validate_subject(writer)
+                .map_err(|error| anyhow::anyhow!("usage_limits.writers: {}", error.message))?;
+            anyhow::ensure!(subject.family == "agent", "usage_limits.writers must contain only agent identities");
+        }
+        Ok(())
+    }
 }
 
 /// An operator-selected external quota source; clients cannot override its URL.
@@ -664,6 +685,7 @@ impl Default for Config {
         let client_gateway_socket = runtime_dir.join("fractal-client.sock");
         Self {
             quota_source: None,
+            usage_limits: None,
             host_envelope_file: None,
             node: host_name(),
             access_mode: None,
@@ -932,6 +954,9 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if let Some(usage_limits) = &self.usage_limits {
+            usage_limits.validate()?;
+        }
         if let Some(directory) = &self.store_dir {
             anyhow::ensure!(directory.is_absolute(), "store_dir must be an absolute directory path");
             anyhow::ensure!(
@@ -1267,6 +1292,22 @@ fn machine_host_name() -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn usage_writer_configuration_is_explicit_and_agent_only() {
+        let absent: super::Config = toml::from_str("").unwrap();
+        assert!(absent.usage_limits.is_none());
+        let empty: super::Config = toml::from_str("[usage_limits]\nwriters=[]").unwrap();
+        assert!(empty.usage_limits.unwrap().writers.is_empty());
+        let configured: super::Config = toml::from_str("[usage_limits]\nwriters=['agent/sample/usage-producer']").unwrap();
+        configured.usage_limits.as_ref().unwrap().validate().unwrap();
+        let roundtrip: super::Config = toml::from_str(&toml::to_string(&configured).unwrap()).unwrap();
+        assert_eq!(roundtrip.usage_limits, configured.usage_limits);
+        for writer in ["person/ada", "harness/sample", "agent/"] {
+            let config: super::Config = toml::from_str(&format!("[usage_limits]\nwriters=['{writer}']")).unwrap();
+            assert!(config.usage_limits.unwrap().validate().is_err());
+        }
+    }
+
     #[test]
     fn inactive_host_envelope_path_roundtrips_and_is_read_strictly() {
         let directory = tempfile::tempdir().unwrap();

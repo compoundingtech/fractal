@@ -397,6 +397,7 @@ impl World {
     fn new(seed: u64, sabotage: Sabotage) -> Self {
         let root = scratch_dir();
         let oracle = Store::open(&root.path().join("oracle.sqlite3"), "oracle").unwrap();
+        oracle.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
         oracle.bind_fleet(FLEET).unwrap();
         let mut world = Self {
             seed,
@@ -439,6 +440,7 @@ impl World {
         let path = self.root.path().join(format!("{name}.sqlite3"));
         let scratch = self.root.path().join(format!("{name}-scratch"));
         let store = Store::open(&path, name.clone()).unwrap();
+        store.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
         store.bind_fleet(FLEET).unwrap();
         let skew_ms = if self.rng.chance(30) {
             (self.rng.below(6 * 24) as i64 - 3 * 24) * DAY_MS / 24
@@ -519,6 +521,7 @@ impl World {
         let placeholder = Store::open_memory(format!("{name}-closed")).unwrap();
         drop(std::mem::replace(&mut self.nodes[index].store, placeholder));
         self.nodes[index].store = Store::open(&path, name).unwrap();
+        self.nodes[index].store.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
         self.nodes[index].store.bind_fleet(FLEET).unwrap();
         self.set_clock(index);
         self.check_index(index);
@@ -990,6 +993,32 @@ impl World {
     }
 
     fn claim_of(&mut self, spec: &fractal_schema::ClaimSpec, index: usize) -> Option<ClaimInput> {
+        if spec.kind == fractal_schema::usage_limits::KIND {
+            return Some(ClaimInput {
+                subject: "agent/sample/usage-producer".into(),
+                kind: spec.kind.clone(),
+                actor: Some("agent/sample/usage-producer".into()),
+                fields: BTreeMap::from([
+                    ("readings".into(), json!([])),
+                    ("credit_readings".into(), json!([{
+                        "account": "digest",
+                        "account_ref": "account/example-0",
+                        "provider": "anthropic",
+                        "credit_id": "durable-convergence-credit",
+                        "expires_at": "2100-01-08T12:30:00Z",
+                        "measured_at": "2100-01-01T12:30:00Z",
+                        "state": "available",
+                        "disposition": {"kind": "unknown", "at": null, "evidence_ref": null},
+                        "coverage": "reported",
+                        "source": "omp-usage",
+                        "host": self.nodes[index].name
+                    }])),
+                ]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some(self.fresh("usage")),
+            });
+        }
         let family = self.rng.pick(&spec.subjects).clone();
         let subject = self.subject_of(&family, index)?;
         let deployment = deployment_fields(&spec.kind);
@@ -1778,9 +1807,9 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
     assert!(trimmed * 2 >= runs, "only {trimmed} of {runs} runs trimmed");
 }
 
-/// Corpus v16 shifts shared RNG draws through kind selection and optional action fields.
-/// All 32 fixed seeds converge; 30 trim. Preserve exact equality with the measured never-trim set.
-const NEVER_TRIMS: &[u64] = &[2, 34];
+/// Corpus v16, including observed usage credits, shifts shared RNG draws through kind selection.
+/// Hosted run 42417346519 observed all 32 fixed seeds trimming; preserve exact equality.
+const NEVER_TRIMS: &[u64] = &[];
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
