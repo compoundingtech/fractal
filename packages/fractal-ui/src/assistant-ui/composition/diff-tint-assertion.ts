@@ -63,7 +63,7 @@ export function assertDiffTint(canvas: HTMLElement) {
     view.style.removeProperty(property)
     return before !== after
   }
-  if (!follows('--fractal-syntax-addition')) throw new Error('Added wash does not follow the addition variable')
-  if (follows('--fractal-syntax-unrelated')) throw new Error('Diff tint probe is not specific')
+  if (!follows('--fractal-diff-addition')) throw new Error('Added wash does not follow the addition variable')
+  if (follows('--fractal-diff-unrelated')) throw new Error('Diff tint probe is not specific')
   return { minimumTextContrast: Math.round(minimumTextContrast * 100) / 100, minimumGutterContrast: Math.round(minimumGutterContrast * 100) / 100 }
 }
