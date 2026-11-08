@@ -3,6 +3,13 @@ use super::*;
 use serde::{Deserialize, Serialize};
 use fractal_schema::custom::{self as schema, Authority, Basis, Expr, Manifest, Predicate, Select};
 
+/// Whole-history admission limits: decision snapshots are refused, never truncated.
+pub const DECISION_INPUTS_MAX_CLAIMS: u64 = 10_000;
+pub const DECISION_INPUTS_MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
+/// Work budget includes repaired rows, which do not consume the effective history limits.
+/// Excessive repaired history is refused with the same typed error, never silently skipped.
+const DECISION_INPUTS_MAX_SCANNED_CLAIMS: u64 = 2 * DECISION_INPUTS_MAX_CLAIMS;
+
 // Explicit UPSERTs in triggers keep an outer admission UPSERT from overriding IGNORE.
 const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hd9bc2fa21a4c owner=fractal_store::store::custom TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS custom_registrations (
@@ -102,6 +109,14 @@ pub struct RegistrationRequest {
     pub manifest: Manifest,
     pub actor: String,
 }
+
+/// Complete, authority-validated decision inputs from one database snapshot.
+/// Vector position is canonical interpretation order; store indexes are arrival cursors only.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DecisionInputs {
+    pub claims: Vec<ClaimRecord>,
+    pub basis: Value,
+}
 pub fn typed(e: fractal_schema::ValidationError) -> FractalError {
     FractalError::new(e.code, e.message)
 }
@@ -123,6 +138,51 @@ pub fn claims(connection: &Connection, subject: &str) -> Result<Vec<ClaimRecord>
          AND NOT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired')
          ORDER BY CANONICAL_ASC(claims)"))?
         .query_map([subject],claim_from_row)?.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+fn decision_inputs_preflight(
+    connection: &Connection,
+    subject: &str,
+    max_claims: u64,
+    max_body_bytes: u64,
+) -> Result<()> {
+    // No aggregate or sort: SQLite yields each subject row before visiting the next.
+    // Keep repaired rows in the cursor so even a repaired-only history has bounded work.
+    // CASE avoids measuring excluded bodies. Canonical ordering is applied only after
+    // admission, by claims(), in the caller's same read transaction.
+    let mut statement = connection.prepare(
+        "SELECT CASE WHEN NOT EXISTS(
+             SELECT 1 FROM replica_records WHERE claim_id=claims.id AND state='repaired'
+         ) THEN length(CAST(claims.body AS BLOB)) END
+         FROM claims CROSS JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.subject=?1 LIMIT ?2",
+    )?;
+    let mut rows = statement.query(params![subject, DECISION_INPUTS_MAX_SCANNED_CLAIMS + 1])?;
+    let mut scanned = 0;
+    let mut claim_count = 0;
+    let mut body_bytes = 0_u64;
+    while let Some(row) = rows.next()? {
+        scanned += 1;
+        let bytes: Option<u64> = row.get(0)?;
+        if let Some(bytes) = bytes {
+            claim_count += 1;
+            body_bytes = body_bytes.saturating_add(bytes);
+        }
+        if scanned > DECISION_INPUTS_MAX_SCANNED_CLAIMS
+            || claim_count > max_claims || body_bytes > max_body_bytes
+        {
+            return Err(FractalError::new(
+                "decision-inputs-too-large",
+                format!(
+                    "decision history exceeds its admission budget after scanning {scanned} claims \
+                     ({claim_count} effective claims and {body_bytes} body bytes so far); \
+                     limits are {max_claims} effective claims, {max_body_bytes} body bytes, \
+                     and {DECISION_INPUTS_MAX_SCANNED_CLAIMS} scanned claims including repaired history"
+                ),
+            ).into());
+        }
+    }
+    Ok(())
 }
 pub fn registration(
     connection: &Connection,
@@ -571,6 +631,13 @@ pub fn slots(m: &Manifest, history: &[ClaimRecord]) -> BTreeMap<String, ClaimRec
 }
 fn basis_revision(connection: &Connection, subject: &str, kinds: &[String]) -> Result<String> {
     let history = claims(connection, subject)?;
+    basis_revision_from_history(subject, kinds, &history)
+}
+fn basis_revision_from_history(
+    subject: &str,
+    kinds: &[String],
+    history: &[ClaimRecord],
+) -> Result<String> {
     let mut kinds = kinds.to_vec();
     kinds.sort();
     kinds.dedup();
@@ -938,6 +1005,96 @@ impl Store {
     }
     pub fn custom_basis_revision(&self, subject: &str, kinds: &[String]) -> Result<String> {
         basis_revision(&self.readers.get(), subject, kinds)
+    }
+    /// Read the same repaired-filtered canonical inputs as the basis, never raw log pages.
+    /// Invalid or unavailable authority rejects the entire read rather than granting approval.
+    pub fn decision_inputs(&self, subject: &str) -> Result<DecisionInputs> {
+        self.decision_inputs_with_limits(
+            subject,
+            DECISION_INPUTS_MAX_CLAIMS,
+            DECISION_INPUTS_MAX_BODY_BYTES,
+        )
+    }
+
+    fn decision_inputs_with_limits(
+        &self,
+        subject: &str,
+        max_claims: u64,
+        max_body_bytes: u64,
+    ) -> Result<DecisionInputs> {
+        let version = if subject.starts_with("custom/decision/tree/v1/") {
+            1
+        } else if subject.starts_with("custom/decision/tree/v2/") {
+            2
+        } else {
+            anyhow::bail!("expected a decision.tree v1 or v2 subject");
+        };
+        let connection = self.readers.get();
+        let snapshot = connection.unchecked_transaction()?;
+        let (hash, manifest, state) = registration(&snapshot, subject)?
+            .ok_or_else(|| anyhow::anyhow!("decision registration is unavailable"))?;
+        anyhow::ensure!(
+            state == "ready" && manifest.kind == "decision.tree" && manifest.version == u32::from(version),
+            "decision registration is not ready or does not match the subject"
+        );
+        let answered = format!("custom.decision.tree.v{version}.answered");
+        anyhow::ensure!(
+            manifest.creation_kind == format!("custom.decision.tree.v{version}.opened")
+                && manifest.attention.as_ref()
+                    .is_some_and(|attention| attention.recipient_field == "recipient")
+                && manifest.claims.get(&answered)
+                    .is_some_and(|spec| matches!(spec.authority, Authority::Recipient)),
+            "decision registration must authorize answers only from the addressed recipient"
+        );
+        let source_status: Option<(String, Option<String>)> = snapshot.query_row(
+            "SELECT state,person FROM custom_sources WHERE subject=?1",
+            [subject], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        let (source_state, source_recipient) = source_status
+            .ok_or_else(|| anyhow::anyhow!("decision source is unavailable"))?;
+        // Stale derived status must not prevent its importer from reading fresh raw inputs.
+        anyhow::ensure!(matches!(source_state.as_str(), "ready" | "stale"),
+            "decision source authority is not ready");
+        let source_body = source(&snapshot, subject)?
+            .ok_or_else(|| anyhow::anyhow!("decision source is unavailable"))?;
+        decision_inputs_preflight(&snapshot, subject, max_claims, max_body_bytes)?;
+        let history = claims(&snapshot, subject)?;
+        anyhow::ensure!(
+            history.iter().all(|claim| fields(claim).get("_registration") == Some(&json!(hash))),
+            "decision history contains mismatched registration pins"
+        );
+        let creation = history.iter().find(|claim| claim.kind == manifest.creation_kind)
+            .ok_or_else(|| anyhow::anyhow!("decision creation is unavailable"))?;
+        let creation_fields = fields(creation);
+        let seat = creation_fields.get("seat").and_then(Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("decision creation has no seat"))?;
+        let seat_path = seat.strip_prefix("agent/")
+            .ok_or_else(|| anyhow::anyhow!("decision seat must be an agent"))?;
+        anyhow::ensure!(
+            creation.actor.as_deref() == Some(seat)
+                && (subject == format!("custom/decision/tree/v{version}/{seat_path}")
+                    || (version == 2 && subject.strip_prefix("custom/decision/tree/v2/legacy/")
+                        .is_some_and(|spelling| !spelling.is_empty()))),
+            "decision creation actor, seat, and subject identity must match"
+        );
+        let recipient = creation_fields.get("recipient").and_then(Value::as_str)
+            .filter(|recipient| recipient.starts_with("person/"))
+            .ok_or_else(|| anyhow::anyhow!("decision recipient must be a person"))?;
+        fractal_schema::registry().validate_subject(recipient)?;
+        anyhow::ensure!(
+            source_recipient.as_deref() == Some(recipient)
+                && source_body.pointer("/fields/recipient").and_then(Value::as_str) == Some(recipient),
+            "decision source recipient must match the creation recipient"
+        );
+        for claim in &history {
+            validate_fact(&snapshot, subject, &manifest, &claim.kind,
+                claim.actor.as_deref(), &fields(claim), Some(creation))?;
+        }
+        let kinds = schema::decisions::input_kinds(version);
+        let revision = basis_revision_from_history(subject, &kinds, &history)?;
+        let claims = history.into_iter().filter(|claim| kinds.contains(&claim.kind)).collect();
+        snapshot.commit()?;
+        Ok(DecisionInputs { claims, basis: json!({"subject":subject,"kinds":kinds,"revision":revision}) })
     }
     pub fn custom_attention_items(
         &self,
