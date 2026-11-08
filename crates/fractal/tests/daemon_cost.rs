@@ -2683,6 +2683,19 @@ async fn service_probe(app: &Router, path: &str) -> Result<Value,String> {
     Ok(answer)
 }
 
+async fn required_service_probe(app: &Router, path: &str) -> Value {
+    service_probe(app,path).await.unwrap_or_else(|error| {
+        panic!("seeded service probe must succeed before cost aggregation: {error}")
+    })
+}
+
+#[tokio::test]
+#[should_panic(expected = "seeded service probe must succeed before cost aggregation")]
+async fn missing_service_probe_is_fatal_before_cost_aggregation() {
+    let app = Router::new().fallback(|| async { axum::http::StatusCode::NOT_FOUND });
+    required_service_probe(&app,"/v1/client/claims/by-id/unseeded").await;
+}
+
 fn push_body() -> Value {
     json!({
         "token":"0123456789abcdef0123456789abcdef",
@@ -3152,7 +3165,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                 counted(|| paired_push(&paired_router, push_credential, method, body.as_ref())).await
             } else if probe.path.starts_with("/v1/client/claims") || probe.path.starts_with("/v1/client/work-items/") {
                 let path = fixture.fill(probe.path,attempt);
-                counted(|| service_probe(&service_router,&path)).await
+                counted(|| async { Ok(required_service_probe(&service_router,&path).await) }).await
             } else if let Some(call) = probe.direct {
                 let (store, fixture) = (store.clone(), &fixture);
                 counted(|| async move {
