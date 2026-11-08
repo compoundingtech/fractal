@@ -157,8 +157,9 @@ fn managed_startup_reads_its_declaration_over_authenticated_unix() {
             let _startup = {
                 let startup = fractal_daemon::startup::Startup::begin(&socket).unwrap();
                 startup.phase("full-replay/base-claims");
-                let error = generated_client(&Endpoint::Unix(socket.clone()), Some(SUBJECT))
-                    .err().expect("full-replay startup must refuse client construction before listening");
+                let Err(error) = generated_client(&Endpoint::Unix(socket.clone()), Some(SUBJECT)) else {
+                    panic!("full-replay startup must refuse client construction before listening");
+                };
                 assert!(daemon_is_unreachable(&error));
                 startup
             };

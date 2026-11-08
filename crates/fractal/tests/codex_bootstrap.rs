@@ -1038,7 +1038,13 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
             .unwrap();
     });
     until(|| socket.exists(), "the isolated API did not start").await;
-    let provider = root.path().join("provider");
+    let managed_bin = root.path().join("managed-bin");
+    std::fs::create_dir(&managed_bin).unwrap();
+    let profile = root.path().join("runtime-profile.json");
+    std::fs::write(&profile, serde_json::to_vec(&json!({
+        "personas": {"launch": {"generalist": {"harnessBin": managed_bin}}},
+    })).unwrap()).unwrap();
+    let provider = managed_bin.join("codex");
     let marker = root.path().join("provider-invoked");
     std::fs::write(
         &provider,
@@ -1057,6 +1063,8 @@ async fn bootstrap_waits_for_reconciliation(status: &str, previous: Option<&str>
         ("HOME", root.path().to_string_lossy().into_owned()),
         ("PATH", path.to_string_lossy().into_owned()),
         ("ST_AGENT", SUBJECT.to_owned()),
+        ("FRACTAL_AGENT", SUBJECT.to_owned()),
+        ("AGENT_RUNTIME_PROFILE", profile.to_string_lossy().into_owned()),
         ("ST3_SUBJECT", SUBJECT.to_owned()),
         ("ST3_BIN", binary_path.clone()),
         ("ST3_ENDPOINT", socket.to_string_lossy().into_owned()),
