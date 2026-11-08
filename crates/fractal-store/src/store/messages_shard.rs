@@ -39,7 +39,7 @@ pub const STREAM_INDEX_BASE: u64 = 1 << 48;
 /// row, such as those a rolled-back build admitted without the trigger, and an existing shard
 /// gains an index it lacks. `stream_lifecycle` is this member's record of a stream item's delivery: it is
 /// local, never replicated and outside every digest, as a lifecycle claim would not be.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h3a9e73d4f2c3 owner=fractal_store::store::messages_shard TODO=chunk-or-reference-variable-columns */ "
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hc9b02678051d owner=fractal_store::store::messages_shard TODO=chunk-or-reference-variable-columns */ "
 CREATE TABLE IF NOT EXISTS stream_messages (
     subject TEXT PRIMARY KEY,
     recipient TEXT NOT NULL,
@@ -52,6 +52,11 @@ CREATE INDEX IF NOT EXISTS stream_messages_sender
     ON stream_messages(sender, store_index);
 CREATE INDEX IF NOT EXISTS stream_messages_order
     ON stream_messages(store_index);
+CREATE INDEX IF NOT EXISTS claims_assistant_reply_page
+ON claims(
+    CASE WHEN json_type(body,'$.fields') IS NULL THEN json_extract(body,'$.to') ELSE json_extract(body,'$.fields.to') END,
+    length(accepted_at_unix_ms), accepted_at_unix_ms, subject)
+WHERE kind='message.sent';
 CREATE TRIGGER IF NOT EXISTS stream_messages_admitted AFTER INSERT ON claims
 WHEN NEW.kind='message.sent' BEGIN
     INSERT OR IGNORE INTO stream_messages(subject, recipient, sender, store_index)

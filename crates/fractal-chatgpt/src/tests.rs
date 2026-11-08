@@ -113,6 +113,9 @@ fn validation_accepts_every_published_tool_contract() {
         assert!(validate_arguments(name, &json!({})).is_ok());
         assert!(validate_arguments(name, &json!({"limit":1,"cursor":"opaque","max_response_bytes":16384})).is_ok());
     }
+    assert!(validate_arguments(CONVERSATIONS_LIST, &json!({"replies":true})).is_ok());
+    assert!(validate_arguments(CONVERSATIONS_LIST, &json!({"replies":"true"})).is_err());
+    assert!(validate_arguments(CONVERSATIONS_LIST, &json!({"replies":true,"recipient":"assistant/mcp"})).is_err());
     assert!(validate_arguments(ALERT_GET, &json!({"alert_id":"attention/test"})).is_ok());
     assert!(validate_arguments(CONVERSATION_READ, &json!({"agent_id":"agent/example-reader","session_id":"session/a",
         "reference":"opaque","revision":"claim/a","start":0,"end":1,"max_response_bytes":1})).is_ok());
@@ -637,8 +640,15 @@ fn chatgpt_discovery_matches_main_golden() {
         tools: tool_definitions(Profile::ChatGpt),
         ..Default::default()
     };
-    let golden: Value =
+    let mut golden: Value =
         serde_json::from_slice(include_bytes!("testdata/chatgpt-tools-list.json")).unwrap();
+    // Explicit additive contract change; preserve the independent fixture for every
+    // other tool and field rather than regenerating it from the implementation.
+    let conversation = golden["tools"].as_array_mut().unwrap().iter_mut()
+        .find(|tool| tool["name"] == CONVERSATIONS_LIST).unwrap();
+    conversation["description"] = json!("Discover bounded conversation metadata without content. To read incoming agent replies, set replies=true: newest canonical replies to this authenticated assistant return directly usable read objects, including replies from earlier agent incarnations. Pass read unchanged to fractal_conversation_read. Without replies, entries describe current agent timelines; read may be null for histories without readable text. Continue with value.page.next_cursor and the same replies mode. Pages fit max_response_bytes; an item that cannot fit is refused.");
+    conversation["inputSchema"]["properties"]["replies"] = json!({"type":"boolean",
+        "description":"Set true to discover newest canonical agent replies addressed to this authenticated assistant, independent of current agent sessions."});
     assert_eq!(serde_json::to_value(&result).unwrap(), golden);
 }
 
