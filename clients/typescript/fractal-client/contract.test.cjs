@@ -1088,6 +1088,19 @@ test('mission declaration read encodes exact revisions and preserves served text
     assert.equal(new URL(calls.at(-1)).searchParams.has('revision'), false);
 });
 
+test('mission detail run read names the requested run and leaves the plain detail unbounded by it', async () => {
+    const calls = [];
+    const mission = 'mission/example/readback';
+    const client = new FractalClient({ baseUrl: 'https://example.test', fetchImpl: async (url) => {
+        calls.push(url);
+        return response(envelope(url.endsWith('/capabilities') ? capabilities : { kind: 'mission', id: mission }));
+    } });
+    await client.missionsGetRun(mission, 'mission-run/old&one');
+    assert.equal(calls.at(-1), 'https://example.test/v1/client/missions/' + encodeURIComponent(mission) + '?run=' + encodeURIComponent('mission-run/old&one'));
+    await client.missionsGet(mission);
+    assert.equal(new URL(calls.at(-1)).searchParams.has('run'), false);
+});
+
 test('terminal exact filters encode subjects and refuse an old server ignoring filters', async () => {
     const calls = [];
     let filters = { owner: 'agent/lookup/seat-064', state: 'running' };

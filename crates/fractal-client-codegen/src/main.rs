@@ -398,6 +398,10 @@ fn rust_operation_methods(
                 out,
                 "    pub async fn resources_list(&self, filters: &ResourcesFilter, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ResourcesPage>, ClientError> {{ let values = [(\"opened_by\", filters.opened_by.as_deref()), (\"kind\", filters.kind.as_deref()), (\"subject_prefix\", filters.subject_prefix.as_deref())]; let mut filters = [(\"\", \"\"); 3]; let mut count = 0; for (name, value) in values {{ if let Some(value) = value {{ filters[count] = (name, value); count += 1; }} }} self.list_internal_with_filters(\"resources\", cursor, limit, false, &filters[..count]).await }}"
             )?;
+        } else if id == "missions.get" {
+            writeln!(out, "    pub async fn missions_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {{ self.resource_internal(\"missions\", id).await }}")?;
+            writeln!(out, "    /// The mission detail with the timing and step-history bound lifted for `run` (`mission-run/<id>` or `<id>`), which must be a run of this mission.")?;
+            writeln!(out, "    pub async fn missions_get_run(&self, id: &str, run: &str) -> Result<Envelope<Resource>, ClientError> {{ self.get(&format!(\"/v1/client/missions/{{}}?run={{}}\", percent_encode_segment(id), percent_encode(run))).await }}")?;
         } else if id.ends_with(".get") {
             let collection = path
                 .trim_start_matches("/v1/client/")
@@ -589,6 +593,10 @@ fn swift_operation_methods(
                 out,
                 "    public func resourcesList(filters: ResourcesFilter = .init(), cursor: String? = nil, limit: Int? = nil) async throws -> Envelope<ResourcesPage> {{ var query: [URLQueryItem] = []; if let openedBy = filters.openedBy {{ query.append(.init(name: \"opened_by\", value: openedBy)) }}; if let kind = filters.kind {{ query.append(.init(name: \"kind\", value: kind)) }}; if let subjectPrefix = filters.subjectPrefix {{ query.append(.init(name: \"subject_prefix\", value: subjectPrefix)) }}; if let cursor {{ query.append(.init(name: \"cursor\", value: cursor)) }}; if let limit {{ query.append(.init(name: \"limit\", value: String(limit))) }}; return try await get(\"v1/client/resources\", query: query) }}"
             )?;
+        } else if id == "missions.get" {
+            writeln!(out, "    public func missionsGet(id: String) async throws -> Envelope<Resource> {{ try await resource(\"missions\", id: id) }}")?;
+            writeln!(out, "    /// The mission detail with the timing and step-history bound lifted for `run` (`mission-run/<id>` or `<id>`), which must be a run of this mission.")?;
+            writeln!(out, "    public func missionsGetRun(id: String, run: String) async throws -> Envelope<Resource> {{ try await get(\"v1/client/missions/\\(id)\", query: [.init(name: \"run\", value: run)]) }}")?;
         } else if id.ends_with(".get") {
             let collection = path
                 .trim_start_matches("/v1/client/")
@@ -1766,6 +1774,10 @@ fn typescript_operation_methods(
                 out,
                 "    async {method}(id: string, options: {{ after?: string; wait_ms?: number }} = {{}}, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}` + query(options), undefined, requestOptions); }}"
             )?;
+        } else if id == "missions.get" {
+            writeln!(out, "    async missionsGet(id: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}`, undefined, requestOptions); }}")?;
+            writeln!(out, "    /** The mission detail with the timing and step-history bound lifted for `run` (`mission-run/<id>` or `<id>`), which must be a run of this mission. */")?;
+            writeln!(out, "    async missionsGetRun(id: string, run: string, requestOptions: RequestOptions = {{}}): Promise<EnvelopeOf<{response}>> {{ return this.get(`{route}` + query({{ run }}), undefined, requestOptions); }}")?;
         } else if id == "timeline.list" || id == "terminal.screen" || id.ends_with(".get") {
             let query_suffix = if id == "timeline.list" {
                 " + query(options)"
@@ -2323,5 +2335,26 @@ public enum Next { case value } // {
         let fields = schema_properties(&model).flat_map(|properties| properties.keys())
             .map(String::as_str).collect::<std::collections::BTreeSet<_>>();
         assert_eq!(fields, std::collections::BTreeSet::from(["registered", "environment"]));
+    }
+
+    #[test]
+    fn mission_detail_run_read_is_a_separate_method_beside_unchanged_missions_get() -> Result<()> {
+        let operations: Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/operations.json"
+        ))?;
+        let reads = operations["reads"].as_array().unwrap();
+        let actions = operations["actions"].as_object().unwrap();
+        let rust = rust_operation_methods(reads, actions)?;
+        assert!(rust.contains("pub async fn missions_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> { self.resource_internal(\"missions\", id).await }"));
+        assert!(rust.contains("pub async fn missions_get_run(&self, id: &str, run: &str) -> Result<Envelope<Resource>, ClientError>"));
+        assert!(rust.contains("/v1/client/missions/{}?run={}\", percent_encode_segment(id), percent_encode(run)"));
+        let swift = swift_operation_methods(reads, actions)?;
+        assert!(swift.contains("public func missionsGet(id: String) async throws -> Envelope<Resource> { try await resource(\"missions\", id: id) }"));
+        assert!(swift.contains("public func missionsGetRun(id: String, run: String) async throws -> Envelope<Resource>"));
+        assert!(swift.contains("query: [.init(name: \"run\", value: run)]"));
+        let typescript = typescript_operation_methods(reads, actions)?;
+        assert!(typescript.contains("async missionsGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/missions/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }"));
+        assert!(typescript.contains("async missionsGetRun(id: string, run: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/missions/${encodeURIComponent(routedId(id))}` + query({ run }), undefined, requestOptions); }"));
+        Ok(())
     }
 }

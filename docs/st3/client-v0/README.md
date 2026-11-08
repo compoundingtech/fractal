@@ -280,8 +280,10 @@ A mission detail read also folds each step's `attempts`, `waits` and `transition
 by `GET /v1/client/missions/{id}?run=<mission run id>`. `run` takes `mission-run/<id>` or `<id>`
 and lifts the timing and enrichment bound for that one run only (its `started_at`,
 `completed_at`, loop and wake fields fill in as for the latest finish); a run of another mission is
-`not-found`, and an empty `run` is ignored. Lists, pages and collection windows never carry these
-fields, and other runs' steps omit them: absence is not proof of a single attempt or no waits.
+`not-found`, and an empty `run` is ignored. Typed clients send it with `missionsGetRun(id, run)`
+(Rust `missions_get_run`); `missionsGet(id)` keeps its signature and never sends `run`. Lists,
+pages and collection windows never carry these fields, and other runs' steps omit them: absence is
+not proof of a single attempt or no waits.
 
 - `attempts[]`: `{n, claimant, started_at, ended_at, outcome, reason?}`, oldest first. An attempt
   opens at its first claim or `working`/`claimed` state (a reclaim keeps it) and ends at its
