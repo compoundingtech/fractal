@@ -19,6 +19,7 @@ import { DataSourceProvider } from '../data/react.tsx'
 import { ConversationPane } from './ConversationPane.tsx'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import type { UxTelemetry } from '../telemetry/ux.ts'
+import * as StateCell from '../state/cell/StateCell.ts'
 
 const snapshot: Snapshot = {
   id: 'snapshot/1',
@@ -201,7 +202,10 @@ let gateway: Gateway | undefined
 let root: Root | undefined
 const container = document.createElement('div')
 
+let uninstallCells: (() => Promise<void>) | undefined
 beforeEach(() => {
+  // UI state cells (drafts among them) start empty for every test, as in a fresh browser.
+  uninstallCells = StateCell.install(StateCell.memoryLayer)
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   vi.stubGlobal('crypto', webcrypto)
   frames = new Map()
@@ -232,6 +236,7 @@ afterEach(async () => {
   vi.unstubAllGlobals()
   vi.useRealTimers()
   vi.restoreAllMocks()
+  await uninstallCells?.()
 })
 
 /** Drain socket callbacks, browser-task decode slices, stream fibers and frame-ingest commits. */
