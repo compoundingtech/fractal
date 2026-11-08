@@ -332,10 +332,17 @@ def maintain_clone(row):
         # Record attempts, not successes: a broken maintenance command must not
         # run every five minutes. The tick row preserves its failure.
         atomic_json(stamp, {'attemptedAt': now})
-        for command in (
-                ('repack', '-d', '--geometric=2'),
-                ('prune', '--expire=2.weeks.ago'),
-                ('-c', 'gc.rerereResolved=60', '-c', 'gc.rerereUnresolved=7', 'rerere', 'gc')):
+        commands = [('prune', '--expire=2.weeks.ago')]
+        full_stamp = L/f'{C.name}-git-full-gc.json'
+        if not full_stamp.exists() or now - json.loads(full_stamp.read_text())['attemptedAt'] >= 30 * 86400:
+            # Collect packed garbage before geometric repacking can refresh its
+            # pack age. This deliberately permits one full repack per month.
+            atomic_json(full_stamp, {'attemptedAt': now})
+            commands.append(('gc', '--cruft', '--prune=2.weeks.ago'))
+        commands.extend((
+            ('repack', '-d', '--geometric=2'),
+            ('-c', 'gc.rerereResolved=60', '-c', 'gc.rerereUnresolved=7', 'rerere', 'gc')))
+        for command in commands:
             try:
                 git(*command, capture=True)
             except (OSError, subprocess.SubprocessError) as error:

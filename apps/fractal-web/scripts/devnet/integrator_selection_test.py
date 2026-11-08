@@ -1044,23 +1044,31 @@ class SelectionTest(unittest.TestCase):
 
     def test_clone_maintenance_is_daily_and_failures_are_nonfatal(self):
         row = {}
-        failure = subprocess.CalledProcessError(1, ['git', 'repack'], stderr='fixture repack failure')
-        with patch.object(self.module, 'git', side_effect=[failure, self.response([]), self.response([])]) as git, \
+        failure = subprocess.CalledProcessError(1, ['git', 'gc'], stderr='fixture gc failure')
+        with patch.object(self.module, 'git', side_effect=[self.response([]), failure, self.response([]), self.response([])]) as git, \
                 patch.object(self.module.time, 'time', return_value=100000):
             self.module.maintain_clone(row)
             self.module.maintain_clone(row)
-        self.assertEqual(git.call_count, 3)
-        self.assertEqual(git.call_args_list[0].args, ('repack', '-d', '--geometric=2'))
-        self.assertEqual(git.call_args_list[1].args, ('prune', '--expire=2.weeks.ago'))
-        self.assertEqual(git.call_args_list[2].args[-2:], ('rerere', 'gc'))
-        self.assertEqual(row['maintenanceErrors'][0]['detail'], 'fixture repack failure')
+        self.assertEqual(git.call_count, 4)
+        self.assertEqual(git.call_args_list[0].args, ('prune', '--expire=2.weeks.ago'))
+        self.assertEqual(git.call_args_list[1].args, ('gc', '--cruft', '--prune=2.weeks.ago'))
+        self.assertEqual(git.call_args_list[2].args, ('repack', '-d', '--geometric=2'))
+        self.assertEqual(git.call_args_list[3].args[-2:], ('rerere', 'gc'))
+        self.assertEqual(row['maintenanceErrors'][0]['detail'], 'fixture gc failure')
         with patch.object(self.module, 'git') as git, \
                 patch.object(self.module.time, 'time', return_value=186400):
             self.module.maintain_clone(row)
         self.assertEqual(git.call_count, 3)
+        self.assertNotIn(('gc', '--cruft', '--prune=2.weeks.ago'), [call.args for call in git.call_args_list])
+        with patch.object(self.module, 'git') as git, \
+                patch.object(self.module.time, 'time', return_value=100000 + 30 * 86400):
+            self.module.maintain_clone(row)
+        self.assertEqual(git.call_count, 4)
 
     def test_real_maintenance_preserves_base_pack_and_prunes_old_rerere(self):
         with self.metadata_repository() as (git, outputs, cache, generator, install):
+            self.module.atomic_json(self.module.L/f'{self.module.C.name}-git-full-gc.json',
+                                    {'attemptedAt': self.module.time.time()})
             git('repack', '-ad')
             packs = list((self.module.C / '.git/objects/pack').glob('*.pack'))
             self.assertEqual(len(packs), 1)
@@ -1083,6 +1091,32 @@ class SelectionTest(unittest.TestCase):
             self.assertFalse((rr / ('a' * 40)).exists())
             self.assertFalse((rr / ('b' * 40)).exists())
             self.assertTrue((rr / ('c' * 40) / 'postimage').exists())
+
+    def test_monthly_collection_expires_packed_garbage_but_keeps_fresh_objects(self):
+        with self.metadata_repository() as (git, outputs, cache, generator, install):
+            stale = self.module.C / 'stale-input'
+            stale.write_text('stale unreachable blob\n')
+            old_oid = git('hash-object', '-w', stale, capture=True).stdout.strip()
+            pack_root = self.module.C / '.git/objects/pack'
+            pack_root.mkdir(exist_ok=True)
+            packed = subprocess.run(['git', '-C', str(self.module.C), 'pack-objects',
+                                     str(pack_root / 'pack')], input=old_oid + '\n',
+                                    text=True, capture_output=True, check=True).stdout.strip()
+            old = self.module.time.time() - 30 * 86400
+            os.utime(pack_root / f'pack-{packed}.pack', (old, old))
+            git('prune-packed')
+            stale.write_text('fresh unreachable blob\n')
+            fresh_oid = git('hash-object', '-w', stale, capture=True).stdout.strip()
+            stale.write_text('stale loose blob\n')
+            loose_oid = git('hash-object', '-w', stale, capture=True).stdout.strip()
+            loose = self.module.C / '.git/objects' / loose_oid[:2] / loose_oid[2:]
+            os.utime(loose, (old, old))
+            row = {}
+            self.module.maintain_clone(row)
+            self.assertNotIn('maintenanceErrors', row)
+            for oid in (old_oid, loose_oid):
+                self.assertNotEqual(git('cat-file', '-e', oid, check=False).returncode, 0)
+            self.assertEqual(git('cat-file', '-e', fresh_oid, check=False).returncode, 0)
 
     def test_abandoned_merge_clears_unresolved_rerere_variants(self):
         with self.metadata_repository() as (git, outputs, cache, generator, install):
