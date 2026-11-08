@@ -156,7 +156,7 @@ The table summarizes the descriptions published by the adapter. A scope listed h
 | `fractal_alert_answer` | `write.assistant.answers` | Write | Execute one typed person-ask answer using the alert's current episode and fence. |
 | `fractal_missions_list` | `read.assistant.missions` | Read | List mission metadata. |
 | `fractal_agents_list` | `read.assistant.agents` | Read | List agent metadata, not priorities or conversation content. |
-| `fractal_conversations_list` | `read.assistant.conversation` | Read | Discover source-bounded conversation metadata and read handles without conversation content. |
+| `fractal_conversations_list` | `read.assistant.conversation` | Read | Discover bounded conversation metadata and read handles without content; `replies:true` selects newest canonical replies to the authenticated assistant, including earlier agent incarnations. |
 | `fractal_conversation_detail` | `read.assistant.conversation` | Read | Read one agent's current conversation with bounded chat excerpts and revision-pinned read handles. |
 | `fractal_conversation_timeline` | `read.assistant.conversation` | Read | Page bounded chat excerpts and revision-pinned read handles. |
 | `fractal_conversation_search` | `read.assistant.conversation` | Read | Search bounded plain conversation text snippets. |

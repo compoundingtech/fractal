@@ -117,7 +117,7 @@ const TOOLS: &[(&str, &str, bool)] = &[
     (ALERT_ANSWER, "Execute one typed person-ask answer under write.assistant.answers using the alert's current episode and fence.", false),
     (MISSIONS_LIST, "List mission metadata.", true),
     (AGENTS_LIST, "List agent metadata. For a known canonical agent ID, set agent_id to avoid paging through the fleet. This does not read priorities or conversation content.", true),
-    (CONVERSATIONS_LIST, "Discover source-bounded conversation metadata and read handles without conversation content. Each value.items entry supplies agent_id and session_id for fractal_conversation_timeline and a read object containing all fractal_conversation_read arguments (null when the bounded current timeline page has no readable text handle; use timeline to continue). Pass read unchanged to fractal_conversation_read; use value.page.next_cursor to page this list. Pages fit max_response_bytes; an item that cannot fit alone is named in the error.", true),
+    (CONVERSATIONS_LIST, "Discover bounded conversation metadata without content. To read incoming agent replies, set replies=true: newest canonical replies to this authenticated assistant return directly usable read objects, including replies from earlier agent incarnations. Pass read unchanged to fractal_conversation_read. Without replies, entries describe current agent timelines; read may be null for histories without readable text. Continue with value.page.next_cursor and the same replies mode. Pages fit max_response_bytes; an item that cannot fit is refused.", true),
     (CONVERSATION_DETAIL, "Read one agent's current conversation with bounded chat excerpts and revision-pinned read handles. Use agent_id from fractal_conversations_list; pass each non-null timeline item's read object unchanged to fractal_conversation_read. Content may be sensitive.", true),
     (CONVERSATION_TIMELINE, "Page bounded chat excerpts and revision-pinned read handles. Copy agent_id and session_id from fractal_conversations_list to select the discovered session; omit session_id only to select the current session. Pass each non-null value.items[].read object unchanged to fractal_conversation_read, and use value.page.next_cursor only to continue this timeline. Content may be sensitive.", true),
     (CONVERSATION_SEARCH, "Search bounded plain conversation text snippets. Content may be sensitive.", true),
@@ -162,6 +162,7 @@ fn schema(name: &str) -> Value {
         CONVERSATION_READ => json!({"agent_id":{"type":"string","description":"Copy read.agent_id from a discovered conversation or timeline item."},"session_id":{"type":"string","description":"Copy read.session_id from the same handle; do not infer from agent_id."},"reference":{"type":"string","description":"Copy read.reference, an opaque content reference, not a pagination cursor."},"revision":{"type":"string","description":"Copy read.revision paired with this content reference to pin the source version."},"start":{"type":"integer","minimum":0,"description":"Copy read.start, the inclusive range start."},"end":{"type":"integer","minimum":0,"description":"Copy read.end, the exclusive range end."},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         ALERTS_LIST => json!({"agent_id":{"type":"string","pattern":"^agent/[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact canonical agent ID, not an alias or display name."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         AGENTS_LIST => json!({"agent_id":{"type":"string","pattern":"^agent/[A-Za-z0-9/._:@+=~-]+$","maxLength":256,"description":"Exact canonical agent ID, not an alias or display name."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
+        CONVERSATIONS_LIST => json!({"replies":{"type":"boolean","description":"Set true to discover newest canonical agent replies addressed to this authenticated assistant, independent of current agent sessions."},"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
         _ => json!({"limit":{"type":"integer","minimum":1},"cursor":{"type":"string"},"max_response_bytes":{"type":"integer","minimum":1,"maximum":16384}}),
     };
     let required = match name {
@@ -181,6 +182,7 @@ fn schema(name: &str) -> Value {
 fn matches_schema(value: &Value, contract: &Value) -> bool {
     match contract["type"].as_str() {
         Some("string") => value.is_string(),
+        Some("boolean") => value.is_boolean(),
         Some("integer") => value.as_u64().is_some_and(|number| {
             contract["minimum"].as_u64().is_none_or(|minimum| number >= minimum)
                 && contract["maximum"].as_u64().is_none_or(|maximum| number <= maximum)

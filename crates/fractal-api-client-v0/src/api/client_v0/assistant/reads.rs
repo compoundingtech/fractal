@@ -16,6 +16,8 @@ use fractal_api_core::api::client_v0::assistant::reads::project_with_context as 
 pub mod conversation_reads;
 #[path = "reads_discovery.rs"]
 mod discovery;
+#[path = "reads_replies.rs"]
+mod replies;
 
 /// Assistant projections. The conversation discovery, timeline and search projections need the
 /// client-v0 search and conversation-block readers, which sit above fractal-api-core, so they are served
@@ -71,6 +73,14 @@ pub async fn project(
 
 pub fn projector<'a>(state: &'a AppState, snapshot: &'a ClientSnapshot, projection: &'a str,
                      parameters: &'a BTreeMap<String, String>, max_bytes: usize, binding: &'a str,
-                     context: &'a response_body::Context) -> fractal_api_core::api::client_v0::assistant::authorization::ProjectFuture<'a> {
-    Box::pin(project_with_context(state, snapshot, projection, parameters, max_bytes, binding, context))
+                     principal: &'a str, context: &'a response_body::Context) -> fractal_api_core::api::client_v0::assistant::authorization::ProjectFuture<'a> {
+    Box::pin(async move {
+        if projection == "conversations" && parameters.get("replies").is_some_and(|value| value == "true") {
+            return replies::page(state, snapshot, parameters, max_bytes, binding, principal, context).await;
+        }
+        if projection == "conversation-content" && parameters.get("session_id").is_some_and(|value| value == replies::SESSION) {
+            return replies::read(state, snapshot, parameters, max_bytes, binding, principal).await;
+        }
+        project_with_context(state, snapshot, projection, parameters, max_bytes, binding, context).await
+    })
 }
