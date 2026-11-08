@@ -221,6 +221,12 @@ mod tests {
         invalid_launch_value["launch"] = json!({"type": "shell", "value": 42});
         let mut invalid_kind = member;
         invalid_kind["kind"] = json!(42);
+        // This decoder regression intentionally stores syntactically invalid JSON.
+        // The normal agent-host expression index rejects that fixture before the
+        // reader sees it, so remove only that index in this isolated test store.
+        store.connection.write().execute_batch(
+            "DROP INDEX desired_agent_host_index",
+        ).unwrap();
         for payload in [
             serde_json::to_string(&corrupt).unwrap(),
             serde_json::to_string(&missing).unwrap(),
