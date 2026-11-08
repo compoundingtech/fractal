@@ -207,6 +207,8 @@ one release per commit. It builds nothing: it takes the run's `fractal-release-a
 checksums and the source recorded in each archive, then replaces the assets (both target archives and
 their compatibility archives, their `.sha256` files, `SHA256SUMS` and `RELEASE.json`), rewrites the notes, and moves the tag. The notes give the exact
 source commit, a link to the run, and the merged pull request titles since the previous edge (at most 30).
+The ID-based download uses `merge-multiple: true` and `path: dist`, keeping archives,
+`SHA256SUMS` and `RELEASE.json` directly in `dist/`, as assembly and the edge publisher require.
 Archives carry no tag in `BUILD.json`; `source` identifies the commit.
 
 - Versioned releases and tags are unchanged. `edge` is marked as a pre-release and never as latest, so the

@@ -130,6 +130,15 @@ assert 'name: "fractal-release-attempt-${{ github.run_attempt }}"' in native_job
 assert 'artifact-id: ${{ steps.release.outputs.artifact-id }}' in native_jobs['assemble']
 assert 'id: release' in native_jobs['assemble']
 assert 'artifact-ids: ${{ needs.assemble.outputs.artifact-id }}' in native_jobs['publishEdge']
+# ID selection does not imply the named-artifact flat layout in download-artifact.
+# Both consumers read root files in dist/, never dist/<artifact-name>/.
+for job in ('assemble', 'publishEdge'):
+    download = re.search(
+        r'^      - uses: actions/download-artifact@v4\n(.*?)(?=^      - |\Z)',
+        native_jobs[job], re.M | re.S).group(1)
+    assert re.search(r'^          merge-multiple: true$', download, re.M), download
+    assert re.search(r'^          path: dist$', download, re.M), download
+assert '--dist dist' in native_jobs['publishEdge']
 assert 'fractal-release-attempt-' not in native_jobs['publishEdge']
 for name in ('publishEmbed', 'publishEdge'):
     assert "github.event_name == 'push'" in native_jobs[name]

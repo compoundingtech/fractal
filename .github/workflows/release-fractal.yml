@@ -785,6 +785,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           artifact-ids: ${{ needs.assemble.outputs.artifact-id }}
+          merge-multiple: true
           path: dist
       - name: Move the rolling edge pre-release to this verified commit
         run: scripts/release-fractal-edge --source "$SOURCE_SHA" --dist dist --run-url "$RUN_URL"

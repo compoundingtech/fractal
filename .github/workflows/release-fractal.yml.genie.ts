@@ -349,6 +349,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
           "uses": "actions/download-artifact@v4",
           "with": {
             "artifact-ids": "${{ needs.assemble.outputs.artifact-id }}",
+            "merge-multiple": true,
             "path": "dist"
           }
         },
