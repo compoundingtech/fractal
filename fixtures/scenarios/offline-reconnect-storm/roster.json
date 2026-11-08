@@ -50,6 +50,7 @@
         "reachability": "local",
         "revision": "ag40",
         "runtime_ids": [
+          "runtime/example-harbor-builder-shell",
           "runtime/example-harbor-builder"
         ],
         "since": "2030-01-01T11:58:00.000Z",

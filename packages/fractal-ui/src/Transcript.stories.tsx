@@ -155,6 +155,10 @@ export const scenarioExemptions: readonly string[] = [
   'UnavailableWithComposerLight:contract-fixture',
   'UnconfirmedSend:contract-fixture',
   'UnconfirmedSendLight:contract-fixture',
+  'WorkLogRunningRows:contract-fixture',
+  'WorkLogRunningRowsLight:contract-fixture',
+  'WorkLogTree:contract-fixture',
+  'WorkLogTreeLight:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
 const harnessEventData: TranscriptStoryData = {
@@ -334,6 +338,115 @@ export const Expanded: Story = { tags: ['critical'], args: { state: 'expanded' }
   await expect(canvas.getByRole('region', { name: 'Opened tool detail' }).querySelector('pre')?.textContent).toBe(source)
 } }
 export const ExpandedLight: Story = { ...Expanded, args: { state: 'expanded', scheme: 'light' } }
+const treeReasoning: ConversationItem = { _tag: 'Reasoning', id: 'tree/thinking', text: 'The **expandable** and plain rows must share one label edge.', streaming: false, at }
+const treeItems: readonly ConversationItem[] = [
+  { _tag: 'ToolCall', id: 'tree/read', callId: 'tree/read', name: 'read', input: { path: 'src/rows.ts' }, status: 'success', result: { content: source, mediaType: 'text/plain', isError: false, at: '2026-01-15T12:00:03Z' }, callSeen: true, at: '2026-01-15T12:00:01Z' },
+  { _tag: 'ToolCall', id: 'tree/silent', callId: 'tree/silent', name: 'run', input: { command: 'pnpm test rows' }, status: 'success', result: { content: '', isError: false, at: '2026-01-15T12:00:14Z' }, callSeen: true, at: '2026-01-15T12:00:03Z' },
+  { _tag: 'ToolCall', id: 'tree/plain', callId: 'tree/plain', name: 'status', input: {}, status: 'success', result: { content: '', isError: false, at: '2026-01-15T12:00:15Z' }, callSeen: true, at: '2026-01-15T12:00:14Z' },
+  { _tag: 'ToolCall', id: 'tree/wait', callId: 'tree/wait', name: 'wait', input: { jobs: ['bg_rows'] }, status: 'success', result: { content: '', isError: false, at: '2026-01-15T12:00:20Z' }, callSeen: true, at: '2026-01-15T12:00:15Z' },
+  treeReasoning,
+]
+const treeKind = (name: string) => name === 'run' ? 'run' as const : name === 'wait' ? 'wait' as const : 'read' as const
+const treeLiveItems: readonly ConversationItem[] = [{ _tag: 'ToolCall', id: 'tree-live/wait', callId: 'tree-live/wait', name: 'wait', input: { jobs: ['bg_live'] }, status: 'running', callSeen: true, at }]
+const treeLiveData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'tree-live', items: treeLiveItems, work: workLogTurnFromItems(treeLiveItems, { kindFor: treeKind, running: true, failed: false, interrupted: false, startedAt: at }) }] }
+const treeData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'tree', items: treeItems, work: workLogTurnFromItems(treeItems, { kindFor: treeKind, running: false, failed: false, interrupted: false, durationMs: 20000, startedAt: at, completeHistory: true }) }] }
+/** The open work log as a tree: toggles lead expandable rows, the type glyph follows, and plain rows keep the empty slot so every label shares one edge. A running Wait spins the same ring as Working; a finished Wait keeps its clock. */
+export const WorkLogTree: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><section aria-label="Settled tree" {...stylex.props(styles.frame)}><RuntimeTranscript data={treeData} onOpenTool={() => {}} onRetry={() => {}} /></section><section aria-label="Running wait" {...stylex.props(styles.frame)}><RuntimeTranscript data={treeLiveData} onOpenTool={() => {}} onRetry={() => {}} /></section></main>, play: async ({ canvasElement }) => {
+  const canvas = within(within(canvasElement).getByRole('region', { name: 'Settled tree' }))
+  const fold = await canvas.findByRole('button', { name: /Worked for 20s/ })
+  await userEvent.click(fold)
+  const children = canvas.getByTestId('work-log-children')
+  const left = (element: Element) => element.getBoundingClientRect().left
+  const entries = [...children.querySelectorAll<HTMLElement>('[data-tool-status]')]
+  await expect(entries).toHaveLength(4)
+  const [read, silent, plain, waited] = entries.map(entry => entry.firstElementChild as HTMLElement) as [HTMLElement, HTMLElement, HTMLElement, HTMLElement]
+  const thinking = canvas.getByRole('button', { name: 'Thinking' })
+  const rows = [read, silent, plain, waited, thinking]
+  const assertTree = async () => {
+    const toggle = left(fold.firstElementChild!) + 22
+    const title = left(read.querySelector('[data-call-title]')!)
+    await expect(title - toggle).toBeCloseTo(44, 1)
+    for (const row of rows) {
+      await expect(left(row)).toBeCloseTo(toggle, 1)
+      await expect(left(row.children[0]!)).toBeCloseTo(toggle, 1)
+      await expect(left(row.children[1]!)).toBeCloseTo(toggle + 22, 1)
+      await expect(left(row.querySelector('[data-call-title]')!)).toBeCloseTo(title, 1)
+      await expect(Math.abs(row.querySelector('[data-call-meta]')!.getBoundingClientRect().right - row.getBoundingClientRect().right)).toBeLessThan(0.5)
+    }
+    for (const row of [read, silent, waited, thinking]) await expect(row.children[0]).toHaveAttribute('data-row-disclosure')
+  }
+  await assertTree()
+  // Control: a toggle returned to the row end must fail the measured tree.
+  const moved = read.children[0] as HTMLElement
+  moved.style.order = '1'
+  try { await expect(assertTree()).rejects.toThrow() } finally { moved.style.order = '' }
+  await assertTree()
+  // Plain rows are not disclosures: no button, no toggle, an empty leading slot.
+  await expect(plain.tagName).toBe('DIV')
+  await expect(plain.querySelector('[data-row-disclosure]')).toBeNull()
+  await expect(plain.children[0]).toBeEmptyDOMElement()
+  await expect(read.querySelector('[data-call-duration]')).toHaveTextContent(/^2s$/)
+  await expect(silent.querySelector('[data-call-duration]')).toHaveTextContent(/^11s$/)
+  // The whole row stays the disclosure: pointer and keyboard toggle it, and focus paints its ring.
+  await expect(silent).toHaveAttribute('aria-expanded', 'false')
+  await userEvent.click(silent.querySelector('[data-call-title]')!)
+  await expect(silent).toHaveAttribute('aria-expanded', 'true')
+  await expect(silent.querySelector('[data-row-disclosure]')).toHaveAttribute('data-row-disclosure', 'open')
+  await expect(thinking).toHaveAttribute('aria-expanded', 'false')
+  thinking.focus()
+  await userEvent.keyboard('{Enter}')
+  await expect(thinking).toHaveAttribute('aria-expanded', 'true')
+  await userEvent.keyboard(' ')
+  await expect(thinking).toHaveAttribute('aria-expanded', 'false')
+  await userEvent.keyboard('{Enter}')
+  await expect(thinking).toHaveAttribute('aria-expanded', 'true')
+  await expect(thinking).toHaveFocus()
+  await expect(getComputedStyle(thinking).outlineStyle).toBe('solid')
+  await assertTree()
+  await expect(left(canvas.getByTestId('thinking-body')) - left(thinking)).toBeCloseTo(22, 1)
+  // A finished Wait is still: its clock glyph, no ring.
+  await expect(waited.querySelector('[data-live-ring]')).toBeNull()
+  await expect(getComputedStyle(waited.children[1]!.querySelector('svg')!).animationName).toBe('none')
+  // A running Wait reuses Working's ring: same element styles, and it spins unless motion is reduced.
+  const live = within(within(canvasElement).getByRole('region', { name: 'Running wait' }))
+  const workingRing = live.getByTestId('live-work').querySelector<HTMLElement>('[data-live-ring]')!
+  const waitRow = live.getByTestId('work-log-children').querySelector<HTMLElement>('[data-tool-status="running"]')!.firstElementChild as HTMLElement
+  const waitRing = waitRow.children[1]!.querySelector<HTMLElement>('[data-live-ring]')!
+  await expect(waitRing.className).toBe(workingRing.className)
+  await expect(waitRow.querySelector('svg:not([data-row-disclosure] svg)')).toBeNull()
+  await expect(getComputedStyle(waitRing).animationName).toBe(getComputedStyle(workingRing).animationName)
+  if (!matchMedia('(prefers-reduced-motion: reduce)').matches) await expect(getComputedStyle(waitRing).animationName).not.toBe('none')
+} }
+export const WorkLogTreeLight: Story = { ...WorkLogTree, args: { scheme: 'light' } }
+const runningRowItems: readonly ConversationItem[] = [
+  { _tag: 'ToolCall', id: 'mixed/read', callId: 'mixed/read', name: 'read', input: { path: 'src/rows.ts' }, status: 'success', result: { content: source, mediaType: 'text/plain', isError: false, at: '2026-01-15T12:00:00.200Z' }, callSeen: true, at },
+  { _tag: 'ToolCall', id: 'mixed/run', callId: 'mixed/run', name: 'run', input: { command: 'pnpm test rows' }, status: 'success', result: { content: 'Passed', isError: false, at: '2026-01-15T12:00:23Z' }, callSeen: true, at: '2026-01-15T12:00:01Z' },
+  { _tag: 'ToolCall', id: 'mixed/stopped', callId: 'mixed/stopped', name: 'run', input: { command: 'pnpm build' }, status: 'interrupted', result: { content: 'Stopped', isError: false, at: '2026-01-15T12:00:30Z' }, callSeen: true, at: '2026-01-15T12:00:23Z' },
+  { _tag: 'ToolCall', id: 'mixed/wait', callId: 'mixed/wait', name: 'wait', input: { jobs: ['bg_rows'] }, status: 'running', callSeen: true, at: '2026-01-15T12:00:30Z' },
+]
+const runningRowData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'mixed', items: runningRowItems, work: workLogTurnFromItems(runningRowItems, { kindFor: treeKind, running: true, failed: false, interrupted: false, startedAt: at }) }] }
+/** Finished and running rows in one work log: every row's metadata ends on the same right edge, with the same type and ink. Measure at any width by resizing and reloading. */
+export const WorkLogRunningRows: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={runningRowData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
+  const canvas = within(canvasElement)
+  await canvas.findByTestId('work-log-children')
+  const row = (status: string, index = 0) => canvasElement.querySelectorAll<HTMLElement>(`[data-tool-status="${status}"] > button`)[index]!
+  const running = row('running')
+  const word = running.querySelector<HTMLElement>('[data-call-word]')!
+  const durations = [row('success', 0), row('success', 1), row('interrupted')].map(entry => entry.querySelector<HTMLElement>('[data-call-duration]')!)
+  await expect(durations.map(duration => duration.textContent)).toEqual(['<1s', '22s', '7s'])
+  await expect(word).toHaveTextContent(/^Running$/)
+  const textRight = (element: HTMLElement) => { const range = document.createRange(); range.selectNodeContents(element); return range.getBoundingClientRect().right }
+  const assertEdges = async () => { for (const duration of durations) await expect(Math.abs(textRight(word) - textRight(duration))).toBeLessThan(0.5) }
+  await assertEdges()
+  // Control: the reported regression, a word held short of the edge, must fail.
+  word.style.marginInlineEnd = '86px'
+  try { await expect(assertEdges()).rejects.toThrow() } finally { word.style.marginInlineEnd = '' }
+  await assertEdges()
+  for (const property of ['fontSize', 'lineHeight', 'color'] as const) await expect(getComputedStyle(word)[property]).toBe(getComputedStyle(durations[0]!)[property])
+  await expect(running.children[1]!.querySelector('[data-live-ring]')).not.toBeNull()
+  await expect(running.children[1]!.querySelector('[data-live-ring]')!.className).toBe(canvas.getByTestId('live-work').querySelector('[data-live-ring]')!.className)
+} }
+export const WorkLogRunningRowsLight: Story = { ...WorkLogRunningRows, args: { scheme: 'light' } }
 const nextFrame = () => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
 async function expectNoOutputWithControl(element: HTMLElement) {
   const assertAbsent = async () => { await expect(element).not.toHaveTextContent('No output') }
@@ -523,7 +636,10 @@ export const Streaming: Story = { tags: ['critical'], args: { state: 'streaming'
   await canvas.findByTestId('live-work')
   await expect(canvasElement.querySelectorAll('[data-testid="live-work"]')).toHaveLength(1)
   await expect(canvas.getByRole('status', { name: 'Response in progress' })).toBeInTheDocument()
-  await expect(canvas.getByRole('progressbar', { name: 'Run in progress' })).toHaveAttribute('aria-valuetext', 'Running')
+  // The turn's own row is the run signal: the header carries no status text or sweep.
+  await expect(canvas.getByTestId('live-activity-label')).toHaveTextContent(/^Working/)
+  await expect(within(canvas.getByTestId('transcript-header')).queryByRole('progressbar')).toBeNull()
+  await expect(canvas.getByTestId('transcript-header')).not.toHaveTextContent('Running')
   await expect(canvasElement.querySelectorAll('[data-streaming-tail="true"]')).toHaveLength(1)
   await expect(canvasElement.querySelector('[aria-label="Copy answer"]')).toBeNull()
   await expect(canvas.getByRole('button', { name: /Working/ })).toBeDisabled()

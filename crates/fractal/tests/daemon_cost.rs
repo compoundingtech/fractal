@@ -20,6 +20,9 @@
 //! [`GROWTH`] times its work at the smaller, after dividing by how much larger its answer grew: a
 //! list that answers ten times more rows may read ten times more, and a request that answers the
 //! same must read about the same. Small differences under [`SLACK`] steps pass.
+//! Cold search index construction visits every local conversation, including those without
+//! searchable text. Its separate row normalizes by that conversation count and strictly caps
+//! per-conversation VM/full-scan work growth at 1.5x; warm search requests retain their flat bound.
 //!
 //! Additive work/mission `progress_at` serialization uses timestamps already hydrated by these
 //! routes; lightweight mission cards return null and do not add summary reads.
@@ -138,6 +141,10 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// Routes the check does not measure, and why. Keep this list short: a route here can grow with
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
+    (
+        "GET /v1/client/ready-work",
+        "requires a declared cohort and a current work publication matching both graph head and healthy attention frontier, with at most 5,000 work rows; this census mutates the store between probes, so a plain GET would measure stale-cut refusal rather than ready-demand handoff reads; populated same-cut cost probe follow-up: #5776",
+    ),
     (
         "POST /v1/fleet/admission-override",
         "an operator's rare release of a waiting member; it reads this member's peers and its newest daemon.started claim and appends one claim, none of which grows with claim history; placement_handoff::a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_override covers the real route through the CLI",
@@ -1397,6 +1404,11 @@ const SEAT_RUNTIME: &str = "cost-seat-0-runtime";
 
 /// The same agent list, after one seat changes at each scale.
 const COLD_AGENTS: &str = "GET /v1/client/agents (after harness observation)";
+/// First native search through worker completion, normalized by local conversations.
+const COLD_SEARCH: &str = "conversation search cold build";
+/// Indexing must visit even empty conversations, so indexed bytes are not its work unit.
+/// The 1.5x per-conversation cap permits linear construction, but rejects content × agents.
+const COLD_SEARCH_GROWTH: f64 = 1.5;
 const ARRANGEMENT_OWNER: &str = "person/ada";
 const ARRANGEMENT_SUBJECT: &str = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
 const ARRANGEMENT_PATH: &str = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001";
@@ -1529,7 +1541,7 @@ struct Cost {
     sorts: u64,
     autoindex_rows: u64,
     statements: u64,
-    /// The answer's size in bytes, or the rows a trim deleted.
+    /// The answer's size in bytes, rows a trim deleted, or local conversations for cold search.
     answer: u64,
     /// How many things the answer returned ([`item_count`]), at least one.
     items: u64,
@@ -1871,10 +1883,12 @@ async fn no_request_does_work_that_grows_with_the_store() {
         } else {
             (after.answer.max(1) as f64 / before.answer.max(1) as f64).max(1.0)
         };
+        let growth_limit = if name == COLD_SEARCH { COLD_SEARCH_GROWTH } else { GROWTH };
         let grew = |field: fn(&Cost) -> u64| {
             let (before, after) = (field(before), field(after));
             let ratio = after as f64 / before.max(1) as f64 / answered;
-            (ratio, ratio > GROWTH && after > before + SLACK)
+            // Cold indexing has a strict per-conversation bound, not the warm-row slack.
+            (ratio, ratio > growth_limit && (name == COLD_SEARCH || after > before + SLACK))
         };
         let (steps, steps_grew) = grew(|cost| cost.vm_steps);
         let (scans, scans_grew) = grew(|cost| cost.fullscan_steps);
@@ -1888,13 +1902,14 @@ async fn no_request_does_work_that_grows_with_the_store() {
             ));
         }
         let summary = format!(
-            "{} -> {} VM steps, {} -> {} full-scan steps, answer {} -> {} bytes",
+            "{} -> {} VM steps, {} -> {} full-scan steps, answer {} -> {} {}",
             before.vm_steps,
             after.vm_steps,
             before.fullscan_steps,
             after.fullscan_steps,
             before.answer,
-            after.answer
+            after.answer,
+            if name == COLD_SEARCH { "local conversations" } else { "bytes" },
         );
         match KNOWN_GROWTH.iter().find(|(route, _)| route == name) {
             Some((_, limit)) if steps.max(scans) > *limit => failures.push(format!(
@@ -1904,6 +1919,10 @@ async fn no_request_does_work_that_grows_with_the_store() {
                 "{name}: no longer grows with the store; remove it from KNOWN_GROWTH: {summary}"
             )),
             Some(_) => {}
+            None if name == COLD_SEARCH && (steps_grew || scans_grew) => failures.push(format!(
+                "{name}: per-conversation work exceeds {COLD_SEARCH_GROWTH}x \
+                 (VM {steps:.2}x, full-scan {scans:.2}x): {summary}"
+            )),
             None if steps_grew || scans_grew => {
                 failures.push(format!("{name}: work grows with the store: {summary}"))
             }
@@ -1934,6 +1953,7 @@ async fn no_request_does_work_that_grows_with_the_store() {
             "usage_window": {"since_ms": usage_window.0, "until_ms": usage_window.1},
             "claims": [small.claims, large.claims],
             "growth_limit": GROWTH,
+            "cold_search": {"growth_limit": COLD_SEARCH_GROWTH, "normalization": "local conversations"},
             "slack": SLACK,
             "small": small.costs,
             "large": large.costs,
@@ -2141,6 +2161,86 @@ fn coordination_bootstrap_work_is_bounded_independently_of_history_size() {
     );
     assert!(samples[1].vm_steps <= samples[0].vm_steps * 2 + SLACK);
     assert!(samples[1].fullscan_steps <= samples[0].fullscan_steps + 8);
+}
+
+/// Both the HTTP SLO route and main.rs's history tick call this same SLO fold.
+/// Repeated observations grow the durable log, not the projected credit inventory.
+#[test]
+fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
+    const WRITER: &str = "agent/sample/usage-producer";
+    const DAY_MS: u64 = 86_400_000;
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::open(&root.path().join("credits.db"), "cost-node").unwrap();
+    store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+    // Complete initialization outside measured request scopes; joining the worker is deterministic.
+    store.wait_for_usage_credit_backfill().unwrap();
+    let now = chrono::Utc::now().timestamp_millis() as u64;
+    let time = |at: u64| chrono::DateTime::from_timestamp_millis(at as i64).unwrap().to_rfc3339();
+    let append = |credit_id: &str, state: &str, expires: u64, n: u64| {
+        store.append_claim(&ClaimInput {
+            subject: WRITER.into(), kind: "usage.limits.observed".into(), actor: Some(WRITER.into()),
+            fields: BTreeMap::from([
+                ("readings".into(), json!([])),
+                ("credit_readings".into(), json!([{
+                    "account": "digest", "account_ref": "account/one", "provider": "anthropic",
+                    "credit_id": credit_id, "expires_at": time(expires),
+                    "measured_at": time(now - 1_000 + n),
+                    "state": state, "coverage": "reported", "source": "omp-usage", "host": "cost-node",
+                    "disposition": {"kind": "unknown", "at": null, "evidence_ref": null},
+                }])),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    };
+    // An identity not refreshed by any later batch must never vanish from the inventory.
+    let forfeited = append("retained-forfeiture", "forfeited", now - DAY_MS, 0);
+    let mut enabled = Vec::new();
+    let mut disabled = Vec::new();
+    for n in 1..=1_000 {
+        let refreshed = append("refreshed", "available", now + 2 * DAY_MS, n);
+        if !matches!(n, 100 | 1_000) {
+            continue;
+        }
+        for configured in [true, false] {
+            store.set_usage_limits_writers(if configured { vec![WRITER.into()] } else { vec![] }).unwrap();
+            if configured {
+                store.wait_for_usage_credit_backfill().unwrap();
+            }
+            let mut samples = Vec::new();
+            for _ in 0..4 {
+                let scope = work::SqliteWorkScope::start();
+                let rows = fractal_daemon::api::slo_rows(&store).unwrap();
+                let spent = scope.finish();
+                if configured {
+                    let row = rows.iter().find(|row| row["id"] == "CAM-R01/anthropic").unwrap();
+                    assert_eq!(row["status"], "missed");
+                    assert_eq!(row["current"], "1 forfeited window-equivalents");
+                    let evidence = row["evidence"].as_array().unwrap();
+                    assert_eq!(evidence.len(), 2);
+                    assert!(evidence.iter().any(|entry| entry["claim_id"] == forfeited.id));
+                    assert!(evidence.iter().any(|entry| entry["claim_id"] == refreshed.id));
+                } else {
+                    let row = rows.iter().find(|row| row["id"] == "CAM-R01/unknown").unwrap();
+                    assert_eq!(row["status"], "no-data");
+                    assert!(row["evidence"].as_array().unwrap().is_empty());
+                }
+                samples.push(spent);
+            }
+            let spent = samples.into_iter().skip(1).min_by_key(|sample| sample.vm_steps).unwrap();
+            if configured { enabled.push(spent); } else { disabled.push(spent); }
+        }
+        store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+    }
+    for (configured, samples) in [(true, enabled), (false, disabled)] {
+        let (small, large) = (samples[0], samples[1]);
+        assert!(small.statements > 0, "shared SLO SQL work must be traced");
+        assert!(large.statements <= small.statements + 2,
+            "SLO SQL calls grew with durable credit history (configured={configured}): {small:?} -> {large:?}");
+        assert!(large.vm_steps <= small.vm_steps + SLACK,
+            "SLO row work grew with durable credit history (configured={configured}): {small:?} -> {large:?}");
+        assert!(large.fullscan_steps <= small.fullscan_steps + 8,
+            "SLO scanned durable credit history (configured={configured}): {small:?} -> {large:?}");
+    }
 }
 
 #[test]
@@ -3062,6 +3162,59 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         }
         if probe.route == "POST /v1/agents/rename-id" {
             prepare_renames(&store);
+        }
+        if probe.route == "GET /v1/client/conversations/search" {
+            // The cold build owns all SQL work through the worker's explicit completion,
+            // not merely until its first 503 or a quiet interval between reader admissions.
+            let path = fixture.fill(probe.path, 0);
+            smallclaims::sqlite::histogram::take();
+            let before_work = work::total();
+            let before_builds = fractal_daemon::api::managed_owner_map_build_count_for_test();
+            let started = Instant::now();
+            let (indexed_bytes, local_conversations) =
+                tokio::time::timeout(Duration::from_secs(120), async {
+                    if let Err(error) = person.request::<(), Value>("GET", &path, None).await {
+                        assert!(
+                            fractal_daemon::client::api_error_parts(&error).is_some_and(
+                                |(status, code, message, _)| {
+                                    status == 503
+                                        && code == "remote-unavailable"
+                                        && message
+                                            == "conversation search index is being built; retry shortly"
+                                },
+                            ),
+                            "the cold search request failed: {error:#}",
+                        );
+                    }
+                    fractal_daemon::api::client_v0::search::wait_native_index_for_test(
+                        &store, "person/bench-operator",
+                    ).await.expect("the cold search index worker must succeed")
+                })
+                .await
+                .expect("the cold search index worker must finish within 120 seconds");
+            let spent = work::total() - before_work;
+            let owner_map_builds =
+                fractal_daemon::api::managed_owner_map_build_count_for_test() - before_builds;
+            println!(
+                "scale {scale}: {COLD_SEARCH}: {:.3}s, {owner_map_builds} owner-map builds, \
+                 {local_conversations} local conversations, {indexed_bytes} indexed bytes, \
+                 {} VM steps, {} full-scan steps, {} statements",
+                started.elapsed().as_secs_f64(), spent.vm_steps, spent.fullscan_steps,
+                spent.statements,
+            );
+            assert!(
+                owner_map_builds <= local_conversations + 1,
+                "cold search rebuilt the fleet owner map {owner_map_builds} times for \
+                 {local_conversations} local conversations",
+            );
+            assert!(indexed_bytes > 0, "cold search must index the generated content");
+            assert!(local_conversations > 0, "cold search must visit local conversations");
+            let (max_repeat, top_shape) = most_repeated_shape();
+            costs.insert(COLD_SEARCH.to_owned(), Cost {
+                max_repeat,
+                top_shape,
+                ..Cost::from_work(spent, local_conversations as u64, None)
+            });
         }
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.

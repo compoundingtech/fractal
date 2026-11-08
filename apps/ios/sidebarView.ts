@@ -2,10 +2,16 @@ import type { SidebarArrangement } from './sidebarEdits';
 import { sidebarArrangement } from './sidebarEdits';
 
 export type SidebarKind = 'Agents' | 'Missions' | 'Terminals' | 'Machines' | 'Pull requests' | 'Repositories' | 'Resources' | 'Unavailable';
-export type SidebarResource = { id: string; title: string; kind: SidebarKind; target: string; missing?: boolean };
+export type SidebarResource = { id: string; title: string; kind: SidebarKind; target: string; searchText?: string; missing?: boolean };
 export type SidebarGroup = { id: string; title: string; resources: SidebarResource[]; collapsed: boolean; folder: boolean };
 export type SidebarChoices = Record<string, boolean>;
 const kinds: SidebarKind[] = ['Agents', 'Missions', 'Terminals', 'Machines', 'Pull requests', 'Repositories', 'Resources', 'Unavailable'];
+
+/** Shared search contract for the resource browser and the folder's resource picker. */
+export function sidebarResourceMatches(row: SidebarResource, filter: string): boolean {
+  const query = filter.trim().toLowerCase();
+  return !query || row.title.toLowerCase().includes(query) || row.id.toLowerCase().includes(query) || (typeof row.searchText === 'string' && row.searchText.toLowerCase().includes(query));
+}
 
 /** A subject leaving a current window remains visible, marked unavailable. */
 export function rememberResources(previous: Map<string, SidebarResource>, current: SidebarResource[]): Map<string, SidebarResource> {
@@ -30,8 +36,7 @@ export function sidebarGroups(arrangements: SidebarArrangement[], resources: Map
     return effective && folders.some(([id]) => id === effective) ? effective : null;
   };
   const query = filter.trim().toLowerCase();
-  const matches = (row: SidebarResource) => !query || row.title.toLowerCase().includes(query) || row.id.toLowerCase().includes(query);
-  const group = (id: string, title: string, rows: SidebarResource[], folder: boolean): SidebarGroup => ({ id, title, resources: rows.filter(matches), folder, collapsed: !query && (choices[id] ?? (!folder && rows.length > 30)) });
+  const group = (id: string, title: string, rows: SidebarResource[], folder: boolean): SidebarGroup => ({ id, title, resources: rows.filter(row => sidebarResourceMatches(row, query)), folder, collapsed: !query && (choices[id] ?? (!folder && rows.length > 30)) });
   const groups = folders.map(([id, folder]) => group(`folder/${id}`, folder.name.value, [...catalog.values()].filter(row => location(row.id) === id).sort((a, b) => compare(arrangement!.body.placements[a.id].value.key, arrangement!.body.placements[b.id].value.key) || compare(a.id, b.id)), true));
   const unfiled = [...catalog.values()].filter(row => !location(row.id));
   for (const kind of kinds) {

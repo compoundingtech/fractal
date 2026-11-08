@@ -2,10 +2,13 @@ import { Effect, Layer } from 'effect'
 import { buildIdentity, deploymentId } from 'virtual:build-identity'
 import { liveSource } from '../data/liveSource.ts'
 import { makeTelemetry } from '../telemetry/browser.ts'
+import { setPageFoldersClientName } from '../folders/client.ts'
 import type { Replay } from '@fractal/scenarios/replay'
 
 /** Page-owned scopes survive React Fast Refresh; a full navigation owns teardown. */
 export const createPageRuntime = (replay?: Replay) => {
+  const client = `fractal-web ${buildIdentity.machineVersion}`
+  setPageFoldersClientName(client)
   // Dogfood records 100% of pages: budget roots and their SDK detail cannot disappear at 10%.
   const telemetry = makeTelemetry({
     otlpTracesUrl: import.meta.env.VITE_OTLP_TRACES_URL?.trim() || undefined,
@@ -33,6 +36,7 @@ export const createPageRuntime = (replay?: Replay) => {
     adoptEarlyCollections: replay === undefined,
     options: {
       baseUrl: window.location.origin, maxFollows: 8, conversationSlots: 'advertised',
+      client,
       ...(replay === undefined ? {} : { socket: replay.socket, fetch: replay.fetch }),
       parentSpan: ux.activeSpan,
       traceContext: ux.traceContext,

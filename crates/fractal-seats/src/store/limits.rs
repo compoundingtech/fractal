@@ -95,10 +95,11 @@ fn utc(unix_ms: u64) -> String {
 }
 
 pub trait LimitsStore {
-    /// The highest recent weekly reading in each account's latest reset window, in account order.
-    /// While the projection is still being filled after an upgrade the answer is not yet known,
-    /// and this returns nothing: a half-filled projection must never read as an unused account.
+    /// Observational display/SLO evidence, including currently configured producer windows.
+    /// Returns nothing until the projection has caught up after an upgrade.
     fn account_limits(&self) -> Result<Vec<AccountLimit>>;
+    /// Harness-only evidence for scheduling and enforcement, never affected by producer clocks.
+    fn harness_account_limits(&self) -> Result<Vec<AccountLimit>>;
     /// Whether the account limits projection has caught up with the `harness.limits` claims at
     /// least once. False only on the first start after an upgrade, until the catch-up finishes.
     fn account_limits_ready(&self) -> Result<bool>;
@@ -147,6 +148,13 @@ impl LimitsStore for Store {
         if !self.account_limits_ready()? {
             return Ok(Vec::new());
         }
+        account_limits_for_writers(&self.readers.get(), &self.usage_limits_writers())
+    }
+
+    fn harness_account_limits(&self) -> Result<Vec<AccountLimit>> {
+        if !self.account_limits_ready()? {
+            return Ok(Vec::new());
+        }
         account_limits_at(&self.readers.get())
     }
 
@@ -175,7 +183,7 @@ impl LimitsStore for Store {
                 message: "the account limits projection is catching up after an upgrade; no limits decision is made until it has".into(),
             });
         }
-        let limits = self.account_limits()?;
+        let limits = self.harness_account_limits()?;
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
             "SELECT subject, body FROM desired WHERE kind='agent' ORDER BY subject",
@@ -284,7 +292,7 @@ impl LimitsStore for Store {
         if !self.account_limits_ready().map_err(internal)? {
             return Ok(outcome);
         }
-        for limit in self.account_limits().map_err(internal)? {
+        for limit in self.harness_account_limits().map_err(internal)? {
             let Some(weekly) = limit.weekly_percent else {
                 continue;
             };
@@ -470,16 +478,27 @@ impl LimitsStore for Store {
                 "message/limits-{}",
                 &canonical_hash(&key).map_err(internal)?[..20]
             );
+            let notice = ClaimInput {
+                subject: subject.clone(),
+                kind: "message.sent".into(),
+                actor: Some(LIMITS_ACTOR.into()),
+                fields: serde_json::from_value(json!({
+                    "from": LIMITS_ACTOR, "to": policy.notify,
+                    "title": title, "content": reason, "status": "sent",
+                    "tags": ["account-limits", format!("account:{}", limit.account), format!("window:{episode}")]
+                })).map_err(internal)?,
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            };
+            // Where its recipient's host reads it, decided before the transaction: a notice
+            // routed to the stream is queued in the outbox, which drains to the shard.
+            let route = fractal_store::store::message_routing::legacy_reason(self, &notice).map_err(internal)?;
             self.connection.batched(|tx| {
                 // Sent as a graph claim, a mirrored stream item or a queued outbox row.
                 let recorded = fractal_store::store::message_sent::message_sent_tx(tx, &subject).map_err(internal)?;
                 if !recorded {
-                    append_claim_tx(tx, &self.origin, &subject, "message.sent", Some(LIMITS_ACTOR),
-                        &json!({"fields": {
-                            "from": LIMITS_ACTOR, "to": policy.notify,
-                            "title": title, "content": reason, "status": "sent",
-                            "tags": ["account-limits", format!("account:{}", limit.account), format!("window:{episode}")]
-                        }, "evidence": []}), &[], None).map_err(claim_append_error)?;
+                    fractal_store::store::message_routing::send_message_tx(tx, &self.origin, &notice, route)?;
                 }
                 Ok::<_, FractalError>(())
             }).map_err(internal)??;
@@ -935,6 +954,47 @@ agent "other" { workspace "/tmp"; harness "codex" { account-pool "person/ada"; }
         )
         .unwrap();
         store.apply_internal(&intent, "declare-accounts").unwrap();
+    }
+
+    #[test]
+    fn producer_clock_cannot_erase_harness_five_hour_scheduling_evidence() {
+        let store = Store::open_memory("alder").unwrap();
+        declare_accounts(&store);
+        let at = 1_000_000_u64;
+        let later = at + 2 * HOUR as u64;
+        let reset = later + HOUR as u64;
+        store.append_claim(&ClaimInput {
+            subject:"agent/alder.single".into(), actor:Some("agent/alder.single".into()),
+            kind:"harness.limits".into(),
+            fields:serde_json::from_value(json!({"driver":"codex", "account_ref":"ada/one",
+                "five_hour_percent":80.0, "five_hour_resets_at_unix_ms":reset,
+                "measured_at_unix_ms":at})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:Some("harness-partial".into()),
+        }).unwrap();
+        let accounts = store.declared_accounts().unwrap();
+        let one = accounts.iter().find(|account| account.name == "ada/one").unwrap();
+        assert_eq!(store.candidates(&[one], u128::from(later)).unwrap()[0].five_hour_percent, Some(80.0));
+        let writer = "agent/sample/usage-producer";
+        store.set_usage_limits_writers(vec![writer.into()]).unwrap();
+        store.append_claim(&ClaimInput {
+            subject:writer.into(), actor:Some(writer.into()), kind:"usage.limits.observed".into(),
+            fields:serde_json::from_value(json!({"readings":[{
+                "account":fractal_drivers::account::account_label("codex", "declared:ada/one"),
+                "account_ref":"ada/one", "provider":"openai-codex", "window":"5h",
+                "used_percent":5.0, "resets_at":null, "coverage":"reported",
+                "measured_at":chrono::DateTime::from_timestamp_millis(later as i64).unwrap().to_rfc3339(),
+                "source":"omp-usage", "host":"cedar"
+            }], "credit_readings":[]})).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:Some("producer-later".into()),
+        }).unwrap();
+        assert_eq!(store.candidates(&[one], u128::from(later)).unwrap()[0].five_hour_percent, Some(80.0));
+        let harness = store.harness_account_limits().unwrap();
+        assert_eq!(harness[0].five_hour_percent, Some(80.0));
+        assert_eq!(harness[0].measured_at_unix_ms, at);
+        let display = store.account_limits().unwrap();
+        let five = display[0].windows.iter().find(|window| window.window == "5h").unwrap();
+        assert_eq!(five.used_percent, Some(5.0));
+        assert_eq!(five.measured_at_unix_ms, later);
     }
 
     fn policy() -> LimitsPolicy {
