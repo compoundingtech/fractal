@@ -149,7 +149,9 @@ pub async fn client_ready_work(
         message: "a current work cut and all cohort declarations are required".into(),
         details: Box::default(),
     };
-    // No live refold or unbounded native handoff scan on this opt-in route.
+    // No live refold: at most 5,000 published steps, each eligible step doing indexed
+    // subject/kind seeks through that subject's release/return/progress events.
+    // Latest handoff candidates also need canonical ordering; event history is not capped.
     if publication.rows.rows.len() > 5_000 {
         return Err(available());
     }
@@ -177,6 +179,8 @@ pub async fn client_ready_work(
     })
     .await?
     .ok_or_else(available)?;
+    #[cfg(test)]
+    super::ready_work_tests::after_count(&state);
     // The same generation fence as published work paging. This result has no continuation.
     if valid_until.is_some_and(|until| until <= client_now_ms())
         || !matches!(list.current(), ListRead::Served(_, id)
