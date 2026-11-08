@@ -865,100 +865,6 @@ mod tests {
         assert!(body["value"]["next_cursor"].is_null());
     }
     #[tokio::test]
-    async fn recently_closed_context_is_owner_scoped_and_ignores_reopened_threads() {
-        use thread_metadata::Edit;
-
-        let root = tempfile::tempdir().unwrap();
-        let state = super::super::tests::test_state_named(root.path(), "thread-context");
-        let owner = "person/operator";
-        for (person, thread, reopen) in [
-            (owner, "thread/first", false),
-            (owner, "thread/second", false),
-            (owner, "thread/reopened", true),
-            ("person/other", "thread/private", false),
-        ] {
-            let (created, _) = thread_metadata::apply(
-                &state.store,
-                person,
-                thread,
-                &format!("{thread}:create"),
-                Edit::Create {
-                    agent: "agent/example",
-                    title: "Review",
-                },
-            )
-            .unwrap();
-            let (closed, _) = thread_metadata::apply(
-                &state.store,
-                person,
-                thread,
-                &format!("{thread}:close"),
-                Edit::Close {
-                    revision: &created.id,
-                },
-            )
-            .unwrap();
-            if reopen {
-                thread_metadata::apply(
-                    &state.store,
-                    person,
-                    thread,
-                    &format!("{thread}:reopen"),
-                    Edit::Reopen {
-                        revision: &closed.id,
-                    },
-                )
-                .unwrap();
-            }
-        }
-        let app = crate::api::router(state);
-        let get = |uri: String| {
-            let app = app.clone();
-            async move {
-                let response = app
-                    .oneshot(
-                        Request::builder()
-                            .uri(uri)
-                            .header(LOCAL_PERSON_HEADER, owner)
-                            .body(Body::empty())
-                            .unwrap(),
-                    )
-                    .await
-                    .unwrap();
-                let status = response.status();
-                let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES)
-                    .await
-                    .unwrap();
-                let json: Value = serde_json::from_slice(&bytes).unwrap();
-                (status, json)
-            }
-        };
-        let (status, page) = get("/v1/client/threads?recently_closed=true&limit=1".into()).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(page["value"]["items"][0]["id"], "thread/second");
-        let cursor = page["value"]["next_cursor"].as_str().unwrap();
-        let (_, older) = get(format!(
-            "/v1/client/threads?recently_closed=true&limit=1&cursor={cursor}"
-        ))
-        .await;
-        assert_eq!(older["value"]["items"][0]["id"], "thread/first");
-        assert!(older["value"]["next_cursor"].is_null());
-        assert_eq!(
-            get(format!(
-                "/v1/client/threads?agent_id=agent%2Fexample&cursor={cursor}"
-            ))
-            .await
-            .0,
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
-        assert_eq!(
-            get("/v1/client/threads?agent_id=agent%2Fexample&recently_closed=true".into())
-                .await
-                .0,
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
-    }
-    #[tokio::test]
     async fn thread_reply_keys_are_disjoint_between_two_owners() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::test_state_named(root.path(), "thread-reply-keys");
@@ -1315,6 +1221,101 @@ agent "garden/other" { workspace "/work/garden"; harness "omp" {} }
                 .unwrap()
                 .claims
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn recently_closed_context_is_owner_scoped_and_ignores_reopened_threads() {
+        use thread_metadata::Edit;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "thread-context");
+        let owner = "person/operator";
+        for (person, thread, reopen) in [
+            (owner, "thread/first", false),
+            (owner, "thread/second", false),
+            (owner, "thread/reopened", true),
+            ("person/other", "thread/private", false),
+        ] {
+            let (created, _) = thread_metadata::apply(
+                &state.store,
+                person,
+                thread,
+                &format!("{thread}:create"),
+                Edit::Create {
+                    agent: "agent/example",
+                    title: "Review",
+                },
+            )
+            .unwrap();
+            let (closed, _) = thread_metadata::apply(
+                &state.store,
+                person,
+                thread,
+                &format!("{thread}:close"),
+                Edit::Close {
+                    revision: &created.id,
+                },
+            )
+            .unwrap();
+            if reopen {
+                thread_metadata::apply(
+                    &state.store,
+                    person,
+                    thread,
+                    &format!("{thread}:reopen"),
+                    Edit::Reopen {
+                        revision: &closed.id,
+                    },
+                )
+                .unwrap();
+            }
+        }
+        let app = crate::api::router(state);
+        let get = |uri: String| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .uri(uri)
+                            .header(LOCAL_PERSON_HEADER, owner)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                let status = response.status();
+                let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES)
+                    .await
+                    .unwrap();
+                let json: Value = serde_json::from_slice(&bytes).unwrap();
+                (status, json)
+            }
+        };
+        let (status, page) = get("/v1/client/threads?recently_closed=true&limit=1".into()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(page["value"]["items"][0]["id"], "thread/second");
+        let cursor = page["value"]["next_cursor"].as_str().unwrap();
+        let (_, older) = get(format!(
+            "/v1/client/threads?recently_closed=true&limit=1&cursor={cursor}"
+        ))
+        .await;
+        assert_eq!(older["value"]["items"][0]["id"], "thread/first");
+        assert!(older["value"]["next_cursor"].is_null());
+        assert_eq!(
+            get(format!(
+                "/v1/client/threads?agent_id=agent%2Fexample&cursor={cursor}"
+            ))
+            .await
+            .0,
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        assert_eq!(
+            get("/v1/client/threads?agent_id=agent%2Fexample&recently_closed=true".into())
+                .await
+                .0,
+            StatusCode::UNPROCESSABLE_ENTITY
         );
     }
 }
