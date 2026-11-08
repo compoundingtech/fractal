@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import unittest
 sys.dont_write_bytecode = True
-from sqlite_large_values import MANIFEST, declarations, findings, record, scan, scan_file, sqlite_crates, flow_site, inventory_delta
+from sqlite_large_values import MANIFEST, REGENERATE, declarations, findings, formatting_findings, manifest_text, record, scan, scan_file, sqlite_crates, flow_site, inventory_delta
 
 
 class Policy(unittest.TestCase):
@@ -36,6 +36,53 @@ class Policy(unittest.TestCase):
         self.path.write_text(text)
         errors = findings(self.root, self.manifest)
         self.assertTrue(any(contains in error for error in errors), errors)
+
+    def test_canonical_order_and_single_line_records(self):
+        manifest = {"version": 1, "reviewed_base": "reviewed-not-current-head",
+                    "sites": [{"id": "lv-hf00000000000", "excerpt": "a\nb"},
+                              {"id": "lv-h100000000000"}]}
+        text = manifest_text(manifest)
+        parsed = json.loads(text)
+        self.assertEqual([e["id"] for e in parsed["sites"]],
+                         ["lv-h100000000000", "lv-hf00000000000"])
+        self.assertEqual(parsed["reviewed_base"], manifest["reviewed_base"])
+        self.assertEqual(len([line for line in text.splitlines() if '"id":' in line]), 2)
+        self.assertEqual(formatting_findings(text, parsed), [])
+        wrong_order = text.replace('lv-h100000000000', 'lv-hf00000000001')
+        for invalid in (wrong_order, json.dumps(parsed, indent=2) + "\n"):
+            errors = formatting_findings(invalid, json.loads(invalid))
+            self.assertEqual(len(errors), 1)
+            self.assertIn(REGENERATE, errors[0])
+
+    def test_guard_rejects_noncanonical_text_and_format_command_repairs_it(self):
+        path = self.root / MANIFEST
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(self.manifest, indent=4) + "\n")
+        command = [sys.executable, str(Path(__file__).with_name("check-sqlite-large-values")),
+                   "--root", str(self.root)]
+        result = subprocess.run(command, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(REGENERATE, result.stderr)
+        subprocess.run([*command, "--format"], check=True, capture_output=True)
+        self.assertEqual(path.read_text(), manifest_text(self.manifest))
+
+    def test_independent_hash_ordered_inserts_merge_cleanly(self):
+        base = {"sites": [{"id": f"lv-h{value:012x}"} for value in
+                          (0x100, 0x300, 0x500, 0x700, 0x900, 0xb00, 0xd00, 0xf00)]}
+        ours = dict(base, sites=[*base["sites"], {"id": "lv-h000000000200"}])
+        theirs = dict(base, sites=[*base["sites"], {"id": "lv-h000000000e00"}])
+        paths = [self.root / name for name in ("ours.json", "base.json", "theirs.json")]
+        for path, manifest in zip(paths, (ours, base, theirs)):
+            path.write_text(manifest_text(manifest))
+        result = subprocess.run(["git", "merge-file", "-p", *map(str, paths)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        merged = json.loads(result.stdout)
+        self.assertEqual(len(merged["sites"]), 10)
+        self.assertEqual(result.stdout, manifest_text(merged))
+        self.assertIn({"id": "lv-h000000000200"}, merged["sites"])
+        self.assertIn({"id": "lv-h000000000e00"}, merged["sites"])
+        print("git merge-file: two independent hash-ordered inserts merged cleanly (10 records)")
 
     def test_new_inline_write_is_not_grandfathered_by_old_exception(self):
         old = self.register('fn write() { db.execute("INSERT INTO facts(body) VALUES(?1)", [body]); }')

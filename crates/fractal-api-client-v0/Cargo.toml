@@ -11,6 +11,7 @@ test-support = ["fractal-api-core/test-support"]
 
 [dependencies]
 fractal-api-core = { path = "../fractal-api-core" }
+fractal-store = { path = "../fractal-store" }
 anyhow = "1"
 axum = { version = "0.8", features = ["json", "ws"] }
 base64 = "0.22"
