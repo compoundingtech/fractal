@@ -48,6 +48,13 @@ export interface CommandPaletteProps {
   readonly recentStore?: RecentStore | undefined
   /** A full-screen sheet offering only here and tab; the narrow layout's when absent. */
   readonly phone?: boolean | undefined
+  /** The section the palette opens scoped to, such as `spaces` for Alt+G; Escape widens it to all. */
+  readonly section?: string | undefined
+  /**
+   * The row chosen on opening. `next-space` chooses the space after the current one, so Alt+G then
+   * Enter switches, as Ctrl+G does in the TUI; Alt+G again inside moves to the next one.
+   */
+  readonly select?: 'next-space' | undefined
 }
 
 /** The palette's open state, for the host's Mod+K / Ctrl+T handler and the phone's search button. */
@@ -91,11 +98,17 @@ export function CommandPalette({ isOpen, onOpenChange, ...props }: CommandPalett
   </ThemePortal>
 }
 
+/** The row of the space after the current one, wrapping; the current one when it is the only space. */
+const nextSpaceRow = (state: WorkspaceState): string => {
+  const at = state.spaces.findIndex(space => space.id === state.current)
+  return `space:${state.spaces[(at + 1) % state.spaces.length]!.id}`
+}
+
 const fallbackRecent = memoryRecentStore()
 // Defaults are constants: a fresh array each render would re-ask every source, which answers with a fresh render.
 const noCommands: readonly HostCommand[] = []
 
-function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands = noCommands, search, onSaid, canOpen, recentStore = fallbackRecent, phone, onClose }: Omit<CommandPaletteProps, 'isOpen' | 'onOpenChange' | 'phone'> & { readonly phone: boolean; readonly onClose: () => void }) {
+function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands = noCommands, search, onSaid, canOpen, recentStore = fallbackRecent, phone, section, select, onClose }: Omit<CommandPaletteProps, 'isOpen' | 'onOpenChange' | 'phone'> & { readonly phone: boolean; readonly onClose: () => void }) {
   const { recent, push } = useRecent({ store: recentStore })
   const [mode, setMode] = React.useState<PaletteMode>({ _tag: 'Search' })
   // A tap on the phone opens here, or in a tab when that is chosen above the list.
@@ -171,6 +184,8 @@ function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands =
     },
     onClose,
     'aria-label': 'Search Fractal',
+    initialSection: section,
+    initialSelected: select === 'next-space' ? nextSpaceRow(state) : undefined,
   })
   const naming = palette.mode._tag === 'Naming' ? palette.mode : undefined
   const list = React.useRef<HTMLDivElement>(null)
@@ -183,6 +198,16 @@ function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands =
   }, [selectedId])
   const scoped = palette.section === undefined ? undefined : paletteSections.find(section => section.id === palette.section)
   const inputProps = palette.getInputProps()
+  const onInputKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    // In the spaces section, Alt+G again moves to the next space (the TUI's Ctrl+G, as tmux does).
+    if (event.altKey && !event.metaKey && !event.ctrlKey && event.code === 'KeyG' && palette.section === 'spaces' && naming === undefined) {
+      event.preventDefault()
+      event.stopPropagation()
+      palette.move(1)
+      return
+    }
+    inputProps.onKeyDown?.(event)
+  }
 
   return <>
     <div {...stylex.props(styles.field)}>
@@ -191,6 +216,7 @@ function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands =
       {scoped !== undefined && <span data-palette-scope={scoped.id} {...stylex.props(styles.scope)}>{scoped.label}</span>}
       <input
         {...inputProps}
+        onKeyDown={onInputKeyDown}
         autoFocus
         aria-label={naming === undefined ? 'Search Fractal' : 'Name'}
         placeholder={naming !== undefined ? namingPrompt(naming.intent) : phone ? 'Search' : 'Search agents, missions, resources and commands'}

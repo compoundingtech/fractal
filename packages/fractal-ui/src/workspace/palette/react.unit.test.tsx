@@ -36,8 +36,12 @@ const Palette = (props: {
   readonly mode?: PaletteMode
   readonly targets?: readonly OpenTarget[]
   readonly recent?: readonly string[]
+  readonly initialSection?: string
+  readonly initialSelected?: string
+  readonly onState?: (state: ReturnType<typeof usePalette<string>>) => void
 }) => {
   const palette = usePalette({ sections, ...props })
+  props.onState?.(palette)
   return <div>
     <input {...palette.getInputProps()} />
     <div {...palette.getListProps()} data-loading={palette.loading ? '' : undefined}>
@@ -81,6 +85,18 @@ describe('usePalette', () => {
     expect(selectedLabel()).toBe('Toggle theme')
     key({ key: 'ArrowDown' })
     expect(selectedLabel()).toBe('Split right')
+  })
+
+  it('opens scoped to a section with a row chosen, and moves the selection for the host', () => {
+    let state: ReturnType<typeof usePalette<string>> | undefined
+    act(() => root.render(<Palette sources={[people, commands]} onSelect={() => {}} initialSection="commands" initialSelected="commands/Toggle theme" onState={next => { state = next }} />))
+    expect(labels()).toEqual(['Split right', 'Toggle theme'])
+    expect(selectedLabel()).toBe('Toggle theme')
+    act(() => state!.move(1))
+    expect(selectedLabel()).toBe('Split right')
+    // The jump is the palette's own, so Escape leaves it as it leaves Alt+digit.
+    key({ key: 'Escape' })
+    expect(labels()).toEqual(['Ada', 'Atlas Builder', 'Split right', 'Toggle theme'])
   })
 
   it('limits targets, falling back to here', () => {
