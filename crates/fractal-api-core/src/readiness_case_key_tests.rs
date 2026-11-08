@@ -152,7 +152,7 @@ fn held_notice_continues_and_replays_without_a_second_message() {
     merge_different_occupant(&store, &remote, &root);
     drain_notices(&mut admission, &journal, &store, Some(backup)).unwrap();
     assert_eq!(store.messages(Some(backup), true).unwrap().len(), 1);
-    let occupants = store.operation_claims(&root).unwrap();
+    let (occupants, _) = store.operation_claims(&root).unwrap();
     merge_different_occupant(&store, &remote,
         &format!("{root}:conflict:{}", occupants[0].id));
     drain_notices(&mut admission, &journal, &store, Some(backup)).unwrap();
@@ -206,7 +206,7 @@ fn merge_different_occupant(store: &Store, remote: &Store, key: &str) {
     }).unwrap();
     store.import_replication(remote.origin(), &remote.export_replication(0).unwrap()).unwrap();
     assert!(store.operation_claim(key).unwrap().is_none());
-    assert_eq!(store.operation_claims(key).unwrap().len(), 2);
+    assert_eq!(store.operation_claims(key).unwrap().0.len(), 2);
 }
 
 #[test]
@@ -225,7 +225,7 @@ fn replicated_conflicts_continue_each_family_and_preserve_acknowledged_receipts(
         let root = format!("{}:{suffix}", opening.episode);
         let first = occupy(&store, &root);
         merge_different_occupant(&store, &remote, &root);
-        let occupants = store.operation_claims(&root).unwrap();
+        let (occupants, _) = store.operation_claims(&root).unwrap();
         // A continuation can itself receive divergent replicated requests.
         let continuation = format!("{root}:conflict:{}", occupants[0].id);
         occupy(&store, &continuation);
@@ -253,19 +253,19 @@ fn replicated_conflicts_continue_each_family_and_preserve_acknowledged_receipts(
             format!("{}:weekly", opening.episode)
         };
         let id = receipt.body["_operation"]["id"].as_str().unwrap();
-        let first = store.operation_claims(&root).unwrap();
+        let (first, _) = store.operation_claims(&root).unwrap();
         let next = format!("{root}:conflict:{}", first[0].id);
-        let second = store.operation_claims(&next).unwrap();
+        let (second, _) = store.operation_claims(&next).unwrap();
         let actual = format!("{root}:conflict:{}", second[0].id);
-        assert_eq!(store.operation_claims(&actual).unwrap()[0].body["_operation"]["id"], id);
+        assert_eq!(store.operation_claims(&actual).unwrap().0[0].body["_operation"]["id"], id);
         merge_different_occupant(&store, &remote, &actual);
     }
     for notice in &notices {
         let input = notice_input(notice);
         let root = input.idempotency_key.as_deref().unwrap();
-        let first = store.operation_claims(root).unwrap();
+        let (first, _) = store.operation_claims(root).unwrap();
         let next = format!("{root}:conflict:{}", first[0].id);
-        let second = store.operation_claims(&next).unwrap();
+        let (second, _) = store.operation_claims(&next).unwrap();
         let actual = format!("{root}:conflict:{}", second[0].id);
         merge_different_occupant(&store, &remote, &actual);
     }
@@ -282,7 +282,7 @@ fn replicated_conflicts_continue_each_family_and_preserve_acknowledged_receipts(
     assert_eq!(store.operational_failure(&opening.episode).unwrap().unwrap().status, "resolved");
     for receipt in [&early, &weekly] {
         let root = format!("{}:recovered", receipt.id);
-        let occupants = store.operation_claims(&root).unwrap();
+        let (occupants, _) = store.operation_claims(&root).unwrap();
         merge_different_occupant(&store, &remote,
             &format!("{root}:conflict:{}", occupants[0].id));
     }
@@ -302,4 +302,94 @@ fn replicated_conflicts_continue_each_family_and_preserve_acknowledged_receipts(
     drain_notices(&mut restarted, &journal, &store, None).unwrap();
     assert_eq!(store.messages(Some(&policy.config.reviewer), true).unwrap().len(), 2);
     assert_eq!(store.index().unwrap(), index);
+}
+
+fn replicated_occupants(store: &Store, key: &str, count: usize, serial: &mut usize) -> Vec<String> {
+    let mut ids = Vec::new();
+    for _ in 0..count {
+        *serial += 1;
+        let peer = Store::open_memory(&format!("replica-{serial}")).unwrap();
+        let receipt = peer.append_claim(&ClaimInput {
+            subject: "custom/fixture/record".into(), kind: "custom.fixture.record".into(),
+            actor: Some("agent/fixture.owner".into()),
+            fields: BTreeMap::from([("request".into(), json!(*serial))]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some(key.into()),
+        }).unwrap();
+        ids.push(receipt.id);
+        store.import_replication(peer.origin(), &peer.export_replication(0).unwrap()).unwrap();
+    }
+    ids
+}
+
+#[test]
+fn overflowing_occupants_prefer_daemon_receipts_and_do_not_stop_sampler_recovery() {
+    let (dir, mut policy, store) = fixture();
+    let journal = dir.path().join("readiness-case.json");
+    policy.config.evidence_file = dir.path().join("weekly-evidence.json");
+    policy.config.retained_pairs_file = Some(dir.path().join("retained-evidence.json"));
+    fs::write(policy.config.retained_pairs_file.as_ref().unwrap(),
+        serde_json::to_vec(&json!({"version":1,"pairs":[]})).unwrap()).unwrap();
+    let end = (MINUTES + 10) * MINUTE_MS;
+    let mut admission = Admission::load(&journal, &policy.config).unwrap();
+    let opening = plan(&mut admission, &policy, &journal, end);
+    assert!(record(&store, &policy.config, &opening).unwrap());
+    let expected = phase_receipt(&store, &opening, "early").unwrap().unwrap();
+    let mut serial = 0;
+    let root = format!("{}:early", opening.episode);
+    replicated_occupants(&store, &root, 20, &mut serial);
+    let (receipts, overflow) = store.operation_claims(&root).unwrap();
+    assert!(overflow);
+    assert_eq!(receipts.len(), 16);
+    assert_eq!(receipts[0].id, expected.id, "daemon priority precedes immutable ID ordering");
+    assert_eq!(phase_receipt(&store, &opening, "early").unwrap().unwrap().id, expected.id);
+    let notice_root = format!("{}:notice:early", opening.episode);
+    replicated_occupants(&store, &notice_root, 20, &mut serial);
+    let mut remaining = keys::MAX_VISITS;
+    assert!(matches!(keys::resolve(&store, &notice_root, &notice_root,
+        &opening.reviewer, 0, &|_, _| false, &mut remaining).unwrap(), keys::Lookup::Blocked));
+    assert_eq!(keys::MAX_VISITS - remaining, 17, "one bounded read and sixteen occupants");
+    let missed = reading(end + MINUTE_MS, 11);
+    fs::write(&policy.config.evidence_file, serde_json::to_vec(&missed).unwrap()).unwrap();
+    run_sampler(&policy, &store, missed.end_ms).unwrap();
+    assert_eq!(store.messages(Some(&policy.config.reviewer), true).unwrap().len(), 1);
+    let met = reading(end + 2 * MINUTE_MS, 0);
+    fs::write(&policy.config.evidence_file, serde_json::to_vec(&met).unwrap()).unwrap();
+    run_sampler(&policy, &store, met.end_ms).unwrap();
+    assert!(Admission::load(&journal, &policy.config).unwrap().weekly.recovered);
+    assert_eq!(store.operational_failure(&opening.episode).unwrap().unwrap().status, "resolved");
+    let index = store.index().unwrap();
+    run_sampler(&policy, &store, met.end_ms).unwrap();
+    assert_eq!(store.index().unwrap(), index, "diagnostics and notices are deduplicated");
+}
+
+#[test]
+fn branched_continuations_share_one_total_visit_budget() {
+    let (dir, policy, store) = fixture();
+    let journal = dir.path().join("case.json");
+    let mut admission = Admission::load(&journal, &policy.config).unwrap();
+    let opening = plan(&mut admission, &policy, &journal, (MINUTES + 10) * MINUTE_MS);
+    let root = format!("{}:early", opening.episode);
+    let mut serial = 0;
+    for first in replicated_occupants(&store, &root, 3, &mut serial) {
+        let child = format!("{root}:conflict:{first}");
+        for second in replicated_occupants(&store, &child, 3, &mut serial) {
+            replicated_occupants(&store, &format!("{root}:conflict:{second}"), 3, &mut serial);
+        }
+    }
+    let mut remaining = keys::MAX_VISITS;
+    let result = keys::resolve(&store, &root, &root, &opening.reviewer, 0,
+        &|_, _| false, &mut remaining).unwrap();
+    assert!(matches!(result, keys::Lookup::Blocked));
+    assert_eq!(remaining, 0);
+    let index = store.index().unwrap();
+    let mut remaining = keys::MAX_VISITS;
+    assert!(matches!(keys::resolve(&store, &root, &root, &opening.reviewer, 0,
+        &|_, _| false, &mut remaining).unwrap(), keys::Lookup::Blocked));
+    assert_eq!(remaining, 0);
+    assert_eq!(store.index().unwrap(), index, "replay does not repeat the diagnostic");
+    let missed = reading(opening.cut + MINUTE_MS, 11);
+    admission.weekly(&journal, &policy.config, &store, &missed, missed.end_ms,
+        |opening, action| record_weekly(&store, opening, action)).unwrap();
+    drain_notices(&mut admission, &journal, &store, None).unwrap();
+    assert_eq!(store.messages(Some(&policy.config.reviewer), true).unwrap().len(), 1);
 }

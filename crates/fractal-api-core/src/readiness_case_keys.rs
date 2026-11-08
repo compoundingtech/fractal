@@ -4,6 +4,7 @@ use crate::model::ClaimRecord;
 use sha2::Digest as _;
 
 const MAX_CONFLICTS: usize = 4;
+pub(super) const MAX_VISITS: usize = 64;
 
 pub(super) enum Lookup {
     Vacant(String),
@@ -11,12 +12,15 @@ pub(super) enum Lookup {
     Blocked,
 }
 
-fn conflict(store: &Store, root: &str, owner: &str, receipt: &ClaimRecord) -> Result<()> {
+fn conflict(store: &Store, root: &str, owner: &str, receipt: Option<&ClaimRecord>) -> Result<()> {
     let episode = format!("readiness-operation-conflict/{}", hex::encode(sha2::Sha256::digest(root)));
-    eprintln!("fractal: readiness operation conflict: {episode}, occupied by {}", receipt.id);
     if store.operational_failure(&episode)?.is_some() {
         return Ok(());
     }
+    let reason = receipt.map_or_else(
+        || "Readiness operation resolution exceeded its bounded work allowance".to_owned(),
+        |receipt| format!("A readiness operation is occupied by a different record: {}", receipt.id),
+    );
     let source = format!("daemon/{}", store.origin());
     // This diagnostic has no operation key: its native, system-only failure episode
     // records the conflict without relying on another globally occupied key.
@@ -29,11 +33,13 @@ fn conflict(store: &Store, root: &str, owner: &str, receipt: &ClaimRecord) -> Re
             ("reviewer".into(), json!(owner)),
             ("title".into(), json!("Readiness operation conflict")),
             ("severity".into(), json!("warning")),
-            ("reason".into(), json!(format!("A readiness operation is occupied by a different record: {}", receipt.id))),
+            ("reason".into(), json!(reason)),
             ("targets".into(), json!([source])),
         ]),
-        evidence: vec![receipt.id.clone()], expected_subject: None, idempotency_key: None,
+        evidence: receipt.into_iter().map(|receipt| receipt.id.clone()).collect(),
+        expected_subject: None, idempotency_key: None,
     })?;
+    eprintln!("fractal: readiness operation conflict: {episode}: {reason}");
     Ok(())
 }
 
@@ -41,35 +47,54 @@ pub(super) fn lookup(
     store: &Store, root: &str, owner: &str,
     accepts: impl Fn(&ClaimRecord, &str) -> bool,
 ) -> Result<Lookup> {
-    resolve(store, root, root, owner, 0, &accepts)
+    let mut remaining = MAX_VISITS;
+    resolve(store, root, root, owner, 0, &accepts, &mut remaining)
 }
 
-fn resolve(
+pub(super) fn resolve(
     store: &Store, root: &str, key: &str, owner: &str, depth: usize,
     accepts: &impl Fn(&ClaimRecord, &str) -> bool,
+    remaining: &mut usize,
 ) -> Result<Lookup> {
-    let receipts = store.operation_claims(key)?;
+    if *remaining == 0 {
+        conflict(store, root, owner, None)?;
+        return Ok(Lookup::Blocked);
+    }
+    *remaining -= 1;
+    let (receipts, overflow) = store.operation_claims(key)?;
+    if overflow {
+        conflict(store, root, owner, None)?;
+    }
     if receipts.is_empty() {
         return Ok(Lookup::Vacant(key.to_owned()));
     }
     let mut expected = None;
     for receipt in &receipts {
+        if *remaining == 0 {
+            conflict(store, root, owner, None)?;
+            return Ok(Lookup::Blocked);
+        }
+        *remaining -= 1;
         if accepts(receipt, key) {
             expected.get_or_insert(receipt);
         } else {
-            conflict(store, root, owner, receipt)?;
+            conflict(store, root, owner, Some(receipt))?;
         }
     }
     if let Some(receipt) = expected {
         return Ok(Lookup::Recorded(receipt.clone()));
     }
-    if depth == MAX_CONFLICTS { return Ok(Lookup::Blocked); }
+    if overflow || depth == MAX_CONFLICTS { return Ok(Lookup::Blocked); }
     let mut selected = None;
     // Search occupied alternative continuations before creating any new receipt.
     // A later replicated occupant can sort before the occupant originally used.
     for receipt in &receipts {
         let next = format!("{root}:conflict:{}", receipt.id);
-        let found = resolve(store, root, &next, owner, depth + 1, accepts)?;
+        let found = resolve(store, root, &next, owner, depth + 1, accepts, remaining)?;
+        if *remaining == 0 {
+            conflict(store, root, owner, None)?;
+            return Ok(Lookup::Blocked);
+        }
         if matches!(found, Lookup::Recorded(_)) {
             return Ok(found);
         }
@@ -117,10 +142,10 @@ pub(super) fn append(store: &Store, input: &mut ClaimInput, owner: &str) -> Resu
                 if matches(store, input, &receipt, input.idempotency_key.as_deref().unwrap()) {
                     return Ok(Some(receipt));
                 }
-                conflict(store, &root, owner, &receipt)?;
+                conflict(store, &root, owner, Some(&receipt))?;
                 return Ok(None);
             }
-            Err(error) if matches!(error.code.as_str(), "idempotency-mismatch" | "idempotency-conflict") => {},
+            Err(error) if matches!(error.code, "idempotency-mismatch" | "idempotency-conflict") => {},
             Err(error) => return Err(error.into()),
         }
     }
