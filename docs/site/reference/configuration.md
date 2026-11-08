@@ -112,6 +112,20 @@ the PATH of the terminal running `fractal apply`, nor just launchd's or systemd'
 service environment. Agent `env` entries overlay that environment. Fractal also
 prepends its own executable directory so its wrapper can be found.
 
+Managed `omp`, `claude`, and `codex` launches read `AGENT_RUNTIME_PROFILE`, or
+`$HOME/.local/state/nix/profiles/coding-agent-runtime/share/coding-agents/profile.json`
+when that variable is unset. Each launch reads the current profile through its
+stable link and executes `<personas.launch.<persona>.harnessBin>/<harness>`
+directly. `AGENT_PERSONA` selects the persona, defaulting to `generalist` only
+when unset. The profile publisher selects the directory; Fractal does not
+duplicate persona-to-path rules. A missing persona entry, `harnessBin`, or
+executable wrapper refuses launch, naming the missing key/path. There is no
+fallback to a raw provider or to a different persona.
+
+Before upgrading a host to this launch contract, publish and activate a runtime
+profile containing `personas.launch.<persona>.harnessBin` for its managed seats.
+Existing provider processes are not changed by the upgrade.
+
 To change lookup for one agent, set its `PATH` (the literal `${PATH}` expands to
 the captured shell PATH):
 
@@ -119,22 +133,23 @@ the captured shell PATH):
 env { PATH "/opt/codex/bin:${PATH}"; }
 ```
 
-To bypass PATH lookup and version-manager shims entirely for the native program,
-set `executable` inside the harness:
+For `pi` and `opencode`, bypass PATH lookup and version-manager shims by setting
+`executable` inside the harness. For example:
 
 ```kdl
-harness "codex" {
-  executable "/opt/codex/bin/codex"
+harness "pi" {
+  executable "/opt/pi/bin/pi"
   effort "high"
 }
 ```
 
 `executable` is one executable name or path, not a shell command. Spaces in a
-path are preserved; put arguments in `args`, not in this string. An absolute
-path is recommended for a pinned installation. A plain name uses the seat's
-PATH. Fractal does not interpret `CODEX_BIN` or `CLAUDE_BIN` as executable
-overrides, and there is no separate per-harness executable setting in local
-daemon configuration. A native harness may still read its own configuration
+path are preserved; put arguments in `args`, not in this string. For managed
+`omp`, `claude`, and `codex`, Fractal replaces even an explicit raw executable
+with the profile's managed wrapper, preserving the remaining provider arguments.
+For other harnesses, an absolute path selects a pinned installation and a plain
+name uses the seat's PATH. Fractal does not interpret `CODEX_BIN` or `CLAUDE_BIN`
+as executable overrides. A native harness may still read its own configuration
 and environment variables after it starts.
 
 ## Preview and gate checks
