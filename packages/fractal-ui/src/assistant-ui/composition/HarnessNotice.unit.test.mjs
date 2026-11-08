@@ -171,7 +171,8 @@ for (const scheme of ['dark', 'light']) test(`curated ${scheme} harness cards di
   try {
     await act(async () => root.render(React.createElement(React.Fragment, null, harnessNoticeExamples.map(item => React.createElement(HarnessNotice, { key: item.id, item })))))
     assert.equal(container.querySelectorAll('[data-testid=harness-notice]').length, 4)
-    const buttons = [...container.querySelectorAll('button[aria-expanded]')]
+    // Disclosure triggers only: a code block in a panel brings its own `Code actions` menu trigger.
+    const buttons = [...container.querySelectorAll('[data-testid=harness-trigger]')]
     assert.equal(buttons.length, 4)
     for (const button of buttons) assert.equal(button.getAttribute('aria-expanded'), 'false')
     const summaries = [...container.querySelectorAll('[data-testid=harness-excerpt]')].map(e => e.textContent).join(' ')
