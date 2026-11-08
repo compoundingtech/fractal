@@ -14,14 +14,17 @@ export interface PhoneAgentDrawerHandle { open: () => void; close: () => void; t
  * primary pointer is coarse. Closing returns focus to `triggerRef`, the header control that opens it, with a focus
  * ring only when the drawer was dismissed from the keyboard.
  */
-export function PhoneAgentDrawer({ ref, triggerRef, headerActions, children, header }: {
+export function PhoneAgentDrawer({ ref, triggerRef, headerActions, children, header, onSheetChange }: {
   readonly ref: React.Ref<PhoneAgentDrawerHandle>
   /** The control that opens the drawer; it gets focus back on every close. */
   readonly triggerRef: React.RefObject<HTMLElement | null>
   /** The dock header's trailing actions, the alerts. */
   readonly headerActions?: React.ReactNode
   readonly children: React.ReactNode
-  readonly header: (open: () => void, sheet: { readonly open: boolean; readonly id: string }) => React.ReactNode
+  /** Drawn before the drawer; a host whose trigger lives elsewhere (the workspace's top bar) leaves it out and follows `onSheetChange`. */
+  readonly header?: (open: () => void, sheet: { readonly open: boolean; readonly id: string }) => React.ReactNode
+  /** The sheet's open state and dialog id, for a trigger's `aria-expanded` and `aria-controls`. */
+  readonly onSheetChange?: (sheet: { readonly open: boolean; readonly id: string }) => void
 }) {
   const dialog = React.useRef<HTMLDivElement>(null)
   const closeButton = React.useRef<HTMLButtonElement>(null)
@@ -43,8 +46,9 @@ export function PhoneAgentDrawer({ ref, triggerRef, headerActions, children, hea
     return () => window.cancelAnimationFrame(frame)
   }, [isOpen, triggerRef])
   React.useImperativeHandle(ref, () => ({ open, close, toggle: () => { if (isOpen) close(); else open() } }), [close, isOpen, open])
+  React.useLayoutEffect(() => { onSheetChange?.({ open: isOpen, id }) }, [onSheetChange, isOpen, id])
   return <>
-    {header(open, { open: isOpen, id })}
+    {header?.(open, { open: isOpen, id })}
     <div {...underlayProps} hidden={!isOpen} {...stylex.props(styles.overlay, !isOpen && styles.hidden)}>
       <FocusScope contain={isOpen}>
         <div {...mergeProps(modalProps, dialogProps)} ref={dialog} id={id} aria-modal="true" {...stylex.props(styles.drawer)}>

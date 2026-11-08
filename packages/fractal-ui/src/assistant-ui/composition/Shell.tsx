@@ -213,6 +213,40 @@ export function ThreadHeader({
 }
 
 /**
+ * `ThreadHeader`'s controls for a host whose tab strip is the one top bar: the native action slot, the terminal toggle
+ * and the right-panel toggle, in the order and with the names the header gives them. Desktop only; a phone keeps
+ * `ThreadHeader`.
+ */
+export function ThreadActions({ nativeActions, actionPortalRef, terminalAvailable = false, terminalDisabledReason, terminalOpen, onToggleTerminal, panelOpen, onTogglePanel }: {
+  nativeActions?: React.ReactNode
+  actionPortalRef?: React.Ref<HTMLDivElement>
+  terminalAvailable?: boolean
+  terminalDisabledReason?: string
+  terminalOpen: boolean
+  onToggleTerminal: () => void
+  panelOpen: boolean
+  onTogglePanel: () => void
+}) {
+  return <div data-thread-actions {...stylex.props(styles.barActions)}>
+    <div data-testid="native-action-slot" ref={actionPortalRef} {...stylex.props(styles.actionSlot)}>{nativeActions}</div>
+    {terminalAvailable && <ChromeControl icon={terminalOpen ? 'message' : 'terminal'} label={terminalOpen ? 'Show conversation' : 'Show terminal'} active={terminalOpen} onPress={onToggleTerminal} />}
+    {!terminalAvailable && terminalDisabledReason !== undefined && <ChromeControl icon="terminal" label="Show terminal" disabledReason={terminalDisabledReason} />}
+    <ChromeControl icon="panel" label="Toggle right panel" pressed={panelOpen} onPress={onTogglePanel} />
+  </div>
+}
+
+/**
+ * The conversation's breadcrumb where no line draws it: the folder and the open subject's name as a heading, for
+ * assistive technology and the page outline. The tab strip shows the name; the subject's hover card shows the folder.
+ */
+export function ThreadBreadcrumb({ folder, title, label = 'Breadcrumb' }: { folder?: string; title: string; label?: string }) {
+  return <nav aria-label={label} {...stylex.props(styles.visuallyHidden)}>
+    {folder !== undefined ? <><span>{folder}</span><span aria-hidden="true">/</span></> : null}
+    <span role="heading" aria-level={2}>{title}</span>
+  </nav>
+}
+
+/**
  * The phone terminal toggle, placed by the host at the trailing end of its workspace tab row: a 44px button whose
  * visible **Terminal** label names it, so its meaning never depends on a tooltip. Unavailable, it stays focusable and
  * `aria-disabled`, keeps `aria-pressed="false"`, is described by the reason, and opens that reason in a popover on
@@ -257,6 +291,8 @@ const styles = stylex.create({
   crumbSlash: { color: c.fgMuted },
   crumbTitle: { color: c.fg, fontWeight: t.weightMedium, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   actionSlot: { display: 'flex', alignItems: 'center', gap: 4, flexShrink: 1, minWidth: 0 },
+  barActions: { display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0, paddingInline: 4 },
+  visuallyHidden: { position: 'absolute', width: 1, height: 1, overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap' },
   actions: { marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: 4, flexShrink: 1, minWidth: 0, maxWidth: '100%' },
   outlineXs: { height: g.controlSm, display: 'inline-flex', alignItems: 'center', whiteSpace: 'nowrap', flexShrink: 0, paddingInline: 6, borderWidth: 1, borderStyle: 'solid', borderColor: c.borderStrong, backgroundColor: 'rgba(255, 255, 255, 0.025)', color: c.fg, borderRadius: r.control, fontSize: t.metaSize, lineHeight: t.metaLeading, fontWeight: t.weightMedium, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: 1 } },
   outlineTouch: { height: g.touchTarget },

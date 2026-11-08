@@ -3,6 +3,7 @@ import * as React from 'react'
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { Agent, Attention, decodeUnknownSync } from '@fractal/client/schema'
+import { Option } from 'effect'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
@@ -25,7 +26,7 @@ const alertOf = (id: string, title: string) => decodeUnknownSync(Attention)({
 })
 
 const source = fixtureSource({ world: {
-  now: 5000, gateway: 'gateway.example.invalid', agents: [agent, { ...agent, id: 'agent/b', name: 'Agent B' } as Agent], missions: [],
+  now: 5000, gateway: 'gateway.example.invalid', agents: [agent, { ...agent, id: 'agent/b', name: 'Agent B' } as Agent, { ...agent, id: 'agent/c', name: 'Agent C', ask: Option.some('question') } as Agent], missions: [],
   attention: [alertOf('attention/one', 'First alert'), alertOf('attention/two', 'Second alert')], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' },
 } })
 
@@ -177,6 +178,31 @@ it('brings the selected tab into view whenever the strip changes size', async ()
   } finally {
     scroll.mockRestore()
   }
+})
+
+it('has one top bar: the tab strip carries the conversation\'s actions, and the open agent\'s name stays its heading', async () => {
+  await mount()
+  const workspace = host.querySelector<HTMLElement>('section[aria-label="Agent workspace"]')!
+  const bars = workspace.querySelectorAll('header')
+  expect(bars).toHaveLength(1)
+  const bar = bars[0]!
+  expect(bar.querySelector('[role="tablist"][aria-label="Workspace tabs"]')).not.toBeNull()
+  for (const name of ['More actions', 'Show terminal', 'Toggle right panel']) expect(bar.querySelector(`button[aria-label="${name}"]`), name).not.toBeNull()
+  // The breadcrumb is kept for assistive technology, though no longer drawn as its own line.
+  expect(bar.querySelector('nav[aria-label="Breadcrumb"] [role="heading"]')?.textContent).toBe('Agent A')
+})
+
+it('marks a tab that needs you with the amber status ring, and shows the sidebar\'s hover card on a resting pointer', async () => {
+  await mount()
+  await act(async () => row('agent/c').click())
+  const tab = (name: string) => strip().find(node => node.getAttribute('aria-label')?.startsWith(name))!
+  expect(tab('Agent C').querySelector('[data-mark="needs-you"]')).not.toBeNull()
+  expect(tab('Agent C').getAttribute('aria-label')).toContain('needs you')
+  expect(tab('Agent A').querySelector('[data-mark="needs-you"]')).toBeNull()
+  expect(tab('Agent A').querySelector('[data-status]')).not.toBeNull()
+  // The same card the sidebar row shows, with the host it no longer gets from a header line.
+  await act(async () => { tab('Agent C').dispatchEvent(new MouseEvent('mouseover', { bubbles: true })) })
+  await vi.waitFor(() => expect(document.querySelector('[data-testid="agent-hover-card"]')?.textContent).toContain('Agent C'), { timeout: 3000 })
 })
 
 it('gives an answered alert\'s tab to the next alert, and closes it when none is left', async () => {

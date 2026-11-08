@@ -739,6 +739,14 @@ tabs and windows. A phone has the same flat strip, with the panel
 as a sheet that closes on a switch. An answered alert gives its tab to the next alert, and closes
 it when none is left. Right-click on a tab, or Alt+Shift+W, closes the others.
 
+The tab strip is the window's one top bar, at every width. It leads with the sidebar or drawer
+button and ends with the conversation's controls: the overflow menu, the terminal toggle and the
+right-panel (on phones, Agent details) button. The selected tab has an accent line along its top
+edge and a full-contrast title; the others are muted. An agent's tab starts with the sidebar row's
+status circle, amber when the agent needs you and red when it failed, and a resting pointer opens
+the sidebar row's hover card, which carries the host. The breadcrumb stays for assistive technology
+as a visually hidden landmark with the agent's name as its heading.
+
 Hidden tabs keep their DOM within a budget (`resources.ts`) but hold no feed demand: a visible
 follow is never evicted, so a hidden one could pin a gateway's only slot.
 
