@@ -621,7 +621,7 @@ fn renew_nested_ancestor_leases_tx(
     let expiry = now.saturating_add(600_000);
     transaction
         .execute(
-            /* sqlite-large-value: allow-for-now lv-heca706b36312 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs
+            /* sqlite-large-value: allow-for-now lv-hdaafb8e69f1c owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs
              SET lease_expires_at_unix_ms=?1, updated_at_unix_ms=?2
              WHERE generation_id=?3
                AND substr(?4, 1, length(step_path) + 1)=step_path || '/'

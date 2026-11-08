@@ -6412,7 +6412,7 @@ fn an_active_nested_lease_can_publish_its_parent_mission_output() {
     assert_eq!(output.revision, mission.revision);
 }
 
-fn nested_work_ancestor_expiry_after_child_completion(holder: &str) -> u128 {
+fn nested_work_ancestor_expiry_after_child_completion(holder: &str) -> (u128, u128) {
     let store = Store::open_memory("node").unwrap();
     let source = r#"version 2
 
@@ -6483,13 +6483,14 @@ mission "nested-work" state="ready" {
     store
         .work_action(&child.subject, "claim", &request("claim-child"))
         .unwrap();
+    let anchored_expiry = now_ms() + 60_000;
     store
         .connection
         .lock()
         .unwrap()
         .execute(
-            /* sqlite-large-value: allow-for-now lv-h414f4baa2072 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms='0', lease_owner=?2 WHERE subject=?1",
-            params![parent.subject, holder],
+            /* sqlite-large-value: allow-for-now lv-h1c3e44d7086a owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_expires_at_unix_ms=?3, lease_owner=?2 WHERE subject=?1",
+            params![parent.subject, holder, anchored_expiry.to_string()],
         )
         .unwrap();
 
@@ -6501,17 +6502,19 @@ mission "nested-work" state="ready" {
     assert_eq!(parent.status, "working");
     assert_eq!(parent.claimant.as_deref(), Some(holder));
     assert_eq!(parent.claim_incarnation.as_deref(), Some("current"));
-    parent.claim_expires_at_unix_ms.unwrap()
+    (anchored_expiry, parent.claim_expires_at_unix_ms.unwrap())
 }
 
 #[test]
 fn nested_work_renews_the_literal_owners_ancestor_lease() {
-    assert!(nested_work_ancestor_expiry_after_child_completion("agent/node/worker") > now_ms());
+    let (before, after) = nested_work_ancestor_expiry_after_child_completion("agent/node/worker");
+    assert!(after > before);
 }
 
 #[test]
 fn nested_work_does_not_renew_an_alias_owned_ancestor_lease() {
-    assert_eq!(nested_work_ancestor_expiry_after_child_completion("node/worker"), 0);
+    let (before, after) = nested_work_ancestor_expiry_after_child_completion("node/worker");
+    assert_eq!(after, before);
 }
 
 #[test]

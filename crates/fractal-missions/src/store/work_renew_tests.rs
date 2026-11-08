@@ -951,7 +951,9 @@ fn independent_work_capacity_uses_literal_ownership_for_admission() {
                 if holder == "agent/node/worker" {
                     assert_eq!(started.unwrap_err().code, "agent-capacity", "{actor} / {holder} / {status}");
                 } else {
-                    assert!(started.unwrap().claimant.is_none());
+                    let started = started.unwrap();
+                    assert!(started.claimant.is_none());
+                    step.store.set_step_state(&started.subject, "cancelled", None).unwrap();
                 }
                 let second = step.store.create_mission_run(&MissionRunRequest {
                     mission: "capacity-second".into(), revision: None, workspace: "/tmp".into(),
@@ -989,7 +991,7 @@ fn bare_work_actors_claim_renew_release_and_complete_with_main_normalization() {
             let step = ready_step_with_mail(0);
             let main_actor = smallclaims::store::normalize_actor(bare_actor, "agent");
             step.store.connection.write().execute(
-                /* sqlite-large-value: allow-for-now lv-h755979e290e9 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2 WHERE subject=?1",
+                /* sqlite-large-value: allow-for-now lv-h34894d4454a8 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2 WHERE subject=?1",
                 params![step.subject, main_actor],
             ).unwrap();
             let mut mutation = request("bare-claim", None);
