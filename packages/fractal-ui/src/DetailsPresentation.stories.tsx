@@ -747,7 +747,7 @@ async function openPhoneSheet(canvasElement:HTMLElement){
   const canvas=within(canvasElement),opener=canvas.getByRole('button',{name:'Agent details'})
   await userEvent.click(opener)
   const sheet=await canvas.findByRole('dialog',{name:'Agent details'}),panel=await within(sheet).findByRole('complementary',{name:'Agent inspector'})
-  await waitFor(()=>requireContract(panel.querySelectorAll('[role="tab"]').length===2&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details and Changes'))
+  await waitFor(()=>requireContract(panel.querySelectorAll('[role="tab"]').length===3&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details, Changes and Resources'))
   return {opener,sheet,panel}
 }
 function ProductionPhoneInspector({ scheme }: Args) {
@@ -1192,7 +1192,7 @@ function ompPlay(narrow:boolean,state:OmpSupplementState){
     if(narrow){const opened=await openPhoneSheet(canvasElement);panel=opened.panel;assertSheetClose(opened.sheet)}
     else{
       panel=await within(canvasElement).findByRole('complementary',{name:'Agent inspector'})
-      await waitFor(()=>requireContract(panel.querySelectorAll('[role="tab"]').length===2&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details and Changes'))
+      await waitFor(()=>requireContract(panel.querySelectorAll('[role="tab"]').length===3&&panel.querySelector('[data-testid="details-pane"]'),'Production inspector did not mount Details, Changes and Resources'))
       requireContract(panel.getBoundingClientRect().height>=899,'Production desktop inspector lost its dock-height layout')
       assertDesktopClose(panel)
     }

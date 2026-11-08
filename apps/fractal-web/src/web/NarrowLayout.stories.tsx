@@ -118,7 +118,7 @@ const assertWide = async (canvasElement: HTMLElement) => {
   await expect(canvas.queryByRole('dialog', { name: 'Agents' })).toBeNull()
   await expect(header.queryByRole('button', { name: 'Expand sidebar' })).toBeNull()
   await expect(header.getByRole('button', { name: 'Toggle right panel' })).toBeVisible()
-  await expect(header.getByRole('button', { name: 'Actions for WorkbenchShell' })).toBeVisible()
+  await expect(header.getByRole('button', { name: 'More actions' })).toBeVisible()
   await expect(header.getByRole('button', { name: 'Show terminal' })).toBeVisible()
   await expect(header.getByText('build-host-a')).toBeVisible()
   await expect(header.queryByRole('button', { name: 'Agent details' })).toBeNull()
@@ -126,12 +126,13 @@ const assertWide = async (canvasElement: HTMLElement) => {
 }
 /**
  * The inspector is a lazy chunk whose loading fallback carries the same "Agent inspector" landmark, so its own tab
- * list marks the loaded panel. Tabs are read from that list: the Changes view's diff panel has its own tab strip.
+ * list marks the loaded panel. Tabs are read from that list: the Changes view's diff panel has its own tab strip. A
+ * tab with a count is named with it ("Changes, 3").
  */
 const loadedInspector = async (scope: HTMLElement) => {
   const views = await within(scope).findByRole('tablist', { name: 'Agent inspector views' }, { timeout: 15000 })
   const inspector = views.closest<HTMLElement>('aside[aria-label="Agent inspector"]')!
-  return { inspector, views, tab: (name: 'Changes' | 'Details') => within(views).getByRole('tab', { name }) }
+  return { inspector, views, tab: (name: 'Changes' | 'Details') => within(views).getByRole('tab', { name: new RegExp(`^${name}(, \\d+)?$`) }) }
 }
 /** The pane's own side panel opens on Details and remembers the tab for its kind across a close and reopen. */
 const openWideDetails = async (canvasElement: HTMLElement) => {
@@ -163,7 +164,9 @@ const assertPhoneHeader = async (canvasElement: HTMLElement, agentName = 'Workbe
   const node = within(canvasElement).getByTestId('thread-header')
   const header = within(node)
   const buttons = header.getAllByRole('button')
-  await expect(buttons.map(button => button.getAttribute('aria-label'))).toEqual(['Expand sidebar', `Actions for ${agentName}`, 'Conversation menu', 'Agent details'])
+  // The conversation's controls in order, among the bar's other buttons (search, terminal): one overflow menu, then its panel.
+  const named = ['Expand sidebar', 'More actions', 'Agent details', `Actions for ${agentName}`, 'Conversation menu']
+  await expect(buttons.map(button => button.getAttribute('aria-label')).filter(name => name !== null && named.includes(name))).toEqual(['Expand sidebar', 'More actions', 'Agent details'])
   for (const name of ['Resources', 'View KDL', 'Show terminal', 'Show conversation', 'Toggle right panel']) await expect(header.queryByRole('button', { name })).toBeNull()
   const lane = node.getBoundingClientRect()
   await expect(lane.left).toBeGreaterThanOrEqual(0)
@@ -294,7 +297,7 @@ const openDetailsSheet = async (canvasElement: HTMLElement) => {
   await waitFor(() => expect(sheet.contains(document.activeElement)).toBe(true))
   return { canvas, sheet, opener, ...inspector }
 }
-/** The right sheet holds the agent inspector: Details first, Changes one tab away; the conversation actions stay in the header. */
+/** The bottom sheet holds the agent inspector: Details first, then Changes and Resources; the conversation actions stay in the header. */
 export const DrawersOpen: Story = { parameters: { scenario: { _tag: 'contract-fixture', reason: 'Deterministic workspace feeds pin Details-first inspector routing and the Changes tab inside the phone sheet.' } }, play: async ({ canvasElement }) => {
   const { narrow } = await workspace(canvasElement)
   if (!narrow) return openWideDetails(canvasElement)
@@ -304,10 +307,10 @@ export const DrawersOpen: Story = { parameters: { scenario: { _tag: 'contract-fi
   await expect(within(sheet).getByRole('button', { name: 'Close agent details' })).toBeVisible()
   await expect(within(sheet).queryByRole('button', { name: 'Close agent inspector' })).toBeNull()
   await expect(within(sheet).queryByRole('toolbar', { name: 'Agent actions' })).toBeNull()
-  for (const name of ['Actions for WorkbenchShell', 'Conversation menu', 'Terminal']) await expect(within(sheet).queryByRole('button', { name })).toBeNull()
+  for (const name of ['More actions', 'Terminal']) await expect(within(sheet).queryByRole('button', { name })).toBeNull()
   await expect(canvas.queryByRole('separator', { name: /^Resize / })).toBeNull()
   const tabs = within(views).getAllByRole('tab')
-  await expect(tabs.map(node => node.textContent?.trim())).toEqual(['Changes', 'Details'])
+  await expect(tabs.map(node => node.getAttribute('aria-label') ?? node.textContent?.trim())).toEqual(['Details', expect.stringMatching(/^Changes(, \d+)?$/), expect.stringMatching(/^Resources(, \d+)?$/)])
   for (const node of tabs) {
     const rect = node.getBoundingClientRect()
     await expect(rect.width).toBeGreaterThanOrEqual(44)
@@ -324,11 +327,12 @@ export const DrawersOpen: Story = { parameters: { scenario: { _tag: 'contract-fi
   const headerTop = capturedHeader.getBoundingClientRect().top
   for (const row of rows) await expect(row.getBoundingClientRect().bottom).toBeLessThanOrEqual(headerTop)
   await expect(changes.getBoundingClientRect().width).toBeLessThanOrEqual(sheet.getBoundingClientRect().width)
-  // A reopened sheet mounts a fresh inspector on Details.
+  // A reopened sheet shows the agent panel's last tab: the tab is remembered per kind, as beside a pane.
   await userEvent.click(within(sheet).getByRole('button', { name: 'Close agent details' }))
   await waitFor(() => expect(canvas.queryByRole('dialog', { name: 'Agent details' })).toBeNull())
   const reopened = await openDetailsSheet(canvasElement)
-  await expect(reopened.tab('Details')).toHaveAttribute('aria-selected', 'true')
+  await expect(reopened.tab('Changes')).toHaveAttribute('aria-selected', 'true')
+  await userEvent.click(reopened.tab('Details'))
 } }
 /** Collapse removes the real dock separator mid-drag; its Escape listener must leave with it. */
 export const SidebarDragUnmountCleanup: Story = {
@@ -382,7 +386,7 @@ export const SidebarDragUnmountCleanup: Story = {
       await expect(held).toBe(false)
       await expect(removedKeys).toEqual(dragKeys)
       await expect(activeKeys.size).toBe(0)
-      await user.click(canvas.getByRole('button', { name: 'Conversation menu' }))
+      await user.click(canvas.getByRole('button', { name: 'More actions' }))
       await expect(await canvas.findByRole('menu')).toBeVisible()
       await user.keyboard('{Escape}')
       await waitFor(() => expect(canvas.queryByRole('menu')).toBeNull())
