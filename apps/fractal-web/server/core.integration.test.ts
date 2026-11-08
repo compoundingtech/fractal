@@ -176,6 +176,10 @@ it.each([
   '/v1/client//pairings/request/complete',
   '//v1/client/pairing/browser-requests',
   '/v1/client/pairing/%2e%2e/pairings/request/complete',
+  '/v1/client/Pairing/browser-requests/request/redeem',
+  '/v1/client/pAiRiNgS/request/complete',
+  '/v1/client/%50airing/browser-requests',
+  '/v1/client/%50aIrInGs/request/complete',
 ])('never forwards raw pairing routes over HTTP or WebSocket (%s)', async path => {
   // Even an otherwise admitted edge request must use the stricter cookie-only publisher wrapper.
   const setup = await fixture()

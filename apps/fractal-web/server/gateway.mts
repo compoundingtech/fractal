@@ -39,7 +39,7 @@ export const clientRoute = (url: string): boolean => {
   const path = browserPath(url)
   if (path === undefined || (path !== '/v1/client' && !path.startsWith('/v1/client/'))) return false
   // Only the publisher's cookie-only wrapper may begin or complete browser/device pairing.
-  return !/^\/v1\/client\/pairings?(?:\/|$)/.test(path)
+  return !/^\/v1\/client\/pairings?(?:\/|$)/i.test(path)
 }
 /** Remove propagation-only query fields without rewriting application query bytes. */
 export const withoutTraceQuery = (url: string | undefined): string | undefined => {

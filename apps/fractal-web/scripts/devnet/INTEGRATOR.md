@@ -124,7 +124,8 @@ The daemon seals the browser grant to `read.projections`, `read.declarations`,
 `read.glasses`, `read.arrangements`, `terminal.read`, and `control.messages`.
 Raw daemon `pairing` and `pairings` routes are never forwarded from HTTP or
 WebSocket browsers; only the publisher wrapper may call them. Encoded routes
-are decoded once and ambiguous paths are refused before routing.
+are decoded once, namespace exclusions are case-insensitive, and ambiguous paths
+are refused before routing.
 Status validates an existing browser credential with the daemon; revoked or
 expired credentials are cleared and must pair again. A send authorization
 refusal rechecks status and restores the pairing prompt without dropping drafts.
