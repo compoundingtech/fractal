@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "none",
-    "detail": "Compatibility test inputs only; the rollback fixture recognizes baselines that already refuse service profiles while retaining authentication and claim-retention assertions. No runtime contract or operator change."
+    "detail": "Compatibility test inputs only; the rollback fixture recognizes baselines that already refuse service profiles and plugin-principal inspection, retaining assistant authentication, owner-read controls and claim-retention assertions. No runtime contract or operator change."
   },
   "downtime": {
     "status": "none",

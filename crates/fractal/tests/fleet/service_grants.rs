@@ -185,7 +185,8 @@ async fn previous_release_refuses_plugin_service_grants_on_same_database_rollbac
     // Older baselines admitted this profile-blind counterexample. v0.3.31's
     // Profile::issuable unconditionally refuses service profiles; no config enables them.
     let (status, body) = auth_response(&node, &grants[6]).await;
-    if status == 403 {
+    let baseline_refuses_service_profiles = status == 403;
+    if baseline_refuses_service_profiles {
         let error: Value = serde_json::from_str(&body).unwrap();
         assert_eq!(error["code"], "forbidden", "{body}");
         assert_eq!(error["message"], "service grant issuance is disabled", "{body}");
@@ -196,11 +197,37 @@ async fn previous_release_refuses_plugin_service_grants_on_same_database_rollbac
     } else {
         assert_eq!(status, 400, "{} grant {}: {body}\n{}", node.name, grants[6].id, node.logs());
     }
-    let inspected: Value = Client::unix_as(node.socket(), PERSON).unwrap()
-        .get(&format!("/v1/client/assistant/grants/{}", grants[0].id)).await.unwrap();
+    let owner = Client::unix_as(node.socket(), PERSON).unwrap();
+    if baseline_refuses_service_profiles {
+        // v0.3.31 also validates the stored principal while projecting an owner read.
+        // A plugin is not an assistant: only the historical projection assertion is skipped.
+        let response = reqwest::Client::builder().unix_socket(node.socket()).build().unwrap()
+            .get(format!("http://localhost/v1/client/assistant/grants/{}", grants[0].id))
+            .header("x-st3-person", PERSON).send().await.unwrap();
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        assert_eq!(status.as_u16(), 403, "{body}");
+        let error: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(error["code"], "forbidden", "{body}");
+        assert_eq!(error["message"], "invalid assistant principal", "{body}");
+        eprintln!(
+            "baseline release already validates assistant principals: skipping only the \
+             historical plugin-grant projection assertions"
+        );
+    } else {
+        let inspected: Value = owner
+            .get(&format!("/v1/client/assistant/grants/{}", grants[0].id)).await.unwrap();
+        assert_eq!(inspected["kind"], "assistant-grant", "{inspected}");
+        assert_eq!(inspected["principal"], "assistant/chatgpt", "{inspected}");
+        assert_eq!(inspected["scopes"], json!(["read.service.status"]), "{inspected}");
+    }
+    // Keep a positive owner-read control with the assistant principal and profile
+    // accepted by both binaries; refusal above must not conceal a broken inspection route.
+    let inspected: Value = owner
+        .get(&format!("/v1/client/assistant/grants/{}", grants[3].id)).await.unwrap();
     assert_eq!(inspected["kind"], "assistant-grant", "{inspected}");
     assert_eq!(inspected["principal"], "assistant/chatgpt", "{inspected}");
-    assert_eq!(inspected["scopes"], json!(["read.service.status"]), "{inspected}");
+    assert_eq!(inspected["scopes"], json!(["read.assistant.summary"]), "{inspected}");
     assert_retained(&node, &grants).await;
     node.stop();
     node.binary = PathBuf::from(st3());
