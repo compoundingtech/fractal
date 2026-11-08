@@ -1,4 +1,4 @@
-import { HTML_POLICY } from './markdown-html-policy'
+import { HTML_POLICY, tagEnd } from './markdown-html-policy'
 /**
  * Source-level helpers for the kit's Markdown: where a document may be cut into independently parsed blocks, and the
  * remark steps every surface shares. Nothing here imports a parser, so a later parser swap keeps the block contract.
@@ -11,6 +11,18 @@ const DEFINITION = /^[ \t>]*(?:(?:[-*+]|\d{1,9}[.)])[ \t]+)*\[[^\]\n]+\]:/m
 const RAW_HTML_OPEN = /^ {0,3}<(script|style|pre|textarea)(?=[\s>]|$)/i
 const RAW_DECLARATION = /^ {0,3}<(?:\?|![A-Za-z]|!\[CDATA\[)/
 const CONTINUATION = /^(?: {2,}|\t)/
+/** The tags on a line with their quoted attribute values emptied, found by the policy's own bounded tag scan. */
+function tagHeads(line: string): string {
+  let heads = ''
+  for (let at = line.indexOf('<'); at !== -1; at = line.indexOf('<', at + 1)) {
+    const closed = tagEnd(line, at)
+    // A tag whose `>` is on a later line (`<details\n>`) still opens here.
+    const end = closed !== -1 ? closed : (line.indexOf('<', at + 1) + 1 || line.length + 1) - 2
+    heads += line.slice(at, end + 1).replace(/"[^"]*"|'[^']*'/g, '""') + ' '
+    at = end
+  }
+  return heads
+}
 const CONTAINERS = 'blockquote|dd|details|div|dl|dt|h[1-6]|li|ol|p|pre|summary|table|tbody|td|tfoot|th|thead|tr|ul'
 /** HTML that holds blank lines inside it: containers, and the elements the policy drops with their content. */
 const HOLDING = new RegExp(`<(/?)(${CONTAINERS}|${HTML_POLICY.dropWithContent.join('|')})(?=[\\s>/]|$)`, 'gi')
@@ -74,7 +86,7 @@ export function splitMarkdownBlocks(text: string): readonly string[] {
     // An HTML container left open (a disclosure, a quote, a table) holds the blank lines inside it.
     // Per name, so a stray close of one element cannot end another; quoted attribute values are not tags.
     // Comments and quoted attribute values hold no tags.
-    for (const [, slash, tag] of line.replace(/<!--[\s\S]*?-->/g, '').replace(/<[^<>]*>/g, inner => inner.replace(/"[^"]*"|'[^']*'/g, '""')).matchAll(HOLDING)) {
+    for (const [, slash, tag] of tagHeads(line.replace(/<!--[\s\S]*?-->/g, '')).matchAll(HOLDING)) {
       const name = tag!.toLowerCase()
       const open = holding.get(name) ?? 0
       if (slash === '') { holding.set(name, open + 1); held += 1 } else if (open > 0) { holding.set(name, open - 1); held -= 1 }
@@ -102,9 +114,11 @@ export function remarkHardBreaks() {
  * Inline Markdown as the words it renders to, for one-line labels that cannot carry formatting (rows, titles, accessible
  * names) and must not load the parser. Code keeps its text, emphasis and link markers go, an image keeps its alt text.
  */
+const PLAIN_TEXT_MAX = 2048
 export function markdownPlainText(markdown: string): string {
   const code: string[] = []
-  return markdown
+  // A label is one line: past this length nothing more shows, and the patterns below stay cheap.
+  return markdown.slice(0, PLAIN_TEXT_MAX)
     .replace(/\s*\n\s*/g, ' ')
     .replace(/^\s{0,3}(?:#{1,6}\s+|>\s*|[-*+]\s+(?:\[[ xX]\]\s+)?|\d{1,9}[.)]\s+)/, '')
     .replace(/(`+)([^`]|[^`][\s\S]*?[^`])\1(?!`)/g, (_, _fence: string, text: string) => `\u0000${code.push(text.trim()) - 1}\u0001`)
