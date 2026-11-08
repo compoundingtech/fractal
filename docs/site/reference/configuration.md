@@ -112,6 +112,41 @@ the PATH of the terminal running `fractal apply`, nor just launchd's or systemd'
 service environment. Agent `env` entries overlay that environment. Fractal also
 prepends its own executable directory so its wrapper can be found.
 
+Daemon-managed `omp`, `claude`, and `codex` launches read the absolute path in
+`AGENT_RUNTIME_PROFILE`, or
+`$HOME/.local/state/nix/profiles/coding-agent-runtime/share/coding-agents/profile.json`
+when that variable is unset. Each launch reads the current profile through its
+stable link and executes `<personas.launch.<persona>.harnessBin>/<harness>`
+directly. The Agent Spec's `persona` selects the persona; `AGENT_PERSONA` is next,
+and `generalist` is the last fallback. A declared persona that disagrees with
+`AGENT_PERSONA` refuses launch. The selected `harnessBin` is prepended to the
+provider child's PATH, so provider subprocesses also resolve managed wrappers;
+the driver's own PATH is unchanged. The profile publisher selects the directory;
+Fractal does not duplicate persona-to-path rules. A missing persona entry,
+`harnessBin`, or executable wrapper refuses launch, naming the missing key/path.
+There is no fallback to a raw provider or to a different persona.
+Only a confirmed missing Agent Spec permits the environment/default persona
+fallback; authorization, transport, malformed-response, and server errors refuse
+managed launch. Prelaunch contract capture measures the selected wrapper, not a
+raw executable from login PATH. Driver re-exec uses the managed wrapper for helper
+commands while adopting, without restarting the running provider.
+
+Wrapper selection follows the authoritative seat declaration, not a launch flag
+or an environment-based guess. Flagless invocations and legacy driver re-exec
+are managed too. A native exemption requires a validated `bind-terminal`
+declaration for a person-owned terminal, an authenticated session belonging to
+that person, and the seat's current incarnation matching the binding exactly.
+Missing or mismatched proof refuses the exemption.
+
+For a positively verified person-terminal binding,
+`fractal driver claude --subject agent/example -- /native/claude`
+retains its native executable and PATH. Merely naming an agent subject from a
+person shell does not establish a native exemption.
+
+Before upgrading a host to this launch contract, publish and activate a runtime
+profile containing `personas.launch.<persona>.harnessBin` for its managed seats.
+Existing provider processes are not changed by the upgrade.
+
 To change lookup for one agent, set its `PATH` (the literal `${PATH}` expands to
 the captured shell PATH):
 
@@ -119,22 +154,23 @@ the captured shell PATH):
 env { PATH "/opt/codex/bin:${PATH}"; }
 ```
 
-To bypass PATH lookup and version-manager shims entirely for the native program,
-set `executable` inside the harness:
+For `pi` and `opencode`, bypass PATH lookup and version-manager shims by setting
+`executable` inside the harness. For example:
 
 ```kdl
-harness "codex" {
-  executable "/opt/codex/bin/codex"
+harness "pi" {
+  executable "/opt/pi/bin/pi"
   effort "high"
 }
 ```
 
 `executable` is one executable name or path, not a shell command. Spaces in a
-path are preserved; put arguments in `args`, not in this string. An absolute
-path is recommended for a pinned installation. A plain name uses the seat's
-PATH. Fractal does not interpret `CODEX_BIN` or `CLAUDE_BIN` as executable
-overrides, and there is no separate per-harness executable setting in local
-daemon configuration. A native harness may still read its own configuration
+path are preserved; put arguments in `args`, not in this string. For managed
+`omp`, `claude`, and `codex`, Fractal replaces even an explicit raw executable
+with the profile's managed wrapper, preserving the remaining provider arguments.
+For other harnesses, an absolute path selects a pinned installation and a plain
+name uses the seat's PATH. Fractal does not interpret `CODEX_BIN` or `CLAUDE_BIN`
+as executable overrides. A native harness may still read its own configuration
 and environment variables after it starts.
 
 ## Preview and gate checks
