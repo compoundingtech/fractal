@@ -12842,6 +12842,15 @@ async fn writer_binding_native_sessions_and_internal_routes_retain_their_authori
         let result = super::write_principal::bind_request(&state, request).await;
         assert_eq!(result.is_ok(), actor == "agent/native", "{actor}");
     }
+    let app = router(state.clone()).layer(axum::Extension(peer.clone()));
+    let before = state.store.index().unwrap();
+    let (status, response) = writer_binding_request(
+        app, "/v1/agents/restart", None, None,
+        json!({"subject":"agent/native","actor":"agent/other","idempotency_key":"native-restart"}),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert_eq!(response["code"], "foreign-agent-actor");
+    assert_eq!(state.store.index().unwrap(), before);
     for path in ["/v1/internal/replication/receive", "/v1/repair/apply"] {
         for native in [false, true] {
             let mut request = Request::builder().method("POST").uri(path)
