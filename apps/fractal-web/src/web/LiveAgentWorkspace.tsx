@@ -17,7 +17,10 @@ import { OpenProvider, openCommand, type Open } from '../workspace/openable.ts'
 import { paneKey, parsePane, subjectAgent, subjectOfRef, subjectRef } from '../workspace/subject.ts'
 import { AlertsTabCodeBoundary } from '../workspace/surfaces.tsx'
 import { prefetchConversationPane, prefetchTerminalDetail } from '../workspace/chunks.ts'
-import { tabPresentation } from '../workspace/tabPresentation.tsx'
+import { rememberedTitle, tabPresentation } from '../workspace/tabPresentation.tsx'
+import { describe, workspaceKinds } from '../workspace/kinds.ts'
+import { isCoreKind } from '../workspace/registry.ts'
+import { LiveResourceCard, LiveViewCard } from './ViewCards.tsx'
 import { useMarkRead, useUnreadMarks } from './readPosition.ts'
 import { useWorkspaceResources, useWorkspaceRoute, useWorkspaceState, useWorkspaceStore, type WorkspaceNavigation } from '../workspace/useWorkspace.ts'
 import { useWorkspaceKeys } from '../workspace/useWorkspaceKeys.ts'
@@ -578,17 +581,6 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     return next
   }, [agents, subjects, asking])
   const offline = connection._tag !== 'Live'
-  // Agents resolve to the sidebar row's card; other kinds fall through to an outer source, if any.
-  // One entry per entity kind, so a kind the kit adds without a card here does not compile. `undefined`
-  // defers to an outer source: resources and folders belong to plugins and the sidebar.
-  const cards = React.useMemo((): { readonly [K in EntityKind]: (id: string) => React.ReactNode | undefined } => ({
-    agent: id => <LiveAgentCard agentRef={id} needsMe={needsYou.has(id)} now={frozenAt} />,
-    mission: id => <LiveMissionCard missionRef={id} now={frozenAt} />,
-    alert: id => <LiveAlertCard alertId={id} />,
-    resource: () => undefined,
-    folder: () => undefined,
-  }), [needsYou, frozenAt])
-  const resolveCard = React.useCallback<EntityCardResolver>(entity => cards[entity.kind](entity.id), [cards])
   // Filtering uses observed status, not wall time; ticking cannot change membership.
   const visibleSidebarTree = React.useMemo(() => liveSidebarTree({ tree: sidebarFolders.orderingTree, agents, needsYou, asking, filters: deferredFilters, stale }), [sidebarFolders.orderingTree, agents, needsYou, asking, deferredFilters, stale])
   const showRows = React.useMemo(() => liveShowRows({ agents, needsYou, asking, filters: deferredFilters, stale }), [agents, needsYou, asking, deferredFilters, stale])
@@ -612,7 +604,28 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const unread = useUnreadMarks(agents)
   const missionsKnown = useMissions()._tag === 'Observed'
   const presentationWorld = React.useMemo((): PresentationWorld => ({ agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef, missionsKnown }), [agents, fleet._tag, needsYou, attention, byRef, missionsKnown])
-  const tabItems = React.useMemo(() => allTabs.map(tab => ({ ...tabPresentation({ tab, world: presentationWorld, unread }), ...(space.local.views[tab.id]?.dirty === true ? { dirty: true } : {}) })), [allTabs, space.local.views, presentationWorld, unread])
+  const tabItems = React.useMemo(() => allTabs.map(tab => {
+    const view = space.local.views[tab.id]
+    return { ...tabPresentation({ tab, world: presentationWorld, seen: view?.seenTitle, unread }), ...(view?.dirty === true ? { dirty: true } : {}) }
+  }), [allTabs, space.local.views, presentationWorld, unread])
+  // Each tab remembers the last name it was observed under, in this client's view state, for when it reloads or goes.
+  React.useEffect(() => {
+    for (const tab of allTabs) {
+      const seen = rememberedTitle(describe(parsePane(tab.ref), presentationWorld))
+      if (seen !== undefined && space.local.views[tab.id]?.seenTitle !== seen) store.dispatch({ _tag: 'SetView', tab: tab.id, view: { seenTitle: seen } })
+    }
+  }, [allTabs, presentationWorld, space.local.views, store])
+  // One card per entity kind, so a kind the kit adds without one here does not compile. A resource a plugin's
+  // kind claims defers to that plugin's outer source; folders belong to the sidebar's.
+  const cards = React.useMemo((): { readonly [K in EntityKind]: (id: string) => React.ReactNode | undefined } => ({
+    agent: id => <LiveAgentCard agentRef={id} needsMe={needsYou.has(id)} now={frozenAt} />,
+    mission: id => <LiveMissionCard missionRef={id} now={frozenAt} />,
+    alert: id => <LiveAlertCard alertId={id} />,
+    view: id => <LiveViewCard id={id} />,
+    resource: id => isCoreKind(workspaceKinds.kindOf(subjectOfRef(id)).id) ? <LiveResourceCard id={id} world={presentationWorld} /> : undefined,
+    folder: () => undefined,
+  }), [needsYou, frozenAt, presentationWorld])
+  const resolveCard = React.useCallback<EntityCardResolver>(entity => cards[entity.kind](entity.id), [cards])
   // The breadcrumb and the document title name the shown tab as its tab does.
   const activeLabel = tabItems.find(item => item.id === activeRow?.id)?.title
   useTabMetadata({

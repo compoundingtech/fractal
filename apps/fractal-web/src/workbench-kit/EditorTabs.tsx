@@ -44,6 +44,8 @@ export interface EditorTabItem {
   readonly kind?: string
   /** Unsaved local state (e.g. a composer draft); replaces the close glyph with a dot. */
   readonly dirty?: boolean
+  /** Its name is still loading for the first time: the title shimmers. */
+  readonly loading?: boolean
   /** `live`: following a working subject; `unavailable`: stale or absent (dimmed). */
   readonly status?: 'live' | 'unavailable'
   /** Needs the user: spoken in the tab's name; the host draws the mark itself, in `icon`. */
@@ -282,6 +284,17 @@ const styles = stylex.create({
   titleBox: { display: 'inline-grid', minWidth: 0 },
   titleCell: { gridArea: '1 / 1', minWidth: 0 },
   titleReserve: { gridArea: '1 / 1', minWidth: 0, fontWeight: 500, visibility: 'hidden', pointerEvents: 'none' },
+  // A first load's kind word, swept by a highlight; still under reduced motion.
+  loading: {
+    color: 'transparent',
+    backgroundImage: `linear-gradient(90deg, ${tokens['--ds-gray-800']} 0%, ${tokens['--ds-gray-1000']} 50%, ${tokens['--ds-gray-800']} 100%)`,
+    backgroundSize: '200% 100%',
+    backgroundClip: 'text',
+    WebkitBackgroundClip: 'text',
+    animationName: stylex.keyframes({ '0%': { backgroundPosition: '100% 0' }, '100%': { backgroundPosition: '-100% 0' } }),
+    animationDuration: { default: '1.2s', '@media (prefers-reduced-motion: reduce)': '0s' },
+    animationIterationCount: 'infinite',
+  },
   // Colour, not opacity: a 55% tab title fails WCAG contrast (axe color-contrast).
   unavailable: { color: tokens['--ds-gray-800'], fontStyle: 'italic' },
   detail: {
@@ -795,13 +808,13 @@ const TabItem = ({
           {tab.icon === undefined ? null : <span {...stylex.props(styles.icon)}>{tab.icon}</span>}
           {vertical ? (
             <span {...stylex.props(styles.verticalText)}>
-              <span {...stylex.props(styles.title)}>{tab.title}</span>
+              <span data-tab-loading={tab.loading === true ? '' : undefined} {...stylex.props(styles.title, tab.loading === true && styles.loading)}>{tab.title}</span>
               {detail}
             </span>
           ) : (
             <>
               <span {...stylex.props(styles.titleBox)}>
-                <span {...stylex.props(styles.title, styles.titleCell)}>{tab.title}</span>
+                <span data-tab-loading={tab.loading === true ? '' : undefined} {...stylex.props(styles.title, styles.titleCell, tab.loading === true && styles.loading)}>{tab.title}</span>
                 <span aria-hidden="true" {...stylex.props(styles.title, styles.titleReserve)}>{tab.title}</span>
               </span>
               {detail}

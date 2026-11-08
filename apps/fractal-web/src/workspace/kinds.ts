@@ -2,6 +2,7 @@ import * as React from 'react'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { makeKindRegistry, type KindPolicy } from './registry.ts'
+import type { KindDescriptor, PresentationWorld } from './presentation.ts'
 import type { Subject, SubjectKind } from './subject.ts'
 import { githubContributions, GithubTab } from '../plugins/github/index.ts'
 import { AgentSurface, AlertSurface, DeclarationSurface, DocumentSurface, InboxSurface, MissionsSurface, ResourceSurface, UnsupportedSurface, UsageSurface } from './surfaces.tsx'
@@ -67,3 +68,6 @@ const githubSurface: KindSurface = {
 export const workspaceKinds = makeKindRegistry<KindSurface>({ views, contributions: githubContributions(() => githubSurface) })
 
 export const policyOf = (subject: Subject): KindPolicy => workspaceKinds.kindOf(subject).policy
+
+/** The one descriptor of a subject, through its kind. Every surface that names a subject asks here. */
+export const describe = (subject: Subject, world: PresentationWorld): KindDescriptor => workspaceKinds.kindOf(subject).present(subject, world)
