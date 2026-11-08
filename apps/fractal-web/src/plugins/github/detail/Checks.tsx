@@ -39,7 +39,7 @@ export function CheckList({ label, runs, now }: { readonly label: string; readon
       </div>
       <div {...stylex.props(d.rowSide)}>
         {seconds === undefined ? null : <span data-duration>{formatDurationShort(seconds)}</span>}
-        <ExternalLink href={run.url} label={`Logs for ${run.name} on GitHub`}>Logs on GitHub</ExternalLink>
+        <ExternalLink href={run.url} label={`Logs on GitHub for ${run.name}`}>Logs on GitHub</ExternalLink>
       </div>
       {run.summary == null || run.summary === '' ? null : <p {...stylex.props(d.rowSummary)}>{run.summary}</p>}
     </li>

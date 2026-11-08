@@ -207,7 +207,8 @@ describe('AlertsList context', () => {
     expect(line.querySelector('[data-mark="needs-you"]')).toBeNull()
     expect(line.querySelector('[data-alert-mission]')!.textContent).toBe('Rename fetchUser to loadUser')
     expect(line.querySelector('[data-alert-step]')!.textContent).toBe('review-rename')
-    expect(rowButton(asked).getAttribute('aria-label')).toContain('from Atlas Reviewer, mission Rename fetchUser to loadUser, step review-rename')
+    expect(rowButton(asked).getAttribute('aria-label')).toContain('Atlas Reviewer, Rename fetchUser to loadUser, review-rename')
+    expect(document.getElementById(rowButton(asked).getAttribute('aria-describedby')!)?.textContent).toBe('from Atlas Reviewer, mission Rename fetchUser to loadUser, step review-rename')
   })
   it('falls back to the served label, and never shows a hashed mission id', async () => {
     await render()

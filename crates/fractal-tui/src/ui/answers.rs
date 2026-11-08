@@ -85,7 +85,7 @@ mod tests {
             structured: Some(Box::new(fractal_client::StructuredRequest {
                 version: 1, entry_type: "choice".into(), question: "Choose".into(),
                 why_person: String::new(), summary: None, reasons: Vec::new(),
-                recommendation: None, subjects: Vec::new(), custom: true,
+                recommendation: None, subjects: Vec::new(), custom: true, words: None,
                 attachments: Vec::new(),
                 answers: vec![fractal_client::RequestAnswerOption {
                     id: "yes".into(), label: "Yes".into(), ..Default::default()

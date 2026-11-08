@@ -710,7 +710,7 @@ pub(crate) fn render_structured_request(request: &Value, style: OutputStyle) -> 
             }
         }
         if request["custom"] == true {
-            let _ = writeln!(output, "  Or answer in your own words with --text.");
+            let _ = writeln!(output, "  Or answer in your own words with --words.");
         }
     }
     let reasons = list(&request["reasons"]);
@@ -1010,9 +1010,12 @@ pub(crate) fn render_step_run(
                     .unwrap_or(response.status.as_str())
             };
             let id = answer
-                .and_then(|answer| answer["id"].as_str())
-                .map(|id| format!(" {id}"))
-                .unwrap_or_default();
+                .map(fractal_daemon::person_request::read_answer)
+                .and_then(|answer| answer["choices"].as_array().cloned())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|choice| choice["id"].as_str().map(|id| format!(" {id}")))
+                .collect::<String>();
             let _ = writeln!(
                 output,
                 "  • {outcome}{id}: {}  ({}, {})",

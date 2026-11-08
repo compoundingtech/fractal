@@ -56,10 +56,12 @@ function hasQuestions(call: PromptCall): boolean {
  * shown; `answer` only when that call's questions can be chosen from; every other answer always.
  */
 export function offeredPromptAnswers(answers: readonly string[], calls: readonly PromptCall[]): string[] {
-  const certain = calls.length === 1 && promptCallLines(calls[0].input).length > 0;
+  const [only, other] = calls;
+  const sole = other === undefined ? only : undefined;
+  const certain = sole !== undefined && promptCallLines(sole.input).length > 0;
   return answers.filter(answer => {
     if (answer === 'allow' || answer === 'approve') return certain;
-    if (answer === 'answer') return calls.length === 1 && hasQuestions(calls[0]);
+    if (answer === 'answer') return sole !== undefined && hasQuestions(sole);
     return true;
   });
 }
@@ -150,7 +152,8 @@ export type PromptForm = { kind: PromptKind; question: string; options: PromptFo
  */
 export function promptForm(harness: PromptHarness, answers: readonly string[], prompt: string, calls: readonly PromptCall[]): PromptForm {
   const kind = promptKind(answers);
-  const call = calls.length === 1 ? calls[0] : null;
+  const [only, other] = calls;
+  const call = only !== undefined && other === undefined ? only : null;
   const offered = offeredPromptAnswers(answers, calls);
   const ordered = [...offered.filter(answer => answer !== 'deny'), ...offered.filter(answer => answer === 'deny')];
   const options = ordered.map(answer => ({ answer, label: promptAnswerLabel(harness, kind, call?.tool ?? null, answer), enter: promptAnswerTakesEnter(answer), refuses: promptAnswerRefuses(answer) }));

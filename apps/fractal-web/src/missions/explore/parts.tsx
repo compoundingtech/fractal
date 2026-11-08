@@ -1,10 +1,11 @@
 // EXPLORATION ONLY: the parts the detail variants are built from. Plain SVG and inline styles over the kit's tokens, no
 // new dependency. Colour marks only what needs the person (amber) or failed (red); everything else is neutral ink.
 import * as React from 'react'
+import { VisuallyHidden } from 'react-aria-components'
 
 import { borderVars as border, statusVars as tone, surfaceVars as surface, textVars as ink } from '../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { MissionRing } from '../../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarMissionLine.tsx'
-import { layered } from './layout.ts'
+import { layered } from '../detail/layout.ts'
 import { clock, criticalPath, progressOf, runningMs, span, stepEnd, stepStart, type ExploreMission, type PlanStep, type StepState } from './model.ts'
 
 export const C = { fg: ink.fg, soft: ink.fgSoft, muted: ink.fgMuted, line: border.border, strong: border.borderStrong, hover: surface.rowHover, active: surface.rowActive, canvas: surface.canvas, you: tone.attention, bad: tone.dangerFg }
@@ -202,6 +203,8 @@ export const SmallButton = ({ label, onPress, children, pressed }: { readonly la
 // Trace: wall-clock Gantt. Bars per attempt; waits hatched (amber on you); failures marked with their reason.
 
 const ZOOMS = [{ id: 'all', label: 'All', ms: 0 }, { id: '12h', label: '12h', ms: 12 * 3_600_000 }, { id: '2h', label: '2h', ms: 2 * 3_600_000 }] as const
+/** Narrowest time track; below it the trace scrolls horizontally instead of collapsing beside the step labels. */
+export const MIN_TRACK_WIDTH = 240
 
 export const Trace = ({ mission, selected, onSelect, rowHeight = 26, labelWidth = 200, groupByAgent = false, projected = true }: {
   readonly mission: ExploreMission
@@ -241,7 +244,7 @@ export const Trace = ({ mission, selected, onSelect, rowHeight = 26, labelWidth 
   React.useEffect(() => {
     const element = scrollRef.current
     if (element === null) return
-    const observer = new ResizeObserver(() => setWidth(element.clientWidth - labelWidth))
+    const observer = new ResizeObserver(() => setWidth(Math.max(MIN_TRACK_WIDTH, element.clientWidth - labelWidth)))
     observer.observe(element)
     return () => observer.disconnect()
   }, [labelWidth])
@@ -269,8 +272,8 @@ export const Trace = ({ mission, selected, onSelect, rowHeight = 26, labelWidth 
     <div ref={scrollRef} style={{ overflowX: 'auto', position: 'relative' }}>
       <div role="grid" aria-label={`${mission.title} trace`} style={{ position: 'relative', width: labelWidth + total, fontSize: 12 }}>
         <div role="row" style={{ display: 'flex', height: 20, position: 'sticky', top: 0, borderBottom: `1px solid ${C.line}` }}>
-          <div style={{ width: labelWidth, flexShrink: 0, position: 'sticky', left: 0, background: C.canvas, zIndex: 2 }} />
-          <div style={{ position: 'relative', flex: 1 }}>{ticks.map(t => <span key={t} style={{ position: 'absolute', left: x(t) + 3, top: 3, fontSize: 10, color: C.muted, whiteSpace: 'nowrap' }}>{clock(t)}</span>)}</div>
+          <div role="columnheader" style={{ width: labelWidth, flexShrink: 0, position: 'sticky', left: 0, background: C.canvas, zIndex: 2 }}><VisuallyHidden>Step</VisuallyHidden></div>
+          <div role="columnheader" style={{ position: 'relative', flex: 1 }}><VisuallyHidden>Time</VisuallyHidden>{ticks.map(t => <span key={t} aria-hidden="true" style={{ position: 'absolute', left: x(t) + 3, top: 3, fontSize: 10, color: C.muted, whiteSpace: 'nowrap' }}>{clock(t)}</span>)}</div>
         </div>
         {ordered.map(step => {
           const isSel = selected === step.id
@@ -301,7 +304,7 @@ export const Trace = ({ mission, selected, onSelect, rowHeight = 26, labelWidth 
             </div>
           </React.Fragment>
         })}
-        <span aria-label="now" style={{ position: 'absolute', top: 0, bottom: 0, left: labelWidth + x(mission.now), width: 1.5, background: C.fg, opacity: 0.6, pointerEvents: 'none' }} />
+        <span aria-hidden="true" style={{ position: 'absolute', top: 0, bottom: 0, left: labelWidth + x(mission.now), width: 1.5, background: C.fg, opacity: 0.6, pointerEvents: 'none' }} />
       </div>
     </div>
   </div>

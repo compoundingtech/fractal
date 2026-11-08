@@ -4707,7 +4707,7 @@ fn client_attention_resources_from_items(
                 // updates shows a free-text card, and any response to it reads it.
                 Some(update) if update["type"] == "update" => {
                     resource["action_parameters"]["work.done"]["summary"] = json!("Read");
-                    resource["action_parameters"]["work.done"]["answer"] = json!({"id": "read"});
+                    resource["action_parameters"]["work.done"]["answer"] = json!({"choices": [{"id": "read"}]});
                     resource["update"] = update;
                 }
                 Some(request) => resource["request"] = crate::person_request::client_view(&request),

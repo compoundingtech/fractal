@@ -14,7 +14,7 @@ import { Button, Tooltip } from './assistant-ui/composition/Controls'
 import type { SyncStatus } from './assistant-ui/sync-presentation/sync-status'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
-import { surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t, geometryVars as g } from './assistant-ui/composition-tokens.stylex'
+import { surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t, geometryVars as g, syntaxVars } from './assistant-ui/composition-tokens.stylex'
 import { harnessWeightExamples } from './assistant-ui/composition/HarnessNotice.fixtures'
 import { committedTranscriptHistory } from './story-play'
 
@@ -482,7 +482,7 @@ async function expectNoOutputWithControl(element: HTMLElement) {
 const longCommand = 'pnpm --filter ./packages/rows exec vitest run src/rows.test.ts --reporter=verbose --coverage --coverage.include=src/rows.ts --testNamePattern "selection survives the projection change across visible and hidden rows"'
 const commandRowItems = ([['short', 'pnpm test rows'], ['long', longCommand]] as const).map(([key, command]): ConversationItem => ({ _tag: 'ToolCall', id: `rows/${key}`, callId: `rows/${key}`, name: 'run', input: { command }, status: 'success', result: { content: '✓ selection retained', mediaType: 'text/x-shellscript', isError: false, at: '2026-01-15T12:00:04Z' }, callSeen: true, at: '2026-01-15T12:00:01Z' }))
 const commandRowData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ id: 'rows', items: commandRowItems, work: workLogTurnFromItems(commandRowItems, { kindFor: () => 'run', running: false, failed: false, interrupted: false, durationMs: 4000, startedAt: at, completeHistory: true }) }] }
-/** A long command keeps its row to one line: ellipsis in place, full text in the title. */
+/** A long command keeps its row to one line: ellipsis in place, full text in the hover label. */
 export const LongCommandRow: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={commandRowData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await userEvent.click(await canvas.findByRole('button', { name: /Worked 4s/ }))
@@ -500,8 +500,12 @@ export const LongCommandRow: Story = { tags: ['critical'], render: args => <main
   const assertTokenHeights = async () => {
     for (const height of heights()) await expect(height).toBe(toolRow)
   }
-  const label = rows[1]!.querySelector<HTMLElement>('span[title]')!
-  await expect(label).toHaveAttribute('title', `run ${longCommand}`)
+  const label = rows[1]!.querySelector<HTMLElement>('[data-call-title]')!
+  await userEvent.hover(rows[1]!)
+  const tooltip = await within(document.body).findByRole('tooltip')
+  await expect(tooltip).toHaveTextContent(`run ${longCommand}`)
+  await userEvent.unhover(rows[1]!)
+  await waitFor(() => expect(within(document.body).queryByRole('tooltip')).toBeNull())
   await waitFor(() => expect(label.querySelector('[data-syntax-token]')).not.toBeNull())
   await nextFrame()
   await assertTokenHeights()
@@ -1437,7 +1441,7 @@ export const SemanticItems: Story = { tags: ['critical'], render: args => <main 
   await expect(code).toHaveAttribute('tabindex', '0')
   await expect(code).toHaveAccessibleName('Code, ts')
   await expect(code.scrollWidth).toBeGreaterThan(code.clientWidth)
-  within(code.closest<HTMLElement>('[data-testid="markdown-code-block"]')!).getByRole('button', { name: 'Copy code' }).focus()
+  within(code.closest<HTMLElement>('[data-testid="markdown-code-block"]')!).getByRole('button', { name: 'Code actions' }).focus()
   await userEvent.tab()
   await expect(code).toHaveFocus()
   const focus = getComputedStyle(code)
@@ -1460,16 +1464,29 @@ export const DefaultEmpty: Story = { tags: ['critical'], args: { state: 'empty' 
 } }
 export const SettledAnswerMetaLight: Story = { ...SettledAnswerMeta, args: { scheme: 'light' } }
 
-const tokenAnswer = 'Quoted shell and diff tokens stay neutral.\n\n```bash\nprintf \'%s\\n\' "retained rows"\necho \'single quoted\' > "out file.txt"\n```\n\n```diff\n--- a/src/rows.ts\n+++ b/src/rows.ts\n@@ -1,2 +1,2 @@\n-const label = "old row"\n+const label = "new row"\n```'
+const tokenAnswer = 'Quoted shell and diff tokens take the syntax palette.\n\n```bash\nprintf \'%s\\n\' "retained rows"\necho \'single quoted\' > "out file.txt"\n```\n\n```diff\n--- a/src/rows.ts\n+++ b/src/rows.ts\n@@ -1,2 +1,2 @@\n-const label = "old row"\n+const label = "new row"\n```'
 const tokenItems: readonly ConversationItem[] = cases.settled.turns[0]!.items.map(item => item._tag === 'ToolCall' && item.name === 'run' ? { ...item, input: { command: 'printf \'%s\\n\' "retained rows"' }, result: { content: 'printf \'%s\\n\' "retained rows"\n+inserted line', mediaType: 'text/x-diff', isError: false, at } } : item._tag === 'Text' && item.role === 'assistant' ? { ...item, id: 'tokens/answer', text: tokenAnswer } : item)
 const tokenData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turns: [{ ...cases.settled.turns[0]!, id: 'tokens', items: tokenItems, work: workLogTurnFromItems([cases.settled.turns[0]!.prompt!, ...tokenItems], { kindFor: name => name === 'run' ? 'run' : 'read', running: false, failed: false, interrupted: false, durationMs: 24000, startedAt: at, completeHistory: true }) }] }
 const noGreenData: readonly (readonly [string, TranscriptStoryData])[] = [['tokens', tokenData], ['semantic', semanticData], ...(Object.keys(cases) as State[]).map(state => [state, cases[state]] as const)]
 // Green is hue 90-170° with HSL saturation above 25%; any colour function the parser cannot read fails too.
+// Source syntax is the one exception: it takes the chosen Pierre palette (d05f058ffb), whose strings are green. A syntax
+// token may be green only in its own ink when that ink is a syntaxVars value; any other green on it still fails.
 function greenFindings(root: Element): string[] {
   const findings: string[] = []
+  // Resolve the palette inside the story's themed root, so light reads the light values.
+  const themed = root.querySelector('[data-scheme]') ?? root
+  const paletteInks = new Set(Object.values(syntaxVars).filter((value): value is string => typeof value === 'string' && value.startsWith('var(')).map(value => {
+    const probe = document.createElement('span')
+    probe.style.color = value
+    themed.append(probe)
+    const ink = getComputedStyle(probe).color
+    probe.remove()
+    return ink
+  }))
   const properties = ['color', 'background-color', 'border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color', 'outline-color', 'text-decoration-color', 'caret-color', 'fill', 'stroke', 'box-shadow', 'background-image']
   for (const element of [root, ...root.querySelectorAll('*')]) for (const pseudo of [null, '::before', '::after']) {
     const style = getComputedStyle(element, pseudo)
+    const syntaxInk = element.hasAttribute('data-syntax-token') && paletteInks.has(style.color) ? style.color : undefined
     for (const property of properties) {
       const value = style.getPropertyValue(property)
       if (/\b(?:oklch|oklab|lab|lch|hsla?|hwb)\(/.test(value)) { findings.push(`${property} unparsed ${value}`); continue }
@@ -1477,7 +1494,7 @@ function greenFindings(root: Element): string[] {
         const parts = (match[1] ?? match[2]!).split(/[\s,/]+/).filter(Boolean).map(Number)
         const scale = match[1] === undefined ? 1 : 255
         const [red, green, blue] = parts.slice(0, 3).map(part => part / scale) as [number, number, number]
-        if ((parts[3] ?? 1) === 0) continue
+        if ((parts[3] ?? 1) === 0 || match[0] === syntaxInk) continue
         const max = Math.max(red, green, blue), min = Math.min(red, green, blue), lightness = (max + min) / 2
         if (max === min) continue
         const saturation = (max - min) / (1 - Math.abs(2 * lightness - 1))

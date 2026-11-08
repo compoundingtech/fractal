@@ -55,9 +55,9 @@ const Timestamp = Schema.Number.check(Schema.makeFilter(Number.isFinite))
 const freshnessSchemas = [
   Schema.TaggedStruct('Requested', { since: Timestamp }),
   Schema.TaggedStruct('Live', { since: Timestamp }),
-  Schema.TaggedStruct('Reconnecting', { attempt: Count, issue: Schema.String, nextAt: Schema.optional(Timestamp) }),
+  Schema.TaggedStruct('Reconnecting', { attempt: Count, issue: Schema.String, nextAt: Schema.optionalKey(Timestamp) }),
   Schema.TaggedStruct('Stale', { reason: Schema.TaggedStruct('Resync', {
-    code: Schema.optional(Schema.String), message: Schema.optional(Schema.String), attempt: Count,
+    code: Schema.optionalKey(Schema.String), message: Schema.optionalKey(Schema.String), attempt: Count,
   }) }),
   Schema.TaggedStruct('Stale', { reason: Schema.TaggedStruct('Evicted', {}) }),
   Schema.TaggedStruct('Stale', { reason: Schema.TaggedStruct('Unknown', { detail: Schema.String }) }),

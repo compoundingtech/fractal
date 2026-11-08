@@ -12,6 +12,11 @@ export interface NativeDetailsSource {
    * Details holds no demand, and each open or agent switch starts one fresh read.
    */
   readonly usagePeriod: (agentRef: string) => Atom.Atom<Feed<Native.UsagePeriod>>
+  /**
+   * Spend since a mission run's start, for the mission detail to sum by step and by run. Keyed by the start rounded
+   * down to the minute, so every view of one run shares one read; re-read once a minute while mounted.
+   */
+  readonly missionUsage: (sinceMs: number) => Atom.Atom<Feed<Native.UsagePeriod>>
   /** Latest redacted declaration; revision keys the agent observation, not the independent declaration history. */
   readonly rawDeclarations: (query: { readonly agentRef: string; readonly revision: string }) => Atom.Atom<Feed<Native.AgentDeclaration>>
   /** Public-safe categories mapped from the same raw getter, never a second read. */
@@ -33,8 +38,8 @@ export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
   readonly registry: AtomRegistry.AtomRegistry
   readonly now: () => number
 }): NativeDetailsSource => {
-  /** `polled` re-reads every 15 seconds while mounted; otherwise the getter reads once per mount or refresh. */
-  const reader = <T>(read: (client: FractalClient) => Promise<T>, { polled }: { readonly polled: boolean }): Atom.Atom<Feed<T>> => {
+  /** `polled` re-reads every 15 seconds (or `every`) while mounted; otherwise the getter reads once per mount or refresh. */
+  const reader = <T>(read: (client: FractalClient) => Promise<T>, { polled, every = '15 seconds' }: { readonly polled: boolean; readonly every?: '15 seconds' | '1 minute' }): Atom.Atom<Feed<T>> => {
     let retained: T | undefined
     let readAt: number | undefined
     return Atom.make((get): Feed<T> => {
@@ -59,7 +64,7 @@ export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
             ? error : { _tag: 'Observed', value: retained, freshness: 'stale', readAt, error: { reason: error.reason, detail: error.detail } }
         },
       }))
-      const fiber = Effect.runFork((polled ? Stream.fromEffectSchedule(readOnce, Schedule.spaced('15 seconds')) : Stream.fromEffect(readOnce))
+      const fiber = Effect.runFork((polled ? Stream.fromEffectSchedule(readOnce, Schedule.spaced(every)) : Stream.fromEffect(readOnce))
         .pipe(Stream.runForEach(value => Effect.sync(() => get.setSelf(value)))))
       get.addFinalizer(() => Effect.runFork(Fiber.interrupt(fiber)))
       return retained === undefined ? waiting : { _tag: 'Observed', value: retained, freshness: 'stale', readAt }
@@ -71,6 +76,10 @@ export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
     const response = await client.usagePeriod({ since_ms: Math.max(0, until_ms - 604_800_000), until_ms })
     return Native.decodeUnknownSync(Native.UsagePeriod)(response.value)
   }, { polled: false }))
+  const missionUsagePeriod = Atom.family((since_ms: number) => reader(async client => {
+    const response = await client.usagePeriod({ since_ms, until_ms: Math.max(since_ms, now()) })
+    return Native.decodeUnknownSync(Native.UsagePeriod)(response.value)
+  }, { polled: true, every: '1 minute' }))
   const rawDeclarations = Atom.family((key: string) => reader(async client => {
     const [agentRef, revision] = key.split('\n')
     if (agentRef === undefined || revision === undefined) throw new TypeError('Invalid declaration query')
@@ -96,6 +105,7 @@ export const gatewayNativeDetails = ({ options, discovery, registry, now }: {
       (state._tag === 'Observed' && (state.freshness === 'live' || state.error?.reason === 'failed'))
   }
   return { usagePeriod,
+    missionUsage: sinceMs => missionUsagePeriod(Math.max(0, Math.floor(sinceMs / 60_000) * 60_000)),
     rawDeclarations: ({ agentRef, revision }) => rawDeclarations(`${agentRef}\n${revision}`),
     declarations: ({ agentRef, revision }) => declarations(`${agentRef}\n${revision}`),
     retry: atom => {

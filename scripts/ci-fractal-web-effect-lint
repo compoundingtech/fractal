@@ -149,11 +149,18 @@ def enabled(severity):
     return level not in ('off', 0, 'allow')
 
 
+def read_tsconfig(path):
+    """A tsconfig as data. TypeScript reads JSONC, and Genie heads the configs it generates with `//` lines."""
+    text = re.sub(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', lambda match: match[0] if match[0].startswith('"') else '',
+                  path.read_text(), flags=re.S)
+    return json.loads(text)
+
+
 def configured_rules():
     """Rules the tsconfig plugin entries and the oxlint config name explicitly with a non-off severity."""
     effect = set()
     for project in PROJECTS:
-        options = json.loads((ROOT / project).read_text())['compilerOptions']
+        options = read_tsconfig(ROOT / project)['compilerOptions']
         for plugin in options.get('plugins', []):
             for scope in [plugin, *(entry['options'] for entry in plugin.get('overrides', []))]:
                 effect |= {rule for rule, level in scope.get('diagnosticSeverity', {}).items() if enabled(level)}

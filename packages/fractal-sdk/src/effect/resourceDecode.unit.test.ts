@@ -4,7 +4,7 @@ import { Agent, Resource, decodeUnknownSync } from '@fractal/client/schema'
 import { Option, SchemaAST } from 'effect'
 import { describe, expect, it } from 'vitest'
 
-import oldLiteral from './agentSnapshot.oldLiteral.json'
+import oldLiteral from './agentSnapshot.oldLiteral.json' with { type: 'json' }
 import { decodeResourceRow, decodeResourceRows, makeDecodeDiagnostics, normalizeDecodePath, decodedUsageEquivalence, openAgent, type Open } from './resourceDecode.ts'
 import { makeWindowIngest, type ProcessedWindow } from './windowIngest.ts'
 import { frame } from './windowIngest.fixture.ts'

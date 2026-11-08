@@ -140,8 +140,9 @@ const servedPlay = async ({ canvasElement }: { readonly canvasElement: HTMLEleme
   await expect(holder.querySelector('[data-alert-mission]')).toHaveTextContent('Rename fetchUser to loadUser')
   // The mission card names the step waiting on the answer: mission › step.
   await expect(holder.querySelector('[data-alert-step]')?.textContent).toBeTruthy()
-  await expect(rowButton(holder)).toHaveAccessibleName(/, step \S+/)
-  await expect(rowButton(holder)).toHaveAccessibleName(/, from Atlas \w+, mission Rename fetchUser to loadUser/)
+  // The name is the visible words in order (label in name); the description says which is the agent, the mission and the step.
+  await expect(rowButton(holder)).toHaveAccessibleName(/, Atlas \w+, Rename fetchUser to loadUser, \S+/)
+  await expect(rowButton(holder)).toHaveAccessibleDescription(/^from Atlas \w+, mission Rename fetchUser to loadUser, step \S+$/)
   await expect(question.querySelector('[data-alert-mission]')).toBeNull()
   await expect(list.textContent).not.toMatch(/[0-9a-f]{16,}/)
   // Pointer rest on the agent or the mission opens its shared card (desktop; touch layouts show no hover cards).

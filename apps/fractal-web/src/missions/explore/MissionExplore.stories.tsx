@@ -50,7 +50,7 @@ export const DetailC_TraceFirst: Story = { render: () => <Themed><VariantTraceFi
 const RowColumn = ({ title, Row }: { readonly title: string; readonly Row: (props: { readonly mission: typeof longMission }) => React.ReactNode }) =>
   <section aria-label={title} style={{ width: 256, background: 'var(--sidebar, #111)', borderRadius: 8, paddingBlock: 6 }}>
     <h2 style={{ margin: '4px 12px 8px', fontSize: 11, fontWeight: 600, color: C.muted }}>{title}</h2>
-    <div role="grid" aria-label={title}>{listMissions.map(mission => <Row key={mission.id} mission={mission} />)}</div>
+    <div role="list" aria-label={title}>{listMissions.map(mission => <Row key={mission.id} mission={mission} />)}</div>
   </section>
 
 export const Rows_Compare: Story = {
@@ -60,7 +60,7 @@ export const Rows_Compare: Story = {
     <RowColumn title="R3 · mini trace" Row={RowMiniTrace} />
   </div></Themed>,
   play: async ({ canvasElement }) => {
-    for (const row of canvasElement.querySelectorAll<HTMLElement>('[role="row"]')) await expect(row.getBoundingClientRect().height).toBe(48)
+    for (const row of canvasElement.querySelectorAll<HTMLElement>('[role="listitem"]')) await expect(row.getBoundingClientRect().height).toBe(48)
   },
 }
 

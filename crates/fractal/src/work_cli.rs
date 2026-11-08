@@ -213,10 +213,10 @@ pub(super) async fn run_work(
                         idempotency_key: args.idempotency_key.unwrap_or_else(|| {
                             format!("person-response:{}", uuid::Uuid::now_v7().simple())
                         }),
-                        answer: (args.answer.is_some() || args.text.is_some()).then(|| {
+                        answer: (!args.choice.is_empty() || args.words.is_some()).then(|| {
                             fractal_daemon::person_request::AnswerInput {
-                                id: args.answer,
-                                text: args.text,
+                                choices: args.choice,
+                                words: args.words,
                             }
                         }),
                     },

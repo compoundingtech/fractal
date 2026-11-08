@@ -184,7 +184,7 @@ function OptionRow({ option, index, on, any, disabled, touch, first, notes, noti
     {showNote || offerNote ? <div {...stylex.props(styles.annex)}>
       {showNote
         ? <NoteField option={option} value={note} onChange={value => notes!.onChange(option.id, value)} disabled={disabled} touch={touch} fieldRef={noting.id === option.id ? noting.fieldRef : null} />
-        : <Aria.Button aria-label={`Add a note to ${option.label}`} onPress={() => noting.open(option.id)} {...stylex.props(styles.noteButton, touch && styles.noteTouch)}><Icon name="pencil" size={12} />Add note{touch ? null : <kbd aria-hidden="true" {...stylex.props(styles.noteKey)}>n</kbd>}</Aria.Button>}
+        : <Aria.Button aria-label={`Add note${touch ? '' : ' n'} to ${option.label}`} onPress={() => noting.open(option.id)} {...stylex.props(styles.noteButton, touch && styles.noteTouch)}><Icon name="pencil" size={12} />Add note{touch ? null : <>{' '}<kbd {...stylex.props(styles.noteKey)}>n</kbd></>}</Aria.Button>}
     </div> : null}
   </div>
 }

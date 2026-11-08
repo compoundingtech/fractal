@@ -20,7 +20,7 @@ import { sendFences } from './sendFence';
 import { sendRefusal } from './composer';
 import { Feed } from './feed';
 import { watchSync, type SyncRead } from './syncWatch';
-import { quality, localDrafts } from './qualityNative';
+import { quality, localDrafts, readPositions } from './qualityNative';
 import { nativeCollectionSocket } from './modules/fractal-collections';
 import { FabricCarrier, routeLabel, selectRoute, type CarrierChoice, type FabricSnapshot, type Route } from './carrier';
 import { Observations, toObservationReport, type Context } from './observations';
@@ -186,6 +186,8 @@ function useAppStore(proof?: FabricProfile) {
     return () => { current = false; };
   }, [proof, caps?.session_actor]);
   useEffect(() => foreground.current.subscribe(active => { if (!active && !proofRef.current) void localDrafts.save(draftsOwner.current, draftCache.current); }), []);
+  // Read positions belong to this device's pairing: the gateway and the person signed in to it.
+  useEffect(() => { if (!proof) void readPositions.load(url, caps?.session_actor ?? ''); }, [proof, url, caps?.session_actor]);
   // The request of a send Fractal never confirmed, so sending the same message again repeats it instead of making a second.
   // Attention the person acted on from here: Fractal closing it is their doing, not a vanishing.
   const acted = useRef(new Set<string>());

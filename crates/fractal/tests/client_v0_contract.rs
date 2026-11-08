@@ -4545,7 +4545,7 @@ async fn client_structured_decision_carries_named_answers_both_ways() {
         done(
             "structured-answer",
             serde_json::json!({"target_id": subject, "episode": episode, "summary": "Keep both open",
-                "answer": {"id": "keep-open", "text": "Wait for the schema change."}}),
+                "answer": {"choices": [{"id": "keep-open"}], "words": "Wait for the schema change."}}),
         ),
     )
     .await;
@@ -4556,8 +4556,8 @@ async fn client_structured_decision_carries_named_answers_both_ways() {
     assert_eq!(answer["respondent"], "person/avery");
     assert_eq!(
         answer["answer"],
-        serde_json::json!({"type": "decision", "outcome": "decline", "id": "keep-open",
-            "label": "Keep both open", "text": "Wait for the schema change."})
+        serde_json::json!({"type": "decision", "outcome": "decline",
+            "choices": [{"id": "keep-open", "label": "Keep both open"}], "words": "Wait for the schema change."})
     );
 }
 
@@ -4565,12 +4565,14 @@ async fn client_structured_decision_carries_named_answers_both_ways() {
 fn a_dismissed_person_answer_conforms_and_an_unknown_outcome_does_not() {
     let validator = contract_validator("PersonAnswer");
     for answer in [
-        serde_json::json!({"type": "decision", "outcome": "dismissed"}),
-        serde_json::json!({"type": "choice", "outcome": "dismissed", "text": "Not now."}),
+        serde_json::json!({"type": "decision", "outcome": "dismissed", "choices": []}),
+        serde_json::json!({"type": "choice", "outcome": "dismissed", "choices": [], "words": "Not now."}),
     ] {
         assert_conforms(&validator, "a dismissed answer", &answer);
     }
-    assert!(!validator.is_valid(&serde_json::json!({"type": "decision", "outcome": "vanished"})));
+    assert!(!validator.is_valid(&serde_json::json!({"type": "decision", "outcome": "vanished", "choices": []})));
+    // The answer before the one answer schema is no longer a contract shape: readers normalize it.
+    assert!(!validator.is_valid(&serde_json::json!({"type": "choice", "outcome": "dismissed", "text": "Not now."})));
 }
 
 #[tokio::test]

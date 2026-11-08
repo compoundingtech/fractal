@@ -90,7 +90,7 @@ test('updates remain listed until explicit read, while externally closed updates
   assert.equal(openAlerts(retained, actor).length, 0);
   assert.deepEqual(keepClosed([update], [], new Set([update.id]), actor), []);
   assert.deepEqual(keepClosed(retained, [], new Set([update.id]), actor), []);
-  assert.deepEqual(personAnswer(undefined, 'read', 'Read'), { id: 'read' }, 'explicit read preserves the typed work.done answer');
+  assert.deepEqual(personAnswer(undefined, 'read', 'Read'), { choices: [{ id: 'read' }] }, 'explicit read preserves the typed work.done answer');
 });
 
 // There is no React Native renderer harness in this app. Parse TSX only for the wiring and

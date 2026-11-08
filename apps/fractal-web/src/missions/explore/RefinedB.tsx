@@ -91,7 +91,7 @@ const Definition = ({ mission }: { readonly mission: ExploreMission }) => {
   const tint = (line: string) => line.split(/("[^"]*"|\/\/.*$)/).map((part, i) => part.startsWith('//') ? <span key={i} style={{ color: C.muted }}>{part}</span> : part.startsWith('"') ? <span key={i} style={{ color: C.soft }}>{part}</span> : <span key={i}>{part}</span>)
   return <section aria-label="Definition" style={{ padding: 16, display: 'flex', flexDirection: 'column', gap: 10 }}>
     <div style={{ fontSize: 12, color: C.soft }}>Revision {mission.revisions.length} · published {clock(mission.revisions.at(-1)?.at ?? mission.startedAt)}{mission.source ? <> · from <code>{mission.source.repo}/{mission.source.path}</code> @ {mission.source.commit} <span style={{ color: C.muted }}>(TypeScript source view comes later)</span></> : null}</div>
-    <pre aria-label="Mission KDL" style={{ margin: 0, padding: 12, border: `1px solid ${C.line}`, borderRadius: 8, overflow: 'auto', fontSize: 12, lineHeight: '18px', color: C.fg }}>
+    <pre aria-label="Mission KDL" tabIndex={0} style={{ margin: 0, padding: 12, border: `1px solid ${C.line}`, borderRadius: 8, overflow: 'auto', fontSize: 12, lineHeight: '18px', color: C.fg }}>
       {lines.map((line, i) => <div key={i} style={{ display: 'flex' }}><span aria-hidden="true" style={{ width: 28, color: C.muted, flexShrink: 0, textAlign: 'right', marginInlineEnd: 12 }}>{i + 1}</span><span>{tint(line)}</span></div>)}
     </pre>
   </section>

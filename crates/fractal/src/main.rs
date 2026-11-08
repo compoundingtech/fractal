@@ -4298,6 +4298,18 @@ struct WorkUpdateArgs {
     idempotency_key: String,
 }
 
+/// `ID` or `ID=NOTE`: a named answer, split on the first `=` (an answer id never holds one).
+fn parse_choice(value: &str) -> Result<fractal_daemon::person_request::ChoiceInput, String> {
+    let (id, note) = match value.split_once('=') {
+        Some((id, note)) => (id, Some(note.to_owned())),
+        None => (value, None),
+    };
+    if id.is_empty() {
+        return Err("a choice names an answer id: ID or ID=NOTE".into());
+    }
+    Ok(fractal_daemon::person_request::ChoiceInput { id: id.to_owned(), note })
+}
+
 #[derive(Args)]
 struct WorkDoneArgs {
     #[command(flatten)]
@@ -4308,14 +4320,16 @@ struct WorkDoneArgs {
     #[arg(long = "as")]
     actor: String,
     /// The response in words. A structured answer derives it when omitted.
-    #[arg(long, alias = "reason", required_unless_present_any = ["answer", "text"])]
+    #[arg(long, alias = "reason", required_unless_present_any = ["choice", "words"])]
     summary: Option<String>,
-    /// The ID of one of a structured request's named answers.
-    #[arg(long, value_name = "ID")]
-    answer: Option<String>,
-    /// Text for a structured request: feedback, a custom choice, or the changes requested.
+    /// One of a structured request's named answers, with an optional note on it:
+    /// `--choice land` or `--choice land='after the cut'`.
+    #[arg(long, value_name = "ID[=NOTE]", value_parser = parse_choice)]
+    choice: Vec<fractal_daemon::person_request::ChoiceInput>,
+    /// The person's own words for a structured request: feedback, a custom choice, the changes
+    /// requested, or anything said beside the chosen answer.
     #[arg(long)]
-    text: Option<String>,
+    words: Option<String>,
     #[arg(long)]
     evidence: Vec<String>,
     #[arg(long)]
@@ -7388,6 +7402,9 @@ async fn run_up(args: UpArgs) -> Result<()> {
             (
                 "features".into(),
                 serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
+                    // Reads and writes person answers in the one answer schema (`choices`, `words`);
+                    // until every member advertises it, answers also carry the fields older builds read.
+                    "person_answer_schema":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -14947,10 +14964,11 @@ person an image with the request (up to 4), as `fractal conversations send --att
      {"id": "revise", "label": "Request changes", "outcome": "request_changes",
       "consequence": "I make the changes and ask again."}]}
 
-The person answers with `fractal work done STEP --answer ID [--text TEXT]`; requesting changes,
-feedback and a custom choice need text. The resumed step's `person_answers` carries the answer
-as {"type", "outcome", "id", "label", "text"}: read it with `fractal work show STEP --json` and
-act on `id` and `outcome`, not on the words."##;
+The person answers with `fractal work done STEP --choice ID[=NOTE] [--words TEXT]`; requesting
+changes and feedback need words, and a custom choice is words alone. The resumed step's
+`person_answers` carries the answer as {"type", "outcome", "choices": [{"id", "label", "note"}],
+"words"}: read it with `fractal work show STEP --json` and act on `choices[].id` and `outcome`,
+not on the notes or words."##;
 
 fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bool>) -> String {
     use std::fmt::Write as _;
@@ -15021,12 +15039,8 @@ fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bo
             .answer
             .as_ref()
             .map(|answer| {
-                let id = answer
-                    .id
-                    .as_deref()
-                    .map(|id| format!(" {id}"))
-                    .unwrap_or_default();
-                format!("{}{id}", answer.outcome)
+                let ids = answer.choices.iter().map(|choice| format!(" {}", choice.id)).collect::<String>();
+                format!("{}{ids}", answer.outcome)
             })
             .unwrap_or_else(|| response.status.clone());
         let _ = writeln!(

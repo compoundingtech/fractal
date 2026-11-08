@@ -43,12 +43,12 @@ export class SloCounters {
   add(name: SloCounter, n = 1): void {
     if (!Number.isFinite(n) || n < 0) return;
     const i = SLO_COUNTERS.indexOf(name);
-    this.counts[i] = sum(this.counts[i], Math.floor(n));
+    this.counts[i] = sum(this.counts[i] ?? 0, Math.floor(n));
   }
   observe(name: SloHistogram, ms: number): void {
     if (Number.isNaN(ms) || ms < 0) return;
     const i = SLO_HISTOGRAMS.indexOf(name) * 17 + sloBucket(ms);
-    this.buckets[i] = sum(this.buckets[i], 1);
+    this.buckets[i] = sum(this.buckets[i] ?? 0, 1);
   }
   /** Serialization and snapshots happen outside input/presentation accounting. */
   line(window: number, host: string, build: string, drain = false): QualityHour {
@@ -84,7 +84,7 @@ export function isQualityHour(value: unknown): value is QualityHour {
 /** Add simultaneous/partial contributions; the latest contributor names the build, the hour keeps its targets. */
 export function mergeQualityHour(a: QualityHour, b: QualityHour): QualityHour {
   const counters = Object.fromEntries(SLO_COUNTERS.map(name => [name, sum(a.counters[name], b.counters[name])])) as QualityHour['counters'];
-  const histograms = Object.fromEntries(SLO_HISTOGRAMS.map(name => [name, a.histograms[name].map((n, i) => sum(n, b.histograms[name][i]))])) as QualityHour['histograms'];
+  const histograms = Object.fromEntries(SLO_HISTOGRAMS.map(name => [name, a.histograms[name].map((n, i) => sum(n, b.histograms[name][i] ?? 0))])) as QualityHour['histograms'];
   return { ...a, build: b.build, counters, histograms };
 }
 export function retainQualityHours(history: readonly QualityHour[], line: QualityHour): QualityHour[] {
@@ -93,7 +93,8 @@ export function retainQualityHours(history: readonly QualityHour[], line: Qualit
   const rows = history.filter(row => row.window_start >= cutoff);
   if (line.window_start >= cutoff) {
     const i = rows.findIndex(row => row.window_start === line.window_start);
-    if (i === -1) rows.push(line); else rows[i] = mergeQualityHour(rows[i], line);
+    const held = rows[i];
+    if (held === undefined) rows.push(line); else rows[i] = mergeQualityHour(held, line);
   }
   return rows.sort((a, b) => a.window_start - b.window_start).slice(-SLO_HISTORY_HOURS);
 }
@@ -102,7 +103,7 @@ export function qualityPercentile(counts: readonly number[], percentile: number)
   if (!total) return null;
   const rank = Math.max(1, Math.ceil(total * percentile / 100));
   let kept = 0;
-  for (let i = 0; i < 17; i++) { kept = sum(kept, counts[i]); if (kept >= rank) return SLO_BUCKET_UPPER_MS[i] ?? Infinity; }
+  for (let i = 0; i < 17; i++) { kept = sum(kept, counts[i] ?? 0); if (kept >= rank) return SLO_BUCKET_UPPER_MS[i] ?? Infinity; }
   return Infinity;
 }
 export type QualityJudgment = { target: SloTarget; value: number | null; limit: number; pass: boolean | null };

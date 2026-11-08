@@ -30,7 +30,7 @@ export const rosterVariants: VariantTable['roster'] = {
   /** The world's own roster with every machine but the local one unreachable while holding the first mission's work. */
   'sidebar-tabs': (ctx, base) => {
     const work = (ctx.cast.missions[0]?.steps ?? []).map((step) => step.work)
-    return { ...base.roster, loading: false, timeline: [], unknown: base.roster.unknown?.filter(({ pointer }) => pointer.startsWith('/state/')),
+    return { ...base.roster, loading: false, timeline: [], ...(base.roster.unknown === undefined ? {} : { unknown: base.roster.unknown.filter(({ pointer }) => pointer.startsWith('/state/')) }),
       state: { ...base.roster.state, machines: base.roster.state.machines.map((value): RosterState['machines'][number] => value.host_id === ctx.cast.hosts[0]?.id ? value
         : { ...value, state: 'unreachable', work, transports: value.transports.map((transport): typeof transport => ({ ...transport, status: 'down' })) }) } }
   },

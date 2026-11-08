@@ -30,13 +30,15 @@ assert.equal(spaced('The release run on the Linux runner failed: mold is missing
 {
   const { personAnswer } = await import('@fractal/views/requestView');
   const options = [{ id: 'works' }, { id: 'broken' }];
-  assert.deepEqual(personAnswer({ type: 'choice', custom: true, answers: options }, undefined, ' it works '), { text: 'it works' });
-  assert.deepEqual(personAnswer({ type: 'choice', custom: true, answers: options }, 'works', 'Works'), { id: 'works' });
-  assert.deepEqual(personAnswer({ type: 'feedback' }, undefined, 'notes'), { text: 'notes' });
+  // The one answer schema: chosen answers, each with an optional note, and the words beside them.
+  assert.deepEqual(personAnswer({ type: 'choice', custom: true, answers: options }, undefined, ' it works '), { choices: [], words: 'it works' });
+  assert.deepEqual(personAnswer({ type: 'choice', custom: true, answers: options }, 'works', 'Works'), { choices: [{ id: 'works' }] });
+  assert.deepEqual(personAnswer({ type: 'choice', custom: true, answers: options }, 'works', 'Works', ' only on prod '), { choices: [{ id: 'works', note: 'only on prod' }] });
+  assert.deepEqual(personAnswer({ type: 'feedback' }, undefined, 'notes'), { choices: [], words: 'notes' });
   assert.equal(personAnswer(undefined, undefined, 'notes'), undefined);
   const decision = { type: 'decision', answers: [{ id: 'land', outcome: 'accept' }, { id: 'hold', outcome: 'decline' }, { id: 'change', outcome: 'request_changes' }] };
-  assert.deepEqual(personAnswer(decision, 'change', 'rename it'), { id: 'change', text: 'rename it' });
-  assert.deepEqual(personAnswer(decision, undefined, 'rename it'), { id: 'change', text: 'rename it' });
+  assert.deepEqual(personAnswer(decision, 'change', 'rename it'), { choices: [{ id: 'change' }], words: 'rename it' });
+  assert.deepEqual(personAnswer(decision, undefined, 'rename it'), { choices: [{ id: 'change' }], words: 'rename it' });
   assert.equal(typeof personAnswer({ type: 'choice', answers: options }, undefined, 'words'), 'string');
 }
 

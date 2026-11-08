@@ -141,7 +141,7 @@ class Evaluation(rig.Run):
     decision=persona.answer(card,run)
     if decision:
      argv=["work","done",card["source_id"],"--as","person/ada"]
-     argv += ["--answer",decision["answer"]] if "answer" in decision else ["--text",decision["text"]]
+     argv += ["--choice",decision["answer"]] if "answer" in decision else ["--words",decision["text"]]
      r=self.cli("Ada answers current "+decision["step"],*argv)
      if r["exit"]: raise RuntimeError("person Home answer failed")
      persona.answered(card,decision); self.actions.append({"type":"person-answer","attention":card["id"],"source":card["source_id"],**decision}); self.save()

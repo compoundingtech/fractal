@@ -15,7 +15,7 @@ export function FilesPanel({ files, filesUrl, landmark }: { readonly files: Gith
       {view.partial ? <p {...stylex.props(d.summaryLine)}>Showing {files.files.length} of {view.total} files. <ExternalLink href={filesUrl}>View all files on GitHub</ExternalLink></p> : null}
       {view.withoutPatch.length === 0 ? null : <ul aria-label="Files without a diff" {...stylex.props(d.rows)}>{view.withoutPatch.map(file => <li key={file.path} {...stylex.props(d.row)}>
         <div {...stylex.props(d.rowMain)}><span {...stylex.props(d.mono)}>{file.path}</span><span {...stylex.props(d.muted)}>{file.status} · binary or too large to show</span></div>
-        <div {...stylex.props(d.rowSide)}><ExternalLink href={filesUrl} label={`View ${file.path} on GitHub`}>View on GitHub</ExternalLink></div>
+        <div {...stylex.props(d.rowSide)}><ExternalLink href={filesUrl} label={`View on GitHub: ${file.path}`}>View on GitHub</ExternalLink></div>
       </li>)}</ul>}
     </div> : null}
     {view.diffs.length === 0 ? null : <div {...stylex.props(styles.diff)}>

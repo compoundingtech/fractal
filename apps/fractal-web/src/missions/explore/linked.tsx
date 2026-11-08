@@ -2,10 +2,11 @@
 // linked hover (dependencies light up), a time brush on the trace (steps that did not run in it dim), a replay cursor
 // (the graph shows each step's state at that moment), and one step hover card anchored wherever the pointer is.
 import * as React from 'react'
+import { VisuallyHidden } from 'react-aria-components'
 
 import { HoverCardSurface } from '../../../../../packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx'
-import { C, Mark, SmallButton, STATE_LABEL } from './parts.tsx'
-import { layered } from './layout.ts'
+import { C, Mark, MIN_TRACK_WIDTH, SmallButton, STATE_LABEL } from './parts.tsx'
+import { layered } from '../detail/layout.ts'
 import { clock, criticalPath, lineage, ranIn, runningMs, span, stateAt, stepEnd, stepStart, type ExploreMission, type PlanStep, type StepState } from './model.ts'
 
 /** Everything the linked views share. One instance per detail view. */
@@ -177,7 +178,7 @@ export const LinkedTrace = ({ mission, linked, rowHeight = 22, labelWidth = 190 
   React.useEffect(() => {
     const element = scrollRef.current
     if (element === null) return
-    const observer = new ResizeObserver(() => setWidth(element.clientWidth - labelWidth))
+    const observer = new ResizeObserver(() => setWidth(Math.max(MIN_TRACK_WIDTH, element.clientWidth - labelWidth)))
     observer.observe(element)
     return () => observer.disconnect()
   }, [labelWidth])
@@ -202,8 +203,8 @@ export const LinkedTrace = ({ mission, linked, rowHeight = 22, labelWidth = 190 
     <div ref={scrollRef} style={{ overflowX: 'auto', position: 'relative' }}>
       <div role="grid" aria-label={`${mission.title} trace`} style={{ position: 'relative', width: labelWidth + total, fontSize: 12, userSelect: 'none' }}>
         <div role="row" style={{ display: 'flex', height: 22, borderBottom: `1px solid ${C.line}` }}>
-          <div style={{ width: labelWidth, flexShrink: 0, position: 'sticky', left: 0, background: C.canvas, zIndex: 2 }} />
-          <div data-trace-axis aria-label="Time axis: drag to select a range" style={{ position: 'relative', flex: 1, cursor: 'col-resize', background: C.hover }}
+          <div role="columnheader" style={{ width: labelWidth, flexShrink: 0, position: 'sticky', left: 0, background: C.canvas, zIndex: 2 }}><VisuallyHidden>Step</VisuallyHidden></div>
+          <div role="columnheader" data-trace-axis aria-label="Time axis: drag to select a range" style={{ position: 'relative', flex: 1, cursor: 'col-resize', background: C.hover }}
             onPointerDown={event => { brushing.current = tAt(axisX(event)); (event.currentTarget as Element).setPointerCapture(event.pointerId) }}
             onPointerMove={event => { const a = brushing.current; if (a === undefined) return; const b = tAt(axisX(event)); if (Math.abs(x(b) - x(a)) > 4) linked.setBrush(a < b ? [a, b] : [b, a]) }}
             onPointerUp={event => { const a = brushing.current; brushing.current = undefined; if (a !== undefined && Math.abs(x(tAt(axisX(event))) - x(a)) <= 4) linked.setBrush(undefined) }}>
@@ -216,11 +217,11 @@ export const LinkedTrace = ({ mission, linked, rowHeight = 22, labelWidth = 190 
           const state = shownState(mission, step, cursor)
           return <div key={step.id} role="row" aria-selected={isSel} data-trace-row={step.id} data-dimmed={dim.has(step.id) || undefined}
             onClick={() => linked.select(step.id)} onPointerEnter={event => linked.hover(step.id, event.currentTarget.querySelector('[role="rowheader"]'))} onPointerLeave={() => linked.hover(undefined)}
-            style={{ display: 'flex', height: rowHeight, alignItems: 'center', cursor: 'pointer', background: isSel ? C.active : isHover ? C.hover : 'transparent', opacity: dim.has(step.id) ? 0.3 : 1, transition: 'opacity 120ms' }}>
+            style={{ display: 'flex', height: rowHeight, alignItems: 'center', cursor: 'pointer', background: isSel ? C.active : isHover ? C.hover : 'transparent' }}>
             <div role="rowheader" style={{ width: labelWidth, flexShrink: 0, display: 'flex', alignItems: 'center', gap: 6, paddingInline: 8, position: 'sticky', left: 0, background: isSel ? C.active : C.canvas, zIndex: 1, height: '100%' }}>
               <Mark state={state} /><button type="button" onFocus={event => linked.hover(step.id, event.currentTarget)} onBlur={() => linked.hover(undefined)} onClick={() => linked.select(step.id)} style={{ border: 0, background: 'transparent', color: C.fg, font: 'inherit', padding: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer', textAlign: 'start' }}>{step.title}</button>
             </div>
-            <div role="gridcell" style={{ position: 'relative', flex: 1, height: '100%' }}>
+            <div role="gridcell" style={{ position: 'relative', flex: 1, height: '100%', opacity: dim.has(step.id) ? 0.3 : 1, transition: 'opacity 120ms' }}>
               {ticks.map(t => <span key={t} aria-hidden="true" style={{ position: 'absolute', left: x(t), top: 0, bottom: 0, width: 1, background: C.line, opacity: 0.5 }} />)}
               {step.waits.map((w, i) => <span key={`w${i}`} style={{ position: 'absolute', left: x(w.start), width: Math.max(2, x(w.end ?? mission.now) - x(w.start)), top: rowHeight * 0.3, height: rowHeight * 0.4, backgroundImage: `repeating-linear-gradient(135deg, ${w.kind === 'you' ? C.you : C.muted} 0 1.5px, transparent 1.5px 5px)`, opacity: w.kind === 'you' ? 0.9 : 0.5, borderRadius: 2 }} />)}
               {step.attempts.map(a => {
