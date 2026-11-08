@@ -221,7 +221,7 @@ with tempfile.TemporaryDirectory() as temporary:
                (call[0] == 'api' and 'PATCH' not in call)
                for call in after['calls'][len(before['calls']):]), 'an older commit must not mutate the release'
 
-    # Equal-source reruns do not mutate even leftover assets.
+    # The refused stale run leaves release bytes and notes untouched.
     assert before['release'] == after['release']
 
     # Corrupt or mismatched archives are refused before gh is called.

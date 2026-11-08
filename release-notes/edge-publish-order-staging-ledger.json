@@ -27,6 +27,6 @@
   },
   "recovery": {
     "status": "none",
-    "detail": "No data recovery or migration. A same-source or descendant publication repairs incomplete assets, cleanup and release notes."
+    "detail": "No data recovery or migration. A same-source publication retry reconciles interrupted aliases, the source manifest, cleanup and release notes. The forward-only guard prevents older or divergent sources from overwriting a newer tag or manifest."
   }
 }
