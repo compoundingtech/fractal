@@ -497,6 +497,22 @@ async fn serve_for_test(socket: &Path, router: axum::Router) -> tokio::task::Joi
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clients_cli_reports_its_fractal_machine_version() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    let server = serve_for_test(&socket, fractal_daemon::api::router(test_state(root.path()))).await;
+    let listed = value(&run_cli(&socket, &["clients"]).await);
+    let version = value(&run_cli(&socket, &["--version"]).await);
+    let expected = format!("fractal {}", version["machine_version"].as_str().unwrap());
+    let items = listed["value"]["items"].as_array().unwrap();
+    assert!(
+        items.iter().any(|item| item["client"].as_str() == Some(expected.as_str())),
+        "{listed}"
+    );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_burst_cli_answers_none_where_the_agent_holds_no_lane_and_only_the_agent_asks() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
