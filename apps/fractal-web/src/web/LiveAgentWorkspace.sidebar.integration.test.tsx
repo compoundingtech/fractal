@@ -400,6 +400,18 @@ it('reveals a slightly future activity timestamp when only the leaf clock catche
   }
 })
 
+it.each([
+  ['a waiting harness with no ask of its own', {}, null],
+  ['its own question to the person', { ask: 'question' }, 'waiting'],
+] as const)('marks the conversation title from the sidebar needs-you set: %s', async (_name, extra, expected) => {
+  const agent = openAgent(decodeUnknownSync(Agent)({ kind: 'agent', id: 'agent/example', name: 'Example Agent', host_id: 'host/example', runtime_ids: [], reachability: 'reachable', state: 'running', harness_state: 'waiting', blocked_on: null, fault: null, revision: '1', updated_at: '1970-01-01T00:00:01.000Z', ...extra }))
+  registry.set(agents, observed({ value: [agent] }))
+  window.history.replaceState(null, '', '/w/agent/example')
+  await mount(1440)
+  const header = host.querySelector('section[aria-label="Agent workspace"] header')!
+  expect(header.querySelector('[data-status]')?.getAttribute('data-status') ?? null).toBe(expected)
+})
+
 it('keeps a calm agent\'s status, and its clock, out of ClockedThreadHeader without rendering the header projection', async () => {
   const now = Atom.make(5000)
   source = { ...source, now }
