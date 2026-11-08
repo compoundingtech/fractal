@@ -3,6 +3,7 @@
 use super::*;
 pub use fractal_delivery::store::missions::*;
 use fractal_store::store::identities::resolve_reference_conn;
+use fractal_store::store::missions::seat_step_rows_literal_tx;
 use fractal_store::store::{work_actor_matches, work_actor_spellings_json};
 
 mod run_review;
@@ -925,15 +926,13 @@ fn seat_order_conflict_tx(
     agent: &str,
     subject: &str,
 ) -> Result<Option<String>> {
-    let order = seat_run_orders_tx(connection, Some(agent))?
-        .remove(agent)
-        .unwrap_or_default();
-    let rows = seat_step_rows_tx(connection, Some(agent))?;
+    let order = fractal_store::store::seat_queue_inputs_literal_tx(connection, agent)?.live_order();
+    let rows = seat_step_rows_literal_tx(connection, agent)?;
     let steps = rows
         .iter()
         .map(RosterStepRow::seat_step)
         .collect::<Vec<_>>();
-    let selection = seat_queue::select(agent, &steps, &order);
+    let selection = seat_queue::select_literal(agent, &steps, &order);
     let Some(next) = selection.next() else {
         return Ok(None);
     };

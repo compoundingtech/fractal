@@ -1772,8 +1772,16 @@ pub fn note_run_view_reads(view: &MissionRunView) {
 
 /// Current held and ready agent steps, for every seat or for one seat.
 pub fn seat_step_rows_tx(connection: &Connection, agent: Option<&str>) -> Result<Vec<RosterStepRow>> {
+    seat_step_rows_with_spellings_tx(connection, agent.map(work_actor_spellings_json))
+}
+
+/// Current held and ready steps eligible for literal mutation admission.
+pub fn seat_step_rows_literal_tx(connection: &Connection, agent: &str) -> Result<Vec<RosterStepRow>> {
+    seat_step_rows_with_spellings_tx(connection, Some(serde_json::to_string(&[agent])?))
+}
+
+fn seat_step_rows_with_spellings_tx(connection: &Connection, spellings: Option<String>) -> Result<Vec<RosterStepRow>> {
     let snapshot_unix_ms = now_ms();
-    let spellings = agent.map(work_actor_spellings_json);
     let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h0096cec23ed6 owner=fractal_store::store::missions TODO=trace-statement-and-value-representation */ SEAT_STEP_ROWS)?;
     let mut rows = statement
         .query_map(params![spellings, snapshot_unix_ms.to_string()], |row| {

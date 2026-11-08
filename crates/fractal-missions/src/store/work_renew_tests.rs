@@ -985,6 +985,40 @@ fn independent_work_capacity_uses_literal_ownership_for_admission() {
 }
 
 #[test]
+fn legacy_ready_run_does_not_block_literal_claim_but_remains_visible() {
+    let first = ready_step_with_mail(0);
+    first.store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h934585192b73 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, created_at_unix_ms='1' WHERE subject=?1",
+        params![first.subject, "node/worker"],
+    ).unwrap();
+    let source = "version 2\nmission \"literal-queue\" state=\"ready\" { goal \"Literal queue admission.\"; step \"work\" { assigned-to \"agent/node/worker\"; } }";
+    let intent = crate::graph::parse_test_intent(source, "node").unwrap();
+    let plan = first.store.mission(&intent, IntentInput {
+        kdl: source.into(), source_name: None,
+    }).unwrap();
+    first.store.apply(&intent, &plan.subject_tokens, "literal-queue-definition").unwrap();
+    let second = first.store.create_mission_run(&MissionRunRequest {
+        mission: "literal-queue".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/test".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "literal-queue-run".into(),
+    }).unwrap();
+    let second = &second.steps[0].subject;
+    first.store.set_step_state(second, "ready", None).unwrap();
+    let visible = first.store.work(Some("agent/node/worker"), false).unwrap();
+    assert_eq!(visible.len(), 2);
+    assert!(visible.iter().any(|step| step.subject == first.subject));
+    assert!(visible.iter().any(|step| step.subject == *second));
+    let mut claim = request("literal-queue-claim", None);
+    claim.actor = Some("agent/node/worker".into());
+    let claimed = first.store.work_action(second, "claim", &claim).unwrap();
+    assert_eq!(claimed.subject, *second);
+    assert_eq!(claimed.claimant.as_deref(), Some("agent/node/worker"));
+    let unchanged = first.store.step_run(&first.subject).unwrap().unwrap();
+    assert_eq!(unchanged.status, "ready");
+    assert!(unchanged.claimant.is_none());
+}
+
+#[test]
 fn bare_work_actors_claim_renew_release_and_complete_with_main_normalization() {
     for bare_actor in ["node.worker", "worker"] {
         for (action, expected_status) in [("release", "ready"), ("complete", "verifying")] {

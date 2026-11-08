@@ -6116,7 +6116,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         // The last durable automatic wake records the head already announced;
         // using its subject in the key also permits returning to an earlier head.
         let steps = work.iter().map(crate::seat_queue::SeatStep::from).collect::<Vec<_>>();
-        let selection = crate::seat_queue::select(agent, &steps, &run_order);
+        let selection = crate::seat_queue::select_literal(agent, &steps, &run_order);
         let last_wake = messages.iter().filter(|message| {
             !crate::silent::message_tag_values(
                 message.tags.iter().map(String::as_str), "wake-source:",
@@ -20181,7 +20181,7 @@ fn seat_chooses_between_runs(agent: &str, work: &[StepRunView]) -> bool {
         .iter()
         .map(crate::seat_queue::SeatStep::from)
         .collect::<Vec<_>>();
-    let selection = crate::seat_queue::select(agent, &steps, &[]);
+    let selection = crate::seat_queue::select_literal(agent, &steps, &[]);
     if !selection.held.is_empty() {
         return false;
     }
@@ -20204,7 +20204,7 @@ fn next_work_wake_for_agent<'a>(
         .iter()
         .map(crate::seat_queue::SeatStep::from)
         .collect::<Vec<_>>();
-    crate::seat_queue::select(agent, &steps, run_order).wake()
+    crate::seat_queue::select_literal(agent, &steps, run_order).wake()
 }
 
 /// Inherited work is woken only after an early parent submission. A turn that is still working can
@@ -20220,7 +20220,7 @@ fn defers_inherited_work_wake(
 fn nested_under_work(step: &StepRunView, work: &[StepRunView]) -> bool {
     let nested = crate::seat_queue::SeatStep::from(step);
     work.iter().any(|ancestor| {
-        crate::seat_queue::nests_under(&crate::seat_queue::SeatStep::from(ancestor), &nested)
+        crate::seat_queue::nests_under_literal(&crate::seat_queue::SeatStep::from(ancestor), &nested)
     })
 }
 

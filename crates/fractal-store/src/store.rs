@@ -19173,6 +19173,16 @@ pub fn seat_queue_inputs_tx(
     seat_queue_inputs_of_tx(connection, agent, None)
 }
 
+/// Queue inputs for mutation admission, without merging actor aliases.
+pub fn seat_queue_inputs_literal_tx(
+    connection: &Connection,
+    agent: &str,
+) -> Result<SeatQueueInputs> {
+    Ok(seat_queue_inputs_matching_tx(connection, Some(agent), None, false)?
+        .remove(agent)
+        .unwrap_or_default())
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Named-run probes `seat_queue_inputs_of_tx` made on this thread, for tests.
@@ -19192,7 +19202,19 @@ pub fn seat_queue_inputs_of_tx(
     agent: Option<&str>,
     only: Option<&BTreeSet<String>>,
 ) -> Result<BTreeMap<String, SeatQueueInputs>> {
-    let spellings = agent.map(work_actor_spellings_json);
+    seat_queue_inputs_matching_tx(connection, agent, only, true)
+}
+
+fn seat_queue_inputs_matching_tx(
+    connection: &Connection,
+    agent: Option<&str>,
+    only: Option<&BTreeSet<String>>,
+    aliases: bool,
+) -> Result<BTreeMap<String, SeatQueueInputs>> {
+    let actor_spellings = |actor: &str| {
+        if aliases { work_actor_spellings_json(actor) } else { json!([actor]).to_string() }
+    };
+    let spellings = agent.map(actor_spellings);
     let mut seats = BTreeMap::<String, SeatQueueInputs>::new();
     let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd2995294a599 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &seat_queue_moves_query())?;
     let rows = statement.query_map(params![seat_queue::MOVED_CLAIM, spellings], |row| {
@@ -19206,8 +19228,12 @@ pub fn seat_queue_inputs_of_tx(
     })?;
     for row in rows {
         let (claim_id, subject, actor, body, accepted_at) = row?;
-        let subject = fractal_schema::canonical_agent_actor(&subject)
-            .map(std::borrow::Cow::into_owned).unwrap_or(subject);
+        let subject = if aliases {
+            fractal_schema::canonical_agent_actor(&subject)
+                .map(std::borrow::Cow::into_owned).unwrap_or(subject)
+        } else {
+            subject
+        };
         let body = serde_json::from_str::<Value>(&body).unwrap_or(Value::Null);
         let fields = body.get("fields").unwrap_or(&body);
         let text = |name: &str| fields.get(name).and_then(Value::as_str).map(str::to_owned);
@@ -19255,8 +19281,12 @@ pub fn seat_queue_inputs_of_tx(
     })?;
     for row in rows {
         let (seat, run_id, joined_at, status, current) = row?;
-        let seat = fractal_schema::canonical_agent_actor(&seat)
-            .map(std::borrow::Cow::into_owned).unwrap_or(seat);
+        let seat = if aliases {
+            fractal_schema::canonical_agent_actor(&seat)
+                .map(std::borrow::Cow::into_owned).unwrap_or(seat)
+        } else {
+            seat
+        };
         let run = format!("mission-run/{run_id}");
         let inputs = seats.entry(seat).or_default();
         let at_unix_ms = u128::try_from(joined_at).unwrap_or_default();
@@ -19282,7 +19312,7 @@ pub fn seat_queue_inputs_of_tx(
         });
         inputs.joins.dedup_by(|left, right| left.run == right.run);
         inputs.statuses.retain(|run, _| inputs.live.contains(run));
-        let spellings = work_actor_spellings_json(seat);
+        let spellings = actor_spellings(seat);
         let moves = inputs
             .moves
             .iter()
