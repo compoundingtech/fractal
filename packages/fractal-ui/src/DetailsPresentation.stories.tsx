@@ -708,10 +708,10 @@ async function checkPlainCopy(root:HTMLElement,targets:readonly HTMLElement[]){
   for(const target of targets){const allowed=root.ownerDocument.createElement('span');allowed.textContent=` ${allowedMatched}.`;target.append(allowed);try{assertPlainCopy(root)}finally{allowed.remove()}}
   assertPlainCopy(root)
 }
-// Reviews and Declared bindings live in the Resources tab and Missions in the agent's mission rows, so Details never names them.
-const productionTail=`${tailPrefix}Workspace, Subagents, Pull requests, CI runs, Files touched, History.`
+// Details names only agent facts; all work resources and missions live in Resources.
+const productionTail=`${tailPrefix}Workspace.`
 const identityGap='Production phone identity paints a missing fact, a dangling separator or a redundant empty mission'
-/** Identity and meta carry only known facts; `Mission none` paints only when it is the sole Overview fact. */
+/** Identity and meta carry only known agent facts; missions do not appear in Details. */
 function assertProductionIdentity(root:HTMLElement){
   const overview=root.querySelector<HTMLElement>('section[aria-label$="Overview"]');requireContract(overview,'Missing production Overview')
   const lines=[...overview.querySelectorAll<HTMLElement>('[data-details-overview-line]:not([data-details-timing-missing])')].filter(paintedElement),texts=lines.map(line=>overviewFactText(line).replace(/\s+/g,' ').trim())
@@ -1135,8 +1135,7 @@ async function checkSpendFocus(panel:HTMLElement,state:OmpSupplementState){
 /**
  * A section's Try again through a held retry: pending keeps the line, its sentence and the focused action; a repeated
  * failure keeps focus on the action; success moves focus to the section's heading control, then removes the line.
- * Missions instead leaves Details once its queue read settles, and focus moves to the selected tab. Every other
- * section keeps its own read line meanwhile.
+ * Missions keeps its recovery heading in Resources after the queue settles, as Overview does in Details.
  */
 async function checkSectionRetryFocus(panel:HTMLElement,read:'session'|'queue'){
   if(read==='queue')await selectInspectorTab(panel,'Resources')
@@ -1159,17 +1158,11 @@ async function checkSectionRetryFocus(panel:HTMLElement,read:'session'|'queue'){
   await waitFor(()=>assertReadAction(action,'Trying again…',true,copy))
   await assertPendingDedup(action,read)
   transport.release(read,'ok')
-  if(read==='queue'){await waitFor(()=>assertMissionsLeft(panel,section,'success'));return}
   await waitFor(()=>{
     const heading=section.querySelector<HTMLElement>('[data-details-section-control]'),active=panel.ownerDocument.activeElement
     requireContract(section.isConnected&&heading!==null&&active===heading&&!action.isConnected&&!section.querySelector('[data-details-read-failure]'),`${readFocus}: ${name} success left focus on ${focusName(active)}${action.isConnected?' with its action mounted':''}`)
   })
   if(read==='queue')await selectInspectorTab(panel,'Details')
-}
-/** The Missions read section exists only while the agent queue read fails or runs; settled, focus it held moves to the selected tab. */
-function assertMissionsLeft(panel:HTMLElement,section:HTMLElement,outcome:string){
-  const active=panel.ownerDocument.activeElement,tab=panel.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
-  requireContract(!section.isConnected&&tab!==null&&active===tab,`${readFocus}: Missions ${outcome} left focus on ${focusName(active)}${section.isConnected?' with its section mounted':''}`)
 }
 async function resetOmpInspector(canvasElement:HTMLElement,narrow:boolean,panel:HTMLElement,state:OmpSupplementState='unavailable'){
   const seen=new Map<Element,string>()
@@ -1185,7 +1178,7 @@ async function resetOmpInspector(canvasElement:HTMLElement,narrow:boolean,panel:
     return remounted
   }finally{observer.disconnect()}
 }
-/** A terminal refusal must hand off focus before removing an action, never discard its section; Missions leaves as on success. */
+/** A terminal refusal hands off focus before removing an action and keeps the section's recovery heading. */
 async function checkRefusedRead(panel:HTMLElement,read:OmpRead,outcome:'refused'|'unsupported',refresh=false){
   if(read==='queue')await selectInspectorTab(panel,'Resources')
   const transport=ompTransport(),name=read==='usage'?'Spend':read==='session'?'Overview':'Missions',section=ompSection(panel,name)
@@ -1196,7 +1189,6 @@ async function checkRefusedRead(panel:HTMLElement,read:OmpRead,outcome:'refused'
   await waitFor(()=>assertReadAction(action,refresh?'Refreshing…':'Trying again…',true))
   await assertPendingDedup(action,read)
   transport.release(read,outcome)
-  if(read==='queue'){await waitFor(()=>assertMissionsLeft(panel,section,outcome));return}
   await waitFor(()=>requireContract(section.isConnected&&heading.isConnected&&section.querySelector('[data-details-section-control]')===heading&&panel.ownerDocument.activeElement===heading&&!action.isConnected,`${readFocus}: ${name} ${outcome} lost its stable same-section focus target`))
   requireContract(!section.querySelector('[data-details-read-action]'),`${readFocus}: ${name} ${outcome} still offers a read action`)
   if(read==='queue')await selectInspectorTab(panel,'Details')
