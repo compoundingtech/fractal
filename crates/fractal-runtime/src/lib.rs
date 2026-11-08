@@ -13,6 +13,7 @@
 
 mod environment;
 pub mod host;
+pub mod host_envelope;
 mod isolate;
 mod lane;
 mod priority;

@@ -1455,6 +1455,7 @@ class CommittedPolicy(unittest.TestCase):
         declared = {'ci-script-tests': sorted([
             # The self-tests that run in a sparse copy of exactly these (scripts/ci-script-tests): a read outside them fails the check.
             'apps/ios/scripts/release_delivery.py', 'apps/ios/scripts/test_release_delivery.py',
+            'apps/fractal-web/scripts/devnet',
             '.config/daily-only.filterset', '.fractal', '.gitattributes', '.github', '.gitignore', '.st', 'apps/fractal-web/.gitignore', 'apps/fractal-web/src/changelog/seen.ts', 'crates/fractal/tests/daemon_load.rs', 'crates/fractal/tests/messaging_faults.rs', 'docs/st3/gate-evidence.md', 'flake.lock', 'flake.nix', 'megarepo.lock', 'nix', 'package.json', 'packages/fractal-ui/.gitignore', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'scripts']), 'linux-gate': sorted([
             '.cargo', '.config/nextest.toml', '.github', 'Cargo.lock', 'Cargo.toml', 'claude-channel', 'clients', 'components', 'crates',
             'docs/st3', 'docs/vrs', 'evals', 'examples', 'fixtures', 'flake.lock', 'flake.nix', 'nix', 'plugins', 'scripts',
