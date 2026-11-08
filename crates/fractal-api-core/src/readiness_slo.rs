@@ -119,12 +119,16 @@ impl ShortReading {
 
 impl RetainedPairs {
     fn latest_at(&self, anchor: &Reading, now: u64) -> Result<Option<ShortSummary>> {
+        Ok(self.fresh_through(anchor, now)?.pop())
+    }
+
+    fn fresh_through(&self, anchor: &Reading, now: u64) -> Result<Vec<ShortSummary>> {
         ensure!(
             self.version == 1 && self.pairs.len() <= MAX_RETAINED_PAIRS,
             "invalid retained pair bundle"
         );
         let mut previous = None;
-        let mut latest = None;
+        let mut fresh = Vec::new();
         for pair in &self.pairs {
             let weekly = &pair.weekly;
             // Check old entries structurally without letting them age out the entire bundle.
@@ -146,7 +150,7 @@ impl RetainedPairs {
                 );
             }
             if weekly.end_ms <= anchor.end_ms && now - weekly.end_ms <= MAX_AGE_MS {
-                latest = Some(summary);
+                fresh.push(summary);
             }
         }
         if let (Some(first), Some(last)) = (self.pairs.first(), previous) {
@@ -155,7 +159,7 @@ impl RetainedPairs {
                 "retained cuts span too much time"
             );
         }
-        Ok(latest)
+        Ok(fresh)
     }
 }
 
@@ -239,6 +243,22 @@ pub fn configure(
         }),
         "readiness_slo.reviewer must name an agent"
     );
+    ensure!(
+        !config.shared_case || config.retained_pairs_file.is_some(),
+        "shared readiness cases require retained_pairs_file"
+    );
+    if let Some(backup) = &config.backup {
+        ensure!(
+            backup != &config.reviewer
+                && backup.strip_prefix("agent/").is_some_and(|id| {
+                    !id.is_empty() && id.len() <= 128 && id.split('/').all(|part| {
+                        !part.is_empty() && part != "." && part != ".."
+                            && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+                    })
+                }),
+            "readiness_slo.backup must name a distinct agent"
+        );
+    }
     POLICY
         .set(Policy {
             config: config.clone(),
@@ -524,9 +544,12 @@ pub fn sample(store: &Store) -> Option<Value> {
     static FAILING: AtomicBool = AtomicBool::new(false);
     static INVALID_BINDING: AtomicBool = AtomicBool::new(false);
     let policy = POLICY.get()?;
-    let row = match policy.reconcile(store, now_ms(), || {
-        trusted_evidence(&policy.config.evidence_file)
-    }) {
+    let result = if policy.config.shared_case {
+        retained_admission::run_sampler(policy, store, now_ms())
+    } else {
+        policy.reconcile(store, now_ms(), || trusted_evidence(&policy.config.evidence_file))
+    };
+    let row = match result {
         Ok(row) => {
             FAILING.store(false, Ordering::Relaxed);
             row
@@ -588,6 +611,35 @@ mod tests {
     }
 
     #[test]
+    fn latest_at_preserves_main_reader_result_for_the_same_bundle() {
+        let anchor = reading(10, MINUTES, MINUTES);
+        let bundle: RetainedPairs = serde_json::from_value(json!({
+            "version": 1,
+            "pairs": (8..=11).map(|minute| {
+                retained_pair(&reading(minute, MINUTES, MINUTES), minute % 4)
+            }).collect::<Vec<_>>(),
+        })).unwrap();
+        for minute in [11, 12, 14] {
+            let now = reading(minute, MINUTES, MINUTES).end_ms;
+            // Main's reader replaces the latest summary for each eligible pair.
+            let mut main_latest = None;
+            for pair in &bundle.pairs {
+                let summary = pair.short.summary(&pair.weekly).unwrap();
+                if pair.weekly.end_ms <= anchor.end_ms
+                    && now - pair.weekly.end_ms <= MAX_AGE_MS
+                {
+                    main_latest = Some(summary);
+                }
+            }
+            let values = |summary: ShortSummary| (summary.end_ms, summary.known, summary.failed);
+            assert_eq!(
+                bundle.latest_at(&anchor, now).unwrap().map(values),
+                main_latest.map(values),
+            );
+        }
+    }
+
+    #[test]
     fn usage_observes_last_fresh_pair_without_writing_the_weekly_state() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open(&dir.path().join("graph.db"), "node").unwrap();
@@ -604,6 +656,8 @@ mod tests {
                 reviewer: "agent/node.ops".into(),
                 evidence_file: dir.path().join("weekly.json"),
                 retained_pairs_file: None,
+                shared_case: false,
+                backup: None,
             },
             checkpoint: dir.path().join("checkpoint.json"),
         };
@@ -680,6 +734,8 @@ mod tests {
         }))
         .unwrap();
         assert!(config.retained_pairs_file.is_none());
+        assert!(!config.shared_case);
+        assert!(config.backup.is_none());
         assert!(
             serde_json::to_value(&config)
                 .unwrap()
@@ -750,6 +806,8 @@ mod tests {
                 reviewer: "agent/node.ops".into(),
                 evidence_file: dir.path().join("unused.json"),
                 retained_pairs_file: None,
+                shared_case: false,
+                backup: None,
             },
             checkpoint: dir.path().join("readiness-slo-cut.json"),
         };
@@ -841,6 +899,8 @@ mod tests {
                 reviewer: "agent/node.ops".into(),
                 evidence_file: dir.path().join("unused.json"),
                 retained_pairs_file: None,
+                shared_case: false,
+                backup: None,
             },
             checkpoint: dir.path().join("readiness-slo-cut.json"),
         };
@@ -1000,3 +1060,6 @@ mod tests {
         );
     }
 }
+
+#[path = "readiness_retained_admission.rs"]
+mod retained_admission;
