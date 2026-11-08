@@ -50,6 +50,57 @@ async fn poll(state: &AppState, session: &ClientSession, started: &Value, key: &
 }
 
 #[tokio::test]
+async fn browser_pairing_explicit_verifier_requires_a_32_byte_hex_key() {
+    for (stored, presented, allowed) in [
+        ("a".repeat(64), "a".repeat(64), true),
+        ("a".repeat(64), "b".repeat(64), false),
+        ("a".repeat(63), "a".repeat(63), false),
+        ("a".repeat(66), "a".repeat(66), false),
+        ("g".repeat(64), "g".repeat(64), false),
+    ] {
+        let (_root,state,owner) = fixture().await;
+        let started = start(&state,&owner,&stored).await;
+        assert_eq!(begun(&state,&started).body["fields"]["verifier"],VERIFIER);
+        answer(&state,&owner,&started,"approve").unwrap();
+        let id = started["requestId"].as_str().unwrap();
+        let result = pairing_complete(State(state.clone()),Extension(owner.clone()),AxumPath(id.into()),Json(PairingComplete {
+            api_version:CLIENT_API_VERSION.into(),code:presented.clone(),
+            device_public_key:format!("browser:{id}"),key_storage:None,fabric_node_id:None,
+        })).await;
+        assert_eq!(result.is_ok(),allowed);
+        if allowed {
+            assert!(result.unwrap().0["credential"].is_string());
+        } else {
+            assert!(poll(&state,&owner,&started,&presented).await.is_err());
+        }
+    }
+}
+
+#[tokio::test]
+async fn browser_pairing_stripped_verifier_never_uses_legacy_completion() {
+    let (_root,state,owner) = fixture().await;
+    let key = "a".repeat(64);
+    let started = start(&state,&owner,&key).await;
+    answer(&state,&owner,&started,"approve").unwrap();
+    let mut request = begun(&state,&started);
+    request.body["fields"].as_object_mut().unwrap().remove("verifier");
+    let stripped = state.store.append_client_operation_claim(&ClaimInput {
+        subject:request.subject.clone(),kind:request.kind,actor:request.actor,
+        fields:serde_json::from_value(request.body["fields"].clone()).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    assert!(state.store.client_operation_is_trusted(&stripped).unwrap());
+    let id = started["requestId"].as_str().unwrap();
+    let error = pairing_complete(State(state.clone()),Extension(owner.clone()),AxumPath(id.into()),Json(PairingComplete {
+        api_version:CLIENT_API_VERSION.into(),code:key.clone(),
+        device_public_key:format!("browser:{id}"),key_storage:None,fabric_node_id:None,
+    })).await.unwrap_err();
+    assert_eq!(error.code,"pairing-restart-required");
+    assert!(poll(&state,&owner,&started,&key).await.is_err());
+    assert!(state.store.claims_for_subject_kind_at(&request.subject,"custom.client.pairing-completed",None,true,1).unwrap().claims.is_empty());
+}
+
+#[tokio::test]
 async fn browser_pairing_wrong_login_disabled_and_rate_limit() {
     let (_root, mut state, session) = fixture().await;
     let body = || Json(serde_json::from_value(json!({"deviceLabel":"Browser","tailnetLogin":"wrong@example.test","requestKeyDigest":"a".repeat(64)})).unwrap());
@@ -226,4 +277,76 @@ async fn browser_pairing_requires_operation_provenance_for_request_and_approver(
     allowance.until_unix_ms = 1;
     state.store.configure_pairing_legacy_allowances(&[allowance]).unwrap();
     assert!(answer(&state,&owner,&after_deadline,"approve").is_err());
+}
+
+#[tokio::test]
+async fn browser_pairing_answers_require_bound_admission_receipts_and_live_pairing_grants() {
+    for fault in ["missing", "ask", "request", "person", "scope", "revoked"] {
+        let (_root,state,owner) = fixture().await;
+        let key = "a".repeat(64);
+        let started = start(&state,&owner,&key).await;
+        let request = begun(&state,&started);
+        let ask_subject = request.body["fields"]["browser_ask"].as_str().unwrap();
+        if fault == "missing" {
+            let ask = state.store.claims_for_subject_kind_at(ask_subject,"work.person-asked",None,true,1).unwrap().claims.remove(0);
+            state.store.append_claim(&ClaimInput {
+                subject:ask_subject.into(),kind:"work.person-done".into(),actor:Some("person/operator".into()),
+                fields:serde_json::from_value(json!({"episode":ask.id,"answer":{"id":"approve"}})).unwrap(),
+                evidence:vec![],expected_subject:None,idempotency_key:None,
+            }).unwrap();
+        } else {
+            answer(&state,&owner,&started,"approve").unwrap();
+            let done = state.store.claims_for_subject_kind_at(ask_subject,"work.person-done",None,true,1).unwrap().claims.remove(0);
+            let mut receipt = state.store.claims_for_subject_kind_at(
+                &format!("custom/client/browser-answer-{}",done.id),"custom.client.pairing-browser-answer-admitted",None,true,1,
+            ).unwrap().claims.remove(0);
+            match fault {
+                "ask" => receipt.body["fields"]["ask"] = json!("step-run/another/ask"),
+                "request" => receipt.body["fields"]["request_id"] = json!("b".repeat(32)),
+                "person" => receipt.body["fields"]["person"] = json!("person/another"),
+                "scope" => {
+                    let limited = paired_device(&state,&["read.projections","control.attention"],"receipt-limited").await;
+                    let grant = state.store.claims_for_subject_kind_at(limited.pairing_grant.as_deref().unwrap(),
+                        "custom.client.pairing-completed",None,true,1).unwrap().claims.remove(0);
+                    receipt.body["fields"]["grant_id"] = json!(grant.id);
+                    receipt.body["fields"]["grant_subject"] = json!(grant.subject);
+                }
+                "revoked" => {
+                    let grant = state.store.claims_for_subject_kind_at(owner.pairing_grant.as_deref().unwrap(),
+                        "custom.client.pairing-completed",None,true,1).unwrap().claims.remove(0);
+                    state.store.append_client_operation_claim(&ClaimInput {
+                        subject:grant.subject,kind:"custom.client.pairing-revoked".into(),actor:Some("person/operator".into()),
+                        fields:BTreeMap::from([("device_id".into(),grant.body["fields"]["device_id"].clone())]),
+                        evidence:vec![grant.id],expected_subject:None,idempotency_key:None,
+                    }).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            if fault != "revoked" {
+                state.store.append_client_operation_claim(&ClaimInput {
+                    subject:receipt.subject,kind:receipt.kind,actor:receipt.actor,
+                    fields:serde_json::from_value(receipt.body["fields"].clone()).unwrap(),
+                    evidence:vec![],expected_subject:None,idempotency_key:None,
+                }).unwrap();
+            }
+        }
+        assert_eq!(approval(&state,&request).unwrap(),"denied","{fault}");
+        assert!(!poll(&state,&owner,&started,&key).await.unwrap().0["bearer"].is_string(),"{fault}");
+    }
+}
+
+#[tokio::test]
+async fn browser_pairing_begin_rate_limit_is_per_device_even_after_denial() {
+    let (_root,state,owner) = fixture().await;
+    let key = "a".repeat(64);
+    for _ in 0..10 {
+        let started = start(&state,&owner,&key).await;
+        answer(&state,&owner,&started,"deny").unwrap();
+    }
+    let error = begin(State(state.clone()),Extension(owner.clone()),Json(serde_json::from_value(json!({
+        "deviceLabel":"Browser","tailnetLogin":"owner@example.test","requestKeyDigest":credential_digest(&key)
+    })).unwrap())).await.unwrap_err();
+    assert_eq!(error.status,StatusCode::TOO_MANY_REQUESTS);
+    let other = paired_device(&state,&["read.projections"],"other-publisher").await;
+    assert!(start(&state,&other,&key).await["requestId"].is_string());
 }

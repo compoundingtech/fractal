@@ -560,6 +560,7 @@ impl PersonWorkStore for Store {
             if update_only && ask.as_ref().is_none_or(|ask| !is_update(ask)) {
                 return Err(FractalError::new("invalid-update-withdrawal", "withdraw names an informational update, not an ask or authored work"));
             }
+            let mut browser_approval = None;
             if ask.as_ref().is_some_and(|ask| ask.actor.as_deref() == Some("daemon/browser-pairing")) {
                 let refused = || FractalError::new("forbidden", "browser pairing approval requires a paired device with control.pairing");
                 if authorization.is_some() || input.delegation.is_some() || !input.actor.starts_with("person/") {
@@ -581,6 +582,15 @@ impl PersonWorkStore for Store {
                 {
                     return Err(refused());
                 }
+                let ask = ask.as_ref().ok_or_else(refused)?;
+                let request_id = ask.body["fields"]["key"].as_str()
+                    .and_then(|key| key.strip_prefix("browser-pairing:"))
+                    .filter(|id| id.len() == 32 && id.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+                    .ok_or_else(refused)?;
+                browser_approval = Some(json!({
+                    "ask":subject,"episode":ask.id,"person":input.actor,"request_id":request_id,
+                    "grant_id":paired.id,"grant_subject":paired.subject
+                }));
             }
             if let Some(authorization) = authorization {
                 let ask = ask.as_ref().filter(|ask| ask.kind == "work.person-asked"
@@ -668,6 +678,13 @@ impl PersonWorkStore for Store {
                 body["evidence"] = json!(response_evidence);
             }
             let claim = append_claim_tx(tx, &self.origin, &subject, kind, Some(response_actor), &body, &evidence, None).map_err(claim_append_error)?;
+            if let Some(mut fields) = browser_approval {
+                fields["answer_id"] = json!(claim.id);
+                let receipt = append_claim_tx(tx, &self.origin, &format!("custom/client/browser-answer-{}", claim.id),
+                    "custom.client.pairing-browser-answer-admitted", Some(response_actor),
+                    &json!({"fields":fields}), std::slice::from_ref(&claim.id), None).map_err(claim_append_error)?;
+                fractal_store::pairing::append_operation_receipt_tx(tx, &receipt).map_err(internal)?;
+            }
             // Past its deadline the ask's own member applies the default, which a later answer on
             // another member must not race; answers before it win (`standing_responses`). The
             // stored time decides, so it is checked here, and refusing rolls this write back.
