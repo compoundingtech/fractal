@@ -139,7 +139,7 @@ const agentFromRow = (row: DecodedAgent): Agent => {
     startedAt: unknown,
     endedAt: unknown,
     lastActivityAt: lastActivityAt === undefined ? unknown : { _tag: 'Known', value: DateTime.toEpochMillis(lastActivityAt) },
-    // Absent from older daemons; then unread falls back to last activity.
+    // Absent from older daemons; then only a loaded window's count marks the conversation unread.
     ...(lastProseAt === undefined ? {} : { lastProseAt: { _tag: 'Known', value: DateTime.toEpochMillis(lastProseAt) } as const }),
     blockedOn: fromOption(row.blocked_on),
     ask: fromOption(row.ask),
