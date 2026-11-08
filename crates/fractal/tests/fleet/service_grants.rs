@@ -67,16 +67,21 @@ fn seed(node: &Node, number: u8, profile: &str, principal: &str, scope: &str,
 // route admission. A 400 is therefore an auth-positive control without reading private data,
 // requiring a signed per-read approval, or creating a proposal. A refusal must be exactly 403,
 // not an unavailable daemon, missing route, bad request, or transport failure.
-async fn assert_auth(node: &Node, grant: &Grant, accepted: bool) {
+async fn auth_response(node: &Node, grant: &Grant) -> (u16, String) {
     let response = reqwest::Client::builder().unix_socket(node.socket()).build().unwrap()
         .post("http://localhost/v1/client/assistant/propose")
         .bearer_auth(&grant.credential).header("content-type", "application/json")
         .body("{").send().await.unwrap();
     let status = response.status();
     let body = response.text().await.unwrap();
-    assert_eq!(status.as_u16(), if accepted { 400 } else { 403 },
-        "{} grant {}: {body}\n{}", node.name, grant.id, node.logs());
     let _: Value = node.client().get("/v1/health").await.unwrap();
+    (status.as_u16(), body)
+}
+
+async fn assert_auth(node: &Node, grant: &Grant, accepted: bool) {
+    let (status, body) = auth_response(node, grant).await;
+    assert_eq!(status, if accepted { 400 } else { 403 },
+        "{} grant {}: {body}\n{}", node.name, grant.id, node.logs());
 }
 
 async fn assert_retained(node: &Node, grants: &[Grant]) {
@@ -174,9 +179,22 @@ async fn previous_release_refuses_plugin_service_grants_on_same_database_rollbac
     node.binary = old;
     node.start().await;
     assert_eq!(node.state_dir(), state);
-    for (index, grant) in grants.iter().enumerate() {
-        // Characterize, rather than conceal, the baseline's profile-blind counterexample.
-        assert_auth(&node, grant, index == 3 || index == 6).await;
+    for (index, grant) in grants.iter().take(6).enumerate() {
+        assert_auth(&node, grant, index == 3).await;
+    }
+    // Older baselines admitted this profile-blind counterexample. v0.3.31's
+    // Profile::issuable unconditionally refuses service profiles; no config enables them.
+    let (status, body) = auth_response(&node, &grants[6]).await;
+    if status == 403 {
+        let error: Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(error["code"], "forbidden", "{body}");
+        assert_eq!(error["message"], "service grant issuance is disabled", "{body}");
+        eprintln!(
+            "baseline release already refuses service profiles: the profile-blind transition \
+             is behind this fleet; skipping only the baseline counterexample acceptance assertion"
+        );
+    } else {
+        assert_eq!(status, 400, "{} grant {}: {body}\n{}", node.name, grants[6].id, node.logs());
     }
     let inspected: Value = Client::unix_as(node.socket(), PERSON).unwrap()
         .get(&format!("/v1/client/assistant/grants/{}", grants[0].id)).await.unwrap();
