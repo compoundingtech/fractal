@@ -282,11 +282,11 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     let browser_bearer = redeemed["bearer"].as_str().unwrap();
     let device_key = smallclaims::fleet::MemberKey::generate().unwrap().0;
     let (_, native_bearer) = paired_device_with_key(
-        &state, &["read.projections", "control.messages"], "native-thread-phone",
+        &state, ALL_SCOPES, "native-thread-phone",
         device_key.public().to_string(),
     ).await;
     let (_, fake_bearer) = paired_device_with_key(
-        &state, &["read.projections", "control.messages"], "browser-lookalike",
+        &state, ALL_SCOPES, "browser-lookalike",
         format!("browser:{}", pairing["requestId"].as_str().unwrap()),
     ).await;
 
