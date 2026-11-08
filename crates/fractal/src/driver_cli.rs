@@ -1,5 +1,50 @@
 use super::*;
 
+fn managed_declaration_result(
+    result: std::result::Result<Value, GeneratedClientError>,
+) -> Result<Value> {
+    match result {
+        Ok(tree) => Ok(tree),
+        Err(GeneratedClientError::Api(ClientErrorCode::NotFound, _, _)) => Ok(Value::Null),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod managed_declaration_tests {
+    use super::*;
+
+    fn api_error(code: ClientErrorCode) -> GeneratedClientError {
+        let envelope = fractal_client::ErrorEnvelope {
+            api_version: "st3.client.v0".into(),
+            error_version: "st3.client.error.v0".into(),
+            request_id: "test".into(),
+            code: code.clone(),
+            message: "declaration read failed".into(),
+            retryable: false,
+            retry_after_ms: None,
+            details: BTreeMap::new(),
+        };
+        GeneratedClientError::Api(code, envelope.message.clone(), Box::new(envelope))
+    }
+
+    #[test]
+    fn confirmed_not_found_allows_persona_fallback() {
+        assert_eq!(managed_declaration_result(Err(api_error(ClientErrorCode::NotFound))).unwrap(), Value::Null);
+        let spec = json!({"children": [{"name": "persona", "arguments": ["steward"]}]});
+        assert_eq!(managed_declaration_result(Ok(spec.clone())).unwrap(), spec);
+    }
+
+    #[test]
+    fn declaration_failures_do_not_become_missing_specs() {
+        for code in [ClientErrorCode::Forbidden, ClientErrorCode::Internal] {
+            assert!(managed_declaration_result(Err(api_error(code))).is_err());
+        }
+        assert!(managed_declaration_result(Err(GeneratedClientError::Transport("unavailable".into()))).is_err());
+        assert!(managed_declaration_result(Err(GeneratedClientError::Protocol("invalid JSON".into()))).is_err());
+    }
+}
+
 /// `st driver-hook NAME [ARGS]`: answer one harness hook with the payload on stdin.
 pub(super) fn run_driver_hook() -> ExitCode {
     fractal_client::set_client_name(format!(
@@ -149,6 +194,13 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         // st3's driver directory, never st2's; the seat's hooks choose the same root.
         if let Some(drivers) = std::env::var_os("ST3_DRIVER_STATE_DIR") {
             fractal_drivers::run::use_harness_state_root(PathBuf::from(drivers).join("sessions"));
+        }
+        if fractal_drivers::managed_launch::is_managed_harness(args.managed_launch, &args.driver) {
+            let gateway = generated_client(&client.endpoint, None)?;
+            let declaration = managed_declaration_result(
+                gateway.agent_declaration_get(subject, None, false).await.map(|reply| reply.value.tree),
+            )?;
+            fractal_drivers::managed_launch::resolve(&args.driver, &mut argv, &declaration)?;
         }
         if let Some(state) = fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV) {
             return resume_native_driver(client, subject, &args.driver, argv, &state).await;
