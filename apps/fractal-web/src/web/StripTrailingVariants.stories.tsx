@@ -96,7 +96,9 @@ const Variants = ({ scheme }: { readonly scheme: 'dark' | 'light' }) =>
 
 const meta = {
   excludeStories: ['scenarioExemptions'],
-  title: 'Fractal/App/StripTrailingVariants',
+  // A local design comparison, not a Fractal/App production-module suite. Keep existing links and gate ids.
+  id: 'fractal-app-striptrailingvariants',
+  title: 'Fractal/Explore/Strip trailing controls',
   component: Variants,
   args: { scheme: 'dark' },
   parameters: { layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'A design comparison of the tab strip trailing controls, drawn from kit controls with made-up tab names.' } },
