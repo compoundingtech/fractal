@@ -532,6 +532,12 @@ export const timelineItems = (
 const isMailBody = (item: ConversationItem): boolean =>
   item._tag === 'Text' || item._tag === 'Message' || (item._tag === 'Event' && item.kind === 'delivery')
 
+/** The body text a projected mail item shows a reader: prose, the joined message, or a wake's payload. */
+const shownMailText = (item: ConversationItem): readonly string[] =>
+  item._tag === 'Text' || item._tag === 'Message' ? (item.text === undefined ? [] : [item.text])
+    : item._tag === 'Event' && item.kind === 'delivery' && item.notice?._tag === 'Delivery' ? [item.notice.payload]
+      : []
+
 interface MailPairs {
   /** Each shown message's body, by message id (delivery-echo removal compares against it). */
   readonly bodies: ReadonlyMap<string, string>
@@ -942,14 +948,16 @@ export class LiveTimeline {
       if (key !== undefined) userMailContent.add(key)
     }
     const pairs = this.mailPairs(mailboxHeaders)
-    // A paired body counts as shown only when it projects to the message; a hidden body keeps its
-    // header row instead, so a delivery repeating it is the only readable copy and must stay.
-    const shownBodies = new Map(pairs.bodies)
+    // A delivery may be dropped only for the text a reader can actually see: the body as its projection
+    // shows it, not the raw entry. A hidden body (its header keeps its row) or a body whose projection
+    // shows only part of it leaves the delivery as the readable copy.
+    const shownBodies = new Map<string, string>()
     for (const entry of this.ordered) {
       if (entry.type !== 'content') continue
       const mailbox = pairs.headerOf.get(entry.id)
       if (mailbox === undefined) continue
-      if (!this.cached({ entry, result: undefined, active: true, mailbox }).some(isMailBody)) shownBodies.delete(mailbox.body.message_id)
+      const shown = this.cached({ entry, result: undefined, active: true, mailbox }).flatMap(shownMailText)
+      if (shown.length === 1) shownBodies.set(mailbox.body.message_id, shown[0]!)
     }
     for (let at = from; at < this.ordered.length; at += 1) {
       const entry = this.ordered[at]!
