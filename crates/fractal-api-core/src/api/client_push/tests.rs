@@ -9,6 +9,7 @@ const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 fn state(root: &std::path::Path) -> AppState {
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         store: Arc::new(Store::open(&root.join("graph.db"), "push-test").unwrap()),
         notify: Arc::new(Notify::new()),
@@ -37,6 +38,7 @@ fn grant(state: &AppState, expiry: u64) {
             kind: "custom.client.pairing-completed".into(),
             actor: Some(PERSON.into()),
             fields: serde_json::from_value(json!({
+                "pairing_operation_version":1,
                 "credential_hash":hex::encode(Sha256::digest(CREDENTIAL.as_bytes())),
                 "session_actor":ACTOR,"person_id":PERSON,"device_id":"device/phone",
                 "scopes":["read.projections"],"expires_at_unix_ms":expiry

@@ -14,6 +14,7 @@ fn pair(state: &AppState) {
             kind: "custom.client.pairing-completed".into(),
             actor: Some(PERSON.into()),
             fields: serde_json::from_value(json!({
+                "pairing_operation_version":1,
                 "device_id":"device/phone","person_id":PERSON,"session_actor":ACTOR,
                 "scopes":["read.projections"],"expires_at_unix_ms":client_now_ms() as u64 + 600_000
             }))

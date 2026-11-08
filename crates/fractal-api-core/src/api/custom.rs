@@ -280,8 +280,9 @@ mod tests {
         let credential = "notice-history-paired-credential";
         state.store.append_claim(&ClaimInput {
             subject: "custom/client/notice-history-pair".into(),
-            kind: "custom.client.pairing-completed".into(), actor: None,
+            kind: "custom.client.pairing-completed".into(), actor: Some("person/example".into()),
             fields: BTreeMap::from([
+                ("pairing_operation_version".into(), json!(1)),
                 ("credential_hash".into(), json!(client_v0::credential_digest(credential))),
                 ("session_actor".into(), json!("client/notice-history")),
                 ("person_id".into(), json!("person/example")),

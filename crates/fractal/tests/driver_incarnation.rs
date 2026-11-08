@@ -35,6 +35,7 @@ async fn provider_incarnation(
         })
         .unwrap();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store,

@@ -176,6 +176,7 @@ mod tests {
 
     fn state(root: &std::path::Path) -> AppState {
         AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             store:Arc::new(crate::store::Store::open(&root.join("graph.db"),"diagnostic-test").unwrap()),
             notify:Arc::new(tokio::sync::Notify::new()),event_notify:tokio::sync::watch::channel(0).0,
@@ -190,6 +191,7 @@ mod tests {
         state.store.append_claim(&ClaimInput {
             subject:format!("custom/client/{credential}"),kind:"custom.client.pairing-completed".into(),actor:Some("person/ada".into()),
             fields:BTreeMap::from([
+                ("pairing_operation_version".into(),json!(1)),
                 ("credential_hash".into(),json!(hex::encode(Sha256::digest(credential.as_bytes())))),
                 ("session_actor".into(),json!(actor)),("person_id".into(),json!("person/ada")),
                 ("scopes".into(),scopes),("expires_at_unix_ms".into(),json!(expires)),
