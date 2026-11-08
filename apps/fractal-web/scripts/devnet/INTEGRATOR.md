@@ -58,6 +58,9 @@ The launcher fails closed with `RuntimeError` if the resolved bootstrap cache
 and pnpm store paths overlap, or if the resolved cache and candidate worktree
 paths overlap: neither may contain the other, and equal paths are refused.
 These checks prevent candidate-writable mounts from exposing the trusted cache.
+Candidate worktree overlap is checked before any sandbox tool bootstrap or
+trusted package realization, including on cold invocations and when the cache
+path is a symlink into the worktree.
 
 The configured package store is mounted only in candidate children at
 `/sandbox/pnpm-store`; trusted install invocations pass that path with pnpm's
