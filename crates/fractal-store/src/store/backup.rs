@@ -1817,9 +1817,9 @@ mod tests {
                     header.shards.insert("notes".into(), digest);
                 }
             })),
-            ("unsupported claim backup format/version: \"st3.claim-backup\" version 6", Box::new(|records| {
+            ("unsupported claim backup format/version: \"st3.claim-backup\" version 7", Box::new(|records| {
                 if let Record::Header(header) = &mut records[0] {
-                    header.version = 6;
+                    header.version = 7;
                 }
             })),
         ];

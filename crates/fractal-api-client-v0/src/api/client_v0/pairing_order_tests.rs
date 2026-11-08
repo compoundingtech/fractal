@@ -59,7 +59,7 @@ pub(super) fn replicate(from: &AppState, to: &AppState) {
             subject:format!("host/{}", to.store.origin()),kind:"fleet.member-admitted".into(),actor:None,
             fields:serde_json::from_value(json!({
                 "fleet_id":"pairing-fleet",
-                "member_key":peer.public(),"via":"member","sponsor":from.store.origin(),
+                "member_key":peer.public(),"via":"member","sponsor":format!("host/{}", from.store.origin()),
                 "writer_floor":0,"mode":"listening",
             })).unwrap(),
             evidence:vec![],expected_subject:None,idempotency_key:None,
