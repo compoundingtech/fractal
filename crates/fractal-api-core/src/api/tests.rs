@@ -37,7 +37,7 @@ fn empty_process_environment_is_unavailable() {
     let ancestry = harness_ancestor(pid, Some(&peer));
     child.kill().unwrap();
     child.wait().unwrap();
-    assert_eq!(identity, Some(HarnessAncestry::Unavailable), "empty environ local identity");
+    assert_eq!(identity, Err(AncestryUnavailableReason::EmptyEnvironment), "empty environ local identity");
     assert_eq!(ancestry, HarnessAncestry::Unavailable, "empty environ ancestry walk");
 }
 
@@ -48,20 +48,20 @@ fn person_uid_boundary_stops_before_unreadable_foreign_ancestors() {
         let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
         let (_, birth) = local_harness_process(pid).unwrap().generation.unwrap();
         for (ancestor, expected) in [
-            (Some(HarnessProcess { uid: 0, generation: None }), HarnessAncestry::Person),
-            (Some(HarnessProcess { uid: 1000, generation: None }), HarnessAncestry::Unavailable),
-            (None, HarnessAncestry::Unavailable),
+            (Ok(HarnessProcess { uid: 0, generation: None, generation_error: None }), HarnessAncestry::Person),
+            (Ok(HarnessProcess { uid: 1000, generation: None, generation_error: None }), HarnessAncestry::Unavailable),
+            (Err(AncestryUnavailableReason::ProcessMetadataInvalid("fixture")), HarnessAncestry::Unavailable),
         ] {
-            let result = walk_harness_ancestry(pid, Some(&peer), |candidate| {
+            let result = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer), |candidate| {
                 if candidate == pid {
-                    Some(HarnessProcess { uid: 1000, generation: Some((pid + 1, birth)) })
+                    Ok(HarnessProcess { uid: 1000, generation: Some((pid + 1, birth)), generation_error: None })
                 } else {
-                    ancestor
+                    ancestor.clone()
                 }
             }, |candidate| {
                 assert_eq!(candidate, pid, "foreign or unreadable ancestors need no environment read");
-                Some(HarnessAncestry::Person)
-            });
+                Ok(HarnessAncestry::Person)
+            }), |_| {});
             assert_eq!(result, expected);
         }
     });
@@ -73,15 +73,15 @@ fn captured_connector_case(captured: bool, changed_at: Option<usize>) -> Harness
         let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
         let process = local_harness_process(pid).unwrap();
         let mut inspection = 0;
-        walk_harness_ancestry(pid, captured.then_some(&peer), |_| {
-            let mut current = process;
+        ancestry_or_record(walk_harness_ancestry(pid, captured.then_some(&peer), |_| {
+            let mut current = process.clone();
             if changed_at == Some(inspection) {
                 current.generation.as_mut().unwrap().1 =
                     current.generation.unwrap().1.wrapping_add(1);
             }
             inspection += 1;
-            Some(current)
-        }, |_| Some(HarnessAncestry::Bound("agent/fixture/worker".into())))
+            Ok(current)
+        }, |_| Ok(HarnessAncestry::Bound("agent/fixture/worker".into()))), |_| {})
     })
 }
 
@@ -104,6 +104,55 @@ fn ancestry_failed_connector_capture_is_unavailable() {
 fn ancestry_matching_connector_capture_binds() {
     assert_eq!(captured_connector_case(true, None),
         HarnessAncestry::Bound("agent/fixture/worker".into()));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_records_environment_read_failure() {
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let process = local_harness_process(pid).unwrap();
+        let ancestor = pid + 1;
+        let mut recorded = Vec::new();
+        let result = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer),
+            |_| {
+                let mut current = process.clone();
+                current.generation.as_mut().unwrap().0 = ancestor;
+                Ok(current)
+            },
+            |candidate| if candidate == pid { Ok(HarnessAncestry::Person) } else {
+                Err(AncestryUnavailableReason::ProcessReadFailed {
+                    operation: "proc-environ-read", error: "Permission denied".into(),
+                })
+            }),
+            |cause| recorded.push((cause.pid, cause.reason.clone())));
+        assert_eq!(result, HarnessAncestry::Unavailable);
+        assert_eq!(recorded, vec![(Some(ancestor), AncestryUnavailableReason::ProcessReadFailed {
+            operation: "proc-environ-read", error: "Permission denied".into(),
+        })]);
+    });
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_records_generation_change() {
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let process = local_harness_process(pid).unwrap();
+        let mut inspection = 0;
+        let mut recorded = Vec::new();
+        let result = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer), |_| {
+            let mut current = process.clone();
+            if inspection == 1 {
+                current.generation.as_mut().unwrap().1 += 1;
+            }
+            inspection += 1;
+            Ok(current)
+        }, |_| Ok(HarnessAncestry::Bound("agent/fixture/worker".into()))),
+            |cause| recorded.push((cause.pid, cause.reason.clone())));
+        assert_eq!(result, HarnessAncestry::Unavailable);
+        assert_eq!(recorded, vec![(Some(pid), AncestryUnavailableReason::AncestorGenerationChanged)]);
+    });
 }
 
 // A real serving-boundary probe for manual person-CLI integration checks.
