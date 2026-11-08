@@ -865,15 +865,16 @@ mod schema_install_tests {
          WHERE ?5 IS NOT NULL AND kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
              AND json_extract(body,'$.fields.expires_at_unix_ms') IS NULL AND json_type(body,'$.fields') IS NULL
          UNION
-         SELECT granted.id FROM claims AS policy INDEXED BY claims_assistant_v1_principal_index
+         SELECT granted.id FROM claims AS policy INDEXED BY claims_assistant_v1_principal_expiry_index
          JOIN claims AS granted INDEXED BY claims_subject_kind_accepted_index
              ON granted.subject=policy.subject AND granted.kind=?1
          WHERE ?5 IS NOT NULL AND policy.kind=?4 AND policy.origin=granted.origin
              AND COALESCE(json_extract(policy.body,'$.fields.principal'),'assistant/chatgpt')=?2
+             AND json_extract(policy.body,'$.fields.expires_at_unix_ms')>?5
              AND COALESCE(json_extract(granted.body,'$.fields.principal'),'assistant/chatgpt')=?2)
      SELECT claims.id FROM eligible JOIN claims ON claims.id=eligible.id
      WHERE ?5 IS NULL OR claims.origin<>?6 OR NOT EXISTS (
-         SELECT 1 FROM claims AS revoked INDEXED BY claims_subject_kind_accepted_index
+         SELECT 1 FROM claims AS revoked INDEXED BY claims_assistant_v1_transition_index
          WHERE revoked.subject=claims.subject AND revoked.kind=?3
          AND revoked.origin=claims.origin AND revoked.actor=claims.actor
          AND json_extract(revoked.body,'$.fields.issuer')=revoked.actor
@@ -918,7 +919,7 @@ mod schema_install_tests {
             let connection = Connection::open(&path).unwrap();
             connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
             install_initial_schema(&connection, true).unwrap();
-            connection.execute_batch("DROP INDEX claims_assistant_v1_principal_index; DROP INDEX claims_assistant_v1_principal_expiry_index;").unwrap();
+            connection.execute_batch("DROP INDEX claims_assistant_v1_principal_index; DROP INDEX claims_assistant_v1_principal_expiry_index; DROP INDEX claims_assistant_v1_transition_index;").unwrap();
             connection.pragma_update(None, "user_version", version).unwrap();
             connection.execute(
                 "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES('batch','node',1,'hash','1')",
@@ -962,6 +963,9 @@ mod schema_install_tests {
             }
             assert!(plan(&connection, ACTIVE, true).iter().any(|step|
                 step.contains(EXPIRY_INDEX) && step.contains("<expr>>?")));
+            assert!(plan(&connection, ACTIVE, true).iter().any(|step|
+                step.contains("claims_assistant_v1_transition_index")
+                    && step.contains("subject=? AND kind=? AND origin=? AND actor=?")));
             for (principal, mut expected) in [
                 ("assistant/chatgpt", vec!["chatgpt".to_owned(), "legacy".to_owned()]),
                 ("assistant/mcp", vec!["mcp".to_owned()]),
