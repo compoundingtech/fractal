@@ -2152,6 +2152,8 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::open(&root.path().join("credits.db"), "cost-node").unwrap();
     store.set_usage_limits_writers(vec![WRITER.into()]).unwrap();
+    // Complete initialization outside measured request scopes; joining the worker is deterministic.
+    store.wait_for_usage_credit_backfill().unwrap();
     let now = chrono::Utc::now().timestamp_millis() as u64;
     let time = |at: u64| chrono::DateTime::from_timestamp_millis(at as i64).unwrap().to_rfc3339();
     let append = |credit_id: &str, state: &str, expires: u64, n: u64| {
@@ -2181,6 +2183,9 @@ fn slo_credit_sql_work_is_bounded_independently_of_durable_history() {
         }
         for configured in [true, false] {
             store.set_usage_limits_writers(if configured { vec![WRITER.into()] } else { vec![] }).unwrap();
+            if configured {
+                store.wait_for_usage_credit_backfill().unwrap();
+            }
             let mut samples = Vec::new();
             for _ in 0..4 {
                 let scope = work::SqliteWorkScope::start();

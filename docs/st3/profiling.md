@@ -326,6 +326,8 @@ readings, and writes nothing.
 Quota windows merge `harness.limits` and `usage.limits.observed` by provider account digest and
 window, selecting the newest provider observation time across hosts (canonical claim order
 breaks ties). Each window retains its own freshness clock, reset, `SOURCE` and `HOST`.
+A harness partial refresh emits only explicitly present windows: a 5h-only reading neither
+replaces weekly evidence nor advances weekly freshness.
 `reported` carries a percentage; `unreported` is unknown, never zero; `unsupported` is shown
 explicitly as unsupported rather than no-data. The existing one-hour freshness window applies.
 Scheduling, quota diagnostics and enforcement read harness-only evidence; producer clocks and
@@ -355,8 +357,17 @@ of measurement time. Within a state class (`available` and `unknown` share one),
 provider `measured_at` at full RFC3339 precision wins, then claim ID breaks equal-time ties
 consistently across members. An incrementally maintained local projection retains the winning
 reading per provider/account/credit identity **and writer**, including excluded writers.
+The durable usage kind has no numeric retention bound. Store open does not scan retained usage
+history or wait for credit backfill: historical initialization resumes asynchronously from a
+persisted cursor in bounded batches, releasing the writer lock between batches. A missing
+inventory with no configured writers skips initialization; later configured access starts the
+same bounded catch-up, never a synchronous history fold.
 SLO requests and the SLO-history tick read those heads, filter the current writer configuration,
 then apply the same state-class/time/claim-ID ordering across writers.
+Until catch-up completes, both CAM rows are unknown (`no-data`, null remaining percentage),
+even when partial evidence looks successful. Their `current` and `explain` text explicitly say
+`catching-up` with the processed store index and target index; progress counts the claim-store
+cut, not decoded credit readings. Clients display that text without parsing it.
 Read work depends on retained identities and writers, not the
 number of durable observations. An empty writer configuration returns unknown credit rows without
 credit SQL. Rows retain the selected claim and disposition evidence. Missing expiry, unknown state,

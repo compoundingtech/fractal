@@ -155,6 +155,7 @@ fn every_persistent_table_has_a_projection_scope() {
         "account_limit_seats",
         "local_usage_credit_heads",
         "local_usage_credit_pending",
+        "local_usage_credit_progress",
         "local_latest_slots",
         "local_resource_projection_pending",
         // Member-local duration windows and dirty runs, rebuilt from canonical claims.

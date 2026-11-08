@@ -989,6 +989,18 @@ delivery order. Missing/unknown/unreported/unsupported evidence is
 `no-data`, stale evidence is `stale`; neither proves success. These rows describe observed
 credits only and do not enforce quotas or redeem credits.
 
+The durable usage kind has no numeric retention bound. Opening a store never scans retained
+usage history or waits for credit initialization. A missing inventory remains uninitialized
+with no configured writers; configuring writers or directly reading the inventory starts
+asynchronous, bounded catch-up batches with a persisted resumable cursor and a released writer
+lock between batches. Until complete, **both** CAM rows have `status: "no-data"` and null
+`remaining_percent`, never success from partial evidence. Their `current` and `explain` display
+text explicitly say `catching-up through store index N of M`; these are claim-store progress
+indices, not counts of decoded credits. The status enum is unchanged. Clients show the supplied
+text rather than parsing it. An empty writer configuration still returns unknown credit rows
+without credit SQL. Once caught up, reads use incremental per-identity/per-writer heads rather
+than folding the retained observation history.
+
 `GET /v1/client/slo/history?id=…&since_ms=…&until_ms=…&steps=…` reads what was left of one row
 across a period, from the daemon's local observation log (one reading a minute, kept seven days;
 it is not in the graph and does not replicate). The period defaults to the 24 hours ending now,

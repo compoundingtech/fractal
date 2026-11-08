@@ -478,31 +478,46 @@ Inline storage here proves neither encoded size nor execution-cost bounds.
 
 ## Incremental observed credit heads
 
-`fractal_store::store::usage_credits` owns `lv-h3e04a0b79a9c`,
-`lv-h9b470b7969be`, `lv-hfa1f0cadbda8`, `lv-h78cef2ce4382`,
-`lv-h8e8ca6ee8350`, `lv-hb2a7b858df59` and `lv-h032c204ec84f`.
+`fractal_store::store::usage_credits` owns `lv-he501efb4d29a`,
+`lv-ha6f6e9f76f2b`, `lv-h974bed02ce8f`, `lv-hfa1f0cadbda8`,
+`lv-hf26ee56ee42a`, `lv-h8e8ca6ee8350`, `lv-hb2a7b858df59`,
+`lv-h032c204ec84f` and `lv-h6308405566ae`.
 The projection retains one inline credit JSON object and claim ID per
 provider/account/credit ID/writer. Heads compare absorbing state precedence
 (`redeemed` > `forfeited` > `available`/`unknown`), then exact seconds/nanoseconds
-and claim ID within a state class. SQL extracts the rank from the retained JSON;
-the table layout is unchanged.
-Its pending table contains newly admitted claim IDs, drained in the projection
-transaction; only bootstrap and explicit rebuild visit retained history.
-Provider, account, credit ID, actor and claim ID TEXT keys and credit JSON
-remain variable-size values. The owner must preserve exact ordering and
-writer-selectable evidence when moving these columns and queue reclamation
-to bounded/reference storage. Head-count-bounded reads prove no byte bound.
-The fixed v2 metadata marker forces a historical refold on upgrades from the
-timestamp-only v1 projection, recovering terminal evidence previously discarded.
-It is one initialization scalar, not growing history.
+and claim ID within a state class. SQL extracts the rank from retained JSON.
+The pending table contains newly admitted claim IDs, drained in their append or
+replication transaction independently of historical completeness.
+Append and replication leave an absent projection absent: authoritative claims
+arriving before initialization are included in the worker's initial target.
 
-The module's tests own `lv-hd4c1f52b5ad6`, `lv-hd2ecc22bed99`,
-`lv-h342a097047a2`, `lv-h9706066ba498` and `lv-hcec7294d27f7`:
-fixture-only resets, legacy-head replacement and backfills exercise bootstrap,
-v1 upgrade recovery and pending catch-up using existing inline claim IDs.
-State-order regressions cover both delivery orders, replication, rebuild and
-writer-configuration changes. Preserve these scenarios
-when the production representation changes.
+Historical catch-up persists a singleton numeric claim-store-index cursor and
+target. Open only installs/resumes metadata for an already-present projection;
+an absent projection with empty writer configuration is left absent. Configuring
+writers or directly reading credits starts a background worker, never a synchronous
+historical fold. Each writer transaction visits at most 64 claim rows and commits
+its cursor with the absorbing upserts, releasing the writer between batches.
+No history-sized pending insertion or index build is required. Interrupted workers
+resume from the committed cursor. Queue ownership follows the resource-backfill
+lifecycle: dropping the store prevents another batch from retaining its writer.
+Read snapshots expose `catching_up`, `through_index` and `target_index` atomically
+with the heads; incremental writes never promote partial historical heads to complete.
+Legacy timestamp-only heads are repaired by the same bounded refold. Explicit
+rebuild removes obsolete heads and resets the durable cursor.
+
+There is no numeric retention limit for durable usage observations. Provider,
+account, credit ID, actor and claim ID TEXT keys and credit JSON remain
+variable-size values. Bounded claim batches prove neither a per-claim byte bound
+nor a bound on the number of retained heads. The owner must preserve exact
+ordering, resumability and writer-selectable evidence when moving these columns
+and queue reclamation to bounded/reference storage.
+
+The module's fixture-only reset/update sites are inventoried under
+`fractal_store::store::usage_credits::tests`. Regressions cover legacy recovery,
+pending catch-up, both delivery orders, replication, rebuild, configuration
+changes, interruption/reopen at several persisted cursors versus a full fold,
+and an incrementally appended claim while a historical worker is paused after
+commit. Preserve these scenarios when the representation changes.
 
 `fractal_store::store::limits` owns revised `lv-hc361226a445f` and
 `lv-he63d64cf72c5`. Quota reclamation now binds the writer subject as well as

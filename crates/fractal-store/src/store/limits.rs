@@ -167,7 +167,7 @@ pub fn reading(origin: &str, body: &Value) -> Option<(AccountLimit, String)> {
                     [
                         ("weekly", "weekly_percent", "weekly_resets_at_unix_ms"),
                         ("5h", "five_hour_percent", "five_hour_resets_at_unix_ms"),
-                    ].into_iter().map(|(window, used, resets)| LimitWindow {
+                    ].into_iter().filter(|(_, used, _)| fields.get(*used).is_some()).map(|(window, used, resets)| LimitWindow {
                         window: window.into(),
                         used_percent: percent(used),
                         resets_at_unix_ms: fields[resets].as_u64(),

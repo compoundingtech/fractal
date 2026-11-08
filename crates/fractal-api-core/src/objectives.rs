@@ -678,6 +678,34 @@ mod tests {
     }
 
     #[test]
+    fn five_hour_only_harness_refresh_preserves_weekly_budget_and_its_clock() {
+        use crate::LimitsStore;
+        let store = crate::store::Store::open_memory("alder").unwrap();
+        for fields in [
+            json!({"driver":"claude", "account":"claude/example",
+                "weekly_percent":40.0, "measured_at_unix_ms":1000}),
+            json!({"driver":"claude", "account":"claude/example",
+                "five_hour_percent":20.0, "measured_at_unix_ms":2000}),
+        ] {
+            store.append_claim(&crate::model::ClaimInput {
+                subject:"agent/sample/harness".into(), actor:Some("agent/sample/harness".into()),
+                kind:"harness.limits".into(), fields:serde_json::from_value(fields).unwrap(),
+                evidence:vec![], expected_subject:None, idempotency_key:None,
+            }).unwrap();
+        }
+        let limits = store.account_limits().unwrap();
+        let report = rows(&json!({"targets":[]}), &limits, 2500, 1000);
+        let weekly = by_id(&report, "claude/example/weekly");
+        assert_eq!(weekly["remaining_percent"], 60.0);
+        assert_eq!(weekly["status"], "stale");
+        assert_eq!(weekly["measured_at_unix_ms"], 1000);
+        let five = by_id(&report, "claude/example/5h");
+        assert_eq!(five["remaining_percent"], 80.0);
+        assert_eq!(five["status"], "met");
+        assert_eq!(five["measured_at_unix_ms"], 2000);
+    }
+
+    #[test]
     fn quota_coverage_and_per_window_clocks_are_visible() {
         let mut account = limit("claude/example", None, None, None);
         account.windows = serde_json::from_value(json!([

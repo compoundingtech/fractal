@@ -80,7 +80,8 @@ fn append_projects_each_claim_kind_in_order() {
 }
 
 #[test]
-fn replicated_claims_project_arrangements_and_ordered_memberships_only() {
+fn replicated_claims_project_credits_arrangements_and_ordered_memberships_only() {
+    assert_eq!(taking(projectors::REPLICATED, "usage.limits.observed"), ["usage-credits"]);
     assert_eq!(taking(projectors::REPLICATED, "arrangement.edited"), ["arrangement-project"]);
     assert_eq!(
         taking(projectors::REPLICATED, "ordered-membership.edited"),

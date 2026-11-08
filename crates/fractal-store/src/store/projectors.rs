@@ -115,7 +115,7 @@ pub const APPEND: &[AppendProjector] = &[
     AppendProjector {
         name: "usage-credits",
         takes: Takes::Kinds(&["usage.limits.observed"]),
-        project: |transaction, _| usage_credits::flush(transaction),
+        project: usage_credits::project,
     },
     AppendProjector {
         name: "arrangements",
@@ -137,6 +137,11 @@ pub const APPEND: &[AppendProjector] = &[
 /// Projects a replicated claim the incremental projection extends the graph with, after every
 /// claim of the range has its event row.
 pub const REPLICATED: &[AppendProjector] = &[
+    AppendProjector {
+        name: "usage-credits",
+        takes: Takes::Kinds(&["usage.limits.observed"]),
+        project: usage_credits::project,
+    },
     AppendProjector {
         name: "arrangement-project",
         takes: Takes::Kinds(&["arrangement.edited"]),

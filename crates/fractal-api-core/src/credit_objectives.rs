@@ -172,18 +172,45 @@ impl Credits {
 /// Retaining every writer's head lets configuration changes activate older authorized evidence.
 /// Only currently configured writers contribute; changing that set never changes stored evidence.
 pub fn rows(store: &Store, now: u64, fresh_ms: u64) -> anyhow::Result<Vec<Value>> {
-    let mut credits = Credits::default();
+    let credits = Credits::default();
     let writers = store.usage_limits_writers();
     // The unconfigured SLO/history tick must do no credit SQL, even on populated stores.
     if writers.is_empty() {
         return Ok(credits.rows(now, fresh_ms));
     }
-    for reading in store.usage_credit_readings()? {
+    let snapshot = store.usage_credit_readings()?;
+    Ok(snapshot_rows(&snapshot, &writers, now, fresh_ms))
+}
+
+fn snapshot_rows(
+    snapshot: &crate::store::UsageCreditSnapshot,
+    writers: &std::collections::BTreeSet<String>,
+    now: u64,
+    fresh_ms: u64,
+) -> Vec<Value> {
+    let mut credits = Credits::default();
+    for reading in &snapshot.readings {
         if writers.contains(&reading.actor) {
             credits.observe_reading(&reading.claim_id, &reading.credit);
         }
     }
-    Ok(credits.rows(now, fresh_ms))
+    let mut rows = credits.rows(now, fresh_ms);
+    if snapshot.catching_up {
+        for row in &mut rows {
+            row["status"] = json!("no-data");
+            row["remaining_percent"] = Value::Null;
+            row["current"] = json!(format!(
+                "unknown; catching-up through store index {} of {}; partial evidence: {}",
+                snapshot.through_index, snapshot.target_index, row["current"].as_str().unwrap_or("unknown"),
+            ));
+            row["explain"] = json!(format!(
+                "{} Inventory catching-up through store index {} of {} using resumable bounded batches; partial evidence cannot prove either objective.",
+                row["explain"].as_str().unwrap_or(""),
+                snapshot.through_index, snapshot.target_index,
+            ));
+        }
+    }
+    rows
 }
 
 #[cfg(test)]
@@ -213,6 +240,42 @@ mod tests {
             "body": {"fields": {"readings": [], "credit_readings": readings}},
             "predecessors": [], "accepted_at_unix_ms": NOW,
         })).unwrap()
+    }
+
+    #[test]
+    fn catching_up_never_proves_either_objective_even_with_successful_partial_evidence() {
+        let store = Store::open_memory("alder").unwrap();
+        store.set_usage_limits_writers(vec![PRODUCER.into()]).unwrap();
+        let reading = credit("one", "redeemed", NOW + 2 * DAY_MS);
+        store.append_claim(&crate::model::ClaimInput {
+            subject: PRODUCER.into(), kind: "usage.limits.observed".into(), actor: Some(PRODUCER.into()),
+            fields: BTreeMap::from([
+                ("readings".into(), json!([])), ("credit_readings".into(), json!([reading])),
+            ]),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        store.wait_for_usage_credit_backfill().unwrap();
+        let complete = store.usage_credit_readings().unwrap();
+        for row in snapshot_rows(&complete, &store.usage_limits_writers(), NOW, DAY_MS) {
+            assert_eq!(row["status"], "met");
+        }
+        for through_index in [0, 3, 9] {
+            for include_readings in [false, true] {
+                let partial = crate::store::UsageCreditSnapshot {
+                    readings: if include_readings { complete.readings.clone() } else { Vec::new() },
+                    catching_up: true, through_index, target_index: 10,
+                };
+                let rows = snapshot_rows(&partial, &store.usage_limits_writers(), NOW, DAY_MS);
+                assert_eq!(rows.len(), 2);
+                for row in rows {
+                    assert_eq!(row["status"], "no-data");
+                    assert!(row["remaining_percent"].is_null());
+                    let progress = format!("catching-up through store index {through_index} of 10");
+                    assert!(row["current"].as_str().unwrap().contains(&progress));
+                    assert!(row["explain"].as_str().unwrap().contains(&progress));
+                }
+            }
+        }
     }
 
     #[test]
@@ -396,6 +459,7 @@ mod tests {
         let path = root.path().join("credits.db");
         let store = Store::open(&path, "alder").unwrap();
         store.set_usage_limits_writers(vec![PRODUCER.into()]).unwrap();
+        store.wait_for_usage_credit_backfill().unwrap();
         let now = chrono::Utc::now().timestamp_millis() as u64;
         let mut reading = credit("one", "available", now + DAY_MS / 2);
         reading["measured_at"] = json!(time(now));
@@ -441,6 +505,7 @@ mod tests {
         }
         // Reconfiguring the local writer set activates the original claim, with no reappend.
         store.set_usage_limits_writers(vec![PRODUCER.into()]).unwrap();
+        store.wait_for_usage_credit_backfill().unwrap();
         let rows = crate::api::slo_rows(&store).unwrap();
         for objective in ["CAM-R01/anthropic", "CAM-R02/anthropic"] {
             let row = rows.iter().find(|row| row["id"] == objective).unwrap();
@@ -466,6 +531,7 @@ mod tests {
                     let path = root.path().join("credits.db");
                     let store = Store::open(&path, "alder").unwrap();
                     store.set_usage_limits_writers(vec![PRODUCER.into(), OTHER.into()]).unwrap();
+                    store.wait_for_usage_credit_backfill().unwrap();
                     let mut older = credit("one", older_state, NOW - DAY_MS);
                     older["measured_at"] = json!(time(NOW - 1));
                     let mut newer = credit("one", newer_state, NOW - DAY_MS);
@@ -497,6 +563,7 @@ mod tests {
                     drop(store);
                     let store = Store::open(&path, "alder").unwrap();
                     store.set_usage_limits_writers(vec![PRODUCER.into(), OTHER.into()]).unwrap();
+                    store.wait_for_usage_credit_backfill().unwrap();
                     for row in rows(&store, NOW, DAY_MS).unwrap() {
                         assert_eq!(row["evidence"][0]["claim_id"], expected.as_str());
                         assert_eq!(row["status"], status);
@@ -513,6 +580,7 @@ mod tests {
         let path = root.path().join("credits.db");
         let store = Store::open(&path, "alder").unwrap();
         store.set_usage_limits_writers(vec![PRODUCER.into(), OTHER.into()]).unwrap();
+        store.wait_for_usage_credit_backfill().unwrap();
         let now = timestamp("2026-11-08T10:00:01Z").unwrap();
         let append = |actor: &str, at: &str, state: &str| {
             let mut reading = credit("one", state, now - DAY_MS);
@@ -542,6 +610,7 @@ mod tests {
         drop(store);
         let store = Store::open(&path, "alder").unwrap();
         store.set_usage_limits_writers(vec![PRODUCER.into()]).unwrap();
+        store.wait_for_usage_credit_backfill().unwrap();
         assert_eq!(rows(&store, now, DAY_MS).unwrap()[0]["evidence"][0]["claim_id"], expected);
         store.set_usage_limits_writers(vec![OTHER.into()]).unwrap();
         assert_eq!(rows(&store, now, DAY_MS).unwrap()[0]["evidence"][0]["claim_id"], other.id);
