@@ -24,13 +24,17 @@ const fakePort = (initial: BrowserPairingStatusReply) => {
 let root: Root | undefined
 let container: HTMLDivElement | undefined
 // Only timers are faked: the poll is a timeout, and React's act still drains real microtasks.
-beforeEach(() => { vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] }) })
+beforeEach(() => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+})
 afterEach(() => {
   act(() => root?.unmount())
   container?.remove()
   root = undefined
   container = undefined
   vi.useRealTimers()
+  vi.unstubAllGlobals()
 })
 
 const mount = async (port: BrowserPairingPort, messageSend: 'granted' | 'ungranted' = 'ungranted') => {

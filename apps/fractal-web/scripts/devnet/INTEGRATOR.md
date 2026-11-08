@@ -120,6 +120,8 @@ code. Request secrets and device credentials are held exclusively in HttpOnly,
 Secure, SameSite=Strict cookies. Forgetting revokes the current device before
 clearing its cookie. HTTP and WebSocket gateway requests use that device's
 bearer when present and otherwise retain the read-only publisher bearer.
+The daemon seals the browser grant to `read.projections`, `read.declarations`,
+`read.glasses`, `read.arrangements`, `terminal.read`, and `control.messages`.
 
 ## Trust boundary
 
