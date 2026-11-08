@@ -7272,6 +7272,16 @@ async fn run_up(args: UpArgs) -> Result<()> {
             open_daemon_store(&config, &state_identity)
         })
     })?);
+    store
+        .extension::<fractal_daemon::config::AgentPopulationEnabled>()
+        .0
+        .set(config.agent_population_enabled)
+        .map_err(|_| anyhow::anyhow!("population activation already initialized"))?;
+    store
+        .extension::<fractal_daemon::config::AgentPopulationRepositories>()
+        .0
+        .set(config.agent_population_repositories.clone())
+        .map_err(|_| anyhow::anyhow!("population repository registry already initialized"))?;
     if let Some(fleet_id) = &config.fleet_id {
         store.bind_fleet(fleet_id)?;
     }
