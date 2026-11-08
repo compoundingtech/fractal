@@ -51,8 +51,13 @@ deployment-owned resources; scripts do not provision deployments or credentials.
 | `FRACTAL_INTEGRATOR_GIT_USER_NAME` | Optional launcher-owned local commit name; defaults to `Fractal live-r3 integrator` |
 | `FRACTAL_INTEGRATOR_GIT_USER_EMAIL` | Optional launcher-owned local commit email; defaults to `live-r3@fractal-integrator.invalid` |
 | `FRACTAL_INTEGRATOR_SANDBOX` | Required: `bwrap`; no default or unsandboxed fallback |
-| `FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT` | Absolute, deployment-owned bootstrap scratch directory outside candidate clones and snapshots; `nix-bootstrap-cache/` retains trusted Nix fetcher metadata across isolated bootstrap HOMEs and is not mounted in candidate sandboxes |
+| `FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT` | Absolute, deployment-owned bootstrap scratch directory outside candidate clones and snapshots; `nix-bootstrap-cache/` retains trusted Nix fetcher metadata across isolated bootstrap HOMEs and must be disjoint from candidate worktrees and the pnpm store |
 | `FRACTAL_INTEGRATOR_PNPM_STORE` | Absolute, dedicated writable pnpm package cache outside candidate clones; must contain no credentials |
+
+The launcher fails closed with `RuntimeError` if the resolved bootstrap cache
+and pnpm store paths overlap, or if the resolved cache and candidate worktree
+paths overlap: neither may contain the other, and equal paths are refused.
+These checks prevent candidate-writable mounts from exposing the trusted cache.
 
 The configured package store is mounted only in candidate children at
 `/sandbox/pnpm-store`; trusted install invocations pass that path with pnpm's

@@ -138,6 +138,9 @@ def tools():
         raise RuntimeError('FRACTAL_INTEGRATOR_SANDBOX must be bwrap (no unsandboxed fallback)')
     state = directory('FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT')
     store = directory('FRACTAL_INTEGRATOR_PNPM_STORE')
+    cache = (state / 'nix-bootstrap-cache').resolve()
+    if cache.is_relative_to(store) or store.is_relative_to(cache):
+        raise RuntimeError('Nix bootstrap cache must be disjoint from the pnpm store')
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     store.mkdir(parents=True, exist_ok=True)
     # This file belongs to the trusted launcher checkout, never the candidate.
@@ -201,6 +204,9 @@ def run(args, *, worktree, shell=None, network=False, output=None,
     host_home = Path.home().resolve()
     if host_home == Path('/') or any(host_home.is_relative_to(path) for path in (worktree, store)):
         raise RuntimeError('candidate mounts must not contain the operator home')
+    cache = (state / 'nix-bootstrap-cache').resolve()
+    if cache.is_relative_to(worktree) or worktree.is_relative_to(cache):
+        raise RuntimeError('Nix bootstrap cache must be disjoint from the candidate worktree')
     cwd = Path(working_directory).resolve(strict=True) if working_directory else worktree
     if not cwd.is_relative_to(worktree):
         raise RuntimeError('candidate working directory escapes the worktree')

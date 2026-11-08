@@ -138,6 +138,54 @@ class RunnerTest(unittest.TestCase):
         self.assertEqual(Path(environment['HOME']).parent, self.state)
         self.assertFalse(Path(environment['HOME']).exists())
 
+    def test_tools_refuses_bootstrap_cache_overlapping_pnpm_store(self):
+        self.tools.stop()
+        cache = self.state / 'nix-bootstrap-cache'
+        alias = self.root / 'store-alias'
+        alias.symlink_to(cache, target_is_directory=True)
+        for store in (self.state, cache, cache / 'pnpm', alias):
+            with self.subTest(store=store), patch.dict(os.environ, {
+                    'FRACTAL_INTEGRATOR_SANDBOX': 'bwrap',
+                    'FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT': str(self.state),
+                    'FRACTAL_INTEGRATOR_PNPM_STORE': str(store)}), \
+                    patch.object(sandbox.subprocess, 'run') as execute:
+                with self.assertRaisesRegex(RuntimeError, 'bootstrap cache must be disjoint from the pnpm store'):
+                    sandbox.tools.__wrapped__()
+                execute.assert_not_called()
+
+    def test_tools_refuses_bootstrap_cache_symlink_into_pnpm_store(self):
+        self.tools.stop()
+        (self.state / 'nix-bootstrap-cache').symlink_to(self.store, target_is_directory=True)
+        with patch.dict(os.environ, {
+                'FRACTAL_INTEGRATOR_SANDBOX': 'bwrap',
+                'FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT': str(self.state),
+                'FRACTAL_INTEGRATOR_PNPM_STORE': str(self.store)}), \
+                patch.object(sandbox.subprocess, 'run') as execute:
+            with self.assertRaisesRegex(RuntimeError, 'bootstrap cache must be disjoint from the pnpm store'):
+                sandbox.tools.__wrapped__()
+            execute.assert_not_called()
+
+    def test_run_refuses_bootstrap_cache_overlapping_candidate_worktree(self):
+        cache = self.state / 'nix-bootstrap-cache'
+        cache.mkdir()
+        nested = cache / 'candidate'
+        nested.mkdir()
+        alias = self.root / 'candidate-alias'
+        alias.symlink_to(cache, target_is_directory=True)
+        for worktree in (self.state, cache, nested, alias):
+            with self.subTest(worktree=worktree), \
+                    patch.object(sandbox.subprocess, 'run') as execute:
+                with self.assertRaisesRegex(RuntimeError, 'bootstrap cache must be disjoint from the candidate worktree'):
+                    sandbox.run(['true'], worktree=worktree)
+                execute.assert_not_called()
+
+    def test_run_refuses_bootstrap_cache_symlink_into_candidate_worktree(self):
+        (self.state / 'nix-bootstrap-cache').symlink_to(self.worktree, target_is_directory=True)
+        with patch.object(sandbox.subprocess, 'run') as execute:
+            with self.assertRaisesRegex(RuntimeError, 'bootstrap cache must be disjoint from the candidate worktree'):
+                sandbox.run(['true'], worktree=self.worktree)
+            execute.assert_not_called()
+
     def test_bootstrap_cache_is_not_exposed_by_candidate_mounts(self):
         cache = Path(sandbox.bootstrap_env('/isolated-home', self.state)['XDG_CACHE_HOME'])
         (self.worktree / '.git').mkdir()
