@@ -8208,6 +8208,15 @@ async fn previous_release_upgrades_in_place_beside_the_idle_outbox_and_rolls_bac
     let mut before = listed(&o).await;
     assert_eq!(before, [(first, "read".to_owned()), (second, "sent".to_owned())]);
 
+    // The drain checks the recipient's host again after restart. Give the queued item a
+    // local recipient eligible for the stream rather than relying on an undeclared seat.
+    let declaration = root.path().join("outbox-recipient.kdl");
+    fs::write(&declaration, format!(
+        "version 2\nagent \"fleet-reader\" {{ host \"o\"; workspace {:?}; command \"true\"; restart \"never\" }}\n",
+        o.root,
+    )).unwrap();
+    o.st_ok(&["apply", "--no-gate-check", declaration.to_str().unwrap(), "--as", PERSON]);
+
     let recovery = previous_release_archive(&o, root.path());
     // Upgrade in place: the mail reads the same, and the outbox is there and empty.
     o.stop();
