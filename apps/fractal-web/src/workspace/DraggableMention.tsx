@@ -9,5 +9,6 @@ import { paneKey, subjectOfRef } from './subject.ts'
  */
 export const DraggableMention = ({ subject, children }: { readonly subject: string; readonly children?: React.ReactNode }) => {
   const drag = useEntityDrag({ ref: paneKey(subjectOfRef(subject)) })
-  return <span data-entity-mention={subject} onPointerDown={drag.onPointerDown} onDragStart={event => event.preventDefault()}>{children}</span>
+  // Capture: a React Aria link's press stops the pointer's propagation.
+  return <span data-entity-mention={subject} onPointerDownCapture={drag.onPointerDown} onDragStart={event => event.preventDefault()}>{children}</span>
 }

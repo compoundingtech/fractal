@@ -47,6 +47,7 @@ export const scenarioExemptions: readonly string[] = [
   'Offline:contract-fixture',
   'Populated:contract-fixture',
   'ScriptedRepair:contract-fixture',
+  'SidebarDragToPane:contract-fixture',
   'Splits:contract-fixture',
   'SplitsDragAndDrop:contract-fixture',
   'TabSwitchGeometry:contract-fixture',
@@ -188,6 +189,37 @@ export const SplitsDragAndDrop: Story = {
     await waitFor(() => expect(strips()).toHaveLength(1))
     expect(tabs()).toHaveLength(2)
     expect(surface()).toBe(node)
+    canvasElement.dataset.proof = 'passed'
+  },
+}
+
+/**
+ * A sidebar row on the same pointer drag: an agent dragged from the roster to a pane's right edge
+ * splits there and opens once, at the drop, under a live chip. Released over its own row, the drag
+ * is not also a press that opens it.
+ */
+export const SidebarDragToPane: Story = {
+  args: { state: 'populated' },
+  play: async ({ canvasElement, args }) => {
+    await waitFor(() => assertProductionAppState(canvasElement, args.state, true), { timeout: 60000 })
+    const strips = () => [...canvasElement.querySelectorAll<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"]')]
+    const tabs = () => strips().flatMap(strip => [...strip.querySelectorAll<HTMLElement>('[role="tab"]')])
+    await waitFor(() => expect(tabs()).toHaveLength(1))
+    const other = fixtureProjections.agents.find(row => row.id !== appStoryAgent(args.state))!
+    const row = () => canvasElement.querySelector<HTMLElement>(`[data-sidebar-tree-key="${other.id}"]`)
+    await waitFor(() => expect(row()).not.toBeNull())
+    // Released over itself: nothing opens.
+    const own = row()!.getBoundingClientRect()
+    drag(row()!, { x: own.left + own.width / 2 + 2, y: own.top + own.height / 2 + 12 })()
+    await new Promise(resolve => setTimeout(resolve, 200))
+    expect(tabs()).toHaveLength(1)
+    const slot = canvasElement.querySelector<HTMLElement>('[data-drop-content]')!.getBoundingClientRect()
+    const drop = drag(row()!, { x: slot.right - 12, y: slot.top + slot.height / 2 })
+    await waitFor(() => expect(canvasElement.querySelector('[data-drop-overlay]')?.getAttribute('data-drop-overlay')).toBe('right'))
+    await waitFor(() => expect(document.querySelector('[data-testid="drag-chip"]')).not.toBeNull())
+    drop()
+    await waitFor(() => expect(strips()).toHaveLength(2))
+    expect(tabs()).toHaveLength(2)
     canvasElement.dataset.proof = 'passed'
   },
 }

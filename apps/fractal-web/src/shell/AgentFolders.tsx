@@ -38,6 +38,7 @@ import { filterFolders, matchesRow, parseSidebarQuery, sortMembers, type Sidebar
 import { fixtureSidebarState, sidebarState } from './sidebar/state.ts'
 import { outsideFilterMenu, showRowFacts, useMachineMemory, withRememberedMachines } from './sidebar/show.ts'
 import { sameFolderFleet } from './sameFolderFleet.ts'
+import { FolderDropIndicator, useFolderPointerDrag } from './folderPointerDrag.tsx'
 import type { SidebarFilters } from './sidebar/state.ts'
 import { StatusIcon, agentStatus, compactTime, type AgentStatus } from './sidebar/StatusIcon.tsx'
 import { SidebarToolbar } from './sidebar/Toolbar.tsx'
@@ -171,6 +172,8 @@ const styles = stylex.create({
   },
   drag: { position: 'absolute', insetInlineEnd: 0, top: 0, opacity: { default: 0, ':focus-visible': 1 }, width: 16, height: 16, outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: geometryVars.focusRing, outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusInset },
   treeContent: { position: 'relative', width: '100%' },
+  // Only an event host: the tree keeps its own box.
+  pointerRoot: { display: 'contents' },
 })
 
 /** Fractal folders own membership; view-only filters, order and collapse use shared persistence. */
@@ -694,10 +697,26 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
       const node = foldersById.get(String(item.key))
       const disabled = node?._tag === 'Agent' && node.parent !== undefined
       const itemState = React.useMemo(() => disabled ? { ...state, isDisabled: true } : state, [state, disabled])
-      return useNativeDraggableItem(item, itemState)
+      const native = useNativeDraggableItem(item, itemState)
+      // A pointer drags rows on the workspace's drag (`folderPointerDrag.tsx`), so no row is natively
+      // draggable: the platform's drag would cancel it. The Move button keeps React Aria's keyboard drag.
+      const { draggable: _draggable, onDragStart: _start, onDrag: _drag, onDragEnd: _end, ...dragProps } = native.dragProps as typeof native.dragProps & { readonly draggable?: unknown; readonly onDragStart?: unknown; readonly onDrag?: unknown; readonly onDragEnd?: unknown }
+      return { ...native, dragProps }
     }
     return { ...nativeDragHooks, useDraggableItem: useSidebarDraggableItem }
   }, [nativeDragHooks, foldersById])
+  const pointerRoot = React.useRef<HTMLDivElement>(null)
+  const pointerDrag = useFolderPointerDrag({
+    root: pointerRoot,
+    nodes: foldersById,
+    mapTarget: dropTarget,
+    apply: (id, target) => {
+      const verdict = props.canDrop([id], target)
+      if ('ok' in verdict) props.onMove({ items: [id], target })
+      else props.onEditRefused?.(verdict.refused)
+    },
+  })
+  const justDragged = pointerDrag.justDragged
   // Status names replace only their owning RAC item, retaining sibling measurement keys.
   const elements = React.useMemo(() => new Map<string, CachedBoundElement>(), [props.onSelect, props.onOpenMission])
   const items = React.useMemo(() => {
@@ -721,7 +740,7 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
         disclosurePlacement: node._tag === 'Agent' ? 'trailing' : 'leading',
         onAction: node._tag !== 'Agent' ? undefined
           : node.missionId !== undefined ? () => props.onOpenMission?.(node.missionId!)
-          : node.parent === undefined ? () => props.onSelect?.(node.id) : undefined,
+          : node.parent === undefined ? () => { if (!justDragged()) props.onSelect?.(node.id) } : undefined,
         render: state => <BoundFolderRow node={node} touchDisclosure={state.trailingDisclosure ? <SidebarTreeDisclosure expanded={state.expanded} noun={disclosureNoun(node)} /> : undefined} />,
       }
       elements.set(node.id, { node, element })
@@ -730,7 +749,7 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
     const next = props.tree.map(node => render(node, 0))
     for (const key of elements.keys()) if (!retained.has(key)) elements.delete(key)
     return next
-  }, [props.tree, props.onSelect, props.onOpenMission, props.accessibleNames, props.agentRowHeight, props.rowStatus, elements])
+  }, [props.tree, props.onSelect, props.onOpenMission, props.accessibleNames, props.agentRowHeight, props.rowStatus, elements, justDragged])
   const expandAncestors = (selected: string) => {
     const path: SidebarNode[] = []
     const find = (nodes: readonly SidebarNode[]): boolean => {
@@ -750,7 +769,11 @@ const BoundAgentFolders = (props: AgentFoldersProps) => {
     for (const node of foldersById.values()) if (node.children !== undefined && node.collapsed === keys.has(node.id)) props.onToggleCollapsed({ id: node.id, collapsed: !keys.has(node.id) })
   }, [foldersById, props.onToggleCollapsed])
   return <BoundFolderPresentation.Provider value={props}>
-    <AgentFolderTree items={items} expanded={expanded} onExpandedChange={onExpandedChange} treeRef={treeRef} dragAndDropHooks={dragAndDropHooks} />
+    {/* Capture: React Aria's row press stops the pointer's propagation. */}
+    <div ref={pointerRoot} onPointerDownCapture={pointerDrag.onPointerDown} onDragStart={event => event.preventDefault()} {...stylex.props(styles.pointerRoot)}>
+      <AgentFolderTree items={items} expanded={expanded} onExpandedChange={onExpandedChange} treeRef={treeRef} dragAndDropHooks={dragAndDropHooks} />
+    </div>
+    <FolderDropIndicator root={pointerRoot} />
     <RevealAgentRow selected={props.selectedId ?? ''} treeRef={treeRef} items={items} revealKey={props.revealKey} expandAncestors={expandAncestors} />
     {props.treeStatus === undefined && props.unavailable === undefined ? null : <div data-wf-roster-status="" {...stylex.props(styles.rosterStatus)}>
       {typeof props.treeStatus === 'string' ? <SystemNotice kind={props.treeStatus.endsWith('…') ? 'loading' : 'offline'} scope="rail" title={props.treeStatus} /> : props.treeStatus}
