@@ -8386,9 +8386,9 @@ impl Store {
                         "SELECT EXISTS(SELECT 1 FROM replica_restore_quarantine WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)",
                         params![envelope.writer, envelope.sequence, envelope.hash], |row| row.get(0),
                     )?;
-                    let hold = if quarantined { Some("unsigned") } else if keyed && !matches!(
+                    let hold = if quarantined || (keyed && !matches!(
                         prepared_membership.window(&envelope.writer, envelope.sequence), crate::fleet::Window::Keyed(_),
-                    ) {
+                    )) {
                         Some("unsigned")
                     } else if keyed {
                         fleet_admission_hold(&pass, prepared_membership, envelope)?

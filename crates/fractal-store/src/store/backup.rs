@@ -437,7 +437,7 @@ impl Store {
             while let Some(row) = rows.next()? {
                 let payload: Vec<u8> = row.get(2)?;
                 let payload: smallclaims::claim::ReplicaEnvelopePayload =
-                    ciborium::from_reader(payload.as_slice())?;
+                    ciborium::from_reader(payload.as_slice()).map_err(|error| anyhow::anyhow!("backup contains unadmitted envelopes: {error}"))?;
                 anyhow::ensure!(row.get::<_, Option<String>>(3)?.as_deref() == Some("unsigned")
                     && payload.batch.claims.iter().any(|claim| claim.kind == crate::pairing::OPERATION_AUTHORIZED),
                     "backup contains an unadmitted envelope");
