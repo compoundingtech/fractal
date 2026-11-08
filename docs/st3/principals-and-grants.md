@@ -144,6 +144,10 @@ ignored; the last valid policy (or original grant) stays in force. This applies 
 local grants too: an unauthorized newer overlay no longer replaces their policy.
 The principal expression index prunes expired base grants without issuer policy
 candidates, and matching local revocations, before the authenticated Rust fold.
+The SQL materializes matching-principal issuer-policy subjects once, gates
+revocation checks behind expiry eligibility, and pins the existing subject/kind
+revocation index. This avoids a correlated policy lookup per expired grant and a
+quadratic principal-wide revocation plan as completion/revocation history grows.
 Foreign revocations and policy candidates reach Rust because SQL cannot verify
 signatures. The sealed membership fold has a separate generation-keyed cache:
 request-side cold folds populate it without populating the sealing-path cache.
