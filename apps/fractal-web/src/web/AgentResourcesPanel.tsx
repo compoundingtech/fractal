@@ -23,6 +23,8 @@ import { resourceState, resourceTitle, type ResourcePage } from '../resources/ag
 import { cancelMeasure, measureEnd } from './perfMarks.ts'
 import type { OpenOperation } from '../telemetry/ux.ts'
 import { useNativeDetails } from './useNativeDetails.ts'
+import { useEntityDrag } from '@fractal/ui/workspace/react'
+import { paneKey, subjectOfRef } from '../workspace/subject.ts'
 
 const unsupportedResources = Atom.make<Feed<ResourcePage>>(unavailable({ reason: 'unsupported', detail: '' }))
 
@@ -104,9 +106,11 @@ export const ResourceRow = ({ resource, onOpen }: { readonly resource: ResourceO
   const state = resourceState(resource)
   // A plugin's card (a GitHub PR) when a source knows this ref, so its row, tab and mention agree; else the observed facts.
   const known = useEntityCard({ kind: 'resource', id: resource.id })
+  // Drags onto the workspace as its tab would: a strip slot, a pane's centre or an edge.
+  const drag = useEntityDrag({ ref: paneKey(subjectOfRef(resource.id)) })
   return <li>
     <HoverCard placement="left top" content={() => known ?? <ObservedResourceCard resource={resource} />}>
-      <button type="button" data-resource-row onClick={event => onOpen(resource.id, event.metaKey || event.ctrlKey)} {...stylex.props(styles.row, narrow && styles.rowTouch)}>
+      <button type="button" data-resource-row onPointerDown={drag.onPointerDown} onClick={event => onOpen(resource.id, event.metaKey || event.ctrlKey)} {...stylex.props(styles.row, narrow && styles.rowTouch)}>
         <span {...stylex.props(styles.kind)}><Icon name={kind.icon} label={kind.label} size={14} /></span>
         <span {...stylex.props(styles.title)}>{humanTitle(resource)}</span>
         {state === undefined ? null : <span {...stylex.props(styles.meta)}>{state.replaceAll('_', ' ')}</span>}

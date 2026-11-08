@@ -198,3 +198,51 @@ it('keeps one top bar unsplit, and once split gives every pane its own controls 
   expect(host.querySelectorAll('[data-testid="global-bands"]')).toHaveLength(1)
   expect(bars[0]!.querySelector('[data-testid="global-bands"]') ?? bars[0]!.parentElement!.querySelector('[data-testid="global-bands"]')).not.toBeNull()
 })
+
+const pointer = async (target: EventTarget, type: string, init: { clientX?: number; clientY?: number } = {}) => {
+  await act(async () => {
+    const event = new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, ...init })
+    Object.assign(event, { pointerId: 1, pointerType: 'mouse', width: 1, height: 1 })
+    target.dispatchEvent(event)
+  })
+}
+const box = (x: number, y: number, width: number, height: number): DOMRect =>
+  ({ x, y, width, height, left: x, top: y, right: x + width, bottom: y + height, toJSON: () => ({}) }) as DOMRect
+
+it('drags a tab onto a pane\'s edge with a live chip and a translucent overlay, splitting there; Escape cancels', async () => {
+  await mount()
+  await act(async () => row('agent/b').click())
+  const slot = host.querySelector<HTMLElement>('[data-drop-content]')!
+  slot.getBoundingClientRect = () => box(0, 40, 800, 600)
+  document.elementsFromPoint = () => [slot]
+  const agentB = surface('agent:agent/b')
+  await pointer(tabNamed('Agent B'), 'pointerdown', { clientX: 100, clientY: 20 })
+  await pointer(window, 'pointermove', { clientX: 400, clientY: 300 })
+  await pointer(window, 'pointermove', { clientX: 790, clientY: 300 })
+  expect(document.querySelector('[data-testid="drag-chip"]')?.textContent).toBe('Agent B')
+  expect(host.querySelector('[data-drop-overlay]')?.getAttribute('data-drop-overlay')).toBe('right')
+  await act(async () => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })) })
+  expect(document.querySelector('[data-testid="drag-chip"]')).toBeNull()
+  await pointer(window, 'pointerup', { clientX: 790, clientY: 300 })
+  expect(stripTitles()).toEqual([['Agent A', 'Agent B']])
+  await pointer(tabNamed('Agent B'), 'pointerdown', { clientX: 100, clientY: 20 })
+  await pointer(window, 'pointermove', { clientX: 400, clientY: 300 })
+  await pointer(window, 'pointermove', { clientX: 790, clientY: 300 })
+  await pointer(window, 'pointerup', { clientX: 790, clientY: 300 })
+  expect(stripTitles()).toEqual([['Agent A'], ['Agent B']])
+  expect(surface('agent:agent/b')).toBe(agentB)
+})
+
+it('drops a tab into another pane\'s strip at the slot under the pointer, and the emptied pane collapses', async () => {
+  await mount()
+  await act(async () => row('agent/b').click())
+  await splitTab('Agent B', 'Split right')
+  const target = host.querySelectorAll<HTMLElement>('[data-drop-strip]')[0]!
+  tabNamed('Agent A').getBoundingClientRect = () => box(0, 0, 120, 40)
+  document.elementsFromPoint = () => [target]
+  await pointer(tabNamed('Agent B'), 'pointerdown', { clientX: 900, clientY: 20 })
+  await pointer(window, 'pointermove', { clientX: 400, clientY: 20 })
+  await pointer(window, 'pointermove', { clientX: 10, clientY: 20 })
+  await pointer(window, 'pointerup', { clientX: 10, clientY: 20 })
+  expect(stripTitles()).toEqual([['Agent B', 'Agent A']])
+})

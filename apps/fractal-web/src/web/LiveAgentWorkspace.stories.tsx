@@ -48,6 +48,7 @@ export const scenarioExemptions: readonly string[] = [
   'Populated:contract-fixture',
   'ScriptedRepair:contract-fixture',
   'Splits:contract-fixture',
+  'SplitsDragAndDrop:contract-fixture',
   'TabSwitchGeometry:contract-fixture',
   'Unavailable:contract-fixture',
 ]
@@ -140,6 +141,52 @@ export const Splits: Story = {
     await waitFor(() => expect(strips()).toHaveLength(3))
     press({ key: 'w', code: 'KeyW', altKey: true })
     await waitFor(() => expect(strips()).toHaveLength(2))
+    expect(surface()).toBe(node)
+    canvasElement.dataset.proof = 'passed'
+  },
+}
+
+const drag = (from: Element, to: { readonly x: number; readonly y: number }) => {
+  const start = from.getBoundingClientRect()
+  const at = { x: start.x + start.width / 2, y: start.y + start.height / 2 }
+  const event = (type: string, point: { readonly x: number; readonly y: number }) =>
+    new PointerEvent(type, { bubbles: true, cancelable: true, pointerId: 7, pointerType: 'mouse', button: 0, buttons: type === 'pointerup' ? 0 : 1, clientX: point.x, clientY: point.y })
+  from.dispatchEvent(event('pointerdown', at))
+  for (let step = 1; step <= 8; step++) window.dispatchEvent(event('pointermove', { x: at.x + (to.x - at.x) * step / 8, y: at.y + (to.y - at.y) * step / 8 }))
+  return () => window.dispatchEvent(event('pointerup', to))
+}
+
+/**
+ * Pointer drag and drop, cmux style: a tab dragged to a pane's right edge previews the half it would take
+ * under a live chip and splits there; dragged back onto the other strip it joins it, and the emptied
+ * pane collapses. The tab's surface is the same node throughout.
+ */
+export const SplitsDragAndDrop: Story = {
+  args: { state: 'populated' },
+  play: async ({ canvasElement, args }) => {
+    await waitFor(() => assertProductionAppState(canvasElement, args.state, true), { timeout: 60000 })
+    const other = fixtureProjections.agents.find(row => row.id !== appStoryAgent(args.state))!
+    window.history.pushState(null, '', `/w/${other.id}`)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    const strips = () => [...canvasElement.querySelectorAll<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"]')]
+    const tabs = () => strips().flatMap(strip => [...strip.querySelectorAll<HTMLElement>('[role="tab"]')])
+    await waitFor(() => expect(tabs()).toHaveLength(2))
+    const surface = () => canvasElement.querySelector(`[data-tab-surface="agent:${other.id}"]`)
+    await waitFor(() => expect(surface()).not.toBeNull())
+    const node = surface()
+    const slot = canvasElement.querySelector<HTMLElement>('[data-drop-content]')!.getBoundingClientRect()
+    const drop = drag(tabs()[1]!, { x: slot.right - 12, y: slot.top + slot.height / 2 })
+    await waitFor(() => expect(canvasElement.querySelector('[data-drop-overlay]')?.getAttribute('data-drop-overlay')).toBe('right'))
+    // The chip names the entity as its tab does.
+    expect(tabs()[1]!.getAttribute('aria-label')).toContain(document.querySelector('[data-testid="drag-chip"]')?.textContent ?? '∅')
+    drop()
+    await waitFor(() => expect(strips()).toHaveLength(2))
+    expect(surface()).toBe(node)
+    const home = strips()[0]!.querySelector('[role="tab"]')!.getBoundingClientRect()
+    const back = drag(tabs()[1]!, { x: home.right - 4, y: home.top + home.height / 2 })
+    back()
+    await waitFor(() => expect(strips()).toHaveLength(1))
+    expect(tabs()).toHaveLength(2)
     expect(surface()).toBe(node)
     canvasElement.dataset.proof = 'passed'
   },

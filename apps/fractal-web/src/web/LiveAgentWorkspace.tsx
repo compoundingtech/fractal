@@ -8,8 +8,8 @@ import { DeclarationDialog } from './DeclarationDialog.tsx'
 import type * as SidebarMissionsListModule from '../missions/SidebarMissionsList.tsx'
 import { alertTabMarkers } from './alertsTab.ts'
 import { missionTabMarkersAtom } from './missionsTab.ts'
-import { findPane, locateTab, neighbour, paneRects, type Pane as PaneData } from '@fractal/ui/workspace'
-import { Pane, useWorkspaceKeys as useSplitKeys, type WorkspaceKeysOptions } from '@fractal/ui/workspace/react'
+import { findPane, locateTab, neighbour, paneRects, type EntityDescriptor, type Pane as PaneData } from '@fractal/ui/workspace'
+import { Pane, WorkspaceProvider, useWorkspaceKeys as useSplitKeys, type WorkspaceKeysOptions } from '@fractal/ui/workspace/react'
 import { activeTab, currentSpace, showsTerminal, tabsOf, visibleTabIds, workspaceConfig, type Command, type TabView, type WorkspaceState as WorkspaceStateValue } from '../workspace/model.ts'
 import { bootGlassesOnce, type GlassGateway } from '../workspace/glassSync.ts'
 import type { SpaceSync } from '@fractal/ui/workspace/store'
@@ -404,10 +404,10 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     let cancelIdle: (() => void) | undefined
     const cancelPaint = afterNextPaint(() => {
       if (typeof window.requestIdleCallback === 'function') {
-        const idle = window.requestIdleCallback(prefetchChangelog)
+        const idle = window.requestIdleCallback(prefetchIdle)
         cancelIdle = () => window.cancelIdleCallback(idle)
       } else {
-        const timer = window.setTimeout(prefetchChangelog, 0)
+        const timer = window.setTimeout(prefetchIdle, 0)
         cancelIdle = () => window.clearTimeout(timer)
       }
     })
@@ -607,6 +607,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const tabItems = React.useMemo(() => allTabs.map(tab => ({ ...tabPresentation({ tab, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef, unread }), ...(space.local.views[tab.id]?.dirty === true ? { dirty: true } : {}) })), [allTabs, space.local.views, agents, fleet._tag, needsYou, attention, byRef, unread])
   const activeLabel = tabItems.find(item => item.id === activeRow?.id)?.title
   const itemById = React.useMemo(() => new Map(tabItems.map(item => [item.id, item])), [tabItems])
+  const refById = React.useMemo(() => new Map(allTabs.map(tab => [tab.id, tab.ref])), [allTabs])
   const previousNames = React.useRef<ReadonlyMap<string, string>>(new Map())
   const names = React.useMemo(() => {
     const next = new Map(agents.map(row => [row.ref, row.name]))
@@ -694,21 +695,6 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const [paletteOpen, setPaletteOpen] = React.useState(false)
   const [paletteLoaded, setPaletteLoaded] = React.useState(false)
   const openPalette = React.useCallback(() => { setPaletteLoaded(true); setPaletteOpen(true) }, [])
-  // Its code warms after the first paint and idle, so the first Mod+K does not wait for a chunk.
-  React.useLayoutEffect(() => {
-    let cancelIdle: (() => void) | undefined
-    const warm = () => { void import('../palette/LivePalette.tsx').catch(() => undefined) }
-    const cancelPaint = afterNextPaint(() => {
-      if (typeof window.requestIdleCallback === 'function') {
-        const idle = window.requestIdleCallback(warm, { timeout: 4000 })
-        cancelIdle = () => window.cancelIdleCallback(idle)
-      } else {
-        const timer = window.setTimeout(warm, 0)
-        cancelIdle = () => window.clearTimeout(timer)
-      }
-    })
-    return () => { cancelPaint(); cancelIdle?.() }
-  }, [])
   const openSettings = React.useCallback(() => setSettingsOpen(true), [])
   const sidebarModes = React.useMemo((): readonly HostCommand[] => sidebarModeRows.map(mode => ({
     id: `sidebar-${mode.id}`, section: 'sidebar', label: `Sidebar: ${mode.label}`, search: `sidebar ${mode.label} show`, icon: mode.icon, run: () => showSidebarTab(mode.id),
@@ -759,6 +745,14 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
       switchSpace: () => false,
     }
   }, [go, store, openPalette])
+  const renderDragChip = React.useCallback((entity: EntityDescriptor) => <DragChip entity={entity} scheme={scheme} />, [scheme])
+  // One description per entity, for the drag chip as for the tab: the tab's own presentation, read live.
+  const presentLatest = React.useRef((ref: string) => tabPresentation({ tab: { id: ref, ref }, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef, unread }))
+  presentLatest.current = (ref: string) => tabPresentation({ tab: { id: ref, ref }, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef, unread })
+  const describeEntity = React.useCallback((ref: string): EntityDescriptor => {
+    const item = presentLatest.current(ref)
+    return { kind: item.kind ?? 'resource', id: ref, title: item.title, status: item.icon }
+  }, [])
   const renderPane = (pane: PaneData) => {
     const isLead = pane.id === lead
     const focused = pane.id === space.local.focus
@@ -778,7 +772,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     const syncNote = isLead && boot.retry !== undefined ? <LayoutSyncNote retry={boot.retry} /> : null
     return <Pane key={pane.id} pane={pane} className={stylex.props(styles.pane).className}>
       {/* Each pane is self-contained: its strip ends with its shown tab's own controls. */}
-      <WorkspaceStrip bar items={pane.tabs.flatMap(tab => itemById.get(tab.id) ?? [])} active={pane.active} group={pane.id} focused={focused} narrow={narrow} dispatch={go} open={openRef}
+      <WorkspaceStrip bar items={pane.tabs.flatMap(tab => itemById.get(tab.id) ?? [])} refs={refById} active={pane.active} group={pane.id} focused={focused} narrow={narrow} dispatch={go} open={openRef}
         leading={isLead ? <>
           {narrow
             ? <ChromeControl ref={sidebarOpener} icon="panel-left" label="Expand sidebar" tooltip="Show agents" edge="lead" popup="dialog" expanded={phoneSheet.open} {...(phoneSheet.open ? { controls: phoneSheet.id } : {})} onPress={() => agentsDrawer.current?.open()} />
@@ -801,7 +795,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   }
   // The panes stay outside changing shell providers, whose context propagation would scan every retained turn.
   // Only the stable header DOM host and narrow geometry cross that boundary.
-  return (<EntityCardSource resolve={resolveCard}><OpenProvider value={openRef}><NarrowLayoutContext.Provider value={narrow}>
+  return (<WorkspaceProvider store={splitStore} describe={describeEntity} renderDragChip={renderDragChip}><EntityCardSource resolve={resolveCard}><OpenProvider value={openRef}><NarrowLayoutContext.Provider value={narrow}>
     <WorkbenchContextProvider value={{ open, focusedRef: activeSubject === undefined ? null : subjectRef(activeSubject), subjects: byRef, platform: navigator.platform.includes('Mac') ? 'mac' : 'other' }}>
       <ResourcePanelProvider value={{ state: resourcePanel, onChange: (change) => setResourcePanel((value) => ({ ...value, ...change })) }}>
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
@@ -816,9 +810,8 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
               <section aria-label={workspaceLabel} onPointerOverCapture={prefetchTerminalIntent} onFocusCapture={prefetchTerminalIntent} {...stylex.props(styles.workspace)}>
                 {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} headerActions={sidebarHeaderActions} onSheetChange={setPhoneSheet}>{sidebarBody}</PhoneAgentDrawer> : null}
                 {/* One strip and one portal host at every width: the breakpoint never remounts a surface. The strip is the window's one top bar, so the conversation's controls live at its end. */}
-                <WorkspaceSplits store={splitStore} slots={slots} collapsed={narrow} onHost={setPaneHost} renderPane={renderPane}>
-                  <SplitKeys handlers={splitHandlers} ignore={ignoreSplitKey} />
-                </WorkspaceSplits>
+                <WorkspaceSplits slots={slots} collapsed={narrow} onHost={setPaneHost} renderPane={renderPane} />
+                <SplitKeys handlers={splitHandlers} ignore={ignoreSplitKey} />
                 {paletteLoaded ? <React.Suspense fallback={null}><LivePalette isOpen={paletteOpen} onOpenChange={setPaletteOpen} state={workspace} dispatch={go} actions={paletteActions} /></React.Suspense> : null}
               </section>
               </DockedSplit>
@@ -841,13 +834,27 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
     {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody tabs={allTabs} active={activeRow?.id ?? null} shown={shownTabs} paneOf={paneOfTab} headerSlots={headerSlots} onFocusPane={focusPane} tiers={tiers} views={space.local.views} names={names} onOpenTool={onOpenTool} onOpen={openRef} onReplace={onReplaceTab} onClose={onCloseTab} onBackToAlerts={backToAlerts} onView={onTabView} focusShownFace={focusShownFace} {...(ux === undefined ? {} : { ux })} /></RegisteredPortal>}
-  </NarrowLayoutContext.Provider></OpenProvider></EntityCardSource>)
+  </NarrowLayoutContext.Provider></OpenProvider></EntityCardSource></WorkspaceProvider>)
 }
 
 
 
 
+/**
+ * What the pointer carries while dragging an entity: its status ring or icon and its title, as its tab
+ * shows them. It renders outside the shell, so it carries the shell's scheme itself.
+ */
+const DragChip = ({ entity, scheme }: { readonly entity: EntityDescriptor; readonly scheme: 'dark' | 'light' }) => <div data-testid="drag-chip" data-scheme={scheme} {...stylex.props(liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme, styles.dragChip)}>
+  {entity.status === undefined ? null : <span aria-hidden="true" {...stylex.props(styles.dragChipIcon)}>{entity.status as React.ReactNode}</span>}
+  <span {...stylex.props(styles.dragChipTitle)}>{entity.title}</span>
+</div>
+
 const LivePalette = React.lazy(() => import('../palette/LivePalette.tsx'))
+/** Idle work once the roster has painted: the changelog, and the palette's code so the first Mod+K does not wait for it. */
+const prefetchIdle = () => {
+  prefetchChangelog()
+  void import('../palette/LivePalette.tsx').catch(() => undefined)
+}
 
 const sidebarModeRows = [
   { id: 'agents', label: 'Agents', icon: 'person' },
@@ -951,6 +958,9 @@ const styles = stylex.create({
   workspace: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0 },
   barSlot: { display: 'flex', alignItems: 'center', minWidth: 0 },
   bands: { display: 'contents' },
+  dragChip: { display: 'inline-flex', alignItems: 'center', gap: s.xs, maxWidth: 240, paddingBlock: 4, paddingInline: s.sm, borderRadius: 6, backgroundColor: c.raised, color: c.fg, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, boxShadow: '0 4px 16px rgba(0, 0, 0, 0.24)', fontFamily: t.fontSans, fontSize: t.metaSize, whiteSpace: 'nowrap' },
+  dragChipIcon: { display: 'inline-flex', flexShrink: 0 },
+  dragChipTitle: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' },
   pane: { backgroundColor: c.canvas },
   syncNote: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, paddingInline: s.sm, color: c.fgMuted, fontSize: t.metaSize, whiteSpace: 'nowrap' },
   syncRetry: { appearance: 'none', border: 0, padding: 0, background: 'none', color: c.fg, font: 'inherit', textDecoration: 'underline', cursor: 'pointer', outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusOffset, borderRadius: 2 },

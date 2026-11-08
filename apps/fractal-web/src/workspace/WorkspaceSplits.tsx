@@ -1,12 +1,9 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { paneRects, panesOf, type Pane } from '@fractal/ui/workspace'
-import { Divider, Workspace, WorkspaceProvider, type DividerProps } from '@fractal/ui/workspace/react'
-import type { WorkspaceStore as KitStore } from '@fractal/ui/workspace/store'
+import { Divider, Workspace, dropPlacement, useDragState, type DividerProps } from '@fractal/ui/workspace/react'
 import { colorVars as c, interactionVars as interaction } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-import { currentSpace, type Command, type TabView, type WorkspaceState } from './model.ts'
-import { workspaceKinds } from './kinds.ts'
-import { parsePane } from './subject.ts'
+import { currentSpace, type Command, type WorkspaceState } from './model.ts'
 
 /**
  * Where each pane's content is, for surfaces that live elsewhere. Every tab's surface stays in one host
@@ -108,10 +105,18 @@ export const surfacePlacement = (pane: string): React.CSSProperties => {
 
 export const PaneSlotsContext = React.createContext<PaneSlots | undefined>(undefined)
 
-/** A pane's empty content slot: where its shown surface appears. An empty pane shows `children` here. */
+/**
+ * A pane's empty content slot: where its shown surface appears, and where a dragged entity lands, its
+ * centre opening it here and an edge splitting that side, previewed by a translucent overlay above
+ * the surface. An empty pane shows `children` here.
+ */
 export const PaneSlot = ({ pane, children }: { readonly pane: string; readonly children?: React.ReactNode }) => {
   const slots = React.useContext(PaneSlotsContext)
-  return <div ref={slots?.slot(pane)} data-pane-slot-content={pane} {...stylex.props(styles.slot)}>{children}</div>
+  const zone = useDragState(state => state.over?._tag === 'Content' && state.over.pane === pane ? state.over.zone : undefined)
+  return <div ref={slots?.slot(pane)} data-pane-slot-content={pane} data-drop-content={pane} {...stylex.props(styles.slot)}>
+    {children}
+    {zone === undefined ? null : <div data-drop-overlay={zone._tag === 'Center' ? 'center' : zone.side} style={dropPlacement(zone)} {...stylex.props(styles.overlay)} />}
+  </div>
 }
 
 /** Pane `p` is shown at the top left: the zoomed one, the phone's one, or the first by geometry. */
@@ -123,8 +128,6 @@ export const leadPane = (state: WorkspaceState, collapsed: boolean): string => {
   return panesOf(space.layout)[0]?.id ?? space.local.focus
 }
 
-const describe = (ref: string) => ({ kind: workspaceKinds.kindOf(parsePane(ref)).id, id: ref, title: ref })
-
 const SplitDivider = (props: DividerProps) => <Divider
   {...props}
   aria-label={props.split.axis === 'row' ? 'Resize split, left and right' : 'Resize split, above and below'}
@@ -132,35 +135,28 @@ const SplitDivider = (props: DividerProps) => <Divider
 />
 
 /**
- * The current space's splits from the shared primitives: panes as flat siblings placed from the split
- * sizes, dividers between them, and the one surface host over them. `store` dispatches through the
- * app's routing, so pane focus, resizes and keys reach the URL as a person's own commands do.
+ * The current space's splits from the shared primitives, inside their `WorkspaceProvider`: panes as
+ * flat siblings placed from the split sizes, dividers between them, and the one surface host over them.
  */
-export const WorkspaceSplits = ({ store, slots, collapsed, onHost, renderPane, children }: {
-  readonly store: KitStore<TabView>
+export const WorkspaceSplits = ({ slots, collapsed, onHost, renderPane }: {
   readonly slots: PaneSlots
   /** The surface host, once mounted: a portal container for the surfaces. */
   readonly onHost: (host: HTMLDivElement | null) => void
   /** Only the focused pane shows, as on a phone. */
   readonly collapsed: boolean
   readonly renderPane: (pane: Pane) => React.ReactNode
-  /** Rendered inside the primitives' provider: keys, the palette. */
-  readonly children?: React.ReactNode
 }) => {
   React.useLayoutEffect(() => { slots.measure() })
   const host = React.useCallback((element: HTMLDivElement | null) => {
     slots.setHost(element)
     onHost(element)
   }, [slots, onHost])
-  return <WorkspaceProvider store={store} describe={describe}>
-    <PaneSlotsContext.Provider value={slots}>
-      <div data-testid="workspace-splits" {...stylex.props(styles.area)}>
-        <Workspace collapsed={collapsed} renderPane={renderPane} renderDivider={SplitDivider} />
-        <div ref={host} data-testid="workspace-body-host" {...stylex.props(styles.host)} />
-      </div>
-    </PaneSlotsContext.Provider>
-    {children}
-  </WorkspaceProvider>
+  return <PaneSlotsContext.Provider value={slots}>
+    <div data-testid="workspace-splits" {...stylex.props(styles.area)}>
+      <Workspace collapsed={collapsed} renderPane={renderPane} renderDivider={SplitDivider} />
+      <div ref={host} data-testid="workspace-body-host" {...stylex.props(styles.host)} />
+    </div>
+  </PaneSlotsContext.Provider>
 }
 
 /** Commands the person makes in the workspace. */
@@ -170,6 +166,8 @@ const styles = stylex.create({
   area: { position: 'relative', display: 'flex', flexGrow: 1, flexBasis: 0, minWidth: 0, minHeight: 0 },
   // Above the panes, but it takes no pointer itself: only its surfaces do, inside their slots.
   host: { position: 'absolute', inset: 0, zIndex: 0, pointerEvents: 'none' },
+  // Above the surface host, which is above the panes.
+  overlay: { zIndex: 2, backgroundColor: `color-mix(in srgb, ${c.primary} 16%, transparent)`, borderWidth: 2, borderStyle: 'solid', borderColor: `color-mix(in srgb, ${c.primary} 60%, transparent)`, borderRadius: 6, boxSizing: 'border-box' },
   slot: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },
   // A hairline centred in a wider grab area; above the surface host.
   divider: { backgroundColor: 'transparent', outline: 'none' },
