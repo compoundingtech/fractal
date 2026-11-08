@@ -4,9 +4,10 @@ import { it } from 'vitest'
 
 /**
  * A property test over an Effect `Arbitrary`, with shrinking: the property throws (an `expect`) to fail,
- * and the shrunk input is run once more so the report carries the assertion itself.
+ * and the shrunk input is run once more so the report carries the assertion itself. The seed is fixed so
+ * a run is the same on every machine; widen `runs` or change `seed` locally to search further.
  */
-export const prop = <A>(name: string, arbitrary: Arbitrary.Arbitrary<A>, property: (value: A) => void, options?: { readonly runs?: number }) =>
+export const prop = <A>(name: string, arbitrary: Arbitrary.Arbitrary<A>, property: (value: A) => void, options?: { readonly runs?: number; readonly seed?: number }) =>
   it(name, async () => {
     const holds = (value: A) => {
       try {
@@ -16,7 +17,7 @@ export const prop = <A>(name: string, arbitrary: Arbitrary.Arbitrary<A>, propert
         return false
       }
     }
-    const result = await Effect.runPromise(Arbitrary.checkEffect(arbitrary, holds, { runs: options?.runs ?? 100 }))
+    const result = await Effect.runPromise(Arbitrary.checkEffect(arbitrary, holds, { runs: options?.runs ?? 100, seed: options?.seed ?? 20261108 }))
     if (result._tag === 'Passed') return
     if (result._tag === 'Falsified') {
       try {

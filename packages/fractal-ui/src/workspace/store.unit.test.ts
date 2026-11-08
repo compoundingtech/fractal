@@ -220,7 +220,7 @@ describe('syncing spaces with an external store', () => {
     yield* settle
     const layout = currentSpace(store.getState()).layout
     expect(fake.published).toHaveLength(1)
-    expect((fake.published[0]!.body.layout as { children: unknown[] }).children, 'sent as this client keeps it').toHaveLength(3)
+    expect((fake.published[0]!.body.layout as { readonly children: readonly unknown[] }).children, 'sent as this client keeps it').toHaveLength(3)
     yield* Queue.offer(fake.incoming, { _tag: 'Body', space: 'space', body: kept(fake.published[0]!.body), revision: 'r1' })
     yield* settle
     expect(currentSpace(store.getState()).layout, 'its own echo is not adopted').toBe(layout)

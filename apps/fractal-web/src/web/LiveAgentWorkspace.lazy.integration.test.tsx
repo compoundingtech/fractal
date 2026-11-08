@@ -63,6 +63,7 @@ vi.mock('../data/react.tsx', () => ({
   useRosterDecode: () => ({ undecodable: [], decodeStale: false }),
   useAskingAgents: () => askingAgents,
   useAttention: () => ({ _tag: 'Waiting' }),
+  useMissions: () => ({ _tag: 'Waiting' }),
   useSubjectList: () => [],
   useConnection: () => ({ _tag: 'Live' }),
   useNow: () => 0,
