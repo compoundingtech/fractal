@@ -22,7 +22,7 @@ TOKEN = 'ghs_' + 'A1b2C3d4' * 5
 
 # A stand-in gh: just enough of the release flow to reach `release create`, which fails on request.
 FAKE_GH = r'''#!/usr/bin/env python3
-import json, os, pathlib, shutil, sys
+import io, json, os, pathlib, sys, zipfile
 args = sys.argv[1:]
 if args[:2] == ['run', 'list']:
     print(json.dumps([{'databaseId': 7, 'headSha': os.environ['FAKE_SHA']}]))
@@ -33,17 +33,34 @@ elif args[:2] == ['run', 'view']:
     row.update(json.loads(os.environ['FAKE_RUN']))
     print(json.dumps(row))
 elif args[0] == 'api' and args[1].endswith('/artifacts'):
-    print(json.dumps([{'artifacts': [{'name': os.environ['FAKE_ARTIFACT'], 'expired': False}]}]))
+    artifact = {'id': int(os.environ['FAKE_ARTIFACT_ID']),
+                'name': os.environ['FAKE_ARTIFACT'], 'expired': False}
+    print(json.dumps([{'artifacts': [{'id': 700, 'name': 'fractal-release', 'expired': False}]},
+                      {'artifacts': [artifact]}]))
+elif args[0] == 'api' and '/actions/artifacts/' in args[1]:
+    assert args == ['api', 'repos/example/project/actions/artifacts/701/zip'], args
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, 'w') as bundle:
+        for item in pathlib.Path(os.environ['FAKE_DIST']).iterdir():
+            bundle.write(item, item.name)
+    sys.stdout.buffer.write(archive.getvalue())
 elif args[0] == 'api' and '/actions/runs/' in args[1]:
-    print(json.dumps({'status': 'completed', 'conclusion': 'success', 'run_attempt': 1}))
+    attempt = int(os.environ['FAKE_ATTEMPT'])
+    if '/attempts/' in args[1]:
+        assert args[1].endswith('/attempts/' + str(attempt)), args
+    else:
+        state = pathlib.Path(os.environ['FAKE_ATTEMPT_READS'])
+        reads = int(state.read_text()) if state.exists() else 0
+        state.write_text(str(reads + 1))
+        if reads:
+            attempt = int(os.environ['FAKE_FINAL_ATTEMPT'])
+    print(json.dumps({'status': 'completed', 'conclusion': 'success', 'run_attempt': attempt,
+                      'id': int(args[1].split('/actions/runs/')[1].split('/')[0]),
+                      'workflow_id': 42, 'head_sha': os.environ['FAKE_SHA'],
+                      'head_branch': 'main', 'event': 'push', 'display_title': 'Main build'}))
 elif args[0] == 'api' and args[-1] == 'repos/example/project/releases?per_page=100':
     print(json.dumps([[{'tag_name': 'v0.3.17', 'draft': False, 'prerelease': False,
                        'published_at': '2026-10-07T00:00:00Z', 'id': 17}]]))
-elif args[:2] == ['run', 'download']:
-    assert args[args.index('--name') + 1] == os.environ['FAKE_ARTIFACT'], args
-    destination = pathlib.Path(args[args.index('--dir') + 1])
-    for item in pathlib.Path(os.environ['FAKE_DIST']).iterdir():
-        shutil.copy(item, destination / item.name)
 elif args[:2] == ['release', 'create']:
     assert '--draft' in args and '--verify-tag' not in args, args
     body_path = pathlib.Path(args[args.index('--notes-file') + 1])
@@ -51,7 +68,9 @@ elif args[:2] == ['release', 'create']:
     proof_path = next(pathlib.Path(asset) for asset in assets if pathlib.Path(asset).name == 'CANDIDATE.json')
     proof = json.loads(proof_path.read_text())
     assert proof['source'] == os.environ['FAKE_SHA'] and type(proof['build_run']) is int, proof
-    assert proof['build_attempt'] == 1, proof
+    assert proof['build_attempt'] == int(os.environ['FAKE_ATTEMPT']), proof
+    assert type(proof['build_artifact']) is int and proof['build_artifact'] == 701, proof
+    assert pathlib.Path(os.environ['FAKE_ATTEMPT_READS']).read_text() == '2'
     pathlib.Path(os.environ['FAKE_RECEIPT']).write_text(json.dumps({
         'body': body_path.read_text(),
         'assets': {pathlib.Path(asset).name: pathlib.Path(asset).read_text()
@@ -123,6 +142,7 @@ with tempfile.TemporaryDirectory() as temporary:
     shutil.copy(repo / 'scripts/release-fractal-daily', checkout / 'scripts/release-fractal-daily')
     shutil.copy(repo / 'scripts/release-fractal-manifest.py', checkout / 'scripts/release-fractal-manifest.py')
     shutil.copy(repo / 'scripts/release_gh.py', checkout / 'scripts/release_gh.py')
+    shutil.copy(repo / 'scripts/release_artifact.py', checkout / 'scripts/release_artifact.py')
     shutil.copy(repo / 'scripts/compat-baseline-release', checkout / 'scripts/compat-baseline-release')
     (checkout / '.github').mkdir()
     pin = {'commit': 'a' * 40, 'tag': 'v0.3.17', 'why': 'Previous stable release fixture',
@@ -154,27 +174,41 @@ with tempfile.TemporaryDirectory() as temporary:
 
     receipt = root / 'receipt.json'
 
-    def daily(failure='', token=TOKEN, notes='notes\n', dry_run=False, impact=None, artifact='fractal-release',
-              run_id=None, run_fields=None, summary=''):
+    def daily(failure='', token=TOKEN, notes='notes\n', dry_run=False, impact=None,
+              artifact='fractal-release-attempt-1', run_id=None, run_fields=None, summary='',
+              attempt=1, final_attempt=None):
         receipt.unlink(missing_ok=True)
+        (root / 'attempt-reads').unlink(missing_ok=True)
         (root / 'notes.md').write_text(notes)
         (root / 'impact.json').write_text(json.dumps(impact or {'fragments': [], 'change_links': {}}))
         env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}', GH_TOKEN=token, GH_REPO='example/project',
                    FAKE_SHA=shas[1], FAKE_DIST=str(root / 'dist'), FAKE_FAILURE=failure,
                    FAKE_NOTES=str(root / 'notes.md'), FAKE_RECEIPT=str(receipt),
                    FAKE_IMPACT=str(root / 'impact.json'), FAKE_ARTIFACT=artifact,
-                   FAKE_RUN=json.dumps(run_fields or {}), RELEASE_GH_RETRY_DELAYS='0,0,0')
+                   FAKE_RUN=json.dumps(run_fields or {}), RELEASE_GH_RETRY_DELAYS='0,0,0',
+                   FAKE_ARTIFACT_ID='701', FAKE_ATTEMPT=str(attempt),
+                   FAKE_FINAL_ATTEMPT=str(attempt if final_attempt is None else final_attempt),
+                   FAKE_ATTEMPT_READS=str(root / 'attempt-reads'))
         args = ['python3', 'scripts/release-fractal-daily', '--summary', summary]
         if run_id is not None:
             args += ['--run', str(run_id)]
         return subprocess.run(args + (['--dry-run'] if dry_run else []), cwd=checkout, env=env,
                               text=True, capture_output=True, timeout=60)
 
-    # Both current and pre-rename successful runs reach full checksum/source validation.
-    for artifact in ('fractal-release', 'smalltalk-release'):
-        done = daily(dry_run=True, artifact=artifact)
+    # The real artifact binding downloads the immutable ID from the selected attempt.
+    for attempt in (1, 2):
+        done = daily(dry_run=True, artifact=f'fractal-release-attempt-{attempt}', attempt=attempt)
         assert done.returncode == 0 and 'Validated both release targets' in done.stdout, done
         assert 'would draft v0.3.18' in done.stdout, done
+    for artifact in ('fractal-release', 'smalltalk-release', 'fractal-release-attempt-2'):
+        done = daily(artifact=artifact)
+        assert done.returncode == 1 and 'exactly one unexpired release artifact' in done.stdout, done
+        assert not receipt.exists(), done
+    done = daily(final_attempt=2)
+    assert done.returncode == 1 and 'rerun' in done.stdout, done
+    assert 'Validated both release targets' in done.stdout, done
+    assert (root / 'attempt-reads').read_text() == '2'
+    assert not receipt.exists(), 'an attempt flip after validation must not create a release'
 
     # An explicitly selected older run wins over the newer run returned by `run list`.
     done = daily(dry_run=True, run_id=6)
