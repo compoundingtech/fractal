@@ -163,6 +163,7 @@ impl Store {
         shard: Option<&GraphStore>,
     ) -> Result<Header> {
         let mut header = self.backup_header()?;
+        let quarantined = self.quarantined_operation_history()?;
         let shard_digest = match shard {
             Some(shard) => super::backup_shards::digest(shard)?,
             None => None,
@@ -177,9 +178,11 @@ impl Store {
         } else if !owned.is_empty() {
             header.version = super::backup_format::VERSION_WITH_BODIES;
         }
+        if !quarantined.is_empty() || header.ledgers.contains_key("replica_restore_quarantine") {
+            header.version = super::backup_format::VERSION_WITH_QUARANTINE;
+        }
         let mut hash = Sha256::new();
         write_record(output, &mut hash, &Record::Header(header.clone()))?;
-        let quarantined = self.quarantined_operation_history()?;
         let mut after = (String::new(), 0_u64, String::new());
         let mut count = 0;
         loop {
@@ -505,6 +508,12 @@ impl Store {
                 actual.tables.iter().filter(|(name, digest)| header.tables.get(*name) != Some(*digest)).map(|(name, _)| name).collect::<Vec<_>>()
             );
         }
+        // The mark is permanent and travels only in the archive's append-only ledger.
+        // Stamp after verifying the source ledger, before the staged store is published.
+        self.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-hbd09a1c36932 owner=fractal_store::store::backup TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_restore_quarantine(writer,sequence,envelope_hash) SELECT writer,sequence,envelope_hash FROM replica_envelopes WHERE batch_id IS NULL",
+            [],
+        )?;
         Ok(RestoreReport {
             writer: writer.into(),
             envelopes,
@@ -718,10 +727,34 @@ mod tests {
             }
             assert!(!restored.claims_for_kind_at("daemon.diagnostic", None, true, 10).unwrap().claims.is_empty());
             let retained_archive = root.path().join("retained.backup");
-            archive(&restored, &retained_archive);
+            let retained_header = archive(&restored, &retained_archive);
+            assert_eq!(retained_header.version == super::super::backup_format::VERSION_WITH_QUARANTINE, !keyed);
+            // The supported version range of readers predating quarantine excludes this archive.
+            assert_eq!((super::super::backup_format::VERSION..=super::super::backup_format::VERSION_WITH_SHARDS)
+                .contains(&retained_header.version), keyed);
             let retained = backup::restore(&retained_archive, &root.path().join("retained.db"), root.path()).unwrap();
             assert_eq!(retained.operation_envelopes_quarantined, report.operation_envelopes_quarantined);
             assert_eq!(retained.log_digest, report.log_digest);
+            if !keyed {
+                assert!(restored.replication_signature_requests().unwrap().is_empty());
+                source.bind_fleet("archive-fleet").unwrap();
+                source.pin_fleet_anchor(key.public()).unwrap();
+                source.set_member_key(Some(key.clone())).unwrap();
+                source.admit_fleet_anchor("archive-fleet", key.public(), "listening").unwrap();
+                source.complete_replication_activation().unwrap();
+                restored.bind_fleet("archive-fleet").unwrap();
+                restored.pin_fleet_anchor(key.public()).unwrap();
+                let signed = source.export_replication_exchange("archive-fleet", &Default::default()).unwrap();
+                assert!(signed.envelopes.iter().any(|envelope| envelope.member_key.is_some()));
+                restored.receive_replication_exchange(source.origin(), "archive-fleet", &signed).unwrap();
+                assert!(restored.validate_replication_backlog().unwrap().held >= 5);
+                restored.project_replication_backlog().unwrap();
+                assert!(restored.replication_signature_requests().unwrap().is_empty());
+                for operation in &operations {
+                    assert!(!restored.client_operation_is_trusted(operation).unwrap());
+                    assert!(restored.claim_by_id(&operation.id).unwrap().is_none());
+                }
+            }
         }
     }
 
