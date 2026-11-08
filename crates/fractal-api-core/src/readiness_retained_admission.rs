@@ -18,6 +18,10 @@ struct Admission {
     weekly: Weekly,
     #[serde(default)]
     notices: Vec<Notice>,
+    #[serde(default)]
+    legacy_pending: Option<Reading>,
+    #[serde(default)]
+    legacy_imported: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -43,6 +47,8 @@ struct Opening {
     recorded: bool,
     #[serde(default)]
     adopted: Option<String>,
+    #[serde(default)]
+    adopted_episode: Option<String>,
 }
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -85,6 +91,8 @@ impl Admission {
                 through: 0,
                 case: None,
                 weekly: Weekly::default(),
+                legacy_pending: None,
+                legacy_imported: false,
                 notices: Vec::new(),
             }),
             Err(error) => Err(error.into()),
@@ -114,7 +122,7 @@ impl Admission {
         if self.weekly.recovered {
             self.case = None;
             self.weekly = Weekly::default();
-            self.notices.retain(|notice| !notice.recorded);
+            self.notices.retain(|notice| !notice.recorded && !notice.held);
         }
         // Once an early case opens, a later clear or Unknown never closes it.
         if self.case.is_none() && summary.known >= 4 && summary.failed >= 3 {
@@ -129,6 +137,7 @@ impl Admission {
                 known: summary.known,
                 recorded: false,
                 adopted: None,
+                adopted_episode: None,
             });
         }
         true
@@ -171,6 +180,7 @@ impl Admission {
                     self.executor, self.member, reading.end_ms),
                 reviewer: config.reviewer.clone(), cut: reading.end_ms,
                 failed: 0, known: 0, recorded: true, adopted: None,
+                adopted_episode: None,
             });
         }
         if reading.end_ms <= self.weekly.through || self.case.is_none() {
@@ -208,7 +218,11 @@ impl Admission {
         let mut settled = self.clone();
         match action {
             WeeklyAction::Escalate { .. } => settled.weekly.escalated = true,
-            WeeklyAction::Recover { .. } => settled.weekly.recovered = true,
+            WeeklyAction::Recover { .. } => {
+                settled.weekly.recovered = true;
+                // Informational delivery never survives the case it describes.
+                settled.notices.retain(|notice| !notice.held || notice.episode != opening.episode);
+            }
         }
         settled.weekly.pending = None;
         settled.persist(path)?;
@@ -319,7 +333,7 @@ fn record_weekly(store: &Store, opening: &Opening, action: &WeeklyAction) -> Res
                     kind: "operational.recovered".into(),
                     actor: Some("daemon/runtime".into()),
                     fields: BTreeMap::from([
-                        ("episode".into(), json!(opening.episode)),
+                        ("episode".into(), json!(opening.adopted_episode.as_deref().unwrap_or(&opening.episode))),
                         ("failure".into(), json!(prior)),
                         (
                             "reason".into(),
@@ -398,7 +412,9 @@ fn drain_notices(admission: &mut Admission, journal: &Path, store: &Store, backu
         let recipients = std::iter::once((opening.reviewer.as_str(), false))
             .chain(backup.filter(|backup| *backup != opening.reviewer).map(|backup| (backup, true)));
         for (recipient, held) in recipients {
-            if !queued.notices.iter().any(|notice| notice.episode == opening.episode && notice.phase == phase && notice.recipient == recipient) {
+            if held && admission.weekly.recovered { continue; }
+            if !queued.notices.iter().any(|notice| notice.episode == opening.episode
+                && notice.phase == phase && (notice.recipient == recipient || (held && notice.held))) {
                 let legacy_notice = if !held && phase == "weekly" {
                     if let Some(receipt) = &opening.adopted {
                         let key = format!("st3-fault:{}:daemon/{}:{receipt}", opening.reviewer, store.origin());
@@ -468,16 +484,24 @@ fn drain_notices(admission: &mut Admission, journal: &Path, store: &Store, backu
     Ok(())
 }
 
-/// The enabled shared route replaces (and never calls) the legacy weekly dispatcher.
-pub(super) fn run_sampler(policy: &Policy, store: &Store, now: u64) -> Result<Value> {
-    let config = &policy.config;
-    let retained_path = config.retained_pairs_file.as_ref().context("retained pair path missing")?;
-    let journal = policy.checkpoint.with_file_name("readiness-case.json");
-    let mut admission = Admission::load(&journal, config)?;
-    // Adopt a pre-existing weekly episode by its native receipt before any early admission.
+/// Transfer admitted legacy work without rewriting its checkpoint or reading a newer cut.
+fn import_legacy(admission: &mut Admission, policy: &Policy, store: &Store, journal: &Path) -> Result<()> {
+    if !admission.legacy_imported {
+        if admission.legacy_pending.is_none() {
+            if let Some(Checkpoint::Cut { reading, pending: true }) = policy.read_checkpoint()? {
+                admission.legacy_pending = Some(reading);
+            }
+            admission.persist(journal)?;
+        }
+        if let Some(reading) = &admission.legacy_pending {
+            reading.check(&policy.config.member, reading.observed_at_ms)?;
+            // Only the already-admitted legacy transition is replayed, never fresh dispatch.
+            policy.route(store, reading)?;
+        }
+    }
     if admission.case.is_none() {
         let legacy_episode = crate::objective_faults::episode(
-            store.origin(), &format!("{OBJECTIVE}/{}", config.member)
+            store.origin(), &format!("{OBJECTIVE}/{}", policy.config.member)
         );
         if let Some(failure) = store.operational_failure(&legacy_episode)?
             .filter(|failure| failure.status == "pending")
@@ -487,11 +511,26 @@ pub(super) fn run_sampler(policy: &Policy, store: &Store, now: u64) -> Result<Va
                 reviewer: failure.reviewer,
                 cut: 0, failed: 0, known: 0, recorded: true,
                 adopted: Some(failure.request),
+                adopted_episode: Some(legacy_episode),
             });
             admission.weekly.escalated = true;
-            admission.persist(&journal)?;
         }
     }
+    if !admission.legacy_imported {
+        admission.legacy_pending = None;
+        admission.legacy_imported = true;
+        admission.persist(journal)?;
+    }
+    Ok(())
+}
+
+/// The enabled shared route replaces (and never calls) the legacy weekly dispatcher.
+pub(super) fn run_sampler(policy: &Policy, store: &Store, now: u64) -> Result<Value> {
+    let config = &policy.config;
+    let retained_path = config.retained_pairs_file.as_ref().context("retained pair path missing")?;
+    let journal = policy.checkpoint.with_file_name("readiness-case.json");
+    let mut admission = Admission::load(&journal, config)?;
+    import_legacy(&mut admission, policy, store, &journal)?;
     if let Some(opening) = &admission.case {
         if let Some(receipt) = &opening.adopted {
             store.append_claim(&ClaimInput {
@@ -886,4 +925,93 @@ fn skipped_retained_miss_is_admitted_before_clear_and_replayed_exactly_once() {
     assert_eq!(store.messages(Some(backup), true).unwrap().len(), 2);
     assert_eq!(store.index().unwrap(), after_recovery);
     assert_eq!(fs::read(&policy.checkpoint).unwrap(), weekly_bytes);
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, Policy, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = Policy {
+            config: serde_json::from_value(json!({
+                "executor": "fixture", "member": "member-a",
+                "reviewer": "agent/fixture.owner",
+                "evidence_file": "/run/fractal-slo-evidence/weekly.json",
+                "retained_pairs_file": "/run/fractal-slo-evidence/retained.json",
+                "shared_case": true
+            })).unwrap(),
+            checkpoint: dir.path().join("weekly.json"),
+        };
+        let store = Store::open(&dir.path().join("graph.db"), "fixture").unwrap();
+        let declarations = "version 2\nagent \"fixture.owner\" { command \"true\" }\n";
+        let intent = crate::graph::parse_intent(declarations, "fixture").unwrap();
+        let preview = store.mission(&intent, IntentInput {
+            kdl: declarations.into(), source_name: None,
+        }).unwrap();
+        store.apply(&intent, &preview.subject_tokens, "migration-owner").unwrap();
+        (dir, policy, store)
+    }
+
+    fn reading(end_ms: u64, failed: u64) -> Reading {
+        Reading {
+            version: 1, objective: OBJECTIVE.into(), member: "member-a".into(),
+            start_ms: end_ms - MINUTES * MINUTE_MS, end_ms, observed_at_ms: end_ms,
+            expected: MINUTES, known: MINUTES, good: MINUTES - failed,
+        }
+    }
+
+    #[test]
+    fn pending_legacy_miss_is_imported_before_fresh_recovery() {
+        let (dir, policy, store) = fixture();
+        let end = (MINUTES + 10) * MINUTE_MS;
+        policy.checkpoint(&reading(end, 11), true).unwrap();
+        let legacy_bytes = fs::read(&policy.checkpoint).unwrap();
+        let journal = dir.path().join("case.json");
+        let mut admission = Admission::load(&journal, &policy.config).unwrap();
+        import_legacy(&mut admission, &policy, &store, &journal).unwrap();
+        let legacy_episode = crate::objective_faults::episode(
+            store.origin(), &format!("{OBJECTIVE}/{}", policy.config.member),
+        );
+        let failure = store.operational_failure(&legacy_episode).unwrap().unwrap();
+        assert_eq!(admission.case.as_ref().unwrap().adopted.as_deref(), Some(failure.request.as_str()));
+        assert!(admission.legacy_imported);
+        drain_notices(&mut admission, &journal, &store, None).unwrap();
+        let met = reading(end + MINUTE_MS, 0);
+        admission.weekly(&journal, &policy.config, &store, &met, met.end_ms,
+            |opening, action| record_weekly(&store, opening, action)).unwrap();
+        let mut restarted = Admission::load(&journal, &policy.config).unwrap();
+        import_legacy(&mut restarted, &policy, &store, &journal).unwrap();
+        drain_notices(&mut restarted, &journal, &store, None).unwrap();
+        assert_eq!(store.messages(Some(&policy.config.reviewer), true).unwrap().len(), 1);
+        assert_eq!(store.operational_failure(&legacy_episode).unwrap().unwrap().status, "resolved");
+        assert_eq!(fs::read(&policy.checkpoint).unwrap(), legacy_bytes);
+    }
+
+    #[test]
+    fn unavailable_backup_does_not_accumulate_across_recovered_cases() {
+        let (dir, policy, store) = fixture();
+        let journal = dir.path().join("case.json");
+        let backup = Some("agent/fixture.unavailable");
+        let mut admission = Admission::load(&journal, &policy.config).unwrap();
+        for episode in 0..64 {
+            let end = (MINUTES + 10 + episode * 3) * MINUTE_MS;
+            assert!(admission.plan(&policy.config, ShortSummary {
+                end_ms: end, known: 5, failed: 3,
+            }));
+            admission.persist(&journal).unwrap();
+            admission.replay(&journal, |opening| record(&store, &policy.config, opening)).unwrap();
+            drain_notices(&mut admission, &journal, &store, backup).unwrap();
+            assert_eq!(admission.notices.iter().filter(|notice| notice.held).count(), 1);
+            let met = reading(end + MINUTE_MS, 0);
+            admission.weekly(&journal, &policy.config, &store, &met, met.end_ms,
+                |opening, action| record_weekly(&store, opening, action)).unwrap();
+            drain_notices(&mut admission, &journal, &store, backup).unwrap();
+            assert!(admission.notices.iter().all(|notice| !notice.held));
+            assert!(fs::metadata(&journal).unwrap().len() < CASE_JOURNAL_MAX_BYTES);
+            admission = Admission::load(&journal, &policy.config).unwrap();
+        }
+        assert_eq!(store.messages(Some(&policy.config.reviewer), true).unwrap().len(), 64);
+        assert!(store.messages(backup, true).unwrap().is_empty());
+    }
 }

@@ -492,9 +492,13 @@ owner. A weekly miss can also open a case directly. Each phase admits exactly
 one actionable owner notice. Optional `backup = "agent/example/backup"` selects
 a distinct, active agent for one held informational notice per phase, never
 an alternate owner. An unavailable backup cannot block owner delivery.
+Only one backup intent is retained per phase; undelivered informational intents
+are discarded on recovery rather than carried into later cases.
 Measured weekly recovery closes failure receipts without another owner notice;
-Unknown preserves the case. Existing weekly episodes are adopted by native
-receipt identity before early admission. Keep `readiness-case.json` across
+Unknown preserves the case. Pending legacy cuts are first imported into the
+shared journal and replayed before reading a newer publication. Existing weekly
+episodes are adopted by native receipt identity before early admission.
+Keep `readiness-case.json` across
 restart: it journals phase transitions and notice intents before delivery and
 recognizes native receipts on replay. The legacy weekly checkpoint remains
 byte-for-byte unchanged while the shared route is enabled.
