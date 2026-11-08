@@ -134,6 +134,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Restore the prepared compatibility archive
+        id: compat-archive
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
+          key: ${{ steps['compat-identity'].outputs.key }}
+          fail-on-cache-miss: true
       - name: Restore the Cargo target and registry
         id: cargo-probe
         if: success()
@@ -348,6 +364,7 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-probe.outcome }}","hit":"${{ steps.cargo-probe.outputs.cache-hit }}","matched":"${{ steps.cargo-probe.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":true},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-probe.outcome }}","hit":"${{ steps.nix-probe.outputs.cache-hit }}","matched":"${{ steps.nix-probe.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":true},{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+    needs: [compat-archives-x86_64-unknown-linux-gnu]
   linux-clippy:
     name: warm-clippy
     runs-on:
@@ -578,6 +595,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned fleet archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
+      - name: Restore the prepared compatibility archive
+        id: compat-archive
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
+          key: ${{ steps['compat-identity'].outputs.key }}
+          fail-on-cache-miss: true
       - name: Restore the Cargo target and registry
         id: cargo-probe
         if: success()
@@ -770,6 +803,7 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-probe.outcome }}","hit":"${{ steps.cargo-probe.outputs.cache-hit }}","matched":"${{ steps.cargo-probe.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":true},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-probe.outcome }}","hit":"${{ steps.nix-probe.outputs.cache-hit }}","matched":"${{ steps.nix-probe.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":true},{"name":"Restore the exact-source build snapshot","outcome":"${{ steps.build-snapshot.outcome }}","hit":"${{ steps.build-snapshot.outputs.cache-hit }}","matched":"","opaqueFallback":true,"sourceOnly":true,"avoidable":"${{ steps.build-snapshot.outputs.avoidable-miss }}","lookup":false},{"name":"Restore the Cargo target and registry","outcome":"${{ steps.cargo-cache.outcome }}","hit":"${{ steps.cargo-cache.outputs.cache-hit }}","matched":"${{ steps.cargo-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore the local Nix cache","outcome":"${{ steps.nix-cache.outcome }}","hit":"${{ steps.nix-cache.outputs.cache-hit }}","matched":"${{ steps.nix-cache.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+    needs: [compat-archives-x86_64-unknown-linux-gnu]
   genie-freshness:
     name: warm-genie
     runs-on: ubuntu-latest
@@ -2062,6 +2096,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned fleet archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
+      - name: Restore the prepared compatibility archive
+        id: compat-archive
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
+          key: ${{ steps['compat-identity'].outputs.key }}
+          fail-on-cache-miss: true
       - name: Look for an existing evidence note
         id: gate
         env:
@@ -2114,7 +2164,7 @@ jobs:
           CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) ) }}
-    needs: [main-checks]
+    needs: [main-checks, compat-archives-x86_64-unknown-linux-gnu]
   proof-evidence-gate-typescript-client:
     name: post-merge evidence-gate-typescript-client
     runs-on: ubuntu-latest
@@ -3358,6 +3408,7 @@ jobs:
         proof-pick-runner,
         proof-evidence-gate-linux-gate,
         proof-evidence-gate-rust-tests,
+        compat-archives-x86_64-unknown-linux-gnu,
       ]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !((needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true')) && !(needs.proof-evidence-gate-linux-gate.outputs.refuse == 'true')) ) }}
     runs-on: ${{ fromJSON(vars.CI_MERGE_TEST_BUILD_OWNED && (needs.proof-pick-runner.outputs.ci1_build || format('["namespace-profile-{0};job.priority=1;github.run-id={1}"]', vars.CI_MERGE_NAMESPACE_PROFILE || 'linux-x86-64', github.run_id)) || needs.proof-pick-runner.outputs.ci1 || '["ci1-priority"]') }}
@@ -3376,6 +3427,22 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Restore the prepared compatibility archive
+        id: compat-archive
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
+          key: ${{ steps['compat-identity'].outputs.key }}
+          fail-on-cache-miss: true
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -3556,13 +3623,12 @@ jobs:
   proof-linux-tests:
     name: post-merge linux-tests
     needs:
-      [
-        main-checks,
-        proof-pick-runner,
-        proof-linux-test-build,
-        proof-evidence-gate-linux-gate,
-        proof-evidence-gate-rust-tests,
-      ]
+      - main-checks
+      - proof-pick-runner
+      - proof-linux-test-build
+      - proof-evidence-gate-linux-gate
+      - proof-evidence-gate-rust-tests
+      - compat-archives-x86_64-unknown-linux-gnu
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.proof-evidence-gate-linux-gate.outputs.refuse == 'true')) ) }}
     runs-on: ${{ fromJSON(needs.proof-pick-runner.outputs.ci1 || '["ci1-priority"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
@@ -3587,6 +3653,22 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Restore the prepared compatibility archive
+        id: compat-archive
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
+          key: ${{ steps['compat-identity'].outputs.key }}
+          fail-on-cache-miss: true
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -3809,13 +3891,12 @@ jobs:
   proof-linux-tests-shard-2:
     name: post-merge linux-tests-shard-2
     needs:
-      [
-        main-checks,
-        proof-pick-runner,
-        proof-linux-test-build,
-        proof-evidence-gate-linux-gate,
-        proof-evidence-gate-rust-tests,
-      ]
+      - main-checks
+      - proof-pick-runner
+      - proof-linux-test-build
+      - proof-evidence-gate-linux-gate
+      - proof-evidence-gate-rust-tests
+      - compat-archives-x86_64-unknown-linux-gnu
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.proof-evidence-gate-linux-gate.outputs.refuse == 'true')) ) }}
     runs-on: ${{ fromJSON(needs.proof-pick-runner.outputs.ci1 || '["ci1-priority"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
@@ -3840,6 +3921,22 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Restore the prepared compatibility archive
+        id: compat-archive
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
+          key: ${{ steps['compat-identity'].outputs.key }}
+          fail-on-cache-miss: true
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -4059,13 +4156,12 @@ jobs:
   proof-linux-tests-shard-3:
     name: post-merge linux-tests-shard-3
     needs:
-      [
-        main-checks,
-        proof-pick-runner,
-        proof-linux-test-build,
-        proof-evidence-gate-linux-gate,
-        proof-evidence-gate-rust-tests,
-      ]
+      - main-checks
+      - proof-pick-runner
+      - proof-linux-test-build
+      - proof-evidence-gate-linux-gate
+      - proof-evidence-gate-rust-tests
+      - compat-archives-x86_64-unknown-linux-gnu
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled() && true) && !(needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.proof-evidence-gate-linux-gate.outputs.refuse == 'true')) ) }}
     runs-on: ${{ fromJSON(needs.proof-pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.proof-pick-runner.outputs.ci1 || '["ci1-merge"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
@@ -4090,6 +4186,22 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Restore the prepared compatibility archive
+        id: compat-archive
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
+          key: ${{ steps['compat-identity'].outputs.key }}
+          fail-on-cache-miss: true
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -4309,13 +4421,12 @@ jobs:
   proof-linux-tests-shard-4:
     name: post-merge linux-tests-shard-4
     needs:
-      [
-        main-checks,
-        proof-pick-runner,
-        proof-linux-test-build,
-        proof-evidence-gate-linux-gate,
-        proof-evidence-gate-rust-tests,
-      ]
+      - main-checks
+      - proof-pick-runner
+      - proof-linux-test-build
+      - proof-evidence-gate-linux-gate
+      - proof-evidence-gate-rust-tests
+      - compat-archives-x86_64-unknown-linux-gnu
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled() && true) && !(needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-rust-tests.outputs.skip == 'true') && !(needs.proof-evidence-gate-linux-gate.outputs.refuse == 'true')) ) }}
     runs-on: ${{ fromJSON(needs.proof-pick-runner.outputs.ci1 == '["ci1-priority"]' && '["ci1-merge"]' || needs.proof-pick-runner.outputs.ci1 || '["ci1-merge"]') }}
     environment: ${{ (github.event_name == 'merge_group' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)) && 'evidence-signing' || '' }}
@@ -4340,6 +4451,22 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Restore the prepared compatibility archive
+        id: compat-archive
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
+          key: ${{ steps['compat-identity'].outputs.key }}
+          fail-on-cache-miss: true
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -4801,6 +4928,7 @@ jobs:
         proof-pick-runner,
         proof-evidence-gate-linux-gate,
         proof-evidence-gate-linux-fleet-compat,
+        compat-archives-x86_64-unknown-linux-gnu,
       ]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && ((!cancelled()) && !(needs.proof-evidence-gate-linux-gate.outputs.skip == 'true' || needs.proof-evidence-gate-linux-fleet-compat.outputs.skip == 'true') && !(needs.proof-evidence-gate-linux-gate.outputs.refuse == 'true')) ) }}
     runs-on: ${{ fromJSON(needs.proof-pick-runner.outputs.ci1 || '["ci1-priority"]') }}
@@ -4820,6 +4948,22 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned fleet archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
+      - name: Restore the prepared compatibility archive
+        id: compat-archive
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['compat-identity'].outputs['cache-path'] }}
+          key: ${{ steps['compat-identity'].outputs.key }}
+          fail-on-cache-miss: true
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -6083,3 +6227,62 @@ jobs:
         env:
           CACHE_REASON: Collects the detection and execution results and builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+  compat-archives-x86_64-unknown-linux-gnu:
+    name: Prepare verified compatibility archives (x86_64-unknown-linux-gnu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Identify the pinned messaging archive
+        id: identity-0
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Identify the pinned fleet archive
+        id: identity-1
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
+      - name: Restore messaging archive
+        id: archive-0
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['identity-0'].outputs['cache-path'] }}
+          key: ${{ steps['identity-0'].outputs.key }}
+      - name: Verify and prepare messaging archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_CACHE_HIT: ${{ steps.archive-0.outputs.cache-hit }}
+        run: 'python3 scripts/ci-compat-archive prepare messaging x86_64-unknown-linux-gnu "${{ steps[''identity-0''].outputs.path }}"'
+      - name: Save verified messaging archive
+        if: steps.archive-0.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps['identity-0'].outputs['cache-path'] }}
+          key: ${{ steps['identity-0'].outputs.key }}
+      - name: Restore fleet archive
+        id: archive-1
+        if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps['identity-1'].outputs['cache-path'] }}
+          key: ${{ steps['identity-1'].outputs.key }}
+      - name: Verify and prepare fleet archive
+        shell: bash
+        if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_CACHE_HIT: ${{ steps.archive-1.outputs.cache-hit }}
+        run: 'python3 scripts/ci-compat-archive prepare fleet x86_64-unknown-linux-gnu "${{ steps[''identity-1''].outputs.path }}"'
+      - name: Save verified fleet archive
+        if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256 && steps.archive-1.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps['identity-1'].outputs['cache-path'] }}
+          key: ${{ steps['identity-1'].outputs.key }}
+      - name: Report compatibility archive cache coverage
+        shell: bash
+        run: 'echo "Compatibility archives: exact native-target + pinned-SHA256 restore/save; every restored archive is reverified before use." >> "$GITHUB_STEP_SUMMARY"'
