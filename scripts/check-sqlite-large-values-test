@@ -57,7 +57,7 @@ class Policy(unittest.TestCase):
     def test_guard_rejects_noncanonical_text_and_format_command_repairs_it(self):
         path = self.root / MANIFEST
         path.parent.mkdir(parents=True)
-        path.write_text(json.dumps(self.manifest, indent=2) + "\n")
+        path.write_text(json.dumps(self.manifest, indent=4) + "\n")
         command = [sys.executable, str(Path(__file__).with_name("check-sqlite-large-values")),
                    "--root", str(self.root)]
         result = subprocess.run(command, capture_output=True, text=True)
