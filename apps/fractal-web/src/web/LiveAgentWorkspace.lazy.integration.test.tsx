@@ -69,7 +69,6 @@ vi.mock('../data/react.tsx', () => ({
   useNow: () => 0,
   useNowSnapshot: () => 0,
   useGatewaySync: () => gatewayObservation,
-  useMissions: () => ({ _tag: 'Waiting' }),
   useDataSource: () => ({ gateway: 'alpha.example', reconnect, prefetchTerminal: terminalPrefetch, terminal: () => waitingFeed, agents: waitingFeed, missions: waitingFeed, attention: waitingFeed, usage: { _tag: 'undeclared' } }),
   useFeedInterest: () => {},
 }))
