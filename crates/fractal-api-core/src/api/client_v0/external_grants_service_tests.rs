@@ -376,6 +376,7 @@ async fn service_selectors_match_only_disclosed_claim_kinds() {
             withheld_indexes.push(claim.store_index);
             if n == 0 {
                 state.store.connection.lock().unwrap().execute(
+                    /* sqlite-large-value: allow-for-now lv-h16df3901f435 owner=fractal_api_core::api::client_v0::external_grants_service_tests TODO=bound-or-reference-values-and-reclamation */
                     "INSERT INTO desired(subject,kind,revision,claim_id,body,owner_run) VALUES (?1,'gate-operation',?2,?2,'{}',?3)",
                     rusqlite::params![subject,claim.id,owner],
                 ).unwrap();
@@ -454,6 +455,7 @@ mission "literal-service" state="ready" {
     for lifecycle in ["unknown","invalid"] {
         for (_,subject,_,kind) in identities {
             state.store.connection.lock().unwrap().execute(
+                /* sqlite-large-value: allow-for-now lv-h6825b80ba287 owner=fractal_api_core::api::client_v0::external_grants_service_tests TODO=chunk-or-reference-exact-wire-values */
                 "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms)
                  VALUES(?1,'test-peer',1,?1,0,'{}',?2,?3,?4,'1')",
                 rusqlite::params![format!("record/{lifecycle}/{subject}"),lifecycle,subject,kind],
