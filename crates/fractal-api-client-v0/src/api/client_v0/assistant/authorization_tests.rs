@@ -545,6 +545,23 @@ async fn conversation_routes_share_existing_scope_and_discovered_handle_reads_na
 }
 
 #[tokio::test]
+async fn thread_read_action_is_unavailable_to_mcp_credentials() {
+    let fixture = fixture_principal(SCOPES, true, MCP_PRINCIPAL).await;
+    let result = crate::api::fabric_router(fixture.state.clone()).oneshot(
+        Request::builder().method("POST").uri("/v1/client/actions")
+            .header(AUTHORIZATION, format!("Bearer {}", fixture.credential))
+            .header("Content-Type", "application/json")
+            .body(Body::from(json!({
+                "api_version": CLIENT_API_VERSION, "id": "action/thread-read-mcp",
+                "type": "thread.read", "idempotency_key": "thread-read-mcp-denied",
+                "fence": {"snapshot_id": new_client_snapshot(&fixture.state).id},
+                "parameters": {"target_id": "thread/unknown", "through_message_id": null, "seen_message_ids": []},
+            }).to_string())).unwrap(),
+    ).await.unwrap();
+    assert_eq!(result.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn thread_detail_requires_conversation_grant_and_owner_visible_thread() {
     use crate::store::thread_metadata::{self, Edit};
 
