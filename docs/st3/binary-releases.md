@@ -277,6 +277,20 @@ the operator's summary to the draft notes; it defaults to empty. Publication pre
 that summary verbatim rather than regenerating it. `scripts/release-fractal-daily --dry-run`
 prints the candidate notes without creating a tag or draft.
 
+For an explicitly selected verified build, `recover_draft=true` (script option
+`--recover-draft`) opts into one minimal metadata-only draft POST. It requires
+explicit `tag`, full `sha`, and successful `run`; it never builds a replacement.
+The response status, date and request ID are logged without request credentials.
+An ambiguous create is reconciled by paginated authenticated release listing and
+release-ID reads, not another POST or deletion. Recovery requires an absent tag,
+an exact target SHA and candidate marker, and matching draft flags. Original
+assets are uploaded only after reconciliation, checked against their SHA-256
+digests, and the notes are updated while retaining draft state. Existing exact
+drafts are adopted; conflicting or incomplete evidence stops without deleting
+anything. Ordinary candidate creation also preserves and reconciles drafts after
+an ambiguous failure rather than deleting or retrying them. Publication still
+requires the unchanged exact-SHA product GO and artifact verification.
+
 Candidate version selection, draft creation, cleanup, publication, and edge/embed release
 jobs share one job-level `fractal-release-mutation` concurrency group, with cancellation
 disabled. Edge and embed are not exempt: they also create or edit GitHub releases.
