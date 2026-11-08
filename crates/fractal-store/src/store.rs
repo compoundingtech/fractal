@@ -4231,8 +4231,23 @@ impl Store {
         descending: bool,
         limit: usize,
     ) -> Result<ClaimsPage> {
+        self.claims_page_with_kinds(subject, owner_run, after_index, before_index, descending, limit, None)
+    }
+
+    /// Restrict kinds in SQL before selecting or decoding page rows.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claims_page_with_kinds(
+        &self,
+        subject: Option<&str>,
+        owner_run: Option<&str>,
+        after_index: u64,
+        before_index: Option<u64>,
+        descending: bool,
+        limit: usize,
+        kinds: Option<&[&str]>,
+    ) -> Result<ClaimsPage> {
         let connection = self.readers.get();
-        let query = claims_page_query(subject.is_some(), descending);
+        let query = claims_page_query(subject.is_some(), descending, kinds.is_some());
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h2080eb040134 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
         // The owner filter is evaluated per subject below. Other pages can stop
         // in SQLite at one row past the requested bound, before decoding bodies.
@@ -4241,10 +4256,17 @@ impl Store {
         } else {
             i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)
         };
-        let rows = statement.query_map(
-            params![after_index, before_index, subject, scan_limit],
-            claim_from_row,
-        )?;
+        let rows = if let Some(kinds) = kinds {
+            statement.query_map(
+                params![after_index, before_index, subject, scan_limit, serde_json::to_string(kinds)?],
+                claim_from_row,
+            )?
+        } else {
+            statement.query_map(
+                params![after_index, before_index, subject, scan_limit],
+                claim_from_row,
+            )?
+        };
         let mut claims = Vec::new();
         for row in rows {
             let claim = row?;
