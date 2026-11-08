@@ -1,10 +1,10 @@
 // Explicit-clock presentation only: time leaves read the shared context clock, or the host's fixed instant when given.
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
-import { Button, Focusable, Popover } from 'react-aria-components'
+import { Button, Focusable } from 'react-aria-components'
 import { Tooltip } from '../composition/Controls'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
-import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, motionVars as m, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { rowAttention, rowStatusLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
 import { AgentHoverCard, AgentRowActions } from './DeferredRowActions.tsx'
 import { Highlight } from './rowPresentation.tsx'
@@ -12,6 +12,7 @@ import { SidebarMissionLine, missionLineHasTrigger } from './SidebarMissionLine'
 import { SidebarStatus } from './SidebarStatus'
 import { SidebarTime } from './SidebarTime'
 import { useSidebarHoverIntent } from './useSidebarHoverIntent'
+import { HoverCardSurface, useHoverCardIntent } from '../entity/HoverCard'
 import { useTouchLayout } from './useTouchLayout'
 import { ThemePortal } from '../taste/ThemePortal'
 
@@ -85,7 +86,10 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
   const narrow = React.useContext(NarrowLayoutContext)
   const anchor = React.useRef<HTMLDivElement>(null)
   const touch = useTouchLayout()
-  const { hoverOpen: hovered, setHoverOpen: setHovered } = useSidebarHoverIntent()
+  const { hoverOpen: hovered, setHoverOpen: setRowHovered } = useSidebarHoverIntent()
+  // The row's hover reveals its menu at once; the card follows the canonical hover-card intent.
+  const card = useHoverCardIntent()
+  const setHovered = (value: boolean) => { setRowHovered(value); if (!value) card.setOpen(false) }
   const [countExplained, setCountExplained] = React.useState(false)
   const [menuFocused, setMenuFocused] = React.useState(false)
   const menuTrigger = React.useRef<HTMLButtonElement>(null)
@@ -103,7 +107,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     : (row.unread ?? 0) > 0 ? <span data-row-signal="unread" aria-label={`${row.unread} unread`} {...stylex.props(styles.unread)}>{row.unread}</span> : null
   const hasTrailing = row.lastTurn._tag === 'Known' || signal !== null
   return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-display-only={displayOnly || undefined} data-narrow={narrow || undefined} data-touch={touchRow || undefined} data-touch-mission={touchMission || undefined} data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
-    onMouseEnter={displayOnly ? undefined : () => setHovered(true)} onMouseLeave={displayOnly ? undefined : () => setHovered(false)}
+    onMouseEnter={displayOnly ? undefined : event => { setRowHovered(true); if ((event.target as Element).closest('[data-count-scope]') === null) card.intend(true) }} onMouseLeave={displayOnly ? undefined : () => { setRowHovered(false); card.intend(false) }}
     onFocus={displayOnly ? undefined : event => { if (menuTrigger.current?.contains(event.target) === true) setMenuFocused(true) }} onBlur={displayOnly ? undefined : event => { if (menuTrigger.current?.contains(event.target) === true) setMenuFocused(false) }}
     onContextMenu={displayOnly ? undefined : event => { event.preventDefault(); event.stopPropagation(); setHovered(false); menuTrigger.current?.click() }}
     style={depth > 0 ? { paddingInlineStart: `calc(${s.xl} * ${depth})` } : undefined}
@@ -113,7 +117,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={statusLabel} statusSince={row.statusSince} variant="Marks" needsYou={attention === 'needs-you'} freshness={row.freshness} frozen={frozen} iconOnly /></span>
     <span data-row-column="name" {...stylex.props(styles.name, !hasTrailing && styles.titleToEdge)}>
       <span data-row-column="title" {...stylex.props(styles.title)}><Highlight value={row.title} query={query} /></span>
-      {!displayOnly && row.subagentObservation !== undefined && row.subagentObservation._tag !== 'NotReported' && row.subagentCount !== 0 && <SubagentCount count={row.subagentCount} frozen={frozen} onExplain={open => { setCountExplained(open); if (open) setHovered(false) }} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} />}
+      {!displayOnly && row.subagentObservation !== undefined && row.subagentObservation._tag !== 'NotReported' && row.subagentCount !== 0 && <span data-count-scope onPointerEnter={() => card.setOpen(false)} onPointerLeave={() => card.intend(true)} {...stylex.props(styles.countScope)}><SubagentCount count={row.subagentCount} frozen={frozen} onExplain={open => { setCountExplained(open); if (open) setHovered(false) }} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} /></span>}
     </span>
     {/* SidebarTime omits an instant after `now`: a frozen snapshot never shows activity newer than its observation as 0s. */}
     {hasTrailing && <span data-row-column="trailing" {...stylex.props(styles.trailing)}>
@@ -133,9 +137,9 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     {!displayOnly && <>
       <AgentRowActions row={row} now={now} reportedStatusOnly={reportedStatusOnly} actions={actions} onOpen={onOpen} onMarkRead={onMarkRead} anchorRef={anchor} menuTriggerRef={menuTrigger} onDetailsPress={() => setHovered(false)}
         menuButtonStyle={({ isHovered, isPressed, isFocusVisible }) => [styles.menuButton, (hovered || isHovered || isPressed || isFocusVisible) && styles.menuVisible, touchDisclosure !== undefined && styles.touchMenuButton]} />
-      {hovered && !countExplained && <Popover isNonModal isOpen onOpenChange={open => { if (!open) setHovered(false) }} triggerRef={anchor} placement="right top" offset={8} {...stylex.props(styles.hovercard)}>
+      <HoverCardSurface isOpen={card.isOpen && !countExplained} onOpenChange={card.setOpen} triggerRef={anchor} placement="right top" label={`Reported details for ${row.title}`}>
         <AgentHoverCard row={row} now={now} reportedStatusOnly={reportedStatusOnly} />
-      </Popover>}
+      </HoverCardSurface>
     </>}
     </ThemePortal>
   </div>
@@ -178,6 +182,8 @@ const compactName = '@container agent-name (width < 192px)'
 const hiddenCount = '@container agent-name (width < 48px)'
 
 const styles = stylex.create({
+  // The count explains itself in its own tooltip; pointing at it holds the row's card back instead of stacking both.
+  countScope: { display: 'contents' },
   // Relative: the containing block for the visually hidden details trigger, so it never escapes the scroll clip.
   row: { position: 'relative', display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr) auto`, gridTemplateRows: `${g.controlSm} ${g.controlSm}`, alignItems: 'center', columnGap: s.sm, height: g.sidebarRow, minWidth: 0, width: '100%', boxSizing: 'border-box', paddingInline: s.sm, borderRadius: r.sm, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   interactive: { ':hover': { backgroundColor: surface.rowHover } },
@@ -240,6 +246,4 @@ const styles = stylex.create({
   sep: { paddingInline: s.xs, color: ink.fgMuted },
   unavailable: { color: ink.fgMuted },
   warningIcon: { display: 'inline-block', verticalAlign: 'middle' },
-  // The card mounts on pointer enter; the delayed entrance is the 150ms hover intent, so a pass across rows never flashes cards.
-  hovercard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', boxShadow: elevation.popover, outline: 'none', animationName: stylex.keyframes({ from: { opacity: 0 }, to: { opacity: 1 } }), animationDuration: m.fast, animationDelay: m.fast, animationTimingFunction: 'ease-out', animationFillMode: 'backwards' },
 })
