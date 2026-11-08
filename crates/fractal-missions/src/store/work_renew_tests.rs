@@ -510,7 +510,7 @@ fn ready_step_with_mail(mail: usize) -> Renewal {
 }
 
 #[test]
-fn work_claim_rejects_raw_actor_and_retains_main_spelling_independent_of_assignment() {
+fn work_claim_requires_literal_assignment_and_main_actor_spelling() {
     for (actor, assignee) in [
         ("node/worker", "agent/node/worker"),
         ("agent/node/worker", "node/worker"),
@@ -533,6 +533,15 @@ fn work_claim_rejects_raw_actor_and_retains_main_spelling_independent_of_assignm
             let error = step.store.work_action(&step.subject, "claim", &claim_request).unwrap_err();
             assert_eq!(error.code, "invalid-work-actor");
             assert!(error.message.contains("agent/node/worker"));
+            let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+            assert_eq!(persisted.status, "ready");
+            assert!(persisted.claimant.is_none());
+            assert!(step.store.claims_for(&step.subject, Some("work.claimed")).unwrap().is_empty());
+            continue;
+        }
+        if actor != assignee {
+            let error = step.store.work_action(&step.subject, "claim", &claim_request).unwrap_err();
+            assert_eq!(error.code, "work-not-available");
             let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
             assert_eq!(persisted.status, "ready");
             assert!(persisted.claimant.is_none());
@@ -586,9 +595,6 @@ fn replicated_legacy_claimant_refuses_alias_mutations_without_replay_loss() {
     }).unwrap();
     let subject = &run.steps[0].subject;
     source.set_step_state(subject, "ready", None).unwrap();
-    source.connection.write().execute(
-        /* sqlite-large-value: allow-for-now lv-h2bd292359425 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='node/worker' WHERE subject=?1", [subject],
-    ).unwrap();
     let mut claim_request = request("legacy-replica-claim", None);
     claim_request.actor = Some("agent/node/worker".into());
     source.work_action(subject, "claim", &claim_request).unwrap();
@@ -676,7 +682,7 @@ fn replicated_legacy_claimant_refuses_alias_mutations_without_replay_loss() {
 }
 
 #[test]
-fn work_claim_rejects_raw_actor_and_retains_main_spelling_independent_of_available_to() {
+fn work_claim_requires_literal_candidate_and_main_actor_spelling() {
     for actor in ["node/worker", "agent/node/worker"] {
         for candidate in ["node/worker", "agent/node/worker"] {
             let step = ready_step_with_mail(0);
@@ -689,6 +695,15 @@ fn work_claim_rejects_raw_actor_and_retains_main_spelling_independent_of_availab
             if !actor.starts_with("agent/") {
                 let error = step.store.work_action(&step.subject, "claim", &claim).unwrap_err();
                 assert_eq!(error.code, "invalid-work-actor");
+                let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+                assert_eq!(persisted.status, "ready");
+                assert!(persisted.claimant.is_none());
+                assert!(step.store.claims_for(&step.subject, Some("work.claimed")).unwrap().is_empty());
+                continue;
+            }
+            if actor != candidate {
+                let error = step.store.work_action(&step.subject, "claim", &claim).unwrap_err();
+                assert_eq!(error.code, "work-not-available");
                 let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
                 assert_eq!(persisted.status, "ready");
                 assert!(persisted.claimant.is_none());
@@ -844,7 +859,7 @@ fn work_mutations_require_literal_legacy_or_canonical_holders() {
                 let step = ready_step_with_mail(0);
                 step.store.connection.write().execute(
                     /* sqlite-large-value: allow-for-now lv-hd700e0550a21 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2 WHERE subject=?1",
-                    params![step.subject, holder],
+                    params![step.subject, "agent/node/worker"],
                 ).unwrap();
                 let mut claim = request("holder-action-claim", None);
                 claim.actor = Some("agent/node/worker".into());
@@ -899,14 +914,14 @@ fn work_mutations_require_literal_legacy_or_canonical_holders() {
                 let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
                 assert_eq!(persisted.status, expected_status);
                 assert_eq!(persisted.claimant.as_deref(), expected_holder);
-                assert_eq!(persisted.assigned_to.as_deref(), Some(holder));
+                assert_eq!(persisted.assigned_to.as_deref(), Some("agent/node/worker"));
             }
         }
     }
 }
 
 #[test]
-fn independent_work_capacity_refuses_second_admission_for_actor_aliases() {
+fn independent_work_capacity_uses_literal_ownership_for_admission() {
     for actor in ["node/worker", "agent/node/worker"] {
         for holder in ["node/worker", "agent/node/worker"] {
             for status in ["claimed", "working", "verifying", "blocked"] {
@@ -928,12 +943,16 @@ fn independent_work_capacity_refuses_second_admission_for_actor_aliases() {
                     kdl: declaration.into(), source_name: None,
                 }).unwrap();
                 step.store.apply(&intent, &plan.subject_tokens, "capacity-agent").unwrap();
-                let error = step.store.start_work(&crate::model::WorkStartRequest {
+                let started = step.store.start_work(&crate::model::WorkStartRequest {
                     actor: "agent/node/worker".into(),
                     title: "A second independent task".into(),
                     idempotency_key: "capacity-spontaneous-start".into(),
-                }).unwrap_err();
-                assert_eq!(error.code, "agent-capacity", "{actor} / {holder} / {status}");
+                });
+                if holder == "agent/node/worker" {
+                    assert_eq!(started.unwrap_err().code, "agent-capacity", "{actor} / {holder} / {status}");
+                } else {
+                    assert!(started.unwrap().claimant.is_none());
+                }
                 let second = step.store.create_mission_run(&MissionRunRequest {
                     mission: "capacity-second".into(), revision: None, workspace: "/tmp".into(),
                     requester: Some("person/test".into()), mode: Some("run".into()),
@@ -947,13 +966,17 @@ fn independent_work_capacity_refuses_second_admission_for_actor_aliases() {
                 ).unwrap();
                 claim.idempotency_key = "capacity-second-claim".into();
                 claim.actor = Some(actor.into());
-                let error = step.store.work_action(second, "claim", &claim).unwrap_err();
-                let expected = if actor.starts_with("agent/") { "agent-capacity" } else { "invalid-work-actor" };
-                assert_eq!(error.code, expected, "{actor} / {holder} / {status}");
-                let refused = step.store.step_run(second).unwrap().unwrap();
-                assert_eq!(refused.status, "ready");
-                assert!(refused.claimant.is_none());
-                assert!(step.store.claims_for(second, Some("work.claimed")).unwrap().is_empty());
+                let result = step.store.work_action(second, "claim", &claim);
+                if !actor.starts_with("agent/") || actor == holder {
+                    let expected = if actor.starts_with("agent/") { "agent-capacity" } else { "invalid-work-actor" };
+                    assert_eq!(result.unwrap_err().code, expected, "{actor} / {holder} / {status}");
+                    let refused = step.store.step_run(second).unwrap().unwrap();
+                    assert_eq!(refused.status, "ready");
+                    assert!(refused.claimant.is_none());
+                    assert!(step.store.claims_for(second, Some("work.claimed")).unwrap().is_empty());
+                } else {
+                    assert_eq!(result.unwrap().claimant.as_deref(), Some(actor));
+                }
             }
         }
     }

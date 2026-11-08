@@ -347,7 +347,7 @@ impl AdhocWorkStore for Store {
                 }
                 return Err(FractalError::new("missing-work-actor", "the calling seat needs a live declaration"));
             }
-            let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM step_runs WHERE lease_owner IN (SELECT value FROM json_each(?1)) AND status IN ('claimed','working','verifying','blocked') AND CAST(lease_expires_at_unix_ms AS INTEGER)>?2)", params![fractal_store::store::work_actor_spellings_json(&input.actor), now_ms() as i64], |row| row.get(0)).map_err(internal)?;
+            let active: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM step_runs WHERE lease_owner=?1 AND status IN ('claimed','working','verifying','blocked') AND CAST(lease_expires_at_unix_ms AS INTEGER)>?2)", params![input.actor, now_ms() as i64], |row| row.get(0)).map_err(internal)?;
             if active { return Err(FractalError::new("agent-capacity", "finish or release independent claimed work before starting another run")); }
             let claim = append_claim_tx(tx, &self.origin, &run, "mission-run.created", Some(&input.actor), &json!({"fields": {
                 "status": "running", "mission": mission.subject, "revision": mission.revision, "initial_revision": mission.revision,

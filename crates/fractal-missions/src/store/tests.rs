@@ -6412,9 +6412,7 @@ fn an_active_nested_lease_can_publish_its_parent_mission_output() {
     assert_eq!(output.revision, mission.revision);
 }
 
-#[test]
-fn nested_work_renews_the_same_workers_legacy_ancestor_lease() {
-    let holder = "node/worker";
+fn nested_work_ancestor_expiry_after_child_completion(holder: &str) -> u128 {
     let store = Store::open_memory("node").unwrap();
     let source = r#"version 2
 
@@ -6503,7 +6501,17 @@ mission "nested-work" state="ready" {
     assert_eq!(parent.status, "working");
     assert_eq!(parent.claimant.as_deref(), Some(holder));
     assert_eq!(parent.claim_incarnation.as_deref(), Some("current"));
-    assert!(parent.claim_expires_at_unix_ms.unwrap() > now_ms());
+    parent.claim_expires_at_unix_ms.unwrap()
+}
+
+#[test]
+fn nested_work_renews_the_literal_owners_ancestor_lease() {
+    assert!(nested_work_ancestor_expiry_after_child_completion("agent/node/worker") > now_ms());
+}
+
+#[test]
+fn nested_work_does_not_renew_an_alias_owned_ancestor_lease() {
+    assert_eq!(nested_work_ancestor_expiry_after_child_completion("node/worker"), 0);
 }
 
 #[test]

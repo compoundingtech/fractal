@@ -626,14 +626,14 @@ fn renew_nested_ancestor_leases_tx(
              WHERE generation_id=?3
                AND substr(?4, 1, length(step_path) + 1)=step_path || '/'
                AND status IN ('claimed','working','verifying')
-               AND lease_owner IN (SELECT value FROM json_each(?5))
+               AND lease_owner=?5
                AND lease_incarnation IS ?6",
             params![
                 expiry.to_string(),
                 now.to_string(),
                 generation,
                 step_path,
-                work_actor_spellings_json(actor),
+                actor,
                 incarnation
             ],
         )
@@ -925,17 +925,15 @@ fn seat_order_conflict_tx(
     agent: &str,
     subject: &str,
 ) -> Result<Option<String>> {
-    let agent = fractal_schema::canonical_agent_actor(agent)
-        .unwrap_or(std::borrow::Cow::Borrowed(agent));
-    let order = seat_run_orders_tx(connection, Some(&agent))?
-        .remove(agent.as_ref())
+    let order = seat_run_orders_tx(connection, Some(agent))?
+        .remove(agent)
         .unwrap_or_default();
-    let rows = seat_step_rows_tx(connection, Some(&agent))?;
+    let rows = seat_step_rows_tx(connection, Some(agent))?;
     let steps = rows
         .iter()
         .map(RosterStepRow::seat_step)
         .collect::<Vec<_>>();
-    let selection = seat_queue::select(&agent, &steps, &order);
+    let selection = seat_queue::select(agent, &steps, &order);
     let Some(next) = selection.next() else {
         return Ok(None);
     };
@@ -1012,9 +1010,9 @@ fn carried_claim_successor_tx(
             "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                     lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
              FROM step_runs
-             WHERE run_id=?1 AND step_path=?2 AND lease_owner IN (SELECT value FROM json_each(?3)) AND generation_id<>?4
+             WHERE run_id=?1 AND step_path=?2 AND lease_owner=?3 AND generation_id<>?4
                AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=?1)",
-            params![run_id, step.step, work_actor_spellings_json(actor), generation_id_from_subject(&step.generation)],
+            params![run_id, step.step, actor, generation_id_from_subject(&step.generation)],
             step_run_from_row,
         )
         .optional()
@@ -1032,7 +1030,7 @@ fn mission_output_authority(
                          lease_incarnation: Option<&str>,
                          expiry: Option<u128>| {
         matches!(status, "claimed" | "working")
-            && work_actor_matches(owner, actor)
+            && owner == Some(actor)
             && expiry.is_some_and(|expiry| expiry > now)
             && lease_incarnation.is_none_or(|lease| Some(lease) == incarnation)
     };
@@ -6065,8 +6063,8 @@ impl MissionsStore for Store {
                 if action == "claim" && adhoc_work::pending_handoff(transaction, &current)? {
                     return Err(FractalError::new("handoff-not-acknowledged", "read the handoff note and acknowledge its message before claiming this work"));
                 }
-                let eligible = work_actor_matches(current.assigned_to.as_deref(), &actor)
-                    || current.available_to.iter().any(|candidate| work_actor_matches(Some(candidate), &actor));
+                let eligible = current.assigned_to.as_deref() == Some(actor.as_str())
+                    || current.available_to.iter().any(|candidate| candidate == &actor);
                 if current.agentless || !eligible {
                     return Err(FractalError::new(
                         "work-not-available",
@@ -6077,7 +6075,7 @@ impl MissionsStore for Store {
                     let mut statement = transaction
                         .prepare(
                             "SELECT subject, generation_id, step_path FROM step_runs
-                             WHERE lease_owner IN (SELECT value FROM json_each(?1))
+                             WHERE lease_owner=?1
                                AND subject<>?2
                                AND status IN ('claimed','working','verifying','blocked')
                                AND lease_expires_at_unix_ms IS NOT NULL
@@ -6086,7 +6084,7 @@ impl MissionsStore for Store {
                         )
                         .map_err(internal)?;
                     let active = statement
-                        .query_map(params![work_actor_spellings_json(&actor), subject, now.to_string()], |row| {
+                        .query_map(params![actor, subject, now.to_string()], |row| {
                             Ok((
                                 row.get::<_, String>(0)?,
                                 row.get::<_, String>(1)?,
