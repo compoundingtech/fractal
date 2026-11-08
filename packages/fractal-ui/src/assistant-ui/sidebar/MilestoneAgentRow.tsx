@@ -107,7 +107,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     : (row.unread ?? 0) > 0 ? <span data-row-signal="unread" aria-label={`${row.unread} unread`} {...stylex.props(styles.unread)}>{row.unread}</span> : null
   const hasTrailing = row.lastTurn._tag === 'Known' || signal !== null
   return <div ref={anchor} data-testid="taste-agent-row" data-milestone-row data-display-only={displayOnly || undefined} data-narrow={narrow || undefined} data-touch={touchRow || undefined} data-touch-mission={touchMission || undefined} data-status={row.status} data-frozen={frozen || undefined} data-depth={depth} data-observation-freshness={row.freshness} data-needs-me={row.needsMe}
-    onMouseEnter={displayOnly ? undefined : () => { setRowHovered(true); card.intend(true) }} onMouseLeave={displayOnly ? undefined : () => { setRowHovered(false); card.intend(false) }}
+    onMouseEnter={displayOnly ? undefined : event => { setRowHovered(true); if ((event.target as Element).closest('[data-count-scope]') === null) card.intend(true) }} onMouseLeave={displayOnly ? undefined : () => { setRowHovered(false); card.intend(false) }}
     onFocus={displayOnly ? undefined : event => { if (menuTrigger.current?.contains(event.target) === true) setMenuFocused(true) }} onBlur={displayOnly ? undefined : event => { if (menuTrigger.current?.contains(event.target) === true) setMenuFocused(false) }}
     onContextMenu={displayOnly ? undefined : event => { event.preventDefault(); event.stopPropagation(); setHovered(false); menuTrigger.current?.click() }}
     style={depth > 0 ? { paddingInlineStart: `calc(${s.xl} * ${depth})` } : undefined}
@@ -117,7 +117,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={statusLabel} statusSince={row.statusSince} variant="Marks" needsYou={attention === 'needs-you'} freshness={row.freshness} frozen={frozen} iconOnly /></span>
     <span data-row-column="name" {...stylex.props(styles.name, !hasTrailing && styles.titleToEdge)}>
       <span data-row-column="title" {...stylex.props(styles.title)}><Highlight value={row.title} query={query} /></span>
-      {!displayOnly && row.subagentObservation !== undefined && row.subagentObservation._tag !== 'NotReported' && row.subagentCount !== 0 && <SubagentCount count={row.subagentCount} frozen={frozen} onExplain={open => { setCountExplained(open); if (open) setHovered(false) }} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} />}
+      {!displayOnly && row.subagentObservation !== undefined && row.subagentObservation._tag !== 'NotReported' && row.subagentCount !== 0 && <span data-count-scope onPointerEnter={() => card.setOpen(false)} onPointerLeave={() => card.intend(true)} {...stylex.props(styles.countScope)}><SubagentCount count={row.subagentCount} frozen={frozen} onExplain={open => { setCountExplained(open); if (open) setHovered(false) }} onPress={onSubagentsPress === undefined ? undefined : () => { setHovered(false); onSubagentsPress(row) }} /></span>}
     </span>
     {/* SidebarTime omits an instant after `now`: a frozen snapshot never shows activity newer than its observation as 0s. */}
     {hasTrailing && <span data-row-column="trailing" {...stylex.props(styles.trailing)}>
@@ -182,6 +182,8 @@ const compactName = '@container agent-name (width < 192px)'
 const hiddenCount = '@container agent-name (width < 48px)'
 
 const styles = stylex.create({
+  // The count explains itself in its own tooltip; pointing at it holds the row's card back instead of stacking both.
+  countScope: { display: 'contents' },
   // Relative: the containing block for the visually hidden details trigger, so it never escapes the scroll clip.
   row: { position: 'relative', display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr) auto`, gridTemplateRows: `${g.controlSm} ${g.controlSm}`, alignItems: 'center', columnGap: s.sm, height: g.sidebarRow, minWidth: 0, width: '100%', boxSizing: 'border-box', paddingInline: s.sm, borderRadius: r.sm, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   interactive: { ':hover': { backgroundColor: surface.rowHover } },
