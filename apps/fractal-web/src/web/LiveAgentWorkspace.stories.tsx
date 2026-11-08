@@ -167,6 +167,18 @@ export const Splits: Story = {
       await waitFor(() => expect(strips()).toHaveLength(2))
       expect(shownPanes()).toHaveLength(1)
       await waitFor(() => expect(canvasElement.querySelector('[data-pane][data-focused] [data-testid="workspace-empty"]')).not.toBeNull())
+      // The pane switcher in the top bar reaches the other pane and back.
+      const switcher = () => canvasElement.querySelector<HTMLButtonElement>('[data-testid="pane-switcher"]')!
+      await waitFor(() => expect(switcher().getAttribute('aria-label')).toBe('Pane 2 of 2'))
+      const choose = async (place: number) => {
+        switcher().click()
+        await waitFor(() => expect(document.querySelectorAll('[role="menuitemradio"]').length).toBe(2))
+        document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')[place - 1]!.click()
+        await waitFor(() => expect(switcher().getAttribute('aria-label')).toBe(`Pane ${place} of 2`))
+      }
+      await choose(1)
+      expect(surface()?.getAttribute('aria-hidden')).toBe('false')
+      await choose(2)
       press({ key: 'w', code: 'KeyW', altKey: true })
       await waitFor(() => expect(strips()).toHaveLength(1))
       expect(surface()).toBe(node)

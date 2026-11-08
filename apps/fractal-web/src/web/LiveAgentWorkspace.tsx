@@ -28,6 +28,7 @@ import { WorkspaceBody } from '../workspace/WorkspaceBody.tsx'
 import { WorkspaceEmpty, WorkspaceStrip } from '../workspace/WorkspaceStrip.tsx'
 import { PaneSlot, PaneSlots, WorkspaceSplits, attributeValue, leadPane } from '../workspace/WorkspaceSplits.tsx'
 import { SpaceSwitcher, nextSpace } from '../workspace/SpaceSwitcher.tsx'
+import { PaneSwitcher } from '../workspace/PaneSwitcher.tsx'
 import type { HostActions, HostCommand } from '../palette/mod.ts'
 import { shortcutsPausedSelector } from './shortcuts.ts'
 import { narrowLayoutQuery } from './narrowLayout.ts'
@@ -634,6 +635,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     faviconState: selectedFaviconState({ agent, needsYou: agent !== undefined && needsYou.has(agent.ref), offline }),
   })
   const itemById = React.useMemo(() => new Map(tabItems.map(item => [item.id, item])), [tabItems])
+  const titleOfTab = React.useCallback((id: string) => itemById.get(id)?.title, [itemById])
   const refById = React.useMemo(() => new Map(allTabs.map(tab => [tab.id, tab.ref])), [allTabs])
   const previousNames = React.useRef<ReadonlyMap<string, string>>(new Map())
   const names = React.useMemo(() => {
@@ -814,7 +816,11 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
       <WorkspaceStrip bar items={pane.tabs.flatMap(tab => itemById.get(tab.id) ?? [])} refs={refById} active={pane.active} group={pane.id} focused={focused} narrow={narrow} dispatch={go} open={openRef}
         leading={isLead ? <>
           {narrow
-            ? <ChromeControl ref={sidebarOpener} icon="panel-left" label="Expand sidebar" tooltip="Show agents" edge="lead" popup="dialog" expanded={phoneSheet.open} {...(phoneSheet.open ? { controls: phoneSheet.id } : {})} onPress={() => agentsDrawer.current?.open()} />
+            ? <>
+              <ChromeControl ref={sidebarOpener} icon="panel-left" label="Expand sidebar" tooltip="Show agents" edge="lead" popup="dialog" expanded={phoneSheet.open} {...(phoneSheet.open ? { controls: phoneSheet.id } : {})} onPress={() => agentsDrawer.current?.open()} />
+              {/* A phone shows the focused pane alone; the others are a tap away. */}
+              <PaneSwitcher titleOf={titleOfTab} onFocusPane={focusPane} />
+            </>
             : collapsed ? <ChromeControl ref={sidebarOpener} icon="panel-left" label="Expand sidebar" tooltip="Expand sidebar (⌘/Ctrl+B)" edge="lead" onPress={toggleSidebar} /> : null}
           <ThreadBreadcrumb {...(agent?.host === undefined ? {} : { folder: agent.host })} title={agent?.name ?? activeLabel ?? 'Select an agent'} label={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />
         </> : undefined}

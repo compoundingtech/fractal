@@ -297,3 +297,24 @@ it('marks a zoomed split, and its badge unzooms', async () => {
   expect(panes()).toHaveLength(2)
   expect(host.querySelector('[data-testid="zoom-badge"]')).toBeNull()
 })
+
+it('collapses to the focused pane on a phone, and the pane switcher reaches the others', async () => {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
+  vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('max-width'), media: query, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }))
+  await mount()
+  expect(host.querySelector('[data-testid="pane-switcher"]'), 'one pane needs no switcher').toBeNull()
+  await arrive('/w/agent/b')
+  await splitRight()
+  expect(panes()).toHaveLength(1)
+  const switcher = () => host.querySelector<HTMLButtonElement>('[data-testid="pane-switcher"]')!
+  expect(switcher().getAttribute('aria-label')).toBe('Pane 2 of 2')
+  expect(host.querySelector('[data-pane][data-focused] [data-testid="workspace-empty"]')).not.toBeNull()
+  await act(async () => switcher().click())
+  const items = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"], [role="menuitem"]')]
+  expect(items.map(item => item.textContent)).toEqual(['1Agent B +1', '2Empty'])
+  await act(async () => items[0]!.click())
+  expect(switcher().getAttribute('aria-label')).toBe('Pane 1 of 2')
+  expect(panes()).toHaveLength(1)
+  expect(window.location.pathname).toBe('/w/agent/b')
+  expect(surface('agent:agent/b')!.getAttribute('aria-hidden')).toBe('false')
+})
