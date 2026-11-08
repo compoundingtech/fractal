@@ -2882,7 +2882,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         if choosing.is_empty() {
             return Ok(BTreeMap::new());
         }
-        let mut orders = self.store.seat_run_orders()?;
+        let mut orders = self.store.seat_run_orders_for_mutation()?;
         orders.retain(|agent, _| choosing.contains(agent.as_str()));
         Ok(orders)
     }
@@ -6108,7 +6108,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
 
         let run_order = if seat_chooses_between_runs(agent, &work) {
-            self.store.seat_run_order(agent)?
+            self.store.seat_run_order_for_mutation(agent)?
         } else {
             Vec::new()
         };
@@ -49105,8 +49105,14 @@ mission "ios-proof-blocked" state="ready" {
         let legacy = step("step-run/run-1/legacy", "legacy", "node/worker");
         assert_eq!(
             next_work_wake_for_agent("agent/node/worker", std::slice::from_ref(&legacy), &[]),
-            Some(legacy.subject.as_str()),
-            "a legacy-only ready row must wake its canonical seat"
+            None,
+            "main does not wake a canonical seat for a legacy-only assignment"
+        );
+        let canonical = step("step-run/run-1/canonical", "canonical", "agent/node/worker");
+        assert_eq!(
+            next_work_wake_for_agent("agent/node/worker", std::slice::from_ref(&canonical), &[]),
+            Some(canonical.subject.as_str()),
+            "a literal assignment still wakes its seat"
         );
         assert_eq!(
             next_work_wake_for_agent("daemon/node/worker", std::slice::from_ref(&legacy), &[]),
@@ -49287,8 +49293,8 @@ mission "ios-proof-blocked" state="ready" {
                 &BTreeMap::new(),
                 2_000,
             ),
-            Some(1_000 + WORK_WAKE_RETRY_MS),
-            "a legacy-only ready row keeps its canonical seat's wake deadline"
+            None,
+            "main gives no canonical wake deadline to a legacy-only assignment"
         );
         let mut second = first.clone();
         second.subject = "step-run/newer/work".into();
@@ -50128,6 +50134,12 @@ mission "queued" state="ready" {
   goal "Give the durable seat one step in each run."
   step "work" { assigned-to "agent/node.worker" }
 }
+mission "mixed" state="ready" {
+  concurrent-runs
+  goal "Keep literal and historical assignments in one run."
+  step "work" { assigned-to "agent/node.worker" }
+  step "legacy" { assigned-to "agent/node.worker" }
+}
 mission "gated" state="ready" {
   concurrent-runs
   goal "Hold the durable seat's step until another seat finishes."
@@ -50256,7 +50268,7 @@ mission "fresh" state="ready" {
         /// The step the reconciler wakes now, or none while the seat is held.
         fn wake(&self) -> Option<String> {
             let work = self.store.work_for_reconcile(SEAT).unwrap();
-            let order = self.store.seat_run_order(SEAT).unwrap();
+            let order = self.store.seat_run_order_for_mutation(SEAT).unwrap();
             next_work_wake_for_agent(SEAT, &work, &order).map(str::to_owned)
         }
 
@@ -50309,6 +50321,46 @@ mission "fresh" state="ready" {
                 )
                 .map(|_| ())
         }
+    }
+
+    #[test]
+    fn wake_order_ignores_alias_join_times_and_agrees_with_claim_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("literal-wake-order.sqlite");
+        let seat = SeatQueueFixture::with_store(Arc::new(Store::open(&database, "node").unwrap()));
+        let a = seat.start("mixed", "literal-wake-a");
+        let b = seat.start("queued", "literal-wake-b");
+        let a_work = SeatQueueFixture::step(&a, "work");
+        let a_legacy = SeatQueueFixture::step(&a, "legacy");
+        let b_work = SeatQueueFixture::step(&b, "work");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        crate::store::configure_projection_writer(&connection).unwrap();
+        for (subject, assignee, joined) in [
+            (a_work.as_str(), SEAT, 20),
+            (a_legacy.as_str(), "node.worker", 1),
+            (b_work.as_str(), SEAT, 10),
+        ] {
+            connection.execute(
+                /* sqlite-large-value: allow-for-now lv-h05a4bea897ac owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?1, created_at_unix_ms=?2 WHERE subject=?3",
+                rusqlite::params![assignee, joined, subject],
+            ).unwrap();
+        }
+        drop(connection);
+        assert_eq!(seat.order(), SeatQueueFixture::runs(&[&a, &b]),
+            "presentation still merges the earlier alias join");
+        let expected = SeatQueueFixture::runs(&[&b, &a]);
+        assert_eq!(seat.store.seat_run_order_for_mutation(SEAT).unwrap(), expected);
+        let work = seat.store.work_for_reconcile_all().unwrap();
+        let orders = seat.reconciler.wake_run_orders(
+            &BTreeSet::from([SEAT.to_owned()]), &work,
+        ).unwrap();
+        assert_eq!(orders.get(SEAT), Some(&expected),
+            "deadline order uses only literal joins too");
+        assert_eq!(seat.wake(), Some(b_work.clone()));
+        seat.reconciler.reconcile_once().unwrap();
+        assert_eq!(seat.woken().last(), Some(&b_work),
+            "the actual wake agrees with the literal admission order");
+        seat.work(&b_work, "claim", "literal-wake-claim-b").unwrap();
     }
 
     /// Step 2b: once every member can ask the seat's host, an unchanged working re-stamp stays in

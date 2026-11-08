@@ -19176,11 +19176,9 @@ pub fn seat_queue_inputs_tx(
 /// Queue inputs for mutation admission, without merging actor aliases.
 pub fn seat_queue_inputs_literal_tx(
     connection: &Connection,
-    agent: &str,
-) -> Result<SeatQueueInputs> {
-    Ok(seat_queue_inputs_matching_tx(connection, Some(agent), None, false)?
-        .remove(agent)
-        .unwrap_or_default())
+    agent: Option<&str>,
+) -> Result<BTreeMap<String, SeatQueueInputs>> {
+    seat_queue_inputs_matching_tx(connection, agent, None, false)
 }
 
 #[cfg(any(test, feature = "test-support"))]

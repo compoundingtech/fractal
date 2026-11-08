@@ -926,7 +926,10 @@ fn seat_order_conflict_tx(
     agent: &str,
     subject: &str,
 ) -> Result<Option<String>> {
-    let order = fractal_store::store::seat_queue_inputs_literal_tx(connection, agent)?.live_order();
+    let order = fractal_store::store::seat_queue_inputs_literal_tx(connection, Some(agent))?
+        .remove(agent)
+        .unwrap_or_default()
+        .live_order();
     let rows = seat_step_rows_literal_tx(connection, agent)?;
     let steps = rows
         .iter()
@@ -1795,6 +1798,9 @@ pub trait MissionsStore {
     fn seat_run_orders(&self) -> Result<BTreeMap<String, Vec<String>>>;
     /// The live mission runs queued for one seat, in seat-queue order.
     fn seat_run_order(&self, agent: &str) -> Result<Vec<String>>;
+    /// Literal queue order for wake decisions that must agree with claim admission.
+    fn seat_run_orders_for_mutation(&self) -> Result<BTreeMap<String, Vec<String>>>;
+    fn seat_run_order_for_mutation(&self, agent: &str) -> Result<Vec<String>>;
     /// Record one move in a seat's queue. The move never touches a claim: a
     /// held step stays held, and the new order applies to the next selection.
     fn move_seat_queue_run(
@@ -5241,6 +5247,25 @@ impl MissionsStore for Store {
         Ok(seat_run_orders_tx(&connection, Some(&agent))?
             .remove(&agent)
             .unwrap_or_default())
+    }
+
+    fn seat_run_orders_for_mutation(&self) -> Result<BTreeMap<String, Vec<String>>> {
+        let connection = self.readers.get();
+        Ok(fractal_store::store::seat_queue_inputs_literal_tx(&connection, None)?
+            .into_iter()
+            .map(|(agent, inputs)| (agent, inputs.live_order()))
+            .collect())
+    }
+
+    fn seat_run_order_for_mutation(&self, agent: &str) -> Result<Vec<String>> {
+        smallclaims::touched::note_read(|| format!("kind:{}", seat_queue::MOVED_CLAIM));
+        let agent = normalize_seat(agent);
+        let connection = self.readers.get();
+        let agent = physical_actor(&connection, &agent)?;
+        Ok(fractal_store::store::seat_queue_inputs_literal_tx(&connection, Some(&agent))?
+            .remove(&agent)
+            .unwrap_or_default()
+            .live_order())
     }
 
     fn move_seat_queue_run(
