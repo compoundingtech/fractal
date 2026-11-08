@@ -1037,22 +1037,26 @@ mod tests {
 
     fn membership_repair_state(node: &str) -> AppState {
         let root = std::path::PathBuf::from("/unused-membership-repair");
-        AppState { browser_pairing_login: None, seat_admission: Default::default(), store: Arc::new(Store::open_memory(node).unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: node.into(),
-        state_dir: root.clone(),
-        pty_root: root.join("pty"),
-        pty_binary: root.join("unused-pty"),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: crate::model::PlannerSpec::default(),
-        harness_question_sink: None,
-        owning_person: None,
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(), }
+        AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
+            store: Arc::new(Store::open_memory(node).unwrap()),
+            notify: Arc::new(Notify::new()),
+            event_notify: watch::channel(0_u64).0,
+            node: node.into(),
+            state_dir: root.clone(),
+            pty_root: root.join("pty"),
+            pty_binary: root.join("unused-pty"),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: None,
+            planner_default: crate::model::PlannerSpec::default(),
+            harness_question_sink: None,
+            owning_person: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        }
     }
 
     #[tokio::test]

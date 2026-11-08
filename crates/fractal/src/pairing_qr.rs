@@ -160,14 +160,18 @@ mod tests {
         use tower::ServiceExt as _;
         use fractal_daemon::api::AppState;
         let root = tempfile::tempdir().unwrap();
-        let state = AppState { browser_pairing_login: None, seat_admission: Default::default(), store: Arc::new(fractal_daemon::store::Store::open_memory(node).unwrap()),
-        notify: Arc::new(tokio::sync::Notify::new()),
-        event_notify: tokio::sync::watch::channel(0_u64).0,
-        node: node.into(), state_dir: root.path().into(), pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(), owning_person: None, fleet_id: None,
-        configured_peers: vec![], client_relay: None, native_session_home: None,
-        planner_default: Default::default(), harness_question_sink: None,
-        assistant_receipts: Default::default(), private_notes: Default::default(), };
+        let state = AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
+            store: Arc::new(fractal_daemon::store::Store::open_memory(node).unwrap()),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: node.into(), state_dir: root.path().into(), pty_root: root.path().join("pty"),
+            pty_binary: "pty".into(), owning_person: None, fleet_id: None,
+            configured_peers: vec![], client_relay: None, native_session_home: None,
+            planner_default: Default::default(), harness_question_sink: None,
+            assistant_receipts: Default::default(), private_notes: Default::default(),
+        };
         let response = fractal_daemon::api::router(state).oneshot(
             axum::http::Request::builder().uri("/v1/health")
                 .body(axum::body::Body::empty()).unwrap(),

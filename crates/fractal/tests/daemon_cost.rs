@@ -1767,20 +1767,24 @@ mission "cost/history" state="ready" {
             evidence: Vec::new(), expected_subject: None, idempotency_key: None,
         }).unwrap();
     }
-    let app = fractal_daemon::api::router(AppState { browser_pairing_login: None, seat_admission: Default::default(), owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: NODE.into(),
-    state_dir: root.path().join("state"),
-    pty_root: root.path().join("pty"),
-    pty_binary: stub_pty(root.path()),
-    fleet_id: None, configured_peers: Vec::new(), client_relay: None,
-    native_session_home: Some(root.path().join("home")),
-    planner_default: fractal_daemon::model::PlannerSpec::default(),
-    harness_question_sink: None,
-    assistant_receipts: Default::default(),
-    private_notes: Default::default(), });
+    let app = fractal_daemon::api::router(AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: NODE.into(),
+        state_dir: root.path().join("state"),
+        pty_root: root.path().join("pty"),
+        pty_binary: stub_pty(root.path()),
+        fleet_id: None, configured_peers: Vec::new(), client_relay: None,
+        native_session_home: Some(root.path().join("home")),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    });
     let mut measurements = Vec::new();
     for run in 0..100 {
         let view = store.create_mission_run(&fractal_daemon::model::MissionRunRequest {
@@ -2792,22 +2796,26 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         ..Default::default()
     })
     .unwrap();
-    let state = AppState { browser_pairing_login: None, seat_admission: Default::default(), owning_person: None,
-    store: store.clone(),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: NODE.into(),
-    state_dir: root.join("state"),
-    pty_root: root.join("pty"),
-    pty_binary: pty,
-    fleet_id: Some(FLEET.into()),
-    configured_peers: vec![PEER.into()],
-    client_relay: relay,
-    native_session_home: Some(root.join("home")),
-    planner_default: fractal_daemon::model::PlannerSpec::default(),
-    harness_question_sink: None,
-    assistant_receipts: Default::default(),
-    private_notes: Default::default(), };
+    let state = AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
+        owning_person: None,
+        store: store.clone(),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: NODE.into(),
+        state_dir: root.join("state"),
+        pty_root: root.join("pty"),
+        pty_binary: pty,
+        fleet_id: Some(FLEET.into()),
+        configured_peers: vec![PEER.into()],
+        client_relay: relay,
+        native_session_home: Some(root.join("home")),
+        planner_default: fractal_daemon::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    };
     let harness_sink = Arc::new(CostHarnessQuestionSink(
         std::sync::atomic::AtomicBool::new(false),
     ));

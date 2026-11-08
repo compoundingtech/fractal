@@ -430,22 +430,26 @@ impl Node {
         let notify = Arc::new(Notify::new());
         let reconciler =
             Reconciler::new(store.clone(), runtime.clone(), name.into(), notify.clone());
-        let state = AppState { browser_pairing_login: None, seat_admission: Default::default(), owning_person: None,
-        store: store.clone(),
-        notify,
-        event_notify: watch::channel(0).0,
-        node: name.into(),
-        state_dir: root.path().into(),
-        pty_root: root.path().join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: Some(FLEET.into()),
-        configured_peers: peers.iter().map(|peer| peer.to_string()).collect(),
-        client_relay: None,
-        native_session_home: None,
-        planner_default: Default::default(),
-        harness_question_sink: None,
-        assistant_receipts: Default::default(),
-        private_notes: Default::default(), };
+        let state = AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
+            owning_person: None,
+            store: store.clone(),
+            notify,
+            event_notify: watch::channel(0).0,
+            node: name.into(),
+            state_dir: root.path().into(),
+            pty_root: root.path().join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: Some(FLEET.into()),
+            configured_peers: peers.iter().map(|peer| peer.to_string()).collect(),
+            client_relay: None,
+            native_session_home: None,
+            planner_default: Default::default(),
+            harness_question_sink: None,
+            assistant_receipts: Default::default(),
+            private_notes: Default::default(),
+        };
         let socket = root.path().join("st3.sock");
         let router = fractal_daemon::api::router(state);
         let server = tokio::spawn(async move { fractal_daemon::api::serve_unix(&socket, router).await });

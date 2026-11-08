@@ -38,22 +38,26 @@ impl Daemon {
     }
 
     fn state(root: &Path) -> AppState {
-        AppState { browser_pairing_login: None, seat_admission: Default::default(), owning_person: None,
-        store: Arc::new(Store::open(&root.join("graph.db"), NODE).unwrap()),
-        notify: Arc::new(Notify::new()),
-        event_notify: watch::channel(0_u64).0,
-        node: NODE.into(),
-        state_dir: root.into(),
-        pty_root: root.join("pty"),
-        pty_binary: "pty".into(),
-        fleet_id: None,
-        configured_peers: Vec::new(),
-        client_relay: None,
-        native_session_home: Some(root.join("native")),
-        planner_default: Default::default(),
-        assistant_receipts: Default::default(),
-        private_notes: Arc::new(Authority { catalogs: vec![root.join("catalog")] }),
-        harness_question_sink: None, }
+        AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
+            owning_person: None,
+            store: Arc::new(Store::open(&root.join("graph.db"), NODE).unwrap()),
+            notify: Arc::new(Notify::new()),
+            event_notify: watch::channel(0_u64).0,
+            node: NODE.into(),
+            state_dir: root.into(),
+            pty_root: root.join("pty"),
+            pty_binary: "pty".into(),
+            fleet_id: None,
+            configured_peers: Vec::new(),
+            client_relay: None,
+            native_session_home: Some(root.join("native")),
+            planner_default: Default::default(),
+            assistant_receipts: Default::default(),
+            private_notes: Arc::new(Authority { catalogs: vec![root.join("catalog")] }),
+            harness_question_sink: None,
+        }
     }
 
     fn socket(&self) -> PathBuf {

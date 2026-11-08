@@ -324,14 +324,18 @@ mod tests {
     #[test]
     fn report_enforces_terminal_retention_before_original_deadline_cleanup() {
         let root = tempfile::tempdir().unwrap();
-        let state = AppState { browser_pairing_login: None, seat_admission: Default::default(), store: Arc::new(Store::open(&root.path().join("graph.db"), "report-retention").unwrap()),
-        notify: Arc::new(Notify::new()), event_notify: watch::channel(0u64).0,
-        node: "report-retention".into(), state_dir: root.path().into(),
-        pty_root: root.path().join("pty"), pty_binary: root.path().join("unused"),
-        fleet_id: None, configured_peers: vec![], client_relay: None,
-        native_session_home: None, planner_default: Default::default(),
-        harness_question_sink: None, owning_person: None,
-        assistant_receipts: Default::default(), private_notes: Default::default(), };
+        let state = AppState {
+            browser_pairing_login: None,
+            seat_admission: Default::default(),
+            store: Arc::new(Store::open(&root.path().join("graph.db"), "report-retention").unwrap()),
+            notify: Arc::new(Notify::new()), event_notify: watch::channel(0u64).0,
+            node: "report-retention".into(), state_dir: root.path().into(),
+            pty_root: root.path().join("pty"), pty_binary: root.path().join("unused"),
+            fleet_id: None, configured_peers: vec![], client_relay: None,
+            native_session_home: None, planner_default: Default::default(),
+            harness_question_sink: None, owning_person: None,
+            assistant_receipts: Default::default(), private_notes: Default::default(),
+        };
         let now = client_now_ms();
         let claim = state.store.append_claim(&ClaimInput {
             subject: "custom/client/retention-test".into(), kind: "custom.client.pairing-completed".into(), actor: Some("person/ada".into()),

@@ -123,21 +123,25 @@ pub fn folded_at_once<R>(folded: anyhow::Result<Folded<R>>) -> (Publication<R>, 
 }
 
 pub fn app_state(root: &std::path::Path) -> AppState {
-    AppState { browser_pairing_login: None, seat_admission: Default::default(), owning_person: None,
-    store: Arc::new(Store::open(&root.join("graph.db"), "cedar").unwrap()),
-    notify: Arc::new(Notify::new()),
-    event_notify: watch::channel(0_u64).0,
-    node: "cedar".into(),
-    state_dir: root.to_path_buf(),
-    pty_root: root.join("pty"),
-    pty_binary: root.join("unused-pty"),
-    fleet_id: None,
-    configured_peers: Vec::new(),
-    client_relay: None,
-    native_session_home: None,
-    planner_default: crate::model::PlannerSpec::default(),
-    harness_question_sink: None,
-    assistant_receipts: Default::default(),
-    private_notes: Default::default(), }
+    AppState {
+        browser_pairing_login: None,
+        seat_admission: Default::default(),
+        owning_person: None,
+        store: Arc::new(Store::open(&root.join("graph.db"), "cedar").unwrap()),
+        notify: Arc::new(Notify::new()),
+        event_notify: watch::channel(0_u64).0,
+        node: "cedar".into(),
+        state_dir: root.to_path_buf(),
+        pty_root: root.join("pty"),
+        pty_binary: root.join("unused-pty"),
+        fleet_id: None,
+        configured_peers: Vec::new(),
+        client_relay: None,
+        native_session_home: None,
+        planner_default: crate::model::PlannerSpec::default(),
+        harness_question_sink: None,
+        assistant_receipts: Default::default(),
+        private_notes: Default::default(),
+    }
 }
 
