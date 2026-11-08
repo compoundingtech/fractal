@@ -224,6 +224,8 @@ const useData = () => {
 }
 /** Read the source installed by the nearest provider. */
 export const useDataSource = (): DataSource => useData().source
+/** The source when a provider is mounted; isolated components (stories, kit specimens) get undefined. */
+export const useOptionalDataSource = (): DataSource | undefined => useContext(DataContext)?.source
 /** Acquire follow demand only after a visible surface commits; Activity cleans this up when hidden. */
 export const useFeedInterest = ({
   interest,

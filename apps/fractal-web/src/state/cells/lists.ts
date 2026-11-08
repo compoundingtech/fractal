@@ -31,13 +31,6 @@ export const sidebarTab = StateCell.make({
   seed: (retired, gateway) => StateCell.retiredEntry(retired, SidebarTab, `${gateway}:sidebar.tab`),
 })
 
-/** Browser-local machine groups: `null` = no readable choice; `[]` = explicitly cleared. AND between tokens, OR within. */
-export const MachineGroups = Schema.NullOr(Schema.Array(Schema.Array(Schema.String.check(Schema.isPattern(/^[^\s,A-Z]+$/u))).check(Schema.isMinLength(1))))
-export const sidebarMachines = StateCell.make({
-  scope: 'global', key: 'sidebar.show.machines', version: 2, schema: MachineGroups, default: null,
-  seed: (retired) => StateCell.retiredEntry(retired, MachineGroups, 'sidebar.show.machines@2', 2) ?? undefined,
-})
-
 export const UsageSection = Schema.Struct({ open: Schema.Boolean, height: Schema.Finite })
 export type UsageSection = typeof UsageSection.Type
 /** The sidebar's Usage section, one setting shared by every window. */

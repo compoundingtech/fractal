@@ -71,13 +71,13 @@ try {
   assert.equal(await light.locator('html').evaluate(() => location.href), before.url)
   assert.equal(await page.evaluate(() => history.length), before.history)
   await page.evaluate(() => {
-    localStorage.setItem('wf.ui@1', JSON.stringify({ version: 1, entries: { 'round2.scheme': { version: 1, value: 'dark', clock: Number.MAX_SAFE_INTEGER, writer: 'real-app' } } }))
+    localStorage.setItem('wf.c/round2.scheme', JSON.stringify({ v: 1, t: Number.MAX_SAFE_INTEGER, w: 'real-app', d: 'dark' }))
   })
   await light.locator('[data-testid="live-agent-workspace"][data-scheme="light"]').waitFor()
-  // Allow debounce and storage-event delivery; neither frame may write the real app document.
+  // Allow debounce and storage-event delivery; neither frame may write the real app's cells.
   await page.waitForTimeout(350)
-  const storage = await page.evaluate(() => localStorage.getItem('wf.ui@1'))
-  assert.equal(JSON.parse(storage).entries['round2.scheme'].writer, 'real-app')
+  const storage = await page.evaluate(() => localStorage.getItem('wf.c/round2.scheme'))
+  assert.equal(JSON.parse(storage).w, 'real-app')
   assert.equal(await light.locator('[data-testid="live-agent-workspace"]').getAttribute('data-scheme'), 'light')
   assert.equal(await dark.locator('[data-testid="live-agent-workspace"]').getAttribute('data-scheme'), 'dark')
   const lightFrame = await (await page.$('#light')).contentFrame()
@@ -87,7 +87,7 @@ try {
     lightFrame.evaluate(() => location.reload()),
   ])
   await light.getByTestId('thread-header').getByText('WorkbenchShell', { exact: true }).waitFor()
-  assert.equal(await page.evaluate(() => localStorage.getItem('wf.ui@1')), storage)
+  assert.equal(await page.evaluate(() => localStorage.getItem('wf.c/round2.scheme')), storage)
   for (const frame of page.frames()) assert.deepEqual(await frame.evaluate(() => window.__embedNetworkCalls), [])
   console.log('PASS: memory-only storage, opposite-theme iframe isolation, container-driven narrow layout, private navigation and reload reset')
   await page.close()

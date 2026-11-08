@@ -67,3 +67,16 @@ export const memoryOrigin = ({ quota = Number.POSITIVE_INFINITY }: { readonly qu
   }
   return { local, window }
 }
+
+/**
+ * Stories and browser proofs: store global cell values as another window would, and announce them
+ * with storage events so an already-running store adopts them. Values are the cells' encoded form.
+ */
+export const writeCellsLikeAnotherWindow = (values: Readonly<Record<string, { readonly version?: number; readonly value: unknown }>>, storage: Storage = window.localStorage) => {
+  const t = Date.now() + 1
+  for (const [key, { version = 1, value }] of Object.entries(values)) {
+    const raw = JSON.stringify({ v: version, t, w: 'another-window', d: value })
+    storage.setItem(`wf.c/${key}`, raw)
+    window.dispatchEvent(new StorageEvent('storage', { key: `wf.c/${key}`, newValue: raw, storageArea: storage }))
+  }
+}

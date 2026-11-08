@@ -9,8 +9,11 @@
       ;(() => {
         let scheme = 'dark'
         try {
-          const saved = JSON.parse(localStorage.getItem('wf.ui@1') ?? 'null')
-          const entry = saved?.version === 1 ? saved.entries?.['round2.scheme'] : undefined
+          // The theme cell (StateCell envelope `{ v, d }`), else its entry in the retired `wf.ui@1` document.
+          const cell = JSON.parse(localStorage.getItem('wf.c/round2.scheme') ?? 'null')
+          const saved = cell === null ? JSON.parse(localStorage.getItem('wf.ui@1') ?? 'null') : null
+          const legacy = saved?.version === 1 ? saved.entries?.['round2.scheme'] : undefined
+          const entry = cell !== null ? { version: cell.v, value: cell.d } : legacy
           if (entry?.version === 1 && (entry.value === 'dark' || entry.value === 'light')) scheme = entry.value
           if (entry?.version === 1 && entry.value === 'system') scheme = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
         } catch {}

@@ -64,14 +64,18 @@ const store = (): CellStoreShape => {
 }
 
 /**
- * Replaces the store every cell resolves on its next read: tests install a memory store, embeds
- * install one so they never touch the host app's storage. Returns the previous store's disposer.
+ * Replaces the store every cell resolves on its next read: tests install a memory store per test.
+ * The returned function disposes the installed store and restores the one it replaced.
  */
 export const install = (layer: Layer.Layer<Store.CellStore>): (() => Promise<void>) => {
-  const previous = runtime
-  runtime = ManagedRuntime.make(layer)
-  installed = runtime.runSync(Effect.service(Store.CellStore))
-  return () => previous?.dispose() ?? Promise.resolve()
+  const previous = { runtime, installed }
+  const mine = ManagedRuntime.make(layer)
+  runtime = mine
+  installed = mine.runSync(Effect.service(Store.CellStore))
+  return () => {
+    if (runtime === mine) { runtime = previous.runtime; installed = previous.installed }
+    return mine.dispose()
+  }
 }
 /** A store over any environment, for tests: `layer(environment)`. */
 export const layer = (environment: Layer.Layer<CellEnvironment>, options?: { readonly debounceMs?: number }) =>

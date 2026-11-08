@@ -35,6 +35,8 @@ export interface Retired {
   readonly raw: (key: string) => string | undefined
   /** One entry of the retired `wf.ui@1` document, if it was written at `version`. */
   readonly entry: (key: string, version?: number) => unknown
+  /** One entry of the retired `wf.ui@1` document at whatever version wrote it. */
+  readonly versioned: (key: string) => { readonly version: number; readonly value: unknown } | undefined
 }
 /** The document every persisted atom shared before cells (retired 2026-11-07). Nothing writes it now. */
 export const retiredDocumentKey = 'wf.ui@1'
@@ -129,20 +131,25 @@ export const make = ({ debounceMs = 150, writer = globalThis.crypto.randomUUID()
 
   // A queue, not a ref: writes made before the flushing fiber first runs must still schedule a flush.
   let retiredEntries: Readonly<Record<string, { readonly version?: unknown; readonly value?: unknown }>> | undefined
+  const versioned: Retired['versioned'] = (key) => {
+    if (retiredEntries === undefined) {
+      retiredEntries = {}
+      try {
+        const document: unknown = JSON.parse(environment.retired(retiredDocumentKey) ?? 'null')
+        if (typeof document === 'object' && document !== null && 'entries' in document && typeof document.entries === 'object' && document.entries !== null) {
+          retiredEntries = document.entries as typeof retiredEntries
+        }
+      } catch { /* An unreadable document seeds nothing. */ }
+    }
+    const found = retiredEntries![key]
+    return found !== undefined && typeof found.version === 'number' && Number.isInteger(found.version) ? { version: found.version, value: found.value } : undefined
+  }
   const retired: Retired = {
     raw: environment.retired,
+    versioned,
     entry: (key, version = 1) => {
-      if (retiredEntries === undefined) {
-        retiredEntries = {}
-        try {
-          const document: unknown = JSON.parse(environment.retired(retiredDocumentKey) ?? 'null')
-          if (typeof document === 'object' && document !== null && 'entries' in document && typeof document.entries === 'object' && document.entries !== null) {
-            retiredEntries = document.entries as typeof retiredEntries
-          }
-        } catch { /* An unreadable document seeds nothing. */ }
-      }
-      const found = retiredEntries![key]
-      return found !== undefined && found.version === version ? found.value : undefined
+      const found = versioned(key)
+      return found?.version === version ? found.value : undefined
     },
   }
 
@@ -299,7 +306,8 @@ export const make = ({ debounceMs = 150, writer = globalThis.crypto.randomUUID()
       if (envelope === undefined) {
         envelope = load()
         if (envelope === undefined) {
-          const seeded = spec.seed?.(retired)
+          let seeded: A | undefined
+          try { seeded = spec.seed?.(retired) } catch { seeded = undefined }
           if (seeded !== undefined) { write(seeded); return seeded }
           if (spec.boot !== undefined) project(spec.boot(spec.default))
           return spec.default

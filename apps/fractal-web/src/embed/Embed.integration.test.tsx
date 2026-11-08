@@ -7,7 +7,6 @@ import { Embed } from './Embed.tsx'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 // The same adapter replacement as vite.embed.config.ts, without changing the live app tests.
-vi.mock('../state/storageAdapter.ts', () => import('./memoryStorageAdapter.ts'))
 vi.mock('../state/cell/defaultEnvironment.ts', () => import('./memoryCellEnvironment.ts'))
 let network: Mock<() => never>
 const beaconDescriptor = Object.getOwnPropertyDescriptor(navigator, 'sendBeacon')

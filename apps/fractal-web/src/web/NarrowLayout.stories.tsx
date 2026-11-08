@@ -13,6 +13,7 @@ import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import { narrowLayoutQuery } from './narrowLayout.ts'
 import { tooltipFor } from '../../../../packages/fractal-ui/src/story-play.ts'
 import { touchPointerQuery } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/useTouchLayout.ts'
+import { writeCellsLikeAnotherWindow } from '../state/cell/testing.ts'
 
 // The real workspace over the deterministic fixture world, with resources supported as on the live gateway.
 const resources = { byAgent: () => Atom.make(observed({ value: { items: [], nextCursor: null } })), byId: () => Atom.make(waiting), subjects: Atom.make([]), loadMore: () => undefined, refresh: () => undefined, resolveFile: () => undefined }
@@ -58,12 +59,14 @@ const meta = {
   args: { scheme: 'dark', pointer: 'fine', decodeStale: false },
   argTypes: { scheme: { options: ['dark', 'light'], control: 'radio' }, pointer: { options: ['fine', 'coarse'], control: 'radio' } },
   // The workspace keeps its scheme, agent and panes in persisted UI state; every story starts from the same state.
-  // A storage event makes the already-loaded persistence merge it, as it does for another tab's write.
+  // Storage events make the already-running cell store adopt it, as it does another window's write.
   beforeEach: ({ args }) => {
-    const entry = (value: unknown) => ({ version: 1, value, clock: Date.now(), writer: 'narrow-layout-story' })
-    const raw = JSON.stringify({ version: 1, entries: { 'round2.scheme': entry(args.scheme), 'round2.agent': entry(storyAgent), 'round2.sidebarClosed': entry(false), [`round2.panes.${storyAgent}`]: entry([]) } })
-    window.localStorage.setItem('wf.ui@1', raw)
-    window.dispatchEvent(new StorageEvent('storage', { key: 'wf.ui@1', newValue: raw }))
+    writeCellsLikeAnotherWindow({
+      'round2.scheme': { value: args.scheme },
+      'round2.agent': { value: storyAgent },
+      'panels.leftSidebar': { value: { open: true, ratio: 256 / 1440 } },
+      [`round2.panes.${storyAgent}`]: { value: [] },
+    })
     return args.pointer === 'coarse' ? emulateCoarsePointer() : undefined
   },
 } satisfies Meta<typeof NarrowLayoutStory>
