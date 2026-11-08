@@ -245,13 +245,13 @@ it('lists surfaces to open and tabs to go to in the "+" menu, and the strip has 
   expect(bar.querySelector('button[aria-label="Open surfaces"]')).toBeNull()
   await act(async () => button('Open a tab').click())
   const menu = document.querySelector<HTMLElement>('[role="menu"][aria-label="Open a tab"]')!
-  const section = (name: string) => [...menu.querySelectorAll<HTMLElement>(`[role="group"][aria-label="${name}"] [role="menuitem"]`)]
+  const section = (name: string) => [...menu.querySelectorAll<HTMLElement>(`[role="group"][aria-label="${name}"] [role^="menuitem"]`)]
   expect([...menu.querySelectorAll('[role="group"]')].map(group => group.getAttribute('aria-label'))).toEqual(['Open', 'Go to tab'])
   expect(section('Open').map(item => item.textContent)).toEqual(['Inbox', 'Missions', 'Usage'])
+  // The open tabs are a single choice: the shown one is checked, and choosing another shows it.
   const tabs = section('Go to tab')
-  expect(tabs.map(item => item.textContent?.startsWith('Agent '))).toEqual([true, true])
-  expect(tabs.filter(item => item.getAttribute('aria-current') === 'page').map(item => item.textContent?.slice(0, 7))).toEqual(['Agent B'])
-  await act(async () => tabs.find(item => item.textContent?.startsWith('Agent A'))!.click())
+  expect(tabs.map(item => [item.getAttribute('role'), item.textContent, item.getAttribute('aria-checked')])).toEqual([['menuitemradio', 'Agent A', 'false'], ['menuitemradio', 'Agent B✓', 'true']])
+  await act(async () => tabs[0]!.click())
   expect(selected()).toBe('Agent A')
 })
 

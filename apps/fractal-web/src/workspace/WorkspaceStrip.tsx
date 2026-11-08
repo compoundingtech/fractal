@@ -92,14 +92,9 @@ export const WorkspaceStrip = ({ items, refs, active, group, focused = true, nar
                 <Aria.Header {...stylex.props(styles.menuHeading)}>Open</Aria.Header>
                 {openable.map(item => <MenuItem key={item.id} id={`open:${item.id}`} onAction={() => open(item.ref)}>{item.label}</MenuItem>)}
               </Aria.MenuSection>
-              <Aria.MenuSection aria-label="Go to tab">
+              <Aria.MenuSection aria-label="Go to tab" selectionMode="single" selectedKeys={active === null ? [] : [`tab:${active}`]}>
                 <Aria.Header {...stylex.props(styles.menuHeading)}>Go to tab</Aria.Header>
-                {items.map(item => <MenuItem key={item.id} id={`tab:${item.id}`} textValue={item.title}
-                  onAction={() => dispatch({ _tag: 'Activate', tab: item.id })}
-                  {...(item.id === active ? { 'aria-current': 'page' as const, stylexStyle: styles.currentTab } : {})}
-                  {...(item.detail === undefined ? {} : { suffix: <span {...stylex.props(styles.menuDetail)}>{item.detail}</span> })}>
-                  {item.title}
-                </MenuItem>)}
+                {items.map(item => <MenuItem key={item.id} id={`tab:${item.id}`} textValue={item.title} onAction={() => dispatch({ _tag: 'Activate', tab: item.id })}>{item.title}</MenuItem>)}
               </Aria.MenuSection>
             </Menu>
           </MenuPopover>
@@ -140,8 +135,6 @@ const styles = stylex.create({
   popover: { backgroundColor: c.raised, color: c.fg, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, borderRadius: 6 },
   menu: { padding: s.xs, outline: 'none', minWidth: 140 },
   menuHeading: { padding: '6px 8px 2px', color: c.fgMuted, fontSize: t.metaSize, fontWeight: 600 },
-  menuDetail: { marginInlineStart: s.md, color: c.fgMuted },
-  currentTab: { fontWeight: 600 },
   menuItem: { padding: '4px 8px', borderRadius: 4, cursor: 'pointer', fontSize: t.metaSize, outline: 'none', backgroundColor: { default: 'transparent', ':hover': c.rowHover, ':focus': c.rowHover }, opacity: { default: 1, '[data-disabled]': 0.5 } },
   empty: { position: 'relative', zIndex: 2, margin: 'auto', padding: s.section, color: c.fgMuted, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: s.md },
   emptyTitle: { margin: 0 },

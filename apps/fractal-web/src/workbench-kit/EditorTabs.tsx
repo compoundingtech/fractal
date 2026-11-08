@@ -741,11 +741,12 @@ const TabItem = ({
       data-tab-id={tab.id}
       data-tab-kind={tab.kind}
       aria-label={`${tab.title}${tab.detail === undefined && tab.harness === undefined ? '' : `, ${[tab.detail, tab.harness].filter((part) => part !== undefined).join(' · ')}`}${tab.attention === true ? ', needs you' : ''}${tab.status === 'live' ? ', live' : tab.status === 'unavailable' ? ', unavailable' : ''}`}
-      aria-keyshortcuts={`Enter Delete${onTabMenu === undefined ? '' : ' Shift+F10'} Alt+Shift+${back} Alt+Shift+${forward}`}
       onHoverChange={setHovered}
       render={(props) => (
         <div
           {...mergeProps(props, hostDragProps ?? dragProps, {
+            // RAC's Tab drops aria-keyshortcuts from its own props; the rendered element carries it.
+            'aria-keyshortcuts': `Enter Delete${onTabMenu === undefined ? '' : ' Shift+F10'} Alt+Shift+${back} Alt+Shift+${forward}`,
             onKeyDownCapture: (event: KeyboardEvent) => {
               if (event.altKey && event.shiftKey && (event.key === back || event.key === forward)) {
                 onReorder({
