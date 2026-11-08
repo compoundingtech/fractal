@@ -512,6 +512,23 @@ agent "eval/named" { name "Quartz"; workspace "/tmp"; harness "claude" {} }
     let (status, missing) = get_request(app, "/v1/desired/agent/eval/absent").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
 }
+#[tokio::test]
+async fn status_preserves_claim_provenance_even_with_an_unknown_omit_claims_query() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.apply_internal(
+        &parse_intent("version 2\nagent \"eval/named\" { workspace \"/tmp\"; harness \"claude\" {} }\n", "node").unwrap(),
+        "status-summary-fixture",
+    ).unwrap();
+    let app = router(state);
+    let (code, full) = get_request(app.clone(), "/v1/status?subject=agent/eval/named").await;
+    assert_eq!(code, StatusCode::OK, "{full}");
+    let (code, legacy_query) = get_request(app, "/v1/status?subject=agent/eval/named&omit_claims=true").await;
+    assert_eq!(code, StatusCode::OK, "{legacy_query}");
+    assert!(!full["subjects"][0]["claims"].as_array().unwrap().is_empty());
+    assert_eq!(legacy_query["subjects"][0]["claims"], full["subjects"][0]["claims"]);
+}
+
 
 #[tokio::test]
 async fn delivery_hold_api_enforces_authority_and_keeps_presence_separate() {
@@ -13761,6 +13778,134 @@ async fn notice_managed_owner_reads_ignore_a_repair_rebuilt_cache_after_snapshot
     }
 }
 
+#[test]
+fn managed_owner_collision_keeps_the_first_visible_subject_and_exact_path_equivalence() {
+    for hide_first in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let first = "agent/collision/a";
+        let second = "agent/collision/a:b";
+        for (subject, incarnation) in [(first, "b:c"), (second, "c")] {
+            roster_fixture_append(&state.store, subject, "runtime.observed", json!({
+                "status":"running", "runtime_id":subject, "host":state.node,
+                "incarnation_id":incarnation,
+            }));
+        }
+        let id = managed_session_id(first, "b:c");
+        assert_eq!(id, managed_session_id(second, "c"));
+        if hide_first {
+            // A retained reserved fact hides the subject without changing its routing ID.
+            state.store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-hc075bae4b26b owner=fractal_api_core::api::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+                 SELECT 'collision-notice',batch_id,subject,'attention.notice',origin,
+                        '{\"fields\":{}}','[]',accepted_at_unix_ms
+                 FROM claims WHERE subject=?1 LIMIT 1", [first],
+            ).unwrap();
+        }
+        state.store.read_snapshot(|cut| {
+            assert_eq!(state.store.generic_status_subject_visible_at(first, cut)?, !hide_first);
+            let generic = managed_session_owner_at(&state.store, cut, &id)?;
+            assert_eq!(generic.as_ref().unwrap().0, if hide_first { second } else { first });
+            for hint in [first, second, "agent/missing"] {
+                assert_eq!(
+                    managed_session_owner_for_timeline_at(&state.store, cut, &id, hint)?,
+                    generic,
+                    "hide_first={hide_first}, hint={hint}",
+                );
+            }
+            Ok(())
+        }).unwrap();
+    }
+}
+
+#[test]
+fn managed_owner_map_is_built_once_for_many_timeline_pages_in_one_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let subjects: Vec<_> = (0..4).map(|i| format!("agent/owner-memo/worker-{i}")).collect();
+    for subject in &subjects {
+        roster_fixture_append(&state.store, subject, "runtime.observed", json!({
+            "status":"running", "runtime_id":subject, "host":state.node,
+            "incarnation_id":"current",
+        }));
+    }
+    let session = client_v0::ClientSession::for_tests_scoped(
+        "person/alex", "person/alex", &["read.projections"],
+    );
+    MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(0));
+    state.store.read_snapshot(|_| {
+        let snapshot = new_client_snapshot(&state);
+        for subject in &subjects {
+            let id = managed_session_id(subject, "current");
+            assert_eq!(managed_session_owner_for_timeline_at(
+                &state.store, snapshot.store_index, &id, subject,
+            )?.unwrap().0, *subject);
+        }
+        assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 0);
+        // First pages perform authorization too: repeating them must not fold the fleet.
+        for _ in 0..5 {
+            for subject in &subjects {
+                let id = managed_session_id(subject, "current");
+                let Json(page) = client_v0::timeline_value(
+                    &state, &snapshot, &session, &id,
+                    &ClientListQuery { limit: Some(1), ..Default::default() },
+                ).unwrap();
+                assert!(page["items"].is_array(), "{page}");
+                assert_eq!(managed_session_owner_at(&state.store, snapshot.store_index, &id)?.unwrap().0, *subject);
+                assert_eq!(managed_session_owner_for_timeline_at(
+                    &state.store, snapshot.store_index, &id, subject,
+                )?, managed_session_owner_at(&state.store, snapshot.store_index, &id)?);
+            }
+        }
+        assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 1);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn managed_owner_memo_expires_before_a_same_cut_repair_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = &state.store;
+    let subject = "agent/owner-memo/repair";
+    for incarnation in ["before", "after"] {
+        roster_fixture_append(store, subject, "runtime.observed", json!({
+            "status":"running", "runtime_id":subject, "host":state.node,
+            "incarnation_id":incarnation,
+        }));
+    }
+    let through = store.index().unwrap();
+    let repaired = store.status_summary_at(subject, Some(through)).unwrap()
+        .subjects.remove(0).actual_claim.unwrap();
+    let after = managed_session_id(subject, "after");
+    let before = managed_session_id(subject, "before");
+    MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(0));
+    store.read_snapshot(|_| {
+        assert!(managed_session_owner_at(store, through, &after)?.is_some());
+        assert!(managed_session_owner_at(store, through, &before)?.is_none());
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &after, subject)?,
+            managed_session_owner_at(store, through, &after)?);
+        Ok(())
+    }).unwrap();
+    assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 1);
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-he543d968a9fa owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)", [&repaired],
+    ).unwrap();
+    smallclaims::Runtime::forget_views(store.fractal.as_ref());
+    assert_eq!(store.index().unwrap(), through);
+    store.read_snapshot(|_| {
+        assert!(managed_session_owner_at(store, through, &after)?.is_none());
+        // The inventory's old session must be re-resolved after repair on this new pin.
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &after, subject)?,
+            managed_session_owner_at(store, through, &after)?);
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &before, subject)?,
+            managed_session_owner_at(store, through, &before)?);
+        assert_eq!(managed_session_owner_at(store, through, &before)?.unwrap().1.as_deref(), Some("before"));
+        Ok(())
+    }).unwrap();
+    assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 2);
+}
+
 
 #[tokio::test]
 async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_replication() {
@@ -14834,4 +14979,115 @@ async fn a_restart_that_ignores_a_lanes_fit_needs_a_reason_and_records_who_asked
         "subject": "agent/example/operations", "actor": "person/avery", "idempotency_key": "plain"
     })).await;
     assert!(plain["body"]["fields"].get("ignore_fit").is_none(), "{plain}");
+}
+
+#[test]
+fn population_repository_observations_require_current_host_and_workspace() {
+    let store = Store::open_memory("node").unwrap();
+    let source = "version 2\nagent \"example/workspace\" { workspace \"/tmp\"; command \"true\" }\n";
+    store.apply_internal(&parse_intent(source, "node").unwrap(), "workspace-overlay").unwrap();
+    let subject = "agent/example/workspace";
+    for (host, workspace, repository, expected) in [
+        ("node", "/tmp", Some("example/current"), Some(json!("example/current"))),
+        ("remote", "/tmp", Some("example/wrong-host"), None),
+        ("node", "/previous", Some("example/wrong-workspace"), None),
+        ("node", "/tmp", None, Some(Value::Null)),
+    ] {
+        let mut fields = BTreeMap::from([
+            ("host".into(), json!(host)),
+            ("workspace".into(), json!(workspace)),
+        ]);
+        if let Some(repository) = repository {
+            fields.insert("repository".into(), json!(repository));
+        }
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "workspace.observed".into(), actor: None,
+            fields, evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let mut rows = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+        assert!(rows.iter().all(|card| card.get("observed_repository").is_none()));
+        overlay_population_repositories(&store, &mut rows).unwrap();
+        let card = rows.iter().find(|card| card["id"] == subject).unwrap();
+        assert_eq!(card.get("observed_repository"), expected.as_ref(), "{host} {workspace}");
+    }
+    // Reusing a presented card must erase evidence that no longer matches its location.
+    let mut rows = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+    rows[0]["workspace"] = json!("/moved");
+    overlay_population_repositories(&store, &mut rows).unwrap();
+    assert!(rows[0].get("observed_repository").is_none());
+}
+
+#[test]
+fn ordinary_agent_list_workspace_reads_do_not_add_statements_per_card() {
+    for (count, enabled) in [(1, false), (32, false), (1, true), (32, true)] {
+        let store = Store::open_memory("node").unwrap();
+        store.extension::<crate::config::AgentPopulationEnabled>().0.set(enabled).unwrap();
+        let mut source = String::from("version 2\n");
+        for i in 0..count {
+            source.push_str(&format!(
+                "agent \"example/seat-{i}\" {{ workspace \"/tmp\"; command \"true\" }}\n"
+            ));
+        }
+        store.apply_internal(&parse_intent(&source, "node").unwrap(), "workspace-query-growth").unwrap();
+        for i in 0..count {
+            store.append_claim(&ClaimInput {
+                subject: format!("agent/example/seat-{i}"), kind: "workspace.observed".into(), actor: None,
+                fields: BTreeMap::from([
+                    ("host".into(), json!("node")),
+                    ("workspace".into(), json!("/tmp")),
+                    ("repository".into(), json!("example/current")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let index = store.index().unwrap();
+        let rows = client_agent_resources(&store, false, "warm", index).unwrap();
+        assert_eq!(rows.len(), count);
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let rows = client_agent_resources(&store, false, "again", index).unwrap();
+        let work = scope.finish();
+        assert_eq!(rows.len(), count);
+        assert!(rows.iter().all(|card| ["runtime_state", "_runtime_state", "observed_repository"]
+            .iter().all(|field| card.get(*field).is_none())),
+            "population-only evidence leaked into ordinary agent resources");
+        // The identical fixture at pinned base b0bbc6dc uses six statements
+        // for both cardinalities: population evidence must add no request reads.
+        assert_eq!(work.statements, 6, "ordinary roster query count changed for {count} seats: {work:?}");
+    }
+}
+
+#[test]
+fn population_repository_normalizes_production_shaped_checkout_paths() {
+    let store = Store::open_memory("node").unwrap();
+    let mut rows = vec![json!({
+        "id":"agent/example.workspace", "workspace":"/work/tree", "host_id":"host/node",
+        "checkout":{"repository":"/srv/checkouts/github.com/Example/Repo/refs/heads/main"}
+    })];
+    overlay_population_repositories(&store, &mut rows).unwrap();
+    assert_eq!(rows[0]["checkout"]["repository"], "example/repo");
+    for (raw, expected) in [
+        ("/srv/checkouts/github.com/example/repo", Some("example/repo")),
+        ("/srv/checkouts/github.com/example/repo/refs/heads/feature/topic", Some("example/repo")),
+        ("example/repo", Some("example/repo")),
+        ("/srv/work/repo", None),
+        ("/srv/github.com/example/repo/../other", None),
+        ("/srv/github.com/example/repo/arbitrary", None),
+        ("example/repo/extra", None),
+        ("https://github.com/example/repo", None),
+    ] {
+        assert_eq!(canonical_population_repository(raw).as_deref(), expected, "{raw}");
+    }
+    let source = "version 2\nagent \"example/workspace\" { workspace \"/tmp\"; command \"true\" }\n";
+    store.apply_internal(&parse_intent(source, "node").unwrap(), "population-repository-path").unwrap();
+    store.append_claim(&ClaimInput {
+        subject:"agent/example/workspace".into(), kind:"workspace.observed".into(), actor:None,
+        fields:BTreeMap::from([
+            ("host".into(), json!("node")), ("workspace".into(), json!("/tmp")),
+            ("repository".into(), json!("/srv/checkouts/github.com/example/repo/refs/heads/main")),
+        ]),
+        evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    let mut cards = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+    overlay_population_repositories(&store, &mut cards).unwrap();
+    assert_eq!(cards[0]["observed_repository"], "example/repo");
 }

@@ -128,6 +128,8 @@ pub mod mail_backlog;
 pub mod message_reads;
 pub mod delivery_metrics;
 pub mod mailbox_metrics;
+pub mod population_metrics;
+pub mod population_attention;
 pub mod mission_eligibility_doctor;
 pub mod read_deadline;
 pub mod response_body;
@@ -3309,6 +3311,53 @@ pub fn add_agent_todos(store: &Store, items: &mut [Value], index: u64) -> anyhow
     })
 }
 
+/// Repository evidence belongs to the off-request population fold, not card presentation.
+/// Only positively identified canonical names enter the deployment allowlist comparison.
+fn overlay_population_repositories(store: &Store, items: &mut [Value]) -> anyhow::Result<()> {
+    let subjects = items.iter().filter_map(|item| item["id"].as_str()).collect::<Vec<_>>();
+    let observations = store.latest_workspace_observations(&subjects)?;
+    for item in items {
+        if let Some(repository) = item["checkout"]["repository"].as_str() {
+            item["checkout"]["repository"] = canonical_population_repository(repository)
+                .map_or(Value::Null, Value::String);
+        }
+        item.as_object_mut().expect("agent resource").remove("observed_repository");
+        if let Some(observation) = observations.get(item["id"].as_str().unwrap_or_default()) {
+            let fields = &observation.body["fields"];
+            if fields["workspace"] == item["workspace"]
+                && fields["host"].as_str().map(client_host_id).as_deref() == item["host_id"].as_str()
+            {
+                // A matching observation without an identifiable repository explicitly
+                // clears declaration-only attribution, rather than guessing a checkout.
+                item["observed_repository"] = fields["repository"].as_str()
+                    .and_then(canonical_population_repository).map_or(Value::Null, Value::String);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn canonical_population_repository(value: &str) -> Option<String> {
+    let name = if value.starts_with('/') {
+        if value.split('/').any(|part| matches!(part, "." | "..")) { return None; }
+        let (_, tail) = value.split_once("/github.com/")?;
+        let (owner, tail) = tail.split_once('/')?;
+        let (repository, suffix) = tail.split_once('/').unwrap_or((tail, ""));
+        if !suffix.is_empty() && suffix != "refs" && !suffix.starts_with("refs/") { return None; }
+        [owner, repository]
+    } else {
+        let (owner, repository) = value.split_once('/')?;
+        [owner, repository]
+    };
+    if name.iter().any(|part| part.is_empty() || *part == "." || *part == ".."
+        || part.ends_with(".git")
+        || !part.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
+    {
+        return None;
+    }
+    Some(format!("{}/{}", name[0].to_ascii_lowercase(), name[1].to_ascii_lowercase()))
+}
+
 /// The card's `reason` while rival hosts both claim a seat's runtime. A sentence, not a code:
 /// clients may print it as it is.
 pub const AUTHORITY_INDETERMINATE_REASON: &str =
@@ -3330,11 +3379,14 @@ fn overlay_agent_resources_at(
     crate::otel::roster_phase("card_presentation", || -> anyhow::Result<()> {
         let local_host = client_host_id(store.origin());
         let subjects = items.iter().filter_map(|item| item["id"].as_str().map(str::to_owned)).collect::<Vec<_>>();
-        let heard = HeardSeats::read(store, &subjects.iter().map(String::as_str).collect::<Vec<_>>())?;
+        let subject_refs = subjects.iter().map(String::as_str).collect::<Vec<_>>();
+        let heard = HeardSeats::read(store, &subject_refs)?;
         for item in items.iter_mut() {
             if item.get("updated_at").and_then(Value::as_str) == Some("") {
                 item["updated_at"] = Value::String(at.to_owned());
             }
+            // Raw runtime evidence is an internal input, never a client-v0 agent field.
+            item.as_object_mut().expect("agent resource").remove("_runtime_state");
             let source = item
                 .as_object_mut()
                 .unwrap()
@@ -4040,6 +4092,7 @@ fn client_agent_cards_presented(
                 "updated_at": updated_at,
                 "name": name,
                 "state": state,
+                "_runtime_state": observed,
                 "_restart_underlying_state": restart_underlying_state,
                 "_restart_until_unix_ms": restart_until,
                 "reachability": subject.reachability,
@@ -4180,6 +4233,17 @@ pub type ManagedSessionOwner = (String, Option<String>, Option<String>);
 thread_local! {
     static MANAGED_OWNER_AFTER_PIN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    static MANAGED_OWNER_MAP_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static MANAGED_OWNER_MAP_BUILD_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Process-wide counter for the isolated daemon cost harness, including index workers.
+#[cfg(any(test, feature = "test-support"))]
+pub fn managed_owner_map_build_count_for_test() -> usize {
+    MANAGED_OWNER_MAP_BUILD_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -4194,25 +4258,66 @@ pub fn managed_session_owner_at(
     snapshot_index: u64,
     session_id: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
-    // Pin identity/repair state and bypass the shared logical-cut owner cache.
+    // Pin identity/repair state; the memo belongs to this SQLite snapshot, not its cut
+    // or pooled connection. A repair may rebuild a shared logical-cut cache concurrently.
     crate::performance::task("conversation/owner", || store.read_snapshot(|_| {
         #[cfg(test)]
         managed_owner_after_pin();
-        let connection = store.readers.get();
-        let owners = crate::store::conversation_reads::owners_from_connection(&connection, snapshot_index)?;
-        for owner in owners.values() {
-            if !store.generic_status_subject_visible_at(&owner.subject, snapshot_index)? {
-                continue;
+        let owners = store.readers.pinned_memo(snapshot_index, || {
+            #[cfg(test)]
+            MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(count.get() + 1));
+            #[cfg(any(test, feature = "test-support"))]
+            MANAGED_OWNER_MAP_BUILD_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let connection = store.readers.get();
+            let owners = crate::store::conversation_reads::owners_from_connection(&connection, snapshot_index)?;
+            let mut sessions = std::collections::HashMap::with_capacity(owners.len());
+            for (_, owner) in owners {
+                let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
+                    continue;
+                };
+                // Preserve subject order for ambiguous owner:identity concatenations.
+                sessions.entry(managed_session_id(&owner.subject, identity))
+                    .or_insert_with(Vec::new)
+                    .push((owner.subject, owner.incarnation, owner.origin));
             }
-            let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
-                continue;
-            };
-            if managed_session_id(&owner.subject, identity) == session_id {
-                return Ok(Some((owner.subject.clone(), owner.incarnation.clone(), owner.origin.clone())));
+            Ok(sessions)
+        })?;
+        let Some(candidates) = owners.get(session_id) else {
+            return Ok(None);
+        };
+        for owner in candidates {
+            // Visibility belongs to the lookup, not the snapshot's shared routing memo.
+            if store.generic_status_subject_visible_at(&owner.0, snapshot_index)? {
+                return Ok(Some(owner.clone()));
             }
         }
         Ok(None)
     }))
+}
+
+/// Resolve an inventory's subject again on the page reader's own snapshot. Only an
+/// unambiguous owner:incarnation encoding may bypass the generic candidate scan.
+pub fn managed_session_owner_for_timeline_at(
+    store: &Store,
+    snapshot_index: u64,
+    session_id: &str,
+    subject: &str,
+) -> anyhow::Result<Option<ManagedSessionOwner>> {
+    store.read_snapshot(|_| {
+        if let Some(owner) = managed_session_owner_for_subject_at(
+            store, snapshot_index, session_id, subject,
+        )? {
+            // More than one ':' admits alternative owner/identity splits. Runtime-only
+            // owners also use the generic path because the tuple omits their runtime ID.
+            if !owner.0.contains(':')
+                && owner.1.as_deref().is_some_and(|identity| !identity.contains(':'))
+            {
+                return Ok(Some(owner));
+            }
+        }
+        // Missing, hidden, stale or ambiguous subjects cannot shortcut authorization.
+        managed_session_owner_at(store, snapshot_index, session_id)
+    })
 }
 
 pub fn managed_session_owner_for_subject_at(
