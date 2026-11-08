@@ -80,6 +80,8 @@ fn deadline_and_default(
     default_ms: Option<u64>,
     now: u128,
 ) -> Result<Option<AskDeadline>, FractalError> {
+    // Capability requests always expire, independently of the optional work-ask policy.
+    let default_ms = if input.actor == "daemon/browser-pairing" { Some(300_000) } else { default_ms };
     let Some(default_ms) = default_ms else {
         if input.deadline_ms.is_some() || input.default_answer.is_some() {
             return Err(FractalError::new(
