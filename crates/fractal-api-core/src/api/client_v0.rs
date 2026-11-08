@@ -815,15 +815,15 @@ pub fn authenticate(
         .store
         .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
         .map_err(ApiError::internal)?;
-    let paired = pairings.claims.iter().find(|claim| {
-        fractal_store::trusted_pairing_fields(claim.actor.as_deref(), &claim.body["fields"])
-            &&
-        claim
-            .body
-            .pointer("/fields/credential_hash")
-            .and_then(Value::as_str)
-            == Some(digest.as_str())
-    });
+    let mut paired = None;
+    for claim in &pairings.claims {
+        if claim.body.pointer("/fields/credential_hash").and_then(Value::as_str) == Some(digest.as_str())
+            && state.store.pairing_completion_is_trusted(claim, client_now_ms()).map_err(ApiError::internal)?
+        {
+            paired = Some(claim);
+            break;
+        }
+    }
     let Some(paired) = paired else {
         return Err(credential_rejected("the client credential is unknown or expired"));
     };
@@ -869,7 +869,17 @@ pub fn paired_client_session(
     transport: &'static str,
     custom_forms: bool,
 ) -> Result<ClientSession, ApiError> {
-    if !fractal_store::trusted_pairing_fields(paired.actor.as_deref(), &paired.body["fields"]) {
+    paired_client_session_at(state, paired, transport, custom_forms, client_now_ms())
+}
+
+pub fn paired_client_session_at(
+    state: &AppState,
+    paired: &ClaimRecord,
+    transport: &'static str,
+    custom_forms: bool,
+    now_unix_ms: u128,
+) -> Result<ClientSession, ApiError> {
+    if !state.store.pairing_completion_is_trusted(paired, now_unix_ms).map_err(ApiError::internal)? {
         return Err(credential_rejected("the client credential requires a new pairing"));
     }
     // Revoked wins: any revocation of the grant ends it, whatever order a member admitted the
@@ -879,7 +889,7 @@ pub fn paired_client_session(
     ).map_err(ApiError::internal)?.claims.is_empty();
     let expires_at = paired.body.pointer("/fields/expires_at_unix_ms")
         .and_then(Value::as_u64).map(u128::from).unwrap_or_default();
-    if revoked || expires_at <= client_now_ms() {
+    if revoked || expires_at <= now_unix_ms {
         return Err(credential_rejected("the client credential was revoked or expired"));
     }
     let actor = paired.body.pointer("/fields/session_actor").and_then(Value::as_str)
