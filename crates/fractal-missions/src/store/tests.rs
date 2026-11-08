@@ -9598,9 +9598,21 @@ fn carried_claim_successor_matches_legacy_and_canonical_holders() {
                 );
                 continue;
             }
+            // Literal c72ede13 physical_actor rule, independent of the implementation
+            // under test: normalize_actor(actor, "agent"), then resolve_reference_conn.
+            let main_actor = fractal_store::store::identities::resolve_reference_conn(
+                &store.readers.get(),
+                &smallclaims::store::normalize_actor(actor, "agent"),
+            ).unwrap();
             let renewed = store.work_action(old, "renew", &renew).unwrap();
             assert_eq!(&renewed.subject, carried);
-            assert_eq!(renewed.claimant.as_deref(), Some(holder));
+            // The carried subject has no replicated lease anchor. Main publishes this
+            // renewal and writes the request actor, unlike a quiet in-generation renewal.
+            assert_eq!(renewed.claimant.as_deref(), Some(main_actor.as_str()));
+            let anchors = store.claims_for(carried, Some("work.renewed")).unwrap();
+            assert_eq!(anchors.len(), 1);
+            assert_eq!(anchors[0].actor.as_deref(), Some(main_actor.as_str()));
+            assert_eq!(anchors[0].body["fields"]["claimant"], json!(main_actor));
             assert!(renewed.claim_expires_at_unix_ms.unwrap() > now_ms());
         }
     }
