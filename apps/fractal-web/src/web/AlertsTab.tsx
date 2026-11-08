@@ -175,6 +175,7 @@ const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen, context }: {
   const agentName = agent?.name ?? row.agentLabel
   const mission = row.mission === undefined ? undefined : missionName(row.mission, context)
   const said = [agentName === undefined ? undefined : `from ${agentName}`, mission === undefined ? undefined : `mission ${mission}`, row.step === undefined ? undefined : `step ${row.step}`].filter(Boolean).join(', ')
+  const saidId = React.useId()
   return (
     <li
       data-alert-id={row.id}
@@ -186,7 +187,10 @@ const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen, context }: {
         <Aria.Button
           data-alert-open=""
           aria-current={selected ? 'true' : undefined}
-          aria-label={`${row.title}, ${row.age}${said === '' ? '' : `, ${said}`}${row.line2 === '' ? '' : `, ${row.line2}`}, ${GLYPH_WORDS[row.glyph]}`}
+          // The name is the row's visible words in their order, so speech input can say what it sees (label in name);
+          // which of them is the agent, the mission and the step is the description.
+          aria-label={[row.title, row.age, agentName, mission, row.step, row.line2 === '' ? undefined : row.line2, GLYPH_WORDS[row.glyph]].filter(Boolean).join(', ')}
+          aria-describedby={said === '' ? undefined : saidId}
           onPress={onSelect}
           onKeyDown={(event) => {
             if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) setMenu(true)
@@ -230,6 +234,7 @@ const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen, context }: {
           </Aria.Popover>
         </Aria.MenuTrigger>
       </div>
+      {said === '' ? null : <span id={saidId} hidden>{said}</span>}
     </li>
   )
 }
