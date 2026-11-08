@@ -1,7 +1,7 @@
 import { it } from '@effect/vitest'
 import { Arbitrary, Schema } from 'effect'
 import { describe, expect } from 'vitest'
-import { activeTab, emptyWorkspace, tabsOf, transition, visibleTabIds, type Tab, type WorkspaceState } from './model.ts'
+import { activeTab, currentSpace, emptyWorkspace, tabsOf, transition, visibleTabIds, workspaceConfig, type Tab, type WorkspaceState } from './model.ts'
 import { corePolicies, type DataResource } from './registry.ts'
 import { defaultBudget, desiredHolds, makeResourceManager, planTiers, resourceKey, type Budget } from './resources.ts'
 import { parsePane } from './subject.ts'
@@ -14,17 +14,20 @@ const pane = Arbitrary.schema(Schema.Literals(panes))
 
 const counter = () => {
   let next = 0
-  return { newId: () => `tab-${next++}` }
+  return workspaceConfig(() => `tab-${next++}`)
 }
+
+/** What tier planning reads of a workspace: its current space's layout, recency and views. */
+const plan = (state: WorkspaceState) => ({ layout: currentSpace(state).layout, mru: currentSpace(state).local.mru, views: currentSpace(state).local.views })
 
 const workspace = (open: readonly string[], active = open.at(-1)): WorkspaceState => {
   const context = counter()
-  let state = emptyWorkspace
-  for (const pane of open) state = transition(state, { _tag: 'Open', pane }, context)
-  return active === undefined ? state : transition(state, { _tag: 'Open', pane: active }, context)
+  let state = emptyWorkspace(context)
+  for (const pane of open) state = transition(state, { _tag: 'Open', ref: pane }, context)
+  return active === undefined ? state : transition(state, { _tag: 'Open', ref: active }, context)
 }
 
-const holdsOf = (state: WorkspaceState) => desiredHolds({ tabs: tabsOf(state.layout), tiers: planTiers({ state, budget: defaultBudget }), views: state.views })
+const holdsOf = (state: WorkspaceState) => desiredHolds({ tabs: tabsOf(state), tiers: planTiers({ state: plan(state), budget: defaultBudget }), views: currentSpace(state).local.views })
 
 const fakeDriver = () => {
   const mounts = new Map<string, number>()
@@ -53,49 +56,49 @@ describe('planTiers', () => {
   it.prop('always shows the active tab and respects both budgets', { scenario }, ({ scenario: { open, dom, data } }) => {
     const state = workspace(open)
     const budget: Budget = { dom, data }
-    const tiers = planTiers({ state, budget })
-    const tabs = tabsOf(state.layout)
+    const tiers = planTiers({ state: plan(state), budget })
+    const tabs = tabsOf(state)
     expect(tiers.get(activeTab(state)!.id)).toBe('active')
     expect(tiers.size).toBe(tabs.length)
     const hidden = tabs.filter(tab => tab.id !== activeTab(state)!.id)
-    const cost = (tab: Tab, field: 'domCost' | 'dataCost') => corePolicies[parsePane(tab.pane)._tag][field]
+    const cost = (tab: Tab, field: 'domCost' | 'dataCost') => corePolicies[parsePane(tab.ref)._tag][field]
     expect(hidden.filter(tab => tiers.get(tab.id) === 'mounted').reduce((sum, tab) => sum + cost(tab, 'domCost'), 0)).toBeLessThanOrEqual(dom)
     expect(hidden.filter(tab => ['mounted', 'warm'].includes(tiers.get(tab.id)!)).reduce((sum, tab) => sum + cost(tab, 'dataCost'), 0)).toBeLessThanOrEqual(data)
   })
 
   it('evicts the least recently used conversation first, keeping the tab', () => {
     const state = workspace(agents)
-    const tiers = planTiers({ state, budget: defaultBudget })
-    expect(state.mru.map(id => tiers.get(id))).toEqual(['active', 'mounted', 'mounted', 'warm', 'warm', 'warm', 'warm', 'warm', 'warm', 'cold', 'cold', 'cold'])
-    expect(tabsOf(state.layout)).toHaveLength(12)
+    const tiers = planTiers({ state: plan(state), budget: defaultBudget })
+    expect(currentSpace(state).local.mru.map(id => tiers.get(id))).toEqual(['active', 'mounted', 'mounted', 'warm', 'warm', 'warm', 'warm', 'warm', 'warm', 'cold', 'cold', 'cold'])
+    expect(tabsOf(state)).toHaveLength(12)
   })
 
   it('never evicts a surface holding an unsent draft, and other tabs give way', () => {
     const state = workspace(agents)
-    const oldest = state.mru.at(-1)!
-    const tiers = planTiers({ state: { ...state, views: { [oldest]: { dirty: true } } }, budget: { dom: 1, data: 8 } })
+    const oldest = currentSpace(state).local.mru.at(-1)!
+    const tiers = planTiers({ state: { ...plan(state), views: { [oldest]: { dirty: true } } }, budget: { dom: 1, data: 8 } })
     expect(tiers.get(oldest)).toBe('mounted')
-    expect(tiers.get(state.mru[1]!)).toBe('mounted')
-    expect(tiers.get(state.mru[2]!)).toBe('warm')
+    expect(tiers.get(currentSpace(state).local.mru[1]!)).toBe('mounted')
+    expect(tiers.get(currentSpace(state).local.mru[2]!)).toBe('warm')
   })
 
   it('shows the active tab of every split, whatever the focus', () => {
     const context = counter()
     let state = workspace(['agent:agent/a', 'agent:agent/b', 'agent:agent/c'])
-    state = transition(state, { _tag: 'Move', id: tabsOf(state.layout)[0]!.id, to: { _tag: 'Edge', group: state.focus, side: 'right', first: false } }, { newId: () => `split-${context.newId()}` })
-    const tiers = planTiers({ state, budget: { dom: 0, data: 0 } })
-    for (const id of visibleTabIds(state.layout)) expect(tiers.get(id)).toBe('active')
-    expect(visibleTabIds(state.layout).size).toBe(2)
+    state = transition(state, { _tag: 'Move', tab: tabsOf(state)[0]!.id, to: { _tag: 'Edge', pane: currentSpace(state).local.focus, side: 'right' } }, workspaceConfig(() => `split-${context.newId()}`))
+    const tiers = planTiers({ state: plan(state), budget: { dom: 0, data: 0 } })
+    for (const id of visibleTabIds(state)) expect(tiers.get(id)).toBe('active')
+    expect(visibleTabIds(state).size).toBe(2)
   })
 
   it('holds a terminal stream only while that face is on screen, and the conversation at any face', () => {
     let state = workspace(['terminal:agent/a0', 'agent:agent/a1'], 'agent:agent/a1')
-    const terminal = tabsOf(state.layout)[0]!
-    expect(terminal.pane).toBe('agent:agent/a0')
+    const terminal = tabsOf(state)[0]!
+    expect(terminal.ref).toBe('agent:agent/a0')
     expect(holdsOf(state).get(terminal.id)).toEqual([{ _tag: 'Conversation', ref: 'agent/a0' }])
-    state = transition(state, { _tag: 'Activate', id: terminal.id }, counter())
+    state = transition(state, { _tag: 'Activate', tab: terminal.id }, counter())
     expect(holdsOf(state).get(terminal.id)).toEqual([{ _tag: 'Conversation', ref: 'agent/a0' }, { _tag: 'TerminalScreen', ref: 'terminal/a0' }])
-    state = transition(state, { _tag: 'SetView', id: terminal.id, view: { terminal: false } }, counter())
+    state = transition(state, { _tag: 'SetView', tab: terminal.id, view: { terminal: false } }, counter())
     expect(holdsOf(state).get(terminal.id)).toEqual([{ _tag: 'Conversation', ref: 'agent/a0' }])
   })
 })
@@ -116,9 +119,9 @@ describe('resource manager', () => {
     const fake = fakeDriver()
     const manager = makeResourceManager(fake.driver)
     const context = counter()
-    let state = emptyWorkspace
+    let state = emptyWorkspace(context)
     for (const pane of sequence) {
-      state = transition(state, { _tag: 'Open', pane }, context)
+      state = transition(state, { _tag: 'Open', ref: pane }, context)
       manager.reconcile(holdsOf(state))
       for (const count of fake.mounts.values()) expect(count === 0 || count === 1).toBe(true)
       // The budget, the one visible subject, and a terminal on screen.
@@ -134,14 +137,14 @@ describe('resource manager', () => {
     const manager = makeResourceManager(fake.driver)
     let state = workspace(['document:doc/x'])
     manager.reconcile(holdsOf(state))
-    const document = tabsOf(state.layout)[0]!
+    const document = tabsOf(state)[0]!
     expect(fake.mounts.get('Document:doc/x')).toBe(1)
-    state = transition(state, { _tag: 'Open', pane: 'agent:agent/a0' }, { newId: () => 'tab-agent' })
-    expect(planTiers({ state, budget: defaultBudget }).get(document.id)).toBe('mounted')
+    state = transition(state, { _tag: 'Open', ref: 'agent:agent/a0' }, workspaceConfig(() => 'tab-agent'))
+    expect(planTiers({ state: plan(state), budget: defaultBudget }).get(document.id)).toBe('mounted')
     manager.reconcile(holdsOf(state))
     expect(fake.mounts.get('Document:doc/x')).toBe(1)
     const { acquired, released } = manager.stats()
-    state = transition(state, { _tag: 'Activate', id: document.id }, counter())
+    state = transition(state, { _tag: 'Activate', tab: document.id }, counter())
     manager.reconcile(holdsOf(state))
     expect(fake.mounts.get('Document:doc/x')).toBe(1)
     expect(manager.stats().released).toBe(released)
@@ -161,7 +164,7 @@ describe('resource manager', () => {
     let state = workspace(agents.slice(0, 5))
     manager.reconcile(holdsOf(state))
     const before = fake.total()
-    state = transition(state, { _tag: 'Activate', id: tabsOf(state.layout)[0]!.id }, counter())
+    state = transition(state, { _tag: 'Activate', tab: tabsOf(state)[0]!.id }, counter())
     manager.reconcile(holdsOf(state))
     expect(fake.total()).toBe(before)
   })

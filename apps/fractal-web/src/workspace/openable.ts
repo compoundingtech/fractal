@@ -1,6 +1,7 @@
 import * as React from 'react'
-import type { Command, Drop, Side } from './model.ts'
-import { paneKey, subjectOfRef } from './subject.ts'
+import { ENTITY_DRAG_TYPE, entityDragPayload, parseEntityDragPayload, type EntityKind } from '../../../../packages/fractal-ui/src/assistant-ui/entity/entity.ts'
+import type { Command, Drop } from './model.ts'
+import { paneKey, parsePane, subjectOfRef, subjectRef, type Subject } from './subject.ts'
 
 /**
  * Everything that can open in a tab goes through here: one `open(ref)` verb and its drag counterpart, so a
@@ -12,8 +13,8 @@ export interface OpenGesture {
   readonly background?: boolean
   /** Land at this drop: a strip position or a split edge. */
   readonly at?: Drop
-  /** A new split beside the focused group: the keyboard's way to reach an edge. */
-  readonly split?: Side
+  /** A new split beside the focused pane: the keyboard's way to reach an edge. */
+  readonly split?: 'right' | 'bottom'
 }
 
 export type Open = (ref: string, gesture?: OpenGesture) => void
@@ -23,20 +24,31 @@ export const openCommand = ({ ref, gesture = {}, focus }: {
   readonly ref: string
   readonly gesture?: OpenGesture
   readonly focus: string
-}): Extract<Command, { _tag: 'Open' }> => {
+}): Extract<Command, { _tag: 'Open' | 'Split' }> => {
   const pane = paneKey(subjectOfRef(ref))
-  const at: Drop | undefined = gesture.at ?? (gesture.split === undefined ? undefined : { _tag: 'Edge', group: focus, side: gesture.split, first: false })
-  if (at !== undefined) return { _tag: 'Open', pane, at }
-  return gesture.background === true ? { _tag: 'Open', pane, activate: false } : { _tag: 'Open', pane }
+  if (gesture.at !== undefined) return { _tag: 'Open', ref: pane, at: gesture.at }
+  // An empty pane takes the subject itself; any other splits, as a drag onto that edge would.
+  if (gesture.split !== undefined) return { _tag: 'Split', pane: focus, side: gesture.split, ref: pane }
+  return gesture.background === true ? { _tag: 'Open', ref: pane, activate: false } : { _tag: 'Open', ref: pane }
 }
 
-/** The one drag payload. A tab being dragged carries its subject's ref too, so every drop is the same `Open`. */
-export const openableDragType = 'application/x-fractal-openable'
+/**
+ * The one drag payload, the shared entity descriptor (`ENTITY_DRAG_TYPE`): its id is the subject's ref, so every
+ * drop is the same `Open`, and the hover card and the drag chip name the entity one way.
+ */
+export const openableDragType = ENTITY_DRAG_TYPE
 
-export const readOpenableDrag = (data: Pick<DataTransfer, 'getData'>): string | undefined => {
-  const ref = data.getData(openableDragType)
-  return ref === '' ? undefined : ref
-}
+const entityKindOf = (subject: Subject): EntityKind =>
+  subject._tag === 'Conversation' || subject._tag === 'Terminal' ? 'agent' : subject._tag === 'Mission' ? 'mission' : 'resource'
+
+export const openableDragItems = (ref: string, title = ref): Record<string, string> =>
+  entityDragPayload({ kind: entityKindOf(subjectOfRef(ref)), id: subjectRef(subjectOfRef(ref)), title })
+
+export const readOpenableDrag = (data: Pick<DataTransfer, 'getData'>): string | undefined =>
+  parseEntityDragPayload(data.getData(openableDragType) || undefined)?.id
+
+/** A dragged tab names its subject by its pane key; the payload carries the subject's ref. */
+export const refOfPane = (pane: string): string => subjectRef(parsePane(pane))
 
 interface PointerModifiers {
   readonly metaKey: boolean
@@ -73,15 +85,14 @@ export const openableProps = (ref: string, open: Open, options?: { readonly acti
     if (event.key !== 'Enter') return
     if (event.altKey) {
       event.preventDefault()
-      open(ref, { split: event.shiftKey ? 'below' : 'right' })
+      open(ref, { split: event.shiftKey ? 'bottom' : 'right' })
     } else if (options?.activatesOnEnter !== true) {
       event.preventDefault()
       open(ref, event.metaKey || event.ctrlKey ? { background: true } : {})
     }
   },
   onDragStart: event => {
-    event.dataTransfer.setData(openableDragType, ref)
-    event.dataTransfer.setData('text/plain', ref)
+    for (const [type, value] of Object.entries(openableDragItems(ref))) event.dataTransfer.setData(type, value)
     event.dataTransfer.effectAllowed = 'copyMove'
   },
 })
