@@ -46,7 +46,9 @@
     </script>
     <style data-wf-shell-bootstrap>
       html { background: var(--wf-boot-canvas, #0a0a0a); color-scheme: dark; }
+      /* Fixed-viewport app: only the shell's panes scroll, never the document (see LiveAgentWorkspace styles.app). */
       html, body, #root { height: 100%; margin: 0; }
+      html, body { overflow: hidden; }
       body { background: var(--wf-boot-canvas, #0a0a0a); }
       [data-wf-shell-skeleton] { display: flex; height: 100dvh; background: var(--wf-boot-canvas, #0a0a0a); }
       [data-wf-sidebar-skeleton] { width: var(--wf-boot-sidebar-w, 256px); max-width: 40vw; padding: 8px; box-sizing: border-box; background: var(--wf-boot-sidebar, #000000); border-right: 1px solid var(--wf-boot-line, #242424); }

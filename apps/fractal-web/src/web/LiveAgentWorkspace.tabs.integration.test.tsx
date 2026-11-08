@@ -159,24 +159,37 @@ it('closes the focused tab with Delete or Backspace', async () => {
   expect(titles()).toEqual([])
 })
 
-it('brings the selected tab into view whenever the strip changes size', async () => {
+it('brings the selected tab into view whenever the strip changes size, scrolling only the strip', async () => {
   const observed: { readonly target: Element; readonly callback: (entries: readonly unknown[]) => void }[] = []
   vi.stubGlobal('ResizeObserver', class { constructor(private readonly callback: (entries: readonly unknown[]) => void) {} observe(target: Element) { if (!observed.some(row => row.target === target && row.callback === this.callback)) observed.push({ target, callback: this.callback }) } unobserve() {} disconnect() {} })
-  // jsdom has no layout, so no scrollIntoView of its own.
+  // scrollIntoView also scrolls every ancestor (and the document) that clips the tab: the reveal must never use it.
   Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, writable: true, value: () => {} })
-  const scrolled: string[] = []
-  const scroll = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(function (this: Element) { scrolled.push(this.getAttribute('aria-label') ?? '') })
+  const scrolledIntoView: string[] = []
+  const scroll = vi.spyOn(Element.prototype, 'scrollIntoView').mockImplementation(function (this: Element) { scrolledIntoView.push(this.getAttribute('aria-label') ?? '') })
+  // jsdom has no layout: a 200px strip whose selected tab sits at 300-400px of its content.
+  let scrollLeft = 0
+  const rect = vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+    const box = (left: number, right: number) => ({ left, right, top: 0, bottom: 30, x: left, y: 0, width: right - left, height: 30, toJSON: () => ({}) }) as DOMRect
+    if (this.matches('[role="tablist"][aria-label="Workspace tabs"]')) return box(0, 200)
+    if (this.getAttribute('aria-label') === 'Agent A') return box(300 - scrollLeft, 400 - scrollLeft)
+    return box(0 - scrollLeft, 100 - scrollLeft)
+  })
   try {
     await mount()
     await act(async () => row('agent/b').click())
     await act(async () => row('agent/a').click())
-    scrolled.length = 0
+    const strip = host.querySelector<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"]')!
+    Object.defineProperty(strip, 'clientWidth', { configurable: true, value: 200 })
+    Object.defineProperty(strip, 'clientHeight', { configurable: true, value: 30 })
+    Object.defineProperty(strip, 'scrollLeft', { configurable: true, get: () => scrollLeft, set: (value: number) => { scrollLeft = value } })
+    scrollLeft = 0
     // The width a phone gives the strip arrives after the selection did.
-    const strip = host.querySelector('[role="tablist"][aria-label="Workspace tabs"]')!
     await act(async () => { for (const { target, callback } of [...observed]) if (target.contains(strip) || strip.contains(target)) callback([]) })
-    expect(scrolled).toContain('Agent A')
+    expect(scrollLeft).toBe(200)
+    expect(scrolledIntoView).toEqual([])
   } finally {
     scroll.mockRestore()
+    rect.mockRestore()
   }
 })
 

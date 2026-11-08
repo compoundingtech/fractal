@@ -6,6 +6,7 @@
   "scripts": {
     "test": "vitest run",
     "test:embed": "node scripts/embed-proof.mjs",
+    "test:scroll-containment": "node scripts/scroll-containment-proof.mjs",
     "changelog:registry": "node scripts/changelog-registry.mjs",
     "changelog:registry:check": "node scripts/changelog-registry.mjs --check",
     "typecheck": "node scripts/changelog-registry.mjs && tsc --noEmit",
