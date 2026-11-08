@@ -107,6 +107,9 @@ pub enum Window {
     Summary,
     /// The selected person’s sidebar organization, when supported.
     Arrangements,
+    /// The person's read positions, when supported and the socket has room: its frames only say
+    /// that the positions changed, and the UI reads their list again.
+    ReadPositions,
     Inventory(Inventory),
 }
 
@@ -121,6 +124,7 @@ impl Window {
             Self::Glasses => "glasses",
             Self::Summary => "summary",
             Self::Arrangements => "arrangements",
+            Self::ReadPositions => "read-positions",
             Self::Inventory(inventory) => inventory.collection(),
         }
     }
@@ -128,7 +132,7 @@ impl Window {
     fn from_id(id: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
-            .chain([Self::Glasses, Self::Summary, Self::Arrangements])
+            .chain([Self::Glasses, Self::Summary, Self::Arrangements, Self::ReadPositions])
             .find(|window| window.id() == id)
             .or_else(|| Inventory::from_id(id).map(Self::Inventory))
     }
@@ -136,7 +140,7 @@ impl Window {
     /// How many items to follow: every glass a person may keep, a page of anything else.
     fn limit(self) -> usize {
         match self {
-            Self::Glasses | Self::Arrangements => GLASSES,
+            Self::Glasses | Self::Arrangements | Self::ReadPositions => GLASSES,
             _ => WINDOW,
         }
     }
@@ -254,7 +258,8 @@ pub enum Command {
 }
 
 /// Three conversations remain live alongside collection windows, glasses and a terminal.
-/// Optional arrangements require the advertised sixteen-subscription socket capacity.
+/// Optional arrangements require the advertised sixteen-subscription socket capacity; read
+/// positions take the slot a sixth screen inventory would (`read_positions_room`).
 pub const MAX_CONVERSATIONS: usize = 3;
 
 /// A conversation being shown, on its own subscription.
@@ -583,6 +588,12 @@ async fn connected(
     let sidebar_person = person.filter(|person| {
         person.starts_with("person/") && supports("arrangements") && supports("collections")
     });
+    // Read positions take the socket's last slot, the one a sixth screen inventory would use: while
+    // all six are held the positions are not followed, and the UI polls their list instead.
+    let positions_person = person.filter(|person| {
+        person.starts_with("person/") && supports("read-positions") && supports("collections")
+    });
+    let mut read_positions = positions_person.is_some() && read_positions_room(inventory_granted, *inventories);
     // From version 2 a glass's splits keep their sizes in st.
     if let Some(version) = version
         && updates.send(Update::GlassesVersion(version)).is_err()
@@ -607,6 +618,11 @@ async fn connected(
     }
     if let Some(person) = sidebar_person
         && let Err(error) = stream.subscribe_arrangements("arrangements", person, GLASSES, None).await {
+        return Ended::Dropped(error.to_string());
+    }
+    if read_positions
+        && let Some(person) = positions_person
+        && let Err(error) = stream.subscribe_read_positions(Window::ReadPositions.id(), person, Window::ReadPositions.limit()).await {
         return Ended::Dropped(error.to_string());
     }
     if inventory_granted {
@@ -735,7 +751,7 @@ async fn connected(
                         let Some(window) = Window::from_id(&id) else { continue };
                         // A frame already on its way when the window was left: the socket was
                         // heard from, but nothing of the window comes back.
-                        if left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
+                        if left(window, *missions, read_positions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
                             continue;
                         }
                         *failures = 0;
@@ -749,7 +765,7 @@ async fn connected(
                     }
                     CollectionEvent::Changes { id, snapshot, upserts, removes, order, has_more, .. } => {
                         let Some(window) = Window::from_id(&id) else { continue };
-                        if left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
+                        if left(window, *missions, read_positions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
                             continue;
                         }
                         window_loaded(&mut window_retries, &mut pending_reports, window);
@@ -778,7 +794,7 @@ async fn connected(
                     // one good snapshot resets the wait.
                     CollectionEvent::Resync { id, code, message, retryable, .. } => {
                         if let Some(window) = Window::from_id(&id)
-                            && !(left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)))
+                            && !(left(window, *missions, read_positions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)))
                         {
                             if window == Window::Agents && revisioned_agents && retryable == Some(false) {
                                 agents_sequence = None;
@@ -823,7 +839,7 @@ async fn connected(
                     }
                     CollectionEvent::Error { id, code, message, retryable, .. } => {
                         if let Some(window) = Window::from_id(&id) {
-                            if left(window, *missions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
+                            if left(window, *missions, read_positions) || matches!(window, Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory)) {
                                 continue;
                             }
                             if window == Window::Agents && revisioned_agents && retryable == Some(false) {
@@ -894,16 +910,36 @@ async fn connected(
                 Some(Command::Inventories(wanted)) => {
                     let previous = *inventories;
                     *inventories = wanted;
-                    if !inventory_granted { continue; }
-                    for inventory in previous.windows().into_iter().filter(|old| !wanted.contains(*old)) {
-                        if let Err(error) = stream.unsubscribe(&inventory.id()).await { return Ended::Dropped(error.human()); }
-                        let window = Window::Inventory(inventory);
-                        windows.remove(&window); window_retries.loaded(window);
-                        pending_reports.cancel(window);
-                        if updates.send(Update::WindowStopped(window)).is_err() { return Ended::Closed; }
+                    // A sixth inventory takes the read positions' slot, given up before it is
+                    // asked for; the positions are followed again once an inventory leaves.
+                    let room = read_positions_room(inventory_granted, wanted);
+                    if read_positions && !room {
+                        read_positions = false;
+                        if let Err(error) = stream.unsubscribe(Window::ReadPositions.id()).await { return Ended::Dropped(error.human()); }
+                        windows.remove(&Window::ReadPositions);
+                        window_loaded(&mut window_retries, &mut pending_reports, Window::ReadPositions);
+                        if updates.send(Update::WindowStopped(Window::ReadPositions)).is_err() { return Ended::Closed; }
                     }
-                    for inventory in wanted.windows().into_iter().filter(|new| !previous.contains(*new)) {
-                        if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.human()); }
+                    if inventory_granted {
+                        for inventory in previous.windows().into_iter().filter(|old| !wanted.contains(*old)) {
+                            if let Err(error) = stream.unsubscribe(&inventory.id()).await { return Ended::Dropped(error.human()); }
+                            let window = Window::Inventory(inventory);
+                            windows.remove(&window); window_retries.loaded(window);
+                            pending_reports.cancel(window);
+                            if updates.send(Update::WindowStopped(window)).is_err() { return Ended::Closed; }
+                        }
+                        for inventory in wanted.windows().into_iter().filter(|new| !previous.contains(*new)) {
+                            if let Err(error) = inventory.subscribe(stream).await { return Ended::Dropped(error.human()); }
+                        }
+                    }
+                    if !read_positions
+                        && room
+                        && let Some(person) = positions_person
+                    {
+                        read_positions = true;
+                        if let Err(error) = stream.subscribe_read_positions(Window::ReadPositions.id(), person, Window::ReadPositions.limit()).await {
+                            return Ended::Dropped(error.human());
+                        }
                     }
                 }
                 Some(Command::Converse { targets }) => {
@@ -982,6 +1018,10 @@ async fn connected(
                             Some(person) => stream.subscribe_arrangements(window.id(), person, window.limit(), None).await,
                             None => continue,
                         },
+                        Window::ReadPositions => match positions_person {
+                            Some(person) if read_positions => stream.subscribe_read_positions(window.id(), person, window.limit()).await,
+                            _ => continue,
+                        },
                         Window::Inventory(inventory) if !inventory_granted || !inventories.contains(inventory) => continue,
                         Window::Inventory(inventory) => inventory.subscribe(stream).await,
                         Window::Agents if revisioned_agents => {
@@ -1009,10 +1049,25 @@ async fn connected(
 }
 
 /// Whether a frame for `window` is one already on its way when the window was left: the missions
-/// window is followed only on request, and a snapshot, change, resync or error that arrives after
-/// the unsubscribe must not bring back the rows, the followed state or an error the UI dropped.
-fn left(window: Window, missions_followed: bool) -> bool {
-    window == Window::Missions && !missions_followed
+/// window is followed only on request, and the read positions only while the socket has room; a
+/// snapshot, change, resync or error that arrives after the unsubscribe must not bring back the
+/// rows, the followed state or an error the UI dropped.
+fn left(window: Window, missions_followed: bool, read_positions_followed: bool) -> bool {
+    match window {
+        Window::Missions => !missions_followed,
+        Window::ReadPositions => !read_positions_followed,
+        _ => false,
+    }
+}
+
+/// The screen inventories a socket holds beside the ten fixed subscriptions (attention, missions,
+/// agents, glasses, summary, arrangements, a terminal and three conversations) within st's sixteen.
+const INVENTORY_SLOTS: usize = 6;
+
+/// Whether the socket has a slot for the read positions beside `inventories`: the slot a sixth
+/// inventory would take. Without inventory collections none is ever held.
+fn read_positions_room(inventory_granted: bool, inventories: Inventories) -> bool {
+    !inventory_granted || inventories.windows().len() < INVENTORY_SLOTS
 }
 
 /// Up to half of `wait` more, so many clients told to ask again at once do not all ask together.
@@ -1887,14 +1942,28 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_for_the_missions_window_after_it_was_left_is_ignored() {
-        // The other windows are never left; missions are ignored only while not followed.
-        for window in [Window::Attention, Window::Agents, Window::Glasses, Window::Summary] {
-            assert!(!left(window, false), "{window:?} is always followed");
-            assert!(!left(window, true));
+    fn a_frame_for_a_window_after_it_was_left_is_ignored() {
+        // The other windows are never left; missions and read positions only while not followed.
+        for window in [Window::Attention, Window::Agents, Window::Glasses, Window::Summary, Window::Arrangements] {
+            assert!(!left(window, false, false), "{window:?} is always followed");
+            assert!(!left(window, true, true));
         }
-        assert!(left(Window::Missions, false), "a late missions frame is dropped");
-        assert!(!left(Window::Missions, true), "followed missions are kept");
+        assert!(left(Window::Missions, false, true), "a late missions frame is dropped");
+        assert!(!left(Window::Missions, true, false), "followed missions are kept");
+        assert!(left(Window::ReadPositions, true, false), "a late read positions frame is dropped");
+        assert!(!left(Window::ReadPositions, false, true), "followed read positions are kept");
+    }
+
+    #[test]
+    fn read_positions_take_the_slot_a_sixth_inventory_would() {
+        let five = Inventories { clients: true, usage_hours: Some(24), machines: true, devices: true, sessions: true, terminals: false };
+        let six = Inventories { terminals: true, ..five };
+        assert!(read_positions_room(true, Inventories::default()));
+        assert!(read_positions_room(true, five), "ten fixed, five inventories and the positions make sixteen");
+        assert!(!read_positions_room(true, six), "a sixth inventory needs the slot");
+        assert!(read_positions_room(false, six), "inventories st does not grant hold no slot");
+        assert_eq!(Window::from_id("read-positions"), Some(Window::ReadPositions));
+        assert_eq!(Window::ReadPositions.id(), "read-positions");
     }
 
 }

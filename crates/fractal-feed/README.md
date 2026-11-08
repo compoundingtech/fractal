@@ -10,6 +10,12 @@ sixteen-slot collections are granted, keeping the three conversation slots on ol
 daemons. Its authoritative windows arrive as `Window::Arrangements`, including retirement
 removals and remote register edits; it never creates or edits an arrangement.
 
+With the same person and the `read-positions` capability, it also follows that person's
+`read-positions` collection as `Window::ReadPositions`. Its frames are invalidations only: the UI
+reads `read-positions.list` again. The subscription takes the slot a sixth screen inventory
+would use. While six inventories are held it is given up (`WindowStopped(Window::ReadPositions)`),
+and the UI polls the list until an inventory leaves.
+
 ## Start a feed
 
 Supply a `Client` for each member, already configured with that member's identity and credentials.
@@ -96,7 +102,8 @@ Optional screen inventories use `Command::Inventories(Inventories { .. })`.
 `InventorySupport` reports admission and the member build once per connection;
 only granted `inventory-collections` and sixteen-slot `collections` capabilities
 activate them. At most six inventory slots (one usage period) coexist with the
-existing ten reserved window, conversation and terminal slots.
+existing ten reserved window, conversation and terminal slots; the sixth is shared
+with the read positions, which yield it.
 `Window::Inventory(Inventory::Usage(hours))` identifies the requested period, so
 a late old-period frame cannot overwrite the new period. Retained server resyncs
 report staleness; a permanent refusal does not silently switch to HTTP. The UI

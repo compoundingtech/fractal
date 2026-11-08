@@ -59,10 +59,10 @@
                                         │
                                         │
                                         │
-                                        │
                                         │ ─────────────────────────────────────────────────────────────────────────────
                                         │  ◆ needs you ⠋ working   ● idle
                                         │  ✕ broken    ○ stopped   ? unmanaged
+                                        │  • new since you read
                                         │  This host's Fractal is older: agent states show as Fractal reports them.
  Keys: ctrl+k open   tab tabs   alt+←→↑↓ splits   ctrl+w close   ? help
 
