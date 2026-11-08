@@ -2,12 +2,11 @@
 /**
  * Semantic wait, message and skipped cards stand in for the kit summary line only: through the real
  * app projection and kit transcript, each call's recorded input, command and output stay one raw
- * disclosure away, and the host Open action stays reachable.
+ * disclosure away, inline; there is no host detail surface to open.
  */
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import type { WorkLogCall } from '@fractal/ui/assistant-ui/work-log'
 import type { ConversationItem, ToolCallItem } from '../conversation/model.ts'
 import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
@@ -49,11 +48,8 @@ afterEach(async () => {
 it('keeps raw input, the literal send command with its flags, and output beside semantic wait, message and skipped cards', async () => {
   const state = mapConversationFeed({ _tag: 'Observed', freshness: 'live', value: { items, hasOlder: false, observation: { empty: false } } }, {})
   if (state._tag !== 'Observed') throw new Error('expected an observed transcript')
-  const opened: WorkLogCall[] = []
-  const onOpenTool = (call: WorkLogCall) => { opened.push(call) }
   await act(async () => root!.render(<EmbraceRuntimeProvider options={{ messages: state.items, isRunning: false, onNew: async () => {} }}>
-    <Transcript title="Recorded tools" turns={state.turns} sync={{ _tag: 'Live', since: 1000 }} now={1000} observedAt={1000} onOpenTool={onOpenTool}
-      renderToolDetail={(item: ToolCallItem, call: WorkLogCall) => recordedToolDetail(item, call, () => onOpenTool(call))} />
+    <Transcript title="Recorded tools" turns={state.turns} sync={{ _tag: 'Live', since: 1000 }} now={1000} observedAt={1000} interactiveCalls renderToolDetail={recordedToolDetail} />
   </EmbraceRuntimeProvider>))
   await act(async () => { await Promise.resolve() })
   await act(async () => container.querySelector<HTMLButtonElement>('[data-testid="work-log"] button')!.click())
@@ -90,7 +86,7 @@ it('keeps raw input, the literal send command with its flags, and output beside 
   expect(rawInput(tools.skipped.id)).toBe(JSON.stringify(tools.skipped.input, null, 2))
   expect(preview(tools.skipped.id).querySelector('[data-testid="tool-command"] code')?.textContent).toBe('printf ready --verbose')
   expect(preview(tools.skipped.id).textContent).toContain('Interrupted before execution.')
-  // A skipped card has no inspector button of its own; the kit Open action still reaches the host.
-  await act(async () => preview(tools.skipped.id).querySelector<HTMLButtonElement>('button[aria-label="Open Skipped tool detail"]')!.click())
-  expect(opened.map(call => call.id)).toEqual([tools.skipped.id])
+  // Nothing opens elsewhere: no kit Open action and no inspector button on any card.
+  expect(container.querySelector('[data-testid="tool-preview-actions"]')).toBeNull()
+  expect(container.querySelector('button[aria-label^="Open"]')).toBeNull()
 })

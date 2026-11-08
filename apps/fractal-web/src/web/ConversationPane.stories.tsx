@@ -15,17 +15,16 @@ const meta = {
   title: 'Fractal/App/ConversationPane',
   component: ConversationPane,
   // The pane's own props come from the selected state's fixture, not from controls.
-  args: { state: 'populated', scheme: 'dark', agentRef: '', agentName: '', onOpenTool: () => undefined },
+  args: { state: 'populated', scheme: 'dark', agentRef: '', agentName: '' },
   argTypes: {
     state: { control: 'select', options: appStoryStates },
     scheme: { control: 'radio', options: ['dark', 'light'] },
     agentRef: { table: { disable: true } },
     agentName: { table: { disable: true } },
-    onOpenTool: { table: { disable: true } },
   },
   parameters: { layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'The production ConversationPane module over fixtureSource feeds of the deterministic fixture world pins loading, empty, populated, failed-tool, offline, unavailable and streaming repair states without a gateway.' } },
   render: ({ state, scheme }) => <main data-scheme={scheme} {...stylex.props(styles.root, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
-    <AppStorySpecimen state={state}>{fixture => <ConversationPane agentRef={fixture.agentRef} agentName={fixture.agentName} onOpenTool={() => undefined} />}</AppStorySpecimen>
+    <AppStorySpecimen state={state}>{fixture => <ConversationPane agentRef={fixture.agentRef} agentName={fixture.agentName} />}</AppStorySpecimen>
   </main>,
   play: async ({ canvasElement, args }) => {
     // On a cold dev server the lazily compiled pane takes longer than waitFor's default second.

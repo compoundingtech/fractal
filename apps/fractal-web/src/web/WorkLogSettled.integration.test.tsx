@@ -37,7 +37,7 @@ afterEach(async () => {
 })
 const render = async (turn: TranscriptTurn) => {
   await act(async () => root.render(<EmbraceRuntimeProvider options={{ messages: [turn.prompt!, ...turn.items], isRunning: false, onNew: async () => {} }}>
-    <Transcript turns={[turn]} title="Settled" sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} onOpenTool={() => {}} />
+    <Transcript turns={[turn]} title="Settled" sync={{ _tag: 'Live', since: now }} now={now} observedAt={now} interactiveCalls />
   </EmbraceRuntimeProvider>))
   await act(async () => { await Promise.resolve() })
 }

@@ -42,7 +42,7 @@ vi.mock('../data/react.tsx', async () => {
 import { ConversationPane } from './ConversationPane.tsx'
 
 const render = (ref = 'agent/selected') => renderToStaticMarkup(
-  <ConversationPane agentRef={ref} agentName="Example Agent" onOpenTool={() => {}} />,
+  <ConversationPane agentRef={ref} agentName="Example Agent" />,
 )
 const observed = (items: readonly ConversationItem[] = [], hasOlder = false): Feed<ConversationPage> => ({
   _tag: 'Observed', freshness: 'live', value: { items, hasOlder, observation: { empty: items.length === 0 } },
@@ -117,7 +117,7 @@ describe('ConversationPane kit composition', () => {
 
   it('never mounts a composer for a read-only thread', () => {
     source.feed = observed(scenario.slice(0, 5))
-    const html = renderToStaticMarkup(<ConversationPane agentRef="session/external-child-review" agentName="Reviewer" onOpenTool={() => {}} readOnly />)
+    const html = renderToStaticMarkup(<ConversationPane agentRef="session/external-child-review" agentName="Reviewer" readOnly />)
     expect(html).toContain('data-testid="transcript-scroll"')
     expect(html).not.toContain('textarea')
     expect(html).not.toContain('conversation-composer-dock')

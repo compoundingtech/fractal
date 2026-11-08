@@ -25,7 +25,7 @@ const WorkLogRhythm = ({ scheme }: { readonly scheme: 'dark' | 'light' }) => {
   if (state._tag !== 'Observed') throw new Error('expected an observed transcript')
   return <main {...stylex.props(scheme === 'light' ? compositionLightTheme : assistantDarkTheme, liveAccentTheme, styles.root)}>
     <EmbraceRuntimeProvider options={{ messages: state.items, isRunning: false, onNew: async () => {} }}>
-      <Transcript title="Work log rhythm" turns={state.turns} sync={{ _tag: 'Live', since: 1000 }} now={1000} observedAt={1000} onOpenTool={() => {}} renderToolDetail={(item, call) => recordedToolDetail(item, call, () => {})} />
+      <Transcript title="Work log rhythm" turns={state.turns} sync={{ _tag: 'Live', since: 1000 }} now={1000} observedAt={1000} interactiveCalls renderToolDetail={recordedToolDetail} />
     </EmbraceRuntimeProvider>
   </main>
 }
@@ -53,7 +53,8 @@ const play: Story['play'] = async ({ canvasElement }) => {
   // The tool preview is the only card around a message: no second border inside it.
   const card = canvas.getByTestId('outgoing-message-card')
   await expect(getComputedStyle(card).borderTopWidth).toBe('0px')
-  await expect(canvas.getByTestId('wait-row').querySelector('[aria-hidden="true"]')).toHaveTextContent('·')
+  // The wait reads in place: no inspector action beside its headline.
+  await expect(within(canvas.getByTestId('wait-row')).queryByRole('button')).toBeNull()
 }
 export const Dark: Story = { args: { scheme: 'dark' }, play }
 export const Light: Story = { args: { scheme: 'light' }, play }

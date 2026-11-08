@@ -60,7 +60,6 @@ import { darkTheme as assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme
 import { lightTheme as compositionLightTheme } from '../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
 import type { SidebarActions } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { PinsSection } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/PinsSection.tsx'
-import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { terminalSubjectForAgent } from '../data/projections.ts'
 import { sidebarPins } from '../data/sidebarPins.ts'
 import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useDataSource, useRosterDecode, useAskingAgents, useMissions } from '../data/react.tsx'
@@ -462,11 +461,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // The panel is one app-wide setting on desktop, so it stays as it is across tabs and windows. A phone's sheet closes on a switch instead.
   const [sheetOpen, setSheetOpen] = React.useState(false)
   const [phoneSheet, setPhoneSheet] = React.useState<{ readonly open: boolean; readonly id: string }>({ open: false, id: '' })
-  // A tool's detail opens in the side panel of the pane it was opened from, as a contextual tab.
-  const [openedTool, setOpenedTool] = React.useState<{ readonly pane: string; readonly tab: string | null; readonly call: WorkLogCall } | undefined>(undefined)
-  const focusRef = React.useRef<{ pane: string; tab: string | null }>({ pane: '', tab: null })
-  focusRef.current = { pane: space.local.focus, tab: findPane(space.layout, space.local.focus)?.active ?? null }
-  // A tool detail belongs to its agent and a phone's sheet to what was showing, however the tab changed: Back counts.
+  // A phone's sheet belongs to what was showing, however the tab changed: Back counts.
   const shownTab = activeRow?.id
   React.useLayoutEffect(() => setSheetOpen(false), [shownTab])
   /** Every workspace change from a person; transcript timing starts here. */
@@ -492,7 +487,6 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const onTabView = React.useCallback((id: string, view: TabView) => store.dispatch({ _tag: 'SetView', tab: id, view }), [store])
   const onReplaceTab = React.useCallback((id: string, ref: string) => go({ _tag: 'Replace', tab: id, ref: paneKey(subjectOfRef(ref)) }), [go])
   const onCloseTab = React.useCallback((id: string) => go({ _tag: 'Close', tab: id }), [go])
-  const onOpenTool = React.useCallback((call: WorkLogCall) => { setOpenedTool({ ...focusRef.current, call }) }, [])
   const pins = useAtomValue(terminalSource.pins ?? sidebarPins())
   const pinned = React.useMemo(() => new Set(pins.state.members.map(item => item.member)), [pins.state.members])
   const pinnedItems = React.useMemo(() => {
@@ -643,19 +637,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   }
   // A pane's side panel belongs to its shown subject's kind. On a phone it rises as a sheet over the focused pane.
   const focusedAside = activeSubject === undefined ? undefined : workspaceKinds.kindOf(activeSubject).view.Aside
-  const narrowDetailsOpen = narrow && ((sheetOpen && focusedAside !== undefined) || (current !== '' && openedTool !== undefined))
-  const closeDetails = () => { setSheetOpen(false); setOpenedTool(undefined) }
-  const openDetailsUri = (uri: string) => {
-    const ref = uri.startsWith('agent:') ? `agent/${uri.slice('agent:'.length)}` : uri
-    open({ ref })
-  }
-  const toolDetail = (call: WorkLogCall, width: number | undefined) => <aside aria-label="Tool detail" style={width === undefined ? undefined : { width }} {...stylex.props(styles.changesPanel, width === undefined && styles.sheetPanel)}>
-    <header {...stylex.props(styles.toolDetailHeader)}>
-      <strong {...stylex.props(styles.toolDetailTitle)}>{call.title}{call.argsSummary === undefined ? '' : ` ${call.argsSummary}`}</strong>
-      <Aria.Button aria-label="Close tool detail" onPress={() => setOpenedTool(undefined)} {...stylex.props(styles.iconButton)}>×</Aria.Button>
-    </header>
-    <pre {...stylex.props(styles.toolDetailOutput)}>{call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
-  </aside>
+  const narrowDetailsOpen = narrow && sheetOpen && focusedAside !== undefined
   // The palette loads on first open: neither its code nor its reads belong to the shell's first paint.
   const [paletteOpen, setPaletteOpen] = React.useState(false)
   const [paletteLoaded, setPaletteLoaded] = React.useState(false)
@@ -808,8 +790,6 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     const terminalShown = shownTab !== undefined && paneAgent !== '' && showsTerminal(shownTab, space.local.views[shownTab.id])
     const shownSubject = shownTab === undefined ? undefined : parsePane(shownTab.ref)
     const kindAside = shownSubject === undefined ? undefined : workspaceKinds.kindOf(shownSubject).view.Aside
-    // It stays with the tab it was opened from: another tab in the pane shows the pane's own panel.
-    const tool = openedTool?.pane === pane.id && openedTool.tab === pane.active ? openedTool.call : undefined
     // The control stays enabled while the terminal is shown: it is the way back, even from a deep link to a terminal this agent lacks.
     const disabledReason = terminalShown ? undefined : terminal.disabledReason
     const toggleTerminal = () => {
@@ -840,22 +820,17 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
             {(terminal.ref !== undefined || terminal.disabledReason !== undefined || terminalShown) ? <PhoneTerminalToggle pressed={terminalShown} onPress={toggleTerminal} {...(disabledReason === undefined ? {} : { disabledReason })} /> : undefined}
             <div data-testid="native-action-slot" ref={slots.header(pane.id)} {...stylex.props(styles.barSlot)}>{nativeActions}</div>
             <ChromeControl icon="search" label="Search" edge="trail" popup="dialog" expanded={paletteOpen} onPress={openPalette} />
-            {focused && kindAside !== undefined ? <ChromeControl icon="panel" label="Agent details" edge="trail" popup="dialog" expanded={narrowDetailsOpen} active={narrowDetailsOpen} onPress={() => { if (narrowDetailsOpen) closeDetails(); else setSheetOpen(true) }} /> : null}
+            {focused && kindAside !== undefined ? <ChromeControl icon="panel" label="Agent details" edge="trail" popup="dialog" expanded={narrowDetailsOpen} active={narrowDetailsOpen} onPress={() => setSheetOpen(!narrowDetailsOpen)} /> : null}
           </>
           : <>{zoomBadge}{watch}<PaneThreadActions nativeActions={nativeActions} actionPortalRef={slots.header(pane.id)} terminalAvailable={terminal.ref !== undefined || terminalShown} {...(disabledReason === undefined ? {} : { terminalDisabledReason: disabledReason })} terminalOpen={terminalShown} onToggleTerminal={toggleTerminal} /></>}>
         {/* The global area owns the connection; the focused pane hears it too once it is gone. */}
         {focused ? <PaneConnectionBand /> : null}
         <PaneBody className={stylex.props(styles.paneBody).className}>
           <PaneSlot pane={pane.id}>{pane.tabs.length === 0 ? <WorkspaceEmpty open={openRef} /> : null}</PaneSlot>
-          {narrow || ((kindAside === undefined || shownSubject === undefined) && tool === undefined) ? null : <>
-            <AsideOpener token={tool} />
-            <PaneAside side="end" threshold={() => kindAside === undefined ? Number.POSITIVE_INFINITY : kindAside.threshold({ terminal: terminalShown })} defaultSize={360} minSize={280} aria-label="Side panel" className={stylex.props(styles.paneAside).className} resizerClassName={stylex.props(styles.paneAsideResizer).className}>
-              {({ setOpen }) => {
-                const panel = kindAside === undefined || shownSubject === undefined ? undefined : <kindAside.Panel subject={shownSubject} width="dock" scheme={scheme} onOpen={openRef} onClose={() => setOpen(false)} />
-                return tool === undefined ? panel : <AsideWithTool tool={tool} detail={toolDetail(tool, undefined)} panel={panel} onCloseTool={() => setOpenedTool(undefined)} />
-              }}
-            </PaneAside>
-          </>}
+          {narrow || kindAside === undefined || shownSubject === undefined ? null
+            : <PaneAside side="end" threshold={() => kindAside.threshold({ terminal: terminalShown })} defaultSize={360} minSize={280} aria-label="Side panel" className={stylex.props(styles.paneAside).className} resizerClassName={stylex.props(styles.paneAsideResizer).className}>
+              {({ setOpen }) => <kindAside.Panel subject={shownSubject} width="dock" scheme={scheme} onOpen={openRef} onClose={() => setOpen(false)} />}
+            </PaneAside>}
         </PaneBody>
       </WorkspaceStrip>
     </Pane>
@@ -878,17 +853,16 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
                 {/* Toasts rise from the bottom-left, beside the sidebar and over the panes. */}
                 <ToastRegion><AlertToast onOpen={openAlert} /></ToastRegion>
               </section>
-              {narrow ? <NarrowSheet label="Agent details" side="bottom" isOpen={narrowDetailsOpen} onOpenChange={(isOpen) => { if (!isOpen) closeDetails() }} width={400}>
-                {openedTool !== undefined && current !== '' ? toolDetail(openedTool.call, undefined)
-                  : focusedAside === undefined || activeSubject === undefined ? null
-                    : <focusedAside.Panel subject={activeSubject} width="fill" scheme={scheme} onOpen={ref => { closeDetails(); openRef(ref) }} onClose={closeDetails} />}
+              {narrow ? <NarrowSheet label="Agent details" side="bottom" isOpen={narrowDetailsOpen} onOpenChange={setSheetOpen} width={400}>
+                {focusedAside === undefined || activeSubject === undefined ? null
+                  : <focusedAside.Panel subject={activeSubject} width="fill" scheme={scheme} onOpen={ref => { setSheetOpen(false); openRef(ref) }} onClose={() => setSheetOpen(false)} />}
               </NarrowSheet> : null}
               <div ref={overlayHost} {...stylex.props(styles.overlayHost)} />
             </div>
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody tabs={allTabs} active={activeRow?.id ?? null} shown={shownTabs} paneOf={paneOfTab} headerSlots={headerSlots} onFocusPane={focusPane} tiers={tiers} views={space.local.views} names={names} onOpenTool={onOpenTool} onOpen={openRef} onReplace={onReplaceTab} onClose={onCloseTab} onBackToAlerts={backToAlerts} onView={onTabView} focusShownFace={focusShownFace} {...(ux === undefined ? {} : { ux })} /></RegisteredPortal>}
+    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody tabs={allTabs} active={activeRow?.id ?? null} shown={shownTabs} paneOf={paneOfTab} headerSlots={headerSlots} onFocusPane={focusPane} tiers={tiers} views={space.local.views} names={names} onOpen={openRef} onReplace={onReplaceTab} onClose={onCloseTab} onBackToAlerts={backToAlerts} onView={onTabView} focusShownFace={focusShownFace} {...(ux === undefined ? {} : { ux })} /></RegisteredPortal>}
   </NarrowLayoutContext.Provider></OpenProvider></EntityCardSource></WorkspaceProvider>)
 }
 
@@ -929,33 +903,6 @@ const ignoreSplitKey = (event: KeyboardEvent) => {
   const target = event.target instanceof Element ? event.target : null
   if (target?.closest('[data-testid="terminal-pane"]') != null || target?.closest(shortcutsPausedSelector) != null) return true
   return event.altKey && !event.metaKey && !event.ctrlKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight') && isTyping(event.target)
-}
-
-/** A tool's detail opens its pane's side panel, whatever the pane's width. */
-const AsideOpener = ({ token }: { readonly token: unknown }) => {
-  const aside = usePaneAside()
-  const opened = React.useRef<unknown>(undefined)
-  React.useEffect(() => {
-    if (token === undefined || aside === undefined || opened.current === token) return
-    opened.current = token
-    aside.setOpen(true)
-  }, [token, aside])
-  return null
-}
-
-/** The side panel with a tool's detail as a contextual tab beside the kind's own panel; it shows first and closes back. */
-const AsideWithTool = ({ tool, detail, panel, onCloseTool }: { readonly tool: WorkLogCall; readonly detail: React.ReactNode; readonly panel: React.ReactNode; readonly onCloseTool: () => void }) => {
-  const [shown, setShown] = React.useState<'tool' | 'panel'>('tool')
-  React.useEffect(() => setShown('tool'), [tool])
-  if (panel === undefined) return detail
-  return <Aria.Tabs selectedKey={shown} onSelectionChange={key => setShown(key === 'panel' ? 'panel' : 'tool')} {...stylex.props(styles.asideTabs)}>
-    <Aria.TabList aria-label="Side panel views" {...stylex.props(styles.asideTabList)}>
-      <Aria.Tab id="panel" {...stylex.props(styles.asideTab)}>Details</Aria.Tab>
-      <Aria.Tab id="tool" {...stylex.props(styles.asideTab)}>Tool detail</Aria.Tab>
-    </Aria.TabList>
-    <Aria.TabPanel id="panel" {...stylex.props(styles.asideTabPanel)}>{panel}</Aria.TabPanel>
-    <Aria.TabPanel id="tool" {...stylex.props(styles.asideTabPanel)}>{detail}</Aria.TabPanel>
-  </Aria.Tabs>
 }
 
 /** The pane's own actions, with the toggle for its own side panel when its shown subject has one. */
@@ -1000,7 +947,6 @@ const styles = stylex.create({
   // Out of flow, above the panes. Viewport-wide but zero-height: no hit area of
   // its own, yet shrink-to-fit popovers get the viewport as available width.
   overlayHost: { position: 'fixed', top: 0, left: 0, width: '100%', height: 0, zIndex: 20 },
-  iconButton: { width: 28, height: 28, display: 'inline-flex', justifyContent: 'center', alignItems: 'center', backgroundColor: 'transparent', color: c.fgMuted, borderWidth: 0, borderRadius: 6, cursor: 'pointer' },
   // Message fill plus a hairline: raised equals the sidebar surface in light mode.
   searchField: { backgroundColor: c.message, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border },
   // AgentFolders' Tree owns scrolling; the roster only assigns the remaining flex space.
@@ -1021,17 +967,8 @@ const styles = stylex.create({
   dragChipTitle: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' },
   pane: { backgroundColor: c.canvas },
   paneBody: { display: 'flex', flex: '1 1 0', minWidth: 0, minHeight: 0 },
-  asideTabs: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
-  asideTabList: { display: 'flex', gap: s.xs, flexShrink: 0, paddingInline: s.sm, paddingBlock: s.xs, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: c.border },
-  asideTab: { paddingInline: s.sm, height: g.controlSm, display: 'inline-flex', alignItems: 'center', borderRadius: 6, color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':is([data-selected])': { backgroundColor: c.rowActive, color: c.fg }, outlineStyle: { default: 'none', ':is([data-focus-visible])': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusInset },
-  asideTabPanel: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, outline: 'none' },
   // The pane's side panel: its own surface beside the content, divided by the resizer's line.
   paneAside: { backgroundColor: c.canvas, color: c.fg, borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: c.border },
   paneAsideResizer: { flex: '0 0 6px', marginInlineStart: '-3px', cursor: 'col-resize', zIndex: 1, outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusInset },
   body: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },
-  changesPanel: { display: 'flex', flexDirection: 'column', flexShrink: 0, minWidth: 0, minHeight: 0, overflowY: 'auto', borderLeftWidth: 1, borderLeftStyle: 'solid', borderLeftColor: c.border },
-  sheetPanel: { flexGrow: 1, borderLeftWidth: 0 },
-  toolDetailHeader: { height: 40, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border },
-  toolDetailTitle: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize },
-  toolDetailOutput: { margin: 0, padding: s.lg, minHeight: 0, overflowY: 'auto', fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: c.fgMuted },
 })

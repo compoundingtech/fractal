@@ -7,7 +7,6 @@ import { ComposerDraftSync } from '../../../../packages/fractal-ui/src/assistant
 import { useComposerDraftPort } from './composerDraftPort.ts'
 import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
-import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { useConnection, useConversation, useConversationSync, useDataSource, useFeedInterest, useFleetSelection, useGrants, useNowSnapshot, usePausedNow } from '../data/react.tsx'
 import { createConversationTranscript, frozenTranscript, openableImageUrl, transcriptObservedAt, transcriptSyncStatus, type ConversationTranscriptState } from './conversationTranscript.ts'
 import { composerSendBinding, imageUploadAdapter, type SendRefusal } from './composerSend.ts'
@@ -22,7 +21,6 @@ import type { UxTelemetry } from '../telemetry/ux.ts'
 import { inputPaintRegionMounted, registerInputPaintRegions, type InputPaintRegion } from '../telemetry/inputPaint.ts'
 import type { ConversationPage, Feed, Fleet } from '../data/source.ts'
 import type * as Atom from 'effect/reactivity/Atom'
-import type { ToolCallItem } from '../conversation/model.ts'
 import { recordedToolDetail } from './semanticTool.tsx'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { AgentThreadTabs, type AgentThreadTabsHandle } from '../../../../packages/fractal-ui/src/assistant-ui/composition/AgentThreadTabs.tsx'
@@ -67,7 +65,6 @@ export const ConversationPane = (props: React.ComponentProps<typeof Conversation
 const ConversationThreadPane = ({
   agentRef,
   agentName,
-  onOpenTool,
   onOpenDocument,
   ux,
   visible = true,
@@ -77,8 +74,6 @@ const ConversationThreadPane = ({
   readonly agentRef: string
   /** Roster display name: the composition header and assistant sender captions. */
   readonly agentName: string
-  /** Host-owned detail surface for a tool call opened from the transcript. */
-  readonly onOpenTool: (call: WorkLogCall) => void
   /** Opens a `doc/…` named in the conversation; stable, so the memoized transcript keeps still. */
   readonly onOpenDocument?: (ref: string) => void
   readonly ux?: UxTelemetry
@@ -157,18 +152,17 @@ const ConversationThreadPane = ({
     onFocusCapture={event => { if (!visible) event.target.blur() }}
     onKeyDownCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}
     onClickCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}>
-    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} feed={feed} state={state} stale={stale} ux={ux} visible={visible} readOnly={readOnly} />
+    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenDocument={onOpenDocument} feed={feed} state={state} stale={stale} ux={ux} visible={visible} readOnly={readOnly} />
   </div>
 }
 
-const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, onOpenDocument, feed, state, stale, ux, visible, readOnly }: {
+const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenDocument, feed, state, stale, ux, visible, readOnly }: {
   readonly stale: boolean
   readonly ux?: UxTelemetry
   readonly visible: boolean
   readonly readOnly: boolean
   readonly agentRef: string
   readonly agentName: string
-  readonly onOpenTool: (call: WorkLogCall) => void
   readonly onOpenDocument?: (ref: string) => void
   readonly feed: Feed<ConversationPage>
   readonly state: ConversationTranscriptState
@@ -250,8 +244,6 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     event.stopPropagation()
     onOpenDocument(href)
   }
-  // Recorded semantic evidence stands in for the kit summary line; the kit keeps raw input/output and Open beside it.
-  const renderSemanticDetail = React.useCallback((item: ToolCallItem, call: WorkLogCall) => recordedToolDetail(item, call, () => onOpenTool(call)), [onOpenTool])
   const draftPort = useComposerDraftPort(agentRef)
   const readPosition = useReadPosition({
     conversation: agentRef, items: state._tag === 'Observed' ? state.items : undefined, visible, enabled: !readOnly,
@@ -272,8 +264,8 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       {...readPosition}
       title={agentName}
       loadingState={<div data-testid="transcript-placeholder" role="status" aria-label="Loading conversation" />}
-      onOpenTool={onOpenTool}
-      renderToolDetail={renderSemanticDetail}
+      interactiveCalls
+      renderToolDetail={recordedToolDetail}
       renderTurnFooter={showTurnFacts ? nativeTurnFooter : undefined}
       onRetrySync={retryConversation === undefined ? undefined : () => retryConversation(agentRef)}
       attachmentImages={{ state: images.state, load: (attachment, messageId) => { void images.load(attachment, messageId) } }}
