@@ -161,7 +161,7 @@ pub fn append(state: &AppState, subject: String, kind: &str, actor: &str,
 }
 
 pub fn audit<T>(state: &AppState, operation: &str, actor: &str, transport: &str,
-            grant_id: Option<&str>, result: &Result<T, ApiError>) -> Result<(), ApiError> {
+            grant_id: Option<&str>, requested_principal: Option<&str>, result: &Result<T, ApiError>) -> Result<(), ApiError> {
     let mut random = [0_u8; 12];
     getrandom::fill(&mut random).map_err(ApiError::internal)?;
     let mut referenced = Vec::new();
@@ -178,7 +178,7 @@ pub fn audit<T>(state: &AppState, operation: &str, actor: &str, transport: &str,
         subject: format!("custom/client/assistant-audit-v1-{}", hex::encode(random)),
         kind: "custom.client.assistant.v1.audit".into(), actor: Some(actor.into()),
         fields: serde_json::from_value(json!({"version":1,"operation":operation,
-            "issuer":state.owning_person,"principal":audit_principal.as_deref().unwrap_or(PRINCIPAL),"actor":actor,"transport":transport,
+            "issuer":state.owning_person,"principal":audit_principal.as_deref().or(requested_principal).unwrap_or(PRINCIPAL),"actor":actor,"transport":transport,
             "grant_id":grant_id,"timestamp":client_timestamp(client_now_ms()),
             "outcome":if result.is_ok() {"accepted"} else {"denied"},
             "denial_code":result.as_ref().err().map(|error| error.code.as_str()),

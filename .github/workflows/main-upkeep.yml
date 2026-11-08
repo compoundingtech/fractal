@@ -263,6 +263,8 @@ jobs:
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
       - name: Prepare the historical messaging channel
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (runner.os == 'Linux')
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
           printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
@@ -706,6 +708,8 @@ jobs:
       - name: Build missing cache contents
         shell: bash
         run: nix develop . -c bash scripts/ci-cache-warm fleet-compat
+        env:
+          GH_TOKEN: ${{ github.token }}
         if: success() && (steps.cargo-probe.outputs.cache-hit != 'true' || steps.nix-probe.outputs.cache-hit != 'true') && (success())
       - name: Save Nix outputs
         run: bash scripts/ci-nix-cache save
@@ -3461,6 +3465,8 @@ jobs:
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
       - name: Prepare the historical messaging channel
         if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
           printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
@@ -3650,6 +3656,8 @@ jobs:
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
       - name: Prepare the historical messaging channel
         if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
           printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
@@ -3901,6 +3909,8 @@ jobs:
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
       - name: Prepare the historical messaging channel
         if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
           printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
@@ -4149,6 +4159,8 @@ jobs:
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
       - name: Prepare the historical messaging channel
         if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
           printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
@@ -4397,6 +4409,8 @@ jobs:
         run: 'bash scripts/ci-nix-cache use || echo "::warning::the local Nix cache is unavailable; this run builds everything"'
       - name: Prepare the historical messaging channel
         if: runner.os == 'Linux'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           binary=$(timeout 10m bash scripts/messaging-compat-binary)
           printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\nST3_MESSAGING_COMPAT_BIN=%s\n' "$binary" "$binary" >> "$GITHUB_ENV"
@@ -5555,6 +5569,7 @@ jobs:
               "apps/fractal-web/src/data/pins.ts",
               "apps/fractal-web/src/data/projections.ts",
               "apps/fractal-web/src/data/react.tsx",
+              "apps/fractal-web/src/data/sdk-browser/trace.ts",
               "apps/fractal-web/src/data/sidebarPins.ts",
               "apps/fractal-web/src/data/source.ts",
               "apps/fractal-web/src/data/subjectReadPort.ts",
