@@ -16275,6 +16275,46 @@ subscription "watch/source" {
     }
 
     #[test]
+    fn temporary_pairing_allowance_preserves_scope_expiry_and_revocation() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let cap = fractal_store::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS;
+        let now = cap - 60_000;
+        let claim = state.store.append_claim(&ClaimInput {
+            subject:"custom/client/pairing-existing".into(), kind:"custom.client.pairing-completed".into(),
+            actor:Some("person/alex".into()),
+            fields:serde_json::from_value(json!({
+                "credential_hash":"existing-test-digest", "session_actor":"client/existing",
+                "person_id":"person/alex", "scopes":["read.projections"],
+                "expires_at_unix_ms":cap + 60_000
+            })).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());
+        state.store.configure_pairing_legacy_allowances(&[crate::config::LegacyPairingAllowance {
+            completion_id:claim.id.clone(),
+            record_hash:fractal_store::pairing::record_hash(
+                &claim.origin, claim.actor.as_deref(), &claim.body["fields"],
+            ).unwrap(),
+            until_unix_ms:(cap + 60_000) as u64,
+        }]).unwrap();
+        let session = paired_client_session_at(&state, &claim, "fabric-loopback", false, now).unwrap();
+        assert!(session.allows("read.projections"));
+        assert!(!session.allows("terminal.control"));
+        assert_eq!(session.grant_expires_at, Some(cap + 60_000));
+        assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, cap).is_err());
+        let mut changed = claim.clone();
+        changed.body["fields"]["scopes"] = json!(ALL_SCOPES);
+        assert!(paired_client_session_at(&state, &changed, "fabric-loopback", false, now).is_err());
+        state.store.append_claim(&ClaimInput {
+            subject:claim.subject.clone(), kind:"custom.client.pairing-revoked".into(),
+            actor:Some("person/alex".into()), fields:BTreeMap::new(),
+            evidence:vec![claim.id.clone()], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());
+    }
+
+    #[test]
     fn unmarked_pairing_records_require_a_new_pairing() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());

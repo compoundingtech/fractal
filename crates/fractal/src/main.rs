@@ -6982,6 +6982,7 @@ fn open_daemon_store(
         Some(admitted) => Store::open_admitted(admitted.clone(), &config.node)?,
         None => Store::open(&config.store_path(), &config.node)?,
     };
+    store.configure_pairing_legacy_allowances(&config.pairing_legacy_allowances)?;
     if let Some(person) = &config.person {
         let _ = store.question_principal_default.set(person.clone());
     }

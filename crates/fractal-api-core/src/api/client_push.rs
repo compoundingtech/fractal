@@ -55,10 +55,12 @@ pub fn authenticate(
         .map_err(|_| unavailable())?;
     let paired = pairings.claims.iter().find(|claim| {
         claim.origin == state.store.origin()
-            && fractal_store::trusted_pairing_fields(claim.actor.as_deref(), &claim.body["fields"])
             && claim.body.pointer("/fields/credential_hash").and_then(Value::as_str)
                 == Some(digest.as_str())
     }).ok_or_else(denied)?;
+    if !state.store.pairing_completion_is_trusted(paired, client_now_ms()).map_err(|_| unavailable())? {
+        return Err(denied());
+    }
     let field = |name: &str| paired.body.get("fields").and_then(|fields| fields.get(name))
         .and_then(Value::as_str).filter(|value| !value.is_empty());
     let person = field("person_id")

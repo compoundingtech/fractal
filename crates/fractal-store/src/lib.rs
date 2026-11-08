@@ -32,6 +32,7 @@ pub mod render;
 pub mod client_values;
 pub mod graph;
 pub mod maintenance;
+pub mod pairing;
 pub mod owner_indexes;
 pub mod references;
 pub mod private_notes;
