@@ -1,5 +1,17 @@
 //! Metadata reserved for participant-authorized thread reads.
 
+/// Version 1 reserves thread routing fields and protects generic graph reads.
+/// Version 2 also protects canonical thread messages on conversation read paths.
+pub const READ_PRIVACY_VERSION: u32 = 2;
+
+// A v2 writer may only advertise on a store older serving builds cannot reopen.
+const _: () =
+    assert!(!read_privacy_supports_writes(READ_PRIVACY_VERSION) || super::STORAGE_VERSION >= 22);
+
+pub const fn read_privacy_supports_writes(version: u32) -> bool {
+    version >= 2
+}
+
 /// Every thread message carries this signed marker. Older closed schemas hold the
 /// envelope instead of applying a message their conversation readers cannot protect.
 pub const MESSAGE_READER_VERSION_FIELD: &str = "thread_reader_version";
