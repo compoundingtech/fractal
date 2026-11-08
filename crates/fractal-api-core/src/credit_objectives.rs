@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+#[cfg(test)]
 use crate::model::ClaimRecord;
 use crate::store::Store;
 
@@ -51,22 +52,24 @@ fn timestamp(text: &str) -> Option<u64> {
 }
 
 impl Credits {
-    fn observe(&mut self, claim: &ClaimRecord) {
-        if claim.kind != "usage.limits.observed" {
+    fn observe_reading(&mut self, claim_id: &str, value: &Value) {
+        let Ok(credit) = Credit::deserialize(value) else { return };
+        let Ok(measured_at) = chrono::DateTime::parse_from_rfc3339(&credit.measured_at) else { return };
+        let key = (credit.provider.clone(), credit.account.clone(), credit.credit_id.clone());
+        // Provider measurement time wins over delivery order, at full RFC3339 precision.
+        // Claim ID breaks equal-time ties identically on every member.
+        if self.latest.get(&key).is_some_and(|previous| {
+            (previous.measured_at, previous.claim_id.as_str()) >= (measured_at, claim_id)
+        }) {
             return;
         }
+        self.latest.insert(key, Evidence { credit, claim_id: claim_id.to_owned(), measured_at });
+    }
+
+    #[cfg(test)]
+    fn observe(&mut self, claim: &ClaimRecord) {
         for value in claim.body["fields"]["credit_readings"].as_array().into_iter().flatten() {
-            let Ok(credit) = Credit::deserialize(value) else { continue };
-            let Ok(measured_at) = chrono::DateTime::parse_from_rfc3339(&credit.measured_at) else { continue };
-            let key = (credit.provider.clone(), credit.account.clone(), credit.credit_id.clone());
-            // Provider measurement time wins over delivery order. Claim ID breaks equal-time ties
-            // identically on every member, independent of local replication/store order.
-            if self.latest.get(&key).is_some_and(|previous| {
-                (previous.measured_at, previous.claim_id.as_str()) >= (measured_at, claim.id.as_str())
-            }) {
-                continue;
-            }
-            self.latest.insert(key, Evidence { credit, claim_id: claim.id.clone(), measured_at });
+            self.observe_reading(&claim.id, value);
         }
     }
 
@@ -156,22 +159,20 @@ impl Credits {
     }
 }
 
-/// Fold all durable pages, rather than a bounded recent page: an older forfeiture or an
-/// unrefreshed identity must not disappear and turn an incomplete inventory into success.
+/// Read the incremental latest-per-writer inventory, not the durable observation history.
+/// Retaining every writer's head lets configuration changes activate older authorized evidence.
 /// Only currently configured writers contribute; changing that set never changes stored evidence.
 pub fn rows(store: &Store, now: u64, fresh_ms: u64) -> anyhow::Result<Vec<Value>> {
     let mut credits = Credits::default();
     let writers = store.usage_limits_writers();
-    let mut cursor = None;
-    loop {
-        let page = store.claims_for_kind_at("usage.limits.observed", cursor, true, 256)?;
-        for claim in &page.claims {
-            if claim.actor.as_deref().is_some_and(|actor| writers.contains(actor)) {
-                credits.observe(claim);
-            }
+    // The unconfigured SLO/history tick must do no credit SQL, even on populated stores.
+    if writers.is_empty() {
+        return Ok(credits.rows(now, fresh_ms));
+    }
+    for reading in store.usage_credit_readings()? {
+        if writers.contains(&reading.actor) {
+            credits.observe_reading(&reading.claim_id, &reading.credit);
         }
-        let Some(next) = page.next_cursor else { break };
-        cursor = Some(next);
     }
     Ok(credits.rows(now, fresh_ms))
 }
@@ -376,7 +377,11 @@ mod tests {
         let digest = store.replication_inventory().unwrap().digest;
         // Revocation hides retained evidence immediately, without mutating the durable graph.
         store.set_usage_limits_writers(Vec::new()).unwrap();
-        for row in rows(&store, now, DAY_MS).unwrap() {
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let unknown = rows(&store, now, DAY_MS).unwrap();
+        let spent = scope.finish();
+        assert_eq!(spent.statements, 0, "empty writer configuration must do no credit SQL: {spent:?}");
+        for row in unknown {
             assert_eq!(row["status"], "no-data");
             assert!(row["evidence"].as_array().unwrap().is_empty());
         }
@@ -386,7 +391,11 @@ mod tests {
         assert_eq!(store.replication_inventory().unwrap().digest, digest);
         drop(store);
         let store = Store::open(&path, "alder").unwrap();
-        for row in rows(&store, now, DAY_MS).unwrap() {
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let unknown = rows(&store, now, DAY_MS).unwrap();
+        let spent = scope.finish();
+        assert_eq!(spent.statements, 0, "restart with no writers must do no credit SQL: {spent:?}");
+        for row in unknown {
             assert_eq!(row["status"], "no-data");
             assert!(row["evidence"].as_array().unwrap().is_empty());
         }
@@ -400,5 +409,46 @@ mod tests {
             assert_eq!(row["evidence"][0]["disposition"]["evidence_ref"], "document/credit-plan");
         }
         assert_eq!(store.replication_inventory().unwrap().digest, digest);
+    }
+
+    #[test]
+    fn projected_credit_fold_preserves_precision_ties_and_each_writers_head() {
+        const OTHER: &str = "agent/sample/other-producer";
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("credits.db");
+        let store = Store::open(&path, "alder").unwrap();
+        store.set_usage_limits_writers(vec![PRODUCER.into(), OTHER.into()]).unwrap();
+        let append = |actor: &str, at: &str, state: &str| {
+            let mut reading = credit("one", state, NOW - DAY_MS);
+            reading["measured_at"] = json!(at);
+            store.append_claim(&crate::model::ClaimInput {
+                subject: actor.into(), kind: "usage.limits.observed".into(), actor: Some(actor.into()),
+                fields: BTreeMap::from([
+                    ("readings".into(), json!([])), ("credit_readings".into(), json!([reading])),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap()
+        };
+        let older_at = "2026-11-08T10:00:00.000100Z";
+        let newer_at = "2026-11-08T10:00:00.000900Z";
+        let now = timestamp("2026-11-08T10:00:01Z").unwrap();
+        let newer = append(PRODUCER, newer_at, "forfeited");
+        append(PRODUCER, older_at, "redeemed");
+        let other = append(OTHER, "2026-11-08T10:00:00.000950Z", "redeemed");
+        assert_eq!(rows(&store, now, DAY_MS).unwrap()[0]["evidence"][0]["claim_id"], other.id);
+        store.set_usage_limits_writers(vec![PRODUCER.into()]).unwrap();
+        let selected = rows(&store, now, DAY_MS).unwrap();
+        assert_eq!(selected[0]["status"], "missed");
+        assert_eq!(selected[0]["evidence"][0]["claim_id"], newer.id);
+        assert_eq!(selected[0]["evidence"][0]["measured_at"], newer_at);
+        let tied = append(PRODUCER, "2026-11-08T11:00:00.000900+01:00", "redeemed");
+        let expected = if tied.id > newer.id { tied.id } else { newer.id };
+        assert_eq!(rows(&store, now, DAY_MS).unwrap()[0]["evidence"][0]["claim_id"], expected);
+        drop(store);
+        let store = Store::open(&path, "alder").unwrap();
+        store.set_usage_limits_writers(vec![PRODUCER.into()]).unwrap();
+        assert_eq!(rows(&store, now, DAY_MS).unwrap()[0]["evidence"][0]["claim_id"], expected);
+        store.set_usage_limits_writers(vec![OTHER.into()]).unwrap();
+        assert_eq!(rows(&store, now, DAY_MS).unwrap()[0]["evidence"][0]["claim_id"], other.id);
     }
 }

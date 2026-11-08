@@ -475,3 +475,29 @@ current publication rejects for-each syntax. The UPDATE binds body, mission-ID
 and revision TEXT values; no production writer changes. The maintainer must
 preserve this historical regression through referenced storage/reclamation work.
 Inline storage here proves neither encoded size nor execution-cost bounds.
+
+## Incremental observed credit heads
+
+`fractal_store::store::usage_credits` owns `lv-h3e04a0b79a9c`,
+`lv-h70e958b8f520`, `lv-hfa1f0cadbda8`, `lv-h78cef2ce4382`,
+`lv-hdd8c5ea7ce43`, `lv-hb2a7b858df59` and `lv-h032c204ec84f`.
+The projection retains one inline credit JSON object and claim ID per
+provider/account/credit ID/writer, with exact seconds/nanoseconds ordering.
+Its pending table contains newly admitted claim IDs, drained in the projection
+transaction; only bootstrap and explicit rebuild visit retained history.
+Provider, account, credit ID, actor and claim ID TEXT keys and credit JSON
+remain variable-size values. The owner must preserve exact ordering and
+writer-selectable evidence when moving these columns and queue reclamation
+to bounded/reference storage. Head-count-bounded reads prove no byte bound.
+The fixed metadata marker is one initialization scalar, not growing history.
+
+The module's tests own `lv-h48828470b851`, `lv-hd2ecc22bed99` and
+`lv-h342a097047a2`: fixture-only resets and backfills exercise bootstrap and
+pending catch-up using existing inline claim IDs. Preserve these scenarios
+when the production representation changes.
+
+`fractal_store::store::limits` owns revised `lv-hc361226a445f` and
+`lv-he63d64cf72c5`. Quota reclamation now binds the writer subject as well as
+provider/account/reference/window, so an excluded writer cannot delete another
+writer's evidence. Existing inline keys remain; the owner must preserve this
+per-writer reclamation boundary in the eventual bounded representation.

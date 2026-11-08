@@ -346,7 +346,7 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut newest_index = through;
-    let mut touched = BTreeSet::<(String, String, String, bool, String)>::new();
+    let mut touched = BTreeSet::<(String, String, String, bool, String, String)>::new();
     for (id, subject, origin, body, accepted_at, store_index) in &claims {
         newest_index = newest_index.max(*store_index);
         let value: Value = serde_json::from_str(body)?;
@@ -407,26 +407,28 @@ pub fn flush_limits_page(transaction: &Transaction<'_>, limit: usize) -> Result<
                 head_key
             ])?;
         }
-        touched.insert((limit.driver, limit.account, account_ref, weekly, window.to_owned()));
+        touched.insert((limit.driver, limit.account, account_ref, weekly, window.to_owned(), subject.clone()));
         }
     }
-    // Readings more than an hour older than their group's newest can no longer decide anything.
-    for (driver, account, account_ref, weekly, window) in touched {
+    // Retain each writer's recent readings independently: a currently excluded writer must
+    // never reclaim the evidence selected by a later configuration change.
+    for (driver, account, account_ref, weekly, window, subject) in touched {
         transaction
             .prepare_cached(
-                /* sqlite-large-value: allow-for-now lv-h4c42a6f25b57 owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_readings
-                 WHERE driver=?1 AND account=?2 AND account_ref=?3 AND weekly=?4 AND window=?6
+                /* sqlite-large-value: allow-for-now lv-hc361226a445f owner=fractal_store::store::limits TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM account_limit_readings
+                 WHERE driver=?1 AND account=?2 AND account_ref=?3 AND weekly=?4 AND window=?6 AND subject=?7
                    AND measured_at_unix_ms < (
                        SELECT MAX(measured_at_unix_ms) FROM account_limit_readings
-                       WHERE driver=?1 AND account=?2 AND account_ref=?3 AND weekly=?4 AND window=?6) - ?5",
+                       WHERE driver=?1 AND account=?2 AND account_ref=?3 AND weekly=?4 AND window=?6 AND subject=?7) - ?5",
             )?
-            .execute(/* sqlite-large-value: allow-for-now lv-h1b2eebf5b2d5 owner=fractal_store::store::limits TODO=trace-statement-and-value-representation */ params![
+            .execute(/* sqlite-large-value: allow-for-now lv-he63d64cf72c5 owner=fractal_store::store::limits TODO=trace-statement-and-value-representation */ params![
                 driver,
                 account,
                 account_ref,
                 weekly,
                 ACCOUNT_READING_WINDOW_MS as i64,
-                window
+                window,
+                subject
             ])?;
     }
     if newest_index > through {
@@ -861,13 +863,53 @@ use super::*;
     }
 
     #[test]
+    fn excluded_writer_cannot_reclaim_a_configured_writers_latest_window() {
+        let store = Store::open_memory("alder").unwrap();
+        let first = "agent/sample/usage-producer";
+        let second = "agent/sample/other-producer";
+        store.set_usage_limits_writers(vec![first.into(), second.into()]).unwrap();
+        for (writer, measured, used) in [
+            (first, "1970-01-01T00:00:01Z", 80.0),
+            (second, "1970-01-01T02:00:01Z", 5.0),
+        ] {
+            store.append_claim(&ClaimInput {
+                subject: writer.into(), actor: Some(writer.into()), kind: "usage.limits.observed".into(),
+                fields: serde_json::from_value(json!({
+                    "readings": [{
+                        "provider":"anthropic", "account":"claude/example", "account_ref":"claude/example-ref",
+                        "window":"5h", "used_percent":used, "resets_at":null,
+                        "measured_at":measured, "coverage":"reported", "source":"omp-usage", "host":"cedar"
+                    }], "credit_readings":[]
+                })).unwrap(),
+                evidence:vec![], expected_subject:None, idempotency_key:Some(writer.into()),
+            }).unwrap();
+        }
+        let selected = |writer: &str, expected: f64| {
+            store.set_usage_limits_writers(vec![writer.into()]).unwrap();
+            let limits = account_limits_for_writers(&store.readers.get(), &store.usage_limits_writers()).unwrap();
+            assert_eq!(limits.len(), 1);
+            assert_eq!(limits[0].windows[0].used_percent, Some(expected));
+        };
+        selected(first, 80.0);
+        selected(second, 5.0);
+        {
+            let mut connection = store.connection.write();
+            let transaction = connection.transaction().unwrap();
+            refold_limits_tx(&transaction).unwrap();
+            transaction.commit().unwrap();
+        }
+        selected(first, 80.0);
+        selected(second, 5.0);
+    }
+
+    #[test]
     fn the_catch_up_page_seeks_the_kind_index_past_the_cursor() {
         let store = Store::open_memory("alder").unwrap();
         let connection = store.readers.get();
         let mut statement = connection
             .prepare(
                 "EXPLAIN QUERY PLAN SELECT id, subject, origin, body, accepted_at_unix_ms, store_index
-                 FROM claims WHERE kind='harness.limits' AND store_index>?1
+                 FROM claims WHERE kind IN ('harness.limits','usage.limits.observed') AND store_index>?1
                  ORDER BY store_index LIMIT ?2",
             )
             .unwrap();
@@ -876,10 +918,10 @@ use super::*;
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(
-            plan,
-            ["SEARCH claims USING INDEX claims_kind_index (kind=? AND store_index>?)"]
-        );
+        assert!(plan.iter().any(|step|
+            step == "SEARCH claims USING INDEX claims_kind_index (kind=? AND store_index>?)"
+        ), "{plan:?}");
+        assert!(plan.iter().all(|step| !step.starts_with("SCAN claims")), "{plan:?}");
     }
 
 }

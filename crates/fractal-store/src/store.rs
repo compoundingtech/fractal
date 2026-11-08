@@ -82,6 +82,8 @@ pub mod owned_sets;
 pub mod owned_sets_tests;
 #[cfg(test)]
 pub mod usage_fold_tests;
+pub mod usage_credits;
+pub use usage_credits::UsageCreditReading;
 pub mod resources;
 pub mod resource_preparation;
 pub mod observer_actuals;
