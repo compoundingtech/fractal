@@ -17,8 +17,8 @@ pub(super) async fn prepare_managed_provider(
     argv: &mut [String],
 ) -> Result<()> {
     let actor = client.person.as_deref().unwrap_or(subject);
-    let gateway = generated_client(&client.endpoint, Some(actor))?;
     let declaration = retry_while_daemon_unreachable(subject, || async {
+        let gateway = generated_client(&client.endpoint, Some(actor))?;
         managed_declaration_result(
             gateway.agent_declaration_get(subject, None, false).await.map(|reply| reply.value.tree),
         )

@@ -153,14 +153,26 @@ fn managed_startup_reads_its_declaration_over_authenticated_unix() {
                 private_notes: Default::default(),
             };
             let socket = root.join("managed.sock");
+            #[cfg(target_os = "linux")]
+            let _startup = {
+                let startup = fractal_daemon::startup::Startup::begin(&socket).unwrap();
+                startup.phase("full-replay/base-claims");
+                let error = generated_client(&Endpoint::Unix(socket.clone()), Some(SUBJECT))
+                    .err().expect("full-replay startup must refuse client construction before listening");
+                assert!(daemon_is_unreachable(&error));
+                startup
+            };
             let server_socket = socket.clone();
             let server = tokio::spawn(async move {
+                // Managed adoption may arrive before the restarted daemon accepts connections.
+                tokio::time::sleep(Duration::from_millis(50)).await;
                 serve_unix(&server_socket, router(state)).await.unwrap();
             });
-            while !socket.exists() {
-                tokio::task::yield_now().await;
-            }
             let mut client = Client::new(Endpoint::Unix(socket));
+            let mut argv = vec!["/raw/bin/codex".into()];
+            driver_cli::prepare_managed_provider(&client, SUBJECT, "codex", &mut argv)
+                .await.expect("managed startup must retry client construction during full replay");
+            assert_eq!(Path::new(&argv[0]), root.join("steward/bin/codex"));
             let anonymous = generated_client(&client.endpoint, None).unwrap()
                 .agent_declaration_get(SUBJECT, None, false).await.unwrap_err();
             assert!(matches!(anonymous,
