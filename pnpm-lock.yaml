@@ -92,6 +92,9 @@ importers:
       '@fractal/scenarios':
         specifier: workspace:*
         version: link:../../clients/typescript/fractal-scenarios
+      '@pierre/highlights':
+        specifier: 0.3.0
+        version: 0.3.0
       '@react-aria/optimize-locales-plugin':
         specifier: 2.1.0
         version: 2.1.0
