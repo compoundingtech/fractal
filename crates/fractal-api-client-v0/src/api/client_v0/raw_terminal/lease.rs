@@ -123,9 +123,7 @@ mod tests {
         let (_other_root, mut gateway, _) = fixture();
         gateway.store = Arc::new(Store::open_memory("other-member").unwrap());
         gateway.node = "other-member".into();
-        gateway.store.import_replication(
-            "lease-owner", &issuer.store.export_replication(0).unwrap(),
-        ).unwrap();
+        super::super::super::pairing_order_tests::replicate(&issuer, &gateway);
         pairing(&gateway, "custom/client/gateway-second", "second", json!(["terminal.read"]));
         let first = authenticated(&gateway, "first");
         assert_eq!(authorization_epoch(&gateway, &first).unwrap_err().code, "forbidden");

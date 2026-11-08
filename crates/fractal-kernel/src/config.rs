@@ -203,6 +203,15 @@ pub struct ReadinessSloConfig {
     pub member: String,
     pub reviewer: String,
     pub evidence_file: PathBuf,
+    /// Optional, root-owned retained short readings for the read-only Usage row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_pairs_file: Option<PathBuf>,
+    /// Replace independent weekly routing with a durable early/weekly readiness case.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared_case: bool,
+    /// Optional informational recipient; never becomes the actionable owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<String>,
 }
 
 /// An operator-selected external quota source; clients cannot override its URL.

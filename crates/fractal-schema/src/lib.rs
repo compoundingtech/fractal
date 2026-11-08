@@ -4888,6 +4888,7 @@ mod tests {
         // Reconstruct the registry at the principal transition, before usage observations.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
+        current.claims.remove("client.operation-authorized").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =

@@ -215,18 +215,22 @@ impl Fixture {
     }
 
     fn claim(&self, subject: &str, kind: &str, fields: Value) {
-        self.state
-            .store
-            .append_claim(&ClaimInput {
+        let input = ClaimInput {
                 subject: subject.into(),
                 kind: kind.into(),
-                actor: None,
+                actor: fields.get("person_id").and_then(Value::as_str)
+                    .or((kind == "custom.client.pairing-revoked").then_some("person/ada"))
+                    .map(str::to_owned),
                 fields: serde_json::from_value(fields).unwrap(),
                 evidence: vec![],
                 expected_subject: None,
                 idempotency_key: None,
-            })
-            .unwrap();
+            };
+        if kind.starts_with("custom.client.pairing") {
+            self.state.store.append_client_operation_claim(&input)
+        } else {
+            self.state.store.append_claim(&input)
+        }.unwrap();
         signal_changed(&self.state);
     }
 }

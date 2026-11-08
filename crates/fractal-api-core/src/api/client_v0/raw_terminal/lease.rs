@@ -63,11 +63,13 @@ fn epoch() -> &'static str {
     &EPOCH
 }
 
+type AuthorityClaim = (String, String, Option<String>, Value);
+
 fn latest(
     connection: &Connection,
     subject: &str,
     kind: &str,
-) -> anyhow::Result<Option<(String, String, Option<String>, Value)>> {
+) -> anyhow::Result<Option<AuthorityClaim>> {
     if kind == "custom.client.pairing-completed" {
         return Ok(fractal_store::pairing::latest_completion(connection, subject, None, client_now_ms())?
             .map(|claim| (claim.id, claim.origin, claim.actor, claim.body)));
