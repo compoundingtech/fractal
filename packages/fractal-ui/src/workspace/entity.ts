@@ -15,4 +15,8 @@ export interface EntityDragPayload<Kind extends string = string, Status = unknow
   /** The ref the tab opens. */
   readonly ref: string
   readonly tab?: { readonly space: string; readonly id: string } | undefined
+  /** `false` when the entity cannot open as a tab, such as a folder: strips and panes never take it. */
+  readonly opens?: boolean | undefined
+  /** The host's own data, for its drop targets. */
+  readonly data?: unknown
 }

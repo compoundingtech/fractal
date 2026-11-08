@@ -12,13 +12,27 @@ import { useOptionalWorkspaceContext, useWorkspaceContext } from './context.tsx'
  * hit-tests drop targets by their data attributes, and ends on release (drop) or Escape (cancel).
  *
  * Drop targets mark themselves: `data-drop-strip="<pane>"` on a tab strip (tabs inside carry
- * `data-workspace-tab`) and `data-drop-content="<pane>"` on a pane's content.
+ * `data-workspace-tab`) and `data-drop-content="<pane>"` on a pane's content. A host adds its own
+ * targets with `useDropTarget`, such as a sidebar's folders; they are asked first, per element.
  */
 
 /** Where a drag would land right now. */
 export type DragOver =
   | { readonly _tag: 'Strip'; readonly pane: string; readonly slot: number }
   | { readonly _tag: 'Content'; readonly pane: string; readonly zone: DropZone }
+  /** A host target's own place, as its `resolve` described it. */
+  | { readonly _tag: 'Target'; readonly target: string; readonly data: unknown }
+
+/** A host's drop target, asked about each element under the pointer before the workspace's own. */
+export interface DropTarget {
+  readonly id: string
+  /**
+   * `undefined` when the element is not this target's; `null` when it is, but nothing lands there now
+   * (no target behind it is asked); otherwise the place, which `drop` gets back.
+   */
+  readonly resolve: (element: Element, point: { readonly x: number; readonly y: number }, payload: EntityDragPayload) => unknown
+  readonly drop: (payload: EntityDragPayload, data: unknown) => void
+}
 
 export interface DragState {
   readonly payload: EntityDragPayload | undefined
@@ -34,6 +48,7 @@ export const dragThreshold = 5
 export class DragController {
   state: DragState = idle
   private readonly listeners = new Set<() => void>()
+  private readonly targets = new Map<string, DropTarget>()
   private teardown: (() => void) | undefined
 
   constructor(private readonly host: {
@@ -42,6 +57,12 @@ export class DragController {
     /** The edge band of a pane's content, as a fraction (or pixels above 1). */
     readonly edge?: number | undefined
   }) {}
+
+  /** Registers a host's drop target; the returned function removes it. */
+  addTarget = (target: DropTarget) => {
+    this.targets.set(target.id, target)
+    return () => { if (this.targets.get(target.id) === target) this.targets.delete(target.id) }
+  }
 
   subscribe = (listener: () => void) => {
     this.listeners.add(listener)
@@ -82,6 +103,10 @@ export class DragController {
       // The press that ended a drag is not also a click on what it started on.
       window.addEventListener('click', swallow, { capture: true })
       setTimeout(() => window.removeEventListener('click', swallow, { capture: true }), 0)
+      if (over?._tag === 'Target') {
+        this.targets.get(over.target)?.drop(carried, over.data)
+        return
+      }
       const drop = over === undefined ? undefined : this.dropOf(over, carried)
       if (drop !== undefined) this.host.drop(carried, drop)
     }
@@ -129,6 +154,13 @@ export class DragController {
   private overAt(x: number, y: number, payload: EntityDragPayload): DragOver | undefined {
     const stack = typeof document.elementsFromPoint === 'function' ? document.elementsFromPoint(x, y) : []
     for (const element of stack) {
+      for (const target of this.targets.values()) {
+        const data = target.resolve(element, { x, y }, payload)
+        if (data === null) return undefined
+        if (data !== undefined) return { _tag: 'Target', target: target.id, data }
+      }
+      // What cannot open as a tab lands only on a host's targets.
+      if (payload.opens === false) continue
       const strip = element.closest('[data-drop-strip]')
       if (strip !== null) {
         const pane = strip.getAttribute('data-drop-strip')!
@@ -148,6 +180,7 @@ export class DragController {
 
   /** The model's drop for a target, or `undefined` where it would change nothing. */
   dropOf(over: DragOver, payload: EntityDragPayload): Drop | undefined {
+    if (over._tag === 'Target' || payload.opens === false) return undefined
     const space = currentSpace(this.host.getState())
     const own = payload.tab !== undefined && payload.tab.space === space.id ? payload.tab.id : undefined
     if (over._tag === 'Strip') {
@@ -177,12 +210,16 @@ export interface EntityDragProps {
  * `touch` is set, since phones show one pane and have nowhere to drop. Outside any workspace a press
  * is only a press, so the same row can render where nothing takes drops.
  */
-export const useEntityDrag = ({ ref, entity, tab, touch = false, isDisabled = false }: {
+export const useEntityDrag = ({ ref, entity, tab, opens, data, touch = false, isDisabled = false }: {
   readonly ref: string
   /** The entity's description; the workspace's `describe(ref)` when absent. */
   readonly entity?: EntityDescriptor | undefined
   /** Set when the dragged thing is one of the workspace's own tabs, so a drop moves it. */
   readonly tab?: { readonly space: string; readonly id: string } | undefined
+  /** `false` for what cannot open as a tab: it lands only on a host's drop targets. */
+  readonly opens?: boolean | undefined
+  /** The host's own data, which its drop targets read. */
+  readonly data?: unknown
   readonly touch?: boolean | undefined
   readonly isDisabled?: boolean | undefined
 }): EntityDragProps => {
@@ -194,12 +231,32 @@ export const useEntityDrag = ({ ref, entity, tab, touch = false, isDisabled = fa
       const { drag, describe } = workspace
       drag.press(event, () => {
         const described = entity ?? describe(ref)
-        return tabSpace === undefined || tabId === undefined
-          ? { entity: described, ref }
-          : { entity: described, ref, tab: { space: tabSpace, id: tabId } }
+        return {
+          entity: described, ref,
+          ...(tabSpace === undefined || tabId === undefined ? {} : { tab: { space: tabSpace, id: tabId } }),
+          ...(opens === undefined ? {} : { opens }),
+          ...(data === undefined ? {} : { data }),
+        }
       })
     },
-  }), [workspace, ref, entity, tabSpace, tabId, touch, isDisabled])
+  }), [workspace, ref, entity, tabSpace, tabId, opens, data, touch, isDisabled])
+}
+
+/**
+ * Adds a host's own drop target while mounted: a sidebar's folders, a list's insert lines. Its
+ * `resolve` and `drop` may change between renders; the latest are used.
+ */
+export const useDropTarget = (target: DropTarget) => {
+  const workspace = useOptionalWorkspaceContext()
+  const latest = React.useRef(target)
+  latest.current = target
+  const drag = workspace?.drag
+  const id = target.id
+  React.useEffect(() => drag?.addTarget({
+    id,
+    resolve: (element, point, payload) => latest.current.resolve(element, point, payload),
+    drop: (payload, data) => latest.current.drop(payload, data),
+  }), [drag, id])
 }
 
 /** The live chip that follows the pointer while dragging. */
