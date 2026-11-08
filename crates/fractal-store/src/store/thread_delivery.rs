@@ -1,7 +1,12 @@
 //! Thread delivery uses ordinary message claims, with separate quote and ask relations.
 
 use super::*;
+use fractal_schema::threads::{MESSAGE_READER_VERSION, MESSAGE_READER_VERSION_FIELD};
 use thread_metadata::{PersonAuthority, creation_claim, latest_applied_claim};
+
+pub(super) fn add_reader_marker(input: &mut ClaimInput) {
+    input.fields.insert(MESSAGE_READER_VERSION_FIELD.into(), json!(MESSAGE_READER_VERSION));
+}
 
 pub(super) fn verified_signature(
     input: &ClaimInput,
@@ -26,7 +31,7 @@ pub(super) fn verified_signature(
         return Err(invalid());
     };
     let binds = |name: &str| signature.signed_fields.iter().any(|field| field == name);
-    let required = ["content", "from", "to", "thread_id"];
+    let required = ["content", "from", "to", "thread_id", MESSAGE_READER_VERSION_FIELD];
     let contextual = [
         "thread_quote_id",
         "thread_origin_ask",
@@ -238,10 +243,12 @@ pub fn append_reply(
         Ok(())
     };
     store.graph.ensure_principal_key(from)?;
-    let encoded_signature = verified_signature(input, &principal, signature)?;
+    let mut marked = input.clone();
+    add_reader_marker(&mut marked);
+    let encoded_signature = verified_signature(&marked, &principal, signature)?;
     append_claim_with_commit_context(
         &store.graph,
-        input,
+        &marked,
         None,
         None,
         None,
@@ -370,14 +377,14 @@ mod tests {
         input
             .fields
             .insert("thread_quote_id".into(), json!("message/quoted"));
+        add_reader_marker(&mut input);
         let actor = input.actor.as_deref().unwrap();
         let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
         let mut signature = ClaimSignature::sign(&key, "", actor, None, vec![], now_ms() as u64);
         signature.format = Some(FIELDS_FORMAT.into());
-        signature.signed_fields = ["content", "from", "thread_id", "thread_quote_id", "to"]
-            .into_iter()
-            .map(str::to_owned)
-            .collect();
+        signature.signed_fields = [
+            "content", "from", "thread_id", "thread_quote_id", MESSAGE_READER_VERSION_FIELD, "to",
+        ].into_iter().map(str::to_owned).collect();
         signature.signature = key.sign(&fields_signing_bytes(
             &input.subject,
             &input.kind,

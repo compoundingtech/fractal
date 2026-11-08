@@ -678,6 +678,7 @@ pub fn start_from_ask_as(
         ));
     }
     let mut first_message = first_message.clone();
+    thread_delivery::add_reader_marker(&mut first_message);
     for (name, value) in [
         ("thread_id", thread),
         ("thread_origin_ask", ask),

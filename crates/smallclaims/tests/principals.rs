@@ -70,7 +70,36 @@ fn queued_judgment_reads_the_current_claim_body_once_and_still_rejects_tampering
 #[test]
 fn storage_version_follows_the_reviewed_migration_order() {
     // Runtime operations used 19 and signatures used 20. Thread privacy adds reader floor 21.
-    assert_eq!(fractal_storage_version::STORAGE_VERSION, 21);
+    // Complete thread serving privacy requires version 22 before enabling writes.
+    assert_eq!(fractal_storage_version::STORAGE_VERSION, 22);
+}
+
+#[test]
+fn version_21_store_opens_at_version_22_and_retains_history() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let store = Store::open(&path, "node", Arc::new(Plain)).unwrap();
+    let original = note(&store, None, "version 21 history");
+    drop(store);
+
+    // Model the prior reader's header on an otherwise compatible graph.
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.pragma_update(None, "user_version", 21).unwrap();
+    drop(connection);
+
+    let reopened = Store::open(&path, "node", Arc::new(Plain)).unwrap();
+    let version: u32 = reopened
+        .readers
+        .get()
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 22);
+    let retained = reopened
+        .latest_claim(&original.subject, Some(&original.kind))
+        .unwrap()
+        .unwrap();
+    assert_eq!(retained.id, original.id);
+    assert_eq!(retained.body, original.body);
 }
 
 fn key() -> Arc<MemberKey> {
