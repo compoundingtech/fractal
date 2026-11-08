@@ -13,6 +13,18 @@ const rowMembers = (row: HTMLElement): readonly string[] => row.dataset.scrollAn
 /** A prefix can grow inside a turn without moving its wrapper, so the wrapper anchors only when it has no leaf row. */
 const isAnchorContainer = (row: HTMLElement) => row.hasAttribute('data-scroll-anchor-container')
 const navigationKeys: Readonly<Record<string, true>> = { PageUp: true, PageDown: true, Home: true, End: true, ArrowUp: true, ArrowDown: true, ' ': true }
+/** Keys that move the reader toward history. Shift+Space pages up. */
+const upwardKeys: Readonly<Record<string, true>> = { PageUp: true, Home: true, ArrowUp: true }
+/** A reader within about one line of the end is at the end: a scroll that lands here resumes following. */
+export const followEndBand = 48
+/** A control that opens or closes part of a row; pressing it is a request to read that row, not the live end. */
+const disclosureSelector = '[aria-expanded], summary'
+
+/**
+ * Which way reader input moves the lane. Following is a state, not a position: only input toward history leaves it,
+ * because input that cannot scroll (a wheel or key at the end, a click, focus) produces no scroll event to restore it.
+ */
+type Intent = 'history' | 'end' | 'none'
 
 /** A bounded lane owns scrolling; a misconfigured host may leave it to an ancestor or the page. */
 function pressScrollOwner(lane: HTMLElement): HTMLElement {
@@ -29,6 +41,8 @@ export interface ViewportState {
   readonly top: number
   readonly following: boolean
   readonly unread: boolean
+  /** Rows that arrived below a reader away from the end; the jump control counts them. */
+  readonly newCount?: number
   readonly firstRenderedId?: string
   /** The reader's line by row identity: `top` alone drifts when a remount backfills rows above it. `memberId` is a source leaf the row owns, so a summary whose turn id changed still restores. */
   readonly anchor?: { readonly id: string; readonly offset: number; readonly memberId?: string }
@@ -157,6 +171,8 @@ class ViewportController {
   private frame: number | undefined
   private captureFrame: number | undefined
   private unread = false
+  private newCount = 0
+  private jumpCount: HTMLElement | null = null
   private lastTop = 0
   private lastWidth = 0
   private programmaticTop: number | undefined
@@ -208,7 +224,13 @@ class ViewportController {
       this.pendingAnchor = saved.anchor
       this.snapshotAnchor = saved.anchor
       this.unread = saved.unread
+      this.newCount = saved.newCount ?? 0
     }
+  }
+
+  readonly attachJumpCount = (count: HTMLElement | null) => {
+    this.jumpCount = count
+    this.dock()
   }
 
   readonly attachJump = (button: HTMLButtonElement | null) => {
@@ -218,6 +240,8 @@ class ViewportController {
 
   /** Shows the jump for unread rows or a run the reader has scrolled away from, and never reflows the lane under an active press. */
   private dock() {
+    if (!this.unread) this.newCount = 0
+    if (this.jumpCount !== null) this.jumpCount.textContent = this.newCount > 0 ? ` · ${this.newCount} new` : ''
     if (this.jumpButton !== null && this.pressed.size === 0) this.jumpButton.hidden = !(this.unread || (this.running && !this.following))
   }
 
@@ -228,7 +252,7 @@ class ViewportController {
   }
 
   readonly released = (): ViewportState => {
-    const state = { top: this.lastTop, following: this.following, unread: this.unread, firstRenderedId: this.firstRenderedId }
+    const state = { top: this.lastTop, following: this.following, unread: this.unread, newCount: this.newCount, firstRenderedId: this.firstRenderedId }
     const anchor = this.pendingAnchor ?? this.snapshotAnchor
     return this.following || anchor === undefined ? state : { ...state, anchor }
   }
@@ -272,6 +296,7 @@ class ViewportController {
   readonly resume = (saved?: ViewportState) => {
     this.followAnimation.cancel()
     this.unread = saved !== undefined && !saved.following && saved.unread
+    this.newCount = this.unread ? saved?.newCount ?? 0 : 0
     this.snapshotAnchor = saved?.following === false ? saved.anchor : undefined
     this.dock()
     if (saved !== undefined && !saved.following) {
@@ -400,9 +425,11 @@ class ViewportController {
     this.schedule()
   }
 
-  readonly changed = () => {
+  /** `added`: rows new to this conversation, as opposed to rows whose content changed. */
+  readonly changed = (added = 0) => {
     if (!this.following) {
       this.unread = true
+      this.newCount += added
       this.dock()
     }
     this.schedule()
@@ -412,10 +439,36 @@ class ViewportController {
     if (element === null) return
     this.element = element
     this.lastWidth = element.clientWidth
+    let touchY: number | undefined
+    /** A press on the lane itself, outside any row: its scrollbar. A drag there arrives only as scroll events. */
+    let laneHeld = false
+    const touchStart = (event: TouchEvent) => { touchY = event.touches[0]?.clientY }
+    const intent = (event: Event): Intent => {
+      const target = event.target instanceof Element ? event.target : null
+      if (event.type === 'wheel') return (event as WheelEvent).deltaY < 0 ? 'history' : (event as WheelEvent).deltaY > 0 ? 'end' : 'none'
+      if (event.type === 'touchmove') {
+        const y = (event as TouchEvent).touches[0]?.clientY
+        const previous = touchY
+        touchY = y
+        // A finger moving down drags the content down: the reader scrolls toward history.
+        return y === undefined || previous === undefined ? 'none' : y > previous ? 'history' : y < previous ? 'end' : 'none'
+      }
+      if (event instanceof KeyboardEvent) {
+        if ((event.key === 'Enter' || event.key === ' ') && target?.closest(disclosureSelector) != null) return 'history'
+        return upwardKeys[event.key] === true || (event.key === ' ' && event.shiftKey) ? 'history' : 'end'
+      }
+      // Expanding a row: the reader wants that row to stay put, not the live end.
+      if (event.type === 'pointerdown' && target?.closest(disclosureSelector) != null) return 'history'
+      return 'none'
+    }
     const manual = (event: Event) => {
       // Focusing the lane itself does not navigate to a row or change the reader's position.
       if (event.type === 'focusin' && event.target === element) return
-      if (event instanceof KeyboardEvent && (navigationKeys[event.key] !== true || (event.target instanceof HTMLElement && event.target.closest('input,textarea,[contenteditable="true"]')))) return
+      if (event instanceof KeyboardEvent && (navigationKeys[event.key] !== true || (event.target instanceof HTMLElement && event.target.closest('input,textarea,[contenteditable="true"]')))) {
+        if (!(event.key === 'Enter' && event.target instanceof Element && event.target.closest(disclosureSelector) !== null)) return
+      }
+      // A following lane leaves the end only on input toward history; the end, a click or focus keep it following.
+      if (this.following && intent(event) !== 'history') return
       if (event.type === 'wheel' || event.type === 'touchmove' || event.type === 'keydown') this.pressedAnchor = undefined
       // Reader input interrupts an eased return where it is.
       this.followAnimation.cancel()
@@ -426,6 +479,7 @@ class ViewportController {
       this.scheduleCapture()
       if (this.frame !== undefined) cancelAnimationFrame(this.frame)
       this.frame = undefined
+      this.dock()
     }
     const scroll = () => {
       if (this.programmaticTop !== undefined && Math.abs(element.scrollTop - this.programmaticTop) < geometryNumbers.scrollEndTolerance) {
@@ -440,10 +494,20 @@ class ViewportController {
         return
       }
       // A real reader scroll (including scrollbar dragging) takes ownership until the next press, and interrupts an eased return.
-      this.followAnimation.cancel()
+      const toward = element.scrollTop > this.lastTop
+      const distance = element.scrollHeight - element.clientHeight - element.scrollTop
       this.pressedAnchor = undefined
       this.lastTop = element.scrollTop
-      this.following = element.scrollHeight - element.clientHeight - element.scrollTop <= geometryNumbers.scrollEndTolerance
+      if (this.following) {
+        // Moving toward the end, or a shrink that clamps the lane at the end, keeps following; only a move up into history leaves it.
+        if (toward || (distance <= followEndBand && !laneHeld)) { this.schedule(); return }
+        this.followAnimation.cancel()
+        this.following = false
+      } else if (toward && distance <= followEndBand && !this.followAnimation.active) {
+        // Back within a line of the end: follow again and close the gap.
+        this.following = true
+        this.schedule()
+      }
       if (this.following) {
         this.unread = false
         this.dock()
@@ -459,6 +523,7 @@ class ViewportController {
     const view = page.defaultView
     const press = (event: PointerEvent) => {
       this.pressed.add(event.pointerId)
+      laneHeld = event.target === element
       if (this.pressedAnchor !== undefined || !(event.target instanceof Element)) return
       const row = event.target.closest<HTMLElement>(rowSelector)
       if (row !== null && element.contains(row)) {
@@ -472,20 +537,30 @@ class ViewportController {
     }
     const release = (event: PointerEvent) => {
       this.pressed.delete(event.pointerId)
+      if (this.pressed.size === 0) laneHeld = false
       if (this.pressedAnchor?.pointerId === event.pointerId) this.pressedAnchor = undefined
       this.dock()
+      // A press held the row in place while rows arrived below; a following lane catches up once it ends.
+      if (this.pressedAnchor === undefined && this.following) this.schedule()
     }
     // A release the page never sees (the window blurs, the tab hides) must not latch the dock.
     const abandon = () => {
+      laneHeld = false
       this.pressed.clear()
       this.pressedAnchor = undefined
       this.dock()
+      if (this.following) this.schedule()
     }
     const hidden = () => { if (page.visibilityState === 'hidden') abandon() }
-    const observer = new ResizeObserver(() => { this.preservePress(); this.schedule() })
+    // Pin in the observer, after layout and before paint, so a streaming block never shows a frame below the fold.
+    const observer = new ResizeObserver(() => {
+      if (!this.preservePress() && this.following && !this.followAnimation.active) this.writeTop(element.scrollHeight)
+      this.schedule()
+    })
     observer.observe(element)
     if (element.firstElementChild !== null) observer.observe(element.firstElementChild)
     element.addEventListener('wheel', manual, { passive: true })
+    element.addEventListener('touchstart', touchStart, { passive: true })
     element.addEventListener('touchmove', manual, { passive: true })
     element.addEventListener('keydown', manual)
     element.addEventListener('pointerdown', manual, { passive: true })
@@ -514,6 +589,7 @@ class ViewportController {
       if (this.captureFrame !== undefined) cancelAnimationFrame(this.captureFrame)
       this.captureFrame = undefined
       element.removeEventListener('wheel', manual)
+      element.removeEventListener('touchstart', touchStart)
       element.removeEventListener('touchmove', manual)
       element.removeEventListener('keydown', manual)
       element.removeEventListener('pointerdown', manual)
@@ -618,7 +694,10 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
       const olderLoaded = previous.length > 0 && items.length > previous.length && sameRows(previous, items.slice(items.length - previous.length))
       prepended.current ||= olderLoaded
       if (olderLoaded || sameRows(previous, items)) controller.schedule()
-      else controller.changed()
+      else {
+        const before = new Set(previous.map(row => row.id))
+        controller.changed(items.reduce((count, row) => before.has(row.id) ? count : count + 1, 0))
+      }
     }
     controller.updateHistory(history)
     // The first render is not a command, and a conversation switch adopts its key without scrolling.
@@ -646,7 +725,7 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
   return <div {...stylex.props(styles.frame)}>
     {renderHeader?.(startIndex, revealRow, materializing)}
     <div {...props} style={{ ...props.style, overflowAnchor: 'none' }} ref={controller.attach}><div {...contentProps}>{typeof children === 'function' ? children(startIndex, revealRow, materializing) : children}</div></div>
-    <Button ref={controller.attachJump} onPress={controller.jump} hidden {...stylex.props(styles.jump)}>{running ? <span {...stylex.props(styles.jumpWorking)}><LiveRing size="sm" />Working · Jump to latest</span> : 'New messages ↓'}</Button>
+    <Button ref={controller.attachJump} onPress={controller.jump} hidden data-testid="jump-to-latest" {...stylex.props(styles.jump)}><span {...stylex.props(styles.jumpWorking)}>{running && <LiveRing size="sm" />}<span>{running && 'Working · '}Jump to latest<span ref={controller.attachJumpCount} /></span></span></Button>
   </div>
 })
 
