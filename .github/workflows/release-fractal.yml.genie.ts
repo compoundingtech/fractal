@@ -53,6 +53,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         "scripts/fixtures/install-release-v0.3.17",
         "scripts/release-fractal*",
         "scripts/release-fractal-embed.mjs",
+        "scripts/release_gh.py",
         "apps/fractal-web/**",
         "scripts/release_notes*",
         "scripts/compat-baseline-release*",

@@ -105,6 +105,11 @@ for event, ref in [('push', 'refs/tags/v1.2.3'), ('workflow_dispatch', 'refs/hea
     assert first[0] != second[0] and not first[1] and not second[1]
 assert policy('release-fractal.yml', 'pull_request', 100, 42, ref='refs/pull/42/merge')[1]
 release = (ROOT / '.github/workflows/release-fractal.yml').read_text()
+release_paths = release.split('  pull_request:\n', 1)[1].split('\npermissions:', 1)[0]
+release_source = (ROOT / '.github/workflows/release-fractal.yml.genie.ts').read_text()
+assert '\n      - scripts/release_gh.py\n' in release_paths, 'gh retry changes must exercise release PR fixtures'
+assert '"scripts/release_gh.py",' in release_source, 'the owning generator must retain the release helper filter'
+print('passed: release-fractal PR filter includes release_gh.py in workflow and generator')
 assert release.index('nix build .#release-cc^out') < release.index('name: Test installer')
 assert 'packages.release-cc = pkgs.stdenv.cc;' in (ROOT / 'flake.nix').read_text()
 print('passed: newest pending main release retained; active, tag and pinned manual releases preserved; host compiler provided')
