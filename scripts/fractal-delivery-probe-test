@@ -996,6 +996,13 @@ class NativeProbeTests(unittest.IsolatedAsyncioTestCase):
                 env["DBUS_SESSION_BUS_ADDRESS"] = os.environ["DBUS_SESSION_BUS_ADDRESS"]
             # The fault eval's default phase bound for node startup and each CLI call.
             nodes = [faults.Node(directory, host, BINARY, env, binary_directory, 60) for host in ("amber", "cobalt")]
+            for node in nodes:
+                runtime_profile = node.root / "runtime-profile.json"
+                runtime_profile.write_text(json.dumps({
+                    "personas": {"launch": {"generalist": {"harnessBin": str(node.root / "bin")}}},
+                }))
+                node.env["AGENT_RUNTIME_PROFILE"] = str(runtime_profile)
+                node.env["AGENT_PERSONA"] = "generalist"
             if publication_gap:
                 # Hold the launcher's return after the real PTY is published. The
                 # native channel can already see its local incarnation while the
