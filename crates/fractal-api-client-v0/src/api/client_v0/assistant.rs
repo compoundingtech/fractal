@@ -449,6 +449,7 @@ mod tests {
             subject: "custom/client/paired-owner".into(),
             kind: "custom.client.pairing-completed".into(), actor: Some(ISSUER.into()),
             fields: serde_json::from_value(json!({
+                "pairing_operation_version":1,
                 "credential_hash": credential_digest(credential),
                 "session_actor": "person/robin/session/phone", "person_id": ISSUER,
                 "scopes": ALL_SCOPES, "expires_at_unix_ms": u64::MAX,

@@ -38,6 +38,7 @@ fn grant(state: &AppState, expiry: u64) {
             kind: "custom.client.pairing-completed".into(),
             actor: Some(PERSON.into()),
             fields: serde_json::from_value(json!({
+                "pairing_operation_version":1,
                 "credential_hash":hex::encode(Sha256::digest(CREDENTIAL.as_bytes())),
                 "session_actor":ACTOR,"person_id":PERSON,"device_id":"device/phone",
                 "scopes":["read.projections"],"expires_at_unix_ms":expiry

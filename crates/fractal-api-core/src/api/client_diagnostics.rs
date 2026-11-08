@@ -191,6 +191,7 @@ mod tests {
         state.store.append_claim(&ClaimInput {
             subject:format!("custom/client/{credential}"),kind:"custom.client.pairing-completed".into(),actor:Some("person/ada".into()),
             fields:BTreeMap::from([
+                ("pairing_operation_version".into(),json!(1)),
                 ("credential_hash".into(),json!(hex::encode(Sha256::digest(credential.as_bytes())))),
                 ("session_actor".into(),json!(actor)),("person_id".into(),json!("person/ada")),
                 ("scopes".into(),scopes),("expires_at_unix_ms".into(),json!(expires)),

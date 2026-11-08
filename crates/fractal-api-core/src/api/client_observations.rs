@@ -662,6 +662,7 @@ mod tests {
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/test".into()),
                 fields: BTreeMap::from([
+                    ("pairing_operation_version".into(), json!(1)),
                     (
                         "credential_hash".into(),
                         json!(hex::encode(Sha256::digest(credential.as_bytes()))),
