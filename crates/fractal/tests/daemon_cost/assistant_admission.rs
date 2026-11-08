@@ -1,5 +1,5 @@
 //! Opt-in, real HTTP/Unix daemon measurement (not a router oneshot or mocked daemon).
-//! Run this same test source on 98e550cb and on PR3-B, sequentially on dev5:
+//! Run this same test source on 98e550cb and on PR3-B, sequentially on one host:
 //! ```sh
 //! ST_ADMISSION_VARIANT=baseline cargo test --release -p fractal --test integration daemon_cost::assistant_admission::authenticated_get_during_pairing -- --exact --nocapture --test-threads=1
 //! ST_ADMISSION_VARIANT=indexed cargo test --release -p fractal --test integration daemon_cost::assistant_admission::authenticated_get_during_pairing -- --exact --nocapture --test-threads=1
@@ -11,8 +11,8 @@
 //! ST_ADMISSION_HISTORY (default 10000) is expired grants PER principal; ST_ADMISSION_SAMPLES
 //! (default 200) is measured GET/completion pairs PER read mode. Setup and proof creation are
 //! outside timing. Each pair starts behind a barrier, with no sleeps, polling, retries or timers.
-//! ST_ADMISSION_REPORT optionally saves the complete JSON report. Run on dev5; hardware is
-//! observed from uname/lscpu in the report, not inferred from an environment label.
+//! ST_ADMISSION_REPORT optionally saves the complete JSON report. Hardware is observed
+//! from uname/lscpu in the report, not inferred from an environment label.
 //! The index DDL timing is a synthetic startup migration probe on the populated disposable
 //! real store, not total daemon startup or cold-disk startup. Latencies use the real daemon's
 //! bound sockets, bearer middleware, grant lookup, projection and durable approval consumption.
@@ -278,7 +278,7 @@ async fn authenticated_get_during_pairing() {
     let final_rows: u64 = final_connection.query_row("SELECT count(*) FROM claims", [], |r| r.get(0)).unwrap();
     let report = json!({"variant":variant,"baseline_revision":"98e550cb75", "hardware_uname":hardware("uname", &["-a"]),
         "hardware_lscpu":hardware("lscpu", &["-J"]),"hardware_hostname":hardware("hostname", &[]),
-        "expected_host":"dev5, AMD Ryzen 9 9955HX, 16 cores / 32 threads (verify observed hardware)",
+        "expected_host":"same otherwise-idle host for both variants (verify observed hardware)",
         "history_grants_per_principal":history,"initial_total_claim_rows":total_rows,"initial_granted_rows_by_principal":principal_rows,
         "final_total_claim_rows":final_rows,"admission_query":query,
         "explain_without_index":before,"explain_with_index":after,"synthetic_startup_index_build_ms":build_ms,
@@ -386,7 +386,7 @@ fn synthetic_large_store_index_build() {
         "explain_without_index":before,"explain_with_index":after,
         "hardware_uname":hardware("uname", &["-a"]),
         "hardware_hostname":hardware("hostname", &[]),"hardware_lscpu":hardware("lscpu", &["-J"]),
-        "expected_host":"dev5, AMD Ryzen 9 9955HX, 16 cores / 32 threads (verify observed hardware)",
+        "expected_host":"same otherwise-idle host for both variants (verify observed hardware)",
     });
     println!("ADMISSION_INDEX_BUILD {}", serde_json::to_string_pretty(&report).unwrap());
     if let Some(path) = std::env::var_os("ST_ADMISSION_INDEX_REPORT") {

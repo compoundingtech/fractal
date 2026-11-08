@@ -406,14 +406,18 @@ mod tests {
             ("several-policies-expired", json!({"expires_at_unix_ms":101}), vec![99, 102, 100], 0, false, false),
             ("unrelated-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, false),
             ("legacy-default-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
+            ("null-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
+            ("mcp-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
         ];
         for (name, mut source, policies, revokes, replicated, denied) in cases {
             let root = tempfile::tempdir().unwrap();
             let mut state = crate::api::tests_shared::state(root.path());
             state.owning_person = Some("person/owner".into());
             source["profile"] = json!("service");
-            if name != "legacy-default-principal" {
-                source["principal"] = json!(if name == "unrelated-principal" { MCP_PRINCIPAL } else { PRINCIPAL });
+            if name == "null-principal" {
+                source["principal"] = Value::Null;
+            } else if name != "legacy-default-principal" {
+                source["principal"] = json!(if matches!(name, "unrelated-principal" | "mcp-principal") { MCP_PRINCIPAL } else { PRINCIPAL });
             }
             let subject = format!("custom/client/differential-{name}");
             let append_fixture = |store: &Store, kind: &str, value: Value, previous: Option<&ClaimRecord>| {
@@ -447,7 +451,8 @@ mod tests {
             for owner in [Some("person/owner"), None] {
                 state.owning_person = owner.map(str::to_owned);
                 for profile in ["assistant", "service"] {
-                    let candidate = json!({"profile":profile,"principal":PRINCIPAL});
+                    let principal = if name == "mcp-principal" { MCP_PRINCIPAL } else { PRINCIPAL };
+                    let candidate = json!({"profile":profile,"principal":principal});
                     let old = rust_only_admission(&state, &candidate).map_err(|error| error.code);
                     let new = admit_profile(&state, &candidate).map_err(|error| error.code);
                     assert_eq!(new, old, "{name}: owner={owner:?}, profile={profile}");
