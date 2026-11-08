@@ -98,7 +98,7 @@ async fn renewal_refuses_explicitly_withdrawn_source_and_bad_pending_proof() {
     let candidate=MemberKey::generate().unwrap().0;
     state.store.append_claim(&ClaimInput {subject:source.subject.clone(),kind:"custom.client.pairing-revoked".into(),actor:Some(PERSON.into()),fields:BTreeMap::new(),evidence:vec![],expected_subject:None,idempotency_key:None}).unwrap();
     let error=stage(State(state.clone()),Extension(ClientSession::local(Some("agent/deployer")).unwrap()),Json(staging(&source))).await.unwrap_err();
-    assert!(error.message.contains("unreceipted withdrawal"),"{}",error.message);
+    assert!(error.message.contains("withdrawn"),"{}",error.message);
     assert!(complete(State(state.clone()),Extension(ClientSession::pairing()),Json(approval(offer,&old,&candidate))).await.is_err());
     assert!(poll(&state,&old).await.unwrap().0["renewals"].as_array().unwrap().is_empty());
     let request=serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"device_public_key":old.public(),"timestamp_unix_ms":client_now_ms(),"signature":"invalid"})).unwrap();

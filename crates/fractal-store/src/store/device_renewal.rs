@@ -1,5 +1,5 @@
 use super::*;
-use crate::pairing::{append_operation_receipt_tx, completion_is_revoked, operation_is_trusted};
+use crate::pairing::{append_operation_receipt_tx, operation_is_trusted};
 
 impl Store {
     /// Commit an approved renewal and its replacement in one writer transaction.
@@ -37,14 +37,6 @@ impl Store {
         let raw_withdrawal: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.client.pairing-revoked' AND (subject=?1 OR json_extract(body,'$.fields.device_id')=?2))",
             params![source.subject, device], |row| row.get(0),
-        )?;
-        if raw_withdrawal && !completion_is_revoked(&tx,&source.subject,&source.id,&source.origin)? {
-            return Err(anyhow::Error::new(FractalError::new("forbidden",
-                "the historical grant has an unreceipted withdrawal; renewal was refused. Surface this record to the operator")));
-        }
-        let key_withdrawal: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='principal.key-revoked' AND subject=?1 AND json_extract(body,'$.fields.key') IN (?2,?3))",
-            params![person, old_key, candidate], |row| row.get(0),
         )?;
         anyhow::ensure!(!raw_withdrawal && !key_withdrawal, FractalError::new("forbidden", "a renewal key or source was withdrawn"));
         anyhow::ensure!(consumed.kind == "custom.client.pairing-renewal-consumed"
@@ -91,6 +83,14 @@ mod tests {
             json!({"person_id":"person/example","device_public_key":"candidate-key","scopes":["read.projections"],"delegated_scopes":["read.projections"]}));
         (store,stage,source,challenge,consumed,replacement)
     }
+    fn withdraw(store: &Store, source: &ClaimRecord) {
+        let mut connection = store.connection.write();
+        let tx = connection.transaction().unwrap();
+        let withdrawal = append_claim_tx(&tx, "member", &source.subject, "custom.client.pairing-revoked",
+            Some("person/example"), &json!({"fields":{"person_id":"person/example","device_id":"device/old","completion_id":source.id}}), &[], None).unwrap();
+        append_operation_receipt_tx(&tx, &withdrawal).unwrap();
+        tx.commit().unwrap();
+    }
     #[test]
     fn device_renewal_commits_receipts_and_replacement_once() {
         let (store,stage,source,challenge,consumed,replacement)=fixture();
@@ -114,8 +114,7 @@ mod tests {
     #[test]
     fn device_renewal_rechecks_withdrawal_after_preparation() {
         let (store,stage,source,challenge,consumed,replacement)=fixture();
-        store.append_client_operation_claim(&input(&source.subject,"custom.client.pairing-revoked",
-            json!({"person_id":"person/example","device_id":"device/old","completion_id":source.id}))).unwrap();
+        withdraw(&store, &source);
         assert!(store.commit_device_renewal(&stage,&source,&challenge,&consumed,&replacement).is_err());
         assert!(store.claims_for_subject_kind_at(&stage.subject,"custom.client.pairing-renewal-consumed",None,true,1).unwrap().claims.is_empty());
     }
@@ -137,8 +136,7 @@ mod tests {
     #[test]
     fn device_renewal_withdrawal_is_not_limited_by_unrelated_history() {
         let (store,stage,source,challenge,consumed,replacement)=fixture();
-        store.append_client_operation_claim(&input(&source.subject,"custom.client.pairing-revoked",
-            json!({"person_id":"person/example","device_id":"device/old","completion_id":source.id}))).unwrap();
+        withdraw(&store, &source);
         {
             let mut connection=store.connection.write();
             let tx=connection.transaction().unwrap();

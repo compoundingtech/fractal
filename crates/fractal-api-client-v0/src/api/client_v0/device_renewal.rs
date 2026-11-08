@@ -77,7 +77,7 @@ fn record(state: &AppState, subject: &str, kind: &str) -> Result<Option<ClaimRec
         _ => Ok(None),
     }
 }
-fn append(state: &AppState, subject: String, kind: &str, actor: &str, person: &str, mut fields: BTreeMap<String, Value>, expected: Option<String>, evidence: Vec<String>) -> Result<ClaimRecord, ApiError> {
+fn append(state: &AppState, subject: String, kind: &str, (actor, person): (&str, &str), mut fields: BTreeMap<String, Value>, expected: Option<String>, evidence: Vec<String>) -> Result<ClaimRecord, ApiError> {
     fields.insert("person_id".into(), json!(person));
     state.store.append_client_operation_claim(&ClaimInput {
         subject, kind: kind.into(), actor: Some(actor.into()), fields, evidence,
@@ -90,12 +90,7 @@ fn not_revoked(state: &AppState, source: &ClaimRecord) -> Result<(), ApiError> {
         "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.client.pairing-revoked' AND (subject=?1 OR json_extract(body,'$.fields.device_id')=?2))",
         rusqlite::params![source.subject, device], |row| row.get(0),
     ).map_err(ApiError::internal)?;
-    if withdrawn {
-        if !state.store.pairing_completion_is_revoked(source).map_err(ApiError::internal)? {
-            return Err(forbidden("the historical grant has an unreceipted withdrawal; renewal was refused. Surface this record to the operator"));
-        }
-        return Err(forbidden("the source device was withdrawn"));
-    }
+    if withdrawn { return Err(forbidden("the source device was withdrawn")); }
     let person = text(source, "person_id")?;
     let key = text(source, "device_public_key")?;
     let revoked: bool = state.store.readers.get().query_row(
@@ -164,7 +159,7 @@ pub async fn stage(State(state): State<AppState>, Extension(session): Extension<
     let id = fresh_id()?;
     let renewal_id = format!("renewal/{id}");
     let expires = client_now_ms() + u128::from(request.expires_in_hours) * DAY_MS / 24;
-    append(&state, format!("custom/client/pairing-renewal-{id}"), STAGED, requester, person,
+    append(&state, format!("custom/client/pairing-renewal-{id}"), STAGED, (requester, person),
         BTreeMap::from([
             ("renewal_id".into(), json!(renewal_id)), ("migration_epoch".into(), json!(request.migration_epoch)),
             ("requested_by".into(), json!(requester)),
@@ -207,7 +202,7 @@ pub async fn pending(State(state): State<AppState>, Json(request): Json<Pending>
         let tuple = offer_tuple(&stage, &nonce, expires)?;
         let issuer_signature = state.store.sign_device_renewal_offer(person, &tuple).map_err(ApiError::internal)?;
         let root = pairing_root_proof(&state, person)?.ok_or_else(|| forbidden("the member cannot prove the renewal root"))?;
-        append(&state, format!("custom/client/pairing-renewal-challenge-{nonce}"), CHALLENGE, person, person,
+        append(&state, format!("custom/client/pairing-renewal-challenge-{nonce}"), CHALLENGE, (person, person),
             BTreeMap::from([("renewal_id".into(), field(&stage,"renewal_id").clone()),("nonce".into(),json!(nonce)),("expires_at_unix_ms".into(),json!(expires))]), None, vec![stage.id.clone()])?;
         renewals.push(json!({"renewal_id":text(&stage,"renewal_id")?,"migration_epoch":text(&stage,"migration_epoch")?,"issuer_member":text(&stage,"issuer_member")?,"person_id":person,"requested_by":text(&stage,"requested_by")?,"scopes":field(&stage,"scopes"),"old_public_key":request.device_public_key,"nonce":nonce,"expires_at_unix_ms":expires,"person_root_key_proof":root,"issuer_signature":issuer_signature}));
     }
