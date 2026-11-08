@@ -134,6 +134,25 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
   const [show, setShow] = useState(false);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const { height } = useWindowDimensions();
+  const scroll = useRef<ScrollView>(null);
+  const scrollContent = useRef<View>(null);
+  const viewportHeight = useRef(0);
+  const offset = useRef(0);
+  const attachScroll = useCallback((view: ScrollView | null) => {
+    scroll.current = view;
+    viewportHeight.current = 0;
+    offset.current = 0;
+  }, []);
+  const revealComposer = useCallback((row: View) => {
+    const content = scrollContent.current;
+    if (!content) return;
+    row.measureLayout(content, (_x, y, _width, rowHeight) => {
+      const top = Math.max(0, y - 8);
+      const bottom = y + rowHeight + 8 - viewportHeight.current;
+      const target = Math.max(bottom, Math.min(top, offset.current));
+      if (viewportHeight.current && target !== offset.current) scroll.current?.scrollTo({ y: target, animated: true });
+    });
+  }, []);
   const { palette } = useTextAppearance();
   if (!threads.length && !page.issue && !page.more) return null;
   return <View style={{ backgroundColor: palette.mantle }}>
@@ -142,7 +161,10 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
       <T numberOfLines={1} style={{ flex: 1 }}><T bold color={theme.accent}>{title}</T>{threads[0] ? <T dim> · {threads[0].title}</T> : null}</T>
       <T dim>{show ? '▾ hide' : '▸ show'}</T>
     </Pressable>
-    {show ? <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: Math.round(height * 0.4), flexGrow: 0 }} contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 8 }}>
+    {show ? <ScrollView ref={attachScroll} innerViewRef={scrollContent as React.RefObject<View>} keyboardShouldPersistTaps="handled" scrollEventThrottle={16}
+      onLayout={event => { viewportHeight.current = event.nativeEvent.layout.height; }}
+      onScroll={event => { offset.current = event.nativeEvent.contentOffset.y; }}
+      style={{ maxHeight: Math.round(height * 0.4), flexGrow: 0 }} contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 8 }}>
       {threads.map(thread => {
         const open = expanded.has(thread.id);
         return <View key={thread.id}>
@@ -161,7 +183,7 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
             <T numberOfLines={1} color={theme.accent} style={{ flexShrink: 1 }}>{open ? '▾' : '▸'} {thread.title}</T>
             <T dim numberOfLines={1}>· {threadSummaryLine(thread)}</T>
           </Pressable>
-          {open ? <ThreadBody client={client} thread={thread} onOpen={() => openThread(thread.id)} /> : null}
+          {open ? <ThreadBody client={client} thread={thread} onOpen={() => openThread(thread.id)} revealComposer={revealComposer} /> : null}
         </View>;
       })}
       {page.issue ? <T color={theme.waiting}>{page.issue}</T> : null}
@@ -326,8 +348,8 @@ function eventLine(event: Exclude<ThreadTimelineEvent, ThreadMessage>): string {
 }
 
 // The same thread view renders inside a conversation and on its own screen.
-function ThreadBody({ client, thread, onOpen, onTimelineChange }: {
-  client: ThreadClient; thread: ThreadSummary; onOpen?: () => void; onTimelineChange?: () => void;
+function ThreadBody({ client, thread, onOpen, onTimelineChange, revealComposer }: {
+  client: ThreadClient; thread: ThreadSummary; onOpen?: () => void; onTimelineChange?: () => void; revealComposer?: (row: View) => void;
 }) {
   const { actions, threadActions, status, threadRefresh, threadDeliveries, actor, data, feed } = useStore();
   const read = useCallback((cursor: string | undefined, signal: AbortSignal) => client.threadTimeline(thread.id, { cursor, limit: THREAD_WINDOW_SIZE }, { signal }), [client, thread.id]);
@@ -378,7 +400,7 @@ function ThreadBody({ client, thread, onOpen, onTimelineChange }: {
     })}
     {page.issue ? <T color={theme.waiting}>{page.issue}</T> : !page.items.length ? <T dim>{page.loading ? 'Loading history…' : 'No thread messages yet.'}</T> : null}
     {canReply || threadDeliveries?.has(thread.id) ? <ThreadComposer key={thread.id} thread={thread} canReply={canReply}
-      selection={quote ? { id: quote.id, from: actorLabel(quote.actor_id), text: quote.content } : undefined} selectionVersion={quoteFocus}
+      selection={quote ? { id: quote.id, from: actorLabel(quote.actor_id), text: quote.content } : undefined} selectionVersion={quoteFocus} revealComposer={revealComposer}
     /> : null}
     {thread.state === 'closed' && threadActions.has('thread.reopen') ? <T dim>Reopen to reply.</T> : null}
     <ThreadActionFeedback result={editResult} busy={editing || status !== 'online'} onRetry={() => {
@@ -409,9 +431,15 @@ function readThreadDraft(raw: string | undefined): ThreadDraft {
   }
 }
 
-function ThreadComposer({ thread, canReply, selection, selectionVersion }: { thread: ThreadSummary; canReply: boolean; selection?: Quote; selectionVersion: number }) {
+function ThreadComposer({ thread, canReply, selection, selectionVersion, revealComposer }: {
+  thread: ThreadSummary; canReply: boolean; selection?: Quote; selectionVersion: number; revealComposer?: (row: View) => void;
+}) {
   const { actions, draftCache, draftsReady, saveDrafts, status, threadDeliveries } = useStore();
   const input = useRef<TextInput>(null);
+  const row = useRef<View>(null);
+  const reveal = () => {
+    if (row.current && input.current?.isFocused()) revealComposer?.(row.current);
+  };
   const key = threadDraftKey(thread.id);
   const [draft, setDraft] = useState(() => readThreadDraft(draftCache.current.get(key)));
   const touched = useRef(false);
@@ -446,6 +474,7 @@ function ThreadComposer({ thread, canReply, selection, selectionVersion }: { thr
     appliedSelection.current = selectionVersion;
     storeDraft({ ...draft, quote: selection });
     input.current?.focus();
+    reveal();
     // A selection event, rather than a new render, replaces the draft's quote.
   }, [selectionVersion]);
 
@@ -465,7 +494,7 @@ function ThreadComposer({ thread, canReply, selection, selectionVersion }: { thr
       <T dim numberOfLines={1} style={{ flex: 1 }}>Replying to {draft.quote.from} · {draft.quote.text}</T>
       <Button label="Remove quote" disabled={!enabled} onPress={() => storeDraft({ text: draft.text })} />
     </View> : null}
-    {canReply ? <ThreadComposeField inputRef={input} text={draft.text} onChange={text => storeDraft({ ...draft, text })}
+    {canReply ? <ThreadComposeField inputRef={input} rowRef={revealComposer ? row : undefined} onReveal={revealComposer ? reveal : undefined} text={draft.text} onChange={text => storeDraft({ ...draft, text })}
       onSend={() => void send(() => actions.replyToThread(thread, content, draft.quote?.id))} enabled={enabled} canSend={!!content && !issue} /> : null}
     {canReply && issue ? <T color={theme.waiting}>{issue}</T> : null}
     <ThreadActionFeedback result={feedback} busy={sending || status !== 'online'} onRetry={() => {
@@ -474,12 +503,12 @@ function ThreadComposer({ thread, canReply, selection, selectionVersion }: { thr
   </View>;
 }
 
-function ThreadComposeField({ inputRef, text, onChange, onSend, onCancel, enabled, canSend, autoFocus }: {
-  inputRef?: Ref<TextInput>; text: string; onChange: (text: string) => void; onSend: () => void;
+function ThreadComposeField({ inputRef, rowRef, onReveal, text, onChange, onSend, onCancel, enabled, canSend, autoFocus }: {
+  inputRef?: Ref<TextInput>; rowRef?: Ref<View>; onReveal?: () => void; text: string; onChange: (text: string) => void; onSend: () => void;
   onCancel?: () => void; enabled: boolean; canSend: boolean; autoFocus?: boolean;
 }) {
-  return <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 6 }}>
-    <Field ref={inputRef} accessibilityLabel="Message thread" placeholder="Message thread" value={text} editable={enabled}
+  return <View ref={rowRef} onLayout={onReveal} style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 6 }}>
+    <Field ref={inputRef} onFocus={onReveal} accessibilityLabel="Message thread" placeholder="Message thread" value={text} editable={enabled}
       onChangeText={onChange} multiline autoFocus={autoFocus} style={{ flex: 1 }} />
     <Button label="Send" disabled={!enabled || !canSend} onPress={onSend} />
     {onCancel ? <Button label="Cancel" disabled={!enabled} onPress={onCancel} /> : null}
