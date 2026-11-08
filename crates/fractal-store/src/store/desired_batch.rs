@@ -67,8 +67,8 @@ impl Store {
         subjects.sort();
         subjects.dedup();
         let cursor = request.cursor.as_deref().map(decode_cursor).transpose()?;
-        // Projection tables can advance without a claim append. Fence both the claim
-        // cut and the shared desired/mission projection frontier inside this snapshot.
+        // Projection and repair writes can advance without a claim append. Fence the
+        // claim cut, graph frontier and desired row-write witness inside this snapshot.
         self.read_snapshot(|cut| {
             let connection = self.readers.get();
             let progress = desired_projection_progress(&connection)?;

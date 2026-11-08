@@ -11479,7 +11479,16 @@ async fn run_harness_questions(
 async fn subject_desired_items(
     client: &Client,
     args: &SubjectDesiredArgs,
-) -> Result<Vec<fractal_daemon::store::desired_batch::DesiredBatchItem>> {
+) -> Result<Vec<Value>> {
+    // Retained member payloads can come from newer daemons. Only decode the page
+    // envelope here; preserve each extensible item exactly as the server supplied it.
+    #[derive(serde::Deserialize)]
+    struct DesiredPage {
+        items: Vec<Value>,
+        next_cursor: Option<String>,
+        #[serde(rename = "store_index")]
+        _store_index: u64,
+    }
     let mut selection = String::from("/v1/desired?limit=1000");
     for subject in &args.subjects {
         selection.push_str("&subject=");
@@ -11492,9 +11501,10 @@ async fn subject_desired_items(
     let mut items = Vec::new();
     let selection_len = selection.len();
     loop {
-        let page: fractal_daemon::store::desired_batch::DesiredBatchPage = client.get(&selection).await?;
-        items.extend(page.items);
-        match page.next_cursor {
+        let DesiredPage { items: page_items, next_cursor, .. } =
+            client.get(&selection).await?;
+        items.extend(page_items);
+        match next_cursor {
             Some(next) => {
                 selection.truncate(selection_len);
                 selection.push_str("&cursor=");

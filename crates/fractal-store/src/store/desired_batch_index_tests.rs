@@ -75,3 +75,77 @@ fn existing_store_startup_installs_desired_kind_index_without_offline_work() {
     assert_eq!(connection.query_row("SELECT COUNT(*) FROM desired", [], |row| row.get::<_, u64>(0)).unwrap(), ROWS);
     eprintln!("desired kind index existing-store startup: desired_rows={ROWS} elapsed={elapsed:?} (normal Store::open, includes all startup work)");
 }
+
+#[test]
+fn desired_cursor_expires_when_repair_rewrites_at_the_same_claim_cut_and_graph_health() {
+    let store = Store::open_memory("node").unwrap();
+    for (command, key) in [("true", "before"), ("false", "after")] {
+        let intent = crate::graph::parse_intent(&format!(
+            "version 2\nagent \"cursor/a\" {{ command \"{command}\"; workspace \".\"; restart \"never\"; }}\n\
+             agent \"cursor/b\" {{ command \"true\"; workspace \".\"; restart \"never\"; }}\n",
+        ), store.origin()).unwrap();
+        crate::store::publication_tests_shared::publish(&store, &intent, key);
+    }
+    let selected = store.selected_desired_token("agent/cursor/a").unwrap().unwrap();
+    let replacement: String = store.readers.get().query_row(
+        "SELECT id FROM claims WHERE subject='agent/cursor/a' AND kind='intent.desired'
+         AND id<>?1 ORDER BY store_index LIMIT 1",
+        [&selected], |row| row.get(0),
+    ).unwrap();
+    let request = DesiredBatchRequest { kind: Some("agent".into()), limit: Some(1), ..Default::default() };
+    let first = store.desired_batch(&request).unwrap();
+    let health = || store.readers.get().query_row(
+        "SELECT status,last_good_store_index FROM projection_health WHERE aggregate='graph'",
+        [], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u64>(1)?)),
+    ).optional().unwrap();
+    let before_health = health();
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        // Exercise the production repair selector with already-admitted claims: no
+        // append or graph projection step is allowed to accidentally expire the page.
+        select_desired_repair_tx(&transaction, &selected, &replacement).unwrap();
+        transaction.commit().unwrap();
+    }
+    assert_eq!(store.selected_desired_token("agent/cursor/a").unwrap(), Some(replacement));
+    let fresh = store.desired_batch(&request).unwrap();
+    assert_eq!(first.store_index, fresh.store_index);
+    assert_eq!(before_health, health());
+    assert_ne!(first.items[0].declaration.desired, fresh.items[0].declaration.desired);
+    let error = store.desired_batch(&DesiredBatchRequest {
+        cursor: Some(first.next_cursor.unwrap()), ..request
+    }).unwrap_err();
+    assert!(format!("{error:?}").contains("desired-cursor-expired"), "{error:?}");
+}
+
+#[test]
+fn desired_write_witness_tracks_noop_updates_and_deletes_transactionally() {
+    let store = Store::open_memory("node").unwrap();
+    let intent = crate::graph::parse_intent(
+        "version 2\nagent \"cursor/a\" { command \"true\"; workspace \".\"; restart \"never\"; }\n",
+        store.origin(),
+    ).unwrap();
+    crate::store::publication_tests_shared::publish(&store, &intent, "witness");
+    let mut connection = store.connection.write();
+    let generation = |connection: &Connection| connection.query_row(
+        "SELECT generation FROM local_desired_write_witness WHERE id=1",
+        [], |row| row.get::<_, u64>(0),
+    ).unwrap();
+    let before = generation(&connection);
+    assert!(before > 0, "publication inserts must advance the witness");
+    {
+        let transaction = connection.transaction().unwrap();
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h11f5c377b176 owner=fractal_store::store::desired_batch_index_tests TODO=bound-or-reference-values-and-reclamation */
+            "UPDATE desired SET body=body WHERE subject='agent/cursor/a'", [],
+        ).unwrap();
+        assert_eq!(generation(&transaction), before + 1);
+        transaction.execute(
+            /* sqlite-large-value: allow-for-now lv-h727c99989afb owner=fractal_store::store::desired_batch_index_tests TODO=bound-or-reference-values-and-reclamation */
+            "DELETE FROM desired WHERE subject='agent/cursor/a'", [],
+        ).unwrap();
+        assert_eq!(generation(&transaction), before + 2);
+        transaction.rollback().unwrap();
+    }
+    assert_eq!(generation(&connection), before, "rolled-back rows must not expire cursors");
+}

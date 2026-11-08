@@ -212,3 +212,60 @@ async fn desired_cursor_invalidation_fails_without_restart_or_partial_result() {
         "limit=1000&cursor=pinned-cut",
     ]);
 }
+
+#[tokio::test]
+async fn desired_all_preserves_newer_members_and_unavailable_items_in_json_output() {
+    use axum::{Json, Router, routing::get};
+
+    const CHILD_ENDPOINT: &str = "ST3_TEST_DESIRED_NEWER_MEMBER_ENDPOINT";
+    if let Ok(endpoint) = std::env::var(CHILD_ENDPOINT) {
+        let client = Client::new(Endpoint::Http(endpoint));
+        let (_, args) = parse(&["fractal", "subject", "desired", "--all", "--json"]);
+        run_subject(&client, SubjectCommand::Desired(args), true).await.unwrap();
+        return;
+    }
+
+    let items = json!([
+        {
+            "subject": "agent/example/newer", "kind": "agent", "desired": {},
+            "member": {"kind": "future-member-kind", "future_field": {"version": 2}},
+            "desired_token": "newer-token",
+            "actual": {"unavailable": {"code": "member-version-unproven"}},
+        },
+        {
+            "subject": "agent/example/normal", "kind": "agent", "desired": {},
+            "desired_token": "normal-token", "actual": {"revision": "normal-revision"},
+        },
+    ]);
+    let response_items = items.clone();
+    let app = Router::new().route("/v1/desired", get(move || {
+        let items = response_items.clone();
+        async move {
+            Json(json!({
+                "api_version": "st3.v1",
+                "value": {"items": items, "next_cursor": null, "store_index": 42},
+            }))
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let output = tokio::task::spawn_blocking(move || {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "subject_desired_cli_tests::desired_all_preserves_newer_members_and_unavailable_items_in_json_output",
+                "--nocapture",
+            ])
+            .env(CHILD_ENDPOINT, endpoint)
+            .output()
+            .unwrap()
+    }).await.unwrap();
+    server.abort();
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let array_start = stdout.find("[\n").expect("CLI prints a pretty JSON array");
+    let mut values = serde_json::Deserializer::from_str(&stdout[array_start..])
+        .into_iter::<Value>();
+    assert_eq!(values.next().unwrap().unwrap(), items);
+}

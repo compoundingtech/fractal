@@ -17,11 +17,14 @@ flattened `DesiredSubject` entries plus `desired_token` and optional extensible 
 All sources for a page are read in one store snapshot.
 
 The cursor binds the store origin, pinned claim read cut, shared graph projection progress,
-selection filters, limit and last subject. The graph projection frontier covers both selected
-desired declarations and mission definitions; backlog projection can advance it without
-appending a claim or changing `store_index`. Continue with unchanged subjects, kind and limit.
-Each continuation validates the claim cut and graph projection health/frontier in the same
-pinned snapshot; a change to either returns typed `desired-cursor-expired`, never a silent
+desired row-write generation, selection filters, limit and last subject. The graph projection
+frontier covers both selected desired declarations and mission definitions; backlog projection
+can advance it without appending a claim or changing `store_index`. A durable per-store
+generation advances transactionally on every desired row insert, update or delete, including
+repair that leaves the claim cut and graph health unchanged. Continue with unchanged subjects,
+kind and limit. Each continuation validates the claim cut, graph health/frontier and row-write
+generation with bounded reads in the same pinned snapshot; any change returns typed
+`desired-cursor-expired`, never a silent
 restart or retry. No historical snapshot or pagination cache is retained. The CLI follows
 every cursor with limit 1,000 and unchanged
 filters, then prints one final JSON array. Any page failure, including cursor invalidation,
@@ -49,6 +52,15 @@ when available, matching the card's desired content revision. It omits runtime
 for this snapshot path: fetch the card. For bulk roster status, use
 `fractal agents ls --all --json`; roster fields such as `state`, `host_id`, and
 `operational` are not interchangeable with card state, host, or projection fields.
+
+An undecodable retained member (including an unknown newer member kind) produces
+`actual: {"unavailable":{"code":"member-version-unproven"}}` for that item,
+instead of failing the batch. Its declaration and selected token remain in the page;
+the current daemon omits `member` when it cannot decode it. The unavailable marker
+replaces the normal actual summary, so it carries no revision. Other items keep their
+normal summaries. Database, mission, declaration-body and other unrelated failures
+still fail the page. The CLI retains raw extensible item JSON from newer servers,
+including member payloads it cannot itself decode, and preserves unavailable markers.
 
 Non-agent actual summaries contain the published declaration `revision` and `digest`,
 plus `state` when cheaply maintained (`draft`, `ready`, or `retired` for missions).

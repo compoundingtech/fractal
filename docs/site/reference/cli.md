@@ -74,11 +74,14 @@ alongside `desired_token` (a selected declaration claim ID or `null`) and option
 `actual` (an extensible JSON summary). This is not a client-v0 envelope.
 
 An opaque cursor binds the store origin, pinned claim read cut, shared graph projection
-progress, selection filters, page limit and last subject. Continuations must keep the same
-subjects, kind and limit. Both the claim cut and graph projection health/frontier must remain
-unchanged; otherwise the API returns typed `desired-cursor-expired`. This frontier covers
-selected desired declarations and mission definitions, including backlog projection that
-changes these tables without appending claims or advancing `store_index`.
+progress, desired row-write generation, selection filters, page limit and last subject.
+Continuations must keep the same subjects, kind and limit. The claim cut, graph projection
+health/frontier and desired row-write generation must all remain unchanged; otherwise the
+API returns typed `desired-cursor-expired`. The frontier covers selected desired declarations
+and mission definitions, including backlog projection without claim appends. Transactional
+row-write triggers also fence repairs and corrections that leave both `store_index` and graph
+health unchanged. Validation reads these bounded witnesses in the page's pinned snapshot;
+it does not scan the declarations or use SQLite's connection-relative `data_version`.
 There is no historical snapshot or pagination cache, silent restart or automatic retry.
 The CLI uses limit 1,000 throughout, collects every page and prints one final JSON array
 only after all reads succeed. Cursor invalidation fails the command without partial stdout.
@@ -100,6 +103,13 @@ the body. Runtime and card state fields are intentionally absent. For bulk roste
 status, use `fractal agents ls --all --json`, whose status is not card state. See
 [the operational query contract](../../st3/operational-queries.md#bulk-desired-declarations)
 for exact omissions and the SHA-256 digest's canonical input.
+
+If a retained member payload cannot be decoded by this daemon (for example, a newer
+member kind), only that item's `actual` becomes
+`{"unavailable":{"code":"member-version-unproven"}}`; normal items and the page
+still succeed. This marker is not a revision or a negative runtime observation.
+Other read failures still fail the page. The CLI preserves extensible item JSON,
+including member payloads from newer daemons, rather than decoding each member locally.
 
 This automation read deliberately does not reduce status or fold cards. It is not a
 replacement for `fractal subject show SUBJECT` or `fractal agents show AGENT`: fetch

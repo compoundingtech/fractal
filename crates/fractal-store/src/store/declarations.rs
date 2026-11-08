@@ -70,7 +70,12 @@ pub fn selected(
                     desired: tree,
                     member: row
                         .member
-                        .map(|body| serde_json::from_str(&body).map_err(internal))
+                        .map(|body| serde_json::from_str(&body).map_err(|error| {
+                            FractalError::new(
+                                "member-version-unproven",
+                                format!("cannot decode retained member for `{subject}`: {error}"),
+                            )
+                        }))
                         .transpose()?,
                     owner_run: row.owner_run,
                     owner_generation: row.owner_generation,

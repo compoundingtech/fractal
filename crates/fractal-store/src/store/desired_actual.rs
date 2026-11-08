@@ -18,11 +18,36 @@
 //! metadata, token and actual summary are not. This is not the declaration revision algorithm.
 use super::*;
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum DesiredActualUnavailableCode {
+    MemberVersionUnproven,
+}
+
+#[derive(serde::Serialize)]
+struct DesiredActualUnavailable {
+    code: DesiredActualUnavailableCode,
+}
+
+#[derive(serde::Serialize)]
+struct DesiredActualUnavailableSummary {
+    unavailable: DesiredActualUnavailable,
+}
+
 impl Store {
     pub fn desired_actual_summary(&self, desired: &DesiredSubject) -> Result<Option<Value>> {
         let connection = self.readers.get();
-        let Some(definition) = declarations::selected(&connection, &desired.subject, None)? else {
-            return Ok(None);
+        let definition = match declarations::selected(&connection, &desired.subject, None) {
+            Ok(Some(definition)) => definition,
+            Ok(None) => return Ok(None),
+            Err(error) if error.code == "member-version-unproven" => {
+                return Ok(Some(serde_json::to_value(DesiredActualUnavailableSummary {
+                    unavailable: DesiredActualUnavailable {
+                        code: DesiredActualUnavailableCode::MemberVersionUnproven,
+                    },
+                })?));
+            }
+            Err(error) => return Err(error.into()),
         };
         let mut summary = serde_json::Map::new();
         summary.insert("revision".into(), json!(definition.revision));
@@ -103,6 +128,48 @@ mod tests {
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();
         assert_agent_fields(&store, "stopped");
+    }
+
+    #[test]
+    fn newer_member_payload_is_unavailable_without_failing_other_batch_items() {
+        let store = Store::open_memory("node").unwrap();
+        let intent = crate::graph::parse_intent(
+            "version 2\nagent \"example/before\" { command \"true\"; workspace \".\"; restart \"never\"; }\nagent \"example/newer\" { command \"true\"; workspace \".\"; restart \"never\"; }\nagent \"example/after\" { command \"true\"; workspace \".\"; restart \"never\"; }\n",
+            "node",
+        ).unwrap();
+        publish(&store, &intent, "publish-members");
+        let request = desired_batch::DesiredBatchRequest::default();
+        let before = store.desired_batch(&request).unwrap();
+        let mut member = serde_json::to_value(
+            intent.subjects["agent/example/newer"].member.as_ref().unwrap(),
+        ).unwrap();
+        member["kind"] = json!("future-member-kind");
+        store.replace_desired_member_for_test(
+            "agent/example/newer", &serde_json::to_string(&member).unwrap(),
+        );
+
+        let page = store.desired_batch(&request).unwrap();
+        assert_eq!(page.items.len(), 3);
+        assert!(page.next_cursor.is_none());
+        assert_eq!(page.store_index, before.store_index);
+        for (item, original) in page.items.iter().zip(&before.items) {
+            assert_eq!(item.declaration.subject, original.declaration.subject);
+            assert_eq!(item.desired_token, original.desired_token);
+            if item.declaration.subject == "agent/example/newer" {
+                assert_eq!(item.actual, Some(json!({
+                    "unavailable": {"code": "member-version-unproven"},
+                })));
+                assert!(item.declaration.member.is_none());
+            } else {
+                assert_eq!(item.actual, original.actual);
+                assert!(item.actual.as_ref().unwrap()["revision"].is_string());
+            }
+        }
+        // Other declaration consumers still receive the precise decode failure.
+        let connection = store.readers.get();
+        let error = declarations::selected(&connection, "agent/example/newer", None).unwrap_err();
+        assert_eq!(error.code, "member-version-unproven");
+        assert!(error.message.contains("future-member-kind"));
     }
 
     #[test]
