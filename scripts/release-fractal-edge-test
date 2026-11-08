@@ -176,6 +176,14 @@ with tempfile.TemporaryDirectory() as temporary:
     notes = second['release']['notes']
     assert 'second change' in notes and 'third change' in notes and 'first change' not in notes, notes
     assert sum(1 for call in second['calls'] if call[:2] == ['release', 'create']) == 1, 'one release, not one per commit'
+    updates = second['calls'][len(first['calls']):]
+    uploads = [(index, [Path(path).name for path in call[call.index('--clobber') + 1:]])
+               for index, call in enumerate(updates) if call[:2] == ['release', 'upload']]
+    patch = next(index for index, call in enumerate(updates) if 'PATCH' in call)
+    assert len(uploads) == 4 and uploads[0][0] < patch < uploads[1][0], uploads
+    assert uploads[2][1] == ['SHA256SUMS'] and uploads[3][1] == ['RELEASE.json'], uploads
+    assert set(uploads[1][1]) == set(first['release']['assets']) - {'SHA256SUMS', 'RELEASE.json'}, uploads
+    print('passed: test_manifest_uploaded_alone_after_all_aliases_and_checksums')
 
     # Rerunning the same commit is harmless; a run for an older commit changes nothing at all.
     checkout_tags()

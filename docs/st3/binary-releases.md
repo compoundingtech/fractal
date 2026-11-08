@@ -205,7 +205,8 @@ After a `main` run of **Fractal tag release** passes every job, its last job (`r
 moves one GitHub pre-release, tagged `edge`, to that commit. It is a single release that is updated, not
 one release per commit. It builds nothing: it takes the run's `fractal-release` artifact, re-checks the
 checksums and the source recorded in each archive, uploads source-qualified staging copies, and moves
-the tag before replacing the fixed-name archives, `.sha256` files, `SHA256SUMS` and `RELEASE.json`.
+the tag before replacing the fixed-name archives and `.sha256` files, then `SHA256SUMS`, then
+`RELEASE.json` alone as the final source commit marker (separate sequential uploads).
 It then removes stale assets and rewrites the notes, which give the exact source commit, a link to the run,
 and the merged pull request titles since the previous edge (at most 30).
 Archives carry no tag in `BUILD.json`; `source` identifies the commit.

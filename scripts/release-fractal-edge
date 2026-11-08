@@ -187,7 +187,12 @@ def main():
         if tag_commit(repository) != args.source:
             gh('api', '--method', 'PATCH', f'repos/{repository}/git/refs/tags/{TAG}',
                '-f', f'sha={args.source}', '-F', 'force=true', done=lambda: tag_commit(repository) == args.source)
-        gh('release', 'upload', TAG, '--repo', repository, '--clobber', *files)
+        aliases = [str(dist / n) for n in names if n not in ('SHA256SUMS', 'RELEASE.json')]
+        gh('release', 'upload', TAG, '--repo', repository, '--clobber', *aliases)
+        gh('release', 'upload', TAG, '--repo', repository, '--clobber', str(dist / 'SHA256SUMS'))
+        # gh may upload multiple files concurrently: publish the manifest alone, last,
+        # so it cannot declare a complete source while fixed aliases are still uploading.
+        gh('release', 'upload', TAG, '--repo', repository, '--clobber', str(dist / 'RELEASE.json'))
     for leftover in sorted((release_assets(repository) or set()) - set(names)):
         gh('release', 'delete-asset', TAG, leftover, '--repo', repository, '--yes',
            done=lambda leftover=leftover: leftover not in (release_assets(repository) or set()))
