@@ -10,6 +10,7 @@ import { EmbraceComposer } from './assistant-ui/EmbraceComposer'
 import type { ConversationItem, SendState, TextItem } from './assistant-ui/embrace-data/model'
 import { workLogTurnFromItems, type WorkLogCall } from './assistant-ui/taste/work-log'
 import { WorkLogV1 } from './assistant-ui/taste/WorkLogV1'
+import { Button, Tooltip } from './assistant-ui/composition/Controls'
 import type { SyncStatus } from './assistant-ui/sync-presentation/sync-status'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
@@ -649,7 +650,7 @@ const hugeOutputItems: readonly ConversationItem[] = [
   { name: 'Running a command', id: 'short' },
 ].map(({ name, id }) => ({ _tag: 'ToolCall', id: `huge-output/${id}`, callId: `huge-call/${id}`, name, input: {}, status: 'success', callSeen: true, at, result: { content: hugeOutput, isError: false, at } }))
 const hugeOutputTurn = workLogTurnFromItems(hugeOutputItems, { kindFor: () => 'read', running: false, failed: false, interrupted: false, completeHistory: true })
-export const HugeOutputHoverLabel: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><div {...stylex.props(styles.narrowLog)}><WorkLogV1 turn={hugeOutputTurn} /></div></main>, play: async ({ canvasElement }) => {
+export const HugeOutputHoverLabel: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><div {...stylex.props(styles.narrowLog)}><WorkLogV1 turn={hugeOutputTurn} /></div><Tooltip label={hugeOutput}><Button>Kit tooltip fed the whole output</Button></Tooltip></main>, play: async ({ canvasElement }) => {
   await expect(hugeOutput.length).toBeGreaterThan(50_000)
   const canvas = within(canvasElement)
   await userEvent.click(canvas.getByRole('button', { name: 'Worked · 2 tools' }))
@@ -675,6 +676,16 @@ export const HugeOutputHoverLabel: Story = { tags: ['critical'], render: args =>
   await expect(box.height).toBeLessThanOrEqual(160)
   await userEvent.unhover(long)
   await waitFor(() => expect(tooltips()).toHaveLength(0))
+  // The kit surface itself bounds a label it should never have been given.
+  const kit = canvas.getByRole('button', { name: 'Kit tooltip fed the whole output' })
+  await userEvent.hover(kit)
+  await waitFor(() => expect(tooltips()).toHaveLength(1))
+  const kitBox = tooltips()[0]!.getBoundingClientRect()
+  await expect(kitBox.height).toBeLessThanOrEqual(160)
+  await expect(kitBox.top).toBeGreaterThanOrEqual(0)
+  await expect(kitBox.bottom).toBeLessThanOrEqual(window.innerHeight)
+  await expect(kitBox.right).toBeLessThanOrEqual(window.innerWidth)
+  await userEvent.unhover(kit)
 } }
 export const Streaming: Story = { tags: ['critical'], args: { state: 'streaming' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
