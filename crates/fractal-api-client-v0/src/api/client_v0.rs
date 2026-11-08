@@ -5850,6 +5850,14 @@ pub async fn pairing_complete(
                 == Some(pairing_id.as_str())
         })
         .ok_or_else(|| ApiError::not_found(format!("pairing `{pairing_id}` does not exist")))?;
+    if begun.origin != state.store.origin() {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "pairing-origin-required".into(),
+            message: "complete pairing on the member that began it".into(),
+            details: Box::default(),
+        });
+    }
     let used = !state
         .store
         .claims_for_subject_kind_at(&subject, "custom.client.pairing-completed", None, true, 1)
@@ -8223,8 +8231,8 @@ async fn dispatch_action(
                 MessageSendRequest {
                     idempotency_key: request.idempotency_key.clone(),
                     // Owner authority permits the operation, but is never the assistant's sender.
-                    from: if session.assistant_write.is_some() {
-                        assistant::PRINCIPAL.into()
+                    from: if let Some(authorization) = session.assistant_write.as_ref() {
+                        authorization.principal().into()
                     } else {
                         authority_actor.clone()
                     },

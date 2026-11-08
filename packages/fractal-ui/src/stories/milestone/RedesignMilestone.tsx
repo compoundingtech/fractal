@@ -10,9 +10,10 @@ import { Pane, PaneHeaderButton, PaneHeaderToggle } from '../../assistant-ui/com
 import { ConnectionStatus } from '../../assistant-ui/composition/SystemState'
 import { DiffPanel, type DiffRevealRequest } from '../../assistant-ui/composition/DiffPanel'
 import { ResourceChipV1 } from '../../assistant-ui/resources/ResourceCardV1'
-import type { TranscriptTurn } from '../../assistant-ui/composition/Transcript'
+import type { TranscriptProps, TranscriptTurn } from '../../assistant-ui/composition/Transcript'
 import type { WorkLogCall } from '../../assistant-ui/taste/work-log'
 import type { SyncStatus } from '../../assistant-ui/sync-presentation/sync-status'
+import { SyncLine } from '../../assistant-ui/sync-presentation/SyncLine'
 import type { SidebarAgentRow as Row } from '../../assistant-ui/sidebar/model'
 import { baselineTheme } from '../../assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from '../../assistant-ui/composition-theme'
@@ -36,7 +37,9 @@ export interface MilestoneRoster {
   readonly query: string
 }
 export interface MilestoneConversation {
-  readonly threads: Readonly<Record<string, { readonly turns: readonly TranscriptTurn[]; readonly running: boolean }>>
+  readonly threads: Readonly<Record<string, { readonly turns: readonly TranscriptTurn[]; readonly running: boolean; readonly history?: TranscriptProps['history'] }>>
+  /** Host-projected status, retained without reconstructing transport facts from a load tag. */
+  readonly sync?: SyncStatus
   readonly primaryRef: string
   readonly reviewerRef: string
   readonly lastSeen: Extract<ThreadView, { readonly _tag: 'Stale' }>['lastSeen']
@@ -111,6 +114,7 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
     return { key: ref, title, status: row.status, statusLabel: row.statusLabel }
   }
   const threadSync = (current: Phase): SyncStatus => {
+    if (props.conversation.value.sync !== undefined) return props.conversation.value.sync
     if (current === 'loading' || current === 'thread-retry') return { _tag: 'Connecting', attempt: 1, since: milestoneNow - 1200 }
     if (current === 'stale') return { _tag: 'Stale', reason: { _tag: 'Reconnecting', attempt: 2, nextAt: milestoneNow + 4000, issue: 'Gateway connection interrupted' }, lastLiveAt: lastSeen.at }
     return { _tag: 'Live', since: milestoneNow - 30_000 }
@@ -209,7 +213,7 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
     })
     return <MilestoneThread key={key} title={rowFor(key)?.title ?? key} view={view} now={milestoneNow}
       runtime={{ messages: turns.flatMap(turn => [...(turn.prompt === undefined ? [] : [turn.prompt]), ...turn.items]), isRunning: running, onNew: async message => send(message.content.flatMap(part => part.type === 'text' ? [part.text] : []).join('\n')) }}
-      transcript={{ turns, sync, now: milestoneNow, observedAt: props.conversation._tag === 'stale' ? props.conversation.observedAt : milestoneNow, renderInlineReference, onOpenTool: openTool, viewportKey: `${props.persistKey}.${key}` }}
+      transcript={{ turns, history: props.conversation.value.threads[key]?.history, sync, now: milestoneNow, observedAt: props.conversation._tag === 'stale' ? props.conversation.observedAt : milestoneNow, renderInlineReference, onOpenTool: openTool, viewportKey: `${props.persistKey}.${key}` }}
       composer={{ running, folder: 'fractal-web', branch: 'feat/metric-track', onSend: send, onSteer: send, draftKey: `${props.persistKey}.${key}` }} />
   }
 
@@ -234,7 +238,11 @@ export function RedesignMilestone(props: RedesignMilestoneProps) {
         <Modal {...stylex.props(styles.drawer)}><Dialog aria-label="Agents" {...stylex.props(styles.drawerDialog)}>{sidebar}</Dialog></Modal>
       </ModalOverlay>}
       <main aria-label="Workspace" {...stylex.props(styles.main)}>
-        {phase === 'stale' && <ConnectionStatus state="reconnecting" text="Next try in 4s · attempt 2" />}
+        {props.conversation.value.sync === undefined
+          ? phase === 'stale' && <ConnectionStatus state="reconnecting" text="Next try in 4s · attempt 2" />
+          : sync._tag === 'Stale' && sync.reason._tag === 'Reconnecting'
+            ? <ConnectionStatus state="reconnecting" text={`${sync.reason.issue} · Next try in ${Math.ceil(Math.max(0, sync.reason.nextAt - milestoneNow) / 1000)}s · attempt ${sync.reason.attempt}`} />
+            : <SyncLine status={sync} label="conversation" now={milestoneNow} observedAt={props.conversation._tag === 'stale' ? props.conversation.observedAt : milestoneNow} inline />}
         {shownKey === undefined
           ? <div {...stylex.props(styles.emptyFrame)}>
             {sidebarHidden && <div {...stylex.props(styles.emptyBar)}>{showSidebar}</div>}
