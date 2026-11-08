@@ -66,6 +66,7 @@ async fn main() -> anyhow::Result<()> {
     )?);
     let socket = root.join("st3.sock");
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),

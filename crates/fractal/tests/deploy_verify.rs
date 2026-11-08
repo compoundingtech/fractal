@@ -90,6 +90,7 @@ async fn verifier_cli_api_uses_signed_local_replica_and_fixed_policy() {
     let store = Arc::new(store);
     let before = store.event_bounds().unwrap();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person:None, store:store.clone(), notify:Arc::new(Notify::new()), event_notify:watch::channel(0).0,
         node:"host-a".into(), state_dir:root.path().into(), pty_root:root.path().join("pty"), pty_binary:"pty".into(),

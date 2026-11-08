@@ -104,6 +104,7 @@ agent "garden/worker" {{
         .unwrap();
     let socket = root.path().join("api.sock");
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),

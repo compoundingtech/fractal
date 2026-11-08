@@ -325,6 +325,7 @@ mod tests {
     fn report_enforces_terminal_retention_before_original_deadline_cleanup() {
         let root = tempfile::tempdir().unwrap();
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             store: Arc::new(Store::open(&root.path().join("graph.db"), "report-retention").unwrap()),
             notify: Arc::new(Notify::new()), event_notify: watch::channel(0u64).0,
