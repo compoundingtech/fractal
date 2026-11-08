@@ -54,6 +54,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         "scripts/release-fractal*",
         "scripts/release_artifact.py",
         "scripts/release-fractal-embed.mjs",
+        "scripts/release_gh.py",
         "apps/fractal-web/**",
         "scripts/release_notes*",
         "scripts/compat-baseline-release*",
