@@ -5941,7 +5941,7 @@ impl MissionsStore for Store {
         let committed = self
             .connection
             .batched(|transaction| -> Result<(StepRunView, Option<u128>), FractalError> {
-                let actor = physical_actor(transaction, &actor)?;
+                let actor = physical_actor(transaction, actor)?;
                 validate_work_write_actor(&actor)?;
                 #[cfg(any(test, feature = "test-support"))]
                 let _writer_work = WorkActionWriterProbe::start(&request.idempotency_key);
