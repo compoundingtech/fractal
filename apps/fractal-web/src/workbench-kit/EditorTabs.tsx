@@ -9,6 +9,7 @@
 
 import * as stylex from '@stylexjs/stylex'
 import {
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -18,6 +19,7 @@ import {
   type ReactNode,
   type Ref,
 } from 'react'
+import { createPortal } from 'react-dom'
 import { mergeProps, mergeRefs, useDrop, type DropItem } from 'react-aria'
 import { Tab, TabList, TabPanel, Tabs, type Key } from 'react-aria-components'
 import { HoverCardSurface, useHoverCardIntent } from '../../../../packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx'
@@ -676,9 +678,7 @@ export const EditorTabs = ({
         </span>
       </Bar>
       {stablePanel ? (
-        <TabPanel key="stable" id={activeId ?? ''} shouldForceMount {...stylex.props(styles.panel)}>
-          {children}
-        </TabPanel>
+        <StableTabPanel activeId={activeId}>{children}</StableTabPanel>
       ) : activeId === null ? (
         children
       ) : (
@@ -688,6 +688,25 @@ export const EditorTabs = ({
       )}
     </Tabs>
   )
+}
+
+/**
+ * RAC's useId retains the first panel id, so its semantic shell must remount on selection. The portal target does
+ * not: moving that same node into the new shell preserves PaneSlot and every surface portalled into it.
+ */
+const StableTabPanel = ({ activeId, children }: { readonly activeId: string | null; readonly children: ReactNode }) => {
+  const [content] = useState(() => {
+    const node = document.createElement('div')
+    node.className = stylex.props(styles.panel).className ?? ''
+    return node
+  })
+  const attach = useCallback((panel: HTMLDivElement | null) => {
+    if (panel !== null) panel.appendChild(content)
+  }, [content])
+  return <>
+    <TabPanel key={activeId ?? ''} id={activeId ?? ''} shouldForceMount ref={attach} {...stylex.props(styles.panel)} />
+    {createPortal(children, content)}
+  </>
 }
 
 interface TabItemProps {

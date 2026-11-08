@@ -93,6 +93,25 @@ it('opens or focuses one tab per subject from the sidebar, and the URL follows',
   expect(window.location.pathname).toBe('/w/agent/a')
 })
 
+it('keeps the pane slot while every selected tab controls its current, labelled panel', async () => {
+  await mount()
+  const slot = host.querySelector('[data-pane-slot-content]')!
+  expect(slot).not.toBeNull()
+  const assertPanel = () => {
+    const tab = strip().find(tab => tab.getAttribute('aria-selected') === 'true')!
+    const panel = document.getElementById(tab.getAttribute('aria-controls')!)
+    expect(panel?.getAttribute('role')).toBe('tabpanel')
+    expect(panel?.getAttribute('aria-labelledby')).toBe(tab.id)
+    expect(panel?.contains(slot)).toBe(true)
+    expect(host.querySelector('[data-pane-slot-content]')).toBe(slot)
+  }
+  assertPanel()
+  await act(async () => row('agent/b').click())
+  assertPanel()
+  await act(async () => row('agent/a').click())
+  assertPanel()
+})
+
 it('reopens a closed tab when history arrives back at its subject', async () => {
   await mount()
   await act(async () => row('agent/b').click())
