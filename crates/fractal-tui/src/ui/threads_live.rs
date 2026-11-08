@@ -780,8 +780,12 @@ impl Threads {
         doc.blank();
     }
 
-    pub(super) fn hover(&mut self, message: Option<String>) {
-        self.hover = message;
+    pub(super) fn hover(&mut self, message: Option<&str>) -> bool {
+        if self.hover.as_deref() == message {
+            return false;
+        }
+        self.hover = message.map(str::to_owned);
+        true
     }
 
     pub(super) fn tap(

@@ -4125,6 +4125,7 @@ impl Ui {
         }
         if event == Event::FocusLost {
             self.hover.clear();
+            self.threads.hover(None);
             self.hover.pressed.set(false);
             self.dragging = false;
             self.middle_tab = None;
@@ -5959,13 +5960,6 @@ impl Ui {
         }
 
         if mouse.kind == MouseEventKind::Moved {
-            let message = self.frame.borrow().hits.iter().find_map(|(rect, hit)| {
-                if rect.contains((mouse.column, mouse.row).into())
-                    && let Hit::Thread(_, thread::Tap::MessageHeader(id)) = hit {
-                    Some(id.clone())
-                } else { None }
-            });
-            self.threads.hover(message);
             self.mouse_moved(mouse);
             return;
         }
