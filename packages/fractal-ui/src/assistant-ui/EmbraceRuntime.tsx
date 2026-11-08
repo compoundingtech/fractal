@@ -39,8 +39,10 @@ function createRuntimeAdoptionStore() {
 const historyAdoptionBatchSize = 8
 /**
  * The runtime eagerly builds message resources even for rows the transcript leaves unmounted.
- * Adopt an older prefix in small paint-sized batches, retaining the current suffix throughout.
- * Replacements and live tail changes remain immediate.
+ * Adopt an older prefix in small paint-sized batches, retaining the current suffix throughout,
+ * starting on the frame after the prepend: React flushes a discrete update's passive effects
+ * before that frame paints, so adopting here would rebuild the runtime inside the frame that
+ * delivered the page. Replacements and live tail changes remain immediate.
  */
 function useHistoryAdoption(options: ConversationRuntimeOptions): ConversationRuntimeOptions {
   const [window, setWindow] = React.useState({ source: options, offset: 0 })
@@ -50,7 +52,7 @@ function useHistoryAdoption(options: ConversationRuntimeOptions): ConversationRu
     const messages = options.messages
     const added = messages === undefined || previous === undefined ? 0 : messages.length - previous.length
     offset = messages !== undefined && previous !== undefined && added > 0 && previous.length > 0 && previous.every((item, index) => messages[added + index] === item)
-      ? Math.max(0, added - historyAdoptionBatchSize)
+      ? added
       : 0
     setWindow({ source: options, offset })
   }
