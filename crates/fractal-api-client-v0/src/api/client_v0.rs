@@ -552,13 +552,16 @@ async fn collection_items_with_windows(
     if request.status.is_some() && request.collection != "agents" {
         return Err(validation("status filters are supported for agents only"));
     }
-    if request.subject.is_some() && !matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "thread-timeline") {
+    if request.subject.is_some() && !matches!(request.collection.as_str(), "arrangements" | "ordered-memberships" | "threads" | "thread-timeline") {
         return Err(validation("this collection does not accept a subject filter"));
     }
     if request.collection == "ordered-memberships" && request.subject.is_none() {
         return Err(validation("ordered memberships require an arrangement subject"));
     }
     validate_agent_selector(&request.collection, request.agent.as_deref())?;
+    if request.attention_thread_hints && request.collection != "attention" {
+        return Err(validation("thread hints are supported for attention only"));
+    }
     let limit = request.limit.unwrap_or(CLIENT_DEFAULT_PAGE_ITEMS);
     if !(1..=CLIENT_MAX_PAGE_ITEMS).contains(&limit) {
         return Err(validation("collection limit must be 1 through 200"));
@@ -574,7 +577,7 @@ async fn collection_items_with_windows(
     // Arrangement ownership and paired-window authority both read the store. Admit this
     // preliminary physical read with the same bare waits as the eventual window query.
     let current = if matches!(request.collection.as_str(), "arrangements" | "ordered-memberships")
-        || (windows.is_some() && session.transport != "unix")
+        || (windows.is_some() && !session.is_unpaired_unix())
     {
         Some(if state.store.readers.has_request_reader() {
             revalidate_session(state, session)?
@@ -677,7 +680,7 @@ async fn collection_items_with_windows(
                 let now = client_now_ms();
                 // Recheck paired grants, including expiry and changed scopes, before any reuse.
                 let (current, person) = match (|| {
-                    let current = if session.transport == "unix" {
+                    let current = if session.is_unpaired_unix() {
                         session.clone()
                     } else {
                         revalidate_session(&state, &session)?
@@ -1023,6 +1026,9 @@ async fn collection_items_with_windows(
                     has_more |= items.len() > limit;
                     items.truncate(limit);
                 }
+                if collection == "attention" && request.attention_thread_hints {
+                    overlay_attention_thread_unread(&store, &current, &mut items)?;
+                }
                 if collection == "agents" {
                     // The window's shared rows are in hand; each reader's live overlay runs
                     // beside the others instead of behind them.
@@ -1070,6 +1076,25 @@ async fn collection_items_with_windows(
         items.truncate(end);
     }
     Ok((snapshot, items, has_more, owner_revision))
+}
+
+/// Overlay only the visible owner window. Shared attention rows remain undecorated.
+fn overlay_attention_thread_unread(
+    store: &Store,
+    session: &ClientSession,
+    items: &mut [Value],
+) -> anyhow::Result<()> {
+    let Ok(person) = thread_access::read_person(session) else { return Ok(()) };
+    let (positions, asks): (Vec<_>, Vec<_>) = items.iter().enumerate().filter_map(|(position, item)| {
+        if item["attention_kind"] != "person-step" || item["person_id"] != person {
+            return None;
+        }
+        Some((position, (item["source_id"].as_str()?, item["episode"].as_str()?)))
+    }).unzip();
+    for position in crate::store::thread_metadata::unread_ask_positions(store, person, &asks)? {
+        items[positions[position]]["thread_unread"] = json!(true);
+    }
+    Ok(())
 }
 
 /// Membership and display order come from the existing shallow page refs. The next
@@ -2446,7 +2471,10 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 }
                 let followed = |s: &CollectionSubscription| s.ivm.is_none() && s.request.agents_publication_version.is_none()
                     && !state.store.collection_view_published(&s.request.collection);
-                if !subscriptions.values().any(followed) {
+                let follows_thread_hints = |s: &CollectionSubscription| s.ivm.is_none()
+                    && s.request.collection == "attention" && s.request.attention_thread_hints
+                    && thread_access::read_person(&session).is_ok();
+                if !subscriptions.values().any(|s| followed(s) || follows_thread_hints(s)) {
                     weighed = index;
                     continue;
                 }
@@ -2461,12 +2489,15 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     };
                     match revisions {
                         Ok(revisions) => {
-                            affected.extend(subscriptions.iter().filter(|(_, s)| followed(s)
-                                && collection_windows::Windows::changed(&s.request.collection, &window_revisions, &revisions))
-                                .map(|(id, _)| id.clone()));
+                            let hints_changed = collection_windows::Windows::changed(
+                                collection_windows::ATTENTION_THREAD_HINTS, &window_revisions, &revisions,
+                            );
+                            affected.extend(subscriptions.iter().filter(|(_, s)| (
+                                followed(s) && collection_windows::Windows::changed(&s.request.collection, &window_revisions, &revisions)
+                            ) || (hints_changed && follows_thread_hints(s))).map(|(id, _)| id.clone()));
                             window_revisions = revisions;
                         }
-                        Err(_) => affected.extend(subscriptions.iter().filter(|(_, s)| followed(s)).map(|(id, _)| id.clone())),
+                        Err(_) => affected.extend(subscriptions.iter().filter(|(_, s)| followed(s) || follows_thread_hints(s)).map(|(id, _)| id.clone())),
                     }
                     weighed = index;
                 } else if index > weighed {
@@ -2474,7 +2505,9 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                     let glasses_changed = subscriptions.values().any(|s| s.request.collection == "glasses") && state.store.glasses_changed(weighed, index).unwrap_or(true);
                     let arrangements_changed = subscriptions.values().any(|s| s.request.collection == "arrangements") && state.store.arrangements_changed(weighed, index).unwrap_or(true);
                     let memberships_changed = subscriptions.values().any(|s| s.request.collection == "ordered-memberships") && state.store.ordered_memberships_changed(weighed, index).unwrap_or(true);
-                    affected.extend(subscriptions.iter().filter(|(_, s)| followed(s) && (
+                    let hints_changed = subscriptions.values().any(follows_thread_hints)
+                        && crate::store::thread_metadata::attention_unread_changed(&state.store, weighed, index).unwrap_or(true);
+                    affected.extend(subscriptions.iter().filter(|(_, s)| (hints_changed && follows_thread_hints(s)) || followed(s) && (
                         (glasses_changed && s.request.collection == "glasses")
                         || (arrangements_changed && s.request.collection == "arrangements")
                         || (memberships_changed && s.request.collection == "ordered-memberships")
@@ -2586,7 +2619,7 @@ async fn collection_stream_socket_with_admission<F, Fut, A, Admission>(
                 // Grace periods, leases and queue deadlines pass without a claim, and so does a
                 // paired grant's expiry. Stable rows remain reusable; authority and local
                 // overlays are rechecked on reads.
-                let paired = session.transport != "unix";
+                let paired = !session.is_unpaired_unix();
                 refresh.extend(subscriptions.iter().filter(|(_, s)| s.ivm.is_none()
                     && (paired && !inventory::is_inventory(&s.request.collection) || collection_follows_clock(&s.request.collection)))
                     .map(|(id, _)| id.clone()));
@@ -9399,6 +9432,9 @@ async fn action_inner(
     }
     if matches!(request.action_type.as_str(), "thread.start" | "thread.reply") {
         return threads::message_action(state, session, request).await;
+    }
+    if request.action_type == "thread.read" {
+        return threads::read_action(state, session, request).await;
     }
     if request.action_type == "thread.link-ask" {
         return threads::link_ask_action(state, session, request).await;

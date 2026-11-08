@@ -1011,6 +1011,7 @@
             "source_id": { "$ref": "#/$defs/Id" },
             "person_id": { "$ref": "#/$defs/Id" },
             "alert": { "type": "boolean", "description": "Whether this item is an alert: it blocks or waits on its person (an ask, a human gate, a launch or revision approval, an agent or custom request, a harness prompt or login, or a broken gate the person published). An update is not one. Absent on daemons that predate alerts." },
+            "thread_unread": { "type": "boolean", "description": "True when the authenticated person has an unread incoming reply in a thread for this exact ask episode. Absent otherwise." },
             "conversation_id": { "$ref": "#/$defs/Id", "description": "The agent whose conversation this item belongs to: the agent that asked, whose work a gate reviews, that planned the launch or proposed the revision, or the seat itself. Absent when no agent is behind it." },
             "conversation_ids": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "description": "Every agent conversation this item shows in, starting with conversation_id. A harness login alert names every seat that shares the login, since one sign-in answers them all." },
             "requester_id": { "$ref": "#/$defs/Id" },
@@ -3347,6 +3348,15 @@
         "private_notes": { "$ref": "#/$defs/PrivateNotesFence" }
       }
     },
+    "ThreadReadParameters": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target_id", "through_message_id", "seen_message_ids"],
+      "properties": {
+        "target_id": {"type":"string","pattern":"^thread/[A-Za-z0-9_-]{1,128}$"},
+        "through_message_id": {"type":["string","null"],"pattern":"^message/.+","maxLength":512},
+        "seen_message_ids": {"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","pattern":"^message/.+","maxLength":512}}
+      }
+    },
     "ActionCommon": {
       "type": "object",
       "additionalProperties": false,
@@ -3373,6 +3383,7 @@
             "review.request-changes",
             "message.send",
             "message.read",
+            "thread.read",
             "message.close",
             "launch.create",
             "launch.revise",
@@ -3601,6 +3612,7 @@
             }
           }
         },
+        { "properties": { "type": { "const": "thread.read" }, "parameters": { "$ref": "#/$defs/ThreadReadParameters" } } },
         { "properties": { "type": { "enum": ["message.read", "message.close"] }, "parameters": { "$ref": "#/$defs/TargetParameters" } } },
         {
           "properties": {
@@ -4558,6 +4570,7 @@
         { "$ref": "#/$defs/AgentsPublicationSubscribe" },
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "subject"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "thread-timeline"}, "subject": {"type": "string", "pattern": "^thread/[A-Za-z0-9_-]{1,128}$"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "thread_context"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "threads"}, "thread_context": {"$ref": "#/$defs/ThreadCollectionContext"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "subject"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "threads"}, "subject": {"type": "string", "pattern": "^thread/[A-Za-z0-9_-]{1,128}$"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "commands"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "actor": {"type": ["string", "null"]}, "status": {"type": ["string", "null"]}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}, "collection": {"enum": ["clients", "usage", "machines", "devices", "sessions", "terminals"]}, "actor": {"type":"null"}, "status": {"type":"null"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "person": {"type": ["string", "null"]}, "since_ms": {"type": "integer", "minimum": 0}, "until_ms": {"type": "integer", "minimum": 0}}},
         {
@@ -4569,6 +4582,7 @@
             "id": { "type": "string", "minLength": 1, "maxLength": 128 },
             "trace": { "$ref": "#/$defs/SubscribeTraceContext" },
             "collection": { "enum": ["missions", "attention", "work", "glasses", "summary"] },
+            "attention_thread_hints": { "type": "boolean", "description": "Opt into the owner thread hint on an attention subscription after collection.attention.thread-hints is granted." },
             "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
             "person": { "type": ["string", "null"] },
             "actor": { "type": ["string", "null"] },
