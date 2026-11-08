@@ -6839,7 +6839,7 @@ fn device_renewal_staging_requires_audited_terms_without_key_or_scope_overrides(
 async fn device_renewal_staging_refuses_remote_endpoints_without_connecting() {
     for endpoint in [
         Endpoint::Http("http://127.0.0.1:1".into()),
-        Endpoint::parse("fabric://devbox/st3-client-v0".into()).unwrap(),
+        Endpoint::parse("fabric://devbox/st3-client-v0").unwrap(),
     ] {
         let error = stage_device_renewal(&endpoint, "person/alex", DeviceRenewalStageRequest {
             api_version: CLIENT_V0_API_VERSION,
