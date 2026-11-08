@@ -1019,6 +1019,9 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/status", "/v1/status?subject={seat}"),
     get("GET /v1/desired/{*subject}", "/v1/desired/{seat}"),
+    post("POST /v1/desired/batch", "/v1/desired/batch", |fixture, _| {
+        json!({"subjects": [fixture.subjects.seats[0]]})
+    }),
     get(
         "GET /v1/resource-references/{*subject}",
         "/v1/resource-references/resource/bench/cost",
