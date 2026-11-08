@@ -93,6 +93,21 @@ pub fn assert_card_fold_parity(store: &Store, indexes: &[u64]) {
                 .map(|status| serde_json::to_value(status).unwrap())
                 .collect::<Vec<_>>();
             assert_eq!(cold, expected, "cold roster status at {index}, history={history}");
+            // The presentation projection must retain membership, authority and all consumed
+            // fields at historical cuts, after reopen/repair/trim and across batch ordering.
+            let mut projected = cold.clone();
+            for status in &mut projected {
+                if let Some(actual) = status["actual"].as_object_mut() {
+                    actual.retain(|field, _| roster_actual::FIELDS.contains(&field.as_str()));
+                }
+            }
+            store.forget_current_views();
+            let roster = store.agent_roster_status_at(None, index, history).unwrap();
+            let roster = roster.subjects.into_iter().map(|status| serde_json::to_value(status).unwrap()).collect::<Vec<_>>();
+            assert_eq!(roster, projected, "projected roster at {index}, history={history}");
+            let full_again = store.agent_card_status_for_generic_reads_at(None, index, history).unwrap();
+            let full_again = full_again.subjects.into_iter().map(|status| serde_json::to_value(status).unwrap()).collect::<Vec<_>>();
+            assert_eq!(full_again, cold, "a projected cache entry leaked into a full card read");
         }
     }
 }

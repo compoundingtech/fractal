@@ -2768,7 +2768,7 @@ fn agent_card_status_cache_has_a_fixed_entry_cap_and_repair_clears_it() {
         for n in 0..AGENT_CARD_STATUS_LIMIT {
             cache.card_statuses.insert(format!("agent/fill/{n}"), StatusEntry {
                 read_at: cut, owners: Vec::new(), claims: ClaimsReduction::AgentCard,
-                status: first.subjects[0].clone(), action: None,
+                status: first.subjects[0].clone(), action: None, card_shape: CardShape::Internal,
             });
         }
     }

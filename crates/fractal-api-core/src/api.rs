@@ -3681,7 +3681,7 @@ fn client_agent_resources_selected(
     changed: Option<(&BTreeSet<String>, &[Value])>,
 ) -> anyhow::Result<Vec<Value>> {
     pinned_unless_enclosed(store, || {
-        let status = crate::otel::roster_phase("status_fold", || store.agent_card_status_for_generic_reads_at(
+        let status = crate::otel::roster_phase("status_fold", || store.agent_roster_status_at(
             changed.map(|(subjects, _)| subjects), snapshot_index, history,
         ))?;
         client_agent_resources_from_status(store, history, snapshot_index, changed, status)
@@ -6028,7 +6028,7 @@ fn warm_agent_roster(store: &Store) -> anyhow::Result<()> {
     for chunk in subjects.chunks(AGENT_ROSTER_WARM_CHUNK) {
         let names = chunk.iter().cloned().collect::<BTreeSet<_>>();
         store.read_snapshot(|index| crate::otel::roster_phase("status_fold", || {
-            store.agent_card_status_for_generic_reads_at(Some(&names), index, false).map(drop)
+            store.agent_roster_status_at(Some(&names), index, false).map(drop)
         }))?;
     }
     Ok(())

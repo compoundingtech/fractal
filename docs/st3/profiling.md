@@ -28,12 +28,22 @@ named barrier runs. Plain CLI listings send neither and remain `first-page` read
 `scope: "agents-roster"` rows (also under route `/v1/client/agents`) time where that wait goes,
 each in its own last-512 sample, `duration_scope: "roster-stage"`. Stage `refresh` is one refresher
 fold from the previous publication, `refresh-cold` one with no publication to start from, which
-refolds every card from the log (the daemon's first complete roster, or after a chunked
-replication projection, a trim or a repair forgot every kept reduction), and `refresh-admission`
-its wait for roster admission (`population: "refresher-folds"`).
+reads every card (the daemon's first complete roster, or after a chunked replication projection,
+a trim or a repair forgot every kept reduction), and `refresh-admission` its wait for roster
+admission (`population: "refresher-folds"`).
 Stage `fresh-wait` is a fresh read's wait for a publication at its cut (2 s at most), and
 `fresh-page` the page it then builds (`population: "fresh-reads"`). Stages are not requests: they
 add no route or path rows.
+
+Cold roster actual-state reads select nine presentation fields with partial indexes, rather
+than decoding the subject's entire actual-state history. Missing fields use empty index seeks;
+sparse fields retain older values, explicit null remains a value, and state transitions clear
+omitted fields. Source selection retains newest-per-origin rivals plus the older nonterminal
+candidate needed by owner authority. Generic card/status APIs still return full actual payloads.
+The bound is on normal current-cut heartbeat histories, not arbitrary repaired/historical index
+exclusions, equal-timestamp ties or rival ancestry traversal. Eleven additive partial indexes
+trade database space and ingest/startup work for cold-read work; prepare indexes offline on large
+stores before rollout and compare refresh-cold, writer holds and database growth on the new build.
 
 `scope: "work-list"` rows (under route `/v1/client/work`) time a current-work read served from
 the published work list, `duration_scope: "work-stage"`. Stage `fresh-wait` is a fresh read's wait

@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Cold agent rosters select actual presentation fields without folding heartbeat history",
+  "replay": {"status": "none", "detail": "No graph replay."},
+  "schema": {"status": "changed", "detail": "Eleven additive local partial indexes on claims, installed by the existing owner-index preparation path. No replicated or claim schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change."},
+  "compatibility": {"status": "none", "detail": "Roster response fields and source authority are unchanged. Full generic status/card payloads remain unchanged. Roster and generic cached cards are separated by shape."},
+  "downtime": {"status": "changed", "detail": "Preparation is per member: before EACH member starts the NEW executable, stop that member's daemon and all store writers, then run that NEW executable's store prepare-indexes --store <existing-store> offline under the directory lifetime fence and SQLite writer reservation. Keep its daemon stopped until both the schema gate and wal_checkpoint(TRUNCATE) succeed. Preparation duration and peak extra disk on a ~50e9-byte store: NOT MEASURED. Skipping preparation moves the synchronous index build into daemon startup and blocks availability until it completes."},
+  "manual": {"status": "changed", "detail": "Run the NEW executable's store prepare-indexes --store <existing-store> on EVERY member before that member starts the new binary; an older executable does not know the eleven indexes. Prepare may fail before commit, or after commit when wal_checkpoint(TRUNCATE) is busy. Keep the daemon stopped, correct the lock, disk or schema cause, and rerun the idempotent prepare until BOTH the schema gate and checkpoint succeed. Never start the daemon as a workaround. Preparation duration and peak extra disk: NOT MEASURED; budget peak disk before rollout."},
+  "recovery": {"status": "changed", "detail": "For rollback, stop the new daemon before starting the old executable's daemon. Reads return to the history fold, but the additive local indexes stay; older binaries continue maintaining them, retaining extra write and storage cost. Rollback does not reclaim their space. Indexes are not replicated."}
+}
