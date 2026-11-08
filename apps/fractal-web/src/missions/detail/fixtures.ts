@@ -1,4 +1,4 @@
-import { Attention, Mission, UsagePeriod, Work, decodeUnknownSync, type AttentionEncoded, type MissionEncoded, type MissionStepEncoded, type WorkEncoded } from '@fractal/client/schema'
+import { Attention, Mission, MissionDeclaration, UsagePeriod, Work, decodeUnknownSync, type AttentionEncoded, type MissionEncoded, type MissionStepEncoded, type WorkEncoded } from '@fractal/client/schema'
 import type * as Native from '@fractal/client/schema'
 import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
@@ -186,3 +186,25 @@ export const missionDetailsFixture = (spend: 'observed' | 'waiting' | 'unavailab
   const period = Atom.make<Feed<Native.UsagePeriod>>(spend === 'observed' ? observed({ value: usagePeriodOf(rows) }) : spend === 'waiting' ? waiting : unavailable({ reason: 'unsupported', detail: 'This gateway does not serve usage.' }))
   return { usagePeriod: () => notHere, missionUsage: () => period, rawDeclarations: () => notHere, declarations: () => notHere, retry: () => undefined, refresh: () => undefined }
 }
+
+const kdl = `mission "platform/sync-v2" {
+  title "Ship sync v2"
+  goal "Clients follow collections with a v2 cursor; v1 readers keep working for 60 days."
+
+  step "spec" { goal "Write the sync v2 spec"; assignee "agent/build-host-b/docs-writer" }
+  step "schema" { after "spec"; goal "Change the wire schema"; assignee "agent/build-host-a/gateway-schema" }
+  step "server" { after "schema"; goal "Implement the server side"; assignee "agent/build-host-a/workbench-shell"; retry max=3 }
+  step "sdk" { after "schema"; goal "Update the client SDK"; assignee "agent/build-host-c/sdk-interop" }
+  step "migration" { after "schema"; goal "Dry-run the data migration"; assignee "agent/build-host-a/workbench-shell" }
+  step "docs" { after "sdk"; goal "Document the new sync API"; assignee "agent/build-host-b/docs-writer" }
+  step "web" { after "sdk"; goal "Move the web app onto sync v2"; assignee "agent/build-host-a/terminal-renderer" }
+  step "security" { after "server"; goal "Security review of the token scope change"
+    assignee "agent/build-host-a/missions-ui"; gate "human" { ask "Approve widening sync tokens to read.projections?" } }
+  step "load" { after "server" "migration"; goal "Load test at 3x peak"; assignee "agent/build-host-b/cas-janitor" }
+  step "canary" { after "security" "load" "web"; goal "Canary at 5% for two hours" }
+  step "rollout" { after "canary"; goal "Roll out to all hosts" }
+  step "announce" { after "rollout"; goal "Announce sync v2" }
+}
+`
+/** The canonical KDL Fractal serves for the mission. */
+export const syncDeclaration: MissionDeclaration = decodeUnknownSync(MissionDeclaration)({ mission: syncMissionRef, revision: 'sha256:5ab0c41e9d', published_at: at(0), text: kdl, legacy: false })
