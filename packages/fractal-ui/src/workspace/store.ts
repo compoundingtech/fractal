@@ -103,7 +103,18 @@ interface SyncTrack {
   readonly held: Map<string, SpaceEvent>
   /** Spaces this sync knows of, so that closing one here can remove it there. */
   readonly known: Set<string>
+  /**
+   * Spaces whose structure a command here changed since they last arrived. Only these are written:
+   * adopting a body (another writer's, another window's, the stored document's) never writes it back,
+   * even where adoption normalised it, so a client never rewrites what it was only shown.
+   */
+  readonly dirty: Set<string>
+  /** Spaces a command here closed: only these are removed there. */
+  readonly closed: Set<string>
 }
+
+/** Whether a command is this client's own: everything but what arrives from elsewhere. */
+const isLocal = <V>(command: Command<V>) => command._tag !== 'Receive' && command._tag !== 'SetRevision'
 
 /**
  * The Effect program that owns the workspace for as long as its scope. A debounced fiber persists and
@@ -134,12 +145,15 @@ export const makeWorkspaceStore = Effect.fn('makeWorkspaceStore')(function* <V>(
   // another window closed it, not that this window has not written its new one yet.
   let remoteSpaces = new Set(Option.match(stored, { onNone: () => [], onSome: document => document.spaces.map(space => space.id) }))
   const listeners = new Set<() => void>()
+  /** Told of each change a command here makes, before listeners, so syncs can mark what to write. */
+  const localChanges = new Set<(before: WorkspaceState<V>, after: WorkspaceState<V>) => void>()
 
   const dispatch = (command: Command<V>) => {
     const current = SubscriptionRef.getUnsafe(state)
     const next = transition(current, command, config)
     if (next === current) return
     Effect.runSync(SubscriptionRef.set(state, next))
+    if (isLocal(command)) for (const mark of localChanges) mark(current, next)
     for (const listener of listeners) listener()
   }
 
@@ -173,16 +187,36 @@ export const makeWorkspaceStore = Effect.fn('makeWorkspaceStore')(function* <V>(
 
   const scope = yield* Effect.scope
   for (const sync of options.sync ?? []) {
-    const track: SyncTrack = { sent: new Map(), received: new Map(), pending: new Set(), held: new Map(), known: new Set() }
+    const track: SyncTrack = { sent: new Map(), received: new Map(), pending: new Set(), held: new Map(), known: new Set(), dirty: new Set(), closed: new Set() }
+    const structure = (space: WorkspaceState<V>['spaces'][number]) => canonicalBody(spaceBody(space, { sizes: sync.syncsSizes }))
+    localChanges.add((before, after) => {
+      const previous = new Map(before.spaces.map(space => [space.id, space] as const))
+      for (const space of after.spaces) {
+        const was = previous.get(space.id)
+        previous.delete(space.id)
+        if (was === space || (was !== undefined && was.name === space.name && was.layout === space.layout)) continue
+        if (was === undefined || structure(was) !== structure(space)) {
+          track.dirty.add(space.id)
+          track.closed.delete(space.id)
+        }
+      }
+      for (const id of previous.keys()) {
+        track.dirty.delete(id)
+        track.closed.add(id)
+      }
+    })
     const bodyOf = (space: string) => {
       const row = SubscriptionRef.getUnsafe(state).spaces.find(candidate => candidate.id === space)
       return row === undefined ? undefined : { body: spaceBody(row, { sizes: sync.syncsSizes }), revision: row.revision }
     }
     const apply = (event: SpaceEvent) => {
+      // What arrives wins over what this client had not written yet: last writer wins.
+      track.dirty.delete(event.space)
       if (event._tag === 'Removed') {
         track.known.delete(event.space)
         track.sent.delete(event.space)
         track.received.delete(event.space)
+        track.closed.delete(event.space)
         dispatch({ _tag: 'Receive', space: event.space, removed: true })
         return
       }
@@ -197,7 +231,7 @@ export const makeWorkspaceStore = Effect.fn('makeWorkspaceStore')(function* <V>(
       dispatch({ _tag: 'Receive', space: event.space, body: event.body, revision: event.revision, sizes: sync.syncsSizes })
     }
     const publishSpace = (space: string): Effect.Effect<void> => Effect.suspend(() => {
-      if (track.pending.has(space)) return Effect.void
+      if (track.pending.has(space) || !track.dirty.has(space)) return Effect.void
       const current = bodyOf(space)
       if (current === undefined) return Effect.void
       const text = canonicalBody(current.body)
@@ -209,6 +243,9 @@ export const makeWorkspaceStore = Effect.fn('makeWorkspaceStore')(function* <V>(
         Effect.tap(result => Effect.sync(() => {
           track.sent.set(space, text)
           track.known.add(space)
+          // Written as it stands: nothing is left to write until a command here changes it again.
+          const now = bodyOf(space)
+          if (now !== undefined && canonicalBody(now.body) === text) track.dirty.delete(space)
           const revision = result === undefined ? undefined : result.revision
           if (revision !== undefined) dispatch({ _tag: 'SetRevision', space, revision })
         })),
@@ -224,6 +261,7 @@ export const makeWorkspaceStore = Effect.fn('makeWorkspaceStore')(function* <V>(
       )
     })
     const removeSpace = (space: string) => {
+      track.closed.delete(space)
       track.known.delete(space)
       track.sent.delete(space)
       track.received.delete(space)
@@ -233,7 +271,7 @@ export const makeWorkspaceStore = Effect.fn('makeWorkspaceStore')(function* <V>(
     const reconcile = Effect.suspend(() => {
       const ids = new Set(SubscriptionRef.getUnsafe(state).spaces.map(space => space.id))
       const effects: Effect.Effect<void>[] = []
-      for (const id of previous) if (!ids.has(id) && track.known.has(id)) effects.push(removeSpace(id))
+      for (const id of previous) if (!ids.has(id) && track.known.has(id) && track.closed.has(id)) effects.push(removeSpace(id))
       previous = ids
       for (const id of ids) effects.push(Effect.forkIn(publishSpace(id), scope).pipe(Effect.asVoid))
       return Effect.all(effects, { discard: true })

@@ -10,6 +10,8 @@ import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import { rightPanelAtom } from './rightPanel.ts'
+import type { GlassGateway } from '../workspace/glassSync.ts'
+import type { CollectionStream, Glass } from '@fractal/client'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 // The answer card's own behaviour has its tests; here only "an answer began" matters.
@@ -34,9 +36,10 @@ let registry: AtomRegistry.AtomRegistry
 let root: Root | undefined
 let host: HTMLDivElement
 
-const mount = async () => {
+const mount = async (glasses?: GlassGateway) => {
   root = createRoot(host)
-  await act(async () => root!.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
+  await act(async () => root!.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace {...(glasses === undefined ? {} : { glasses })} /></DataSourceProvider>))
+  if (glasses !== undefined) await vi.waitFor(() => expect(strip().length).toBeGreaterThan(0))
   await act(async () => vi.dynamicImportSettled())
 }
 const unmount = async () => {
@@ -102,22 +105,37 @@ it('reopens a closed tab when history arrives back at its subject', async () => 
   expect(selected()).toBe('Agent B')
 })
 
-it('restores tabs, each tab\'s face and the shared panel after a reload', async () => {
-  await mount()
+/** The person's glasses as st keeps them: what one page writes, the next page starts from. */
+const glassStore = () => {
+  const glasses = new Map<string, Glass>()
+  let revision = 0
+  const gateway: GlassGateway = {
+    discover: async () => ({ value: { capabilities: [{ id: 'glasses', version: 2, state: 'granted' }] } }) as never,
+    collectionStream: async options => ({
+      subscribeGlasses: (id: string) => queueMicrotask(() => options.onFrame({ kind: 'snapshot', id, collection: 'glasses', items: [...glasses.values()], order: [...glasses.keys()], has_more: false, snapshot: {} } as never)),
+      close: () => {},
+    }) as unknown as CollectionStream,
+    putGlass: async (id, request) => {
+      revision += 1
+      const glass = { id: `glass/person/avery/${id}`, kind: 'glass', revision: `r${revision}`, updated_at: '2026-11-08T00:00:00Z', deleted: false, body: request.body, base_revision: request.base_revision, replaced_revision: null } as Glass
+      glasses.set(glass.id, glass)
+      return { value: glass } as never
+    },
+    deleteGlass: async () => { throw new Error('not expected') },
+  }
+  return { gateway, glasses }
+}
+
+it('starts from the person\'s glasses after a reload; faces and the shared panel are this page\'s', async () => {
+  const st = glassStore()
+  await mount(st.gateway)
   await act(async () => row('agent/b').click())
-  await vi.waitFor(() => expect(button('Show terminal').hasAttribute('aria-disabled')).toBe(false))
-  await act(async () => button('Show terminal').click())
-  expect(terminalShown()).toBe(true)
+  await vi.waitFor(() => expect([...st.glasses.values()].map(glass => JSON.stringify(glass.body))).toEqual([expect.stringContaining('agent:agent/b')]))
   await act(async () => button('Toggle right panel').click())
   await unmount()
-  await mount()
+  window.history.replaceState(null, '', '/')
+  await mount(st.gateway)
   expect(titles()).toEqual(['Agent A', 'Agent B'])
-  expect(selected()).toBe('Agent B')
-  expect(terminalShown()).toBe(true)
-  expect(button('Toggle right panel').getAttribute('aria-pressed')).toBe('true')
-  // The face is the tab's: Agent A still shows its conversation, and the panel is still open for it.
-  await act(async () => row('agent/a').click())
-  expect(terminalShown()).toBe(false)
   expect(button('Toggle right panel').getAttribute('aria-pressed')).toBe('true')
 })
 

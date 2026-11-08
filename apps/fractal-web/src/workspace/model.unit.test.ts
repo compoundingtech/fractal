@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import * as Workspace from '@fractal/ui/workspace'
-import { activeTab, currentSpace, emptyWorkspace, legacyDecoders, showsTerminal, tabsOf, transition, workspaceConfig, workspaceSchema, type Command, type WorkspaceState } from './model.ts'
+import { activeTab, currentSpace, emptyWorkspace, showsTerminal, tabsOf, transition, workspaceConfig, type Command, type WorkspaceState } from './model.ts'
 
 // The reducer, its invariants and its property tests belong to `@fractal/ui/workspace`. These cover Fractal's
-// binding of it: pane keys as refs, one tab per agent with its terminal as a face, and the documents before it.
+// binding of it: pane keys as refs, and one tab per agent with its terminal as a face.
 
 const counter = () => {
   let next = 0
@@ -64,37 +64,5 @@ describe('one tab per agent', () => {
     state = run(state, [{ _tag: 'SetView', tab: tab.id, view: { terminal: false } }])
     expect(showsTerminal(tab, currentSpace(state).local.views[tab.id])).toBe(false)
     expect(Workspace.spaceBody(currentSpace(state), { sizes: false }).layout).toEqual({ tabs: [{ ref: 'terminal:agent/a' }] })
-  })
-})
-
-describe('the document before the shared primitives', () => {
-  it('becomes this client\'s first space, keeping tabs, splits, ratios, focus, recency and views', () => {
-    const { config } = setup()
-    const legacy = {
-      layout: {
-        split: 'right', ratio: 0.3, children: [
-          { id: 'left', tabs: [{ id: 'a', pane: 'agent:agent/a', title: 'Mine' }], active: 'a' },
-          { id: 'right', tabs: [{ id: 'b', pane: 'list:home' }], active: 'b' },
-        ],
-      },
-      focus: 'right', mru: ['b', 'a'], closed: ['usage:'], views: { a: { terminal: true } },
-    }
-    const decoded = Workspace.decodeWorkspace(legacy, { schema: workspaceSchema, config, legacy: legacyDecoders(config) })
-    expect(decoded._tag).toBe('Some')
-    if (decoded._tag !== 'Some') return
-    const space = currentSpace(decoded.value)
-    expect(space.name).toBe('Main')
-    expect(Workspace.panesOf(space.layout).map(pane => pane.tabs.map(tab => tab.ref))).toEqual([['agent:agent/a'], ['list:home']])
-    expect(space.layout).toMatchObject({ axis: 'row', sizes: [0.3, 0.7] })
-    expect(Workspace.tabsOf(space.layout)[0]).toEqual({ id: 'a', ref: 'agent:agent/a', title: 'Mine' })
-    expect(space.local.focus).toBe('right')
-    expect(space.local.mru).toEqual(['b', 'a'])
-    expect(space.local.closed).toEqual(['usage:'])
-    expect(space.local.views).toEqual({ a: { terminal: true } })
-  })
-
-  it('reads a document of no known shape as nothing', () => {
-    const { config } = setup()
-    expect(Workspace.decodeWorkspace({ tabs: [] }, { schema: workspaceSchema, config, legacy: legacyDecoders(config) })._tag).toBe('None')
   })
 })

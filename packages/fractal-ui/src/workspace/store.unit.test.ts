@@ -175,6 +175,59 @@ describe('syncing spaces with an external store', () => {
     expect(store.getState().spaces.map(space => space.id)).toEqual(['space'])
   }).pipe(Effect.provide(memoryPersistence())))
 
+  itEffect('never writes back what it adopted, even where adopting normalised it', () => Effect.gen(function* () {
+    const fake = yield* fakeSync()
+    // One entity, two refs: the second collapses into the first on adoption.
+    const config: WorkspaceConfig = { ...counter('a'), identity: ref => ref.replace(/^face:/, 'doc:') }
+    const store = yield* makeWorkspaceStore({ config, schema, initial, sync: [fake.sync] })
+    yield* Queue.offer(fake.incoming, { _tag: 'Body', space: 'space', body: { name: 'Main', layout: { tabs: [{ ref: 'doc:a' }, { ref: 'face:a' }, { ref: '' }] } }, revision: 'r1' })
+    yield* settle
+    expect(refs(store.getState())).toEqual(['doc:a'])
+    // Showing, scrolling and focusing are not structure either.
+    store.dispatch({ _tag: 'SetView', tab: tabsOf(currentSpace(store.getState()).layout)[0]!.id, view: { scrollTop: 1 } })
+    yield* settle
+    expect(fake.published).toEqual([])
+    // A command here that changes structure writes, on the adopted revision.
+    store.dispatch({ _tag: 'Open', ref: 'doc:b' })
+    yield* settle
+    expect(fake.published).toHaveLength(1)
+    expect(fake.published[0]).toMatchObject({ base: 'r1', body: { layout: { tabs: [{ ref: 'doc:a' }, { ref: 'doc:b' }] } } })
+  }).pipe(Effect.provide(memoryPersistence())))
+
+  itEffect('does not write its stored spaces again on load', () => Effect.gen(function* () {
+    const first = yield* fakeSync()
+    const store = yield* makeWorkspaceStore({ config: counter('a'), schema, initial, sync: [first.sync] })
+    store.dispatch({ _tag: 'Open', ref: 'doc:a' })
+    yield* settle
+    expect(first.published).toHaveLength(1)
+    const second = yield* fakeSync()
+    const again = yield* makeWorkspaceStore({ config: counter('b'), schema, sync: [second.sync] })
+    again.dispatch({ _tag: 'Cycle', by: 1 })
+    yield* settle
+    expect(refs(again.getState())).toEqual(['doc:a'])
+    expect(second.published).toEqual([])
+  }).pipe(Effect.provide(memoryPersistence())))
+
+  itEffect('removes there only what a command here closed', () => Effect.gen(function* () {
+    const changed = yield* Queue.unbounded<void>()
+    const kv = yield* KeyValueStore.KeyValueStore
+    const layer = Layer.succeed(WorkspacePersistence, WorkspacePersistence.of({ key: 'workspace', changed: Stream.fromQueue(changed) }))
+    const fake = yield* fakeSync()
+    const store = yield* makeWorkspaceStore({ config: counter('a'), schema, initial, sync: [fake.sync] }).pipe(Effect.provide(layer))
+    yield* Queue.offer(fake.incoming, { _tag: 'Body', space: 'tui', body: { name: 'Elsewhere', layout: { tabs: [] } }, revision: 'r1' })
+    yield* settle
+    // This window reads the stored document back, as after any other window's write.
+    yield* Queue.offer(changed, undefined)
+    yield* settle
+    // Another window closes it; that window removes it there, not this one.
+    const stored = Option.getOrThrow(Schema.decodeUnknownOption(schema)(JSON.parse((yield* kv.get('workspace'))!)))
+    yield* kv.set('workspace', JSON.stringify(Schema.encodeSync(schema)(transition(stored, { _tag: 'SpaceClose', space: 'tui' }, counter('o')))))
+    yield* Queue.offer(changed, undefined)
+    yield* settle
+    expect(store.getState().spaces.map(space => space.id)).toEqual(['space'])
+    expect(fake.removed).toEqual([])
+  }).pipe(Effect.provide(KeyValueStore.layerMemory)))
+
   it('derives the same idempotency key for the same body on the same base', () => {
     expect(stableKey('a\nr1\n{}')).toBe(stableKey('a\nr1\n{}'))
     expect(stableKey('a\nr1\n{}')).not.toBe(stableKey('a\nr2\n{}'))

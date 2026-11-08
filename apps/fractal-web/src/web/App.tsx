@@ -8,6 +8,7 @@ import { I18nProvider } from 'react-aria/I18nProvider'
 import { usePortalContainerRegistration } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import { DiagnosticsBoundary } from './DiagnosticsBoundary.tsx'
 import { PluginProviders } from '../plugins/index.tsx'
+import { pageGlassGateway } from '../workspace/glassSync.ts'
 
 // Same-origin daemon reads with the browser's own credentials, as every other client read.
 const pluginFetch: typeof fetch = (input, init) => fetch(input, init)
@@ -16,6 +17,9 @@ const pluginFetch: typeof fetch = (input, init) => fetch(input, init)
 const Diagnostics = import.meta.env.DEV || import.meta.env.PERF
   ? React.lazy(() => import('../telemetry/DevBar.tsx').then(({ DevBar }) => ({ default: DevBar })))
   : undefined
+
+// The person's glasses hold the layout; a replayed scenario has none and keeps it in memory.
+const glasses = new URLSearchParams(window.location.search).has('scenario') ? undefined : pageGlassGateway()
 
 const build = {
   version: buildIdentity.baseVersion,
@@ -40,7 +44,7 @@ export const App = () => {
         <DataSourceProvider source={live.source} registry={live.registry}>
           <PluginProviders baseUrl={window.location.origin} fetchImpl={pluginFetch}>
             <React.Profiler id="workbench" onRender={telemetry.onCommit}>
-              <LiveAgentWorkspace ux={telemetry.ux} onSelectConversation={live.selectConversation} build={build} />
+              <LiveAgentWorkspace ux={telemetry.ux} onSelectConversation={live.selectConversation} build={build} glasses={glasses} />
             </React.Profiler>
           </PluginProviders>
         </DataSourceProvider>

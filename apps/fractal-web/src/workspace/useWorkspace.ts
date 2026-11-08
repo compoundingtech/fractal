@@ -21,17 +21,17 @@ export interface WorkspaceNavigation {
 const disposal = new WeakMap<WorkspaceStore, number>()
 
 /** Owns the machine's lifetime. The first render already shows what the URL asks for, with no effect-driven flash. */
-export const useWorkspaceStore = ({ storageKey, location, initialRef, sync }: {
-  /** `undefined` keeps the workspace in memory, for embeds and stories. */
-  readonly storageKey: string | undefined
+export const useWorkspaceStore = ({ location, initialRef, initial, sync }: {
   readonly location: string
   /** What an empty workspace with no subject in its URL starts on: a story's or an embed's known state. */
   readonly initialRef?: string | undefined
+  /** What the workspace starts from, such as the person's glasses; fixed for the store's lifetime. */
+  readonly initial?: WorkspaceState | undefined
   /** External space stores, such as the person's glasses; fixed for the store's lifetime. */
   readonly sync?: readonly SpaceSync[] | undefined
 }): WorkspaceStore => {
   const [store] = React.useState(() => {
-    const created = createWorkspaceStore({ storageKey, sync })
+    const created = createWorkspaceStore({ initial, sync })
     const subject = subjectOfLocation(location)
     if (subject !== undefined) created.dispatch({ _tag: 'Open', ref: paneKey(subject) })
     else if (initialRef !== undefined && tabsOf(created.getState()).length === 0) created.dispatch({ _tag: 'Open', ref: paneKey(subjectOfRef(initialRef)) })
