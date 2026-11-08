@@ -472,13 +472,38 @@ marks it committed after the idempotent transition. A restart replays an
 admitted pending cut before reading the next publication. Keep this checkpoint
 across restart and rollback while using
 the same source identity. The fault reports weekly objective compliance.
-Short outage detection and the publisher's transport remain separate.
-Before enabling both for the same member, the deployment must correlate the
-early warning and weekly miss into one owner-facing case, with a new notice
-only when the case is promoted. Upgrade all fault readers before enabling
-the policy, since older readers do not recognize this no-fallback condition.
-This objective does not implement that
-delivery policy or its off-host availability fallback.
+Upgrade all fault readers before enabling the policy, since older readers do
+not recognize this no-fallback condition.
+
+Retained short readings are a separate, read-only opt-in via
+`retained_pairs_file`, a different root-controlled file in the same evidence
+directory. Its version-1 bundle contains up to four ordered `pairs`, each with
+the exact `weekly` document and a matching `short` document. Short documents
+carry version, objective, member, end_ms, observed_at_ms and up to five distinct
+minute observations (`at_ms`, `ready`) in the completed five-minute window.
+Missing minutes remain Unknown, not failed or successful. Usage reads never
+issue claims or advance either checkpoint.
+
+Set `shared_case = true` to replace independent weekly dispatch with one
+durable readiness case. This is off by default and requires retained pairs.
+Three failed minutes among at least four known minutes open an early phase;
+a proven weekly miss promotes that same case without changing its original
+owner. A weekly miss can also open a case directly. Each phase admits exactly
+one actionable owner notice. Optional `backup = "agent/example/backup"` selects
+a distinct, active agent for one held informational notice per phase, never
+an alternate owner. An unavailable backup cannot block owner delivery.
+Only one backup intent is retained per phase; undelivered informational intents
+are discarded on recovery rather than carried into later cases.
+Measured weekly recovery closes failure receipts without another owner notice;
+Unknown preserves the case. Pending legacy cuts are first imported into the
+shared journal and replayed before reading a newer publication. Existing weekly
+episodes are adopted by native receipt identity before early admission.
+Adoption records must be daemon-authored and bound to the original failure;
+phase-specific delivery is only selected while the shared route is enabled.
+Keep `readiness-case.json` across
+restart: it journals phase transitions and notice intents before delivery and
+recognizes native receipts on replay. The legacy weekly checkpoint remains
+byte-for-byte unchanged while the shared route is enabled.
 
 `fractal slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
 `7d`). The history is a local observation log, not the graph: once a minute the daemon appends the

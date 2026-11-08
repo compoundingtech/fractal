@@ -517,6 +517,12 @@ impl Store {
             .ok_or_else(|| FractalError::new("internal", "the failure was not recorded"))
     }
 
+    /// Only the configured local shared route owns phase-specific notice delivery.
+    pub fn readiness_case_manages(&self, episode: &str) -> bool {
+        self.readiness_shared_case.load(std::sync::atomic::Ordering::Relaxed)
+            && episode.starts_with("slo-objective/readiness-case/")
+    }
+
     pub fn operational_failure(
         &self,
         episode: &str,
@@ -1537,6 +1543,22 @@ impl Store {
         let explicit_reviewer_only = source.starts_with("daemon/")
             && claim.kind == "operational.failure"
             && f["condition"] == API_READINESS_SLO_MISSED;
+        if explicit_reviewer_only && self.readiness_case_manages(&failure.subject) {
+            item.episode.clone_from(&failure.subject);
+        }
+        if explicit_reviewer_only
+            && self.readiness_shared_case.load(std::sync::atomic::Ordering::Relaxed)
+            && let Some(adoption) = self.operation_claim(&format!("{}:readiness-case", failure.request))?
+            && adoption.kind == "readiness.case.adopted"
+            && adoption.actor.as_deref() == Some("daemon/runtime")
+            && adoption.origin == self.origin()
+            && adoption.subject == format!("daemon/{}", self.origin())
+            && adoption.body["evidence"] == serde_json::json!([failure.request])
+            && let Some(episode) = adoption.body["fields"]["episode"].as_str()
+                .filter(|episode| self.readiness_case_manages(episode))
+        {
+            item.episode = episode.to_owned();
+        }
         Ok(Some(OperationalFault { item, explicit_reviewer_only }))
     }
 

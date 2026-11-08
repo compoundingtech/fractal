@@ -2926,6 +2926,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             &[],
         ),
         (
+            "readiness.case.adopted",
+            &["daemon"],
+            WritePolicy::SystemOnly,
+            Cardinality::Append,
+            Some("operational"),
+            true,
+            &[],
+        ),
+        (
             "fault.dismissed",
             &[
                 "agent",
@@ -3751,6 +3760,9 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("episode", string()),
             ("failure", string()),
             ("reason", string()),
+        ],
+        "readiness.case.adopted" => &[
+            ("episode", required_string()),
         ],
         "fault.dismissed" => &[
             ("episode", required_string()),

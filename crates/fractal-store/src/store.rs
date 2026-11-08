@@ -2318,6 +2318,8 @@ pub struct Store {
     pub default_ask_deadline_ms: std::sync::atomic::AtomicU64,
     /// Whether asks get deadlines: `[asks] deadlines`, off by default.
     pub ask_deadlines: std::sync::atomic::AtomicBool,
+    /// Daemon-local readiness routing opt-in; never selected by replicated claims.
+    pub readiness_shared_case: std::sync::atomic::AtomicBool,
     /// The store index up to which person answers were checked for overriding a deadline's
     /// default; in memory, so a restart checks them again and the notice's key keeps it once.
     pub person_answers_checked: std::sync::atomic::AtomicU64,
@@ -2757,6 +2759,7 @@ impl Store {
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
+            readiness_shared_case: false.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
 
@@ -2781,6 +2784,7 @@ impl Store {
         Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
+            readiness_shared_case: false.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
 
@@ -2806,6 +2810,7 @@ impl Store {
         Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
+            readiness_shared_case: false.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
     }
 

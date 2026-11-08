@@ -2479,6 +2479,11 @@ impl<R: RuntimeControl> Reconciler<R> {
             std::sync::atomic::Ordering::Relaxed,
         );
         for fault in faults {
+            // These durable cases own phase-specific delivery, including replay.
+            if self.store.readiness_case_manages(&fault.item.episode)
+            {
+                continue;
+            }
             let Some(owner) = fault.owner.as_deref() else {
                 continue;
             };
