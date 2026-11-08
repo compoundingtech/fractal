@@ -130,7 +130,7 @@ fi`,
         }
       },
       "runs-on": "${{ matrix.runner }}",
-      "timeout-minutes": 5,
+      "timeout-minutes": "${{ matrix.runner == 'macos-15' && 10 || 5 }}",
       "steps": [
         {
           // Exercise the workflow's current publication automation, including tests absent from historical candidates.

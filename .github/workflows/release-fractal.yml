@@ -447,7 +447,7 @@ jobs:
       matrix:
         runner: [ubuntu-latest, macos-15]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 5
+    timeout-minutes: ${{ matrix.runner == 'macos-15' && 10 || 5 }}
     steps:
       - uses: actions/checkout@v4
         with:

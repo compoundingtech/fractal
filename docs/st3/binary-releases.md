@@ -271,6 +271,7 @@ build use SHA-keyed concurrency groups with cancellation disabled; newer main pu
 cannot cancel them. The build rechecks source eligibility before executing source scripts.
 The later mutation job revalidates the successful build identity. `--dry-run --sha`
 never dispatches a build and requires an already successful `--run`.
+To retry without rebuilding, repeat the candidate dispatch with `-f run=SUCCESSFUL_BUILD_RUN_ID -f sha=FULL_40_CHARACTER_SOURCE_SHA` (and the original tag and summary); the run must be a successful main push or an exact matching candidate build.
 The optional `summary` input (`scripts/release-fractal-daily --summary "$SUMMARY"`) adds
 the operator's summary to the draft notes; it defaults to empty. Publication preserves
 that summary verbatim rather than regenerating it. `scripts/release-fractal-daily --dry-run`
