@@ -480,6 +480,23 @@ agent "eval/named" { name "Quartz"; workspace "/tmp"; harness "claude" {} }
     let (status, missing) = get_request(app, "/v1/desired/agent/eval/absent").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
 }
+#[tokio::test]
+async fn status_preserves_claim_provenance_even_with_an_unknown_omit_claims_query() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.apply_internal(
+        &parse_intent("version 2\nagent \"eval/named\" { workspace \"/tmp\"; harness \"claude\" {} }\n", "node").unwrap(),
+        "status-summary-fixture",
+    ).unwrap();
+    let app = router(state);
+    let (code, full) = get_request(app.clone(), "/v1/status?subject=agent/eval/named").await;
+    assert_eq!(code, StatusCode::OK, "{full}");
+    let (code, legacy_query) = get_request(app, "/v1/status?subject=agent/eval/named&omit_claims=true").await;
+    assert_eq!(code, StatusCode::OK, "{legacy_query}");
+    assert!(!full["subjects"][0]["claims"].as_array().unwrap().is_empty());
+    assert_eq!(legacy_query["subjects"][0]["claims"], full["subjects"][0]["claims"]);
+}
+
 
 #[tokio::test]
 async fn delivery_hold_api_enforces_authority_and_keeps_presence_separate() {
