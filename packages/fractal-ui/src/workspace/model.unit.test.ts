@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { prop } from './testing.ts'
 import {
   activeTab, adoptLayout, canonicalBody, currentSpace, decodeWorkspace, emptyWorkspace, focusedPane, isPane, legacyDecoder,
-  makeWorkspaceSchema, panesOf, repairWorkspace, shownPanes, spaceBody, tabsOf, toBinary, toWire, transition, unusedName,
+  makeWorkspaceSchema, minimumSize, normalizeSizes, panesOf, repairWorkspace, shownPanes, spaceBody, tabsOf, toBinary, toWire, transition, unusedName,
   type Command, type Drop, type Layout, type Space, type WireLayout, type WorkspaceConfig, type WorkspaceState,
 } from './mod.ts'
 
@@ -385,6 +385,18 @@ describe('the shared body', () => {
     const body = spaceBody(space(first), { sizes: true })
     const second = run(start(), [{ _tag: 'Receive', space: 'space', body }], counter(500))
     expect(canonicalBody(spaceBody(space(second), { sizes: true }))).toBe(canonicalBody(body))
+  })
+
+  it('keeps sizes it has held at the minimum the same when they come back', () => {
+    // Found by the property above: clamping then rescaling put the small pane under the minimum, and
+    // the next pass moved it again, so a client's own sizes never compared equal to their echo.
+    const sizes = normalizeSizes([1.754068159028e-311, 2.5e-323], 2)!
+    expect(sizes).toEqual([1 - minimumSize, minimumSize])
+    expect(normalizeSizes(sizes, 2)).toBe(sizes)
+    const three = normalizeSizes([0.01, 0.01, 10], 3)!
+    expect(three.every(size => size >= minimumSize)).toBe(true)
+    expect(three.reduce((sum, size) => sum + size, 0)).toBeCloseTo(1, 12)
+    expect(normalizeSizes(three, 3)).toBe(three)
   })
 
   it('adopts another writer\'s structure, keeping this client\'s ids, shown tabs, views and focus', () => {
