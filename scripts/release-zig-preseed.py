@@ -2,6 +2,7 @@
 """Preseed GitHub archives from Ghostty's pinned package manifest, not new pins."""
 
 import argparse
+import http.client
 import json
 import os
 from pathlib import Path
@@ -33,11 +34,30 @@ def download(url, destination, sleep=time.sleep, open_url=urllib.request.urlopen
         try:
             with open_url(candidate, timeout=60) as response, destination.open("wb") as output:
                 shutil.copyfileobj(response, output)
+                length = response.headers.get("Content-Length")
+                if length is not None and output.tell() != int(length):
+                    raise urllib.error.ContentTooShortError("truncated archive response", None)
             return
-        except (OSError, urllib.error.URLError) as error:
+        except (OSError, urllib.error.URLError, http.client.HTTPException) as error:
             if index == len(urls) - 1:
                 raise
             print(f"Archive transport failed: {candidate}: {error}", flush=True)
+
+
+def fetch_git(package, fetch, sleep=time.sleep):
+    commit = package["commit"]
+    if not re.fullmatch(r"[0-9a-f]{40}", commit):
+        raise ValueError(f"invalid Git commit pin: {commit}")
+    url = f"git+{package['url']}#{commit}"
+    for attempt, delay in enumerate((0, 1, 3)):
+        if delay:
+            sleep(delay)
+        try:
+            return fetch(url)
+        except (OSError, subprocess.CalledProcessError) as error:
+            if attempt == 2:
+                raise
+            print(f"Git transport failed: {url}: {error}", flush=True)
 
 
 def seed(source, *, fetch=None, **download_options):
@@ -56,8 +76,13 @@ def seed(source, *, fetch=None, **download_options):
             expected = package["dest"].removeprefix("vendor/p/")
             if package["dest"] != f"vendor/p/{expected}" or "/" in expected or not expected:
                 raise ValueError(f"invalid Zig cache pin: {package['dest']}")
-            download(package["url"], archive, **download_options)
-            actual = fetch(archive)
+            if package.get("type") == "git":
+                # vaxis requires its own uucode Git pin in addition to Ghostty's
+                # newer archive pin. Preserve Git package semantics; no tarball substitute.
+                actual = fetch_git(package, fetch, download_options.get("sleep", time.sleep))
+            else:
+                download(package["url"], archive, **download_options)
+                actual = fetch(archive)
             if actual != expected:
                 raise ValueError(f"Zig hash mismatch for {package['url']}: expected {expected}, got {actual}")
             print(f"PASS Zig package hash verified: {expected}", flush=True)

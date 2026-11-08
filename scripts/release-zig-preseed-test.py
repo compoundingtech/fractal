@@ -6,6 +6,7 @@ import http.server
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import threading
 import urllib.request
@@ -19,13 +20,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
     paths = []
     primary_ok = False
     fallback_ok = True
+    truncated = False
 
     def do_GET(self):
         self.paths.append(self.path)
         ok = self.primary_ok if self.path.startswith("/primary/") else self.fallback_ok
         self.send_response(200 if ok else 503)
+        truncated = self.truncated if self.path.startswith("/primary/") else False
+        if truncated == "length":
+            self.send_header("Content-Length", "100")
+        elif truncated == "chunked":
+            self.send_header("Transfer-Encoding", "chunked")
         self.end_headers()
-        self.wfile.write(b"archive bytes" if ok else b"unavailable")
+        self.wfile.write(b"a\r\nshort" if truncated == "chunked" else b"archive bytes" if ok else b"unavailable")
 
     def log_message(self, *_):
         pass
@@ -69,6 +76,16 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack
     assert Handler.paths == ["/primary/archive.tar.gz"]
     print("PASS successful primary does not use fallback")
 
+    for truncated in ("length", "chunked"):
+        Handler.paths.clear()
+        delays.clear()
+        Handler.truncated = truncated
+        preseed.seed(source, fetch=fetch, **options)
+        assert delays == [1, 3]
+        assert Handler.paths == ["/primary/archive.tar.gz"] * 3 + ["/fallback/archive.tar.gz"]
+    Handler.truncated = False
+    print("PASS truncated response retries then codeload fallback")
+
     try:
         preseed.seed(source, fetch=lambda _: "wrong-hash", **options)
     except ValueError as error:
@@ -96,3 +113,32 @@ with tempfile.TemporaryDirectory() as directory, contextlib.ExitStack() as stack
     preseed.seed(source, fetch=fetch, **options)
     assert preseed.codeload("https://github.com/owner/repo/archive/abcdef.tar.gz") == "https://codeload.github.com/owner/repo/tar.gz/abcdef"
     print("PASS tag and commit URLs derived from upstream pins")
+
+    git_package = {
+        "type": "git",
+        "url": "https://github.com/example/unicode",
+        "commit": "a" * 40,
+        "dest": "vendor/p/git-content-hash",
+    }
+    manifest.write_text(json.dumps([git_package]))
+    git_calls = []
+    delays.clear()
+
+    def git_fetch(candidate):
+        assert candidate == f"git+{git_package['url']}#{git_package['commit']}"
+        git_calls.append(candidate)
+        if len(git_calls) < 3:
+            raise subprocess.CalledProcessError(1, ["zig", "fetch", candidate])
+        return "git-content-hash"
+
+    preseed.seed(source, fetch=git_fetch, **options)
+    assert len(git_calls) == 3 and delays == [1, 3]
+    print("PASS Git-source record retries and verifies pinned hash without archive conversion")
+
+    try:
+        preseed.seed(source, fetch=lambda _: "wrong-git-hash", **options)
+    except ValueError as error:
+        assert "Zig hash mismatch" in str(error)
+    else:
+        raise AssertionError("Git hash mismatch accepted")
+    print("PASS Git-source hash mismatch refused")
