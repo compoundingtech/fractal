@@ -714,14 +714,16 @@ clock and its own digest as producer, accepts exactly the documented request key
 `tests` observation with `runner: "wrapper"`. It cannot check that the command really ran; that is
 the cooperative boundary (agents with the key's account can lie) and belongs in the known defects.
 
-Before fetching the checked commit into its private scratch repository, the signer hydrates
-missing reachable objects (including historical blobs) in the source checkout. Local
-`upload-pack` disables lazy fetching, so a `blob:none` checkout cannot otherwise serve that
-fetch even when its working tree is complete. Missing IDs are fetched from the configured
-promisor remote in batches of at most 200, without updating refs or running maintenance.
-An unavailable promisor remote or a fetch that makes no progress refuses signing with
-`cannot hydrate ... before signing`; no evidence is published. This does not change the
-signed observation or the verifier's trust boundary.
+Before invoking the signer, `scripts/st-test` hydrates missing reachable objects
+(including historical blobs) in the source checkout, using the caller's normal Git context.
+Local `upload-pack` disables lazy fetching, so a `blob:none` checkout cannot otherwise
+serve the private scratch fetch even when its working tree is complete. The caller fetches
+missing IDs from its configured promisor remote in batches of at most 200, without updating
+refs, recursing into submodules, or running maintenance. A failed fetch or one that makes
+no progress stops preparation. The signer itself never contacts a promisor remote: it disables
+lazy fetching and refuses with the missing-object count and an instruction to hydrate in the
+caller. Other callers must perform that preparation themselves. The signed observation and
+verifier requirements are unchanged.
 
 `scripts/testdata/evidence/wrapper-note/` is a golden note made with a throwaway key
 (`python3 scripts/evidence-wrap-test --write-fixture DIR` regenerates one). The verifier's tests

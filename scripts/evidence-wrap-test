@@ -722,6 +722,8 @@ os.execv({real_git!r}, ['git', *args])
                         '--change-id', 'github:example/repo#5', '--', 'true'],
                        checkout, partial_home)
 
+        caller = runpy.run_path(str(ROOT / 'scripts/st-test'))
+        caller['hydrate_commit'](partial, git(partial, 'rev-parse', 'HEAD'))
         signed = partial_wrap(partial)
         assert signed.returncode == 0, signed.stderr.decode()
         assert not any(line.startswith('?') for line in
@@ -729,14 +731,20 @@ os.execv({real_git!r}, ['git', *args])
         signed_result = json.loads(signed.stderr.decode()[signed.stderr.decode().index('{'):])
         git(partial, '-c', 'gpg.format=ssh', '-c', f'gpg.ssh.allowedSignersFile={signers}',
             'verify-commit', signed_result['record'])
-        print('passed: blob:none partial-clone signing hydrates historical blobs before the scratch fetch')
+        print('passed: caller hydrates blob:none historical blobs before signing with a verified signature')
 
-        git(unavailable, 'remote', 'set-url', 'origin', (tmp / 'missing-origin.git').as_uri())
-        refused = partial_wrap(unavailable)
+        marker = tmp / 'transport-ran'
+        git(unavailable, 'remote', 'set-url', 'origin', 'ssh://invalid.example/repository')
+        git(unavailable, 'config', 'core.sshCommand', f'touch {marker}')
+        request = dict(good, commit=git(unavailable, 'rev-parse', 'HEAD'))
+        refused = subprocess.run([sys.executable, str(SIGN)], cwd=unavailable,
+                                 input=json.dumps(request).encode(), capture_output=True,
+                                 env=dict(ENV, HOME=str(partial_home), EVIDENCE_SIGN_NOW=DATE))
         assert refused.returncode != 0, refused.stderr.decode()
-        assert b'cannot hydrate missing objects before signing' in refused.stderr, refused.stderr.decode()
-        assert not git(unavailable, 'for-each-ref', 'refs/evidence')
-        print('passed: partial-clone hydration failure refuses signing without publishing evidence')
+        assert b'missing objects before signing; hydrate the source repository in the caller first' in refused.stderr, refused.stderr.decode()
+        assert not marker.exists(), 'the signer must not run a transport'
+        assert not git(unavailable, 'for-each-ref', 'refs/tags/evidence', 'refs/notes/evidence')
+        print('passed: signer refuses missing partial-clone objects without running a transport or publishing evidence')
 
         if write_fixture:
             write_fixture.mkdir(parents=True, exist_ok=True)
