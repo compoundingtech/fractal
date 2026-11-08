@@ -1702,6 +1702,7 @@ mod tests {
     fn unit_bakes_the_effective_config_and_limit() -> Result<()> {
         let config = Config { node: "node-a".into(),
         quota_source: None,
+        host_envelope_file: None,
         access_mode: None,
         claude_primary_ownership: None,
         claude_primary_ownership_observe: None,
@@ -1736,6 +1737,7 @@ mod tests {
         asks: crate::config::AsksConfig::default(),
         codex_work_without_asking: None,
         wait_for_peers_after_start: None,
+        readiness_slo: None,
         fleet: None, };
         let spec = ServiceSpec::new("/usr/bin/st3", config, 1024)?;
         let unit = render_systemd_user_unit(&spec);
