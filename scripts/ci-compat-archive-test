@@ -158,6 +158,28 @@ class ArchiveTests(unittest.TestCase):
                 self.assertEqual(needs[f"artifact-{kind}"], "pinned-archive-attempt-1")
                 self.assertNotEqual(needs[f"artifact-{kind}"], "pinned-archive-attempt-2")
 
+    def test_empty_artifact_name_fails_before_download(self):
+        source = (ROOT / ".github/workflows/compat-archive.ts").read_text()
+        command = re.search(r"run: '(\[ -n \"\$COMPAT_ARCHIVE_NAME\"[^\n]+)'", source).group(1)
+        for name, expected in (("", 1), ("pinned-archive-attempt-1", 0)):
+            result = subprocess.run(["bash", "-c", command], env={**os.environ, "COMPAT_ARCHIVE_NAME": name},
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, expected)
+            if not name:
+                self.assertIn("empty artifact name; refusing to download all run artifacts", result.stdout)
+        for workflow in ("fleet", "main-upkeep", "daily-long", "debug-assertions-daily", "macos"):
+            text = (ROOT / f".github/workflows/{workflow}.yml").read_text()
+            guards = re.findall(
+                r"- name: Require an explicit prepared archive name\n(.*?)"
+                r"- name: Download the prepared compatibility archive", text, re.S)
+            self.assertTrue(guards, workflow)
+            self.assertEqual(len(guards), text.count("- name: Download the prepared compatibility archive"))
+            for guard in guards:
+                self.assertIn("COMPAT_ARCHIVE_NAME: ${{ needs[", guard)
+                self.assertIn("outputs['artifact-", guard)
+                self.assertIn(command, guard)
+                self.assertNotIn("\n        if:", guard)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -41,6 +41,9 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
         env: { PRODUCER_RESULT: `\${{ needs['${producer}'].result }}` },
         run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }' },
       identity(kind, target, 'compat-identity'),
+      { name: 'Require an explicit prepared archive name', shell: 'bash',
+        env: { COMPAT_ARCHIVE_NAME: `\${{ needs['${producer}'].outputs['artifact-${kind}'] }}` },
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }' },
       { name: 'Download the prepared compatibility archive', id: 'compat-archive',
         uses: 'actions/download-artifact@v4', with: {
           name: `\${{ needs['${producer}'].outputs['artifact-${kind}'] }}`,
