@@ -356,7 +356,9 @@ pub struct ClaimsQuery {
 
 impl ClaimsQuery {
     fn has_selector(&self) -> bool {
-        self.subject.is_some() || self.owner_run.is_some()
+        // Every new query field requires an explicit selector-admission decision.
+        let Self { subject, owner_run, after_index: _, before_index: _, order: _, limit: _ } = self;
+        subject.is_some() || owner_run.is_some()
     }
 }
 
