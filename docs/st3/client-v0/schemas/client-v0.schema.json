@@ -2038,9 +2038,28 @@
       "required": ["at", "status", "attempt", "event"],
       "properties": {
         "at": { "type": "integer", "minimum": 0, "description": "Unix milliseconds." },
-        "status": { "anyOf": [{ "enum": ["waiting-person", "waiting", "ready", "claimed", "blocked", "verifying", "completed", "failed", "cancelled"] }, { "type": "string" }], "description": "The step's state after the event, in the WorkState vocabulary of `state`. Open, because it replays durable claims: a status word an older or newer writer recorded passes through. A repeat of the previous state and attempt is not listed again." },
+        "status": { "anyOf": [{ "enum": [
+          "waiting-person",
+          "waiting",
+          "ready",
+          "claimed",
+          "blocked",
+          "verifying",
+          "completed",
+          "failed",
+          "cancelled"
+        ] }, { "type": "string" }], "description": "The step's state after the event, in the WorkState vocabulary of `state`. Open, because it replays durable claims: a status word an older or newer writer recorded passes through. A repeat of the previous state and attempt is not listed again." },
         "attempt": { "type": "integer", "minimum": 1 },
-        "event": { "anyOf": [{ "enum": ["state", "carried", "retried", "claimed", "submitted", "failed", "released", "nudged"] }, { "type": "string" }], "description": "The claim behind it. nudged is a stall marker: st nudged an idle holder, and status repeats the state it found. Clients treat an unknown event as state." },
+        "event": { "anyOf": [{ "enum": [
+          "state",
+          "carried",
+          "retried",
+          "claimed",
+          "submitted",
+          "failed",
+          "released",
+          "nudged"
+        ] }, { "type": "string" }], "description": "The claim behind it. nudged is a stall marker: st nudged an idle holder, and status repeats the state it found. Clients treat an unknown event as state." },
         "reason": { "type": "string" },
         "idle_since": { "type": "integer", "minimum": 0, "description": "nudged only: since when the holder had been idle, in Unix milliseconds." }
       }
