@@ -2470,7 +2470,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let faults = {
             let mut phase = crate::reconcile_telemetry::phase("fault_snapshot");
-            let faults = self.store.fault_snapshot(now)?;
+            let faults = self.store.fault_delivery_snapshot(now)?;
             phase.items(faults.len());
             faults
         };
@@ -2479,11 +2479,6 @@ impl<R: RuntimeControl> Reconciler<R> {
             std::sync::atomic::Ordering::Relaxed,
         );
         for fault in faults {
-            // These durable cases own phase-specific delivery, including replay.
-            if self.store.readiness_case_manages(&fault.item.episode)
-            {
-                continue;
-            }
             let Some(owner) = fault.owner.as_deref() else {
                 continue;
             };

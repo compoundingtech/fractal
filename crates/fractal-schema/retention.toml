@@ -135,7 +135,6 @@
 "observer.state" = { class = "current", pending = "no reader audit yet" }
 "operational.failure" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "operational.recovered" = { class = "transition", window = "7d", pending = "no reader audit yet" }
-"readiness.case.adopted" = { class = "durable" }
 "ordered-membership.edited" = { class = "durable" }
 "owned-set.revised" = { class = "durable" }
 "person.delegation-set" = { class = "durable" }

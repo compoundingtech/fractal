@@ -544,7 +544,6 @@ pub fn sample(store: &Store) -> Option<Value> {
     static FAILING: AtomicBool = AtomicBool::new(false);
     static INVALID_BINDING: AtomicBool = AtomicBool::new(false);
     let policy = POLICY.get()?;
-    store.readiness_shared_case.store(policy.config.shared_case, Ordering::Relaxed);
     let result = if policy.config.shared_case {
         retained_admission::run_sampler(policy, store, now_ms())
     } else {

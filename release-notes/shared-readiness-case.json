@@ -1,7 +1,7 @@
 {
   "version": 1,
   "summary": "Add an opt-in shared readiness case with phase-specific owner and held informational notices.",
-  "replay": {"status": "changed", "detail": "A separate readiness-case journal imports pending legacy cuts before fresh readings and persists admitted phases and notice intents; restart replay recognizes native receipts, including daemon-authored, receipt-bound adoption records."},
+  "replay": {"status": "changed", "detail": "A separate readiness-case journal replays pending legacy cuts through the legacy writer before fresh readings. Existing weekly episodes drain under their existing writer without a shared-case primary notice; new shared phases and notice intents replay from native receipts."},
   "schema": {"status": "none", "detail": "No database schema change."},
   "rules": {"status": "changed", "detail": "Enabled shared cases replace independent weekly dispatch. Each escalation phase sends one actionable notice to the original owner and optionally one held informational notice to a distinct backup. Undelivered informational intents are bounded per phase and discarded on recovery. Measured recovery closes failure receipts without a new owner notice; Unknown preserves unresolved cases."},
   "compatibility": {"status": "changed", "detail": "Shared routing defaults off. Legacy weekly configuration remains accepted and its checkpoint bytes are unchanged. Retained evidence display and shared routing are separate opt-ins."},
