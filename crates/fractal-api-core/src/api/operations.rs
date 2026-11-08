@@ -689,8 +689,20 @@ pub async fn get_desired(
 /// Bulk comparison read: no status reduction or cold actual-state folds.
 pub async fn desired_batch(
     State(state): State<AppState>,
-    Json(request): Json<crate::store::desired_batch::DesiredBatchRequest>,
-) -> Result<Json<Vec<crate::store::desired_batch::DesiredBatchItem>>, ApiError> {
+    Query(parameters): Query<Vec<(String, String)>>,
+) -> Result<Json<crate::store::desired_batch::DesiredBatchPage>, ApiError> {
+    let mut request = crate::store::desired_batch::DesiredBatchRequest::default();
+    for (name, value) in parameters {
+        match name.as_str() {
+            "subject" => request.subjects.push(value),
+            "kind" => request.kind = Some(value),
+            "cursor" => request.cursor = Some(value),
+            "limit" => request.limit = Some(value.parse().map_err(|_| ApiError::bad(
+                FractalError::new("desired-page-limit", "limit must be an integer between 1 and 1000"),
+            ))?),
+            _ => {}
+        }
+    }
     let store = state.store.clone();
     blocking_store(move || store.desired_batch(&request)).await.map(Json)
 }

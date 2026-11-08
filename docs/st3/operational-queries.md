@@ -6,10 +6,27 @@ Use `fractal subject desired --json [--all | SUBJECT...] [--kind K]` to read des
 declarations and selected declaration tokens with cheap actual summaries, without
 reducing status or folding cards. The existing CLI noun is `subject`, singular.
 An empty subject selection means all declarations; explicit names are exact IDs.
-The API is `POST /v1/desired/batch` with `{"subjects":[],"kind":"agent"}` (`kind`
-optional), returning a JSON array of flattened `DesiredSubject` entries plus
-`desired_token` and optional extensible `actual`. At most 1,000 supplied names are
-accepted (`desired-batch-limit` otherwise). All sources are read in one store snapshot.
+The API is `GET /v1/desired?subject=ID&subject=ID&kind=K&limit=N&cursor=TOKEN`.
+Repeated URL-encoded `subject` parameters select exact names; omitting them selects all.
+`kind` and `cursor` are optional. At most 1,000 supplied names are accepted
+(`desired-batch-limit` otherwise). Page limit defaults to 1,000 and cannot exceed 1,000;
+zero or an over-limit value returns HTTP 422 `desired-page-limit`.
+Each page is `{"items":[...],"next_cursor":null,"store_index":123}`: `items` contains
+flattened `DesiredSubject` entries plus `desired_token` and optional extensible `actual`,
+`next_cursor` is an opaque string or `null`, and `store_index` is a `u64`.
+All sources for a page are read in one store snapshot.
+
+The cursor binds the store origin, pinned read cut, selection filters, limit and last
+subject. Continue with unchanged subjects, kind and limit. Each continuation validates
+that the store is still at the pinned cut; a changed cut returns typed
+`desired-cursor-expired`, never a silent restart or retry. No historical snapshot or
+pagination cache is retained. The CLI follows every cursor with limit 1,000 and unchanged
+filters, then prints one final JSON array. Any page failure, including cursor invalidation,
+fails the command without partial stdout.
+
+This GET inherits the single desired GET's `read.projections` authorization, deadline and
+read admission, including refusal of paired devices without that scope. It remains a read
+during fleet drain and performs no status reduction or cold card folds.
 See the [CLI reference](../site/reference/cli.md#bulk-desired-declarations) for the
 selection and response contract. Missing actual fields are not negative observations:
 fetch the card with `fractal subject show SUBJECT` or `fractal agents show AGENT`.
@@ -38,7 +55,7 @@ recursively sort object keys, preserve array order, and use compact JSON with no
 whitespace. The input is the declaration itself, not the surrounding
 `PublicationDefinition` metadata, revision, or selected desired token.
 
-The raw batch API is not a client-v0 operation. The committed Rust, Swift and
+The raw paged desired API is not a client-v0 operation. The committed Rust, Swift and
 TypeScript clients are generated from `docs/st3/client-v0/schemas/operations.json`
 and `client-v0.schema.json`, so this route does not change those inputs or outputs.
 Their regeneration command is `cargo run --locked -p fractal-client-codegen`;

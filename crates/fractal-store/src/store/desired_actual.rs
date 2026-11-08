@@ -1,6 +1,6 @@
 //! Cheap current-cut summaries of selected declarations, not a runtime status reduction.
 //!
-//! Call inside the bulk reader's pinned `read_snapshot_unindexed` closure. An agent's
+//! Call inside the bulk reader's pinned reader snapshot. An agent's
 //! `revision` is its published declaration revision, as on its card, not an observation's
 //! revision or the desired token. Runtime/card fields without a maintained folded source
 //! are deliberately absent: fetch the card for status, operation_status, state, host,

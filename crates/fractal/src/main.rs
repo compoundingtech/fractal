@@ -11458,15 +11458,40 @@ async fn run_harness_questions(
     }
 }
 
+async fn subject_desired_items(
+    client: &Client,
+    args: &SubjectDesiredArgs,
+) -> Result<Vec<fractal_daemon::store::desired_batch::DesiredBatchItem>> {
+    let mut selection = String::from("/v1/desired?limit=1000");
+    for subject in &args.subjects {
+        selection.push_str("&subject=");
+        selection.push_str(&urlencoding::encode(subject));
+    }
+    if let Some(kind) = &args.kind {
+        selection.push_str("&kind=");
+        selection.push_str(&urlencoding::encode(kind));
+    }
+    let mut items = Vec::new();
+    let selection_len = selection.len();
+    loop {
+        let page: fractal_daemon::store::desired_batch::DesiredBatchPage = client.get(&selection).await?;
+        items.extend(page.items);
+        match page.next_cursor {
+            Some(next) => {
+                selection.truncate(selection_len);
+                selection.push_str("&cursor=");
+                selection.push_str(&urlencoding::encode(&next));
+            }
+            None => return Ok(items),
+        }
+    }
+}
+
 async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool) -> Result<()> {
     match command {
         SubjectCommand::Desired(args) => {
-            let result: Value = client
-                .post(
-                    "/v1/desired/batch",
-                    &json!({ "subjects": args.subjects, "kind": args.kind }),
-                )
-                .await?;
+            // Do not emit partial output if any continuation has expired or otherwise fails.
+            let result = subject_desired_items(client, &args).await?;
             print_value(&result, json_output)
         }
         SubjectCommand::Reply {

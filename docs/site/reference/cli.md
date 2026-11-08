@@ -63,12 +63,26 @@ by the literal desired kind: stopped and terminally retired agents are `stop`, n
 The server accepts at most 1,000 supplied names and returns the typed error
 `desired-batch-limit` above that limit.
 
-This is one `POST /v1/desired/batch` with JSON body
-`{"subjects":["agent/garden/worker"],"kind":"agent"}`. `subjects` defaults to `[]`;
-`kind` is optional. The response is a JSON array, not a client-v0 envelope. Each item
+The CLI follows `GET /v1/desired?subject=ID&subject=ID&kind=K&limit=N&cursor=TOKEN`,
+with repeated URL-encoded `subject` parameters; omitting them selects all declarations.
+`kind` and `cursor` are optional. The default and maximum page limit are both 1,000;
+zero or a larger limit returns HTTP 422 `desired-page-limit`.
+Each API page is `{"items":[...],"next_cursor":null,"store_index":123}`, with a
+string `next_cursor` when another page follows and a `u64` store index. Each item
 flattens `DesiredSubject` (`subject`, `kind`, `desired`, `member`, and ownership fields)
 alongside `desired_token` (a selected declaration claim ID or `null`) and optional
-`actual` (an extensible JSON summary). The whole read uses one store snapshot.
+`actual` (an extensible JSON summary). This is not a client-v0 envelope.
+
+An opaque cursor binds the store origin, pinned read cut, selection filters, page limit
+and last subject. Continuations must keep the same subjects, kind and limit, and the
+store must still be at that cut; a changed cut returns typed `desired-cursor-expired`.
+There is no historical snapshot or pagination cache, silent restart or automatic retry.
+The CLI uses limit 1,000 throughout, collects every page and prints one final JSON array
+only after all reads succeed. Cursor invalidation fails the command without partial stdout.
+
+Each page uses one store read snapshot. This GET uses the existing desired-read
+`read.projections` scope, deadline and read admission, and remains available during fleet
+drain. It does not reduce status or cold-fold cards.
 Published mission definitions are included as synthesized `DesiredSubject` entries:
 `desired` is the canonical published `MissionSpec`; optional `member` and ownership
 fields are absent, including for retained retired definitions.
