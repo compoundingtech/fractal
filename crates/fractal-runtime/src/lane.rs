@@ -413,15 +413,19 @@ fn slice_cgroup(slice: &str) -> Option<std::path::PathBuf> {
     Some(app_slice_cgroup()?.join(LANES_SLICE).join(slice))
 }
 
-/// `app.slice` of the user manager this process runs in, where seats' scopes and the lanes sit.
+/// `app.slice` of the user manager this process runs in, where the lanes sit.
 pub(crate) fn app_slice_cgroup() -> Option<std::path::PathBuf> {
+    Some(user_manager_cgroup()?.join("app.slice"))
+}
+
+/// The user manager's cgroup, including app and interactive session slices.
+pub(crate) fn user_manager_cgroup() -> Option<std::path::PathBuf> {
     let own = std::fs::read_to_string("/proc/self/cgroup").ok()?;
     let own = own.lines().find_map(|line| line.strip_prefix("0::"))?;
     let parts: Vec<&str> = own.split('/').filter(|part| !part.is_empty()).collect();
     let manager = parts.iter().position(|part| part.starts_with("user@") && part.ends_with(".service"))?;
     let mut path = std::path::PathBuf::from("/sys/fs/cgroup");
     path.extend(&parts[..=manager]);
-    path.push("app.slice");
     Some(path)
 }
 

@@ -102,6 +102,7 @@ it('uses replay transports without early adoption and closes replay with the pag
     adoptEarlyCollections: false,
     options: expect.objectContaining({
       baseUrl: 'https://example.test', maxFollows: 8, conversationSlots: 'advertised',
+      client: 'fractal-web test',
       socket: replay.socket, fetch: replay.fetch,
     }),
   }))

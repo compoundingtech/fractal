@@ -558,6 +558,24 @@ fn duration_view(instrument: &Instrument) -> Option<Stream> {
     Some(stream.build().expect("seconds histogram view is valid"))
 }
 
+/// AP-2026-11-07-r2 safety margin; the population allocation remains 256 buckets.
+const AGENT_POPULATION_CARDINALITY_LIMIT: usize = 512;
+
+fn agent_population_view(instrument: &Instrument) -> Option<Stream> {
+    if !matches!(
+        instrument.name(),
+        "st.agents" | "st.attention.open" | "st.agents.refresh.last_success"
+    ) {
+        return None;
+    }
+    Some(
+        Stream::builder()
+            .with_cardinality_limit(AGENT_POPULATION_CARDINALITY_LIMIT)
+            .build()
+            .expect("agent population view is valid"),
+    )
+}
+
 /// The request-duration histogram shares the st2 view (30 s and 60 s buckets
 /// included for long-polls and replay); startup owns its longer bucket range.
 const HTTP_SERVER_DURATION_INSTRUMENT: &str = "http.server.request.duration";
@@ -1178,6 +1196,7 @@ impl Telemetry {
                             opentelemetry_sdk::metrics::PeriodicReader::builder(exporter).build(),
                         )
                         .with_view(duration_view)
+                        .with_view(agent_population_view)
                         .with_resource(resource.clone())
                         .build();
                     if matches!(unit, Unit::Daemon) {
@@ -1797,6 +1816,52 @@ mod tests {
             }),
             "series beyond the cap fold into otel.metric.overflow"
         );
+    }
+
+    #[test]
+    fn agent_population_view_caps_each_observable_gauge() {
+        use super::{AGENT_POPULATION_CARDINALITY_LIMIT, agent_population_view, duration_view};
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+        use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+
+        let exporter = InMemoryMetricExporter::default();
+        let provider = SdkMeterProvider::builder()
+            .with_reader(PeriodicReader::builder(exporter.clone()).build())
+            .with_view(duration_view)
+            .with_view(agent_population_view)
+            .build();
+        let names = ["st.agents", "st.attention.open", "st.agents.refresh.last_success"];
+        for name in names {
+            provider.meter("st3").u64_observable_gauge(name)
+                .with_unit(if name == "st.agents.refresh.last_success" { "s" } else { "{item}" })
+                .with_callback(|observer| {
+                    for series in 0..AGENT_POPULATION_CARDINALITY_LIMIT + 25 {
+                        observer.observe(1, &[KeyValue::new("series", series.to_string())]);
+                    }
+                })
+                .build();
+        }
+        provider.force_flush().unwrap();
+        let finished = exporter.get_finished_metrics().unwrap();
+        for name in names {
+            let metric = finished.iter()
+                .flat_map(|resource| resource.scope_metrics())
+                .flat_map(|scope| scope.metrics())
+                .find(|metric| metric.name() == name)
+                .expect("each population instrument is exported");
+            let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = metric.data() else {
+                panic!("population instruments must export as u64 gauges");
+            };
+            assert_eq!(gauge.data_points().count(), AGENT_POPULATION_CARDINALITY_LIMIT + 1);
+            assert_eq!(gauge.data_points().filter(|point| {
+                point.attributes().any(|attribute| {
+                    attribute.key.as_str() == "otel.metric.overflow"
+                        && attribute.value == opentelemetry::Value::Bool(true)
+                })
+            }).count(), 1, "excess series produce exactly one explicit overflow point");
+        }
+        provider.shutdown().unwrap();
     }
 
     /// Opt-in cost proof: ~1 GiB in small, touched allocations, with alternate

@@ -2430,6 +2430,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
         "one-shot",
         "capacity",
         "handles-faults",
+        "notice-runtime",
         "accountable",
         "principal",
         "mission-authority",
@@ -2475,6 +2476,7 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
         "one-shot",
         "capacity",
         "handles-faults",
+        "notice-runtime",
         "accountable",
         "mission-authority",
         "queue-authority",
@@ -2515,6 +2517,10 @@ fn validate_agent_body(document: &KdlDocument, owner: &str) -> Result<(), Fracta
     }
     if let Some(flag) = unique_child(document, "handles-faults")? {
         ensure_bare(flag)?;
+    }
+    if let Some(flag) = unique_child(document, "notice-runtime")? {
+        ensure_bare(flag)?;
+        ensure_no_children(flag)?;
     }
     if let Some(flag) = unique_child(document, "one-shot")? {
         ensure_bare(flag)?;

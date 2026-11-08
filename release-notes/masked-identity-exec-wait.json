@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Wait for exec before inspecting masked-identity test fixtures",
+  "replay": {"status": "none", "detail": "Test-only fixture synchronization; no runtime replay change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rules or fleet coordination change."},
+  "compatibility": {"status": "none", "detail": "No client, protocol or harness contract change."},
+  "downtime": {"status": "none", "detail": "No runtime change or additional service interruption."},
+  "manual": {"status": "none", "detail": "No installation or upgrade steps required."},
+  "recovery": {"status": "none", "detail": "No database or runtime recovery change."}
+}

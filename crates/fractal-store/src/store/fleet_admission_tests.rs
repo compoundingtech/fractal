@@ -159,6 +159,194 @@ fn replica_records_bear_authority_only_in_the_authority_families() {
 }
 
 #[test]
+fn trusted_usage_admission_also_requires_the_allowlisted_writer() {
+    let store = node("observer", None, None);
+    let mut input = ClaimInput {
+        subject: "agent/sample/usage-producer".into(),
+        kind: "usage.limits.observed".into(),
+        actor: Some("agent/sample/usage-producer".into()),
+        fields: serde_json::from_value(json!({"readings": [], "credit_readings": []})).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    };
+    assert!(store.append_claim(&input).is_err(), "absent config denies trusted append");
+    assert!(store.append_client_claim(&input).is_err(), "absent config denies public append");
+    store.set_usage_limits_writers(Vec::new()).unwrap();
+    assert!(store.append_claim(&input).is_err(), "empty config denies");
+    for writer in ["person/ada", "harness/sample", "agent/"] {
+        assert!(store.set_usage_limits_writers(vec![writer.into()]).is_err());
+    }
+    store.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
+    store.append_claim(&input).unwrap();
+    store.append_client_claim(&input).unwrap();
+    input.subject = "agent/sample/other-producer".into();
+    input.actor = Some(input.subject.clone());
+    assert!(store.append_claim(&input).is_err(), "other self-authoring agents denied");
+    assert!(store.append_client_claim(&input).is_err());
+    input.subject = "agent/sample/usage-producer".into();
+    for actor in [None, Some("person/ada"), Some("harness/omp"), Some("agent/other")] {
+        input.actor = actor.map(str::to_owned);
+        assert!(store.append_claim(&input).is_err(), "must reject actor {actor:?}");
+        assert!(store.append_client_claim(&input).is_err());
+    }
+}
+
+#[test]
+fn replicated_usage_storage_is_independent_of_each_receivers_configured_writers() {
+    let anchor_key = key();
+    let receiver_key = key();
+    let source = node("source", Some(&anchor_key), Some(&anchor_key));
+    source.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
+    admit(&source, "source", &anchor_key, "anchor", None);
+    admit(&source, "receiver", &receiver_key, "invite", None);
+    let observation = source.append_claim(&ClaimInput {
+        subject: "agent/sample/usage-producer".into(),
+        kind: "usage.limits.observed".into(),
+        actor: Some("agent/sample/usage-producer".into()),
+        fields: serde_json::from_value(json!({"readings": [], "credit_readings": []})).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    for writers in [None, Some(Vec::new()), Some(vec!["agent/sample/other".into()]), Some(vec!["agent/sample/usage-producer".into()])] {
+        let receiver = node("receiver", Some(&receiver_key), Some(&anchor_key));
+        if let Some(writers) = writers {
+            receiver.set_usage_limits_writers(writers).unwrap();
+        }
+        let admission = sync(&source, &receiver);
+        assert_eq!(admission.invalid, 0);
+        assert!(admitted(&receiver, &observation));
+    }
+}
+
+#[test]
+fn replicated_usage_folds_existing_evidence_after_config_change_and_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let anchor_key = key();
+    let receiver_key = key();
+    let writer = "agent/sample/usage-producer";
+    let source = node("alder", Some(&anchor_key), Some(&anchor_key));
+    source.set_usage_limits_writers(vec![writer.into()]).unwrap();
+    admit(&source, "alder", &anchor_key, "anchor", None);
+    admit(&source, "cedar", &receiver_key, "invite", None);
+    let observation = source.append_claim(&ClaimInput {
+        subject: writer.into(),
+        kind: "usage.limits.observed".into(),
+        actor: Some(writer.into()),
+        fields: serde_json::from_value(json!({
+            "readings": [{
+                "account": "digest", "account_ref": "account/sample", "provider": "anthropic",
+                "window": "weekly", "used_percent": 42.0, "resets_at": null,
+                "measured_at": "2026-11-07T10:00:00Z", "coverage": "reported",
+                "source": "omp-usage", "host": "alder"
+            }],
+            "credit_readings": []
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let path = root.path().join("cedar.sqlite3");
+    let receiver = Store::open(&path, "cedar").unwrap();
+    receiver.bind_fleet(FLEET).unwrap();
+    receiver.pin_fleet_anchor(anchor_key.public()).unwrap();
+    receiver.set_member_key(Some(receiver_key)).unwrap();
+    receiver.set_usage_limits_writers(Vec::new()).unwrap();
+    assert_eq!(sync(&source, &receiver).invalid, 0);
+    assert!(admitted(&receiver, &observation));
+    let fold = |store: &Store| {
+        limits::account_limits_for_writers(&store.readers.get(), &store.usage_limits_writers()).unwrap()
+    };
+    assert!(fold(&receiver).is_empty(), "empty config retains but does not fold");
+    let before = receiver.backup_header().unwrap();
+
+    receiver.set_usage_limits_writers(vec![writer.into()]).unwrap();
+    let rows = fold(&receiver);
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].windows.iter().find(|window| window.window == "weekly").unwrap().used_percent, Some(42.0));
+    let configured = receiver.backup_header().unwrap();
+    assert_eq!(configured.graph_digest, before.graph_digest);
+    assert_eq!(configured.tables["claim_sources"], before.tables["claim_sources"]);
+    receiver.set_usage_limits_writers(Vec::new()).unwrap();
+    assert!(fold(&receiver).is_empty());
+
+    let archive_path = root.path().join("cedar.jsonl");
+    let header = receiver.write_backup(&mut std::fs::File::create(&archive_path).unwrap()).unwrap();
+    let restored_path = root.path().join("restored.sqlite3");
+    let report = crate::backup::restore(&archive_path, &restored_path, root.path()).unwrap();
+    assert!(report.projections_match);
+    assert_eq!(report.graph_digest, header.graph_digest);
+    assert_eq!(report.tables["claim_sources"], header.tables["claim_sources"]);
+    let restored = Store::open(&restored_path, &report.writer).unwrap();
+    assert!(admitted(&restored, &observation));
+    assert!(fold(&restored).is_empty());
+    drop(restored);
+    drop(receiver);
+
+    let reopened = Store::open(&path, "cedar").unwrap();
+    assert!(fold(&reopened).is_empty(), "local config is supplied again on restart");
+    reopened.set_usage_limits_writers(vec![writer.into()]).unwrap();
+    assert_eq!(fold(&reopened), rows, "restart folds retained claims without another sync");
+    let after = reopened.backup_header().unwrap();
+    assert_eq!(after.graph_digest, before.graph_digest);
+    assert_eq!(after.tables["claim_sources"], before.tables["claim_sources"]);
+}
+
+#[test]
+fn old_members_hold_usage_observations_without_blocking_known_claims_or_authority() {
+    let anchor_key = key();
+    let older_key = key();
+    let current = node("current", Some(&anchor_key), Some(&anchor_key));
+    current.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
+    admit(&current, "current", &anchor_key, "anchor", None);
+    admit(&current, "older", &older_key, "invite", None);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("older.sqlite3");
+    let older = Store::open(&path, "older").unwrap();
+    older.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
+    older.bind_fleet(FLEET).unwrap();
+    older.pin_fleet_anchor(anchor_key.public()).unwrap();
+    older.set_member_key(Some(older_key.clone())).unwrap();
+    let mut registry = fractal_schema::registry().clone();
+    registry.claims.remove("usage.limits.observed").unwrap();
+    older.set_claim_registry(registry);
+    sync(&current, &older);
+
+    let observation = current.append_claim(&ClaimInput {
+        subject: "agent/sample/usage-producer".into(),
+        kind: "usage.limits.observed".into(),
+        actor: Some("agent/sample/usage-producer".into()),
+        fields: serde_json::from_value(json!({"readings": [], "credit_readings": []})).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    let later = note(&current, "known claim after usage observation");
+    let admission = sync(&current, &older);
+    assert_eq!((admission.unknown, admission.invalid), (1, 0));
+    assert!(!admitted(&older, &observation));
+    assert!(admitted(&older, &later));
+    let held = older.replica_records(true).unwrap();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].error_code.as_deref(), Some("unknown-claim-kind"));
+    assert!(!replica_record_bears_authority("unknown", Some("usage.limits.observed")));
+    let connection = older.connection.lock().unwrap();
+    assert_eq!(has_unknown_claim_at(&connection, "agent/sample/usage-producer", None).unwrap(), None);
+    drop(connection);
+    drop(older);
+
+    let upgraded = Store::open(&path, "older").unwrap();
+    upgraded.set_usage_limits_writers(vec!["agent/sample/usage-producer".into()]).unwrap();
+    upgraded.set_member_key(Some(older_key)).unwrap();
+    assert_eq!(upgraded.validate_replication_backlog().unwrap().unknown, 0);
+    upgraded.project_replication_backlog().unwrap();
+    assert!(admitted(&upgraded, &observation));
+    assert!(upgraded.replica_records(true).unwrap().is_empty());
+}
+
+
+#[test]
 fn mixed_builds_keep_signed_unknown_claims_and_project_them_after_upgrade() {
     let anchor_key = key();
     let older_key = key();
