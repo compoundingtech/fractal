@@ -3,9 +3,8 @@
 // receives it through react-aria `useDrop`. React Aria's `useDrag` is not used: it reads a press at a tab's
 // exact centre, or a virtual click, as a screen reader's drag and leaves the app inert until Escape, and a
 // tab's keyboard way to move is Alt+Shift+Arrow below. wf adds Alt+Shift+←/→ (↑/↓ when vertical) reorder announced through a
-// live region, Delete to close, dirty/live/attention markers and an "Open surfaces"
-// overflow menu. The close glyph is pointer-only (`aria-hidden`) so a
-// tab holds no nested interactive element.
+// live region, Delete to close and dirty/live/attention markers. The close glyph shows on the shown, hovered or
+// keyboard-focused tab and is pointer-only (`aria-hidden`), so a tab holds no nested interactive element or extra tab stop.
 
 import * as stylex from '@stylexjs/stylex'
 import {
@@ -26,12 +25,10 @@ import { HoverCardSurface, useHoverCardIntent } from '../../../../packages/fract
 import { ThemePortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/ThemePortal.tsx'
 import { interactionVars as interaction, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
-import { Menu, MenuItem, MenuPopover, MenuTrigger } from '../ui-compat/components.tsx'
 import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
 
 import { HarnessIcon } from './brand-icons.tsx'
-import { IconButton } from './IconButton.tsx'
-import { CloseIcon, MoreIcon } from './icons.tsx'
+import { CloseIcon } from './icons.tsx'
 
 /** One editor surface represented in a tab strip. */
 export interface EditorTabItem {
@@ -81,6 +78,8 @@ export interface EditorTabsProps {
   readonly dragType: string
   readonly onActivate: (id: string) => void
   readonly onClose: (id: string) => void
+  /** The host's actions for one tab, opened by a right-click, Shift+F10 or the ContextMenu key on it, anchored to `tab`. */
+  readonly onTabMenu?: ((id: string, tab: HTMLElement) => void) | undefined
   /** Same-group reorder or a drop from another group; `toIndex` is the final index. */
   readonly onMove: (move: { readonly source: TabDragPayload; readonly toIndex: number }) => void
   readonly actions?: ReactNode
@@ -90,8 +89,6 @@ export interface EditorTabsProps {
   readonly stablePanel?: boolean
   /** 44px targets for a coarse pointer. */
   readonly touch?: boolean
-  /** The strip's own menu of its open tabs; a host that lists them elsewhere, as a phone's More actions does, leaves it out. */
-  readonly surfacesMenu?: boolean
   /** Before the tabs, in the same row: in `bar`, the controls that lead the window's top bar. */
   readonly leading?: ReactNode
   /** After the strip's own controls: in `bar`, the controls that end the window's top bar. */
@@ -465,12 +462,12 @@ export const EditorTabs = ({
   dragType,
   onActivate,
   onClose,
+  onTabMenu,
   onMove,
   actions,
   children,
   stablePanel = false,
   touch = false,
-  surfacesMenu = true,
   leading,
   end,
   hostDrag,
@@ -639,6 +636,7 @@ export const EditorTabs = ({
               groupId={groupId}
               dragType={dragType}
               onClose={onClose}
+              onTabMenu={onTabMenu}
               onReorder={reorder}
               touch={touch}
               hostDragProps={hostDrag?.tabProps(tab)}
@@ -656,33 +654,6 @@ export const EditorTabs = ({
         )}
         <div {...stylex.props(styles.actions, vertical && styles.actionsVertical)}>
           {actions}
-          {surfacesMenu ? <MenuTrigger>
-            <IconButton label="Open surfaces" icon={<MoreIcon />} />
-            <MenuPopover>
-              <Menu
-                aria-label={`${label}: open surfaces`}
-                selectionMode="single"
-                selectedKeys={activeId === null ? [] : [activeId]}
-                onAction={(key) => onActivate(String(key))}
-              >
-                {tabs.map((tab) => (
-                  <MenuItem
-                    key={tab.id}
-                    id={tab.id}
-                    {...(tab.detail === undefined && tab.harness === undefined
-                      ? {}
-                      : {
-                          suffix: [tab.detail, tab.harness]
-                            .filter((part) => part !== undefined)
-                            .join(' · '),
-                        })}
-                  >
-                    {tab.title}
-                  </MenuItem>
-                ))}
-              </Menu>
-            </MenuPopover>
-          </MenuTrigger> : null}
           {end}
         </div>
         <span role="status" aria-live="polite" {...stylex.props(styles.srOnly)}>
@@ -715,6 +686,7 @@ interface TabItemProps {
   readonly groupId: string
   readonly dragType: string
   readonly onClose: (id: string) => void
+  readonly onTabMenu: ((id: string, tab: HTMLElement) => void) | undefined
   readonly onReorder: (move: { readonly tab: EditorTabItem; readonly to: number }) => void
   readonly touch: boolean
   /** The host's drag in place of the platform's. */
@@ -731,6 +703,7 @@ const TabItem = ({
   groupId,
   dragType,
   onClose,
+  onTabMenu,
   onReorder,
   touch,
   hostDragProps,
@@ -768,7 +741,7 @@ const TabItem = ({
       data-tab-id={tab.id}
       data-tab-kind={tab.kind}
       aria-label={`${tab.title}${tab.detail === undefined && tab.harness === undefined ? '' : `, ${[tab.detail, tab.harness].filter((part) => part !== undefined).join(' · ')}`}${tab.attention === true ? ', needs you' : ''}${tab.status === 'live' ? ', live' : tab.status === 'unavailable' ? ', unavailable' : ''}`}
-      aria-keyshortcuts={`Enter Delete Alt+Shift+${back} Alt+Shift+${forward}`}
+      aria-keyshortcuts={`Enter Delete${onTabMenu === undefined ? '' : ' Shift+F10'} Alt+Shift+${back} Alt+Shift+${forward}`}
       onHoverChange={setHovered}
       render={(props) => (
         <div
@@ -781,11 +754,20 @@ const TabItem = ({
                 })
               } else if (event.key === 'Delete' || event.key === 'Backspace') {
                 onClose(tab.id)
+              } else if (onTabMenu !== undefined && (event.key === 'ContextMenu' || (event.shiftKey && event.key === 'F10'))) {
+                card.intend(false)
+                onTabMenu(tab.id, event.currentTarget as HTMLElement)
               } else {
                 return
               }
               event.preventDefault()
               event.stopPropagation()
+            },
+            onContextMenu: (event: MouseEvent) => {
+              if (onTabMenu === undefined) return
+              event.preventDefault()
+              card.intend(false)
+              onTabMenu(tab.id, event.currentTarget as HTMLElement)
             },
             onMouseEnter: () => card.intend(true),
             onMouseLeave: () => card.intend(false),
@@ -826,7 +808,7 @@ const TabItem = ({
         ).className ?? ''
       }
     >
-      {() => (
+      {({ isFocusVisible }) => (
         <>
           {tab.status === 'live' && !vertical ? <span {...stylex.props(styles.live)} /> : null}
           {tab.icon === undefined ? null : <span {...stylex.props(styles.icon)}>{tab.icon}</span>}
@@ -860,10 +842,10 @@ const TabItem = ({
             {...stylex.props(
               styles.trailing,
               touch && styles.trailingTouch,
-              tab.dirty === true || active || hovered ? styles.closeShown : styles.closeHidden,
+              tab.dirty === true || active || hovered || isFocusVisible ? styles.closeShown : styles.closeHidden,
             )}
           >
-            {tab.dirty === true && !hovered ? (
+            {tab.dirty === true && !hovered && !isFocusVisible ? (
               <span {...stylex.props(styles.dirtyDot)} />
             ) : (
               <CloseIcon />

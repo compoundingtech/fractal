@@ -798,10 +798,10 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
       focusShownFace.current = true
       store.dispatch({ _tag: 'SetView', tab: shownTab.id, view: { terminal: !terminalShown } })
     }
-    // A phone folds "Open a tab" and the pane's other tabs into its one More actions, so every bar target stays 44px.
+    // A phone folds the "+" menu's two sections, Open and Go to tab, into its one More actions, so every bar target stays 44px.
     const phoneSections: readonly OverflowSection[] | undefined = narrow ? [
-      { title: 'Open a tab', items: openable.map(item => ({ id: item.id, label: item.label, onAction: () => openRef(item.ref) })) },
-      ...(pane.tabs.length > 1 ? [{ title: 'Open tabs', items: pane.tabs.map(tab => ({ id: tab.id, label: titleOfTab(tab.id) ?? tab.ref, current: tab.id === pane.active, onAction: () => go({ _tag: 'Activate', tab: tab.id }) })) }] : []),
+      { title: 'Open', items: openable.map(item => ({ id: item.id, label: item.label, onAction: () => openRef(item.ref) })) },
+      ...(pane.tabs.length > 1 ? [{ title: 'Go to tab', items: pane.tabs.map(tab => ({ id: tab.id, label: titleOfTab(tab.id) ?? tab.ref, current: tab.id === pane.active, onAction: () => go({ _tag: 'Activate', tab: tab.id }) })) }] : []),
     ] : undefined
     const nativeActions = paneAgent === '' ? undefined : <ConversationHeaderActions key={paneAgent} agentRef={paneAgent} onViewDeclaration={() => openRef(`declaration/${paneAgent}`)} sections={phoneSections} />
     const watch = terminalShown && shownTab !== undefined ? <TerminalAttachWatch key={paneAgent} agentRef={paneAgent} onMissing={reason => onMissingTerminal(paneAgent, shownTab.id, reason)} /> : null

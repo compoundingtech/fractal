@@ -46,7 +46,7 @@ export const agentActions = (agent: { readonly state?: string; readonly activity
   ]
 }
 
-/** A group the host adds after the agent's own actions, e.g. a phone's "Open a tab" and open tabs. */
+/** A group the host adds after the agent's own actions, e.g. a phone's Open and Go to tab sections. */
 export interface OverflowSection {
   readonly title: string
   readonly items: readonly { readonly id: string; readonly label: string; readonly current?: boolean; readonly onAction: () => void }[]
