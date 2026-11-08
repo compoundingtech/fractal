@@ -180,6 +180,7 @@ function Main({ proofSession = false }: { proofSession?: boolean }) {
       <Text style={{ color: colors.text, fontSize: 17 }}>Your trusted member has prepared renewed access for this phone. Approve with Face ID, Touch ID, or your device passcode.</Text>
       <Text selectable style={{ color: colors.text, fontSize: 17 }}>Member: {renewal.issuer_member}</Text>
       <Text selectable style={{ color: colors.text, fontSize: 17 }}>Person: {renewal.person_id}</Text>
+      <Text selectable style={{ color: colors.text, fontSize: 17 }}>Requested by {renewal.requested_by}</Text>
       <Text style={{ color: colors.text, fontSize: 17, fontWeight: '600' }}>Access</Text>
       {renewal.scopes.map(scope => <Text key={scope} selectable style={{ color: colors.text, fontSize: 16 }}>{scope}</Text>)}
       <Text style={{ color: colors.text, fontSize: 15 }}>Your saved trust pin verified this request. Your existing pairing stays saved until renewed access has been verified and securely stored.</Text>

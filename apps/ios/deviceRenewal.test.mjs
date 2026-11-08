@@ -27,7 +27,7 @@ const vector = JSON.parse(readFileSync(new URL('../../fixtures/clients/device-pa
 const now = 1_800_000_000_000;
 const profile = () => ({ url: 'https://member.example', credential: 'previous-bearer-never-sent-for-renewal', personRootFingerprint: vector.fingerprint,
   signing: { key: 'p256:old-device-key', storage: 'secure-enclave', handle: 'old-handle', person: vector.person, chain: ['old-grant'] }, routing: { carrier: 'tailscale', members: [] } });
-const offer = () => ({ renewal_id: 'renewal/example', migration_epoch: 'example-epoch', issuer_member: 'host/example', person_id: vector.person,
+const offer = () => ({ renewal_id: 'renewal/example', migration_epoch: 'example-epoch', issuer_member: 'host/example', person_id: vector.person, requested_by: 'agent/example',
   scopes: ['control.messages'], old_public_key: 'p256:old-device-key', nonce: 'fresh-nonce', expires_at_unix_ms: now + 300_000,
   person_root_key_proof: structuredClone(vector.proofs[1]), issuer_signature: 'offer-signature' });
 const session = () => ({ kind: 'paired-session', device_id: 'device/0123456789abcdef01234567', person_id: vector.person,
@@ -72,7 +72,7 @@ test('pending uses a domain-separated old-key proof, never the saved bearer, and
 });
 
 test('pending refuses changed signed tuples, another old key, expired offers and wrong pins', async () => {
-  for (const change of [value => { value.scopes.push('control.terminals'); }, value => { value.old_public_key = 'another-key'; }, value => { value.expires_at_unix_ms = now; }, value => { value.person_id = 'person/other'; }]) {
+  for (const change of [value => { value.scopes.push('control.terminals'); }, value => { value.requested_by = 'agent/other'; }, value => { value.old_public_key = 'another-key'; }, value => { value.expires_at_unix_ms = now; }, value => { value.person_id = 'person/other'; }]) {
     const t = setup(); const altered = structuredClone(t.challenge); change(altered);
     t.ports.post = async () => ({ kind: 'device-renewals', renewals: [altered] });
     await assert.rejects(pendingRenewals(t.previous, t.previous.url, 'st3.client.v0', t.ports));

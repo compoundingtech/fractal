@@ -3,7 +3,7 @@ import { verifyPairing, verifyPersonRoot, type ProofCrypto } from './pairingProo
 
 export type RenewalProfile = { url: string; credential: string; personRootFingerprint?: string; signing?: { key: string; storage: 'secure-enclave' | 'software'; handle?: string; person: string; chain: string[] } };
 export type RenewalOffer = {
-  renewal_id: string; migration_epoch: string; issuer_member: string; person_id: string;
+  renewal_id: string; migration_epoch: string; issuer_member: string; person_id: string; requested_by: string;
   scopes: string[]; old_public_key: string; nonce: string; expires_at_unix_ms: number;
   person_root_key_proof: unknown; issuer_signature: string;
 };
@@ -26,7 +26,7 @@ export const watchRenewalForeground = (gate: { active: boolean; subscribe(listen
 };
 const requireValue = (condition: unknown, message: string): void => { if (!condition) throw new Error(message); };
 export const pendingRenewalText = (key: string, timestamp: number): string => `fractal-device-renewal-pending-v1\n${JSON.stringify([key, timestamp])}`;
-const tuple = (offer: RenewalOffer): unknown[] => [offer.renewal_id, offer.migration_epoch, offer.issuer_member, offer.person_id, offer.scopes, offer.old_public_key, offer.nonce, offer.expires_at_unix_ms];
+const tuple = (offer: RenewalOffer): unknown[] => [offer.renewal_id, offer.migration_epoch, offer.issuer_member, offer.person_id, offer.requested_by, offer.scopes, offer.old_public_key, offer.nonce, offer.expires_at_unix_ms];
 export const renewalOfferText = (offer: RenewalOffer): string => `fractal-device-renewal-offer-v1\n${JSON.stringify(tuple(offer))}`;
 export const renewalApprovalText = (offer: RenewalOffer, candidate: string): string => `fractal-device-renewal-v1\n${JSON.stringify([...tuple(offer), candidate])}`;
 
@@ -36,6 +36,7 @@ const isRenewalOffer = (value: unknown): value is RenewalOffer => {
     && 'migration_epoch' in value && typeof value.migration_epoch === 'string'
     && 'issuer_member' in value && typeof value.issuer_member === 'string'
     && 'person_id' in value && typeof value.person_id === 'string'
+    && 'requested_by' in value && typeof value.requested_by === 'string'
     && 'old_public_key' in value && typeof value.old_public_key === 'string'
     && 'nonce' in value && typeof value.nonce === 'string'
     && 'issuer_signature' in value && typeof value.issuer_signature === 'string'
