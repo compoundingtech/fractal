@@ -26,6 +26,8 @@ import { recordedToolDetail } from './semanticTool.tsx'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { AgentThreadTabs, type AgentThreadTabsHandle } from '../../../../packages/fractal-ui/src/assistant-ui/composition/AgentThreadTabs.tsx'
 import { subagentThreadFocus } from './subagentThreadFocus.ts'
+import { BrowserPairing } from './BrowserPairing.tsx'
+import { pairingSendRefusal, pairingStoreFor } from './browserPairingState.ts'
 
 export const ConversationPane = (props: React.ComponentProps<typeof ConversationThreadPane>) => {
   const feed = useConversation(props.agentRef)
@@ -185,13 +187,16 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     })
   }, [agentRef])
   const [refusal, setRefusal] = React.useState<SendRefusal>()
+  // Absent outside the served page: fixtures, replays and hosts without pairing keep the composer as it was.
+  const pairing = source.pairing === undefined ? undefined : pairingStoreFor(source.pairing)
+  const onRefused = React.useMemo(() => pairingSendRefusal(pairing, setRefusal), [pairing])
   const upload = source.attachments?.upload
   const attachmentAdapter = React.useMemo(() => upload === undefined ? undefined : imageUploadAdapter(upload), [upload])
   const binding = composerSendBinding({
     source, agentRef, grants,
     readable: state._tag === 'Observed',
     items: state._tag === 'Observed' ? state.items : [],
-    refusal, onRefused: setRefusal, attachmentAdapter,
+    refusal, onRefused, attachmentAdapter,
   })
   // The composer's Stop (and Esc) interrupts the agent's turn, as Interrupt in its actions does.
   // A refusal belongs to the run it answered (the running turn's id): it shows beside Stop while that run
@@ -264,6 +269,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       markStart('keystroke_paint')
       measureEnd('keystroke_paint')
     }} style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: `calc(${geometryVars.controlLg} + ${geometryVars.controlMd} + 3 * ${spaceVars.md} + 2 * ${geometryVars.hairline} + ${spaceVars.lg})`, paddingBottom: spaceVars.lg }}>
+      {pairing === undefined ? null : <BrowserPairing store={pairing} messageSend={grants.messageSend} />}
       <EmbraceComposer variant="C1" readingColumn conversationLabel={agentName} disabledReason={state._tag === 'Unavailable' && state.classification === 'not-found' ? 'Conversation not found' : binding.disabledReason} {...(binding.imageAttachments === undefined ? {} : { imageAttachments: binding.imageAttachments })} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
     </div>}
   </EmbraceRuntimeProvider>
