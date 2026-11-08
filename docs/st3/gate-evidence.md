@@ -714,6 +714,15 @@ clock and its own digest as producer, accepts exactly the documented request key
 `tests` observation with `runner: "wrapper"`. It cannot check that the command really ran; that is
 the cooperative boundary (agents with the key's account can lie) and belongs in the known defects.
 
+Before fetching the checked commit into its private scratch repository, the signer hydrates
+missing reachable objects (including historical blobs) in the source checkout. Local
+`upload-pack` disables lazy fetching, so a `blob:none` checkout cannot otherwise serve that
+fetch even when its working tree is complete. Missing IDs are fetched from the configured
+promisor remote in batches of at most 200, without updating refs or running maintenance.
+An unavailable promisor remote or a fetch that makes no progress refuses signing with
+`cannot hydrate ... before signing`; no evidence is published. This does not change the
+signed observation or the verifier's trust boundary.
+
 `scripts/testdata/evidence/wrapper-note/` is a golden note made with a throwaway key
 (`python3 scripts/evidence-wrap-test --write-fixture DIR` regenerates one). The verifier's tests
 read it too. A note applies only to the tree it names, so it helps CI only when the pushed commit
