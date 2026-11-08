@@ -28,8 +28,9 @@ from release_notes import FIELDS, ImpactError, render
 
 WORKFLOW = 'release-fractal.yml'
 SEMVER = re.compile(r'v(\d+)\.(\d+)\.(\d+)')
-# Stay below GitHub's 125000-character release-body limit.
-RELEASE_BODY_LIMIT = 120000
+# Keep create/publish metadata small. Complete notes travel as an asset.
+RELEASE_BODY_BYTES = 24 * 1024
+DRAFT_MARKER = '\n\n<!-- fractal-daily-candidate -->\n'
 FULL_NOTES_POINTER = ('The complete notes and upgrade guide are attached as the `RELEASE-NOTES.md` asset; '
                       'complete classifications are attached as `UPGRADE-IMPACT.json`.')
 
@@ -190,7 +191,8 @@ def cleanup_superseded_drafts(tag, drafts):
 
 def release_body(rendered, impact):
     """Summarize oversized intervals from classifications, never from sliced Markdown."""
-    if len(rendered) <= RELEASE_BODY_LIMIT:
+    limit = RELEASE_BODY_BYTES - len(DRAFT_MARKER.encode())
+    if len(rendered.encode()) <= limit:
         return rendered
     headline, marker, _ = rendered.partition('\n## Upgrade impact\n')
     if not marker:
@@ -234,11 +236,11 @@ def release_body(rendered, impact):
     body = '\n'.join(lines)
     # Reserve the largest possible omission count before accepting any complete entry.
     reserve = f'\n{len(items)} more upgrade items; see the attached complete notes.\n\n{FULL_NOTES_POINTER}\n'
-    if len(body) + len(reserve) > RELEASE_BODY_LIMIT:
+    if len((body + reserve).encode()) > limit:
         raise ImpactError('cannot build bounded release body: headline and classification counts exceed limit')
     included = 0
     for item in items:
-        if len(body) + len(item) + len(reserve) > RELEASE_BODY_LIMIT:
+        if len((body + item + reserve).encode()) > limit:
             break
         body += item
         included += 1
@@ -353,7 +355,7 @@ def main():
     notes = dist / 'RELEASE-NOTES.md'
     notes.write_text(rendered)
     body_notes = dist / 'RELEASE-BODY.md'
-    body_notes.write_text(body + '\n\n<!-- fractal-daily-candidate -->\n')
+    body_notes.write_text(body + DRAFT_MARKER, encoding='utf-8')
     (dist / 'UPGRADE-IMPACT.json').write_text(json.dumps(impact, indent=2) + '\n')
     (dist / 'CANDIDATE.json').write_text(json.dumps({
         'source': sha, 'build_run': run_id, 'build_attempt': attempt,
@@ -365,11 +367,12 @@ def main():
         print(body)
         shortened = 'shortened' if body != rendered else 'unchanged'
         say(f'dry run: release body {shortened}: {len(body)} characters '
-            f'(full notes: {len(rendered)}; limit: {RELEASE_BODY_LIMIT})')
+            f'(full notes: {len(rendered)} characters; draft body limit: {RELEASE_BODY_BYTES} bytes)')
         say(f'dry run: would draft {tag} at {sha} with {len(assets)} assets, including RELEASE-NOTES.md')
         return 0
 
     assert_current_attempt(run_id, repository, attempt, run)
+    say(f'draft create metadata: {body_notes.stat().st_size} UTF-8 bytes; {len(assets)} assets verified locally')
     gh('release', 'create', tag, '--target', sha, '--draft', '--title', f'Fractal {tag}',
        '--notes-file', str(body_notes), *assets, done=lambda: discard_partial_draft(tag))
     cleanup_superseded_drafts(tag, drafts)
