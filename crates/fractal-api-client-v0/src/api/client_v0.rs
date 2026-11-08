@@ -5651,11 +5651,13 @@ fn begin_person_challenge(
         ("device_name".into(), Value::String(request.device_name)),
         ("person_id".into(), Value::String(person_id.clone())),
         ("scopes".into(), json!(scopes)),
-        ("code_hash".into(), Value::String(pairing_verifier::digest(&verifier_key, &code))),
         ("verifier".into(), Value::String(pairing_verifier::MARKER.into())),
         ("verifier_key_id".into(), Value::String(pairing_verifier::key_id(&verifier_key))),
         ("expires_at_unix_ms".into(), json!(expires_at)),
     ]);
+    let stored_pairing_id = begun_fields["pairing_id"].as_str().expect("pairing ID is a string");
+    let code_hash = pairing_verifier::digest(&verifier_key, stored_pairing_id, &code);
+    begun_fields.insert("code_hash".into(), Value::String(code_hash));
     if fabric_gateway {
         begun_fields.insert("fabric_gateway".into(), Value::Bool(true));
     }
@@ -5899,7 +5901,9 @@ pub async fn pairing_complete(
             {
                 return Err(restart());
             }
-            pairing_verifier::verify(&key, &request.code, expected)
+            let stored_pairing_id = begun.body.pointer("/fields/pairing_id")
+                .and_then(Value::as_str).ok_or_else(restart)?;
+            pairing_verifier::verify(&key, stored_pairing_id, &request.code, expected)
         }
         Some(_) => return Err(restart()),
         None => {

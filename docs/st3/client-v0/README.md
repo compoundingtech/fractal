@@ -1793,6 +1793,10 @@ Person challenges use 40-bit random codes with a 300-second expiry and independe
 `code_hash` holds HMAC-SHA-256, and
 `verifier_key_id` holds the SHA-256 fingerprint of the member-local secret. The secret lives
 at `state_dir/pairing-verifier/key` (0600, parent directory 0700), never in claims or backups.
+The MAC input is `fractal/pairing-code-verifier/v1\0` (including the NUL), followed
+by the full prefixed pairing ID's UTF-8 byte length as an unsigned big-endian u64,
+the ID's UTF-8 bytes, and the code's UTF-8 bytes, without normalization. Verifiers
+are bound to the stored pairing ID, including its namespace prefix.
 Replicated claims alone cannot support offline guessing against this keyed verifier.
 The threat bound remains a 40-bit code valid for 300 seconds, not a high-entropy credential;
 use an encrypted path and independently verify the person-root fingerprint.
@@ -1805,6 +1809,11 @@ A wrong code with the matching verifier secret still returns the existing `forbi
 Legacy challenges without the marker are accepted only if unexpired and their expiry minus
 the claim timestamp is at most 300,000 ms; a longer legacy lifetime returns
 `pairing-restart-required`. Existing completed person pairings remain usable.
+Downgrading to a pre-keyed-verifier binary makes in-flight keyed pairings fail with
+HTTP 403 `forbidden`, message `the pairing code is invalid, expired, or already used`:
+the older binary ignores the marker and compares the stored HMAC with the unkeyed
+code digest. Restart those pairings on the downgraded member; no stored claims or
+verifier state need cleanup.
 There is no rollback protection when both secret and claims are restored to an earlier state:
 a previously consumed challenge can become usable again until its original expiry. This is
 an accepted limitation, not a guarantee of preserved single-use history across such a restore.

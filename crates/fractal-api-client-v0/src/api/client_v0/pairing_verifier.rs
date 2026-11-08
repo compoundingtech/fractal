@@ -13,6 +13,8 @@ use sha2::{Digest as _, Sha256};
 pub const MARKER: &str = "hmac-sha256-v1";
 pub const PERSON_TTL_MS: u128 = 300_000;
 
+const MAC_DOMAIN: &[u8] = b"fractal/pairing-code-verifier/v1\0";
+
 /// Load or durably create the daemon's 32-byte secret. All creators serialize on a
 /// separate lock inode; the final key is published only after its contents are synced.
 /// Never export this directory in logical backups or put the key into a claim.
@@ -66,21 +68,29 @@ pub fn key_id(key: &[u8; 32]) -> String {
 }
 
 /// Compute HMAC-SHA256 for a low-entropy pairing code; not for bearer lookup indexes.
-pub fn digest(key: &[u8; 32], code: &str) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts a 32-byte key");
-    mac.update(code.as_bytes());
+/// Input: domain (including NUL), pairing ID byte length as big-endian u64, full
+/// prefixed pairing ID UTF-8 bytes, then code UTF-8 bytes. No normalization is applied.
+pub fn digest(key: &[u8; 32], pairing_id: &str, code: &str) -> String {
+    let mac = pairing_mac(key, pairing_id, code);
     hex::encode(mac.finalize().into_bytes())
 }
 
 /// Verify the stored HMAC in constant time (malformed encodings are refused).
-pub fn verify(key: &[u8; 32], code: &str, expected: &str) -> bool {
+pub fn verify(key: &[u8; 32], pairing_id: &str, code: &str, expected: &str) -> bool {
     let mut decoded = [0_u8; 32];
     if hex::decode_to_slice(expected, &mut decoded).is_err() {
         return false;
     }
+    pairing_mac(key, pairing_id, code).verify_slice(&decoded).is_ok()
+}
+
+fn pairing_mac(key: &[u8; 32], pairing_id: &str, code: &str) -> Hmac<Sha256> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts a 32-byte key");
+    mac.update(MAC_DOMAIN);
+    mac.update(&(pairing_id.len() as u64).to_be_bytes());
+    mac.update(pairing_id.as_bytes());
     mac.update(code.as_bytes());
-    mac.verify_slice(&decoded).is_ok()
+    mac
 }
 
 /// Random 128-bit pairing identity, independent of the device name and code.
@@ -97,11 +107,31 @@ mod tests {
     #[test]
     fn keyed_codes_and_random_identity() {
         let key = [42; 32];
-        let verifier = digest(&key, "ABCDEFGH");
-        assert!(verify(&key, "ABCDEFGH", &verifier));
-        assert!(!verify(&key, "ABCDEFGJ", &verifier));
-        assert!(!verify(&[43; 32], "ABCDEFGH", &verifier));
+        let pairing_id = "pairing/000102030405060708090a0b0c0d0e0f";
+        let verifier = digest(&key, pairing_id, "ABCDEFGH");
+        assert!(verify(&key, pairing_id, "ABCDEFGH", &verifier));
+        assert!(!verify(&key, pairing_id, "ABCDEFGJ", &verifier));
+        assert!(!verify(&[43; 32], pairing_id, "ABCDEFGH", &verifier));
         assert_ne!(random_id().unwrap(), random_id().unwrap());
+    }
+
+    #[test]
+    fn verifier_is_bound_to_the_full_pairing_identity() {
+        let key = [42; 32];
+        let verifier = digest(&key, "pairing/abc", "ABCDEFGH");
+        assert!(!verify(&key, "pairing/def", "ABCDEFGH", &verifier));
+        assert!(!verify(&key, "assistant-grant/abc", "ABCDEFGH", &verifier));
+        assert_ne!(digest(&key, "pairing/a", "bc"), digest(&key, "pairing/ab", "c"));
+    }
+
+    #[test]
+    fn domain_separated_verifier_known_answer() {
+        // HMAC-SHA256 over b"fractal/pairing-code-verifier/v1\0", 40_u64.to_be_bytes(),
+        // b"pairing/000102030405060708090a0b0c0d0e0f", then b"ABCDEFGH".
+        assert_eq!(
+            digest(&[42; 32], "pairing/000102030405060708090a0b0c0d0e0f", "ABCDEFGH"),
+            "06925ad937df8f9d773b8224b724ac236d712dd609936bd1d3e64bf1a095c641",
+        );
     }
 
     #[test]

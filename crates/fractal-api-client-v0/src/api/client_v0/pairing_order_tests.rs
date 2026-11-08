@@ -211,7 +211,7 @@ async fn keyed_person_pairing_is_private_and_wrong_code_does_not_consume_it() {
     let same_code = fixed_begin("ABCDEFGH");
     assert_ne!(first["pairing_id"], same_code["pairing_id"]);
     assert_ne!(begun_person(&state, &first).subject, begun_person(&state, &same_code).subject);
-    assert_eq!(begun_person(&state, &first).body["fields"]["code_hash"],
+    assert_ne!(begun_person(&state, &first).body["fields"]["code_hash"],
         begun_person(&state, &same_code).body["fields"]["code_hash"]);
     let second = fixed_begin("ABCDEFGJ");
     let mut a = begun_person(&state, &first);
