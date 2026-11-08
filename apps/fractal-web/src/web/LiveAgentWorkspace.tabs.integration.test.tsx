@@ -219,6 +219,42 @@ it('closes the focused tab with Delete or Backspace', async () => {
   expect(titles()).toEqual([])
 })
 
+it('opens a tab\'s actions with Shift+F10 or the ContextMenu key, and its close glyph adds no tab stop', async () => {
+  await mount()
+  await act(async () => row('agent/b').click())
+  const tab = () => strip().find(node => node.getAttribute('aria-label') === 'Agent B')!
+  expect(tab().getAttribute('aria-keyshortcuts')).toContain('Shift+F10')
+  // The × is the pointer's: hidden from assistive technology, never focusable; the tab is the one focus target.
+  expect(tab().querySelector('button, a[href], input, [tabindex]')).toBeNull()
+  const actions = () => [...document.querySelectorAll<HTMLElement>('[role="menu"][aria-label="Tab actions"] [role="menuitem"]')]
+  const press = async (init: KeyboardEventInit) => act(async () => { tab().focus(); tab().dispatchEvent(new KeyboardEvent('keydown', { ...init, bubbles: true, cancelable: true })) })
+  await press({ key: 'F10', shiftKey: true })
+  expect(actions().map(item => item.textContent)).toEqual(['Split right', 'Split down', 'Close', 'Close others'])
+  await act(async () => actions().find(item => item.textContent === 'Close others')!.click())
+  expect(titles()).toEqual(['Agent B'])
+  await press({ key: 'ContextMenu' })
+  expect(actions().filter(item => item.getAttribute('aria-disabled') !== 'true').map(item => item.textContent)).toEqual(['Close'])
+  await act(async () => actions().find(item => item.textContent === 'Close')!.click())
+  expect(titles()).toEqual([])
+})
+
+it('lists surfaces to open and tabs to go to in the "+" menu, and the strip has no other tab overflow', async () => {
+  await mount()
+  await act(async () => row('agent/b').click())
+  const bar = host.querySelector<HTMLElement>('section[aria-label="Agent workspace"] header')!
+  expect(bar.querySelector('button[aria-label="Open surfaces"]')).toBeNull()
+  await act(async () => button('Open a tab').click())
+  const menu = document.querySelector<HTMLElement>('[role="menu"][aria-label="Open a tab"]')!
+  const section = (name: string) => [...menu.querySelectorAll<HTMLElement>(`[role="group"][aria-label="${name}"] [role^="menuitem"]`)]
+  expect([...menu.querySelectorAll('[role="group"]')].map(group => group.getAttribute('aria-label'))).toEqual(['Open', 'Go to tab'])
+  expect(section('Open').map(item => item.textContent)).toEqual(['Inbox', 'Missions', 'Usage'])
+  // The open tabs are a single choice: the shown one is checked, and choosing another shows it.
+  const tabs = section('Go to tab')
+  expect(tabs.map(item => [item.getAttribute('role'), item.textContent, item.getAttribute('aria-checked')])).toEqual([['menuitemradio', 'Agent A', 'false'], ['menuitemradio', 'Agent B✓', 'true']])
+  await act(async () => tabs[0]!.click())
+  expect(selected()).toBe('Agent A')
+})
+
 it('brings the selected tab into view whenever the strip changes size, scrolling only the strip', async () => {
   const observed: { readonly target: Element; readonly callback: (entries: readonly unknown[]) => void }[] = []
   vi.stubGlobal('ResizeObserver', class { constructor(private readonly callback: (entries: readonly unknown[]) => void) {} observe(target: Element) { if (!observed.some(row => row.target === target && row.callback === this.callback)) observed.push({ target, callback: this.callback }) } unobserve() {} disconnect() {} })

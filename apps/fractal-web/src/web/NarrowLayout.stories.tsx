@@ -157,7 +157,7 @@ const openWideDetails = async (canvasElement: HTMLElement) => {
 
 /**
  * The phone's one top bar: the chevron, the pane's tabs, then Terminal (when the agent has one), More actions, Search
- * and Agent details. "Open a tab" and the open tabs live in More actions, not beside the tabs. Each button is a visible
+ * and Agent details. The "+" menu's Open and Go to tab sections live in More actions, not beside the tabs. Each button is a visible
  * 44×44px target inside the window, clear of the others; the tabs keep at least a quarter of the window between the
  * chevron and the trailing controls, and the bar never scrolls sideways. The breadcrumb stays for assistive technology.
  */
@@ -168,7 +168,7 @@ const assertPhoneHeader = async (canvasElement: HTMLElement, agentName = 'Workbe
   // The conversation's controls in order, among the bar's other buttons (terminal, search): one overflow menu, then its panel.
   const named = ['Expand sidebar', 'More actions', 'Agent details', `Actions for ${agentName}`, 'Conversation menu']
   await expect(buttons.map(button => button.getAttribute('aria-label')).filter(name => name !== null && named.includes(name))).toEqual(['Expand sidebar', 'More actions', 'Agent details'])
-  for (const name of ['Resources', 'View KDL', 'Toggle right panel', 'Open a tab', 'Open surfaces']) await expect(header.queryByRole('button', { name })).toBeNull()
+  for (const name of ['Resources', 'View KDL', 'Toggle right panel', 'Open a tab']) await expect(header.queryByRole('button', { name })).toBeNull()
   const lane = node.getBoundingClientRect()
   await expect(lane.left).toBeGreaterThanOrEqual(0)
   await expect(lane.right).toBeLessThanOrEqual(window.innerWidth)
