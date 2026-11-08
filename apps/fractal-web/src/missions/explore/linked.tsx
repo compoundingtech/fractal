@@ -6,7 +6,7 @@ import { VisuallyHidden } from 'react-aria-components'
 
 import { HoverCardSurface } from '../../../../../packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx'
 import { C, Mark, MIN_TRACK_WIDTH, SmallButton, STATE_LABEL } from './parts.tsx'
-import { layered } from './layout.ts'
+import { layered } from '../detail/layout.ts'
 import { clock, criticalPath, lineage, ranIn, runningMs, span, stateAt, stepEnd, stepStart, type ExploreMission, type PlanStep, type StepState } from './model.ts'
 
 /** Everything the linked views share. One instance per detail view. */

@@ -3,7 +3,7 @@
 import * as React from 'react'
 
 import { C, Mark } from './parts.tsx'
-import { layered } from './layout.ts'
+import { layered } from '../detail/layout.ts'
 import { progressOf, span, stepEnd, stepStart, type ExploreMission, type PlanStep, type StepState } from './model.ts'
 
 const cellColor = (state: StepState) => state === 'failed' ? C.bad : state === 'waiting-you' ? C.you : state === 'done' ? C.soft : state === 'running' ? C.fg : 'transparent'

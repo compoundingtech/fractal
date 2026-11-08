@@ -37,14 +37,6 @@ export const WorkspaceStrip = ({ items, refs, active, group, focused = true, nar
   readonly children: React.ReactNode
 }) => {
   const [menu, setMenu] = React.useState<{ readonly id: string; readonly target: React.RefObject<Element | null> }>()
-  // Tabs belong to the kit; a right-click reaches them here by the id they already expose.
-  const onContextMenu = (event: React.MouseEvent<HTMLDivElement>) => {
-    const target = event.target instanceof Element ? event.target.closest('[data-tab-id]') : null
-    const id = target?.getAttribute('data-tab-id')
-    if (target === null || id === null || id === undefined) return
-    event.preventDefault()
-    setMenu({ id, target: { current: target } })
-  }
   // The kit's drag wiring swallows a focused tab's own Delete; the strip closes it here, before the drag sees the key.
   const onKeyDownCapture = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'Delete' && event.key !== 'Backspace') return
@@ -71,7 +63,7 @@ export const WorkspaceStrip = ({ items, refs, active, group, focused = true, nar
       },
     }),
   }), [group, dropIndex, refs, drag, describe, space])
-  return <div onContextMenu={onContextMenu} onKeyDownCapture={onKeyDownCapture} {...stylex.props(styles.host)}>
+  return <div onKeyDownCapture={onKeyDownCapture} {...stylex.props(styles.host)}>
     <EditorTabs
       label="Workspace tabs"
       groupId={group}
@@ -84,21 +76,26 @@ export const WorkspaceStrip = ({ items, refs, active, group, focused = true, nar
       dragType="application/x-fractal-workspace-tab"
       stablePanel
       touch={narrow}
-      surfacesMenu={!narrow}
       hostDrag={hostDrag}
       onActivate={id => dispatch({ _tag: 'Activate', tab: id })}
       onClose={id => dispatch({ _tag: 'Close', tab: id })}
+      // A tab's actions are on the tab: a right-click, Shift+F10 or the ContextMenu key opens them.
+      onTabMenu={(id, tab) => setMenu({ id, target: { current: tab } })}
       onMove={({ source, toIndex }) => dispatch({ _tag: 'Move', tab: source.tabId, to: { _tag: 'Strip', pane: group, index: toIndex } })}
       actions={<>
-        {/* A phone folds "Open a tab" and the open-tab list into the bar's More actions, keeping its targets 44px. */}
+        {/* "Open" then "Go to tab"; a phone folds both into the bar's More actions, keeping its targets 44px. */}
         {narrow ? null : <MenuTrigger>
           <IconButton label="Open a tab" icon={<PlusIcon />} />
           <MenuPopover>
-            <Menu aria-label="Open a tab" onAction={key => {
-              const row = openable.find(item => item.id === key)
-              if (row !== undefined) open(row.ref)
-            }}>
-              {openable.map(item => <MenuItem key={item.id} id={item.id}>{item.label}</MenuItem>)}
+            <Menu aria-label="Open a tab">
+              <Aria.MenuSection aria-label="Open">
+                <Aria.Header {...stylex.props(styles.menuHeading)}>Open</Aria.Header>
+                {openable.map(item => <MenuItem key={item.id} id={`open:${item.id}`} onAction={() => open(item.ref)}>{item.label}</MenuItem>)}
+              </Aria.MenuSection>
+              <Aria.MenuSection aria-label="Go to tab" selectionMode="single" selectedKeys={active === null ? [] : [`tab:${active}`]}>
+                <Aria.Header {...stylex.props(styles.menuHeading)}>Go to tab</Aria.Header>
+                {items.map(item => <MenuItem key={item.id} id={`tab:${item.id}`} textValue={item.title} onAction={() => dispatch({ _tag: 'Activate', tab: item.id })}>{item.title}</MenuItem>)}
+              </Aria.MenuSection>
             </Menu>
           </MenuPopover>
         </MenuTrigger>}
@@ -137,6 +134,7 @@ const styles = stylex.create({
   host: { display: 'contents' },
   popover: { backgroundColor: c.raised, color: c.fg, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, borderRadius: 6 },
   menu: { padding: s.xs, outline: 'none', minWidth: 140 },
+  menuHeading: { padding: '6px 8px 2px', color: c.fgMuted, fontSize: t.metaSize, fontWeight: 600 },
   menuItem: { padding: '4px 8px', borderRadius: 4, cursor: 'pointer', fontSize: t.metaSize, outline: 'none', backgroundColor: { default: 'transparent', ':hover': c.rowHover, ':focus': c.rowHover }, opacity: { default: 1, '[data-disabled]': 0.5 } },
   empty: { position: 'relative', zIndex: 2, margin: 'auto', padding: s.section, color: c.fgMuted, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: s.md },
   emptyTitle: { margin: 0 },

@@ -1,3 +1,5 @@
+import { useAtom } from '@effect/atom-react'
+import * as Atom from 'effect/reactivity/Atom'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
@@ -29,6 +31,9 @@ export interface MissionActions {
   readonly dismiss: (offer: MissionActionOffer) => void
 }
 
+/** Each offer's run, per mission: the tab and its side panel draw the same offers and must agree on them. */
+const actionRunsAtom = Atom.family((_missionId: string) => Atom.make<ReadonlyMap<string, ActionRun>>(new Map()).pipe(Atom.keepAlive))
+
 /** Run offers for one mission through the source's port; chat opens the seat instead of sending. */
 export const useMissionActions = ({ port, mission, readOnly, onOpen }: {
   readonly port: MissionActionPort | undefined
@@ -36,10 +41,8 @@ export const useMissionActions = ({ port, mission, readOnly, onOpen }: {
   readonly readOnly: boolean
   readonly onOpen: (ref: string) => void
 }): MissionActions => {
-  const [runs, setRuns] = React.useState<ReadonlyMap<string, ActionRun>>(new Map())
-  const live = React.useRef(true)
-  React.useEffect(() => () => { live.current = false }, [])
-  const set = (offer: MissionActionOffer, run: ActionRun) => { if (live.current) setRuns(current => new Map(current).set(offerKey(offer), run)) }
+  const [runs, setRuns] = useAtom(actionRunsAtom(mission.id))
+  const set = (offer: MissionActionOffer, run: ActionRun) => setRuns(current => new Map(current).set(offerKey(offer), run))
   const state = (offer: MissionActionOffer) => runs.get(offerKey(offer)) ?? idle
   const send = (offer: MissionActionOffer) => {
     if (port === undefined) return

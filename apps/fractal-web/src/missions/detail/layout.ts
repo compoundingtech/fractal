@@ -1,6 +1,10 @@
 // A small layered (Sugiyama-style) layout for mission DAGs, no dependency: longest-path layering, then a few barycenter
 // sweeps to cut crossings. Mission plans are tens of steps, which this handles in well under a millisecond.
-import type { PlanStep } from './model.ts'
+/** What the layout reads of a step: its id and the ids it waits for. */
+export interface LayoutNode {
+  readonly id: string
+  readonly after: readonly string[]
+}
 
 export interface Placed {
   readonly id: string
@@ -8,7 +12,7 @@ export interface Placed {
   readonly order: number
 }
 
-export const layered = (steps: readonly PlanStep[]): { readonly nodes: ReadonlyMap<string, Placed>; readonly layers: number; readonly widest: number } => {
+export const layered = (steps: readonly LayoutNode[]): { readonly nodes: ReadonlyMap<string, Placed>; readonly layers: number; readonly widest: number } => {
   const ids = new Set(steps.map(step => step.id))
   const deps = new Map(steps.map(step => [step.id, step.after.filter(dep => ids.has(dep))]))
   const layerOf = new Map<string, number>()
@@ -45,5 +49,5 @@ export const layered = (steps: readonly PlanStep[]): { readonly nodes: ReadonlyM
   }
   const nodes = new Map<string, Placed>()
   rows.forEach((row, layerIndex) => row.forEach((id, order) => nodes.set(id, { id, layer: layerIndex, order })))
-  return { nodes, layers: count, widest: Math.max(...rows.map(row => row.length)) }
+  return { nodes, layers: count, widest: Math.max(0, ...rows.map(row => row.length)) }
 }

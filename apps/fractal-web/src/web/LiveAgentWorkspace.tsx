@@ -33,6 +33,7 @@ import { PaneSwitcher } from '../workspace/PaneSwitcher.tsx'
 import type { HostActions, HostCommand } from '../palette/mod.ts'
 import { shortcutsPausedSelector } from './shortcuts.ts'
 import { narrowLayoutQuery } from './narrowLayout.ts'
+
 import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
 import { LiveAlertNames } from '../conversation/alerts/LiveAlertNames.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
@@ -488,6 +489,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const onTabView = React.useCallback((id: string, view: TabView) => store.dispatch({ _tag: 'SetView', tab: id, view }), [store])
   const onReplaceTab = React.useCallback((id: string, ref: string) => go({ _tag: 'Replace', tab: id, ref: paneKey(subjectOfRef(ref)) }), [go])
   const onCloseTab = React.useCallback((id: string) => go({ _tag: 'Close', tab: id }), [go])
+
   const pins = useAtomValue(terminalSource.pins ?? sidebarPins())
   const pinned = React.useMemo(() => new Set(pins.state.members.map(item => item.member)), [pins.state.members])
   const pinnedItems = React.useMemo(() => {
@@ -791,6 +793,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     const terminalShown = shownTab !== undefined && paneAgent !== '' && showsTerminal(shownTab, space.local.views[shownTab.id])
     const shownSubject = shownTab === undefined ? undefined : parsePane(shownTab.ref)
     const kindAside = shownSubject === undefined ? undefined : workspaceKinds.kindOf(shownSubject).view.Aside
+
     // The control stays enabled while the terminal is shown: it is the way back, even from a deep link to a terminal this agent lacks.
     const disabledReason = terminalShown ? undefined : terminal.disabledReason
     const toggleTerminal = () => {
@@ -798,10 +801,10 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
       focusShownFace.current = true
       store.dispatch({ _tag: 'SetView', tab: shownTab.id, view: { terminal: !terminalShown } })
     }
-    // A phone folds "Open a tab" and the pane's other tabs into its one More actions, so every bar target stays 44px.
+    // A phone folds the "+" menu's two sections, Open and Go to tab, into its one More actions, so every bar target stays 44px.
     const phoneSections: readonly OverflowSection[] | undefined = narrow ? [
-      { title: 'Open a tab', items: openable.map(item => ({ id: item.id, label: item.label, onAction: () => openRef(item.ref) })) },
-      ...(pane.tabs.length > 1 ? [{ title: 'Open tabs', items: pane.tabs.map(tab => ({ id: tab.id, label: titleOfTab(tab.id) ?? tab.ref, current: tab.id === pane.active, onAction: () => go({ _tag: 'Activate', tab: tab.id }) })) }] : []),
+      { title: 'Open', items: openable.map(item => ({ id: item.id, label: item.label, onAction: () => openRef(item.ref) })) },
+      ...(pane.tabs.length > 1 ? [{ title: 'Go to tab', items: pane.tabs.map(tab => ({ id: tab.id, label: titleOfTab(tab.id) ?? tab.ref, current: tab.id === pane.active, onAction: () => go({ _tag: 'Activate', tab: tab.id }) })) }] : []),
     ] : undefined
     const nativeActions = paneAgent === '' ? undefined : <ConversationHeaderActions key={paneAgent} agentRef={paneAgent} onViewDeclaration={() => openRef(`declaration/${paneAgent}`)} sections={phoneSections} />
     const watch = terminalShown && shownTab !== undefined ? <TerminalAttachWatch key={paneAgent} agentRef={paneAgent} onMissing={reason => onMissingTerminal(paneAgent, shownTab.id, reason)} /> : null
@@ -911,6 +914,7 @@ const ignoreSplitKey = (event: KeyboardEvent) => {
   if (target?.closest('[data-testid="terminal-pane"]') != null || target?.closest(shortcutsPausedSelector) != null) return true
   return event.altKey && !event.metaKey && !event.ctrlKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight') && isTyping(event.target)
 }
+
 
 /** The pane's own actions, with the toggle for its own side panel when its shown subject has one. */
 const PaneThreadActions = (props: Omit<React.ComponentProps<typeof ThreadActions>, 'panelOpen' | 'onTogglePanel'>) => {

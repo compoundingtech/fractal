@@ -147,7 +147,7 @@ const press = (init: KeyboardEventInit, target: EventTarget = document.body) =>
   target.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }))
 
 /**
- * Splits, cmux style: a tab moves into a split from its menu, Alt+O zooms and back, Alt+Left moves to the
+ * Splits, cmux style: a tab moves into a split from its menu (Shift+F10 on the focused tab), Alt+O zooms and back, Alt+Left moves to the
  * other split, a divider resizes from the keyboard, Mod+D makes an empty split and Alt+W closes it. The
  * moved tab's surface is the same node throughout: nothing remounts.
  */
@@ -190,7 +190,9 @@ export const Splits: Story = {
       canvasElement.dataset.proof = 'passed'
       return
     }
-    moved.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+    // The tab's actions are on the tab: the keyboard reaches them as the pointer's right-click does.
+    moved.focus()
+    press({ key: 'F10', code: 'F10', shiftKey: true }, moved)
     await waitFor(() => expect([...document.querySelectorAll('[role="menuitem"]')].some(item => item.textContent === 'Split right')).toBe(true))
     ;[...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(item => item.textContent === 'Split right')!.click()
     await waitFor(() => expect(strips()).toHaveLength(2))
