@@ -735,7 +735,7 @@ export type CheckConclusion = 'success' | 'failure' | 'pending' | 'skipped'
 export interface WorldPullRequest {
   readonly repo: RepoId
   readonly number: number
-  /** `resource/github/<repo>/pull/<n>` */
+  /** `resource/github/<repo>/pull-request/<n>`, the daemon's one shape */
   readonly ref: string
   readonly url: string
   readonly title: string
@@ -765,7 +765,7 @@ const pr = (
   const owner = agents.find((a) => a.ref === spec.agent)
   return {
     ...rest,
-    ref: `resource/github/${spec.repo}/pull/${spec.number}`,
+    ref: `resource/github/${spec.repo}/pull-request/${spec.number}`,
     url: `https://github.com/${spec.repo}/pull/${spec.number}`,
     author: botAccount,
     branch: owner?.session.branch ?? 'main',
@@ -935,7 +935,7 @@ const ciRun = (
 export const ciRuns: readonly WorldCiRun[] = [
   ciRun({
     id: 11873452,
-    pullRequest: 'resource/github/acme/webfractal/pull/214',
+    pullRequest: 'resource/github/acme/webfractal/pull-request/214',
     workflow: 'ci',
     status: 'in_progress',
     conclusion: 'pending',
@@ -949,7 +949,7 @@ export const ciRuns: readonly WorldCiRun[] = [
   }),
   ciRun({
     id: 11870118,
-    pullRequest: 'resource/github/acme/webfractal/pull/221',
+    pullRequest: 'resource/github/acme/webfractal/pull-request/221',
     workflow: 'ci',
     status: 'completed',
     conclusion: 'success',
@@ -963,7 +963,7 @@ export const ciRuns: readonly WorldCiRun[] = [
   }),
   ciRun({
     id: 11866703,
-    pullRequest: 'resource/github/acme/platform/pull/1312',
+    pullRequest: 'resource/github/acme/platform/pull-request/1312',
     workflow: 'check',
     status: 'completed',
     conclusion: 'failure',
@@ -977,7 +977,7 @@ export const ciRuns: readonly WorldCiRun[] = [
   }),
   ciRun({
     id: 11861290,
-    pullRequest: 'resource/github/acme/gateway/pull/88',
+    pullRequest: 'resource/github/acme/gateway/pull-request/88',
     workflow: 'rust',
     status: 'queued',
     conclusion: 'pending',

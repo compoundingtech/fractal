@@ -28,7 +28,7 @@ const entry = (input: {
 const conversation = entry({ ref: 'agent/build-host-a/workbench-shell', presentation: 'detail' })
 const mission = entry({ ref: decisionD12.mission, presentation: 'detail' })
 const pullRequest = entry({
-  ref: 'resource/github/acme/webfractal/pull/214',
+  ref: 'resource/github/acme/webfractal/pull-request/214',
   presentation: 'detail',
 })
 const terminal = entry({ ref: 'terminal/build-host-a/workbench-shell', presentation: 'detail' })

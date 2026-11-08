@@ -13,7 +13,7 @@ const world: PaletteWorld = {
   ],
   missions: [{ ref: 'mission/release', title: 'Release 3.2', word: 'running' }],
   machines: [{ id: 'juniper', connected: true }],
-  resources: [{ ref: 'github/pr/compoundingtech/fractal/12', title: 'Fix the palette', kind: 'pull request' }],
+  resources: [{ ref: 'resource/github/compoundingtech/fractal/pull-request/12', title: 'Fix the palette', kind: 'pull request' }],
 }
 const ids = (query: string, items = worldItems(world)) => {
   const parsed = parseQuery(query, paletteSections)
@@ -39,7 +39,7 @@ describe('world rows', () => {
     expect(byId.get('home:attention/1')).toEqual({ _tag: 'Open', ref: 'home:attention/1' })
     expect(byId.get('list:fleet')).toEqual({ _tag: 'Open', ref: 'list:fleet' })
     expect(byId.get('machine:machine/juniper')).toEqual({ _tag: 'Open', ref: 'machine:machine/juniper' })
-    expect(byId.get('resource:github/pr/compoundingtech/fractal/12')).toEqual({ _tag: 'Open', ref: 'resource:github/pr/compoundingtech/fractal/12' })
+    expect(byId.get('resource:resource/github/compoundingtech/fractal/pull-request/12')).toEqual({ _tag: 'Open', ref: 'resource:resource/github/compoundingtech/fractal/pull-request/12' })
   })
 
   it('offers an agent’s terminal only once something is typed, as the TUI does', () => {

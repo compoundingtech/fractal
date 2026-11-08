@@ -25,7 +25,11 @@ const idPattern = /^[1-9][0-9]{0,15}$/
 const validName = (owner: string, repo: string) => ownerPattern.test(owner) && repoPattern.test(repo) && repo !== '.' && repo !== '..'
 const id = (raw: string | undefined): number | undefined => raw !== undefined && idPattern.test(raw) ? Number(raw) : undefined
 
-/** Subject ref → typed ref. Accepts both spellings in the graph today: `pull` and `pull-request`. */
+/**
+ * Subject ref → typed ref, in the one shape the daemon writes (`crates/fractal-github-base`, `github_subject`
+ * and `item_move`): `resource/github/OWNER/REPO/pull-request/N` or `/issue/N`. GitHub's own `pull` is a URL
+ * spelling (`parseGithubUrl`), never a subject's.
+ */
 export const parseSubjectRef = (ref: string): GithubRef | undefined => {
   if (!ref.startsWith(subjectPrefix)) return undefined
   const parts = ref.slice(subjectPrefix.length).split('/')
@@ -35,7 +39,6 @@ export const parseSubjectRef = (ref: string): GithubRef | undefined => {
   const n = id(raw)
   if (n === undefined) return undefined
   switch (segment) {
-    case 'pull':
     case 'pull-request': return { kind: 'pull-request', owner, repo, number: n }
     case 'issue': return { kind: 'issue', owner, repo, number: n }
     case 'comment': return { kind: 'comment', owner, repo, comment_id: n }

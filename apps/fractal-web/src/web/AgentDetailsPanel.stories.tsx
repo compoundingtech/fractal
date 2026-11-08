@@ -22,7 +22,7 @@ const resource = (id: string, kind: string, facts: Record<string, unknown>) =>
 const page: ResourcePage = {
   nextCursor: null,
   items: [
-    resource('resource/github/acme/garden/pull/5707', 'vcs.pull-request', { title: 'Wait for exec in the masked-identity fixture', state: 'open' }),
+    resource('resource/github/acme/garden/pull-request/5707', 'vcs.pull-request', { title: 'Wait for exec in the masked-identity fixture', state: 'open' }),
     resource('resource/ci/run/88', 'ci.run', { name: 'Linux tests', status: 'in_progress' }),
     resource('resource/github/acme/garden/issue/9', 'vcs.issue', { title: 'Flaky backup export', state: 'closed' }),
     resource('resource/custom/board/3', 'custom.acme.board', {}),
@@ -76,7 +76,7 @@ export const Resources: Story = {
     await expect(canvas.getByRole('tab', { name: /^Resources, \d+$/ })).toBeVisible()
     const row = canvas.getByRole('button', { name: /Wait for exec/ })
     await userEvent.click(row)
-    await expect(args.onOpen).toHaveBeenCalledWith('resource/github/acme/garden/pull/5707', false)
+    await expect(args.onOpen).toHaveBeenCalledWith('resource/github/acme/garden/pull-request/5707', false)
     await expect(canvasElement.textContent).not.toContain('vcs.pull-request')
     await expect(canvasElement.textContent).not.toContain('custom.acme.board')
     await expect(canvas.queryByRole('button', { name: 'Open' })).toBeNull()
