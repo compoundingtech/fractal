@@ -168,6 +168,18 @@ export const sidebarSubagentRow = ({ parent, child, stale }: {
   subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } }, children: [],
 })
 
+/**
+ * What a waiting agent waits on, from served facts only: its current step's state (verifying is CI, blocked is a
+ * dependency, waiting-person is a person) or a harness blocked on a person. A wait on you is "Needs you" instead, from the
+ * counted needs-you set (`rowStatusLabel`). Anything else stays plain "Waiting".
+ */
+const waitingLabel = (agent: Agent): string => {
+  const state = agent.currentWork?.[0]?.state
+  const on = state === 'verifying' ? 'CI' : state === 'blocked' ? 'dependency'
+    : state === 'waiting-person' || (agent.blockedOn._tag === 'Known' && agent.blockedOn.value === 'human') ? 'a person' : undefined
+  return on === undefined ? statuses.waiting.label : `${statuses.waiting.label} on ${on}`
+}
+
 /** Presentation of one actual roster observation. A stale roster retains its last-observed status. */
 export const sidebarRow = ({ agent, stale, needsMe, missions, attention, missionInfo, missionUnavailable = false, now = Date.now(), unread }: {
   readonly agent: Agent; readonly stale: boolean; readonly needsMe?: boolean
@@ -190,7 +202,7 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention, mission
   const statusSince = validTimestamp(agent.statusSince)
   const lastObserved = stale || !agent.connected
   // Lifecycle takes precedence over harness activity unless Fractal reports a fault.
-  const statusLabel = statuses[status].label
+  const statusLabel = status === 'waiting' ? waitingLabel(agent) : statuses[status].label
   // Preserve the real projection's driver capability; visual harness metadata can omit non-observing/unknown drivers.
   const observesSubagents = agent.driver?._tag === 'Observing'
   const awaitingFirstReport = observesSubagents && (agent.state === 'desired' || agent.state === 'starting')
