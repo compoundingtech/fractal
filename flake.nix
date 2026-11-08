@@ -1004,6 +1004,10 @@
               SH
               chmod +x "$out/activate"
             '';
+            rollbackPackage = pkgs.runCommand "st3-with-pty" { } ''
+              mkdir -p "$out/bin"
+              cp ${preReceiptPackage}/bin/fractal "$out/bin/st3"
+            '';
           in
           assert pkgs.lib.hasInfix ''person = "person/ada"'' rendered.xdg.configFile."st3/config.toml".text;
           assert pkgs.lib.hasInfix "/tmp/fractal-test.sock" args;
@@ -1102,6 +1106,57 @@
               test ! -e "$binDir/st3" && test ! -L "$binDir/st3"
               test ! -e "$receipt" && test ! -L "$receipt"
               test "$(find "$binDir" -name '.fractal.*' | wc -l)" -eq 0
+            done
+            # Recorded pre-Fractal rollback state, never leftover byte equality.
+            for layout in st-alias st-absent no-state other-package wrong-st3 foreign-alias foreign-symlink; do
+              rm -rf state
+              mkdir -p "$binDir" "$PWD/state/binary-installer"
+              cp ${rollbackPackage}/bin/st3 "$binDir/st3"
+              printf 'leftover candidate\n' > "$target"
+              if [ "$layout" != st-absent ]; then ln -s st3 "$binDir/st"; fi
+              package=${rollbackPackage}
+              if [ "$layout" = other-package ]; then package=${preReceiptPackage}; fi
+              ${pkgs.jq}/bin/jq -n --arg package "$package" \
+                '{installer:"historical-installer",package:$package,narHash:"historical-hash"}' \
+                > "$PWD/state/binary-installer/current.json"
+              case "$layout" in
+                no-state) rm "$PWD/state/binary-installer/current.json" ;;
+                wrong-st3) printf foreign > "$binDir/st3" ;;
+                foreign-alias) ln -sfn elsewhere "$binDir/st" ;;
+                foreign-symlink) mv "$target" "$binDir/elsewhere"; ln -s elsewhere "$target" ;;
+              esac
+              case "$layout" in
+                st-alias|st-absent)
+                  ${pkgs.runtimeShell} activate
+                  cmp "$source" "$target"
+                  test "$(readlink "$binDir/st")" = fractal
+                  test "$(readlink "$binDir/st3")" = fractal
+                  assertReceipt
+                  set -- "$binDir"/fractal.replaced-*
+                  test "$#" = 1
+                  cmp "$1" <(printf 'leftover candidate\n')
+                  # An old generation restores st3 and st, leaving receipt,
+                  # canonical payload and preserved siblings untouched.
+                  for cycle in 1 2; do
+                    rm "$binDir/st3"
+                    cp ${rollbackPackage}/bin/st3 "$binDir/st3"
+                    ln -sfn st3 "$binDir/st"
+                    ${pkgs.runtimeShell} activate
+                    assertReceipt
+                    cmp "$1" <(printf 'leftover candidate\n')
+                  done
+                  echo "PASS: rollback adoption $layout and repeated roll-forward"
+                  ;;
+                *)
+                  if ${pkgs.runtimeShell} activate 2>refusal; then
+                    echo "unexpected rollback adoption: $layout" >&2; exit 1
+                  fi
+                  ${pkgs.gnugrep}/bin/grep -q 'Home Manager: refusing to replace foreign fractal command:' refusal
+                  test ! -e "$receipt"
+                  test -z "$(find "$binDir" -name 'fractal.replaced-*' -print)"
+                  echo "PASS: rollback adoption refuses $layout"
+                  ;;
+              esac
             done
             # A managed physical layout supports mixed exact reverse aliases.
             rm -rf state
