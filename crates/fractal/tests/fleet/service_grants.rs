@@ -157,7 +157,7 @@ async fn previous_release_refuses_plugin_service_grants_on_same_database_rollbac
         // Characterize, rather than conceal, the baseline's profile-blind counterexample.
         assert_auth(&node, grant, index == 3 || index == 6).await;
     }
-    let inspected: Value = Client::unix_as(node.socket(), PERSON)
+    let inspected: Value = Client::unix_as(node.socket(), PERSON).unwrap()
         .get(&format!("/v1/client/assistant/grants/{}", grants[0].id)).await.unwrap();
     assert_eq!(inspected["value"]["kind"], "assistant-grant", "{inspected}");
     assert_eq!(inspected["value"]["principal"], "assistant/chatgpt", "{inspected}");
