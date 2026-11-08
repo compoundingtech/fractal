@@ -656,7 +656,7 @@ mod tests {
         let credential = "observation-credential";
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: grant.into(),
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/test".into()),
@@ -772,7 +772,7 @@ mod tests {
         );
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: grant.into(),
                 kind: "custom.client.pairing-revoked".into(),
                 actor: Some("person/test".into()),
