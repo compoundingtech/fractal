@@ -3063,6 +3063,34 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
         if probe.route == "POST /v1/agents/rename-id" {
             prepare_renames(&store);
         }
+        if probe.route == "GET /v1/client/conversations/search" {
+            // Wait through the person's real search policy before warming or counting requests.
+            // Only the documented initial index build is retryable, not a failed index build.
+            let path = fixture.fill(probe.path, 0);
+            tokio::time::timeout(Duration::from_secs(60), async {
+                loop {
+                    match person.request::<(), Value>("GET", &path, None).await {
+                        Ok(_) => break,
+                        Err(error) => {
+                            assert!(
+                                fractal_daemon::client::api_error_parts(&error).is_some_and(
+                                    |(status, code, message, _)| {
+                                        status == 503
+                                            && code == "remote-unavailable"
+                                            && message
+                                                == "conversation search index is being built; retry shortly"
+                                    },
+                                ),
+                                "the search cost probe readiness request failed: {error:#}",
+                            );
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("the search cost probe index must become ready within 60 seconds");
+        }
         let mut samples = Vec::new();
         // The first run warms statement caches and lazily built state; it is not counted.
         for attempt in 0..4 {
