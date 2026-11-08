@@ -149,6 +149,30 @@ pub fn client_panel(
     Some(panel(&summary, &records, state, width))
 }
 
+pub(super) fn heading(title: &str, metadata: &str, open: bool, width: usize) -> Line<'static> {
+    let title = inline(title);
+    let marker = if width == 1 {
+        if open { "▾" } else { "▸" }
+    } else if open {
+        "▾ "
+    } else {
+        "▸ "
+    };
+    let room = width.saturating_sub(text::width(marker));
+    let title_min = text::width(&title).min(12);
+    let metadata = if text::width(metadata) <= room.saturating_sub(title_min) {
+        metadata.to_owned()
+    } else {
+        String::new()
+    };
+    let title = text::truncate(&title, room.saturating_sub(text::width(&metadata)));
+    Line::from(vec![
+        Span::styled(marker, theme::strong(theme::SAPPHIRE)),
+        Span::styled(title, theme::strong(theme::SAPPHIRE)),
+        Span::styled(metadata, theme::dim()),
+    ])
+}
+
 /// A collapsed embed takes exactly one line. The header remains the toggle when open.
 /// Activity appears only when the thread has an accepted record to show.
 pub fn panel(
@@ -161,7 +185,6 @@ pub fn panel(
     if width == 0 {
         return doc;
     }
-    let title = inline(summary.title);
     if !state.standalone {
         let metadata = format!(
             " · {} message{}{}{}",
@@ -170,26 +193,7 @@ pub fn panel(
             if summary.closed { " · closed" } else { "" },
             if summary.unread { " · unread" } else { "" },
         );
-        let marker = if width == 1 {
-            if state.open { "▾" } else { "▸" }
-        } else if state.open {
-            "▾ "
-        } else {
-            "▸ "
-        };
-        let room = width.saturating_sub(text::width(marker));
-        let title_min = text::width(&title).min(12);
-        let metadata = if text::width(&metadata) <= room.saturating_sub(title_min) {
-            metadata
-        } else {
-            String::new()
-        };
-        let title = text::truncate(&title, room.saturating_sub(text::width(&metadata)));
-        doc.line(Line::from(vec![
-            Span::styled(marker, theme::strong(theme::SAPPHIRE)),
-            Span::styled(title, theme::strong(theme::SAPPHIRE)),
-            Span::styled(metadata, theme::dim()),
-        ]));
+        doc.line(heading(summary.title, &metadata, state.open, width));
         target(&mut doc, 0, 0, width, Tap::Toggle(summary.id.to_owned()));
         if !state.open {
             return doc;

@@ -206,6 +206,7 @@ pub(super) struct Threads {
     earlier: Vec<Earlier>,
     failures: BTreeMap<ThreadInterest, String>,
     open: BTreeMap<String, String>,
+    start_slot: Option<(ThreadInterest, String)>,
     folded_inbox_details: BTreeSet<String>,
     focused: Option<(String, Input)>,
     drafts: BTreeMap<String, Draft>,
@@ -219,6 +220,7 @@ impl Threads {
         self.available = available;
         if !available {
             self.lists.clear();
+            self.start_slot = None;
             self.summaries.clear();
             self.histories.clear();
             self.earlier.clear();
@@ -375,6 +377,13 @@ impl Threads {
 
     pub(super) fn keep_windows(&mut self, wanted: &[ThreadInterest]) {
         self.lists.retain(|interest, _| wanted.contains(interest));
+        if self
+            .start_slot
+            .as_ref()
+            .is_some_and(|(interest, _)| !wanted.contains(interest))
+        {
+            self.start_slot = None;
+        }
         self.failures
             .retain(|interest, _| wanted.contains(interest));
         let held = |id: &str| {
@@ -383,8 +392,11 @@ impl Threads {
             )
         };
         self.histories.retain(|id, _| held(id));
-        self.summaries
-            .retain(|id, _| held(id) || self.lists.values().any(|ids| ids.contains(id)));
+        self.summaries.retain(|id, _| {
+            held(id)
+                || self.lists.values().any(|ids| ids.contains(id))
+                || self.start_slot.as_ref().is_some_and(|(_, started)| started == id)
+        });
     }
 
     pub(super) fn summary(&self, id: &str) -> Option<&ThreadSummary> {
@@ -506,6 +518,9 @@ impl Threads {
                 self.summaries.remove(id);
             }
             self.lists.remove(&interest);
+            if self.start_slot.as_ref().is_some_and(|(ask, _)| ask == &interest) {
+                self.start_slot = None;
+            }
         }
         self.failures.insert(interest, message);
     }
@@ -591,11 +606,47 @@ impl Threads {
         }
         if let Some(context) = self.context(pane) {
             let ids = self.lists.get(&context);
-            if ids.is_some_and(|ids| !ids.is_empty()) {
+            let start = match pane {
+                Pane::Home(Some(item)) if ids.is_some() => self.start_input(item),
+                _ => None,
+            };
+            let drafting = start.as_ref().filter(|input| texts.contains_key(&input.key()));
+            // Keep the new thread at the draft's position. The authoritative collection
+            // still orders the other threads and may arrive after the start receipt.
+            let pinned = self
+                .start_slot
+                .as_ref()
+                .filter(|(interest, _)| ids.is_some() && interest == &context && drafting.is_none())
+                .map(|(_, id)| id);
+            if ids.is_some_and(|ids| !ids.is_empty()) || drafting.is_some() || pinned.is_some() {
                 doc.blank();
                 doc.section("Threads", None, width);
             }
-            for id in ids.into_iter().flatten() {
+            if let Some(input) = drafting {
+                if let Input::Start { item, .. } = input
+                    && let Some(ask) = self.asks.get(item)
+                {
+                    doc.line(thread::heading(&ask.title, " · Draft", true, width));
+                }
+                self.editor(
+                    &mut doc,
+                    &host,
+                    input,
+                    "First message in thread",
+                    cursor,
+                    width,
+                    texts,
+                );
+            }
+            let submitted = drafting
+                .and_then(|input| self.drafts.get(&input.key()))
+                .and_then(|draft| draft.retry.as_ref())
+                .map(|write| &write.id);
+            let siblings = ids
+                .into_iter()
+                .flatten()
+                .filter(|id| Some(*id) != pinned && Some(*id) != submitted);
+            for id in pinned.into_iter().chain(siblings) {
                 self.panel(
                     &mut doc,
                     &host,
@@ -611,30 +662,15 @@ impl Threads {
             if let Some(message) = self.failures.get(&context) {
                 doc.wrap(&[text::run(message, theme::dim())], width);
             }
-            if let Pane::Home(Some(item)) = pane
-                && ids.is_some()
-                && let Some(input) = self.start_input(item)
+            if let Some(Input::Start { item, .. }) = start.as_ref()
+                && drafting.is_none()
             {
-                if self.focused.as_ref() == Some(&(host.clone(), input.clone()))
-                    || texts.contains_key(&input.key())
-                {
-                    self.editor(
-                        &mut doc,
-                        &host,
-                        &input,
-                        "First message in thread",
-                        cursor,
-                        width,
-                        texts,
-                    );
-                } else {
-                    doc.buttons(&[(
-                        "T",
-                        "Start thread",
-                        Hit::Thread(host.clone(), thread::Tap::Start(item.clone())),
-                        theme::SAPPHIRE,
-                    )]);
-                }
+                doc.buttons(&[(
+                    "T",
+                    "Start thread",
+                    Hit::Thread(host, thread::Tap::Start(item.clone())),
+                    theme::SAPPHIRE,
+                )]);
             }
         }
         doc
@@ -1179,7 +1215,14 @@ impl Threads {
                     texts.remove(key);
                 }
                 match write.mutation {
-                    Mutation::Start(_) => {
+                    Mutation::Start(start) => {
+                        self.start_slot = Some((
+                            ThreadInterest::Ask {
+                                id: start.origin_ask,
+                                episode: start.origin_ask_episode,
+                            },
+                            write.id.clone(),
+                        ));
                         self.open.insert(write.host.clone(), write.id.clone());
                         self.focused = Some((write.host, Input::Reply(write.id)));
                     }

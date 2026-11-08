@@ -341,3 +341,99 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     assert!(!visible.contains("Message thread"), "{visible}");
     server.abort();
 }
+
+#[test]
+fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
+    let mut threads = Threads::default();
+    threads.enable(true);
+    let world = super::super::demo::test_world();
+    let cursor = edit::Cursor::default();
+    let mut texts = HashMap::new();
+    let inbox = Pane::Home(Some("attention/ask".into()));
+    let context = ThreadInterest::Ask {
+        id: "step-run/example/ask".into(),
+        episode: "claim/ask".into(),
+    };
+    let older = summary();
+    threads.asks.insert(
+        "attention/ask".into(),
+        Ask {
+            context: context.clone(),
+            agent: older.agent_id.clone(),
+            title: older.title.clone(),
+            snapshot: snapshot().id,
+        },
+    );
+    threads.window(
+        context.clone(),
+        snapshot(),
+        true,
+        ThreadCollectionRows::Summaries(vec![older.clone()]),
+        vec![],
+        vec![older.id.clone()],
+        false,
+    );
+    threads.tap(&inbox.key(), thread::Tap::Start("attention/ask".into()), &mut texts);
+    assert!(threads.paste(&inbox, "First message", &cursor, &mut texts));
+    let lines = |threads: &Threads, texts: &HashMap<String, String>| {
+        threads.mount(&inbox, 100, &cursor, &world, texts)
+            .lines.iter().map(ToString::to_string).collect::<Vec<_>>()
+    };
+    let draft = lines(&threads, &texts);
+    let slot = draft.iter().position(|line| line == "▾ Worker test · Draft").unwrap();
+    assert!(draft[slot + 1..].iter().any(|line| line.starts_with("▸ Worker test")));
+    assert!(threads.key(&inbox, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &cursor, &mut texts));
+    let write = threads.writes().pop().unwrap();
+    assert_ne!(write.id, older.id);
+    let new = ThreadSummary { id: write.id.clone(), ..older.clone() };
+    threads.window(
+        context.clone(),
+        snapshot(),
+        true,
+        ThreadCollectionRows::Summaries(vec![older.clone(), new.clone()]),
+        vec![],
+        vec![older.id.clone(), new.id.clone()],
+        false,
+    );
+    assert_eq!(lines(&threads, &texts), draft);
+    threads.window(
+        context.clone(),
+        snapshot(),
+        true,
+        ThreadCollectionRows::Summaries(vec![older.clone()]),
+        vec![],
+        vec![older.id.clone()],
+        false,
+    );
+    threads.complete(
+        Receipt {
+            write,
+            result: Ok(Some(Envelope {
+                value: new.clone(),
+                snapshot: snapshot(),
+                request_id: String::new(),
+                api_version: fractal_client::API_VERSION.into(),
+            })),
+        },
+        &mut texts,
+    );
+    threads.histories.insert(new.id.clone(), History::default());
+    let accepted = lines(&threads, &texts);
+    assert_eq!(accepted[slot], "▾ Worker test · 1 message · unread");
+    assert!(accepted[slot + 1..].iter().any(|line| line.starts_with("▸ Worker test")));
+
+    threads.window(
+        context.clone(),
+        snapshot(),
+        true,
+        ThreadCollectionRows::Summaries(vec![older.clone(), new.clone()]),
+        vec![],
+        vec![older.id, new.id],
+        false,
+    );
+    assert_eq!(lines(&threads, &texts), accepted);
+    threads.failure(context, "Ask access expired".into(), true);
+    let refused = lines(&threads, &texts);
+    assert!(refused.iter().any(|line| line == "Ask access expired"));
+    assert!(!refused.iter().any(|line| line.contains("Worker test")));
+}
