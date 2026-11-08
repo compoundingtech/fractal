@@ -112,15 +112,19 @@ the PATH of the terminal running `fractal apply`, nor just launchd's or systemd'
 service environment. Agent `env` entries overlay that environment. Fractal also
 prepends its own executable directory so its wrapper can be found.
 
-Managed `omp`, `claude`, and `codex` launches read `AGENT_RUNTIME_PROFILE`, or
+Managed `omp`, `claude`, and `codex` launches read the absolute path in
+`AGENT_RUNTIME_PROFILE`, or
 `$HOME/.local/state/nix/profiles/coding-agent-runtime/share/coding-agents/profile.json`
 when that variable is unset. Each launch reads the current profile through its
 stable link and executes `<personas.launch.<persona>.harnessBin>/<harness>`
-directly. `AGENT_PERSONA` selects the persona, defaulting to `generalist` only
-when unset. The profile publisher selects the directory; Fractal does not
-duplicate persona-to-path rules. A missing persona entry, `harnessBin`, or
-executable wrapper refuses launch, naming the missing key/path. There is no
-fallback to a raw provider or to a different persona.
+directly. The Agent Spec's `persona` selects the persona; `AGENT_PERSONA` is next,
+and `generalist` is the last fallback. A declared persona that disagrees with
+`AGENT_PERSONA` refuses launch. The selected `harnessBin` is prepended to the
+provider child's PATH, so provider subprocesses also resolve managed wrappers;
+the driver's own PATH is unchanged. The profile publisher selects the directory;
+Fractal does not duplicate persona-to-path rules. A missing persona entry,
+`harnessBin`, or executable wrapper refuses launch, naming the missing key/path.
+There is no fallback to a raw provider or to a different persona.
 
 Before upgrading a host to this launch contract, publish and activate a runtime
 profile containing `personas.launch.<persona>.harnessBin` for its managed seats.

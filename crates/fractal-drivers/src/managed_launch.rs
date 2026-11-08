@@ -7,18 +7,32 @@ use anyhow::{Context, Result, ensure};
 // Runtime-profile contract owned by the wrapper publisher.
 const WRAPPER_DIRECTORY_KEY: &str = "harnessBin";
 
+// A driver owns one seat. Keep launch-only environment separate from the driver's environment.
+static PROVIDER_PATH: std::sync::OnceLock<std::ffi::OsString> = std::sync::OnceLock::new();
+
 /// Select the managed executable, including when argv names a raw provider by absolute path.
 /// Other harnesses retain their own launch contracts.
-pub fn resolve(harness: &str, argv: &mut [String]) -> Result<()> {
+pub fn resolve(harness: &str, argv: &mut [String], spec: &serde_json::Value) -> Result<()> {
     if !matches!(harness, "omp" | "claude" | "codex") {
         return Ok(());
     }
     let profile = profile_path()?;
-    let persona = std::env::var_os("AGENT_PERSONA")
-        .map(|persona| persona.into_string().map_err(|_| anyhow::anyhow!("AGENT_PERSONA is not UTF-8")))
-        .transpose()?
-        .unwrap_or_else(|| "generalist".into());
-    resolve_for_persona(harness, argv, &profile, &persona)
+    let environment_persona = std::env::var("AGENT_PERSONA")
+        .map(Some)
+        .or_else(|error| match error {
+            std::env::VarError::NotPresent => Ok(None),
+            error => Err(error),
+        }).context("read AGENT_PERSONA")?;
+    let persona = selected_persona(spec, environment_persona.as_deref())?;
+    resolve_for_persona(harness, argv, &profile, persona)?;
+    let bin = Path::new(&argv[0]).parent().context("managed wrapper has no parent")?;
+    let path = prefixed_path(bin, std::env::var_os("PATH").as_deref())?;
+    if let Some(existing) = PROVIDER_PATH.get() {
+        ensure!(existing == &path, "driver already selected a different managed provider PATH");
+    } else {
+        PROVIDER_PATH.set(path).map_err(|_| anyhow::anyhow!("managed provider PATH already selected"))?;
+    }
+    Ok(())
 }
 
 fn profile_path() -> Result<PathBuf> {
@@ -28,7 +42,9 @@ fn profile_path() -> Result<PathBuf> {
 fn profile_path_from(env: &impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<PathBuf> {
     if let Some(profile) = env("AGENT_RUNTIME_PROFILE") {
         ensure!(!profile.is_empty(), "AGENT_RUNTIME_PROFILE is empty; refusing raw provider");
-        return Ok(PathBuf::from(profile));
+        let profile = PathBuf::from(profile);
+        ensure!(profile.is_absolute(), "AGENT_RUNTIME_PROFILE must be absolute: {}", profile.display());
+        return Ok(profile);
     }
     let home = env("HOME").context("HOME is required to discover the managed runtime profile")?;
     let home = PathBuf::from(home);
@@ -73,6 +89,50 @@ fn resolve_for_persona(
     // changing the driver's environment or letting an explicit raw argv bypass the wrapper.
     *program = wrapper.to_str().context("managed wrapper path is not UTF-8")?.to_owned();
     Ok(())
+}
+
+/// Apply the managed launch environment only to a provider child.
+pub fn apply_provider_path(command: &mut std::process::Command) {
+    apply_path(command, PROVIDER_PATH.get().map(std::ffi::OsString::as_os_str));
+}
+
+fn apply_path(command: &mut std::process::Command, path: Option<&std::ffi::OsStr>) {
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
+}
+
+pub fn provider_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut command = std::process::Command::new(program);
+    apply_provider_path(&mut command);
+    command
+}
+
+fn prefixed_path(bin: &Path, inherited: Option<&std::ffi::OsStr>) -> Result<std::ffi::OsString> {
+    let mut paths = vec![bin.to_path_buf()];
+    if let Some(inherited) = inherited {
+        paths.extend(std::env::split_paths(inherited));
+    }
+    std::env::join_paths(paths).context("prepend managed harness directory to provider PATH")
+}
+
+fn selected_persona<'a>(spec: &'a serde_json::Value, environment: Option<&'a str>) -> Result<&'a str> {
+    let mut nodes = spec.get("children").and_then(serde_json::Value::as_array)
+        .into_iter().flatten().filter(|node| node["name"] == "persona");
+    let declared = if let Some(node) = nodes.next() {
+        ensure!(nodes.next().is_none(), "Agent Spec declares multiple personas");
+        let arguments = node["arguments"].as_array().context("Agent Spec persona needs one string")?;
+        ensure!(arguments.len() == 1, "Agent Spec persona needs one string");
+        Some(arguments[0].as_str().filter(|value| !value.is_empty())
+            .context("Agent Spec persona needs one nonempty string")?)
+    } else {
+        None
+    };
+    if let (Some(declared), Some(environment)) = (declared, environment) {
+        ensure!(declared == environment,
+            "Agent Spec persona {declared} disagrees with AGENT_PERSONA {environment}");
+    }
+    Ok(declared.or(environment).unwrap_or("generalist"))
 }
 
 #[cfg(test)]
@@ -158,5 +218,48 @@ mod tests {
         ));
         assert!(profile_path_from(&|_| None).is_err());
         assert!(profile_path_from(&|name| (name == "AGENT_RUNTIME_PROFILE").then(|| "".into())).is_err());
+    }
+
+    #[test]
+    fn declared_steward_selects_its_wrapper_without_environment_persona() {
+        let (_root, bin, profile) = fixture();
+        std::fs::write(&profile, serde_json::to_vec(&serde_json::json!({
+            "personas": {"launch": {"steward": {"harnessBin": bin}}},
+        })).unwrap()).unwrap();
+        let wrapper = bin.join("omp");
+        std::fs::write(&wrapper, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let spec = serde_json::json!({"children": [{"name": "persona", "arguments": ["steward"]}]});
+        let persona = selected_persona(&spec, None).unwrap();
+        assert_eq!(persona, "steward");
+        let mut argv = ["omp".into()];
+        resolve_for_persona("omp", &mut argv, &profile, persona).unwrap();
+        assert_eq!(Path::new(&argv[0]), wrapper);
+        assert!(selected_persona(&spec, Some("generalist")).is_err());
+        assert_eq!(selected_persona(&serde_json::json!({}), None).unwrap(), "generalist");
+    }
+
+    #[test]
+    fn provider_path_starts_with_managed_bin_without_changing_driver_path() {
+        let before = std::env::var_os("PATH");
+        let path = prefixed_path(Path::new("/managed/bin"), Some(std::ffi::OsStr::new("/native/bin:/usr/bin"))).unwrap();
+        let mut command = std::process::Command::new("/managed/bin/omp");
+        apply_path(&mut command, Some(&path));
+        let provider_path = command.get_envs().find(|(name, _)| *name == std::ffi::OsStr::new("PATH"))
+            .and_then(|(_, value)| value).unwrap();
+        assert_eq!(std::env::split_paths(provider_path).collect::<Vec<_>>(),
+            [PathBuf::from("/managed/bin"), PathBuf::from("/native/bin"), PathBuf::from("/usr/bin")]);
+        assert_eq!(std::env::var_os("PATH"), before);
+    }
+
+    #[test]
+    fn explicit_relative_profile_is_refused() {
+        let error = profile_path_from(&|name| (name == "AGENT_RUNTIME_PROFILE")
+            .then(|| "relative/profile.json".into())).unwrap_err();
+        assert!(format!("{error:#}").contains("AGENT_RUNTIME_PROFILE must be absolute"));
     }
 }

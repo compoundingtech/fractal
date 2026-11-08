@@ -153,8 +153,13 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         if let Some(state) = fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV) {
             return resume_native_driver(client, subject, &args.driver, argv, &state).await;
         }
-        fractal_drivers::managed_launch::resolve(&args.driver, &mut argv)?;
         let incarnation = wait_for_agent_incarnation(client, subject).await?;
+        if matches!(args.driver.as_str(), "omp" | "claude" | "codex") {
+            let declaration = retry_while_daemon_unreachable(subject, || async {
+                client.agent_declaration_get(subject, None, false).await.map_err(anyhow::Error::from)
+            }).await?;
+            fractal_drivers::managed_launch::resolve(&args.driver, &mut argv, &declaration.value.tree)?;
+        }
         let paths = NativePaths::prepare(subject, &args.driver)?;
         let sessions = paths.session_dir.join("provider-sessions");
         if let Some(session) = fractal_daemon::native_seed::first_launch(
