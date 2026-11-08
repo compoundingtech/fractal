@@ -1015,7 +1015,10 @@
           assert rendered.services.smalltalk.webListen == "127.0.0.1:7410";
           assert pkgs.lib.hasInfix "127.0.0.1:7410" args;
           assert pkgs.lib.hasInfix "--web-dist" args;
-          assert builtins.elem "${package}/share/fractal-web" (builtins.filter builtins.isString (builtins.split "[[:space:]\"']+" args));
+          # The PTY wrapper is a symlinkJoin: individual assets resolve outside its web root.
+          assert toString rendered.services.smalltalk.package != package;
+          assert builtins.elem "${rendered.services.smalltalk.package}/share/fractal-web" (builtins.filter builtins.isString (builtins.split "[[:space:]\"']+" args));
+          assert !(builtins.elem "${package}/share/fractal-web" (builtins.filter builtins.isString (builtins.split "[[:space:]\"']+" args)));
           assert (
             let
               disabled = (mkHmModuleEval { webListen = null; }).config;
