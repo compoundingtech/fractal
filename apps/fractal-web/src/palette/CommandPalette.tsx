@@ -9,7 +9,7 @@ import { ThemePortal } from '../../../../packages/fractal-ui/src/assistant-ui/ta
 import { borderVars as border, elevationVars as elevation, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { namingCommand, openCommands, type NamingIntent } from './dispatch.ts'
 import {
-  commandItems, emptyOrder, emptyWorld, leads, namingItem, paletteSections, recentItems, saidItems, spaceItems, typedOrder, worldItems,
+  commandItems, emptyOrder, emptyWorld, leads, namingItem, openableRows, paletteSections, recentItems, saidItems, sectionCap, showAllItem, spaceItems, typedOrder, worldItems,
   type HostCommand, type PaletteEntry, type PaletteRow, type PaletteWorld, type SaidHit,
 } from './items.ts'
 
@@ -39,6 +39,11 @@ export interface CommandPaletteProps {
    * nothing outside can open it at a query yet.
    */
   readonly onSaid?: ((ref: string, query: string, target: OpenTarget) => void) | undefined
+  /**
+   * Whether this client can open a pane key: the kind registry's answer (`opensInWeb`). Rows it cannot
+   * open are hidden. Everything is openable when absent.
+   */
+  readonly canOpen?: ((ref: string) => boolean) | undefined
   /** Per person and gateway (`cellRecentStore`); in memory when absent. */
   readonly recentStore?: RecentStore | undefined
   /** A full-screen sheet offering only here and tab; the narrow layout's when absent. */
@@ -90,7 +95,7 @@ const fallbackRecent = memoryRecentStore()
 // Defaults are constants: a fresh array each render would re-ask every source, which answers with a fresh render.
 const noCommands: readonly HostCommand[] = []
 
-function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands = noCommands, search, onSaid, recentStore = fallbackRecent, phone, onClose }: Omit<CommandPaletteProps, 'isOpen' | 'onOpenChange' | 'phone'> & { readonly phone: boolean; readonly onClose: () => void }) {
+function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands = noCommands, search, onSaid, canOpen, recentStore = fallbackRecent, phone, onClose }: Omit<CommandPaletteProps, 'isOpen' | 'onOpenChange' | 'phone'> & { readonly phone: boolean; readonly onClose: () => void }) {
   const { recent, push } = useRecent({ store: recentStore })
   const [mode, setMode] = React.useState<PaletteMode>({ _tag: 'Search' })
   // A tap on the phone opens here, or in a tab when that is chosen above the list.
@@ -100,7 +105,8 @@ function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands =
     {
       id: 'local',
       items: query => {
-        const local = [...worldItems(world, query), ...commandItems({ state, commands }), ...spaceItems(state, query)]
+        const all = [...worldItems(world, query), ...commandItems({ state, commands }), ...spaceItems(state, query)]
+        const local = canOpen === undefined ? all : openableRows(all, canOpen)
         return [...local, ...recentItems(recent, local)]
       },
     },
@@ -111,13 +117,19 @@ function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands =
         return found === undefined ? [] : saidItems(query, found, names)
       },
     }]),
-  ], [world, state, commands, recent, search, names])
+  ], [world, state, commands, recent, search, names, canOpen])
+  // Sections of the empty list shown in full, after their Show all row was chosen.
+  const [expanded, setExpanded] = React.useState<readonly string[]>([])
+  const cap = React.useMemo(() => ({ perSection: sectionCap, expanded, more: showAllItem }), [expanded])
 
   const choose = (item: PaletteRow, target: OpenTarget) => {
     const entry = item.action
     if (entry.key !== undefined) push(entry.key)
     const action = entry.action
     switch (action._tag) {
+      case 'Expand':
+        setExpanded(current => current.includes(action.section) ? current : [...current, action.section])
+        return
       case 'Name':
         setMode({ _tag: 'Naming', intent: action.intent, initial: action.intent === 'rename' ? state.spaces.find(space => space.id === state.current)?.name ?? '' : '' })
         return
@@ -149,6 +161,7 @@ function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands =
     typedOrder,
     emptyOrder,
     leads,
+    cap,
     mode,
     onModeChange: setMode,
     onSelect: (item, target) => choose(item, phone && target === 'here' ? tapTarget : target),
@@ -160,6 +173,14 @@ function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands =
     'aria-label': 'Search Fractal',
   })
   const naming = palette.mode._tag === 'Naming' ? palette.mode : undefined
+  const list = React.useRef<HTMLDivElement>(null)
+  // Arrow keys move the selection; the list follows it.
+  const selectedId = palette.selected?.id
+  React.useEffect(() => {
+    if (selectedId === undefined) return
+    const rows = list.current?.querySelectorAll<HTMLElement>('[data-palette-row]') ?? []
+    for (const row of rows) if (row.dataset.paletteRow === selectedId) row.scrollIntoView?.({ block: 'nearest' })
+  }, [selectedId])
   const scoped = palette.section === undefined ? undefined : paletteSections.find(section => section.id === palette.section)
   const inputProps = palette.getInputProps()
 
@@ -182,12 +203,14 @@ function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands =
         {target === 'here' ? 'Here' : 'New tab'}
       </Aria.Radio>)}
     </Aria.RadioGroup>}
-    <div {...palette.getListProps()} {...stylex.props(styles.list)}>
+    <div ref={list} {...palette.getListProps()} {...stylex.props(styles.list)}>
       {naming !== undefined
         ? <NamingRow label={palette.query.trim() === '' ? undefined : namingItem(state, naming.intent, palette.query.trim())} />
         : palette.groups.map(group => <div key={group.section.id} {...palette.getSectionProps(group.section)}>
           <div aria-hidden="true" {...stylex.props(styles.sectionLabel)}>{group.section.label}</div>
-          {group.items.map(({ item }) => <Row key={item.id} item={item} props={palette.getItemProps(item)} />)}
+          {group.items.length > windowAbove
+            ? <WindowedRows items={group.items.map(row => row.item)} selected={palette.selected} rowProps={palette.getItemProps} phone={phone} />
+            : group.items.map(({ item }) => <Row key={item.id} item={item} props={palette.getItemProps(item)} />)}
         </div>)}
       {/* A listbox needs an option child; an empty one says why, and cannot be chosen. */}
       {naming === undefined && palette.results.length === 0 && <div role="option" aria-disabled="true" aria-selected="false" {...stylex.props(styles.empty)}>
@@ -211,6 +234,35 @@ function Row({ item, props }: { readonly item: PaletteRow; readonly props: React
     <span {...stylex.props(styles.label)}>{item.label}</span>
     {item.detail !== undefined && item.detail !== '' && <span {...stylex.props(styles.detail, selected && styles.detailSelected)}>{item.detail}</span>}
     {shortcut !== undefined && <kbd {...stylex.props(styles.kbd)}>{keyCaps(shortcut)}</kbd>}
+  </div>
+}
+
+/** A section longer than this renders in chunks, each only while it is near the visible part of the list. */
+const windowAbove = 200
+const chunkSize = 50
+
+type RowProps = (item: PaletteRow) => React.HTMLAttributes<HTMLElement> & { readonly 'data-selected'?: string }
+
+function WindowedRows({ items, selected, rowProps, phone }: { readonly items: readonly PaletteRow[]; readonly selected: PaletteRow | undefined; readonly rowProps: RowProps; readonly phone: boolean }) {
+  const chunks: PaletteRow[][] = []
+  for (let at = 0; at < items.length; at += chunkSize) chunks.push(items.slice(at, at + chunkSize))
+  return chunks.map((chunk, index) => <Chunk key={index} items={chunk} forced={selected !== undefined && chunk.includes(selected)} rowProps={rowProps} rowHeight={phone ? 44 : 28} />)
+}
+
+/** Its rows while it is near the scrolled list or holds the selection (the active descendant must exist); a sized placeholder otherwise. */
+function Chunk({ items, forced, rowProps, rowHeight }: { readonly items: readonly PaletteRow[]; readonly forced: boolean; readonly rowProps: RowProps; readonly rowHeight: number }) {
+  const node = React.useRef<HTMLDivElement>(null)
+  const [near, setNear] = React.useState(false)
+  React.useEffect(() => {
+    const element = node.current
+    if (element === null || typeof IntersectionObserver === 'undefined') return
+    const observer = new IntersectionObserver(entries => setNear(entries.some(entry => entry.isIntersecting)), { root: element.closest('[role="listbox"]'), rootMargin: '400px 0px' })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [])
+  const shown = near || forced
+  return <div ref={node} data-palette-chunk={shown ? 'rows' : 'placeholder'} style={shown ? undefined : { height: items.length * rowHeight }}>
+    {shown && items.map(item => <Row key={item.id} item={item} props={rowProps(item)} />)}
   </div>
 }
 

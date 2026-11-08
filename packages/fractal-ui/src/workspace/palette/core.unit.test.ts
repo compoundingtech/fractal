@@ -58,6 +58,17 @@ describe('ranking', () => {
     expect(rank(items, { query: '', sections, emptyOrder: ['commands'] }).map(group => group.section.id)).toEqual(['commands', 'people', 'projects'])
   })
 
+  it('caps each section of the empty list, ending it with the host’s Show all row, unless it is expanded, scoped or typed', () => {
+    const many = Array.from({ length: 5 }, (_, index) => item('people', `P${index}`, index))
+    const more = (section: PaletteSection, total: number) => item(section.id, `Show all ${total}`, -1)
+    const cap = { perSection: 2, more }
+    expect(flatten(rank(many, { query: '', sections, cap })).map(row => row.label)).toEqual(['P4', 'P3', 'Show all 5'])
+    expect(flatten(rank(many, { query: '', sections, cap: { ...cap, expanded: ['people'] } }))).toHaveLength(5)
+    expect(flatten(rank(many, { query: '', sections, section: 'people', cap }))).toHaveLength(5)
+    expect(flatten(rank(many, { query: 'p', sections, cap }))).toHaveLength(5)
+    expect(flatten(rank(many.slice(0, 2), { query: '', sections, cap })).map(row => row.label)).toEqual(['P1', 'P0'])
+  })
+
   it('puts a section first when one of its rows leads, such as a command typed as it begins', () => {
     const leads = (row: PaletteItem<string>, query: string) => row.section === 'commands' && row.label.toLowerCase().startsWith(query.toLowerCase())
     expect(rank(items, { query: 't', sections }).map(group => group.section.id)).toEqual(['people', 'projects', 'commands'])

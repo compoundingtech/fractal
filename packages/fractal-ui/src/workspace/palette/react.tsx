@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { flatten, parseQuery, pushRecent, rank, sectionJump, targetFromEvent, type OpenTarget, type PaletteItem, type PaletteMode, type PaletteSection, type RankedGroup, type Ranker, type Leads } from './core.ts'
+import { flatten, parseQuery, pushRecent, rank, sectionJump, targetFromEvent, type OpenTarget, type PaletteItem, type PaletteMode, type PaletteSection, type RankedGroup, type Ranker, type Leads, type SectionCap } from './core.ts'
 
 /**
  * Where palette items come from. A source can be synchronous (a list already in memory) or async (a
@@ -30,6 +30,8 @@ export interface UsePaletteOptions<A> {
   /** Section ids in the order the empty query lists them. */
   readonly emptyOrder?: readonly string[] | undefined
   readonly leads?: Leads<A> | undefined
+  /** At most so many rows per section in the empty list, then the host's Show all row. */
+  readonly cap?: SectionCap<A> | undefined
   /** Ids most recent first: an item's recency is its place here. */
   readonly recent?: readonly string[] | undefined
   readonly 'aria-label'?: string | undefined
@@ -97,7 +99,7 @@ const useSourceItems = <A,>(sources: readonly PaletteSource<A>[], query: string)
  * tab, Alt+Enter in a split right, Alt+Shift+Enter below. Naming mode takes a name instead.
  */
 export const usePalette = <A,>(options: UsePaletteOptions<A>): PaletteState<A> => {
-  const { sections, sources, onSelect, onName, onClose, onModeChange, targets, ranker, recent, typedOrder, emptyOrder, leads } = options
+  const { sections, sources, onSelect, onName, onClose, onModeChange, targets, ranker, recent, typedOrder, emptyOrder, leads, cap } = options
   const [ownMode, setOwnMode] = React.useState<PaletteMode>({ _tag: 'Search' })
   const mode = options.mode ?? ownMode
   const setMode = (next: PaletteMode) => {
@@ -122,8 +124,8 @@ export const usePalette = <A,>(options: UsePaletteOptions<A>): PaletteState<A> =
   const order = React.useMemo(() => new Map((recent ?? []).map((id, index) => [id, (recent?.length ?? 0) - index] as const)), [recent])
   const groups = React.useMemo(() => naming ? [] : rank(
     items.map(item => order.has(item.id) ? { ...item, recency: Math.max(item.recency ?? 0, order.get(item.id)!) } : item),
-    { query: parsed.text, sections, section, ranker, typedOrder, emptyOrder, leads },
-  ), [naming, items, order, parsed.text, sections, section, ranker, typedOrder, emptyOrder, leads])
+    { query: parsed.text, sections, section, ranker, typedOrder, emptyOrder, leads, cap },
+  ), [naming, items, order, parsed.text, sections, section, ranker, typedOrder, emptyOrder, leads, cap])
   const results = React.useMemo(() => flatten(groups), [groups])
   const selected = results[Math.min(selectedIndex, results.length - 1)]
   const setQuery = (next: string) => {

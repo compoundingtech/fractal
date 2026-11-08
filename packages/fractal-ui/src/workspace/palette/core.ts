@@ -121,6 +121,18 @@ export interface RankOptions<A> {
   /** Section ids in the order the empty query lists them, likewise. `sections` stays the order of Alt+digit. */
   readonly emptyOrder?: readonly string[] | undefined
   readonly leads?: Leads<A> | undefined
+  readonly cap?: SectionCap<A> | undefined
+}
+
+/**
+ * The empty, unscoped list shows at most `perSection` rows of a section, then the host's `more` row
+ * (such as "Show all 40"), which is an ordinary row the host acts on by expanding the section.
+ */
+export interface SectionCap<A> {
+  readonly perSection: number
+  /** Sections shown in full. */
+  readonly expanded?: readonly string[] | undefined
+  readonly more: (section: PaletteSection, total: number) => PaletteItem<A>
 }
 
 const orderedSections = <A>(items: readonly PaletteItem<A>[], options: RankOptions<A>, query: string): readonly PaletteSection[] => {
@@ -158,7 +170,11 @@ export const rank = <A>(items: readonly PaletteItem<A>[], options: RankOptions<A
       const score = ranker(query, search)
       return score === undefined ? [] : [{ item, score }]
     }).toSorted((left, right) => right.score - left.score || (right.item.recency ?? 0) - (left.item.recency ?? 0))
-    return ranked.length === 0 ? [] : [{ section, items: ranked }]
+    if (ranked.length === 0) return []
+    const cap = options.cap
+    const capped = cap !== undefined && query === '' && options.section === undefined && cap.expanded?.includes(section.id) !== true && ranked.length > cap.perSection
+    if (!capped) return [{ section, items: ranked }]
+    return [{ section, items: [...ranked.slice(0, cap.perSection), { item: cap.more(section, ranked.length), score: 0 }] }]
   })
 }
 

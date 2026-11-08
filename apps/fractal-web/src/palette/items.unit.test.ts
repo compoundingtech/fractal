@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { emptyWorkspace, transition, type WorkspaceConfig } from '@fractal/ui/workspace'
 import { rank, flatten, parseQuery } from '@fractal/ui/workspace/palette'
-import { commandItems, leads, paletteSections, recentItems, saidItems, spaceItems, typedOrder, worldItems, type PaletteWorld } from './items.ts'
+import { commandItems, leads, openableRows, paletteSections, recentItems, saidItems, sectionCap, showAllItem, spaceItems, typedOrder, worldItems, type PaletteWorld } from './items.ts'
 
 let next = 0
 const config: WorkspaceConfig = { newId: () => `id${next++}` }
@@ -108,5 +108,24 @@ describe('recent', () => {
     expect(recent.map(item => item.id)).toEqual(['recent:mission:mission/release', 'recent:agent:agent/example/atlas/builder'])
     expect(recent[0]!.action.key).toBe('mission:mission/release')
     expect(recent[0]!.search).toBe('')
+  })
+})
+
+describe('openable rows', () => {
+  it('hides rows whose pane key the client cannot open, never commands', () => {
+    const rows = [...worldItems(world), ...commandItems({ state: emptyWorkspace(config), commands: [] })]
+    const kept = openableRows(rows, ref => !ref.startsWith('list:fleet') && !ref.startsWith('machine:'))
+    expect(kept.some(item => item.section === 'fleet')).toBe(false)
+    expect(kept.length).toBe(rows.length - 1 - world.machines.length)
+  })
+})
+
+describe('section caps', () => {
+  it('closes a capped section with a Show all row that expands it', () => {
+    const many = worldItems({ ...world, agents: Array.from({ length: 9 }, (_, index) => ({ ref: `agent/a${index}`, name: `A${index}`, detail: '' })) })
+    const agents = rank(many, { query: '', sections: paletteSections, cap: { perSection: sectionCap, more: showAllItem } }).find(group => group.section.id === 'agents')!
+    expect(agents.items.map(row => row.item.label).at(-1)).toBe('Show all 9')
+    expect(agents.items).toHaveLength(sectionCap + 1)
+    expect(agents.items.at(-1)!.item.action.action).toEqual({ _tag: 'Expand', section: 'agents' })
   })
 })
