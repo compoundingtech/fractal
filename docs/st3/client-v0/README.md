@@ -2303,6 +2303,9 @@ with `code: pairing-origin-required`, `retryable: false`, and the message
 `complete pairing on the member that began it`. This check precedes code verification and
 does not consume the challenge or issue a device grant. Complete on the beginning member,
 or start a new pairing on the desired member.
+This guarantee holds only when every member accepting pairing completion runs this
+version or later. An older member has no origin check and can still complete a replicated
+challenge begun on an upgraded member, so upgrade all members.
 
 Person pairing completion returns HTTP 403 `pairing-restart-required`, `retryable: false`,
 and message `start pairing again` when the challenge's verifier key is missing or changed,

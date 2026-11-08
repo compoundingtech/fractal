@@ -8,6 +8,9 @@ use serde::Serialize;
 pub(super) fn parse_gateway(value: &str) -> Result<reqwest::Url, String> {
     let invalid = || "gateway must be an HTTP or HTTPS URL without a query or fragment".to_owned();
     let url = reqwest::Url::parse(value).map_err(|_| invalid())?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("gateway URL must not contain userinfo (username or password)".to_owned());
+    }
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || url.query().is_some()
@@ -46,11 +49,13 @@ pub(super) async fn gateway_is_begin_member(
 ) -> Result<bool> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let url = format!("{}/v1/health", gateway.as_str().trim_end_matches('/'));
     let Ok(response) = client.get(url).send().await else { return Ok(false) };
-    let Ok(health) = response.json::<serde_json::Value>().await else { return Ok(false) };
-    let Some(node) = health["node"].as_str().filter(|node| !node.is_empty()) else {
+    if response.status().is_redirection() { return Ok(false) }
+    let Ok(health) = response.json::<fractal_client::NativeValue<serde_json::Value>>().await else { return Ok(false) };
+    let Some(node) = health.value["node"].as_str().filter(|node| !node.is_empty()) else {
         return Ok(false);
     };
     if fractal_daemon::api::client_host_id(node) != local_member {
@@ -129,7 +134,7 @@ mod tests {
         assert!(check_begin_member(&parse_gateway("https://member-b.example/other").unwrap(), "host/member-a", &peers).is_ok());
     }
 
-    async fn health_server(body: &'static str) -> (reqwest::Url, tokio::task::JoinHandle<()>) {
+    async fn health_server(body: String) -> (reqwest::Url, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = parse_gateway(&format!("http://{}/base/", listener.local_addr().unwrap())).unwrap();
@@ -150,23 +155,52 @@ mod tests {
         (url, served)
     }
 
+    async fn real_health_body(node: &str) -> String {
+        use std::sync::Arc;
+        use tower::ServiceExt as _;
+        use fractal_daemon::api::AppState;
+        let root = tempfile::tempdir().unwrap();
+        let state = AppState {
+            seat_admission: Default::default(),
+            store: Arc::new(fractal_daemon::store::Store::open_memory(node).unwrap()),
+            notify: Arc::new(tokio::sync::Notify::new()),
+            event_notify: tokio::sync::watch::channel(0_u64).0,
+            node: node.into(), state_dir: root.path().into(), pty_root: root.path().join("pty"),
+            pty_binary: "pty".into(), owning_person: None, fleet_id: None,
+            configured_peers: vec![], client_relay: None, native_session_home: None,
+            planner_default: Default::default(), harness_question_sink: None,
+            assistant_receipts: Default::default(), private_notes: Default::default(),
+        };
+        let response = fractal_daemon::api::router(state).oneshot(
+            axum::http::Request::builder().uri("/v1/health")
+                .body(axum::body::Body::empty()).unwrap(),
+        ).await.unwrap();
+        assert!(response.status().is_success());
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        let encoded: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(encoded["api_version"], "st3.v1");
+        assert_eq!(encoded["value"]["node"], node);
+        body
+    }
+
     #[tokio::test]
     async fn gateway_health_matching_member_continues_without_warning() {
-        let (gateway, served) = health_server(r#"{"node":"member-a"}"#).await;
+        let (gateway, served) = health_server(real_health_body("member-a").await).await;
         assert!(gateway_is_begin_member(&gateway, "host/member-a").await.unwrap());
         served.await.unwrap();
     }
 
     #[tokio::test]
     async fn gateway_health_normalizes_whitespace_with_the_shared_host_identity() {
-        let (gateway, served) = health_server(r#"{"node":"member a\twest"}"#).await;
+        let (gateway, served) = health_server(real_health_body("member a\twest").await).await;
         assert!(gateway_is_begin_member(&gateway, "host/member-a-west").await.unwrap());
         served.await.unwrap();
     }
 
     #[tokio::test]
     async fn gateway_health_other_member_is_refused_even_without_a_configured_peer() {
-        let (gateway, served) = health_server(r#"{"node":"member-b"}"#).await;
+        let (gateway, served) = health_server(real_health_body("member-b").await).await;
         let error = gateway_is_begin_member(&gateway, "host/member-a").await.unwrap_err().to_string();
         assert!(error.contains("host/member-a"));
         assert!(error.contains("member-b"));
@@ -176,13 +210,36 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_health_without_node_or_unreachable_requires_warning() {
-        let (gateway, served) = health_server(r#"{"status":"ready"}"#).await;
+        let (gateway, served) = health_server(r#"{"status":"ready"}"#.into()).await;
         assert!(!gateway_is_begin_member(&gateway, "host/member-a").await.unwrap());
         served.await.unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let gateway = parse_gateway(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
         drop(listener);
         assert!(!gateway_is_begin_member(&gateway, "host/member-a").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn gateway_health_redirect_warns_without_contacting_the_destination() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let destination = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway = parse_gateway(&format!("http://{}", first.local_addr().unwrap())).unwrap();
+        let location = format!("http://{}/v1/health", destination.local_addr().unwrap());
+        let served = tokio::spawn(async move {
+            let (mut stream, _) = first.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(stream.read_u8().await.unwrap());
+            }
+            stream.write_all(format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ).as_bytes()).await.unwrap();
+        });
+        assert!(!gateway_is_begin_member(&gateway, "host/member-a").await.unwrap());
+        served.await.unwrap();
+        // A connect would already be queued by the time the completed request returned.
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(100), destination.accept()).await.is_err());
     }
 
     fn challenge() -> PairingChallenge {
@@ -227,6 +284,19 @@ mod tests {
             assert!(!error.contains(value));
         }
         assert_eq!(parse_gateway("HTTPS://EXAMPLE.TEST:443/base").unwrap().as_str(), "https://example.test/base");
+    }
+
+    #[test]
+    fn pairing_qr_rejects_gateway_userinfo_without_echoing_credentials() {
+        for value in [
+            "https://user:password@example.test",
+            "https://user@example.test",
+            "https://:password@example.test",
+        ] {
+            let error = parse_gateway(value).unwrap_err();
+            assert_eq!(error, "gateway URL must not contain userinfo (username or password)");
+            assert!(!error.contains(value));
+        }
     }
 
     #[test]
