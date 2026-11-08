@@ -530,6 +530,12 @@ Existing continuations are searched before a new receipt is written. One shared
 64-visit allowance counts reads and occupant validations across all branches;
 exhaustion blocks that operation nonfatally. Conflict diagnostics and their log
 entry are deduplicated by the original operation key across replay and restart.
+Bounded occupant discovery uses indexed daemon-family and remaining-occupant
+windows, not a full-history priority sort. Priority is not authentication;
+every receipt still requires full expected-record validation.
+A blocked phase lookup is not an absent failure: measured recovery remains
+incomplete, retaining the case and pending recovery even when an existing
+continuation receipt cannot be reached within the bounded window.
 
 **Disabling shared readiness cases**
 

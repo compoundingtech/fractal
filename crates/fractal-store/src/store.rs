@@ -4731,22 +4731,40 @@ impl Store {
     pub fn operation_claims(&self, key: &str) -> Result<(Vec<ClaimRecord>, bool)> {
         let connection = self.readers.get();
         let operation_id = operation_id_for_key(key);
-        let mut statement = connection.prepare_cached(
-            "SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
-                    claims.origin, claims.actor, claims.body, claims.predecessors, claims.accepted_at_unix_ms
-             FROM (
-                 SELECT id FROM claims
-                 WHERE json_extract(body, '$._operation.id')=?1
-                   AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims
-                                  WHERE projection_digest_repaired_claims.id=claims.id)
-                 ORDER BY CASE WHEN origin=?2 AND actor='daemon/runtime'
-                     AND kind IN ('operational.failure','operational.recovered','message.sent')
-                     THEN 0 ELSE 1 END, id
-                 LIMIT 17
-             ) AS occupants JOIN claims ON claims.id=occupants.id",
-        )?;
-        let mut claims = statement.query_map(params![operation_id, self.origin()], claim_from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut claims = Vec::new();
+        // Equality/range seeks of the readiness occupant index avoid sorting the
+        // complete operation history. Local daemon families have their own window;
+        // this is discovery priority only, never receipt authentication.
+        macro_rules! occupant_query {
+            ($origin_filter:literal) => {
+                concat!(
+                    "SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
+                            claims.origin, claims.actor, claims.body, claims.predecessors, claims.accepted_at_unix_ms
+                     FROM claims INDEXED BY claims_operation_readiness_occupants
+                     WHERE json_extract(body, '$._operation.id')=?1
+                       AND CASE WHEN actor='daemon/runtime'
+                           AND kind IN ('operational.failure','operational.recovered','message.sent')
+                           THEN 1 ELSE 0 END=?2 AND ", $origin_filter,
+                    " AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims
+                                     WHERE projection_digest_repaired_claims.id=claims.id)
+                     ORDER BY origin, id LIMIT ?4"
+                )
+            };
+        }
+        for (family, query) in [
+            (1, occupant_query!("origin=?3")),
+            (0, occupant_query!("?3 IS NOT NULL")),
+            (1, occupant_query!("origin<?3")),
+            (1, occupant_query!("origin>?3")),
+        ] {
+            let mut statement = connection.prepare_cached(query)?;
+            let rows = statement.query_map(
+                params![operation_id, family, self.origin(), 17 - claims.len()],
+                claim_from_row,
+            )?;
+            for row in rows { claims.push(row?); }
+            if claims.len() == 17 { break; }
+        }
         if let Some(shard) = messages_shard::shard(self)
             && let Some(claim) = messages_shard::stream_operations::operation_claim(&shard, &operation_id)? {
             claims.push(claim);

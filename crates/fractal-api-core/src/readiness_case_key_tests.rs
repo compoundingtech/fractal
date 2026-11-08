@@ -1,6 +1,14 @@
 use super::*;
 use super::migration_tests::{fixture, reading};
 
+fn recorded_phase(store: &Store, opening: &Opening, phase: &str) -> crate::model::ClaimRecord {
+    match phase_receipt(store, opening, phase).unwrap() {
+        keys::Lookup::Recorded(receipt) => receipt,
+        keys::Lookup::Vacant(_) => panic!("phase is vacant"),
+        keys::Lookup::Blocked => panic!("phase lookup is blocked"),
+    }
+}
+
 fn occupy(store: &Store, key: &str) -> crate::model::ClaimRecord {
     store.append_claim(&ClaimInput {
         subject: "custom/fixture/record".into(), kind: "custom.fixture.record".into(),
@@ -34,13 +42,13 @@ fn continued_lifecycle(conflicts: usize) {
     }
     admission.replay(&journal, |opening| record(&store, &policy.config, opening)).unwrap();
     assert!(admission.case.as_ref().unwrap().recorded);
-    let early = phase_receipt(&store, &opening, "early").unwrap().unwrap();
+    let early = recorded_phase(&store, &opening, "early");
     assert_eq!(early.kind, "operational.failure");
     drain_notices(&mut admission, &journal, &store, None).unwrap();
     let weekly_miss = reading(end + MINUTE_MS, 11);
     admission.weekly(&journal, &policy.config, &store, &weekly_miss, weekly_miss.end_ms,
         |opening, action| record_weekly(&store, opening, action)).unwrap();
-    let weekly = phase_receipt(&store, &opening, "weekly").unwrap().unwrap();
+    let weekly = recorded_phase(&store, &opening, "weekly");
     assert_eq!(weekly.body["evidence"], json!([early.id]));
     drain_notices(&mut admission, &journal, &store, None).unwrap();
     let messages = store.messages(Some(&policy.config.reviewer), true).unwrap();
@@ -178,8 +186,8 @@ fn capped_recovery_does_not_prevent_other_failure_receipts_from_closing() {
     let missed = reading(end + MINUTE_MS, 11);
     admission.weekly(&journal, &policy.config, &store, &missed, missed.end_ms,
         |opening, action| record_weekly(&store, opening, action)).unwrap();
-    let early = phase_receipt(&store, &opening, "early").unwrap().unwrap();
-    let weekly = phase_receipt(&store, &opening, "weekly").unwrap().unwrap();
+    let early = recorded_phase(&store, &opening, "early");
+    let weekly = recorded_phase(&store, &opening, "weekly");
     occupy_chain(&store, &format!("{}:recovered", early.id), 5);
     let met = reading(end + 2 * MINUTE_MS, 0);
     admission.weekly(&journal, &policy.config, &store, &met, met.end_ms,
@@ -234,12 +242,12 @@ fn replicated_conflicts_continue_each_family_and_preserve_acknowledged_receipts(
     }
     admission.replay(&journal, |opening| record(&store, &policy.config, opening)).unwrap();
     assert!(admission.case.as_ref().unwrap().recorded);
-    let early = phase_receipt(&store, &opening, "early").unwrap().unwrap();
+    let early = recorded_phase(&store, &opening, "early");
     let missed = reading(end + MINUTE_MS, 11);
     fs::write(&policy.config.evidence_file, serde_json::to_vec(&missed).unwrap()).unwrap();
     run_sampler(&policy, &store, missed.end_ms).unwrap();
     admission = Admission::load(&journal, &policy.config).unwrap();
-    let weekly = phase_receipt(&store, &opening, "weekly").unwrap().unwrap();
+    let weekly = recorded_phase(&store, &opening, "weekly");
     assert_eq!(weekly.body["evidence"], json!([early.id]));
     assert_eq!(store.messages(Some(&policy.config.reviewer), true).unwrap().len(), 2);
 
@@ -333,7 +341,7 @@ fn overflowing_occupants_prefer_daemon_receipts_and_do_not_stop_sampler_recovery
     let mut admission = Admission::load(&journal, &policy.config).unwrap();
     let opening = plan(&mut admission, &policy, &journal, end);
     assert!(record(&store, &policy.config, &opening).unwrap());
-    let expected = phase_receipt(&store, &opening, "early").unwrap().unwrap();
+    let expected = recorded_phase(&store, &opening, "early");
     let mut serial = 0;
     let root = format!("{}:early", opening.episode);
     replicated_occupants(&store, &root, 20, &mut serial);
@@ -341,7 +349,7 @@ fn overflowing_occupants_prefer_daemon_receipts_and_do_not_stop_sampler_recovery
     assert!(overflow);
     assert_eq!(receipts.len(), 16);
     assert_eq!(receipts[0].id, expected.id, "daemon priority precedes immutable ID ordering");
-    assert_eq!(phase_receipt(&store, &opening, "early").unwrap().unwrap().id, expected.id);
+    assert_eq!(recorded_phase(&store, &opening, "early").id, expected.id);
     let notice_root = format!("{}:notice:early", opening.episode);
     replicated_occupants(&store, &notice_root, 20, &mut serial);
     let mut remaining = keys::MAX_VISITS;
@@ -392,4 +400,44 @@ fn branched_continuations_share_one_total_visit_budget() {
         |opening, action| record_weekly(&store, opening, action)).unwrap();
     drain_notices(&mut admission, &journal, &store, None).unwrap();
     assert_eq!(store.messages(Some(&policy.config.reviewer), true).unwrap().len(), 1);
+}
+
+#[test]
+fn overflowing_ancestor_does_not_turn_a_recorded_continuation_into_absent_failure() {
+    let (dir, policy, store) = fixture();
+    let journal = dir.path().join("case.json");
+    let end = (MINUTES + 10) * MINUTE_MS;
+    let mut admission = Admission::load(&journal, &policy.config).unwrap();
+    let opening = plan(&mut admission, &policy, &journal, end);
+    let root = format!("{}:early", opening.episode);
+    occupy_chain(&store, &root, 1);
+    admission.replay(&journal, |opening| record(&store, &policy.config, opening)).unwrap();
+    let failure = recorded_phase(&store, &opening, "early");
+    assert_ne!(store.operation_claim(&root).unwrap().unwrap().id, failure.id);
+    let mut serial = 0;
+    replicated_occupants(&store, &root, 20, &mut serial);
+    assert!(matches!(phase_receipt(&store, &opening, "early").unwrap(), keys::Lookup::Blocked));
+    let met = reading(end + MINUTE_MS, 0);
+    admission.weekly(&journal, &policy.config, &store, &met, met.end_ms,
+        |opening, action| record_weekly(&store, opening, action)).unwrap();
+    assert!(!admission.weekly.recovered);
+    assert!(admission.weekly.pending.is_some());
+    assert_eq!(admission.case.as_ref().unwrap().episode, opening.episode);
+    assert_eq!(store.operational_failure(&opening.episode).unwrap().unwrap().status, "pending");
+    assert!(store.claim_by_id(&failure.id).unwrap().is_some());
+    assert!(store.fault_delivery_snapshot(u128::from(now_ms()) + 1).unwrap().iter()
+        .any(|fault| fault.item.title == "Readiness operation conflict"));
+    let next = reading(end + 2 * MINUTE_MS, 0);
+    admission.weekly(&journal, &policy.config, &store, &next, next.end_ms,
+        |opening, action| record_weekly(&store, opening, action)).unwrap();
+    assert_eq!(admission.case.as_ref().unwrap().episode, opening.episode);
+    assert!(!admission.weekly.recovered);
+    drop(store);
+    let store = Store::open(&dir.path().join("graph.db"), "fixture").unwrap();
+    let mut restarted = Admission::load(&journal, &policy.config).unwrap();
+    restarted.replay_weekly(&journal,
+        |opening, action| record_weekly(&store, opening, action)).unwrap();
+    assert!(!restarted.weekly.recovered);
+    assert!(restarted.weekly.pending.is_some());
+    assert_eq!(restarted.case.as_ref().unwrap().episode, opening.episode);
 }

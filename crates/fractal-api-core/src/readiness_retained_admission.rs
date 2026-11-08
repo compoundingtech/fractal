@@ -257,7 +257,7 @@ impl Admission {
     }
 }
 
-fn phase_receipt(store: &Store, opening: &Opening, phase: &str) -> Result<Option<crate::model::ClaimRecord>> {
+fn phase_receipt(store: &Store, opening: &Opening, phase: &str) -> Result<keys::Lookup> {
     let root = format!("{}:{phase}", opening.episode);
     let source = format!("daemon/{}", store.origin());
     let (severity, title) = if phase == "early" {
@@ -265,7 +265,7 @@ fn phase_receipt(store: &Store, opening: &Opening, phase: &str) -> Result<Option
     } else {
         ("error", "API readiness weekly breach")
     };
-    let found = keys::lookup(store, &root, &opening.reviewer, |receipt, _key| {
+    keys::lookup(store, &root, &opening.reviewer, |receipt, _key| {
         receipt.kind == "operational.failure"
             && receipt.actor.as_deref() == Some("daemon/runtime")
             && receipt.origin == store.origin() && receipt.subject == source
@@ -274,10 +274,6 @@ fn phase_receipt(store: &Store, opening: &Opening, phase: &str) -> Result<Option
             && receipt.body["fields"]["condition"] == crate::store::API_READINESS_SLO_MISSED
             && receipt.body["fields"]["severity"] == severity
             && receipt.body["fields"]["title"] == title
-    })?;
-    Ok(match found {
-        keys::Lookup::Recorded(receipt) => Some(receipt),
-        keys::Lookup::Vacant(_) | keys::Lookup::Blocked => None,
     })
 }
 
@@ -287,8 +283,10 @@ fn record(store: &Store, config: &ReadinessSloConfig, opening: &Opening) -> Resu
         "early readiness store is not the executor"
     );
     let key = format!("{}:early", opening.episode);
-    if phase_receipt(store, opening, "early")?.is_some() {
-        return Ok(true);
+    match phase_receipt(store, opening, "early")? {
+        keys::Lookup::Recorded(_) => return Ok(true),
+        keys::Lookup::Blocked => return Ok(false),
+        keys::Lookup::Vacant(_) => {},
     }
     ensure!(
         store.fault_reviewer_is_declared(&opening.reviewer)?,
@@ -330,8 +328,10 @@ fn record_weekly(store: &Store, opening: &Opening, action: &WeeklyAction) -> Res
     let weekly_key = format!("{}:weekly", opening.episode);
     match action {
         WeeklyAction::Escalate { cut } => {
-            if phase_receipt(store, opening, "weekly")?.is_some() {
-                return Ok(true);
+            match phase_receipt(store, opening, "weekly")? {
+                keys::Lookup::Recorded(_) => return Ok(true),
+                keys::Lookup::Blocked => return Ok(false),
+                keys::Lookup::Vacant(_) => {},
             }
             ensure!(
                 store.fault_reviewer_is_declared(&opening.reviewer)?,
@@ -356,16 +356,29 @@ fn record_weekly(store: &Store, opening: &Opening, action: &WeeklyAction) -> Res
                     ("severity".into(), json!("error")),
                     ("targets".into(), json!([source])),
                 ]),
-                evidence: early.into_iter().map(|claim| claim.id).collect(),
+                evidence: match early {
+                    keys::Lookup::Recorded(claim) => vec![claim.id],
+                    keys::Lookup::Vacant(_) | keys::Lookup::Blocked => Vec::new(),
+                },
                 expected_subject: None,
                 idempotency_key: Some(weekly_key),
             };
             Ok(keys::append(store, &mut input, &opening.reviewer)?.is_some())
         }
         WeeklyAction::Recover { cut } => {
-            let weekly = phase_receipt(store, opening, "weekly")?.map(|claim| claim.id);
+            let weekly = phase_receipt(store, opening, "weekly")?;
+            // A bounded lookup can conceal a previously accepted continuation.
+            // Blocked is unknown occupancy, never proof that no failure exists.
             let mut complete = true;
-            for prior in early.into_iter().map(|claim| claim.id).chain(weekly) {
+            for phase in [early, weekly] {
+                let prior = match phase {
+                    keys::Lookup::Recorded(claim) => claim.id,
+                    keys::Lookup::Blocked => {
+                        complete = false;
+                        continue;
+                    },
+                    keys::Lookup::Vacant(_) => continue,
+                };
                 let key = format!("{prior}:recovered");
                 let mut input = ClaimInput {
                     subject: source.clone(),
@@ -451,8 +464,10 @@ fn drain_notices(admission: &mut Admission, journal: &Path, store: &Store, backu
     let mut queued = admission.clone();
     if let Some(opening) = admission.case.as_ref() {
     for phase in ["early", "weekly"] {
-        let failure = phase_receipt(store, opening, phase)?.map(|claim| claim.id);
-        let Some(failure) = failure else { continue };
+        let failure = match phase_receipt(store, opening, phase)? {
+            keys::Lookup::Recorded(claim) => claim.id,
+            keys::Lookup::Vacant(_) | keys::Lookup::Blocked => continue,
+        };
         let recipients = std::iter::once((opening.reviewer.as_str(), false))
             .chain(backup.filter(|backup| *backup != opening.reviewer).map(|backup| (backup, true)));
         for (recipient, held) in recipients {
