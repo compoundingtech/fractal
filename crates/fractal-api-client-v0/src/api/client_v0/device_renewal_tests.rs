@@ -53,7 +53,7 @@ async fn renewal_addresses_existing_key_and_preserves_scopes_once() {
     let receipt=staged(&state,&source).await;
     assert!(receipt["expires_at"].is_string());
     let other=MemberKey::generate().unwrap().0;
-    assert_eq!(poll(&state,&other).await.unwrap().0["renewals"],json!([]));
+    assert!(poll(&state,&other).await.is_err());
     let offered=poll(&state,&old).await.unwrap().0;
     let offer=&offered["renewals"][0];
     assert_eq!(offer["scopes"],json!(["read.projections"]));
@@ -66,7 +66,7 @@ async fn renewal_addresses_existing_key_and_preserves_scopes_once() {
     let renewed=completed.iter().find(|claim| claim.body["fields"]["device_public_key"]==candidate.public()).unwrap();
     assert_eq!(renewed.body["fields"]["scopes"],offer["scopes"]);
     assert!(complete(State(state.clone()),Extension(session),Json(approval(offer,&old,&candidate))).await.is_err());
-    assert!(poll(&state,&old).await.unwrap().0["renewals"].as_array().unwrap().is_empty());
+    assert!(poll(&state,&old).await.is_err());
     assert!(paired_client_session(&state,&source,"fabric-loopback",false).is_err());
 }
 
@@ -174,6 +174,37 @@ async fn invalid_pending_proofs_do_not_charge_the_device_allowance() {
         assert!(pending(State(state.clone()), Json(request)).await.is_err());
     }
     assert_eq!(poll(&state, &old).await.unwrap().0["renewals"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn unknown_selectors_and_invalid_pending_proofs_leave_devices_available() {
+    let (_root_a, state_a, old_a, source_a) = fixture();
+    let (_root_b, state_b, old_b, source_b) = fixture();
+    staged(&state_a, &source_a).await;
+    staged(&state_b, &source_b).await;
+    let candidate_a = MemberKey::generate().unwrap().0;
+    let candidate_b = MemberKey::generate().unwrap().0;
+    let offers_a = poll(&state_a, &old_a).await.unwrap().0;
+    let offer_a = &offers_a["renewals"][0];
+    for _ in 0..100 {
+        for key in ["unknown-device-key", old_a.public()] {
+            let request = serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"device_public_key":key,"timestamp_unix_ms":client_now_ms(),"signature":"invalid"})).unwrap();
+            let error = pending(State(state_a.clone()), Json(request)).await.unwrap_err();
+            assert_eq!(error.message, "the renewal key proof is invalid");
+        }
+        let mut unknown = approval(offer_a, &old_a, &candidate_a);
+        unknown.renewal_id = format!("renewal/{}", "0".repeat(48));
+        assert!(complete(State(state_a.clone()), Extension(ClientSession::pairing()), Json(unknown)).await.is_err());
+        let mut unknown_nonce = approval(offer_a, &old_a, &candidate_a);
+        unknown_nonce.nonce = "0".repeat(48);
+        assert!(complete(State(state_a.clone()), Extension(ClientSession::pairing()), Json(unknown_nonce)).await.is_err());
+    }
+    let refreshed_a = poll(&state_a, &old_a).await.unwrap().0;
+    let offered_b = poll(&state_b, &old_b).await.unwrap().0;
+    assert!(complete(State(state_a), Extension(ClientSession::pairing()),
+        Json(approval(&refreshed_a["renewals"][0], &old_a, &candidate_a))).await.is_ok());
+    assert!(complete(State(state_b), Extension(ClientSession::pairing()),
+        Json(approval(&offered_b["renewals"][0], &old_b, &candidate_b))).await.is_ok());
 }
 
 #[tokio::test]

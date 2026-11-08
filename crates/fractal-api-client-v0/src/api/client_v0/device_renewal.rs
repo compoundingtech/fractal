@@ -121,8 +121,19 @@ fn pre_auth_budget() -> Result<(), ApiError> {
     let mut budget = BUDGET.lock().map_err(|_| ApiError::internal("renewal budget unavailable"))?;
     if now.saturating_sub(budget.0) >= 60_000 { *budget = (now, 0); }
     budget.1 += 1;
-    if budget.1 > 4096 { return Err(forbidden("renewal requests are busy; retry later")); }
+    if budget.1 > 65_536 { return Err(forbidden("renewal requests are busy; retry later")); }
     Ok(())
+}
+fn stage_budget(id: &str) -> Result<(), ApiError> {
+    static REQUESTS: LazyLock<Mutex<BTreeMap<String, (u128, u32)>>> = LazyLock::new(Default::default);
+    let now = client_now_ms();
+    let mut requests = REQUESTS.lock().map_err(|_| ApiError::internal("renewal budget unavailable"))?;
+    requests.retain(|_, (start, _)| now.saturating_sub(*start) < 60_000);
+    if !requests.contains_key(id) && requests.len() >= 4096 { return Err(forbidden("renewal requests are busy; retry later")); }
+    let entry = requests.entry(id.into()).or_insert((now, 0));
+    entry.1 += 1;
+    if entry.1 > 30 { return Err(forbidden("renewal requests are limited; retry later")); }
+    pre_auth_budget()
 }
 fn rate_limit(key: &str) -> Result<(), ApiError> {
     static REQUESTS: LazyLock<Mutex<BTreeMap<String, (u128, u32)>>> = LazyLock::new(Default::default);
@@ -198,19 +209,24 @@ fn approval_bytes(stage: &ClaimRecord, nonce: &str, expires: u64, candidate: &st
 pub async fn pending(State(state): State<AppState>, Json(request): Json<Pending>) -> Result<Json<Value>, ApiError> {
     version(&request.api_version)?;
     if request.device_public_key.len() > 160 || request.signature.len() > 256 { return Err(validation("invalid renewal proof")); }
-    pre_auth_budget()?;
     let now = client_now_ms();
+    let mut stages = Vec::new();
+    for stage in matching_claims(&state, STAGED, "old_public_key", &request.device_public_key)? {
+        if local_record(&state, &stage)?
+            && field(&stage,"expires_at_unix_ms").as_u64().is_some_and(|expiry| u128::from(expiry) > now)
+            && record(&state, &stage.subject, CONSUMED)?.is_none() {
+            stages.push(stage);
+        }
+    }
+    if stages.is_empty() { return Err(forbidden("the renewal key proof is invalid")); }
     let proof = format!("fractal-device-renewal-pending-v1\n{}", json!([request.device_public_key, request.timestamp_unix_ms]));
     if now.abs_diff(u128::from(request.timestamp_unix_ms)) > 60_000
         || !smallclaims::principal::verify_key_signature(&request.device_public_key, proof.as_bytes(), &request.signature)
     { return Err(forbidden("the renewal key proof is invalid")); }
     rate_limit(&request.device_public_key)?;
+    pre_auth_budget()?;
     let mut renewals = Vec::new();
-    for stage in matching_claims(&state, STAGED, "old_public_key", &request.device_public_key)? {
-        if !local_record(&state, &stage)? || field(&stage,"old_public_key").as_str() != Some(request.device_public_key.as_str())
-            || field(&stage,"expires_at_unix_ms").as_u64().is_none_or(|expiry| u128::from(expiry) <= now)
-            || record(&state, &stage.subject, CONSUMED)?.is_some()
-        { continue; }
+    for stage in stages {
         if source(&state, &stage).is_err() { continue; }
         let nonce = fresh_id()?;
         let expires = u64::try_from(now + 300_000).map_err(ApiError::internal)?;
@@ -232,7 +248,6 @@ pub async fn complete(State(state): State<AppState>, Extension(_session): Extens
         || request.nonce.len() != 48 || !request.nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
         || request.renewal_id.len() > 80
     { return Err(validation("invalid renewal completion")); }
-    pre_auth_budget()?;
     let _serial = RENEWAL_COMPLETIONS.lock().await;
     let id = request.renewal_id.strip_prefix("renewal/").ok_or_else(|| validation("invalid renewal id"))?;
     let subject = format!("custom/client/pairing-renewal-{id}");
@@ -252,6 +267,7 @@ pub async fn complete(State(state): State<AppState>, Extension(_session): Extens
         || field(&challenge,"expires_at_unix_ms").as_u64() != Some(request.expires_at_unix_ms)
         || u128::from(request.expires_at_unix_ms) <= now
     { return Err(forbidden("the renewal challenge expired")); }
+    stage_budget(&stage.id)?;
     let bytes = approval_bytes(&stage, &request.nonce, request.expires_at_unix_ms, &request.candidate_public_key)?;
     if !smallclaims::principal::verify_key_signature(&request.device_public_key, &bytes, &request.old_signature)
         || !smallclaims::principal::verify_key_signature(&request.candidate_public_key, &bytes, &request.candidate_signature)
