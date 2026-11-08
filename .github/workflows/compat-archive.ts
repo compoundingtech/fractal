@@ -18,7 +18,8 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
   const targets = new Map<string, Set<Kind>>()
   for (const [id, job] of Object.entries(jobs)) {
     // Evidence gates inspect receipts only; they never execute compatibility tests.
-    if (id.startsWith('evidence-gate-')) continue
+    if (job.steps.some((step) => step.id === 'gate'
+      && typeof step.run === 'string' && step.run.includes('scripts/ci-evidence-gate'))) continue
     // Shared historical setup covers test-build, archive consumers and cache warmers.
     const messaging = job.steps.some((step) => step.name === 'Prepare the historical messaging channel')
       || id === 'macos-ci'
@@ -42,7 +43,7 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
       identity(kind, target, 'compat-identity'),
       { name: 'Download the prepared compatibility archive', id: 'compat-archive',
         uses: 'actions/download-artifact@v4', with: {
-          name: "${{ steps['compat-identity'].outputs.key }}",
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}",
           path: "${{ steps['compat-identity'].outputs.directory }}",
         } },
       { name: 'Verify the prepared compatibility archive', shell: 'bash',
@@ -74,7 +75,7 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
               uses: 'actions/cache/save@v4', with: cache(`identity-${index}`) },
             { name: `Share verified ${kind} archive`, ...condition,
               uses: 'actions/upload-artifact@v4', with: {
-                name: `\${{ steps['identity-${index}'].outputs.key }}`,
+                name: `\${{ steps['identity-${index}'].outputs.key }}-attempt-\${{ github.run_attempt }}`,
                 path: `\${{ steps['identity-${index}'].outputs.path }}`,
                 'if-no-files-found': 'error', 'retention-days': 1, 'compression-level': 0,
               } },

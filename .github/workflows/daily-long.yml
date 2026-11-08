@@ -53,7 +53,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps['compat-identity'].outputs.key }}
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -277,7 +277,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps['compat-identity'].outputs.key }}
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -497,7 +497,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps['compat-identity'].outputs.key }}
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -706,7 +706,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps['compat-identity'].outputs.key }}
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -915,7 +915,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps['compat-identity'].outputs.key }}
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -1115,7 +1115,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps['compat-identity'].outputs.key }}
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -1939,7 +1939,7 @@ jobs:
       - name: Share verified messaging archive
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps['identity-0'].outputs.key }}
+          name: "${{ steps['identity-0'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['identity-0'].outputs.path }}
           if-no-files-found: error
           retention-days: 1
@@ -1968,7 +1968,7 @@ jobs:
         if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps['identity-1'].outputs.key }}
+          name: "${{ steps['identity-1'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['identity-1'].outputs.path }}
           if-no-files-found: error
           retention-days: 1

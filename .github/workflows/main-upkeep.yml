@@ -147,7 +147,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps['compat-identity'].outputs.key }}
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -612,7 +612,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps['compat-identity'].outputs.key }}
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -2104,26 +2104,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Require successful archive preparation
-        shell: bash
-        env:
-          PRODUCER_RESULT: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].result }}
-        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
-      - name: Identify the pinned fleet archive
-        id: compat-identity
-        shell: bash
-        run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
-      - name: Download the prepared compatibility archive
-        id: compat-archive
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ steps['compat-identity'].outputs.key }}
-          path: ${{ steps['compat-identity'].outputs.directory }}
-      - name: Verify the prepared compatibility archive
-        shell: bash
-        env:
-          COMPAT_ARCHIVE_CACHE_HIT: "true"
-        run: 'python3 scripts/ci-compat-archive prepare fleet x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Look for an existing evidence note
         id: gate
         env:
@@ -2176,7 +2156,7 @@ jobs:
           CACHE_REASON: Verifies Git notes only; builds nothing and never skips a check.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) ) }}
-    needs: [main-checks, compat-archives-x86_64-unknown-linux-gnu]
+    needs: [main-checks]
   proof-evidence-gate-typescript-client:
     name: post-merge evidence-gate-typescript-client
     runs-on: ubuntu-latest
@@ -3452,7 +3432,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps['compat-identity'].outputs.key }}
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -3682,7 +3662,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps['compat-identity'].outputs.key }}
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -3954,7 +3934,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps['compat-identity'].outputs.key }}
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -4223,7 +4203,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps['compat-identity'].outputs.key }}
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -4492,7 +4472,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps['compat-identity'].outputs.key }}
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -4993,7 +4973,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: ${{ steps['compat-identity'].outputs.key }}
+          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -6302,7 +6282,7 @@ jobs:
       - name: Share verified messaging archive
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps['identity-0'].outputs.key }}
+          name: "${{ steps['identity-0'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['identity-0'].outputs.path }}
           if-no-files-found: error
           retention-days: 1
@@ -6331,7 +6311,7 @@ jobs:
         if: steps.identity-1.outputs.sha256 != steps.identity-0.outputs.sha256
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps['identity-1'].outputs.key }}
+          name: "${{ steps['identity-1'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['identity-1'].outputs.path }}
           if-no-files-found: error
           retention-days: 1

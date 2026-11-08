@@ -98,10 +98,13 @@ class ArchiveTests(unittest.TestCase):
             self.assertEqual(producer.count("uses: actions/upload-artifact@v4"), len(kinds), filename)
             self.assertIn("if-no-files-found: error", producer)
             for name, job in jobs.items():
-                if name.startswith("evidence-gate-"):
+                if "scripts/ci-evidence-gate" in job:
                     self.assertNotIn(producer_id, job, name)
                     self.assertNotIn("ci-compat-archive", job, name)
                     self.assertNotIn("actions/download-artifact@", job, name)
+            if filename == "main-upkeep.yml":
+                self.assertIn("proof-evidence-gate-linux-fleet-compat", jobs)
+                self.assertNotIn(producer_id, jobs["proof-evidence-gate-linux-fleet-compat"])
             for kind in kinds:
                 self.assertIn(f"ci-compat-archive identity {kind} {target}", producer)
             if len(kinds) == 2:
@@ -118,6 +121,18 @@ class ArchiveTests(unittest.TestCase):
                     self.assertNotIn("Restore the prepared compatibility archive", job)
                     self.assertIn("Require successful archive preparation", job)
                     self.assertNotIn("uses: actions/cache/save@v4", job.split("steps:", 1)[1].split("- name: Require successful archive preparation", 1)[0])
+
+    def test_every_archive_artifact_is_attempt_scoped(self):
+        for workflow in ("fleet", "main-upkeep", "daily-long", "debug-assertions-daily", "macos"):
+            text = (ROOT / f".github/workflows/{workflow}.yml").read_text()
+            artifacts = re.findall(
+                r"uses: actions/(?:upload|download)-artifact@v4\n(.*?)(?=\n      - |\n  [\w-]+:|\Z)",
+                text, re.S)
+            compatibility = [block for block in artifacts if ".outputs.key }}" in block]
+            self.assertTrue(compatibility, workflow)
+            for block in compatibility:
+                self.assertIn(".outputs.key }}-attempt-${{ github.run_attempt }}", block, workflow)
+                self.assertNotIn("overwrite:", block, workflow)
 
 
 if __name__ == "__main__":

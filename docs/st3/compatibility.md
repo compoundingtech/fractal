@@ -180,8 +180,10 @@ historical messaging uses the channel source from the same release commit.
 
 CI prepares each pinned native archive once per workflow. The Ubuntu producer uses an
 `actions/cache` entry keyed by target and the pin's SHA256 across runs, then uploads the
-verified bytes as an artifact scoped to the current workflow run. Fleet and messaging
-share the artifact when their archive pins match. Downstream jobs download that artifact,
+verified bytes as an artifact scoped to the current workflow run attempt. Artifact names
+include `github.run_attempt`, so reruns never overwrite bytes used by another attempt.
+Fleet and messaging share the artifact when their archive pins match. Downstream jobs
+download the current attempt's artifact,
 reverify SHA256 and `BUILD.json` source/target, and use `COMPAT_BASELINE_ARCHIVE`, never a
 live release download. Artifacts bridge GitHub-hosted, Namespace and macOS runners without
 assuming their cache backends are shared. Missing or corrupt artifacts fail closed;
