@@ -68,15 +68,34 @@ fn seed(node: &Node, number: u8, profile: &str, principal: &str, scope: &str,
 // requiring a signed per-read approval, or creating a proposal. A refusal must be exactly 403,
 // not an unavailable daemon, missing route, bad request, or transport failure.
 async fn assert_auth(node: &Node, grant: &Grant, accepted: bool) {
+    assert_status(node, grant, if accepted { 400 } else { 403 }).await;
+}
+
+async fn assert_status(node: &Node, grant: &Grant, expected: u16) {
     let response = reqwest::Client::builder().unix_socket(node.socket()).build().unwrap()
         .post("http://localhost/v1/client/assistant/propose")
         .bearer_auth(&grant.credential).header("content-type", "application/json")
         .body("{").send().await.unwrap();
     let status = response.status();
     let body = response.text().await.unwrap();
-    assert_eq!(status.as_u16(), if accepted { 400 } else { 403 },
+    assert_eq!(status.as_u16(), expected,
         "{} grant {}: {body}\n{}", node.name, grant.id, node.logs());
     let _: Value = node.client().get("/v1/health").await.unwrap();
+}
+
+// With the counterexample, assistant grant 4 (index 3) and service grant 7 (index 6)
+// are active, well-formed opposite-profile grants for assistant/chatgpt. The
+// candidate suspends both with 409 grant-profile-conflict; the conflict fold runs
+// before the service-profile refusal. Grant 3 (index 2) has a non-assistant scope,
+// so it is malformed for conflicts and stays a plain 403 service refusal.
+fn candidate_counterexample_status(index: usize) -> u16 {
+    if index == 3 || index == 6 { 409 } else { 403 }
+}
+
+async fn assert_candidate_counterexample(node: &Node, grants: &[Grant]) {
+    for (index, grant) in grants.iter().enumerate() {
+        assert_status(node, grant, candidate_counterexample_status(index)).await;
+    }
 }
 
 async fn assert_retained(node: &Node, grants: &[Grant]) {
@@ -166,9 +185,7 @@ async fn previous_release_refuses_plugin_service_grants_on_same_database_rollbac
     assert_candidate_issuance_grammar(&node).await;
     // Includes the unissuable profile-blind counterexample; candidate must refuse it.
     let grants = fixtures(&mut node, true).await;
-    for (index, grant) in grants.iter().enumerate() {
-        assert_auth(&node, grant, index == 3).await;
-    }
+    assert_candidate_counterexample(&node, &grants).await;
     let state = node.state_dir();
     node.stop();
     node.binary = old;
@@ -188,9 +205,7 @@ async fn previous_release_refuses_plugin_service_grants_on_same_database_rollbac
     node.binary = PathBuf::from(st3());
     node.start().await;
     assert_eq!(node.state_dir(), state);
-    for (index, grant) in grants.iter().enumerate() {
-        assert_auth(&node, grant, index == 3).await;
-    }
+    assert_candidate_counterexample(&node, &grants).await;
     assert_retained(&node, &grants).await;
 }
 
@@ -202,6 +217,18 @@ fn compat_binary() -> PathBuf {
 async fn candidate_offline_service_fixtures_replicate_without_authorizing_credentials() {
     if fractal_daemon::test_support::supervise_test() { return; }
     mixed_pair(None, false).await;
+}
+
+// Candidate-only reproduction of the rollback fixture, without a baseline binary.
+#[tokio::test(flavor = "multi_thread")]
+async fn candidate_suspends_the_offline_counterexample_profile_conflict() {
+    if fractal_daemon::test_support::supervise_test() { return; }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = Node::new(root.path(), "issuer");
+    node.start().await;
+    let grants = fixtures(&mut node, true).await;
+    assert_candidate_counterexample(&node, &grants).await;
+    assert_retained(&node, &grants).await;
 }
 
 async fn assert_candidate_issuance_grammar(node: &Node) {

@@ -248,6 +248,27 @@ fn malformed_local_owner_actor_grants_cannot_suspend_a_local_credential() {
     }
 }
 
+// Same shape as fleet::service_grants' rollback counterexample: a service grant
+// with a non-assistant scope (3), an assistant grant (4) and a well-formed service
+// grant (7), all active for assistant/chatgpt on one member.
+#[test]
+fn compat_counterexample_suspends_the_valid_pair_and_refuses_the_malformed_service() {
+    let root = tempfile::tempdir().unwrap();
+    let state = member(root.path(), "issuer");
+    let [malformed, assistant, service] = ["000000000000000000000003",
+        "000000000000000000000004", "000000000000000000000007"];
+    let mut source = grant_fields(malformed, "service");
+    source["scopes"] = json!(["read.service.status"]);
+    raw_claim(&state, &subject(malformed).unwrap(), GRANTED, OWNER, source);
+    issue(&state, assistant, "assistant").unwrap();
+    raw_claim(&state, &subject(service).unwrap(), GRANTED, OWNER, grant_fields(service, "service"));
+    for id in [assistant, service] {
+        assert_conflict(&authenticate_id(&state, id).expect_err("the valid opposite pair is suspended"));
+    }
+    let refused = authenticate_id(&state, malformed).expect_err("service grants never authenticate");
+    assert_eq!((refused.status, refused.code.as_str()), (StatusCode::FORBIDDEN, "forbidden"));
+}
+
 #[test]
 fn malformed_authenticated_foreign_grants_cannot_suspend_a_local_credential() {
     let root = tempfile::tempdir().unwrap();
