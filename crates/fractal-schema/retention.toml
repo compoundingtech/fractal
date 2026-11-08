@@ -37,6 +37,7 @@
 "agent.helper-launched" = { class = "durable", log = "local" }
 "custom.client.action-result" = { class = "durable" }
 "client.action-result" = { class = "durable", log = "local" }
+"client.operation-authorized" = { class = "durable" }
 "agent.placement.source-offline" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "member.admission-override" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "agent.presence" = { class = "current", pending = "no reader audit yet" }
@@ -92,6 +93,8 @@
 "harness.context-clear.result" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "harness.inventory.observed" = { class = "current", log = "on-change", pending = "no reader audit yet" }
 "harness.limits" = { class = "current" }
+# Quota snapshots also carry immutable credit events and dispositions. Keep every claim.
+"usage.limits.observed" = { class = "durable" }
 # Other nodes read the current harness state: step readiness is judged on the mission's node and
 # fleet views run anywhere. Nothing reads a heartbeat, so only changes replicate.
 "harness.observed" = { class = "current", log = "on-change" }

@@ -21,9 +21,7 @@ pub async fn preview(
         if !effect.starts_with("drain") && !manual {
             continue;
         }
-        let actual = state.store.status_for_generic_reads(
-            Some(subject), None, None, false,
-        ).map_err(ApiError::internal)?.subjects.into_iter().next().and_then(|status| status.actual);
+        let actual = state.store.actual_for_generic_reads(subject, None).map_err(ApiError::internal)?;
         let incarnation = actual.as_ref().and_then(|a| a["incarnation_id"].as_str());
         let blocking = match incarnation {
             _ if manual => intent.subjects.get(subject)
@@ -74,16 +72,10 @@ pub fn resource(state: &AppState, view: sets::View) -> anyhow::Result<Value> {
     let mut value = serde_json::to_value(&view)?;
     let mut statuses = Vec::new();
     for (subject, member, retired) in state.store.owned_set_effective_members(&view)? {
-        let status = state
-            .store
-            .status_for_generic_reads(Some(&subject), None, Some(state.store.index()?), false)?
-            .subjects
-            .into_iter()
-            .find(|s| s.subject == subject);
+        let actual_fields = state.store.actual_for_generic_reads(&subject, Some(state.store.index()?))?;
         let mut launched = None;
-        let incarnation = status
+        let incarnation = actual_fields
             .as_ref()
-            .and_then(|s| s.actual.as_ref())
             .and_then(|a| a.get("incarnation_id"))
             .and_then(Value::as_str);
         for claim in state
@@ -101,9 +93,8 @@ pub fn resource(state: &AppState, view: sets::View) -> anyhow::Result<Value> {
                 break;
             }
         }
-        let actual = status
+        let actual = actual_fields
             .as_ref()
-            .and_then(|s| s.actual.as_ref())
             .and_then(|a| a.get("status"))
             .and_then(Value::as_str);
         let launch_current = launched.as_ref().is_some_and(|token| {

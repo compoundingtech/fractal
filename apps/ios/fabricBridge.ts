@@ -3,6 +3,8 @@
 import { FabricRefusal, type CarrierPorts, type FabricPath } from './carrier';
 import { nativeRefusalAfter } from './fabricSession';
 import { dialFabric, fabricAvailable, fabricIdentity, fabricStats, stopFabric } from './modules/fractal-fabric';
+import { clientName } from '@fractal/views/clientName';
+import app from './app.json';
 
 export { fabricAvailable, fabricIdentity };
 
@@ -26,7 +28,7 @@ export function nativeCarrierPorts(): CarrierPorts {
       // shows whether the member admitted this phone, refused it, or cannot be reached; the carrier's
       // dial limit bounds it, and stopping the bridge ends it.
       try {
-        const response = await fetch(`${result.url}/v1/client/capabilities`, { headers: { accept: 'application/json' } });
+        const response = await fetch(`${result.url}/v1/client/capabilities`, { headers: { accept: 'application/json', 'x-st3-client': clientName('fractal-ios', app.expo.version, process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD) } });
         await response.text().catch(() => '');
       } catch {
         const refused = await refusal().catch(() => null);

@@ -323,6 +323,59 @@ the part not yet used and a reset time. `fractal slo explain ID` says one row in
 may be the start of an id. The list is computed on each read from the live windows and the limit
 readings, and writes nothing.
 
+Quota windows merge `harness.limits` and `usage.limits.observed` by provider account digest and
+window, selecting the newest provider observation time across hosts (canonical claim order
+breaks ties). Each window retains its own freshness clock, reset, `SOURCE` and `HOST`.
+A harness partial refresh emits only explicitly present windows: a 5h-only reading neither
+replaces weekly evidence nor advances weekly freshness.
+`reported` carries a percentage; `unreported` is unknown, never zero; `unsupported` is shown
+explicitly as unsupported rather than no-data. The existing one-hour freshness window applies.
+Scheduling, quota diagnostics and enforcement read harness-only evidence; producer clocks and
+display labels cannot alter those decisions. The producer-inclusive fold is observational.
+Producer batches contain `readings` and `credit_readings`. Daemon configuration
+`[usage_limits] writers = ["agent/sample/usage-producer"]` admits local agent appends,
+each writing as itself, and filters quota and credit folds at read time. Absent or empty
+configuration denies local appends and folds no usage observations. Replication and backup
+restore retain every schema-valid observation regardless of local writers. Config changes
+and restart fold the already stored evidence without re-replication or digest changes.
+Quota retention is writer-local: a newer observation from an excluded producer cannot reclaim
+another writer's latest account/window evidence, including after a projection rebuild.
+Internal window metadata does not extend the public `/usage` wire contract; SLO rows expose
+its provenance.
+Older members retain this non-authority unknown kind for replay after upgrade without changing
+terminal/runtime routing.
+
+Credit objectives read durable `usage.limits.observed` evidence from the currently configured
+omp-usage producers. `CAM-R01/PROVIDER` targets zero forfeited window-equivalents over rolling
+seven days, counted by expiry; each durable credit represents one window-equivalent.
+`CAM-R02/PROVIDER` requires every credit expiring in the next 24 hours to have a `planned`,
+`redeemed` or `declined` disposition, a decision timestamp and a nonempty evidence reference;
+otherwise it is at-risk. Credits fold by provider, account digest and durable `credit_id`,
+not host or friendly account reference. Terminal states are absorbing across writers and hosts:
+`redeemed` wins over `forfeited`, and `forfeited` wins over `available` or `unknown`, regardless
+of measurement time. Within a state class (`available` and `unknown` share one), the newest
+provider `measured_at` at full RFC3339 precision wins, then claim ID breaks equal-time ties
+consistently across members. An incrementally maintained local projection retains the winning
+reading per provider/account/credit identity **and writer**, including excluded writers.
+The durable usage kind has no numeric retention bound. Store open does not scan retained usage
+history or wait for credit backfill: historical initialization resumes asynchronously from a
+persisted cursor in bounded batches, releasing the writer lock between batches. A missing
+inventory with no configured writers skips initialization; later configured access starts the
+same bounded catch-up, never a synchronous history fold.
+SLO requests and the SLO-history tick read those heads, filter the current writer configuration,
+then apply the same state-class/time/claim-ID ordering across writers.
+Until catch-up completes, both CAM rows are unknown (`no-data`, null remaining percentage),
+even when partial evidence looks successful. Their `current` and `explain` text explicitly say
+`catching-up` with the processed store index and target index; progress counts the claim-store
+cut, not decoded credit readings. Clients display that text without parsing it.
+Read work depends on retained identities and writers, not the
+number of durable observations. An empty writer configuration returns unknown credit rows without
+credit SQL. Rows retain the selected claim and disposition evidence. Missing expiry, unknown state,
+unreported/unsupported coverage or a future measurement
+is `no-data`; stale readings are `stale`, never success. The same freshness policy as account
+readings applies. These rows describe only observed credits and are observational: they do not
+stop seats, enforce quotas or redeem credits.
+
 The same file declares CI's objectives, observed outside the daemon. A `[[duration]]` is one
 percentile of a duration (`percentile` from 1 to 99, `target_ms`), the objective
 `NAME/pPERCENTILE`, and its budget is the `100 - percentile` samples in a hundred that may run
@@ -382,6 +435,83 @@ fault agent, nothing opens. It stays the one fault while the row is missed, and 
 that shows the row `met` ends it with `operational.recovered`. A `no-data` row, as after a restart
 before the observer has read any runs, neither opens nor ends one. The other objectives open no
 fault.
+
+### Operator-selected API readiness
+
+An optional daemon policy accepts one independent, rolling API readiness
+objective. The configuration selects the single executor and reviewer;
+the producer does not choose either. For example:
+
+    [readiness_slo]
+    executor = "example-evaluator"
+    member = "example-member"
+    reviewer = "agent/example/observability"
+    evidence_file = "/run/fractal-slo-evidence/readiness.json"
+
+The evidence file must live directly under /run/fractal-slo-evidence.
+The file and its ancestors must be controlled by root, with no group or
+world write access and no symlinks. A trusted publisher atomically replaces the
+file with a bounded JSON document containing version (1), objective
+(fractal-api-readiness), member, start_ms, end_ms, observed_at_ms,
+expected (10,080), known, and good. The window ends on a UTC minute
+boundary. The known and good counts refer to distinct minute slots in that
+seven-day window. Probe selection is outside Fractal. The cut must be no
+more than three minutes old and may not be in the future. Republish the
+same document if retrying an already closed cut.
+
+Fractal computes the lower and upper readiness bounds from these counts. It
+routes one native fault to the named declared agent on a proven miss and
+resolves it only on a proven met reading. A stopped or retired reviewer
+receives no new fault, and an existing episode retains its reviewer without
+falling back to the fleet fault handler. A measured breach remains visible
+and the invalid binding appears in Usage and daemon logs. An unreachable but
+still-declared reviewer remains the owner. Missing, stale, invalid or
+indeterminate readings neither open nor resolve a fault. The local
+readiness-slo-cut.json checkpoint records a pending cut before routing and
+marks it committed after the idempotent transition. A restart replays an
+admitted pending cut before reading the next publication. Keep this checkpoint
+across restart and rollback while using
+the same source identity. The fault reports weekly objective compliance.
+Upgrade all fault readers before enabling the policy, since older readers do
+not recognize this no-fallback condition.
+
+Retained short readings are a separate, read-only opt-in via
+`retained_pairs_file`, a different root-controlled file in the same evidence
+directory. Its version-1 bundle contains up to four ordered `pairs`, each with
+the exact `weekly` document and a matching `short` document. Short documents
+carry version, objective, member, end_ms, observed_at_ms and up to five distinct
+minute observations (`at_ms`, `ready`) in the completed five-minute window.
+Missing minutes remain Unknown, not failed or successful. Usage reads never
+issue claims or advance either checkpoint.
+
+Set `shared_case = true` to replace independent weekly dispatch with one
+durable readiness case. This is off by default and requires retained pairs.
+Three failed minutes among at least four known minutes open an early phase;
+a proven weekly miss promotes that same case without changing its original
+owner. A weekly miss can also open a case directly. Each phase admits exactly
+one actionable owner notice. Optional `backup = "agent/example/backup"` selects
+a distinct, active agent for one held informational notice per phase, never
+an alternate owner. An unavailable backup cannot block owner delivery.
+Only one backup intent is retained per phase; undelivered informational intents
+are discarded on recovery rather than carried into later cases.
+Measured weekly recovery closes failure receipts without another owner notice;
+Unknown preserves the case. Pending legacy cuts are journaled and replayed
+through the legacy writer before reading a newer publication. Enabling the
+shared route uses drain-before-enable: every already-open weekly episode
+finishes under its existing writer and receives no shared-case primary notice.
+Only episodes opened after that drain belong to the shared sender.
+Fresh legacy-drain readings must strictly advance the durable case-journal
+cursor; older and equal cuts are not routed. Exact admitted pending work
+replays separately using its original observation clock.
+Receivers classify managed failures by their originating daemon and linked
+opening, independently of the receiver's local policy configuration.
+Committing recovery also advances the short-admission cursor through that
+weekly cut. A delayed companion at or before recovery cannot reopen the case,
+including after restart; a genuinely later short cut can open a new case.
+Keep `readiness-case.json` across
+restart: it journals phase transitions and notice intents before delivery and
+recognizes native receipts on replay. The legacy weekly checkpoint remains
+byte-for-byte unchanged while the shared route is enabled.
 
 `fractal slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
 `7d`). The history is a local observation log, not the graph: once a minute the daemon appends the

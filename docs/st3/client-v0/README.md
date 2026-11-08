@@ -977,6 +977,30 @@ the rate was fitted to) and, only when the allowance would run out first, `runs_
 `explain` says the same in words. A budget with too little history has none of the three. The list is
 computed on each read from live windows and readings; it writes nothing.
 
+The same list includes observational credit objectives `CAM-R01/PROVIDER` (zero forfeited
+window-equivalents in rolling seven days, by expiry) and `CAM-R02/PROVIDER` (a documented
+planned/redeemed/declined disposition for every credit expiring within 24 hours). One durable
+credit is one window-equivalent. Their evidence comes from replicated, durable
+`usage.limits.observed` claims, folded by provider/account digest/credit ID across writers and
+hosts. Terminal states are absorbing: `redeemed` wins over `forfeited`, and `forfeited` wins over
+`available` or `unknown`, regardless of timestamp. Within the same state class (`available` and
+`unknown` share one), newest full-precision provider measurement time then claim ID wins, not
+delivery order. Missing/unknown/unreported/unsupported evidence is
+`no-data`, stale evidence is `stale`; neither proves success. These rows describe observed
+credits only and do not enforce quotas or redeem credits.
+
+The durable usage kind has no numeric retention bound. Opening a store never scans retained
+usage history or waits for credit initialization. A missing inventory remains uninitialized
+with no configured writers; configuring writers or directly reading the inventory starts
+asynchronous, bounded catch-up batches with a persisted resumable cursor and a released writer
+lock between batches. Until complete, **both** CAM rows have `status: "no-data"` and null
+`remaining_percent`, never success from partial evidence. Their `current` and `explain` display
+text explicitly say `catching-up through store index N of M`; these are claim-store progress
+indices, not counts of decoded credits. The status enum is unchanged. Clients show the supplied
+text rather than parsing it. An empty writer configuration still returns unknown credit rows
+without credit SQL. Once caught up, reads use incremental per-identity/per-writer heads rather
+than folding the retained observation history.
+
 `GET /v1/client/slo/history?id=…&since_ms=…&until_ms=…&steps=…` reads what was left of one row
 across a period, from the daemon's local observation log (one reading a minute, kept seven days;
 it is not in the graph and does not replicate). The period defaults to the 24 hours ending now,
@@ -988,8 +1012,8 @@ never "spent". A daemon that has run for less than the period has fewer readings
 id the daemon has no rows for answers with no readings (`samples` 0 and every step null), not an
 error: a client that remembers an id should check it against the list.
 
-The objectives are this daemon's own: each member reports the targets and limits it measures, and
-nothing replicates between members. The wording in `about`, `target`, `current`, `window` and
+The live-window objectives are this daemon's own: each member reports the targets and limits it
+measures; unlike credit evidence, live measurement windows do not replicate. The wording in `about`, `target`, `current`, `window` and
 `explain` is display text built by the daemon for a person to read; it may change between builds,
 so a client shows it and does not parse it. The pair of reads is experimental while the TUI,
 the phone and the web app settle on what they need. The `slo` capability (version 1) is granted to
@@ -1031,7 +1055,7 @@ and `documentReferencesGet(subject:)`; TypeScript `documentGet(name)`,
 ### Clients connected now
 
 A client may name itself and its build in an `x-st3-client` header on every request and stream,
-for example `stui 0.1.0+a0c135e3`, `smalltalk-ios 1.0 (42)` or `st 0.1.0+a0c135e3`. The Rust
+for example `fractal-tui 0.1.0+a0c135e3`, `fractal-ios 1.0 (42)` or `fractal 0.1.0+a0c135e3`. The Rust
 crate sends what `fractal_client::set_client_name` was given; the TypeScript client takes `client` in
 its options, and Swift `client:` in its initializer. The header is optional, and Fractal shows it as
 reported: it is never identity or authority, and no client is refused, slowed or warned for its
@@ -2289,6 +2313,39 @@ Errors have `error_version: st3.client.error.v0`, a stable kebab-case code, safe
 `runtime-authority-indeterminate`, `runtime-list-not-ready`, `runtime-list-ended`,
 `remote-unavailable`, `terminal-unavailable`, `terminal-ended`,
 `response-budget-exceeded` (HTTP 413), `content-not-text` (HTTP 422), and `internal`.
+
+Pairing records are reserved for the dedicated pairing operations: ordinary claim writes
+cannot use a `custom.client.pairing*` kind or a `custom/client/pairing*` subject.
+Each pairing operation atomically writes a native `client.operation-authorized` receipt,
+bound to the exact operation record ID, content hash, writer and issuing member.
+Authentication requires this receipt; historical numeric admission fields confer no trust.
+Unreceipted challenges require a new pairing. Unreceipted credentials also require
+a new pairing unless an operator configures a temporary migration allowance for an exact
+existing completion record. `pairing_legacy_allowances` defaults to an empty list. Each entry
+contains `completion_id`, `record_hash`, and `until_unix_ms`. The hash is
+`fractal_store::pairing::record_hash(origin, actor, fields)` over the retained completion.
+Startup refuses entries whose hash does not match an existing completion or whose writer
+is not exactly the recorded person.
+An allowance never extends recorded scopes or expiry, bypasses revocation, or lasts beyond
+2026-11-15T23:00:00Z, regardless of its configured deadline. The allowance is member-local
+and must be configured explicitly on each member where the existing credential is used.
+An allowance entry must come from an audited record: it admits exactly the recorded
+contents, not independently verified provenance. Held terminal streams use the earlier of
+the credential expiry and allowance deadline and recheck admission at continuation.
+Revocation of a receipted credential requires a matching operation receipt from its issuing
+member. For an allowance-backed credential, any revocation from that issuer applies,
+including one received after startup. Other revocation records are counted in an operator
+warning, without credential data.
+
+Terminal attachment lifecycle records likewise require the dedicated terminal operations:
+`custom.client.terminal*` kinds and `custom/client/terminal-*` subjects are reserved.
+Attachments and their consumption/detachment records require the same native receipt.
+Unreceipted attachments require a new attach operation; they cannot provide stream authority.
+The receipt kind is registered system-only and cannot be submitted through ordinary claims;
+older schemas reject it as an unknown native kind. A receipt requires member-local operation
+proof or an envelope signed by a keyed fleet member for its issuing origin. Unsigned receipt
+envelopes are refused by both replication and backup admission. Lifecycle selection ignores
+unadmitted records before choosing the current completion or terminal transition.
 
 Unknown, expired, or revoked paired-device credentials return HTTP 403, `code: forbidden`,
 `retryable: false`, and `details.reason: credential-rejected`. Pair the device again to restore

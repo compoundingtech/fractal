@@ -1,3 +1,4 @@
+import { Data } from 'effect'
 import type { Subject, SubjectKind } from './subject.ts'
 
 /**
@@ -79,6 +80,17 @@ export const corePolicies: Readonly<Record<SubjectKind, KindPolicy>> = {
   Unsupported: { resources: () => [], keepWarm: false, domCost: 0, dataCost: 0 },
 }
 
+/** A contribution's declared example is not its alone. */
+export class TabKindClaimConflict extends Data.TaggedError('TabKindClaimConflict')<{
+  readonly kind: string
+  readonly ref: string
+  readonly claimants: readonly string[]
+}> {
+  override get message() {
+    return `Tab kind ${this.kind} declares ${this.ref}, which is claimed by [${this.claimants.join(', ')}]`
+  }
+}
+
 /**
  * Claims never resolve by order. The contribution list is static, so an overlap on a declared example
  * fails when the registry is built; a ref two kinds still both claim gets the generic resource kind.
@@ -91,7 +103,7 @@ export const makeKindRegistry = <View>({ views, contributions = [] }: {
     for (const ref of contribution.examples) {
       const claimants = contributions.filter(other => other.claims(ref)).map(other => other.id)
       if (claimants.length !== 1 || claimants[0] !== contribution.id) {
-        throw new Error(`Tab kind ${contribution.id} declares ${ref}, which is claimed by [${claimants.join(', ')}]`)
+        throw new TabKindClaimConflict({ kind: contribution.id, ref, claimants })
       }
     }
   }
