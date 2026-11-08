@@ -8,7 +8,8 @@ import { DeclarationDialog } from './DeclarationDialog.tsx'
 import type * as SidebarMissionsListModule from '../missions/SidebarMissionsList.tsx'
 import { alertTabMarkers } from './alertsTab.ts'
 import { missionTabMarkersAtom } from './missionsTab.ts'
-import { activeTab, focusedGroup, showsTerminal, tabsOf, type Command, type TabView, type WorkspaceState as WorkspaceStateValue } from '../workspace/model.ts'
+import { focusedPane } from '@fractal/ui/workspace'
+import { activeTab, currentSpace, showsTerminal, tabsOf, type Command, type TabView, type WorkspaceState as WorkspaceStateValue } from '../workspace/model.ts'
 import { OpenProvider, openCommand, type Open } from '../workspace/openable.ts'
 import { paneKey, parsePane, subjectAgent, subjectOfRef, subjectRef } from '../workspace/subject.ts'
 import { AlertsTabCodeBoundary } from '../workspace/surfaces.tsx'
@@ -36,6 +37,8 @@ import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
 import { MilestoneAgentRow } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/MilestoneAgentRow.tsx'
+import { AgentHoverCard } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/DeferredRowActions.tsx'
+import { EntityCardSource, type EntityCardResolver } from '../../../../packages/fractal-ui/src/assistant-ui/entity/EntityHoverCard.tsx'
 import { SidebarMissionChildRow, missionChildAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarMissionLine.tsx'
 import { SidebarQueryContext, sidebarRowAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/rowPresentation.tsx'
 import { SystemNotice, ConnectionStatus } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
@@ -125,6 +128,19 @@ const LiveSidebarAgentRow = React.memo((props: {
   return item === undefined ? null : <MilestoneAgentRow row={item} reportedStatusOnly displayOnly={props.childId !== undefined} active={props.active} frozen={stale} now={frozenAt} touchDisclosure={props.touchDisclosure} onOpenMission={props.childId === undefined ? props.openMission : undefined} actions={props.childId === undefined ? props.actions : undefined} onOpen={props.openRef === undefined ? undefined : onOpen} onSubagentsPress={props.childId === undefined ? onSubagentsPress : undefined} />
 })
 LiveSidebarAgentRow.displayName = 'LiveSidebarAgentRow'
+
+/** An agent's one card, wherever it is asked for by ref: the sidebar row's, from the same feeds. */
+const LiveAgentCard = (props: { readonly agentRef: string; readonly needsMe: boolean; readonly now: number | undefined }) => {
+  const feed = useAgent(props.agentRef)
+  const source = useDataSource()
+  const missionAtom = React.useMemo(() => sidebarMissionFeedsAtom(source), [source])
+  const mission = useAtomValue(missionAtom)
+  const connection = useConnection()
+  const agent = feed._tag === 'Observed' ? feed.value : undefined
+  const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
+  const row = React.useMemo(() => agent === undefined ? undefined : sidebarRow({ agent, stale, needsMe: props.needsMe, ...mission }), [agent, stale, props.needsMe, mission])
+  return row === undefined ? null : <AgentHoverCard row={row} reportedStatusOnly now={props.now} />
+}
 
 /** One further current mission of an agent, as its own 48px tree row. */
 const LiveSidebarMissionChild = React.memo((props: { readonly agentRef: string; readonly missionId: string; readonly label: string; readonly active: boolean }) => {
@@ -269,7 +285,7 @@ const scopeHash = (scope: string) => {
 
 const activeAgentOf = (store: { readonly getState: () => WorkspaceStateValue }) => {
   const tab = activeTab(store.getState())
-  return tab === undefined ? undefined : subjectAgent(parsePane(tab.pane))
+  return tab === undefined ? undefined : subjectAgent(parsePane(tab.ref))
 }
 
 /** One workspace of typed tabs; local geometry and tabs never grant backend authority. */
@@ -306,7 +322,8 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const route = useWorkspaceRoute({ store, state: workspace, location, navigation })
   const tiers = useWorkspaceResources({ store, state: workspace })
   const activeRow = activeTab(workspace)
-  const activeSubject = React.useMemo(() => activeRow === undefined ? undefined : parsePane(activeRow.pane), [activeRow?.pane])
+  const space = currentSpace(workspace)
+  const activeSubject = React.useMemo(() => activeRow === undefined ? undefined : parsePane(activeRow.ref), [activeRow?.ref])
   const hoverOwner = React.useRef<HTMLElement | null>(null)
   const rememberHoverOwner = (event: React.SyntheticEvent<HTMLElement>) => {
     hoverOwner.current = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-wf-agent-ref]') : null
@@ -413,15 +430,15 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // One verb for every surface: the subject decides the kind, and the machine opens or focuses its one tab.
   const openRef: Open = React.useCallback((ref, gesture) => {
     agentsDrawer.current?.close()
-    go(openCommand({ ref, focus: store.getState().focus, ...(gesture === undefined ? {} : { gesture }) }))
+    go(openCommand({ ref, focus: currentSpace(store.getState()).local.focus, ...(gesture === undefined ? {} : { gesture }) }))
   }, [go, store])
   const open = React.useCallback((request: OpenRequest) => openRef(request.ref), [openRef])
   const openAlert = React.useCallback((id: string) => openRef(`alert/${id}`), [openRef])
   const openInbox = React.useCallback(() => openRef('inbox'), [openRef])
   useWorkspaceKeys({ dispatch: go, getState: store.getState, openInbox })
-  const onTabView = React.useCallback((id: string, view: TabView) => store.dispatch({ _tag: 'SetView', id, view }), [store])
-  const onReplaceTab = React.useCallback((id: string, ref: string) => go({ _tag: 'Replace', id, pane: paneKey(subjectOfRef(ref)) }), [go])
-  const onCloseTab = React.useCallback((id: string) => go({ _tag: 'Close', id }), [go])
+  const onTabView = React.useCallback((id: string, view: TabView) => store.dispatch({ _tag: 'SetView', tab: id, view }), [store])
+  const onReplaceTab = React.useCallback((id: string, ref: string) => go({ _tag: 'Replace', tab: id, ref: paneKey(subjectOfRef(ref)) }), [go])
+  const onCloseTab = React.useCallback((id: string) => go({ _tag: 'Close', tab: id }), [go])
   const onOpenTool = React.useCallback((call: WorkLogCall) => { setOpenedTool(call) }, [])
   const pins = useAtomValue(terminalSource.pins ?? sidebarPins())
   const pinned = React.useMemo(() => new Set(pins.state.members.map(item => item.member)), [pins.state.members])
@@ -501,6 +518,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     return next
   }, [agents, subjects, asking])
   const offline = connection._tag !== 'Live'
+  // Agents resolve to the sidebar row's card; other kinds fall through to an outer source, if any.
+  const resolveCard = React.useCallback<EntityCardResolver>(entity =>
+    entity.kind === 'agent' ? <LiveAgentCard agentRef={entity.id} needsMe={needsYou.has(entity.id)} now={frozenAt} /> : undefined, [needsYou, frozenAt])
   useTabMetadata({
     title: tabTitle({ agentName: agent?.name, needsYouCount: needsYou.size, offline }),
     faviconState: selectedFaviconState({ agent, needsYou: agent !== undefined && needsYou.has(agent.ref), offline }),
@@ -515,9 +535,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     selectLatest.current(ref)
   }, [])
   const byRef = React.useMemo(() => new Map(subjects.map((subject) => [subject.ref, subject])), [subjects])
-  const allTabs = React.useMemo(() => tabsOf(workspace.layout), [workspace.layout])
-  const stripTabs = focusedGroup(workspace)?.tabs ?? allTabs
-  const tabItems = React.useMemo(() => stripTabs.map(tab => ({ ...tabPresentation({ tab, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef }), ...(workspace.views[tab.id]?.dirty === true ? { dirty: true } : {}) })), [stripTabs, workspace.views, agents, fleet._tag, needsYou, attention, byRef])
+  const allTabs = React.useMemo(() => tabsOf(workspace), [space.layout])
+  const stripTabs = focusedPane(space)?.tabs ?? allTabs
+  const tabItems = React.useMemo(() => stripTabs.map(tab => ({ ...tabPresentation({ tab, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef }), ...(space.local.views[tab.id]?.dirty === true ? { dirty: true } : {}) })), [stripTabs, space.local.views, agents, fleet._tag, needsYou, attention, byRef])
   const activeLabel = tabItems.find(item => item.id === activeRow?.id)?.title
   const previousNames = React.useRef<ReadonlyMap<string, string>>(new Map())
   const names = React.useMemo(() => {
@@ -531,7 +551,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const width = Math.min(maxSidebar, Math.max(sidebarMinimumWidth, dragWidth ?? Math.round(ratio * viewport)))
   const maxPanel = Math.max(240, viewport - (narrow || collapsed ? 0 : width) - 640)
   const panelSize = dragPanel ?? Math.min(maxPanel, Math.max(240, Math.round(panelFraction * viewport)))
-  const terminalOpen = activeRow !== undefined && current !== '' && showsTerminal(activeRow, workspace.views[activeRow.id])
+  const terminalOpen = activeRow !== undefined && current !== '' && showsTerminal(activeRow, space.local.views[activeRow.id])
   // The control stays enabled while the terminal is shown: it is the way back, even from a deep link to a terminal this agent lacks.
   const shownTerminalDisabledReason = terminalOpen ? undefined : terminalDisabledReason
   // An attach that finds no terminal disables the control with its reason and turns the tab back to the conversation.
@@ -550,7 +570,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const toggleTerminal = () => {
     if (activeRow === undefined || current === '' || (!terminalOpen && terminalRef === undefined)) return
     focusShownFace.current = true
-    store.dispatch({ _tag: 'SetView', id: activeRow.id, view: { terminal: !terminalOpen } })
+    store.dispatch({ _tag: 'SetView', tab: activeRow.id, view: { terminal: !terminalOpen } })
   }
   // Details, Changes and Resources are the panel's tabs; which one shows is part of the one app-wide setting.
   const dockedInspector = !narrow && panel.open && openedTool === undefined && current !== '' ? current : undefined
@@ -607,7 +627,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   </SidebarTabs>
   // The panes stay outside changing shell providers, whose context propagation would scan every retained turn.
   // Only the stable header DOM host and narrow geometry cross that boundary.
-  return (<OpenProvider value={openRef}><NarrowLayoutContext.Provider value={narrow}>
+  return (<EntityCardSource resolve={resolveCard}><OpenProvider value={openRef}><NarrowLayoutContext.Provider value={narrow}>
     <ThreadHeaderSlotContext.Provider value={headerSlot}>
     <WorkbenchContextProvider value={{ open, focusedRef: activeSubject === undefined ? null : subjectRef(activeSubject), subjects: byRef, platform: navigator.platform.includes('Mac') ? 'mac' : 'other' }}>
       <ResourcePanelProvider value={{ state: resourcePanel, onChange: (change) => setResourcePanel((value) => ({ ...value, ...change })) }}>
@@ -623,7 +643,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
               <section aria-label={workspaceLabel} onPointerOverCapture={prefetchTerminalIntent} onFocusCapture={prefetchTerminalIntent} {...stylex.props(styles.workspace)}>
                 {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} headerActions={sidebarHeaderActions} onSheetChange={setPhoneSheet}>{sidebarBody}</PhoneAgentDrawer> : null}
                 {/* One strip and one portal host at every width: the breakpoint never remounts a surface. The strip is the window's one top bar, so the conversation's controls live at its end. */}
-                <WorkspaceStrip bar items={tabItems} active={activeRow?.id ?? null} group={workspace.focus} narrow={narrow} dispatch={go} open={openRef}
+                <WorkspaceStrip bar items={tabItems} active={activeRow?.id ?? null} group={space.local.focus} narrow={narrow} dispatch={go} open={openRef}
                   leading={<>
                     {narrow
                       ? <ChromeControl ref={sidebarOpener} icon="panel-left" label="Expand sidebar" tooltip="Show agents" edge="lead" popup="dialog" expanded={phoneSheet.open} {...(phoneSheet.open ? { controls: phoneSheet.id } : {})} onPress={() => agentsDrawer.current?.open()} />
@@ -661,9 +681,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody tabs={allTabs} active={activeRow?.id ?? null} tiers={tiers} views={workspace.views} names={names} onOpenTool={onOpenTool} onOpen={openRef} onReplace={onReplaceTab} onClose={onCloseTab} onBackToAlerts={backToAlerts} onView={onTabView} focusShownFace={focusShownFace} {...(ux === undefined ? {} : { ux })} empty={<WorkspaceEmpty open={openRef} />} /></RegisteredPortal>}
+    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody tabs={allTabs} active={activeRow?.id ?? null} tiers={tiers} views={space.local.views} names={names} onOpenTool={onOpenTool} onOpen={openRef} onReplace={onReplaceTab} onClose={onCloseTab} onBackToAlerts={backToAlerts} onView={onTabView} focusShownFace={focusShownFace} {...(ux === undefined ? {} : { ux })} empty={<WorkspaceEmpty open={openRef} />} /></RegisteredPortal>}
     </ThreadHeaderSlotContext.Provider>
-  </NarrowLayoutContext.Provider></OpenProvider>)
+  </NarrowLayoutContext.Provider></OpenProvider></EntityCardSource>)
 }
 
 

@@ -1,7 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { isTextDropItem, useDrop, type DropEvent } from 'react-aria'
-import { AGENT_DRAG_MIME, type AgentPlacement } from './agent-drag'
+import type { AgentPlacement } from './agent-drag'
+import { ENTITY_DRAG_TYPE, parseEntityDragPayload } from '../entity/entity'
 import { WorkbenchPresentationContext } from './workbench-appearance'
 import { interactionVars as interaction, accentVars as ac, surfaceVars as sf, textVars as tx, borderVars as bd, radiusVars as r, spaceVars as s, typeVars as t, geometryVars as g } from '../composition-tokens.stylex'
 
@@ -13,10 +14,11 @@ interface Props {
   readonly isDisabled: boolean
 }
 const labels: Record<AgentPlacement, string> = { center: 'Open as tab', right: 'Open in split right', below: 'Open in split below', left: 'Open in split left', above: 'Open in split above' }
-const copyAgent = (types: { has: (type: string) => boolean }) => types.has(AGENT_DRAG_MIME) ? 'copy' as const : 'cancel' as const
+const copyAgent = (types: { has: (type: string) => boolean }) => types.has(ENTITY_DRAG_TYPE) ? 'copy' as const : 'cancel' as const
 async function readAgent(event: DropEvent, onOpen: Props['onOpen'], placement: AgentPlacement) {
-  const item = event.items.find(item => isTextDropItem(item) && item.types.has(AGENT_DRAG_MIME))
-  if (item && isTextDropItem(item)) onOpen(await item.getText(AGENT_DRAG_MIME), placement)
+  const item = event.items.find(item => isTextDropItem(item) && item.types.has(ENTITY_DRAG_TYPE))
+  const entity = item && isTextDropItem(item) ? parseEntityDragPayload(await item.getText(ENTITY_DRAG_TYPE)) : undefined
+  if (entity !== undefined) onOpen(entity.id, placement)
 }
 
 /** Portalled panes keep React ancestry outside the layout. Native drag events still bubble through

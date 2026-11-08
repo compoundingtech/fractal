@@ -1,4 +1,5 @@
-import { showsTerminal, tabsOf, visibleTabIds, type Tab, type TabView, type WorkspaceState } from './model.ts'
+import { tabsOf, visibleTabIds } from '@fractal/ui/workspace'
+import { showsTerminal, type Layout, type Tab, type TabView } from './model.ts'
 import { corePolicyOf, type DataResource, type KindPolicy } from './registry.ts'
 import { parsePane, type Subject } from './subject.ts'
 
@@ -30,7 +31,8 @@ export const defaultBudget: Budget = { dom: 2, data: 8 }
 
 /** Walks hidden tabs from most recently used: each takes what still fits. Eviction is simply no longer fitting. */
 export const planTiers = ({ state, budget, policyOf = corePolicyOf }: {
-  readonly state: Pick<WorkspaceState, 'layout' | 'mru'> & { readonly views?: WorkspaceState['views'] }
+  /** One space: its layout, and this client's recency and views. */
+  readonly state: { readonly layout: Layout; readonly mru: readonly string[]; readonly views?: Readonly<Record<string, TabView>> }
   readonly budget: Budget
   readonly policyOf?: PolicyOf
 }): ReadonlyMap<string, Tier> => {
@@ -45,7 +47,7 @@ export const planTiers = ({ state, budget, policyOf = corePolicyOf }: {
       tiers.set(id, 'active')
       continue
     }
-    const policy = policyOf(parsePane(byId.get(id)!.pane))
+    const policy = policyOf(parsePane(byId.get(id)!.ref))
     const dataFits = policy.dataCost <= data
     // Evicting this surface would lose an unsent draft, so it stays whatever the budget says, and
     // still spends the budget: other tabs give way first.
@@ -80,7 +82,7 @@ export const desiredHolds = ({ tabs, tiers, views = {}, policyOf = corePolicyOf 
   const holds = new Map<string, readonly DataResource[]>()
   for (const tab of tabs) {
     const tier = tiers.get(tab.id) ?? 'cold'
-    const subject = parsePane(tab.pane)
+    const subject = parsePane(tab.ref)
     const policy = policyOf(subject)
     const data = tier === 'active' || tier === 'mounted' || (tier === 'warm' && policy.keepWarm) ? policy.resources(subject) : []
     const agent = subject._tag === 'Conversation' || subject._tag === 'Terminal' ? subject.agent : undefined

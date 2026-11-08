@@ -5,7 +5,9 @@ import { useAtomValue } from '@effect/atom-react'
 import { MissionListRow, missionRowAccessibleName } from '@fractal/ui/assistant-ui/shell'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useAgent, useConnection, useDataSource, useNowSnapshot } from '../data/react.tsx'
-import { missionRowData } from '../missions/rowData.ts'
+import { HoverCard } from '../../../../packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx'
+import { MissionEntityCard } from '../../../../packages/fractal-ui/src/assistant-ui/entity/MissionCard.tsx'
+import { missionChildOf, missionRowData } from '../missions/rowData.ts'
 import { useMissionRows } from '../missions/useMissionRows.ts'
 import { sidebarMissionFeedsAtom, sidebarRow } from './sidebarRow.ts'
 
@@ -15,7 +17,7 @@ const agentMissionIds = (context: ReturnType<typeof sidebarRow>['missionContext'
 
 /**
  * The agent's missions in Details, drawn with the Missions tab's own row and model; the agents column is left out
- * because every row is this agent's. A row opens its mission.
+ * because every row is this agent's. A row opens its mission; pointer rest shows the mission's canonical hover card.
  */
 export const AgentMissions = ({ agentRef, onOpen }: { readonly agentRef: string; readonly onOpen: (ref: string) => void }) => {
   const feed = useAgent(agentRef)
@@ -35,7 +37,10 @@ export const AgentMissions = ({ agentRef, onOpen }: { readonly agentRef: string;
       {shown.map(row => {
         const data = missionRowData(row)
         return <Aria.GridListItem key={row.mission.id} id={row.mission.id} textValue={data.title} aria-label={missionRowAccessibleName(data, now)} {...stylex.props(styles.item)}>
-          <MissionListRow mission={data} now={now} showAgents={false} frozen={frozen} />
+          {/* The mission's canonical card; no agents list, since every row here is this agent's. */}
+          <HoverCard placement="left top" content={() => <MissionEntityCard mission={missionChildOf(row)} now={now} />}>
+            <div data-mission-hover-anchor><MissionListRow mission={data} now={now} showAgents={false} frozen={frozen} /></div>
+          </HoverCard>
         </Aria.GridListItem>
       })}
     </Aria.GridList>

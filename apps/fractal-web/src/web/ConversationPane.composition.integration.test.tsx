@@ -391,7 +391,7 @@ describe('ConversationPane composition activation', () => {
     const show = async (ref: string, surfaceKey = 'surface') => {
       recent = [ref, ...recent.filter(other => other !== ref)]
       const tiers = new Map(recent.map((id, index) => [id, index === 0 ? 'active' as const : index < 3 ? 'mounted' as const : 'cold' as const]))
-      await act(async () => root!.render(<WorkspaceBody key={surfaceKey} tabs={rosterRefs.map(id => ({ id, pane: `agent:${id}` }))} active={ref} tiers={tiers} views={{}} names={new Map(rosterRefs.map(id => [id, id]))} onOpenTool={() => {}} onOpen={() => {}} onReplace={() => {}} onClose={() => {}} onBackToAlerts={() => {}} onView={() => {}} focusShownFace={{ current: false }} empty={null} />))
+      await act(async () => root!.render(<WorkspaceBody key={surfaceKey} tabs={rosterRefs.map(id => ({ id, ref: `agent:${id}` }))} active={ref} tiers={tiers} views={{}} names={new Map(rosterRefs.map(id => [id, id]))} onOpenTool={() => {}} onOpen={() => {}} onReplace={() => {}} onClose={() => {}} onBackToAlerts={() => {}} onView={() => {}} focusShownFace={{ current: false }} empty={null} />))
       await flushFrames()
     }
     const lane = (ref: string) => {

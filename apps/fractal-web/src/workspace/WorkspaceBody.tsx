@@ -92,7 +92,7 @@ const TabSurface = React.memo(function TabSurface({ tab, shown, covered, name, v
   readonly onView: (id: string, view: TabView) => void
   readonly ux?: UxTelemetry
 }) {
-  const subject = React.useMemo(() => parsePane(tab.pane), [tab.pane])
+  const subject = React.useMemo(() => parsePane(tab.ref), [tab.ref])
   const kind = workspaceKinds.kindOf(subject)
   const surface = kind.view
   const save = React.useCallback((scrollTop: number) => onView(tab.id, { scrollTop }), [onView, tab.id])
@@ -110,7 +110,7 @@ const TabSurface = React.memo(function TabSurface({ tab, shown, covered, name, v
   return <div
     ref={memory.host}
     aria-hidden={!shown}
-    data-tab-surface={tab.pane}
+    data-tab-surface={tab.ref}
     data-tab-kind={kind.id}
     onScrollCapture={memory.onScrollCapture}
     {...stylex.props(styles.surface, shown ? styles.shown : covered ? null : styles.hidden, surface.hidden === 'activity' && !shown && styles.inert)}
@@ -146,12 +146,12 @@ export function WorkspaceBody({ tabs, active, tiers, views, names, onOpenTool, o
     return () => { window.cancelAnimationFrame(frame); window.clearTimeout(timer) }
   }, [switched])
   const reading = React.useMemo(() => new Set(tabs.flatMap(tab => {
-    const agent = subjectAgent(parsePane(tab.pane))
+    const agent = subjectAgent(parsePane(tab.ref))
     return agent === undefined ? [] : [agent]
   })), [tabs])
   // Viewports save in mutation cleanup; prune after those saves so a closed key cannot re-enter the memory.
   React.useLayoutEffect(() => { viewportStore.retain(reading) })
-  const activeAgent = activeRow === undefined ? undefined : subjectAgent(parsePane(activeRow.pane))
+  const activeAgent = activeRow === undefined ? undefined : subjectAgent(parsePane(activeRow.ref))
   const terminalFace = activeRow !== undefined && activeAgent !== undefined && showsTerminal(activeRow, views[activeRow.id])
   const showingConversation = terminalFace ? undefined : activeAgent
   const lastConversation = React.useRef<string | undefined>(undefined)
@@ -183,10 +183,10 @@ export function WorkspaceBody({ tabs, active, tiers, views, names, onOpenTool, o
   return <ViewportStoreContext.Provider value={viewportStore}>
     <div ref={area} data-testid="workspace-body" {...stylex.props(styles.area)}>
       {mounted.map(tab => {
-        const agent = subjectAgent(parsePane(tab.pane))
+        const agent = subjectAgent(parsePane(tab.ref))
         return <TabSurface
           // A replaced tab keeps its place but is another surface.
-          key={`${tab.id}:${tab.pane}`}
+          key={`${tab.id}:${tab.ref}`}
           tab={tab}
           shown={tab.id === active}
           covered={tab.id === switched.covered}

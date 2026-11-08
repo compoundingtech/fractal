@@ -10,12 +10,22 @@ import { observed, waiting, type Feed } from '../data/source.ts'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { casMigration, fixtureAttention, fixtureMissions, fixtureNow, flakeTriage, gatewaySchemaV1, sdkInterop, secretsRotation, webfractalFoundation } from './fixtures.ts'
 import { MissionDetail } from './MissionDetailView.tsx'
+import type { MissionActionPort, MissionActionResult } from './missionActions.ts'
 
 const onOpen = fn()
+const onAction = fn()
+
+/** A port that answers after a short wait, so the pending state is visible. */
+const port = (result: MissionActionResult, waitMs = 400): MissionActionPort => ({
+  run: request => { onAction(request.offer.action, request.offer.target); return new Promise(resolve => setTimeout(() => resolve(result), waitMs)) },
+})
 
 /** The served presentation's offered actions, as Fractal attaches them to a mission row. */
 const withActions = (mission: Fractal.Mission): Fractal.Mission => Object.assign({}, mission, {
-  presentation: { actions: [{ id: 'retry-step', action: 'Retry step', target: `${mission.id}/step`, confirm: true }, { id: 'cancel-run', action: 'Cancel run', target: `${mission.id}/run`, confirm: true }] },
+  presentation: { actions: [
+    { id: 'retry-step', action: 'work.retry', target: Option.getOrElse((mission.run_details ?? []).at(-1)!.steps, () => [])[0]?.id ?? `${mission.id}/step`, confirm: false },
+    { id: 'cancel-run', action: 'mission.cancel', target: (mission.run_details ?? []).at(-1)!.id, confirm: true },
+  ] },
 }) as Fractal.Mission
 
 /** One step of the latest run marked failed on its third attempt. */
@@ -28,10 +38,10 @@ const failedMission = (mission: Fractal.Mission): Fractal.Mission => {
   return Object.assign({}, mission, { state: 'failed', run_details: [...runs.slice(0, -1), failed] }) as Fractal.Mission
 }
 
-const Surface = ({ missionRef, feed = observed({ value: fixtureMissions }), readOnly = false }: { readonly missionRef: string; readonly feed?: Feed<readonly Fractal.Mission[]>; readonly readOnly?: boolean }) =>
+const Surface = ({ missionRef, feed = observed({ value: fixtureMissions }), readOnly = false, actionPort }: { readonly missionRef: string; readonly feed?: Feed<readonly Fractal.Mission[]>; readonly readOnly?: boolean; readonly actionPort?: MissionActionPort }) =>
   <main data-scheme="dark" {...stylex.props(styles.canvas, liveLegacyTheme, assistantDarkTheme)}>
     <div {...stylex.props(styles.tab)}>
-      <MissionDetail missionRef={missionRef} visible onOpen={ref => onOpen(ref)} missions={feed} agents={[]} attention={fixtureAttention.filter(item => item.state === 'open')} readOnly={readOnly} now={fixtureNow} />
+      <MissionDetail missionRef={missionRef} visible onOpen={ref => onOpen(ref)} missions={feed} agents={[]} attention={fixtureAttention.filter(item => item.state === 'open')} readOnly={readOnly} now={fixtureNow} {...(actionPort === undefined ? {} : { actionPort })} />
     </div>
   </main>
 
@@ -44,7 +54,7 @@ const meta = {
 export default meta
 type Story = StoryObj<typeof meta>
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
-export const scenarioExemptions: readonly string[] = ['Done:contract-fixture', 'Failed:contract-fixture', 'Loading:contract-fixture', 'Missing:contract-fixture', 'NeedsYou:contract-fixture', 'ReadOnly:contract-fixture', 'Stale:contract-fixture', 'Stuck:contract-fixture', 'Working:contract-fixture']
+export const scenarioExemptions: readonly string[] = ['Done:contract-fixture', 'Failed:contract-fixture', 'Loading:contract-fixture', 'ActionFails:contract-fixture', 'CancelConfirmed:contract-fixture', 'Missing:contract-fixture', 'NeedsYou:contract-fixture', 'ReadOnly:contract-fixture', 'RetryPending:contract-fixture', 'Stale:contract-fixture', 'Stuck:contract-fixture', 'Working:contract-fixture']
 
 export const NeedsYou: Story = {
   args: { missionRef: webfractalFoundation.id },
@@ -94,9 +104,53 @@ export const Missing: Story = {
 export const ReadOnly: Story = {
   args: { missionRef: casMigration.id, readOnly: true, feed: observed({ value: fixtureMissions.map(mission => mission.id === casMigration.id ? withActions(mission) : mission) }) },
   play: async ({ canvasElement }) => {
-    const retry = within(canvasElement).getByRole('button', { name: 'Retry step' })
-    await expect(retry).toBeDisabled()
-    await expect(within(canvasElement).getAllByText('This device is read-only').length).toBe(2)
+    for (const button of within(canvasElement).getAllByRole('button', { name: /^(Retry step|Cancel run)$/ })) await expect(button).toBeDisabled()
+    await expect(within(canvasElement).getAllByText('This device is read-only').length).toBeGreaterThanOrEqual(2)
+  },
+}
+
+const withCas = (mission: Fractal.Mission) => mission.id === casMigration.id ? withActions(mission) : mission
+export const CancelConfirmed: Story = {
+  args: { missionRef: casMigration.id, feed: observed({ value: fixtureMissions.map(withCas) }), actionPort: port({ _tag: 'Done' }) },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onAction.mockClear()
+    // A destructive offer asks first and says what it does; nothing is sent until Confirm.
+    await userEvent.click(canvas.getByRole('button', { name: 'Cancel run' }))
+    const confirm = canvas.getByRole('group', { name: 'Confirm cancel run' })
+    await expect(confirm).toHaveTextContent('cannot be resumed')
+    await expect(onAction).not.toHaveBeenCalled()
+    await userEvent.click(within(confirm).getByRole('button', { name: 'Keep it' }))
+    await expect(canvas.queryByRole('group', { name: 'Confirm cancel run' })).toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: 'Cancel run' }))
+    await userEvent.click(within(canvas.getByRole('group', { name: 'Confirm cancel run' })).getByRole('button', { name: 'Cancel run' }))
+    await expect(onAction).toHaveBeenCalledWith('mission.cancel', expect.stringMatching(/^mission-run\//))
+    await expect(canvasElement.querySelector('[data-mission-action="cancel-run"]')).toHaveAttribute('data-mission-action-state', 'pending')
+    await expect(await canvas.findByText(/^Sent\./)).toBeVisible()
+  },
+}
+export const RetryPending: Story = {
+  args: { missionRef: casMigration.id, feed: observed({ value: fixtureMissions.map(withCas) }), actionPort: port({ _tag: 'Done' }, 60_000) },
+  play: async ({ canvasElement }) => {
+    onAction.mockClear()
+    const retry = within(canvasElement).getAllByRole('button', { name: 'Retry step' })[0]!
+    await userEvent.click(retry)
+    // Not destructive: it sends at once, then every copy of the offer reads pending and cannot send twice.
+    await expect(onAction).toHaveBeenCalledTimes(1)
+    for (const copy of canvasElement.querySelectorAll('[data-mission-action="retry-step"]')) await expect(copy).toHaveAttribute('data-mission-action-state', 'pending')
+    await userEvent.click(canvasElement.querySelector<HTMLElement>('[data-mission-action="retry-step"]')!)
+    await expect(onAction).toHaveBeenCalledTimes(1)
+  },
+}
+export const ActionFails: Story = {
+  args: { missionRef: casMigration.id, feed: observed({ value: fixtureMissions.map(withCas) }), actionPort: port({ _tag: 'Failed', message: 'Fractal changed while this was on its way, so it was not applied.' }, 50) },
+  play: async ({ canvasElement }) => {
+    await userEvent.click(within(canvasElement).getAllByRole('button', { name: 'Retry step' })[0]!)
+    const alerts = await within(canvasElement).findAllByRole('alert')
+    await expect(alerts[0]).toHaveTextContent('was not applied')
+    // The button is usable again after a failure.
+    await expect(canvasElement.querySelector('[data-mission-action="retry-step"]')).toHaveAttribute('data-mission-action-state', 'failed')
+    await expect(canvasElement.querySelector('[data-mission-action="retry-step"]')).not.toBeDisabled()
   },
 }
 

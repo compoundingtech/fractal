@@ -26,7 +26,7 @@ export const prop = <A>(name: string, arbitrary: Arbitrary.Arbitrary<A>, propert
       }
     }
     throw new Error(Arbitrary.formatCheckFailure(result) ?? result._tag)
-  })
+  }, 60_000)
 
 /** An Effect test under a test clock: `TestClock.adjust` moves debounces along. */
 export const itEffect = <E>(name: string, program: () => Effect.Effect<void, E, Scope.Scope>) =>

@@ -19,8 +19,10 @@ import {
   type Ref,
 } from 'react'
 import { mergeProps, mergeRefs, useDrop, type DropItem } from 'react-aria'
-import { Popover, Tab, TabList, TabPanel, Tabs, type Key } from 'react-aria-components'
-import { borderVars as border, elevationVars as elevation, geometryVars as g, interactionVars as interaction, motionVars as m, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { Tab, TabList, TabPanel, Tabs, type Key } from 'react-aria-components'
+import { HoverCardSurface, useHoverCardIntent } from '../../../../packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx'
+import { ThemePortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/ThemePortal.tsx'
+import { interactionVars as interaction } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 import { Menu, MenuItem, MenuPopover, MenuTrigger } from '../ui-compat/components.tsx'
 import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
@@ -144,8 +146,6 @@ const styles = stylex.create({
     borderBottomColor: tokens['--ds-gray-alpha-400'],
   },
   listBar: { alignItems: 'stretch', gap: 0 },
-  // The sidebar row's hover-card frame (MilestoneAgentRow), so the same card looks the same from a tab.
-  hoverCard: { backgroundColor: surface.raised, color: ink.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.md, padding: s.lg, boxSizing: 'border-box', fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, maxWidth: 'calc(100vw - 32px)', boxShadow: elevation.popover, outlineStyle: 'none', animationName: stylex.keyframes({ from: { opacity: 0 }, to: { opacity: 1 } }), animationDuration: m.fast, animationTimingFunction: 'ease-out', animationFillMode: 'backwards' },
   tabBar: {
     height: '100%',
     boxSizing: 'border-box',
@@ -663,18 +663,8 @@ const TabItem = ({
 }: TabItemProps) => {
   const [hovered, setHovered] = useState(false)
   const anchor = useRef<HTMLDivElement | null>(null)
-  // A resting pointer, not a passing one, opens the card. Tracked apart from React Aria's hover, which the tab's
-  // render override does not receive, and never on touch, where a tap is not a rest.
-  const [resting, setResting] = useState(false)
-  const [cardOpen, setCardOpen] = useState(false)
-  useEffect(() => {
-    if (!resting || touch || tab.hoverCard === undefined) {
-      setCardOpen(false)
-      return
-    }
-    const timer = window.setTimeout(() => setCardOpen(true), 500)
-    return () => window.clearTimeout(timer)
-  }, [resting, touch, tab.hoverCard])
+  // The canonical hover intent, the sidebar's: 150ms to open, 300ms to close, one card at a time, none on touch.
+  const card = useHoverCardIntent()
   const [isDragging, setDragging] = useState(false)
   const dragProps = {
     draggable: true,
@@ -723,8 +713,10 @@ const TabItem = ({
               event.preventDefault()
               event.stopPropagation()
             },
-            onMouseEnter: () => setResting(true),
-            onMouseLeave: () => setResting(false),
+            onMouseEnter: () => card.intend(true),
+            onMouseLeave: () => card.intend(false),
+            onFocus: (event: React.FocusEvent<HTMLDivElement>) => { if (event.currentTarget.matches(':focus-visible')) card.intend(true) },
+            onBlur: () => card.intend(false),
             onAuxClick: (event: MouseEvent) => {
               if (event.button === 1) onClose(tab.id)
             },
@@ -798,11 +790,14 @@ const TabItem = ({
               <CloseIcon />
             )}
           </span>
-          {cardOpen && tab.hoverCard !== undefined ? (
-            <Popover isNonModal isOpen triggerRef={anchor} placement="bottom start" offset={6} onOpenChange={(open) => { if (!open) setCardOpen(false) }} {...stylex.props(styles.hoverCard)}>
-              {tab.hoverCard}
-            </Popover>
-          ) : null}
+          {tab.hoverCard === undefined ? null : (
+            // Mounted before the card opens, so the card paints the host's theme.
+            <ThemePortal>
+              <HoverCardSurface triggerRef={anchor} isOpen={card.isOpen} onOpenChange={card.setOpen} placement="bottom start" offset={6} label={`Details for ${tab.title}`}>
+                {tab.hoverCard}
+              </HoverCardSurface>
+            </ThemePortal>
+          )}
         </>
       )}
     </Tab>

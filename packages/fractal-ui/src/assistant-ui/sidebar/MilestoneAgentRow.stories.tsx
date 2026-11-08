@@ -415,6 +415,9 @@ const allStatesPlay: NonNullable<StoryObj<{ scheme: Scheme }>['play']> = async (
   await expect(at('idle').querySelector('circle')).not.toHaveAttribute('fill', 'currentColor')
   await expect(at('waiting').querySelector('circle')).not.toHaveAttribute('fill', 'currentColor')
   await expect(at('waiting').innerHTML).not.toBe(at('idle').innerHTML)
+  // Idle is a plain hollow ring; Waiting (blocked on something other than you) adds clock hands.
+  await expect(at('idle').querySelector('path')).toBeNull()
+  await expect(at('waiting').querySelector('[data-mark-detail="clock"]')).not.toBeNull()
   // Color means act: only failure is colored here, and no quiet state borrows amber, red or blue.
   const probe = getComputedStyle(surfaceRoot.querySelector('[data-tone-probe]')!)
   const soft = probe.color, muted = probe.backgroundColor, danger = probe.borderTopColor

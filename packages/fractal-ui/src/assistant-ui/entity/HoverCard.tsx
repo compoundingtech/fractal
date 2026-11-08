@@ -83,13 +83,16 @@ export interface HoverCardSurfaceProps {
  * the host's `ThemePortal` (mounted before the card opens) so the card paints the host's theme. It is a passive
  * `tooltip` named by `label`: assistive tech reads it as the trigger's supplementary description, never a focus stop.
  */
+// RAC's Tooltip types omit `id`, though it renders and keeps one; the trigger's description needs it.
+const surfaceDom = (id: string | undefined): object => id === undefined ? {} : { id }
+
 export function HoverCardSurface({ triggerRef, isOpen, onOpenChange, placement = 'right top', offset = 8, label, id, children }: HoverCardSurfaceProps) {
   const close = React.useCallback(() => onOpenChange?.(false), [onOpenChange])
   const state = React.useMemo<TooltipTriggerState>(() => ({ isOpen, shouldSkipAnimation: false, open: () => onOpenChange?.(true), close }), [isOpen, onOpenChange, close])
   if (!isOpen) return null
   return <TooltipTriggerStateContext.Provider value={state}>
       <Tooltip isOpen triggerRef={triggerRef as React.RefObject<Element>} placement={placement} offset={offset} containerPadding={8} shouldFlip
-        id={id} aria-label={label} data-hover-card {...stylex.props(styles.frame)}>
+        {...surfaceDom(id)} aria-label={label} data-hover-card {...stylex.props(styles.frame)}>
         {children}
       </Tooltip>
     </TooltipTriggerStateContext.Provider>

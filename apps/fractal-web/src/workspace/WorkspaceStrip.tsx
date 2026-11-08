@@ -45,7 +45,7 @@ export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, l
     if (id === null || id === undefined) return
     event.preventDefault()
     event.stopPropagation()
-    dispatch({ _tag: 'Close', id })
+    dispatch({ _tag: 'Close', tab: id })
   }
   return <div onContextMenu={onContextMenu} onKeyDownCapture={onKeyDownCapture} {...stylex.props(styles.host)}>
     <EditorTabs
@@ -60,9 +60,9 @@ export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, l
       dragType="application/x-fractal-workspace-tab"
       stablePanel
       touch={narrow}
-      onActivate={id => dispatch({ _tag: 'Activate', id })}
-      onClose={id => dispatch({ _tag: 'Close', id })}
-      onMove={({ source, toIndex }) => dispatch({ _tag: 'Move', id: source.tabId, to: { _tag: 'Strip', group, index: toIndex } })}
+      onActivate={id => dispatch({ _tag: 'Activate', tab: id })}
+      onClose={id => dispatch({ _tag: 'Close', tab: id })}
+      onMove={({ source, toIndex }) => dispatch({ _tag: 'Move', tab: source.tabId, to: { _tag: 'Strip', pane: group, index: toIndex } })}
       actions={<>
         <MenuTrigger>
           <IconButton label="Open a tab" icon={<PlusIcon />} />
@@ -82,8 +82,8 @@ export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, l
     </EditorTabs>
     {menu === undefined ? null : <Aria.Popover isOpen triggerRef={menu.target} placement="bottom start" onOpenChange={isOpen => { if (!isOpen) setMenu(undefined) }} {...stylex.props(styles.popover)}>
       <Aria.Menu aria-label="Tab actions" autoFocus="first" onClose={() => setMenu(undefined)} onAction={key => {
-        if (key === 'close') dispatch({ _tag: 'Close', id: menu.id })
-        else if (key === 'close-others') dispatch({ _tag: 'CloseOthers', id: menu.id })
+        if (key === 'close') dispatch({ _tag: 'Close', tab: menu.id })
+        else if (key === 'close-others') dispatch({ _tag: 'CloseOthers', tab: menu.id })
       }} {...stylex.props(styles.menu)}>
         <Aria.MenuItem id="close" {...stylex.props(styles.menuItem)}>Close</Aria.MenuItem>
         <Aria.MenuItem id="close-others" isDisabled={items.length < 2} {...stylex.props(styles.menuItem)}>Close others</Aria.MenuItem>

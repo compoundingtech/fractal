@@ -56,3 +56,23 @@ export const neighbour = (rects: ReadonlyMap<string, Rect>, from: string, direct
   }
   return best?.id
 }
+
+/** Each split's rectangle within `area`, by split id. */
+export const splitRects = (layout: Layout, area: Rect = { x: 0, y: 0, width: 1, height: 1 }): ReadonlyMap<string, Rect> => {
+  const rects = new Map<string, Rect>()
+  const walk = (node: Layout, rect: Rect) => {
+    if (isPane(node)) return
+    rects.set(node.id, rect)
+    const shares = sharesOf(node)
+    let offset = 0
+    node.children.forEach((child, index) => {
+      const share = shares[index]!
+      walk(child, node.axis === 'row'
+        ? { x: rect.x + rect.width * offset, y: rect.y, width: rect.width * share, height: rect.height }
+        : { x: rect.x, y: rect.y + rect.height * offset, width: rect.width, height: rect.height * share })
+      offset += share
+    })
+  }
+  walk(layout, area)
+  return rects
+}
