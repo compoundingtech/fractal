@@ -1,6 +1,7 @@
 import { ClientError, FractalClient, type ClientOptions } from '@fractal/client'
 import * as Native from '@fractal/client/schema/read'
-import { Effect, Fiber } from 'effect'
+import { Cause, Effect, Option } from 'effect'
+import * as AsyncResult from 'effect/reactivity/AsyncResult'
 import * as Atom from 'effect/reactivity/Atom'
 import type * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { clientReadAuthorization, unavailable, waiting, type Feed } from './source.ts'
@@ -13,38 +14,50 @@ export interface ObjectivesSource {
   readonly refresh: () => void
 }
 
+/** Objectives, budgets and their histories read from the gateway as retained feeds. */
 export const gatewayObjectives = ({ options, discovery, registry, now }: {
   readonly options: ClientOptions
   readonly discovery: FractalClient
   readonly registry: AtomRegistry.AtomRegistry
   readonly now: () => number
 }): ObjectivesSource => {
+  // Atom runs the read and interrupts it (aborting the request) on unmount or refresh. Its state ends
+  // with the atom's node, so the last reading is retained here: a remounted pane or a failed re-read
+  // shows it as stale instead of waiting.
   const reader = <T>(read: (client: FractalClient) => Promise<T>): Atom.Atom<Feed<T>> => {
-    let previous: Feed<T> = waiting
-    return Atom.make((get): Feed<T> => {
-      const fiber = Effect.runFork(Effect.tryPromise({
-        try: async signal => {
-          const client = new FractalClient({ ...options, fetchImpl: (input, init) => {
-            signal.throwIfAborted()
-            return (options.fetchImpl ?? globalThis.fetch)(input, { ...init, signal })
-          } })
-          client.discover = () => discovery.discover()
-          const value = await read(client)
+    let retained: { readonly value: T; readonly readAt: number } | undefined
+    const stale = (error?: { readonly reason: 'unsupported' | 'failed'; readonly detail: string }): Feed<T> =>
+      retained === undefined ? waiting
+        : { _tag: 'Observed', value: retained.value, readAt: retained.readAt, freshness: 'stale', ...(error === undefined ? {} : { error }) }
+    return Atom.make(Effect.tryPromise({
+      try: async signal => {
+        const client = new FractalClient({ ...options, fetchImpl: (input, init) => {
           signal.throwIfAborted()
-          return value
-        },
-        catch: error => unavailable({
-          reason: clientReadAuthorization(error) ?? (error instanceof ClientError && (error.status === 404 || error.status === 501) ? 'unsupported' : 'failed'),
-          detail: 'Could not read objectives and budgets.',
-        }),
-      }).pipe(Effect.match({
-        onSuccess: (value): Feed<T> => ({ _tag: 'Observed', value, freshness: 'live', readAt: now() }),
-        onFailure: (failure): Feed<T> => previous._tag === 'Observed' && failure._tag === 'Unavailable' && failure.reason !== 'ungranted' && failure.reason !== 'unauthorized'
-          ? { ...previous, freshness: 'stale', error: { reason: failure.reason, detail: failure.detail } } : failure,
-      }), Effect.tap(value => Effect.sync(() => { previous = value; get.setSelf(value) }))))
-      get.addFinalizer(() => Effect.runFork(Fiber.interrupt(fiber)))
-      return previous._tag === 'Observed' ? { ...previous, freshness: 'stale' } : waiting
-    })
+          return (options.fetchImpl ?? globalThis.fetch)(input, { ...init, signal })
+        } })
+        client.discover = () => discovery.discover()
+        return { value: await read(client), readAt: now() }
+      },
+      catch: error => unavailable({
+        reason: clientReadAuthorization(error) ?? (error instanceof ClientError && (error.status === 404 || error.status === 501) ? 'unsupported' : 'failed'),
+        detail: 'Could not read objectives and budgets.',
+      }),
+    })).pipe(Atom.map(AsyncResult.match({
+      onInitial: () => stale(),
+      onSuccess: ({ value: reading, waiting: refreshing }): Feed<T> => {
+        retained = reading
+        return refreshing === true ? stale() : { _tag: 'Observed', value: reading.value, readAt: reading.readAt, freshness: 'live' }
+      },
+      onFailure: ({ cause }): Feed<T> => {
+        const failure = Option.getOrElse(Cause.findErrorOption(cause), () => unavailable({ reason: 'failed', detail: 'Could not read objectives and budgets.' }))
+        if (failure._tag !== 'Unavailable') return failure
+        if (failure.reason === 'ungranted' || failure.reason === 'unauthorized') {
+          retained = undefined
+          return failure
+        }
+        return retained === undefined ? failure : stale({ reason: failure.reason, detail: failure.detail })
+      },
+    })))
   }
   const list = reader(async client => Native.decodeUnknownSync(Native.SloList)((await client.sloList()).value))
   const accounts = reader(async client => {

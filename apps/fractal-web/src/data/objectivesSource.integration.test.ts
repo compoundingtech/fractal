@@ -39,3 +39,24 @@ it('reads served rows and bounded history, preserving tones, forecasts, gaps and
     registry.dispose()
   }
 })
+
+it('shows the last reading as stale when a pane remounts after its atom was released', async () => {
+  const registry = AtomRegistry.make()
+  const value = { as_of_unix_ms: 90_000_000, rows: [], otel_ui_url: 'https://otel.example.invalid' }
+  const options = { baseUrl: 'http://gateway.invalid', fetchImpl: async (input: RequestInfo | URL) =>
+    new URL(String(input)).pathname.endsWith('/capabilities') ? Response.json(recording.capabilities)
+      : Response.json({ ...recording.cases.agent.payload, value }) }
+  const source = gatewayObjectives({ options, discovery: new FractalClient(options), registry, now: () => 90_000_000 })
+  try {
+    const first = registry.mount(source.list)
+    await vi.waitFor(() => expect(registry.get(source.list)).toMatchObject({ _tag: 'Observed', freshness: 'live' }))
+    first()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const second = registry.mount(source.list)
+    expect(registry.get(source.list)).toMatchObject({ _tag: 'Observed', freshness: 'stale', value: { rows: [] } })
+    await vi.waitFor(() => expect(registry.get(source.list)).toMatchObject({ freshness: 'live' }))
+    second()
+  } finally {
+    registry.dispose()
+  }
+})

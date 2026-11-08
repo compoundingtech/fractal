@@ -21,12 +21,12 @@ export type Tier = 'active' | 'mounted' | 'warm' | 'cold'
 export type PolicyOf = (subject: Subject) => KindPolicy
 
 export interface Budget {
-  /** Hidden DOM subtrees. Three matches the transcript switch budget proven before tabs. */
+  /** Hidden DOM subtrees. With the visible tab, three matches the transcript switch budget proven before tabs. */
   readonly dom: number
   /** Hidden per-subject follows, under the source's 24 retained conversation identities. */
   readonly data: number
 }
-export const defaultBudget: Budget = { dom: 3, data: 8 }
+export const defaultBudget: Budget = { dom: 2, data: 8 }
 
 /** Walks hidden tabs from most recently used: each takes what still fits. Eviction is simply no longer fitting. */
 export const planTiers = ({ state, budget, policyOf = corePolicyOf }: {

@@ -15,6 +15,7 @@ import type { IconName } from '../../../../../packages/fractal-ui/src/assistant-
 import { InlineMarkdown, Markdown } from '../../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import type { AlertAction, AlertActionResult } from './alert-action-port.ts'
 import { useAlertAnswersStore } from './alertAnswers.ts'
+import { AlertNames } from './alertNames.ts'
 import { KIND_WORDS, alertChoices, alertFrom, answeredLabel, canSend, effectiveChoice, partitionChoices, webLink } from './alertChoices.ts'
 import { contextOf, firstLine, isPlainHeading, markdownLine, repeatsHeading, sameWords, useArmed } from './decisionText.ts'
 
@@ -150,7 +151,7 @@ export const AnswerAlert = ({
   const chosen = store.selected(alert)
   const selected = chosen ?? parts.options.filter((choice) => choice.recommended === true).map((choice) => choice.key)
   const answer = choices === null ? undefined : effectiveChoice(choices, selected[0], words)
-  const from = alertFrom(alert)
+  const from = alertFrom(alert, React.useContext(AlertNames))
   const send = (choice: NonNullable<typeof answer>) => {
     if (onAct === undefined) return
     store.send(alert, answeredLabel(choice, words), () => onAct(alert, choice.action(words)))

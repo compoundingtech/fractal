@@ -8,8 +8,6 @@ import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
-import { Schema } from 'effect'
-import { persistedAtom } from '../state/persistence.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
 import { ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 
@@ -44,7 +42,6 @@ beforeEach(async () => {
   window.localStorage.clear()
   window.history.replaceState(null, '', '/w/agent/metric-track')
   registry = AtomRegistry.make()
-  registry.set(persistedAtom({ key: 'round2.phoneAgentTabs', schema: Schema.Array(Schema.String), defaultValue: [] }), [])
   host = document.createElement('div')
   document.body.append(host)
   root = createRoot(host)
@@ -125,7 +122,7 @@ it('closes the phone drawer when an alert opens its mission', async () => {
   const destination = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(item => item.textContent === 'Open mission')!
   expect(destination).not.toBeUndefined()
   await act(async () => destination.click())
-  expect(new URLSearchParams(window.location.search).get('open')).toBe('mission/release:detail')
+  expect(window.location.pathname).toBe('/w/mission/release')
   expect(trigger.getAttribute('aria-expanded')).toBe('false')
   await vi.waitFor(() => expect(document.activeElement).toBe(trigger))
 })
@@ -147,9 +144,9 @@ it('keeps conversation actions in the header and gives the Details sheet only on
   }, { timeout: 15_000 })
 })
 
-// The tab row holds the Workspace views tab list and, fixed after it, the labelled Terminal toggle.
-const workspaceTabs = () => host.querySelector<HTMLElement>('[role="tablist"][aria-label="Workspace views"]')!
-const phoneTerminal = () => workspaceTabs().parentElement!.querySelector<HTMLButtonElement>('button[aria-label="Show terminal"], button[aria-label="Show conversation"]')!
+// The tab row holds the Workspace tabs list and, fixed after it, the labelled Terminal toggle.
+const workspaceTabs = () => host.querySelector<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"]')!
+const phoneTerminal = () => host.querySelector<HTMLButtonElement>('button[data-narrow-terminal]')!
 const headerOrder = () => [...host.querySelectorAll<HTMLButtonElement>('[data-testid="thread-header"] button')].map(button => button.getAttribute('aria-label')).filter(name => ['Expand sidebar', 'More actions', 'Agent details', 'Resources', 'Conversation menu'].includes(name ?? ''))
 const phoneHeaderNames = ['Expand sidebar', 'More actions', 'Agent details']
 /** One Terminal on the phone: outside the header and outside the tab list, beside it in the tab row. */
@@ -174,14 +171,14 @@ it('keeps a labelled Terminal toggle in the phone tab row that stays described a
   const reason = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Terminal unavailable"]')!
   expect(reason).not.toBeNull()
   expect(reason.textContent).toBe('This agent has no terminal.')
-  expect(new URLSearchParams(window.location.search).get('open')).toBeNull()
+  expect(window.location.pathname).toBe('/w/agent/metric-track')
   expect(host.querySelector('[data-testid="terminal-pane"]')).toBeNull()
   await vi.waitFor(() => expect(reason.contains(document.activeElement)).toBe(true))
   await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })))
   await vi.waitFor(() => expect(document.querySelector('[role="dialog"][aria-label="Terminal unavailable"]')).toBeNull())
 })
 
-it('swaps conversation and terminal from the phone tab row, keeps the toggle focused and hides the tabs meanwhile', async () => {
+it('swaps conversation and terminal from the phone tab row, within the one tab', async () => {
   const withTerminal = { ...agent, runtime_ids: [decodeUnknownSync(RuntimeId)('runtime/metric-track')] }
   const source = fixtureSource({ world: { now: 5000, gateway: 'gateway.example.invalid', agents: [withTerminal, { ...agent, id: 'agent/example-reviewer', name: 'Reviewer' }], missions: [], attention: [], events: [], conversations: {}, terminals: {}, envelopes: {}, usage: { _tag: 'undeclared' } } })
   await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace /></DataSourceProvider>))
@@ -189,36 +186,28 @@ it('swaps conversation and terminal from the phone tab row, keeps the toggle foc
   expect(phoneTerminal().getAttribute('aria-label')).toBe('Show terminal')
   expect(phoneTerminal().getAttribute('aria-describedby')).toBeNull()
   await act(async () => phoneTerminal().click())
-  expect(new URLSearchParams(window.location.search).get('open')).toBe('terminal/metric-track:detail')
   expect(phoneTerminal().getAttribute('aria-label')).toBe('Show conversation')
   expect(phoneTerminal().textContent).toBe('Conversation')
   expect(phoneTerminal().hasAttribute('aria-pressed')).toBe(false)
   expect(host.querySelector('[data-testid="terminal-pane"]')?.getAttribute('data-terminal-shown')).toBe('true')
-  expect(host.querySelector('[role="tabpanel"][id$="-panel"]')).toBeNull()
+  expect(workspaceTabs().querySelectorAll('[role="tab"]')).toHaveLength(1)
   assertTerminalInTabRow()
   await act(async () => phoneTerminal().click())
-  expect(new URLSearchParams(window.location.search).get('open')).toBe('thread')
   expect(phoneTerminal().getAttribute('aria-label')).toBe('Show terminal')
   expect(host.querySelector('[data-testid="terminal-pane"]')?.getAttribute('data-terminal-shown')).toBe('false')
-  expect(host.querySelector('[role="tabpanel"][id$="-panel"]')).not.toBeNull()
+  expect(workspaceTabs().querySelectorAll('[role="tab"]')).toHaveLength(1)
   assertTerminalInTabRow()
 })
 
-it('switches Thread and Changes with arrow keys and connects the selected tab to its panel', async () => {
-  const tabs = [...host.querySelectorAll<HTMLElement>('[role="tab"]')].filter(tab => tab.textContent === 'Thread' || tab.textContent === 'Changes')
-  expect(tabs.map(tab => tab.textContent)).toEqual(['Thread', 'Changes'])
-  await act(async () => { tabs[0]!.focus(); tabs[0]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true })) })
+it('keeps every open subject in one flat strip, and closes the Details sheet on a switch', async () => {
+  await act(async () => { window.history.pushState(null, '', '/w/agent/example-reviewer'); window.dispatchEvent(new PopStateEvent('popstate')) })
+  const tabs = [...workspaceTabs().querySelectorAll<HTMLElement>('[role="tab"]')]
+  expect(tabs.map(tab => tab.textContent)).toEqual([expect.stringContaining('Metric track'), expect.stringContaining('Reviewer')])
   expect(tabs[1]!.getAttribute('aria-selected')).toBe('true')
-  expect(document.activeElement).toBe(tabs[1])
-  expect(host.querySelector('[aria-label="Captured changes"]')).not.toBeNull()
-  const panel = host.querySelector(`[role="tabpanel"][aria-labelledby="${tabs[1]!.id}"]`)
-  expect(panel).not.toBeNull()
-  expect(document.getElementById(tabs[1]!.getAttribute('aria-controls')!)).toBe(panel)
-  await act(async () => tabs[1]!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true })))
-  expect(tabs[0]!.getAttribute('aria-selected')).toBe('true')
-  expect(panel!.getAttribute('aria-labelledby')).toBe(tabs[0]!.id)
-  expect(document.getElementById(tabs[0]!.getAttribute('aria-controls')!)).toBe(panel)
-  expect(host.querySelector('[aria-label="Captured changes"]')).toBeNull()
+  await act(async () => host.querySelector<HTMLButtonElement>('button[aria-label="Agent details"]')!.click())
+  expect(document.querySelector('[role="dialog"][aria-label="Agent details"]')).not.toBeNull()
+  await act(async () => { window.history.pushState(null, '', '/w/agent/metric-track'); window.dispatchEvent(new PopStateEvent('popstate')) })
+  await vi.waitFor(() => expect(document.querySelector('[role="dialog"][aria-label="Agent details"]')).toBeNull())
 })
 
 it('keeps the workspace within the visual viewport when the on-screen keyboard resizes it', async () => {
@@ -245,7 +234,7 @@ it('retains the draft, scroll position and WorkspaceBody viewport store across t
     await act(async () => window.dispatchEvent(new Event('resize')))
     expect(host.querySelector('[aria-label="Expand sidebar"]') !== null).toBe(width < 900)
     expect(host.querySelector('[aria-label="Message agent"]')).toBe(field)
-    expect(host.querySelector('[role="tablist"][aria-label="Workspace views"]') !== null).toBe(width < 900)
+    expect(host.querySelector('[role="tablist"][aria-label="Workspace tabs"]')).not.toBeNull()
     expect(field.value).toBe('Unsent rotation draft')
     expect(host.querySelector('[data-testid="retained-conversation"]')).toBe(history)
     expect(history.scrollTop).toBe(672)

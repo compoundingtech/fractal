@@ -14,7 +14,7 @@ import { PortalContainerRegistrationContext } from '../../../../packages/fractal
 import { markStart } from './perfMarks.ts'
 
 markStart('sidebar_interactive', { startTime: 0 })
-const initialAgent = window.location.pathname.match(/^\/w\/(.+)$/)?.[1]
+const initialAgent = window.location.pathname.match(/^\/w\/(agent\/.+)$/)?.[1]
 if (initialAgent !== undefined) {
   try { markStart('open_transcript', { startTime: 0, key: decodeURIComponent(initialAgent) }) } catch { /* Invalid routes have no transcript to measure. */ }
 }

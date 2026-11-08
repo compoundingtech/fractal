@@ -46,21 +46,12 @@ export const Layout: Schema.Codec<Layout> = Schema.Union([
 /** Per-tab view state restored when a tab's surface is mounted again. Local, like glass focus and scroll. */
 export const TabView = Schema.Struct({
   scrollTop: Schema.optional(Schema.Finite),
-  expanded: Schema.optional(Schema.String),
   /** Which face an agent's tab shows; a key naming the terminal itself shows it until told otherwise. */
   terminal: Schema.optional(Schema.Boolean),
   /** Holds an unsent draft. The kit keeps drafts only in the mounted composer, so this pins the surface. */
   dirty: Schema.optional(Schema.Boolean),
 })
 export type TabView = typeof TabView.Type
-
-/** The right sidebar. One for the workspace: opened for one tab, it stays open for the next. */
-export const Panel = Schema.Struct({
-  open: Schema.Boolean,
-  tab: Schema.String,
-  width: Schema.optional(Schema.Finite),
-})
-export type Panel = typeof Panel.Type
 
 export const WorkspaceState = Schema.Struct({
   layout: Layout,
@@ -71,7 +62,6 @@ export const WorkspaceState = Schema.Struct({
   /** Most recently closed pane first; drives reopen. */
   closed: Schema.Array(Schema.String),
   views: Schema.Record(Schema.String, TabView),
-  panel: Panel,
 })
 export type WorkspaceState = typeof WorkspaceState.Type
 
@@ -83,7 +73,6 @@ export const emptyWorkspace: WorkspaceState = {
   mru: [],
   closed: [],
   views: {},
-  panel: { open: false, tab: 'details' },
 }
 
 /** Where a tab lands (`glass.rs::Drop`). */
@@ -140,18 +129,15 @@ export const Command = Schema.TaggedUnion({
   ActivateIndex: { index: Schema.Int },
   ActivatePrevious: {},
   Close: { id: Schema.String },
+  /** Closes the rest of this tab's group, and shows this tab. */
+  CloseOthers: { id: Schema.String },
+  /** This tab gives way to another subject in place, as the TUI's triage does; it is not a closed tab to reopen. */
+  Replace: { id: Schema.String, pane: Schema.String },
   ReopenClosed: {},
   Move: { id: Schema.String, to: Drop },
   /** `node` counts splits in tree order, the whole layout first (`layout.rs::Divider`). */
   SetRatio: { node: Schema.Int, ratio: Schema.Finite },
   SetView: { id: Schema.String, view: TabView },
-  SetPanel: {
-    panel: Schema.Struct({
-      open: Schema.optionalKey(Schema.Boolean),
-      tab: Schema.optionalKey(Schema.String),
-      width: Schema.optional(Schema.Finite),
-    }),
-  },
   Receive: { layout: ReceivedLayout },
 })
 export type Command = typeof Command.Type
@@ -454,6 +440,35 @@ export const transition = (state: WorkspaceState, command: Command, context: Tra
     }
     case 'Close':
       return close(state, command.id)
+    case 'CloseOthers': {
+      const found = locate(state.layout, tab => tab.id === command.id)
+      if (found === undefined) return state
+      const others = found.group.tabs.filter(tab => tab.id !== command.id)
+      const closed = others.reduce((current, tab) => close(current, tab.id), state)
+      return reveal(closed, found.group.id, command.id)
+    }
+    case 'Replace': {
+      const found = locate(state.layout, tab => tab.id === command.id)
+      if (found === undefined || command.pane === '') return state
+      const identity = paneIdentity(command.pane)
+      if (identity === paneIdentity(found.tab.pane)) return reveal(state, found.group.id, found.tab.id)
+      // The subject already has its tab: that one shows, and this one goes.
+      const { closed } = state
+      if (locate(state.layout, tab => paneIdentity(tab.pane) === identity) !== undefined) {
+        return { ...open(close(state, command.id), { _tag: 'Open', pane: command.pane }, context), closed }
+      }
+      const tab: Tab = { id: context.newId(), pane: identity }
+      return {
+        ...state,
+        layout: replaceGroup(state.layout, found.group.id, group => ({
+          ...group,
+          tabs: group.tabs.map(row => row.id === command.id ? tab : row),
+          active: group.active === command.id ? tab.id : group.active,
+        })),
+        mru: state.mru.map(id => id === command.id ? tab.id : id),
+        views: withoutKey(state.views, command.id),
+      }
+    }
     case 'ReopenClosed': {
       const pane = state.closed[0]
       return pane === undefined ? state : open(state, { _tag: 'Open', pane }, context)
@@ -470,10 +485,6 @@ export const transition = (state: WorkspaceState, command: Command, context: Tra
       const next = { ...current, ...command.view }
       if (current !== undefined && Object.keys(next).every(key => current[key as keyof TabView] === next[key as keyof TabView])) return state
       return { ...state, views: { ...state.views, [command.id]: next } }
-    }
-    case 'SetPanel': {
-      const next = { ...state.panel, ...command.panel }
-      return next.open === state.panel.open && next.tab === state.panel.tab && next.width === state.panel.width ? state : { ...state, panel: next }
     }
     case 'Receive': {
       const adopted = adopt(state, command.layout, context)

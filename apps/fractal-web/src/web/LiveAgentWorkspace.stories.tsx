@@ -26,7 +26,7 @@ const meta = {
     window.localStorage.setItem('wf.ui@1', raw)
     window.dispatchEvent(new StorageEvent('storage', { key: 'wf.ui@1', newValue: raw }))
   },
-  render: ({ state }) => <AppStorySpecimen state={state}>{() => <LiveAgentWorkspace />}</AppStorySpecimen>,
+  render: ({ state }) => <AppStorySpecimen state={state}>{() => <LiveAgentWorkspace initialRef={appStoryAgent(state)} persistGeometry={false} />}</AppStorySpecimen>,
   play: async ({ canvasElement, args }) => {
     // On a cold dev server the lazily loaded pane takes longer than waitFor's default second.
     await waitFor(() => assertProductionAppState(canvasElement, args.state, true), { timeout: 60000 })

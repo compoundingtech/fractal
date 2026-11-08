@@ -147,7 +147,6 @@ const ScreenProvider = ({ world, scheme, children }: { readonly world: ScreenWor
   const [registry] = React.useState(() => {
     const value = AtomRegistry.make()
     value.set(schemeAtom(), scheme)
-    value.set(persistedAtom({ key: 'round2.agent', schema: Schema.String, defaultValue: '' }), world.agentRef)
     value.set(persistedAtom({ key: 'round2.sidebarClosed', schema: Schema.Boolean, defaultValue: false }), false)
     return value
   })

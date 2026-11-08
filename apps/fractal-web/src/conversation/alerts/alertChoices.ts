@@ -117,9 +117,11 @@ export const webLink = (url: string | undefined): string | undefined => {
   }
 }
 
-/** Who an alert is from: the agent that asked, else the seat it is about. */
-export const alertFrom = (alert: Pick<Native.Attention, 'requester_id' | 'source_id'>): string =>
-  (alert.requester_id ?? alert.source_id).replace(/^agent\//, '')
+/** Who an alert is from: the agent that asked, else the seat it is about, by its roster name when the host knows it. */
+export const alertFrom = (alert: Pick<Native.Attention, 'requester_id' | 'source_id'>, nameOf: (ref: string) => string | undefined = () => undefined): string => {
+  const ref = alert.requester_id ?? alert.source_id
+  return nameOf(ref) ?? ref.replace(/^agent\//, '')
+}
 
 export const KIND_WORDS: Record<string, string> = {
   'human-gate': 'Review',
