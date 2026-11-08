@@ -768,6 +768,10 @@ and keeps the grid. A wide window moves focus to the shown view on an explicit s
 composer, or the terminal pane rather than its grid, because focusing a live grid arms typing.
 A phone keeps focus on the toggle, so a switch raises no keyboard.
 
+An attach that reports `no-terminal` turns the tab back to its conversation (a view change, so
+it adds no history entry) and disables **Show terminal** with that reason. The failure is remembered
+per agent in memory until the roster reports a different runtime list for that agent.
+
 **Show terminal** stays disabled with an accessible description and
 hover title until the live roster establishes a runtime for the selected agent. While
 loading, its reason is “Waiting for the live agent roster to find this agent’s terminal.”
