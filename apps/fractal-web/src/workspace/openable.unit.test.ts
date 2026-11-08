@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { activeTab, emptyWorkspace, groupsOf, tabsOf, transition } from './model.ts'
+import { panesOf } from '@fractal/ui/workspace'
+import { activeTab, currentSpace, emptyWorkspace, tabsOf, transition, workspaceConfig } from './model.ts'
 import { openableDragType, openableProps, openCommand, readOpenableDrag, type OpenGesture } from './openable.ts'
 import { paneKey, parsePane, subjectRef } from './subject.ts'
 
 const counter = () => {
   let next = 0
-  return { newId: () => `id-${next++}` }
+  return workspaceConfig(() => `id-${next++}`)
 }
+const focus = (state: ReturnType<typeof emptyWorkspace>) => currentSpace(state).local.focus
 
 const recorder = () => {
   const calls: (readonly [string, OpenGesture | undefined])[] = []
@@ -20,34 +22,40 @@ const key = (over: Partial<{ key: string; altKey: boolean; shiftKey: boolean; me
 
 describe('openCommand', () => {
   it('opens and focuses by default, behind on a background gesture', () => {
-    expect(openCommand({ ref: 'agent/a', focus: 'main' })).toEqual({ _tag: 'Open', pane: 'agent:agent/a' })
-    expect(openCommand({ ref: 'agent/a', gesture: { background: true }, focus: 'main' })).toEqual({ _tag: 'Open', pane: 'agent:agent/a', activate: false })
+    expect(openCommand({ ref: 'agent/a', focus: 'main' })).toEqual({ _tag: 'Open', ref: 'agent:agent/a' })
+    expect(openCommand({ ref: 'agent/a', gesture: { background: true }, focus: 'main' })).toEqual({ _tag: 'Open', ref: 'agent:agent/a', activate: false })
   })
 
-  it('splits the focused group for the keyboard, the same command a drag on that edge makes', () => {
-    const drag = openCommand({ ref: 'agent/a', gesture: { at: { _tag: 'Edge', group: 'g', side: 'right', first: false } }, focus: 'g' })
-    expect(openCommand({ ref: 'agent/a', gesture: { split: 'right' }, focus: 'g' })).toEqual(drag)
+  it('splits the focused pane for the keyboard, landing where a drag on that edge lands', () => {
+    const context = counter()
+    const base = transition(transition(emptyWorkspace(context), openCommand({ ref: 'agent/b', focus: 'x' }), context), openCommand({ ref: 'doc/x', focus: 'x' }), context)
+    const pane = focus(base)
+    const byKey = transition(base, openCommand({ ref: 'agent/a', gesture: { split: 'right' }, focus: pane }), counter())
+    const byDrag = transition(base, openCommand({ ref: 'agent/a', gesture: { at: { _tag: 'Edge', pane, side: 'right' } }, focus: pane }), counter())
+    const shape = (state: typeof base) => panesOf(currentSpace(state).layout).map(row => row.tabs.map(tab => tab.ref))
+    expect(shape(byKey)).toEqual(shape(byDrag))
+    expect(shape(byKey)).toEqual([['agent:agent/b', 'document:doc/x'], ['agent:agent/a']])
   })
 
   it('makes a split through the reducer, and moves a tab that is already open', () => {
     const context = counter()
-    let state = transition(emptyWorkspace, openCommand({ ref: 'agent/a', focus: 'main' }), context)
-    state = transition(state, openCommand({ ref: 'agent/b', focus: state.focus }), context)
-    state = transition(state, openCommand({ ref: 'agent/a', gesture: { split: 'below' }, focus: state.focus }), context)
-    expect(groupsOf(state.layout).map(group => group.tabs.map(tab => tab.pane))).toEqual([['agent:agent/b'], ['agent:agent/a']])
-    expect(activeTab(state)?.pane).toBe('agent:agent/a')
+    let state = transition(emptyWorkspace(context), openCommand({ ref: 'agent/a', focus: 'main' }), context)
+    state = transition(state, openCommand({ ref: 'agent/b', focus: focus(state) }), context)
+    state = transition(state, openCommand({ ref: 'agent/a', gesture: { split: 'bottom' }, focus: focus(state) }), context)
+    expect(panesOf(currentSpace(state).layout).map(pane => pane.tabs.map(tab => tab.ref))).toEqual([['agent:agent/b'], ['agent:agent/a']])
+    expect(activeTab(state)?.ref).toBe('agent:agent/a')
   })
 
   it('lets a dragged tab re-enter as the same Open, moving rather than duplicating', () => {
     const context = counter()
-    let state = transition(emptyWorkspace, openCommand({ ref: 'agent/a', focus: 'main' }), context)
-    state = transition(state, openCommand({ ref: 'mail/1', focus: state.focus }), context)
-    const dragged = tabsOf(state.layout)[1]!
-    const ref = subjectRef(parsePane(dragged.pane))
-    state = transition(state, openCommand({ ref, gesture: { at: { _tag: 'Strip', group: state.focus, index: 0 } }, focus: state.focus }), context)
-    expect(tabsOf(state.layout).map(tab => tab.id)).toEqual([dragged.id, tabsOf(state.layout)[1]!.id])
-    expect(tabsOf(state.layout)).toHaveLength(2)
-    expect(paneKey(parsePane(dragged.pane))).toBe('resource:mail/1')
+    let state = transition(emptyWorkspace(context), openCommand({ ref: 'agent/a', focus: 'main' }), context)
+    state = transition(state, openCommand({ ref: 'mail/1', focus: focus(state) }), context)
+    const dragged = tabsOf(state)[1]!
+    const ref = subjectRef(parsePane(dragged.ref))
+    state = transition(state, openCommand({ ref, gesture: { at: { _tag: 'Strip', pane: focus(state), index: 0 } }, focus: focus(state) }), context)
+    expect(tabsOf(state).map(tab => tab.id)).toEqual([dragged.id, tabsOf(state)[1]!.id])
+    expect(tabsOf(state)).toHaveLength(2)
+    expect(paneKey(parsePane(dragged.ref))).toBe('resource:mail/1')
   })
 })
 
@@ -69,7 +77,7 @@ describe('openableProps', () => {
       props.onKeyDown(press.event)
       expect(press.prevented()).toBe(true)
     }
-    expect(calls).toEqual([['doc/x', {}], ['doc/x', { background: true }], ['doc/x', { split: 'right' }], ['doc/x', { split: 'below' }]])
+    expect(calls).toEqual([['doc/x', {}], ['doc/x', { background: true }], ['doc/x', { split: 'right' }], ['doc/x', { split: 'bottom' }]])
   })
 
   it('leaves other keys alone, and plain Enter to a control that already activates on it', () => {
@@ -86,13 +94,14 @@ describe('openableProps', () => {
     expect(calls).toEqual([['doc/x', { split: 'right' }]])
   })
 
-  it('carries the ref in the one drag payload', () => {
+  it('carries the subject as the shared entity descriptor', () => {
     const data = new Map<string, string>()
     const transfer = { effectAllowed: 'none' as DataTransfer['effectAllowed'], setData: (type: string, value: string) => { data.set(type, value) } }
     const props = openableProps('agent/a', () => {})
     props.onDragStart({ dataTransfer: transfer })
     expect(props.draggable).toBe(true)
-    expect(data.get(openableDragType)).toBe('agent/a')
+    // The shared entity descriptor: an agent, by its ref.
+    expect(JSON.parse(data.get(openableDragType)!)).toEqual({ kind: 'agent', id: 'agent/a', title: 'agent/a' })
     expect(readOpenableDrag({ getData: type => data.get(type) ?? '' })).toBe('agent/a')
     expect(readOpenableDrag({ getData: () => '' })).toBeUndefined()
   })

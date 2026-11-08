@@ -26,14 +26,14 @@ export const tabPresentation = ({ tab, agents, rosterKnown, needsYou, attention,
   readonly attention: Feed<readonly Attention[]>
   readonly subjects: ReadonlyMap<string, { readonly title?: string }>
 }): EditorTabItem => {
-  const subject = parsePane(tab.pane)
+  const subject = parsePane(tab.ref)
   const base = { id: tab.id, kind: workspaceKinds.kindOf(subject).id }
   switch (subject._tag) {
     case 'Conversation':
     case 'Terminal': {
       const agent = agents.find(row => row.ref === subject.agent)
       const needsMe = needsYou.has(subject.agent)
-      // The sidebar row's own status circle and hover card: amber when the agent needs you, red when it failed.
+      // The sidebar row's own status circle, amber when the agent needs you and red when it failed, and its one card.
       const row = agent === undefined ? undefined : sidebarRow({ agent, stale: false, needsMe })
       return {
         ...base,

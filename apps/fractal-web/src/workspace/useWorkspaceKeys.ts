@@ -38,7 +38,7 @@ export const useWorkspaceKeys = ({ dispatch, getState, openInbox }: {
         if (event.key === 'PageDown') return run({ _tag: 'Cycle', by: 1 })
         if (event.key === 'PageUp') return run({ _tag: 'Cycle', by: -1 })
         if (event.key === '^' || event.key === '6') return run({ _tag: 'ActivatePrevious' })
-        if (event.key === 'w' && active !== undefined) return run({ _tag: 'Close', id: active })
+        if (event.key === 'w' && active !== undefined) return run({ _tag: 'Close', tab: active })
         if (event.key === 'h' && !typing) {
           event.preventDefault()
           return openInbox()
@@ -47,7 +47,7 @@ export const useWorkspaceKeys = ({ dispatch, getState, openInbox }: {
       if (event.altKey && !event.metaKey && !event.ctrlKey) {
         if (event.code === 'BracketRight') return run({ _tag: 'Cycle', by: 1 })
         if (event.code === 'BracketLeft') return run({ _tag: 'Cycle', by: -1 })
-        if (event.code === 'KeyW' && active !== undefined) return run(event.shiftKey ? { _tag: 'CloseOthers', id: active } : { _tag: 'Close', id: active })
+        if (event.code === 'KeyW' && active !== undefined) return run(event.shiftKey ? { _tag: 'CloseOthers', tab: active } : { _tag: 'Close', tab: active })
         if (event.code === 'KeyT' && event.shiftKey) return run({ _tag: 'ReopenClosed' })
         const digit = event.code.match(/^Digit([1-9])$/)?.[1]
         if (digit !== undefined) return run({ _tag: 'ActivateIndex', index: Number(digit) - 1 })

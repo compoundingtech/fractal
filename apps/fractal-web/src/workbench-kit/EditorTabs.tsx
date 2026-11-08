@@ -22,7 +22,7 @@ import { mergeProps, mergeRefs, useDrop, type DropItem } from 'react-aria'
 import { Tab, TabList, TabPanel, Tabs, type Key } from 'react-aria-components'
 import { HoverCardSurface, useHoverCardIntent } from '../../../../packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx'
 import { ThemePortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/ThemePortal.tsx'
-import { borderVars as border, geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { interactionVars as interaction } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 import { Menu, MenuItem, MenuPopover, MenuTrigger } from '../ui-compat/components.tsx'
 import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
@@ -146,7 +146,6 @@ const styles = stylex.create({
     borderBottomColor: tokens['--ds-gray-alpha-400'],
   },
   listBar: { alignItems: 'stretch', gap: 0 },
-  // The sidebar row's hover-card frame (MilestoneAgentRow), so the same card looks the same from a tab.
   tabBar: {
     height: '100%',
     boxSizing: 'border-box',
@@ -664,10 +663,8 @@ const TabItem = ({
 }: TabItemProps) => {
   const [hovered, setHovered] = useState(false)
   const anchor = useRef<HTMLDivElement | null>(null)
-  // The kit's canonical hover-card intent (150ms open, 300ms close, one card per document, never on touch): a tab's
-  // card is its sidebar row's card, opened the same way.
+  // The canonical hover intent, the sidebar's: 150ms to open, 300ms to close, one card at a time, none on touch.
   const card = useHoverCardIntent()
-  const hasCard = tab.hoverCard !== undefined && !touch
   const [isDragging, setDragging] = useState(false)
   const dragProps = {
     draggable: true,
@@ -716,9 +713,10 @@ const TabItem = ({
               event.preventDefault()
               event.stopPropagation()
             },
-            onMouseEnter: () => { if (hasCard) card.intend(true) },
+            onMouseEnter: () => card.intend(true),
             onMouseLeave: () => card.intend(false),
-            onMouseDown: () => card.setOpen(false),
+            onFocus: (event: React.FocusEvent<HTMLDivElement>) => { if (event.currentTarget.matches(':focus-visible')) card.intend(true) },
+            onBlur: () => card.intend(false),
             onAuxClick: (event: MouseEvent) => {
               if (event.button === 1) onClose(tab.id)
             },
@@ -792,11 +790,14 @@ const TabItem = ({
               <CloseIcon />
             )}
           </span>
-          <ThemePortal>
-            <HoverCardSurface isOpen={hasCard && card.isOpen} onOpenChange={card.setOpen} triggerRef={anchor} placement="bottom start" offset={6} label={`Details for ${tab.title}`}>
-              {tab.hoverCard}
-            </HoverCardSurface>
-          </ThemePortal>
+          {tab.hoverCard === undefined ? null : (
+            // Mounted before the card opens, so the card paints the host's theme.
+            <ThemePortal>
+              <HoverCardSurface triggerRef={anchor} isOpen={card.isOpen} onOpenChange={card.setOpen} placement="bottom start" offset={6} label={`Details for ${tab.title}`}>
+                {tab.hoverCard}
+              </HoverCardSurface>
+            </ThemePortal>
+          )}
         </>
       )}
     </Tab>

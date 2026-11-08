@@ -1,6 +1,9 @@
 import { addTabAtPath, nodeAtPath, parsePaneKey, replaceAtPath, splitGroupAtPath, type LayoutPath, type WorkbenchLayout } from './workbench-model'
 
-/** Text payload: the canonical agent resource key, including optional pane form/view. */
+/**
+ * @deprecated Retired: every drag carries the shared entity descriptor, `ENTITY_DRAG_TYPE` from `entity/entity.ts`.
+ * Nothing produces or reads this type any more; it stays exported for compatibility only.
+ */
 export const AGENT_DRAG_MIME = 'application/x-wf-fractal-agent'
 export type AgentPlacement = 'center' | 'right' | 'below' | 'left' | 'above'
 

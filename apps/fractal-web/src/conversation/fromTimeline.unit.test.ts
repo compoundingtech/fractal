@@ -35,6 +35,13 @@ describe('native delivery echoes (fixtures/clients/transcripts/omp-delivery-echo
     const entries = raw().filter(entry => entry.id !== 'timeline-entry/session-echo/aaaaaaaaaaaaaaaa-content')
     expect(transcript(entries).map(item => item.id)).toContain('timeline-entry/session-echo/native-10-content')
   })
+  it('keeps a delivery whose mail body is paired but hidden, since the delivery is the only readable copy', () => {
+    const entries = raw().map(entry => entry.id === 'timeline-entry/session-echo/aaaaaaaaaaaaaaaa-content'
+      ? { ...entry, body: { ...entry.body, blocks: [{ id: 'mail/hidden', kind: 'text', source_type: 'content', visibility: 'internal', payload: { body_ref: true } }] } } : entry)
+    const items = transcript(entries)
+    expect(items.find(item => item.id === 'timeline-entry/session-echo/aaaaaaaaaaaaaaaa-content')).toMatchObject({ _tag: 'UnknownEvent' })
+    expect(items.map(item => item.id)).toContain('timeline-entry/session-echo/native-10-content')
+  })
   it('applies the same body rule to a channel delivery with blocks', () => {
     const channel = (id: string, preview: string) => `<channel source="plugin:st3-channel:st3" from="agent/example/harbor" messageId="${id}">[st3-delivery:${id}]\n[PING from st3] ${id} from agent/example/harbor: Key audit\n\n${preview}\n</channel>`
     const native = (id: string, text: string) => ({ ...raw().find(entry => entry.id === 'timeline-entry/session-echo/native-10-content')!, id, body: { media_type: 'text/plain', text, blocks: [{ id: `${id}/text`, kind: 'text', source_type: 'content', payload: { body_ref: true } }] } })

@@ -10,7 +10,8 @@ import { Icon, type IconName } from '../composition/Icons'
 import { SidebarAgentRow } from '../sidebar/SidebarAgentRow'
 import { ResourceCardV1, ResourceHoverV1, WholeResourceMeta } from '../resources/ResourceCardV1'
 import { AgentHoverCard } from '../sidebar/DeferredRowActions.tsx'
-import { AGENT_DRAG_MIME, agentPaneKey } from '../workbench/agent-drag'
+import { agentPaneKey } from '../workbench/agent-drag'
+import { entityDragPayload } from '../entity/entity'
 import type { DetailsResource, DetailsSection, DetailsState, DetailsValue } from './model'
 import type { TraceSeries, TraceSubagent } from './trace-series'
 import { DetailsInk } from './DetailsSkeleton'
@@ -296,9 +297,14 @@ function HoverContent({ resource, now }: { resource: DetailsResource; now: numbe
   return <ResourceHoverV1 id={resource.uri} resource={resource.card} file={resource.file} />
 }
 
+/** A resource row drags its entity, as every draggable thing does: an agent by its ref, anything else by its uri. */
+const resourceDragItems = (resource: DetailsResource): Record<string, string> => entityDragPayload(resource.agent !== undefined
+  ? { kind: 'agent', id: resource.agent.ref, title: resource.card.label }
+  : { kind: 'resource', id: resource.uri, title: resource.card.label })
+
 function ResourceEntry({ resource, now, open }: { resource: DetailsResource; now: number; open: (uri: string, split: boolean) => void }) {
   const paneKey = agentPaneKey(resource.uri)
-  const getItems = React.useCallback(() => [{ [AGENT_DRAG_MIME]: paneKey, 'text/plain': paneKey }], [paneKey])
+  const getItems = React.useCallback(() => [resourceDragItems(resource)], [resource])
   const { dragProps } = useDrag({ getItems, getAllowedDropOperations: () => ['copy'] })
   const splitPress=React.useRef(false)
   const narrow = React.useContext(NarrowLayoutContext)
@@ -337,7 +343,7 @@ function resourceIcon(resource: DetailsResource): IconName {
 /** Dense rows retain aligned metadata while branch and PR identities get two lines; painted text names the row and its facts describe it. */
 function DenseRow({ resource, now, open }: { resource: DetailsResource; now: number; open: (uri: string, split: boolean) => void }) {
   const paneKey = agentPaneKey(resource.uri)
-  const getItems=React.useCallback(()=>[{[AGENT_DRAG_MIME]:paneKey,'text/plain':paneKey}],[paneKey])
+  const getItems = React.useCallback(() => [resourceDragItems(resource)], [resource])
   const {dragProps}=useDrag({getItems,getAllowedDropOperations:()=>['copy']})
   const meta = resource.terminal !== undefined ? 'terminal'
     : resource.agent !== undefined ? resource.agent.status === 'unobserved' ? undefined : resource.agent.statusLabel
