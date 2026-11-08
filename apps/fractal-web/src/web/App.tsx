@@ -7,6 +7,10 @@ import { UNSAFE_PortalProvider } from 'react-aria'
 import { I18nProvider } from 'react-aria/I18nProvider'
 import { usePortalContainerRegistration } from '../../../../packages/fractal-ui/src/assistant-ui/taste/PortalContainer.tsx'
 import { DiagnosticsBoundary } from './DiagnosticsBoundary.tsx'
+import { PluginProviders } from '../plugins/index.tsx'
+
+// Same-origin daemon reads with the browser's own credentials, as every other client read.
+const pluginFetch: typeof fetch = (input, init) => fetch(input, init)
 
 // A stored preference must never pull diagnostic modules into a production build.
 const Diagnostics = import.meta.env.DEV || import.meta.env.PERF
@@ -34,9 +38,11 @@ export const App = () => {
           </DiagnosticsBoundary>
         )}
         <DataSourceProvider source={live.source} registry={live.registry}>
-          <React.Profiler id="workbench" onRender={telemetry.onCommit}>
-            <LiveAgentWorkspace ux={telemetry.ux} onSelectConversation={live.selectConversation} build={build} />
-          </React.Profiler>
+          <PluginProviders baseUrl={window.location.origin} fetchImpl={pluginFetch}>
+            <React.Profiler id="workbench" onRender={telemetry.onCommit}>
+              <LiveAgentWorkspace ux={telemetry.ux} onSelectConversation={live.selectConversation} build={build} />
+            </React.Profiler>
+          </PluginProviders>
         </DataSourceProvider>
         <div ref={overlayHost} data-app-overlay-host="" />
       </UNSAFE_PortalProvider>
