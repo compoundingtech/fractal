@@ -184,7 +184,7 @@ export const TraceView = ({ model, controls, agentLabel, visible }: {
             return <div key={step.id} role="row" aria-rowindex={index + 2} aria-selected={isSelected} data-trace-row={step.id} data-state={state}
               data-dimmed={dim.has(step.id) || undefined} data-selected={isSelected || undefined}
               onPointerEnter={() => controls.hover(step.id)} onPointerLeave={() => controls.hover(undefined)}
-              {...stylex.props(styles.row, isSelected && styles.rowSelected, focus.hovered === step.id && styles.rowHovered, dim.has(step.id) && styles.dimmed)}>
+              {...stylex.props(styles.row, isSelected && styles.rowSelected, focus.hovered === step.id && styles.rowHovered)}>
               <div role="rowheader" style={{ width: header }} {...stylex.props(styles.rowHeader, isSelected && styles.rowHeaderSelected)}>
                 <button type="button" aria-pressed={isSelected} onClick={() => controls.select(step.id)} onPointerDown={() => { pressed.current = true }}
                   onFocus={() => { if (!pressed.current) { focused.current = step.id; controls.hover(step.id) } pressed.current = false }}
@@ -198,18 +198,18 @@ export const TraceView = ({ model, controls, agentLabel, visible }: {
               <div role="gridcell" {...stylex.props(styles.cell)}>
                 <SrOnly>{rowSummary(step, model.now)}</SrOnly>
                 {step.waits.map((wait, waitIndex) => wait.kind === 'you' ? null : <span key={`w${waitIndex}`} data-trace-wait={wait.kind} aria-hidden="true"
-                  style={{ left: x(wait.start), width: Math.max(2, x(wait.end ?? model.now) - x(wait.start)) }} {...stylex.props(styles.wait)} />)}
-                {projection === undefined ? null : <span data-trace-projected="" aria-hidden="true" style={{ left: x(projection.start), width: Math.max(3, x(projection.end) - x(projection.start)) }} {...stylex.props(styles.projected)} />}
+                  style={{ left: x(wait.start), width: Math.max(2, x(wait.end ?? model.now) - x(wait.start)) }} {...stylex.props(styles.wait, dim.has(step.id) && styles.dimmed)} />)}
+                {projection === undefined ? null : <span data-trace-projected="" aria-hidden="true" style={{ left: x(projection.start), width: Math.max(3, x(projection.end) - x(projection.start)) }} {...stylex.props(styles.projected, dim.has(step.id) && styles.dimmed)} />}
                 {bars.map((bar, barIndex) => <React.Fragment key={bar.attempt.n}>
                   <span data-trace-span={bar.attempt.outcome} aria-hidden="true" style={{ left: bar.x0, width: bar.x1 - bar.x0 }}
-                    {...stylex.props(styles.bar, bar.attempt.outcome === 'failed' && styles.barFailed, bar.attempt.outcome === 'running' && styles.barRunning, bar.attempt.outcome === 'cancelled' && styles.barCancelled)} />
+                    {...stylex.props(styles.bar, bar.attempt.outcome === 'failed' && styles.barFailed, bar.attempt.outcome === 'running' && styles.barRunning, bar.attempt.outcome === 'cancelled' && styles.barCancelled, dim.has(step.id) && styles.dimmed)} />
                   {places[barIndex] === 'none' ? null : <span data-trace-duration={places[barIndex]} aria-hidden="true"
                     style={places[barIndex] === 'after' ? { left: bar.x1 + 4 } : places[barIndex] === 'inside' ? { left: bar.x0 + 4 } : { left: bar.x0 - 4 - bar.label }}
                     {...stylex.props(styles.duration, places[barIndex] === 'inside' && styles.durationInside, places[barIndex] === 'inside' && bar.attempt.outcome === 'failed' && styles.durationOnFailed)}>{bar.text}</span>}
                 </React.Fragment>)}
                 {/* A wait on the person can fall inside an open attempt; it draws on top so the amber always shows. */}
                 {step.waits.map((wait, waitIndex) => wait.kind !== 'you' ? null : <span key={`y${waitIndex}`} data-trace-wait="you" aria-hidden="true"
-                  style={{ left: x(wait.start), width: Math.max(2, x(wait.end ?? model.now) - x(wait.start)) }} {...stylex.props(styles.wait, styles.waitYou)} />)}
+                  style={{ left: x(wait.start), width: Math.max(2, x(wait.end ?? model.now) - x(wait.start)) }} {...stylex.props(styles.wait, styles.waitYou, dim.has(step.id) && styles.dimmed)} />)}
               </div>
             </div>
           })}
