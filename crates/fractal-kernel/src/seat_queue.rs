@@ -13,6 +13,22 @@ use serde::{Deserialize, Serialize};
 
 pub const MOVED_CLAIM: &str = "agent.queue.moved";
 
+/// Compare work actors without changing persisted rows or conflating recognized actor kinds.
+pub fn work_actor_matches(candidate: Option<&str>, actor: &str) -> bool {
+    let Some(candidate) = candidate.and_then(fractal_schema::canonical_agent_actor) else {
+        return false;
+    };
+    fractal_schema::canonical_agent_actor(actor).as_deref() == Some(candidate.as_ref())
+}
+
+fn same_actor(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => work_actor_matches(Some(left), right),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum Placement {
@@ -222,7 +238,7 @@ pub fn select<'a>(agent: &str, steps: &[SeatStep<'a>], run_order: &[String]) -> 
         .iter()
         .filter(|step| {
             matches!(step.status, "claimed" | "working" | "verifying")
-                && (step.claimant == Some(agent) || step.assignee == Some(agent))
+                && (work_actor_matches(step.claimant, agent) || work_actor_matches(step.assignee, agent))
                 && !submitted_with_ready_nested_work(step, steps)
         })
         .map(|step| step.subject)
@@ -237,11 +253,11 @@ pub fn select<'a>(agent: &str, steps: &[SeatStep<'a>], run_order: &[String]) -> 
         .iter()
         .filter(|step| {
             step.status == "ready"
-                && step.assignee == Some(agent)
+                && work_actor_matches(step.assignee, agent)
                 && !reached_through_parent(step, steps)
         })
         .collect::<Vec<_>>();
-    let waits_its_turn = |step: &SeatStep<'_>| step.carried_claimant != Some(agent);
+    let waits_its_turn = |step: &SeatStep<'_>| !work_actor_matches(step.carried_claimant, agent);
     ready.sort_by(|left, right| {
         waits_its_turn(left)
             .cmp(&waits_its_turn(right))
@@ -268,8 +284,11 @@ pub fn reached_through_parent(step: &SeatStep<'_>, steps: &[SeatStep<'_>]) -> bo
 /// both have the same selector.
 pub fn nests_under(ancestor: &SeatStep<'_>, step: &SeatStep<'_>) -> bool {
     ancestor.run == step.run
-        && ancestor.assignee == step.assignee
-        && ancestor.available_to == step.available_to
+        && same_actor(ancestor.assignee, step.assignee)
+        && ancestor.available_to.len() == step.available_to.len()
+        && ancestor.available_to.iter().zip(step.available_to).all(|(left, right)| {
+            work_actor_matches(Some(left), right)
+        })
         && ancestor.step.len() < step.step.len()
         && step.step.starts_with(ancestor.step)
         && step.step.as_bytes().get(ancestor.step.len()) == Some(&b'/')
@@ -428,6 +447,40 @@ mod tests {
                 live_order(&joins),
                 "case {case}: joins {joins:?}, moves {moves:?}, live {live:?}"
             );
+        }
+    }
+
+    #[test]
+    fn mixed_actor_spellings_share_ready_held_carried_and_nested_selection() {
+        let available = vec!["node/worker".to_owned()];
+        let canonical_available = vec!["agent/node/worker".to_owned()];
+        let first = SeatStep {
+            subject: "step-run/first/build", run: "mission-run/first", step: "build",
+            status: "ready", assignee: Some("node/worker"), claimant: None,
+            available_to: &available, created_at_unix_ms: 10, carried_claimant: None,
+        };
+        let second = SeatStep {
+            subject: "step-run/second/build", run: "mission-run/second",
+            assignee: Some("agent/node/worker"), created_at_unix_ms: 20, ..first
+        };
+        let order = vec![first.run.to_owned(), second.run.to_owned()];
+        for actor in ["node/worker", "agent/node/worker"] {
+            assert_eq!(select(actor, &[second, first], &order).ready, [first.subject, second.subject]);
+            let carried = SeatStep { carried_claimant: Some("node/worker"), ..second };
+            assert_eq!(select(actor, &[first, carried], &order).next(), Some(second.subject));
+            let held = SeatStep { status: "working", claimant: Some("node/worker"), ..second };
+            assert_eq!(select(actor, &[first, held], &order).held, [second.subject]);
+        }
+        let nested = SeatStep {
+            subject: "step-run/first/build/check", step: "build/check",
+            assignee: Some("agent/node/worker"), available_to: &canonical_available, ..first
+        };
+        assert!(reached_through_parent(&nested, &[first, nested]));
+        let submitted = SeatStep { status: "verifying", ..first };
+        assert!(submitted_with_ready_nested_work(&submitted, &[submitted, nested]));
+        for other in ["daemon/node/worker", "person/test", "host/node/worker"] {
+            assert!(select(other, &[first, second], &order).ready.is_empty());
+            assert!(!nests_under(&SeatStep { assignee: Some(other), ..first }, &nested));
         }
     }
 

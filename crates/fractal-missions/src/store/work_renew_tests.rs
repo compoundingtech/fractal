@@ -1,5 +1,6 @@
 #![allow(unused_imports)]
 use super::*;
+use super::adhoc_work::AdhocWorkStore as _;
 use fractal_delivery::store::shared_missions::*;
 use fractal_delivery::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
 use fractal_store::store::work_renew_tests_shared_missions::*;
@@ -506,6 +507,538 @@ fn ready_step_with_mail(mail: usize) -> Renewal {
         vec![format!("st3-work:{}@{}@{}@worker", step.subject, step.attempt, step.readiness_epoch)],
     );
     Renewal { _directory: directory, store, subject }
+}
+
+#[test]
+fn work_claim_requires_literal_assignment_and_main_actor_spelling() {
+    for (actor, assignee) in [
+        ("node/worker", "agent/node/worker"),
+        ("agent/node/worker", "node/worker"),
+        ("node/worker", "node/worker"),
+        ("agent/node/worker", "agent/node/worker"),
+    ] {
+        let step = ready_step_with_mail(0);
+        // Model both current rows and persisted rows predating actor canonicalization.
+        step.store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-h755979e290e9 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2 WHERE subject=?1",
+            params![step.subject, assignee],
+        ).unwrap();
+        assert_eq!(
+            step.store.step_run(&step.subject).unwrap().unwrap().assigned_to.as_deref(),
+            Some(assignee),
+        );
+        let mut claim_request = request("canonical-actor-claim", None);
+        claim_request.actor = Some(actor.into());
+        if !actor.starts_with("agent/") {
+            let error = step.store.work_action(&step.subject, "claim", &claim_request).unwrap_err();
+            assert_eq!(error.code, "invalid-work-actor");
+            assert!(error.message.contains("agent/node/worker"));
+            let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+            assert_eq!(persisted.status, "ready");
+            assert!(persisted.claimant.is_none());
+            assert!(step.store.claims_for(&step.subject, Some("work.claimed")).unwrap().is_empty());
+            continue;
+        }
+        if actor != assignee {
+            let error = step.store.work_action(&step.subject, "claim", &claim_request).unwrap_err();
+            assert_eq!(error.code, "work-not-available");
+            let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+            assert_eq!(persisted.status, "ready");
+            assert!(persisted.claimant.is_none());
+            assert!(step.store.claims_for(&step.subject, Some("work.claimed")).unwrap().is_empty());
+            continue;
+        }
+        let claimed = step.store.work_action(&step.subject, "claim", &claim_request).unwrap();
+        assert_eq!(claimed.claimant.as_deref(), Some(actor));
+        assert_eq!(claimed.assigned_to.as_deref(), Some(assignee));
+        let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+        assert_eq!(persisted.claimant.as_deref(), Some(actor));
+        assert_eq!(persisted.assigned_to.as_deref(), Some(assignee));
+        let claims = step.store.claims_for(&step.subject, Some("work.claimed")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), Some(actor));
+        assert_eq!(claims[0].body["fields"]["claimant"], json!(actor));
+        // Main's physical_actor leaves slash-qualified inputs unchanged. Its literal
+        // capacity predicate sees that exact spelling, not the assignment's spelling.
+        let held: bool = step.store.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM step_runs WHERE subject=?1 AND lease_owner=?2)",
+            params![step.subject, actor], |row| row.get(0),
+        ).unwrap();
+        assert!(held);
+        let fields: BTreeMap<String, Value> =
+            serde_json::from_value(claims[0].body["fields"].clone()).unwrap();
+        let strict = fractal_schema::registry()
+            .validate_claim(&claims[0].subject, &claims[0].kind, &fields);
+        assert!(strict.is_ok(), "old validators must accept every emitted claim: {strict:?}");
+        let mut raw = fields;
+        raw.insert("claimant".into(), json!("node/worker"));
+        assert!(fractal_schema::registry()
+            .validate_claim(&claims[0].subject, &claims[0].kind, &raw).is_err(),
+            "the pre-bridge validator rejects raw claimants");
+    }
+}
+
+#[test]
+fn replicated_legacy_claimant_refuses_alias_mutations_without_replay_loss() {
+    use fractal_store::store::{classify_replicated_claim_with_registry,
+        project_claim_isolated_tx, project_mission_run_update};
+
+    let source = Store::open_memory("node").unwrap();
+    let kdl = "version 2\nmission \"legacy-replica\" state=\"ready\" { goal \"Work.\"; step \"work\" { assigned-to \"agent/node/worker\"; } }";
+    let intent = crate::graph::parse_test_intent(kdl, "node").unwrap();
+    let plan = source.mission(&intent, IntentInput { kdl: kdl.into(), source_name: None }).unwrap();
+    source.apply(&intent, &plan.subject_tokens, "legacy-replica-definition").unwrap();
+    let run = source.create_mission_run(&MissionRunRequest {
+        mission: "legacy-replica".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/test".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "legacy-replica-run".into(),
+    }).unwrap();
+    let subject = &run.steps[0].subject;
+    source.set_step_state(subject, "ready", None).unwrap();
+    let mut claim_request = request("legacy-replica-claim", None);
+    claim_request.actor = Some("agent/node/worker".into());
+    source.work_action(subject, "claim", &claim_request).unwrap();
+    // Model an independently produced historical fact, not a locally admitted write.
+    let mut replication = source.export_replication(0).unwrap();
+    let historical = replication.batches.iter_mut().flat_map(|batch| &mut batch.claims)
+        .find(|claim| claim.subject == *subject && claim.kind == "work.claimed").unwrap();
+    historical.body["fields"]["claimant"] = json!("node/worker");
+    let anchored_expiry = now_ms() + 540_000;
+    historical.body["fields"]["claim_expires_at_unix_ms"] = json!(anchored_expiry);
+    historical.id = claim_hash(
+        &historical.batch_id, &historical.subject, &historical.kind, &historical.origin,
+        historical.actor.as_deref(), &historical.body, &historical.predecessors,
+    ).unwrap();
+    let claim = historical.clone();
+    assert_eq!(claim.body["fields"]["claimant"], json!("node/worker"));
+    assert!(classify_replicated_claim_with_registry(&claim, fractal_schema::registry()).is_ok());
+    let replica = Store::open_memory("replica").unwrap();
+    assert!(replica.step_run(subject).unwrap().is_none());
+    replica.import_replication("node", &replication).unwrap();
+    let projected = replica.step_run(subject).unwrap().unwrap();
+    assert_eq!(projected.claimant.as_deref(), Some("node/worker"));
+    assert_eq!(replica.claims_for(subject, Some("work.claimed")).unwrap()[0].body, claim.body);
+    assert_eq!(projected.claim_incarnation, claim_request.incarnation);
+    assert_eq!(projected.claim_expires_at_unix_ms, Some(anchored_expiry));
+    assert!(anchored_expiry > now_ms() + 300_000, "the anchor would allow a quiet renewal");
+    let before_index = replica.index().unwrap();
+    for action in ["renew", "release", "complete"] {
+        let mut mutation = claim_request.clone();
+        mutation.idempotency_key = format!("legacy-owner-alias-{action}");
+        let error = replica.work_action(subject, action, &mutation).unwrap_err();
+        assert_eq!(error.code, "work-already-claimed", "main's literal ownership fence: {action}");
+        assert_eq!(replica.index().unwrap(), before_index);
+        let after = replica.step_run(subject).unwrap().unwrap();
+        assert_eq!(after.status, projected.status);
+        assert_eq!(after.claimant, projected.claimant);
+        assert_eq!(after.claim_incarnation, projected.claim_incarnation);
+        assert_eq!(after.claim_expires_at_unix_ms, projected.claim_expires_at_unix_ms);
+        // In particular, a refused release must not disappear or clear the lease on replay.
+        replica.rebuild_claim_projections().unwrap();
+        let replayed = replica.step_run(subject).unwrap().unwrap();
+        assert_eq!(replayed.status, projected.status, "{action}");
+        assert_eq!(replayed.claimant, projected.claimant, "{action}");
+        assert_eq!(replayed.claim_incarnation, projected.claim_incarnation, "{action}");
+        assert_eq!(replayed.claim_expires_at_unix_ms, projected.claim_expires_at_unix_ms, "{action}");
+        assert_eq!(replica.index().unwrap(), before_index);
+    }
+    let local_renewals: u64 = replica.readers.get().query_row(
+        "SELECT COUNT(*) FROM local_work_lease_renewals WHERE subject=?1",
+        [subject], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(local_renewals, 0);
+    replica.rebuild_claim_projections().unwrap();
+    assert_eq!(replica.step_run(subject).unwrap().unwrap().claimant.as_deref(), Some("node/worker"));
+    let replayed = replica.step_run(subject).unwrap().unwrap();
+    assert_eq!(replayed.status, projected.status);
+    assert_eq!(replayed.claim_incarnation, projected.claim_incarnation);
+    assert_eq!(replayed.claim_expires_at_unix_ms, projected.claim_expires_at_unix_ms);
+    let replayed_local_renewals: u64 = replica.readers.get().query_row(
+        "SELECT COUNT(*) FROM local_work_lease_renewals WHERE subject=?1",
+        [subject], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(replayed_local_renewals, 0);
+    assert_eq!(replica.claims_for(subject, Some("work.claimed")).unwrap()[0].body, claim.body);
+
+    let mut connection = replica.connection.write();
+    let transaction = connection.transaction().unwrap();
+    transaction.execute(
+        /* sqlite-large-value: allow-for-now lv-hac330e1ef0a3 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='agent/node/other', available_to='[]',
+         status='ready', lease_owner=NULL, lease_incarnation=NULL,
+         lease_expires_at_unix_ms=NULL WHERE subject=?1", [subject],
+    ).unwrap();
+    project_claim_isolated_tx(&transaction, "legacy-ownership-test", &claim, || {
+        project_mission_run_update(&transaction, &claim)
+    }).unwrap();
+    let owner: Option<String> = transaction.query_row(
+        "SELECT lease_owner FROM step_runs WHERE subject=?1", [subject], |row| row.get(0),
+    ).unwrap();
+    assert!(owner.is_none());
+    let defect: String = transaction.query_row(
+        "SELECT error_code FROM projection_health WHERE aggregate=?1",
+        [format!("legacy-ownership-test:{}", claim.id)], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(defect, "invalid-work-claimant");
+}
+
+#[test]
+fn work_claim_requires_literal_candidate_and_main_actor_spelling() {
+    for actor in ["node/worker", "agent/node/worker"] {
+        for candidate in ["node/worker", "agent/node/worker"] {
+            let step = ready_step_with_mail(0);
+            step.store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-hbbb772f82848 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=NULL, available_to=?2 WHERE subject=?1",
+                params![step.subject, json!([candidate]).to_string()],
+            ).unwrap();
+            let mut claim = request("candidate-claim", None);
+            claim.actor = Some(actor.into());
+            if !actor.starts_with("agent/") {
+                let error = step.store.work_action(&step.subject, "claim", &claim).unwrap_err();
+                assert_eq!(error.code, "invalid-work-actor");
+                let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+                assert_eq!(persisted.status, "ready");
+                assert!(persisted.claimant.is_none());
+                assert!(step.store.claims_for(&step.subject, Some("work.claimed")).unwrap().is_empty());
+                continue;
+            }
+            if actor != candidate {
+                let error = step.store.work_action(&step.subject, "claim", &claim).unwrap_err();
+                assert_eq!(error.code, "work-not-available");
+                let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+                assert_eq!(persisted.status, "ready");
+                assert!(persisted.claimant.is_none());
+                assert!(step.store.claims_for(&step.subject, Some("work.claimed")).unwrap().is_empty());
+                continue;
+            }
+            let claimed = step.store.work_action(&step.subject, "claim", &claim).unwrap();
+            assert_eq!(claimed.claimant.as_deref(), Some(actor));
+            let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+            assert_eq!(persisted.claimant.as_deref(), Some(actor));
+            assert!(persisted.assigned_to.is_none());
+            assert_eq!(persisted.available_to, vec![candidate.to_owned()]);
+            let claims = step.store.claims_for(&step.subject, Some("work.claimed")).unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].actor.as_deref(), Some(actor));
+            assert_eq!(claims[0].body["fields"]["claimant"], json!(actor));
+        }
+    }
+}
+
+#[test]
+fn work_actor_equivalence_preserves_recognized_kinds() {
+    use fractal_store::store::{work_actor_matches, work_actor_spellings_json};
+
+    assert!(work_actor_matches(Some("node/worker"), "agent/node/worker"));
+    assert!(work_actor_matches(Some("agent/node/worker"), "node/worker"));
+    for (candidate, actor) in [
+        ("person/reviewer", "agent/person/reviewer"),
+        ("daemon/scheduler", "agent/daemon/scheduler"),
+        ("agent/node/worker", "agent/agent/node/worker"),
+        ("node/worker-other", "agent/node/worker"),
+    ] {
+        assert!(!work_actor_matches(Some(candidate), actor));
+        let spellings: Vec<String> = serde_json::from_str(&work_actor_spellings_json(actor)).unwrap();
+        assert!(!spellings.iter().any(|spelling| spelling == candidate));
+    }
+    for invalid in ["", "worker", "node/worker name"] {
+        assert!(!work_actor_matches(Some(invalid), invalid));
+        assert_eq!(work_actor_spellings_json(invalid), "[]");
+    }
+}
+
+#[test]
+fn work_reads_match_legacy_and_canonical_actor_spellings() {
+    for actor in ["node/worker", "agent/node/worker"] {
+        for stored in ["node/worker", "agent/node/worker"] {
+            for field in ["assignee", "available_to", "lease_owner"] {
+                let step = ready_step_with_mail(0);
+                let snapshot = now_ms();
+                let assignee = if field == "assignee" { stored } else { "agent/node/other" };
+                let available = if field == "available_to" { json!([stored]) } else { json!([]) };
+                let owner = (field == "lease_owner").then_some(stored);
+                let status = if owner.is_some() { "claimed" } else { "ready" };
+                step.store.connection.write().execute(
+                    /* sqlite-large-value: allow-for-now lv-hd60f12cbb0cd owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2, available_to=?3, lease_owner=?4,
+                     status=?5, lease_incarnation=?6, lease_expires_at_unix_ms=?7 WHERE subject=?1",
+                    params![step.subject, assignee, available.to_string(), owner, status,
+                        request("read", None).incarnation, (snapshot + 600_000).to_string()],
+                ).unwrap();
+                let selected = BTreeSet::from([step.subject.clone()]);
+                let lists = [
+                    step.store.work_at_snapshot(Some(actor), false, snapshot).unwrap(),
+                    step.store.client_work_at_snapshot(Some(actor), false, snapshot).unwrap(),
+                    step.store.work_at_snapshot_selected(
+                        Some(actor), false, snapshot, true, false, false, Some(&selected),
+                    ).unwrap(),
+                    step.store.work_history_at_snapshot(Some(actor), snapshot).unwrap(),
+                    step.store.client_work_history_at_snapshot(Some(actor), snapshot).unwrap(),
+                    step.store.client_work_history_page_at_snapshot(
+                        Some(actor), snapshot, 0, 10,
+                    ).unwrap().0,
+                ];
+                for list in lists {
+                    assert_eq!(list.len(), 1, "{actor} / {stored} / {field}");
+                    assert_eq!(list[0].subject, step.subject);
+                }
+                assert_eq!(
+                    step.store.client_work_item_at_snapshot(&step.subject, Some(actor), snapshot)
+                        .unwrap().unwrap().subject,
+                    step.subject,
+                );
+                assert!(step.store.work_at_snapshot(
+                    Some("agent/node/unrelated"), false, snapshot,
+                ).unwrap().is_empty());
+                assert!(step.store.client_work_item_at_snapshot(
+                    &step.subject, Some("agent/node/unrelated"), snapshot,
+                ).unwrap().is_none());
+                let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+                assert_eq!(persisted.assigned_to.as_deref(), Some(assignee));
+                assert_eq!(persisted.claimant.as_deref(), owner);
+                assert_eq!(persisted.available_to, if field == "available_to" {
+                    vec![stored.to_owned()]
+                } else { Vec::<String>::new() });
+            }
+        }
+    }
+}
+
+#[test]
+fn work_renewal_matches_legacy_and_canonical_holders() {
+    for actor in ["node/worker", "agent/node/worker"] {
+        for holder in ["node/worker", "agent/node/worker"] {
+            let step = ready_step_with_mail(0);
+            step.store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-hd38e77dd6432 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='agent/node/worker' WHERE subject=?1",
+                [&step.subject],
+            ).unwrap();
+            let mut claim = request("holder-claim", None);
+            claim.actor = Some("agent/node/worker".into());
+            step.store.work_action(&step.subject, "claim", &claim).unwrap();
+            step.store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h2102123ed04c owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_owner=?2 WHERE subject=?1",
+                params![step.subject, holder],
+            ).unwrap();
+            for status in ["claimed", "working", "verifying", "blocked"] {
+                step.store.connection.write().execute(
+                    /* sqlite-large-value: allow-for-now lv-h28928374ca14 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status=?2 WHERE subject=?1",
+                    params![step.subject, status],
+                ).unwrap();
+                let held = step.store.work_for_renewal(actor).unwrap();
+                assert_eq!(held.len(), 1, "{actor} / {holder} / {status}");
+                assert_eq!(held[0].subject, step.subject);
+            }
+            let mut renew = claim.clone();
+            renew.idempotency_key = "holder-renew".into();
+            renew.actor = Some(actor.into());
+            if !actor.starts_with("agent/") {
+                let before = step.store.claims_for(&step.subject, None).unwrap().len();
+                let error = step.store.work_action(&step.subject, "renew", &renew).unwrap_err();
+                assert_eq!(error.code, "invalid-work-actor");
+                assert_eq!(step.store.claims_for(&step.subject, None).unwrap().len(), before);
+                continue;
+            }
+            if actor != holder {
+                let error = step.store.work_action(&step.subject, "renew", &renew).unwrap_err();
+                assert_eq!(error.code, "work-already-claimed");
+                continue;
+            }
+            let renewed = step.store.work_action(&step.subject, "renew", &renew).unwrap();
+            // Main's quiet renewal writes only the operational lease, not a new claim
+            // or a replacement claimant spelling in the projected step.
+            assert_eq!(renewed.claimant.as_deref(), Some(holder));
+            assert!(renewed.claim_expires_at_unix_ms.unwrap() > now_ms());
+        }
+    }
+}
+
+#[test]
+fn work_mutations_require_literal_legacy_or_canonical_holders() {
+    for actor in ["node/worker", "agent/node/worker"] {
+        for holder in ["node/worker", "agent/node/worker"] {
+            for (action, expected_status) in [("renew", "claimed"), ("release", "ready"), ("complete", "verifying")] {
+                let step = ready_step_with_mail(0);
+                step.store.connection.write().execute(
+                    /* sqlite-large-value: allow-for-now lv-hd700e0550a21 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2 WHERE subject=?1",
+                    params![step.subject, "agent/node/worker"],
+                ).unwrap();
+                let mut claim = request("holder-action-claim", None);
+                claim.actor = Some("agent/node/worker".into());
+                step.store.work_action(&step.subject, "claim", &claim).unwrap();
+                step.store.connection.write().execute(
+                    /* sqlite-large-value: allow-for-now lv-ha0cd354483f3 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_owner=?2 WHERE subject=?1",
+                    params![step.subject, holder],
+                ).unwrap();
+                let mut finish = claim.clone();
+                finish.idempotency_key = format!("holder-{action}");
+                finish.actor = Some(actor.into());
+                if !actor.starts_with("agent/") {
+                    let before = step.store.claims_for(&step.subject, None).unwrap().len();
+                    let error = step.store.work_action(&step.subject, action, &finish).unwrap_err();
+                    assert_eq!(error.code, "invalid-work-actor");
+                    assert_eq!(step.store.claims_for(&step.subject, None).unwrap().len(), before);
+                    assert_eq!(step.store.step_run(&step.subject).unwrap().unwrap().claimant.as_deref(), Some(holder));
+                    continue;
+                }
+                if actor != holder {
+                    let before_index = step.store.index().unwrap();
+                    let before = step.store.step_run(&step.subject).unwrap().unwrap();
+                    let error = step.store.work_action(&step.subject, action, &finish).unwrap_err();
+                    assert_eq!(error.code, "work-already-claimed", "{action}");
+                    assert_eq!(step.store.index().unwrap(), before_index);
+                    let after = step.store.step_run(&step.subject).unwrap().unwrap();
+                    assert_eq!(after.status, before.status);
+                    assert_eq!(after.claimant, before.claimant);
+                    assert_eq!(after.claim_incarnation, before.claim_incarnation);
+                    assert_eq!(after.claim_expires_at_unix_ms, before.claim_expires_at_unix_ms);
+                    assert_eq!(after.worker_reported, before.worker_reported);
+                    continue;
+                }
+                let finished = step.store.work_action(&step.subject, action, &finish).unwrap();
+                assert_eq!(finished.status, expected_status, "{actor} / {holder} / {action}");
+                // A quiet renewal retains the projected claimant; release/complete clear it.
+                let expected_holder = (action == "renew").then_some(holder);
+                assert_eq!(finished.claimant.as_deref(), expected_holder);
+                if action == "renew" {
+                    assert_eq!(finished.claim_incarnation, claim.incarnation);
+                    assert!(finished.claim_expires_at_unix_ms.unwrap() > now_ms());
+                    let local_holder: String = step.store.connection.write().query_row(
+                        "SELECT lease_owner FROM local_work_lease_renewals WHERE subject=?1",
+                        [&step.subject], |row| row.get(0),
+                    ).unwrap();
+                    assert_eq!(local_holder, actor);
+                } else {
+                    assert!(finished.claim_incarnation.is_none());
+                    assert!(finished.claim_expires_at_unix_ms.is_none());
+                }
+                assert_eq!(finished.worker_reported, action == "complete");
+                let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+                assert_eq!(persisted.status, expected_status);
+                assert_eq!(persisted.claimant.as_deref(), expected_holder);
+                assert_eq!(persisted.assigned_to.as_deref(), Some("agent/node/worker"));
+            }
+        }
+    }
+}
+
+#[test]
+fn independent_work_capacity_uses_literal_ownership_for_admission() {
+    for actor in ["node/worker", "agent/node/worker"] {
+        for holder in ["node/worker", "agent/node/worker"] {
+            for status in ["claimed", "working", "verifying", "blocked"] {
+                let step = ready_step_with_mail(0);
+                step.store.connection.write().execute(
+                    /* sqlite-large-value: allow-for-now lv-h48c2f2d4b497 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='agent/node/worker' WHERE subject=?1",
+                    [&step.subject],
+                ).unwrap();
+                let mut claim = request("capacity-first", None);
+                claim.actor = Some("agent/node/worker".into());
+                step.store.work_action(&step.subject, "claim", &claim).unwrap();
+                step.store.connection.write().execute(
+                    /* sqlite-large-value: allow-for-now lv-h7d7fcc2328ee owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET lease_owner=?2, status=?3 WHERE subject=?1",
+                    params![step.subject, holder, status],
+                ).unwrap();
+                let declaration = "version 2\nagent \"node/worker\" { workspace \"/tmp\"; command \"true\"; restart \"never\"; }\nmission \"capacity-second\" state=\"ready\" { goal \"Another task.\"; step \"work\" { assigned-to \"agent/node/worker\"; } }";
+                let intent = crate::graph::parse_test_intent(declaration, "node").unwrap();
+                let plan = step.store.mission(&intent, IntentInput {
+                    kdl: declaration.into(), source_name: None,
+                }).unwrap();
+                step.store.apply(&intent, &plan.subject_tokens, "capacity-agent").unwrap();
+                let started = step.store.start_work(&crate::model::WorkStartRequest {
+                    actor: "agent/node/worker".into(),
+                    title: "A second independent task".into(),
+                    idempotency_key: "capacity-spontaneous-start".into(),
+                });
+                if holder == "agent/node/worker" {
+                    assert_eq!(started.unwrap_err().code, "agent-capacity", "{actor} / {holder} / {status}");
+                } else {
+                    let started = started.unwrap();
+                    assert!(started.claimant.is_none());
+                    step.store.set_step_state(&started.subject, "cancelled", None).unwrap();
+                }
+                let second = step.store.create_mission_run(&MissionRunRequest {
+                    mission: "capacity-second".into(), revision: None, workspace: "/tmp".into(),
+                    requester: Some("person/test".into()), mode: Some("run".into()),
+                    inputs: BTreeMap::new(), idempotency_key: "capacity-second-run".into(),
+                }).unwrap();
+                let second = &second.steps[0].subject;
+                step.store.set_step_state(second, "ready", None).unwrap();
+                step.store.connection.write().execute(
+                    /* sqlite-large-value: allow-for-now lv-h78e96a5b9d99 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee='agent/node/worker' WHERE subject=?1",
+                    [second],
+                ).unwrap();
+                claim.idempotency_key = "capacity-second-claim".into();
+                claim.actor = Some(actor.into());
+                let result = step.store.work_action(second, "claim", &claim);
+                if !actor.starts_with("agent/") || actor == holder {
+                    let expected = if actor.starts_with("agent/") { "agent-capacity" } else { "invalid-work-actor" };
+                    assert_eq!(result.unwrap_err().code, expected, "{actor} / {holder} / {status}");
+                    let refused = step.store.step_run(second).unwrap().unwrap();
+                    assert_eq!(refused.status, "ready");
+                    assert!(refused.claimant.is_none());
+                    assert!(step.store.claims_for(second, Some("work.claimed")).unwrap().is_empty());
+                } else {
+                    assert_eq!(result.unwrap().claimant.as_deref(), Some(actor));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn bare_work_actors_claim_renew_release_and_complete_with_main_normalization() {
+    for bare_actor in ["node.worker", "worker"] {
+        for (action, expected_status) in [("release", "ready"), ("complete", "verifying")] {
+            let step = ready_step_with_mail(0);
+            let main_actor = smallclaims::store::normalize_actor(bare_actor, "agent");
+            step.store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h34894d4454a8 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2 WHERE subject=?1",
+                params![step.subject, main_actor],
+            ).unwrap();
+            let mut mutation = request("bare-claim", None);
+            mutation.actor = Some(bare_actor.into());
+            let claimed = step.store.work_action(&step.subject, "claim", &mutation).unwrap();
+            assert_eq!(claimed.status, "claimed");
+            assert_eq!(claimed.claimant.as_deref(), Some(main_actor.as_str()));
+            assert_eq!(claimed.claim_incarnation, mutation.incarnation);
+            let claims = step.store.claims_for(&step.subject, Some("work.claimed")).unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].actor.as_deref(), Some(main_actor.as_str()));
+            assert_eq!(claims[0].body["fields"]["claimant"], json!(main_actor));
+
+            mutation.idempotency_key = "bare-renew".into();
+            let renewed = step.store.work_action(&step.subject, "renew", &mutation).unwrap();
+            assert_eq!(renewed.status, "claimed");
+            assert_eq!(renewed.claimant.as_deref(), Some(main_actor.as_str()));
+            assert_eq!(renewed.claim_incarnation, mutation.incarnation);
+            assert!(renewed.claim_expires_at_unix_ms.unwrap() > now_ms());
+
+            mutation.idempotency_key = format!("bare-{action}");
+            let finished = step.store.work_action(&step.subject, action, &mutation).unwrap();
+            assert_eq!(finished.status, expected_status);
+            assert!(finished.claimant.is_none());
+            assert!(finished.claim_incarnation.is_none());
+            assert!(finished.claim_expires_at_unix_ms.is_none());
+            assert_eq!(finished.worker_reported, action == "complete");
+            let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+            assert_eq!(persisted.status, expected_status);
+            assert!(persisted.claimant.is_none());
+        }
+    }
+}
+
+#[test]
+fn work_claim_rejects_malformed_actor_without_claiming_work() {
+    let step = ready_step_with_mail(0);
+    for (index, actor) in ["", "agent/", "/worker", "node/worker name"].iter().enumerate() {
+        let mut claim_request = request(&format!("malformed-actor-claim-{index}"), None);
+        claim_request.actor = Some((*actor).into());
+        let error = step.store.work_action(&step.subject, "claim", &claim_request).unwrap_err();
+        assert_eq!(error.code, "invalid-work-actor", "{actor:?}");
+        let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+        assert_eq!(persisted.status, "ready");
+        assert!(persisted.claimant.is_none());
+        assert!(step.store.claims_for(&step.subject, Some("work.claimed")).unwrap().is_empty());
+    }
 }
 
 #[test]
