@@ -353,3 +353,14 @@ test('policy fourth pass: long paths, image alt formatting, quoted closes, task 
     assert.ok(milliseconds < 200, `${milliseconds}ms`)
   }
 })
+
+test('a link calls its hooks before any early return, and an unsafe href never reaches the preview', async () => {
+  const source = await readFile(new URL('./Markdown.tsx', import.meta.url), 'utf8')
+  const body = source.slice(source.indexOf('function MarkdownLink('), source.indexOf('\nfunction ', source.indexOf('function MarkdownLink(') + 1))
+  assert.ok(body.lastIndexOf('React.useContext(') < body.indexOf('return '), 'MarkdownLink must call every hook before it can return')
+  const { MarkdownLinkPreviewContext } = await server.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
+  const seen = []
+  const html = renderToStaticMarkup(h(MarkdownLinkPreviewContext.Provider, { value: href => { seen.push(href); return undefined } }, h(Markdown, { text: markdownBlock('[bad](javascript:alert(1)) and [good](https://example.test/a)') })))
+  assert.deepEqual(seen, ['https://example.test/a'])
+  assert.match(html, /bad/)
+})
