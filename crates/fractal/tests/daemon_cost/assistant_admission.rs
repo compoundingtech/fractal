@@ -1,5 +1,5 @@
 //! Opt-in, real HTTP/Unix daemon measurement (not a router oneshot or mocked daemon).
-//! Run this same test source on 98e550cb and on PR3-B, sequentially on dev5:
+//! Run this same test source on the named revisions, sequentially on the same host:
 //! ```sh
 //! ST_ADMISSION_VARIANT=baseline cargo test --release -p fractal --test integration daemon_cost::assistant_admission::authenticated_get_during_pairing -- --exact --nocapture --test-threads=1
 //! ST_ADMISSION_VARIANT=indexed cargo test --release -p fractal --test integration daemon_cost::assistant_admission::authenticated_get_during_pairing -- --exact --nocapture --test-threads=1
@@ -11,8 +11,9 @@
 //! ST_ADMISSION_HISTORY (default 10000) is expired grants PER principal; ST_ADMISSION_SAMPLES
 //! (default 200) is measured GET/completion pairs PER read mode. Setup and proof creation are
 //! outside timing. Each pair starts behind a barrier, with no sleeps, polling, retries or timers.
-//! ST_ADMISSION_REPORT optionally saves the complete JSON report. Run on dev5; hardware is
-//! observed from uname/lscpu in the report, not inferred from an environment label.
+//! ST_ADMISSION_FOREIGN_ACTIVE optionally adds verified same-profile active foreign grants
+//! (default 0; use 3 for the provenance-check scenario). ST_ADMISSION_REPORT optionally
+//! saves the complete JSON report. Hardware is observed from uname/lscpu, not inferred.
 //! The index DDL timing is a synthetic startup migration probe on the populated disposable
 //! real store, not total daemon startup or cold-disk startup. Latencies use the real daemon's
 //! bound sockets, bearer middleware, grant lookup, projection and durable approval consumption.
@@ -27,8 +28,8 @@ use ring::{rand::SystemRandom, signature::{Ed25519KeyPair, KeyPair as _}};
 use serde_json::{Value, json};
 use tokio::sync::Barrier;
 
-const OWNER: &str = "person/admission-bench";
-const NODE: &str = "admission-bench";
+const OWNER: &str = "person/bench-operator";
+const NODE: &str = "benchmark-member";
 const GRANTED: &str = "custom.client.assistant.v1.granted";
 const INDEX: &str = "claims_assistant_v1_principal_index";
 const CREATE_INDEX: &str = "CREATE INDEX claims_assistant_v1_principal_index ON claims(kind,COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'))";
@@ -117,6 +118,55 @@ fn p95(samples: &mut [f64]) -> f64 {
     samples[(samples.len() * 95).div_ceil(100) - 1]
 }
 
+// Real signed membership and replication, outside measured requests. Merely
+// copying origin text would not exercise the authentication provenance check.
+fn foreign_same_profile(store: &Store, anchor: Arc<smallclaims::fleet::MemberKey>, template: &Value, count: usize) {
+    let fleet = super::super::daemon_bench::FLEET;
+    store.pin_fleet_anchor(anchor.public()).unwrap();
+    store.set_member_key(Some(anchor.clone())).unwrap();
+    store.admit_fleet_anchor(fleet, anchor.public(), "listening").unwrap();
+    let peer = Store::open_memory("benchmark-peer").unwrap();
+    peer.bind_fleet(fleet).unwrap();
+    let key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    peer.pin_fleet_anchor(anchor.public()).unwrap();
+    peer.set_member_key(Some(key.clone())).unwrap();
+    store.append_claim(&ClaimInput {
+        subject:"host/benchmark-peer".into(), kind:"fleet.member-admitted".into(),
+        actor:Some(OWNER.into()), fields:serde_json::from_value(json!({
+            "fleet_id":fleet,"member_key":key.public(),"via":"invite","mode":"listening"
+        })).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    let sync = |from: &Store, to: &Store| {
+        let exchange = from.export_replication_exchange_answering(
+            fleet, &to.replication_inventory().unwrap(), &to.replication_signature_requests().unwrap(),
+        ).unwrap();
+        to.receive_replication_exchange(from.origin(), fleet, &exchange).unwrap();
+        to.validate_replication_backlog().unwrap();
+        to.project_replication_backlog().unwrap();
+    };
+    sync(store, &peer);
+    let mut ids = Vec::new();
+    for row in 0..count {
+        let id = format!("{:024x}", row + 1);
+        let mut fields = template.clone();
+        fields["grant_id"] = json!(id);
+        fields["session_actor"] = json!(format!("assistant/chatgpt/session/{id}"));
+        fields["expires_at_unix_ms"] = json!(u64::MAX);
+        fields["credential_hash"] = json!(hex::encode(ring::digest::digest(&ring::digest::SHA256, id.as_bytes()).as_ref()));
+        let grant = peer.append_claim(&ClaimInput {
+            subject:format!("custom/client/assistant-v1-{id}"), kind:GRANTED.into(),
+            actor:Some(OWNER.into()), fields:serde_json::from_value(fields).unwrap(),
+            evidence:vec![], expected_subject:None, idempotency_key:None,
+        }).unwrap();
+        ids.push(grant.id);
+    }
+    sync(&peer, store);
+    for id in ids {
+        assert!(store.claim_has_authenticated_member_writer(&id).unwrap(),
+            "the foreign-grant scenario must exercise verified provenance");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn authenticated_get_during_pairing() {
     let Ok(variant) = std::env::var("ST_ADMISSION_VARIANT") else { return };
@@ -125,11 +175,14 @@ async fn authenticated_get_during_pairing() {
     let indexed = variant == "indexed";
     let history = number("ST_ADMISSION_HISTORY", 10_000);
     let samples = number("ST_ADMISSION_SAMPLES", 200);
+    let foreign_active: usize = std::env::var("ST_ADMISSION_FOREIGN_ACTIVE")
+        .map_or(0, |value| value.parse().expect("nonnegative foreign grant count"));
     let root = tempfile::tempdir().unwrap();
     let database = root.path().join("admission.sqlite");
     let store = Arc::new(Store::open(&database, NODE).unwrap());
     store.bind_fleet(super::super::daemon_bench::FLEET).unwrap();
-    store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
+    let node_key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+    store.set_node_key(node_key.clone()).unwrap();
     let state = AppState {
         seat_admission:Default::default(), owning_person:Some(OWNER.into()), store:store.clone(),
         notify:Arc::new(tokio::sync::Notify::new()), event_notify:tokio::sync::watch::channel(0).0,
@@ -186,6 +239,9 @@ async fn authenticated_get_during_pairing() {
     // authorize a request. Grant history is deliberately nonempty for BOTH principals.
     let template_subject = format!("custom/client/assistant-v1-{}", sessions[0].1["grant"]["id"].as_str().unwrap().trim_start_matches("assistant-grant/"));
     let template = store.claims_for_subject_kind_at(&template_subject, GRANTED, None, true, 1).unwrap().claims.pop().unwrap();
+    if foreign_active > 0 {
+        foreign_same_profile(&store, node_key, &template.body["fields"], foreign_active);
+    }
     let fixture_store = store.clone();
     tokio::task::spawn_blocking(move || {
         for principal in ["assistant/chatgpt", "assistant/mcp"] {
@@ -278,7 +334,8 @@ async fn authenticated_get_during_pairing() {
     let final_rows: u64 = final_connection.query_row("SELECT count(*) FROM claims", [], |r| r.get(0)).unwrap();
     let report = json!({"variant":variant,"baseline_revision":"98e550cb75", "hardware_uname":hardware("uname", &["-a"]),
         "hardware_lscpu":hardware("lscpu", &["-J"]),"hardware_hostname":hardware("hostname", &[]),
-        "expected_host":"dev5, AMD Ryzen 9 9955HX, 16 cores / 32 threads (verify observed hardware)",
+        "host_description":"Observed local benchmark host; no prescribed hardware identity",
+        "fixture_person_ids":[OWNER],"verified_foreign_same_profile_active_grants":foreign_active,
         "history_grants_per_principal":history,"initial_total_claim_rows":total_rows,"initial_granted_rows_by_principal":principal_rows,
         "final_total_claim_rows":final_rows,"admission_query":query,
         "explain_without_index":before,"explain_with_index":after,"synthetic_startup_index_build_ms":build_ms,
@@ -386,7 +443,8 @@ fn synthetic_large_store_index_build() {
         "explain_without_index":before,"explain_with_index":after,
         "hardware_uname":hardware("uname", &["-a"]),
         "hardware_hostname":hardware("hostname", &[]),"hardware_lscpu":hardware("lscpu", &["-J"]),
-        "expected_host":"dev5, AMD Ryzen 9 9955HX, 16 cores / 32 threads (verify observed hardware)",
+        "host_description":"Observed local benchmark host; no prescribed hardware identity",
+        "fixture_person_ids":[OWNER],
     });
     println!("ADMISSION_INDEX_BUILD {}", serde_json::to_string_pretty(&report).unwrap());
     if let Some(path) = std::env::var_os("ST_ADMISSION_INDEX_REPORT") {
