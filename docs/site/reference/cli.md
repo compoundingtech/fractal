@@ -47,6 +47,63 @@ still take precedence.
 
 For small independent authorized work, use `fractal work start`. Claim before executing assigned work, record progress, and complete with evidence. Use `fractal work revise` for an explicit new generation of an existing run.
 
+### Bulk desired declarations
+
+```sh
+fractal subject desired --json --all
+fractal subject desired --json agent/garden/worker mission/garden
+fractal subject desired --json --all --kind agent
+```
+
+The existing noun is singular: `fractal subject desired --json [--all | SUBJECT...] [--kind K]`.
+No subjects (with or without `--all`) selects all declarations. Named subjects are exact IDs,
+not fuzzy matches; `--all` cannot be combined with names. `--kind` filters either selection
+by the literal desired kind: stopped and terminally retired agents are `stop`, not
+`agent`; unfiltered all includes their retained declarations.
+The server accepts at most 1,000 supplied names and returns the typed error
+`desired-batch-limit` above that limit.
+
+The CLI follows `GET /v1/desired?subject=ID&subject=ID&kind=K&limit=N&cursor=TOKEN`,
+with repeated URL-encoded `subject` parameters; omitting them selects all declarations.
+`kind` and `cursor` are optional. The default and maximum page limit are both 1,000;
+zero or a larger limit returns HTTP 422 `desired-page-limit`.
+Each API page is `{"items":[...],"next_cursor":null,"store_index":123}`, with a
+string `next_cursor` when another page follows and a `u64` store index. Each item
+flattens `DesiredSubject` (`subject`, `kind`, `desired`, `member`, and ownership fields)
+alongside `desired_token` (a selected declaration claim ID or `null`) and optional
+`actual` (an extensible JSON summary). This is not a client-v0 envelope.
+
+An opaque cursor binds the store origin, pinned read cut, selection filters, page limit
+and last subject. Continuations must keep the same subjects, kind and limit, and the
+store must still be at that cut; a changed cut returns typed `desired-cursor-expired`.
+There is no historical snapshot or pagination cache, silent restart or automatic retry.
+The CLI uses limit 1,000 throughout, collects every page and prints one final JSON array
+only after all reads succeed. Cursor invalidation fails the command without partial stdout.
+
+Each page uses one store read snapshot. This GET uses the existing desired-read
+`read.projections` scope, deadline and read admission, and remains available during fleet
+drain. It does not reduce status or cold-fold cards.
+Published mission definitions are included as synthesized `DesiredSubject` entries:
+`desired` is the canonical published `MissionSpec`; optional `member` and ownership
+fields are absent, including for retained retired definitions.
+Their `desired_token` is `null`, matching mission cards: publication claim IDs are
+not selected desired-table tokens. Compare mission declarations using
+`actual.revision` and `actual.digest`, not a substituted publication claim ID.
+
+Agent `actual` currently includes only the maintained published declaration `revision`
+when available. Non-agents include the published `revision`, declaration `digest`,
+and maintained `state` when available (missions: `draft`, `ready`, `retired`), never
+the body. Runtime and card state fields are intentionally absent. For bulk roster
+status, use `fractal agents ls --all --json`, whose status is not card state. See
+[the operational query contract](../../st3/operational-queries.md#bulk-desired-declarations)
+for exact omissions and the SHA-256 digest's canonical input.
+
+This automation read deliberately does not reduce status or fold cards. It is not a
+replacement for `fractal subject show SUBJECT` or `fractal agents show AGENT`: fetch
+the card for fields absent from the cheap summary. These raw `/v1/desired` routes are
+outside the generated client-v0 contract; no generated client or OpenAPI artifact
+is needed for this command.
+
 ## Operating a machine
 
 | Command | Purpose |

@@ -1019,6 +1019,7 @@ const PROBES: &[Probe] = &[
     ),
     get("GET /v1/status", "/v1/status?subject={seat}"),
     get("GET /v1/desired/{*subject}", "/v1/desired/{seat}"),
+    get("GET /v1/desired", "/v1/desired?subject={seat}"),
     get(
         "GET /v1/resource-references/{*subject}",
         "/v1/resource-references/resource/bench/cost",
