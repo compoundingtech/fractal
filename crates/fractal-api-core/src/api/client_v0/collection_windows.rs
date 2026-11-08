@@ -12,7 +12,7 @@ const STORES: usize = 64;
 pub const WINDOWS: usize = 64;
 pub const SESSION_WINDOWS: usize = 16;
 const KIND_LIMIT: usize = 10_000;
-pub const COLLECTIONS: [&str; 15] = [
+pub const COLLECTIONS: [&str; 17] = [
     "missions",
     "attention",
     "agents",
@@ -23,6 +23,7 @@ pub const COLLECTIONS: [&str; 15] = [
     "summary",
     "summary-missions",
     "clients", "usage", "machines", "devices", "sessions", "terminals",
+    "threads", "thread-timeline",
 ];
 
 #[derive(Default)]
