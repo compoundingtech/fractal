@@ -120,6 +120,26 @@ fn demo_environment_excludes_both_tui_configuration_spellings() {
 }
 
 #[test]
+fn assistant_pairing_principal_defaults_to_chatgpt_and_accepts_mcp() {
+    for (flag, expected) in [
+        (None, AssistantPrincipal::Chatgpt),
+        (Some("assistant/chatgpt"), AssistantPrincipal::Chatgpt),
+        (Some("assistant/mcp"), AssistantPrincipal::Mcp),
+    ] {
+        let cli = Cli::try_parse_from(
+            ["fractal", "devices", "--as", "person/robin", "pair", "--assistant"]
+                .into_iter().chain(flag),
+        ).unwrap();
+        assert!(matches!(cli.command, Command::Devices(DevicesArgs {
+            command: Some(DevicesCommand::Pair { assistant: Some(principal), .. }), ..
+        }) if principal == expected));
+    }
+    assert!(Cli::try_parse_from([
+        "fractal", "devices", "--as", "person/robin", "pair", "--assistant", "assistant/forged",
+    ]).is_err());
+}
+
+#[test]
 fn github_watch_line_shows_throttling_without_a_new_wire_state() {
     let view = serde_json::json!({
         "thread": "acme/garden#12", "state": "active",
@@ -362,6 +382,21 @@ fn slo_list_groups_objectives_and_budgets_and_explain_prints_the_plain_words() {
     assert!(explained.contains("LEFT     60% of the allowance"));
     assert!(explained.contains("RESETS   1970-01-02 00:00 UTC"));
     assert!(explained.ends_with("An allowance that resets.\n"));
+}
+
+#[test]
+fn slo_list_and_explanation_show_observation_source_host_and_unsupported() {
+    let row = json!({"id":"claude/example/5h","kind":"budget","status":"unsupported",
+        "current":"unsupported","target":"100% allowance","window":"5-hour",
+        "source":"omp-usage","host":"example-host","remaining_percent":null,
+        "explain":"The provider does not support this window."});
+    let list = render_slo_list(std::slice::from_ref(&row));
+    assert!(list.contains("SOURCE"));
+    assert!(list.contains("HOST"));
+    assert!(list.contains("unsupported"));
+    assert!(list.contains("omp-usage"));
+    assert!(list.contains("example-host"));
+    assert!(render_slo_explanation(&row).contains("SOURCE   omp-usage · example-host"));
 }
 
 #[test]

@@ -2877,3 +2877,104 @@ agent "example.owner/remote" { workspace "/tmp"; harness "claude" {} }
     }
     provider.shutdown().unwrap();
 }
+
+/// The child exports an isolated cached snapshot through the real HTTP/JSON exporter.
+/// The parent checks the receiver's decoded OTLP, not merely local instrument counters.
+#[cfg(target_os = "linux")]
+#[test]
+fn population_gauges_export_exact_otlp_attribute_sets() {
+    const CHILD: &str = "ST_POPULATION_EXPORT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        use fractal_daemon::{SeatsStoreCore as _, SubagentsStore as _};
+        use opentelemetry::metrics::MeterProvider as _;
+        use opentelemetry_otlp::WithExportConfig as _;
+        use std::sync::{Arc, RwLock};
+        let store = fractal_daemon::store::Store::open_memory("example").unwrap();
+        let intent = fractal_daemon::parse_intent(
+            "version 2\nagent \"example.worker\" { workspace \"/tmp\"; harness \"claude\" {} }\n",
+            "example",
+        ).unwrap();
+        store.apply_internal(&intent, "population-export").unwrap();
+        let append = |kind: &str, fields: Value| {
+            store.append_claim(&fractal_daemon::model::ClaimInput {
+                subject: "agent/example.worker".into(), kind: kind.into(),
+                actor: None, fields: serde_json::from_value(fields).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        };
+        append("runtime.observed", serde_json::json!({
+            "status":"running", "runtime_id":"wrapper", "incarnation_id":"one"
+        }));
+        append("harness.observed", serde_json::json!({
+            "state":"working", "driver":"claude", "incarnation_id":"one"
+        }));
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        append("subagent.appeared", serde_json::json!({
+            "subagent_id":"child", "driver":"omp", "incarnation_id":"one",
+            "session_id":"native", "lease_expires_at_unix_ms":now + 60_000
+        }));
+        assert_eq!(store.running_subagents(now).unwrap().len(), 1);
+        let snapshot = fractal_daemon::api::population_metrics::summarize(&store, &[]).unwrap();
+        let exporter = opentelemetry_otlp::MetricExporter::builder().with_http()
+            .with_protocol(opentelemetry_otlp::Protocol::HttpJson).build().unwrap();
+        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_resource(opentelemetry_sdk::Resource::builder_empty()
+                .with_service_name("st-daemon")
+                .with_attribute(opentelemetry::KeyValue::new("host.name", "example-host")).build())
+            .with_periodic_exporter(exporter).build();
+        fractal_daemon::api::population_metrics::register_metrics(&provider.meter("st3"), Arc::new(RwLock::new(snapshot)));
+        provider.force_flush().unwrap();
+        provider.shutdown().unwrap();
+        return;
+    }
+    let Some(collector) = otelite("population_gauges_export_exact_otlp_attribute_sets") else { return; };
+    let root = tempfile::tempdir().unwrap();
+    let output = isolated_command(&collector, root.path())
+        .args(["run", "--out"]).arg(root.path().join("capture"))
+        .args(["--protocol", "http/json", "--"])
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", "otel_export::population_gauges_export_exact_otlp_attribute_sets", "--nocapture"])
+        .env(CHILD, "1").output().unwrap();
+    assert!(output.status.success(), "population exporter child failed: {output:?}");
+    let requests = capture_requests(&root.path().join("capture/metrics.ndjson"));
+    let mut population = std::collections::BTreeSet::new();
+    let mut attention = std::collections::BTreeMap::new();
+    let mut freshness = false;
+    let value = |point: &Value| point["asInt"].as_u64()
+        .or_else(|| point["asInt"].as_str().and_then(|value| value.parse().ok()))
+        .expect("OTLP u64 gauge value");
+    for request in &requests {
+        for point in metric_points(request, "st.agents") {
+            let keys = point["attributes"].as_array().unwrap().iter()
+                .map(|attribute| attribute["key"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(keys, std::collections::BTreeSet::from([
+                "st.agent.driver", "st.agent.kind", "st.agent.repo",
+                "st.agent.state", "st.agent.reason", "st.agent.has_work"]));
+            assert_eq!(value(point), 1);
+            assert_eq!(string_attribute(point, "st.agent.repo"), Some("unattributed"));
+            assert_eq!(string_attribute(point, "st.agent.reason"), Some("unattributed"));
+            assert_eq!(bool_attribute(point, "st.agent.has_work"), Some(false));
+            population.insert((string_attribute(point, "st.agent.driver").unwrap().to_owned(),
+                string_attribute(point, "st.agent.kind").unwrap().to_owned(),
+                string_attribute(point, "st.agent.state").unwrap().to_owned()));
+        }
+        for point in metric_points(request, "st.attention.open") {
+            assert_eq!(point["attributes"].as_array().unwrap().len(), 1);
+            attention.insert(string_attribute(point, "st.attention.kind").unwrap().to_owned(),
+                value(point));
+        }
+        for point in metric_points(request, "st.agents.refresh.last_success") {
+            assert!(point["attributes"].as_array().is_none_or(Vec::is_empty));
+            assert!(value(point) > 0);
+            freshness = true;
+        }
+    }
+    assert_eq!(population, std::collections::BTreeSet::from([
+        ("claude".into(), "unattributed".into(), "working".into()),
+        ("omp".into(), "subagent".into(), "unknown".into())]));
+    assert_eq!(attention.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>(),
+        std::collections::BTreeSet::from(["person-step", "human-gate", "launch-approval", "unread-message",
+            "agent-request", "revision-approval", "harness-login", "harness-prompt", "fault", "unattributed"]));
+    assert!(attention.values().all(|count| *count == 0));
+    assert!(freshness);
+}

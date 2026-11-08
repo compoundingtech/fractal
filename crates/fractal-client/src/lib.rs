@@ -1343,6 +1343,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::ProjectionDetailInvalidSource
         | ErrorCode::AttentionMigrated
         | ErrorCode::IssuerRequired
+        | ErrorCode::PairingOriginRequired
         | ErrorCode::SuspendAuthoredSessionSelection
         | ErrorCode::LegacyActionReceiptUntrusted
         | ErrorCode::RuntimeNotLocal

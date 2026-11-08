@@ -22,6 +22,7 @@ fractal-resource-providers = { path = "../fractal-resource-providers", optional 
 fractal-resource-wasip2 = { path = "../fractal-resource-wasip2", optional = true, features = ["runtime"] }
 fractal-wire = { path = "../fractal-wire" }
 fractal-schema = { path = "../fractal-schema" }
+fractal-runtime = { path = "../fractal-runtime" }
 tempfile = "3"
 toml = "0.9"
 tracing = "0.1"

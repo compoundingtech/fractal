@@ -17,6 +17,8 @@ Use these documents for implementation details:
 - [Seat rollout](owned-seat-cutover.md) defines idle cutover, strict native-session continuity and source status.
 - [Free mode](../site/reference/configuration.md#free-mode): within a fleet, an agent may do anything the person who
   runs the fleet may do, as itself, until principals and grants land.
+- [Principals and grants](principals-and-grants.md) defines the #867 acceptance matrix, delegated authority,
+  read-only service identity, explicit deferrals and release gates.
 - [Person delegation](person-delegation.md): record a person's prior answer or instruction as
   the agent, with the person's allowed list, exact episode, and quoted evidence.
 - [External assistants](external-assistants.md): separate assistant principals, owner-issued expiring grants, and proof-bearing read boundaries.

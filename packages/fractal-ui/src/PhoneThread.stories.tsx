@@ -7,7 +7,8 @@ import { scenarioArgTypes } from '@fractal/scenarios/storybook'
 import { scenarioSections } from './scenario-transcript.story-harness'
 import { ThreadHeader } from './assistant-ui/composition/Shell'
 import { NarrowLayoutContext } from './assistant-ui/composition/NarrowLayout'
-import { Transcript, transcriptMountedWindow } from './assistant-ui/composition/Transcript'
+import { Transcript } from './assistant-ui/composition/Transcript'
+import { transcriptMountedWindow } from './assistant-ui/composition/transcript-window'
 import { EmbraceComposer } from './assistant-ui/EmbraceComposer'
 import { EmbraceRuntimeProvider } from './assistant-ui/EmbraceRuntime'
 import { baselineTheme } from './assistant-ui/neutral-theme'
@@ -70,8 +71,7 @@ export const Narrow: Story = { tags: ['critical'], play: async ({ canvasElement 
   // 16px field text: iOS Safari zooms the page when a smaller field takes focus.
   await expect(getComputedStyle(field).fontSize).toBe('16px')
   const header = canvas.getByTestId('thread-header')
-  await expect(canvas.queryByTestId('run-progress')).toBeNull()
-  await expect(canvas.getAllByTestId('transcript-header').some(element => element.textContent?.includes('Running'))).toBe(true)
+  await expect(canvas.getAllByTestId('transcript-header').some(element => element.textContent?.includes('Running'))).toBe(false)
   for (const name of ['Expand sidebar', 'Agent details']) {
     const rect = within(header).getByRole('button', { name }).getBoundingClientRect()
     await expect(Math.min(rect.width, rect.height)).toBeGreaterThanOrEqual(44)
@@ -100,7 +100,7 @@ export const NarrowLight: Story = { ...Narrow, args: { scheme: 'light', narrow: 
 export const Desktop: Story = { tags: ['critical'], args: { narrow: false }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   await expect(canvasElement.querySelector('[data-testid="kit-composer"]')).not.toHaveAttribute('data-narrow')
-  await expect(canvas.getAllByTestId('run-progress').length).toBeGreaterThan(0)
+  await expect(canvas.getAllByTestId('transcript-header').some(element => element.textContent?.includes('Running'))).toBe(false)
   await expect(getComputedStyle(canvas.getByRole('textbox', { name: 'Message' })).fontSize).toBe('14px')
   const send = canvas.getByRole('button', { name: 'Send' }).getBoundingClientRect()
   await expect({ width: send.width, height: send.height }).toEqual({ width: 32, height: 32 })

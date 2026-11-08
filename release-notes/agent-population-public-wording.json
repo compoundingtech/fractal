@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Clarify population contract wording so prose is not mistaken for person identifiers by the public repository check.",
+  "replay": {"status": "none", "detail": "Documentation wording only; no claim replay changes."},
+  "schema": {"status": "none", "detail": "No database schema changes."},
+  "rules": {"status": "none", "detail": "No checkpoint or coordination rule changes."},
+  "compatibility": {"status": "none", "detail": "No contract semantics, runtime or protocol changes; contract revision remains r2."},
+  "downtime": {"status": "none", "detail": "No runtime changes or interruption."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Documentation wording only; rollback does not affect runtime state."}
+}

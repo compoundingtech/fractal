@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Work log rows lead with their toggle, align Running with durations and share the Working spinner; the conversation header drops its run status and progress sweep",
+  "replay": { "status": "none", "detail": "Web UI presentation only; no replay or rebuild." },
+  "schema": { "status": "none", "detail": "No storage changes." },
+  "rules": { "status": "none", "detail": "No rules changes." },
+  "compatibility": { "status": "none", "detail": "No runtime, wire or client changes. The kit adds a LiveRing export. The transcript window constants move to their own module and stay exported from @fractal/ui/assistant-ui, and the durationColumn token is retained." },
+  "downtime": { "status": "none", "detail": "No restart-time work." },
+  "manual": { "status": "none", "detail": "No operator action required." },
+  "recovery": { "status": "none", "detail": "Reverting restores the previous row layout and header status." }
+}

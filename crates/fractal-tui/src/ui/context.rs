@@ -304,6 +304,7 @@ impl Ui {
 
     fn hit_menu(&self, hit: &Hit) -> Option<Menu> {
         let label = match hit {
+            Hit::SidebarToggle => "Show or hide sidebar [Ctrl+S]",
             Hit::Connection => "Show connection",
             Hit::Home => "Open Inbox [Ctrl+H]",
             Hit::Usage => "Show or hide Usage",
