@@ -198,6 +198,7 @@ async fn revisioned_agents_cached_bytes_revalidate_grant_expiry_revocation_and_s
         let pairing = |expires: u64, scopes: Vec<&str>| ClaimInput {
             subject: "custom/client/stream-test".into(), kind: "custom.client.pairing-completed".into(),
             actor: Some("person/ada".into()), fields: serde_json::from_value(json!({
+                "pairing_operation_version":1,
                 "session_actor":"client/stream-test","person_id":"person/ada",
                 "credential_hash":"invented-test-credential","expires_at_unix_ms":expires,
                 "scopes":scopes,

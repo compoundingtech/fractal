@@ -26,6 +26,7 @@ fn complete(state: &AppState, expires_at: u64) -> ClaimRecord {
             kind: "custom.client.pairing-completed".into(),
             actor: Some(PERSON.into()),
             fields: serde_json::from_value(json!({
+                "pairing_operation_version":1,
                 "session_actor": "person/avery/session/phone", "person_id": PERSON,
                 "credential_hash": "test-not-a-secret", "expires_at_unix_ms": expires_at,
                 "scopes": ["read.projections"],

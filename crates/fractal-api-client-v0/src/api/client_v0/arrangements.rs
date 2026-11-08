@@ -806,6 +806,7 @@ mod tests {
             expected_subject:None, idempotency_key:None,
         }).unwrap();
         let paired = append("custom.client.pairing-completed", json!({
+            "pairing_operation_version":1,
             "session_actor":"client/device-arrangement-test", "person_id":"person/ada",
             "credential_hash":"test-not-a-secret", "expires_at_unix_ms":u64::MAX,
             "scopes":["read.projections","read.arrangements"]
