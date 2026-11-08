@@ -12708,6 +12708,37 @@ async fn writer_binding_pairing_uses_authority_actor_for_claims_and_senders() {
 }
 
 #[tokio::test]
+async fn writer_binding_pairing_records_retain_dedicated_writer_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "writer-binding-reserved-records";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.work"]);
+    let app = router(state.clone());
+    for bound in [false, true] {
+        let actor = if bound { "agent/own" } else { "person/example" };
+        for (subject, kind) in [
+            ("custom/client/writer-binding-reserved", "custom.client.pairing-completed"),
+            ("custom/client/pairing-writer-binding", "custom.example.recorded"),
+        ] {
+            let before = state.store.index().unwrap();
+            let (status, response) = writer_binding_request(
+                app.clone(), "/v1/claims", bound.then_some(actor),
+                (!bound).then_some(credential),
+                json!({"subject":subject, "kind":kind, "actor":actor,
+                    "fields":{"credential_hash":client_v0::credential_digest("reserved-record"),
+                        "session_actor":"person/example/session/other",
+                        "person_id":"person/example", "device_id":"device/other",
+                        "scopes":["control.work"], "expires_at_unix_ms":u64::MAX,
+                        "pairing_operation_version":1}}),
+            ).await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{bound}/{kind}: {response}");
+            assert_eq!(response["code"], "claim-write-forbidden");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+}
+
+#[tokio::test]
 async fn writer_binding_legacy_attention_operations_require_attention_scope() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
