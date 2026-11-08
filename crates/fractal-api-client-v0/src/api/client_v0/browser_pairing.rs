@@ -65,7 +65,7 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
         title: format!("Pair browser: {}", body.device_label),
         reason: format!("Approve only after comparing this display code with the browser you are using. Device labels and login text are supplied by the requester, not proof of browser identity.\n\nDevice: {}\nTailnet login: {}\nDisplay code: {display}\nRequest: {id}\n\nGrants web read access and message sending for 30 days; revocable in Devices.", body.device_label, body.tailnet_login),
         step: None, new_run: None, incarnation: None, legacy_request: None,
-        idempotency_key: format!("browser-pairing:{id}"), deadline_ms: Some(300_000), default_answer: Some("deny".into()),
+        idempotency_key: format!("browser-pairing:{id}"), deadline_ms: Some(300_000), default_answer: None,
         request: Some(json!({"version":1,"type":"decision",
             "question":format!("Pair {} ({display})?", body.device_label),
             "why_person":"Only you can compare this display code with the browser you are using. The requester supplies the device label and login text.",
