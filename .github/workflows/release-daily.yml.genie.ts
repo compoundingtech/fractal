@@ -62,7 +62,7 @@ export default githubWorkflow(auditCaches({
   jobs: {
     build: {
       name: 'build-exact-release-candidate',
-      if: "github.event_name == 'workflow_dispatch' && inputs.mode == 'candidate' && inputs.sha != '' && inputs.run == '' && !inputs.recover_draft && github.ref == 'refs/heads/main'",
+      if: "github.event_name == 'workflow_dispatch' && inputs.mode == 'candidate' && inputs.sha != '' && inputs.run == '' && github.ref == 'refs/heads/main' && inputs.recover_draft != true",
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 180,
       concurrency: {
