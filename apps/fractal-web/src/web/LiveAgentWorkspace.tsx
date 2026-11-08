@@ -5,7 +5,6 @@ import { agentSeatChildren, sidebarMissionChild, sidebarRow, sidebarSubagentRow,
 import { subagentThreadFocus } from './subagentThreadFocus.ts'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
 import { DeclarationDialog } from './DeclarationDialog.tsx'
-import { AgentActions } from './AgentActions.tsx'
 import type * as SidebarMissionsListModule from '../missions/SidebarMissionsList.tsx'
 import { alertTabMarkers } from './alertsTab.ts'
 import { missionTabMarkersAtom } from './missionsTab.ts'
@@ -535,7 +534,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // Details, Changes and Resources are the panel's tabs; which one shows is part of the one app-wide setting.
   const dockedInspector = !narrow && panel.open && openedTool === undefined && current !== '' ? current : undefined
   const dockLabel = panel.tab === 'resources' ? 'Resize Resources' : panel.tab === 'changes' ? 'Resize Changes' : 'Resize Details'
-  const agentHeaderActions = current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} onViewDeclaration={() => openRef(`declaration/${current}`)} /></>
+  const agentHeaderActions = current === '' ? undefined : <><ConversationHeaderActions key={current} agentRef={current} onViewDeclaration={() => openRef(`declaration/${current}`)} /></>
   // Below the breakpoint Details is a sheet over the thread, never an inline panel beside it.
   const narrowDetailsOpen = narrow && current !== '' && (sheetOpen || openedTool !== undefined)
   const closeDetails = () => { setSheetOpen(false); setOpenedTool(undefined) }
@@ -619,7 +618,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
               {narrow ? <NarrowSheet label="Agent details" isOpen={narrowDetailsOpen} onOpenChange={(isOpen) => { if (!isOpen) closeDetails() }} width={400}>
                 {current === '' ? null : openedTool !== undefined ? toolDetail(openedTool, undefined) : (
                   <React.Suspense fallback={<SystemNotice kind="loading" title="Loading agent details" />}>
-                    <AgentDetailsPanel key={current} agentRef={current} width="fill" scheme={scheme} onClose={closeDetails} onOpen={(uri) => { closeDetails(); openDetailsUri(uri) }} />
+                    <AgentDetailsPanel key={current} agentRef={current} width="fill" scheme={scheme} view={panel.tab} onViewChange={view => setPanel({ tab: view })} onClose={closeDetails} onOpen={(uri) => { closeDetails(); openDetailsUri(uri) }} />
                   </React.Suspense>
                 )}
               </NarrowSheet> : null}

@@ -146,5 +146,3 @@ const styles = stylex.create({
   choices: { display: 'flex', justifyContent: 'flex-end', gap: s.md },
 })
 
-/** Rendered by the workspace until its call site goes with the tab shell; the actions live in the overflow menu now. */
-export const AgentActions = (_props: { readonly agent: Pick<Agent, 'ref' | 'name' | 'state' | 'activity'> }): React.ReactNode => null

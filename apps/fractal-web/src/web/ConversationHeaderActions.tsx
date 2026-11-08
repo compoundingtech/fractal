@@ -1,6 +1,5 @@
 import * as React from 'react'
 import { useAgent } from '../data/react.tsx'
-import type { UxTelemetry } from '../telemetry/ux.ts'
 import { ConversationOverflowMenu } from './AgentActions.tsx'
 import { DeclarationDialog } from './DeclarationDialog.tsx'
 
@@ -11,9 +10,6 @@ import { DeclarationDialog } from './DeclarationDialog.tsx'
 export const ConversationHeaderActions = ({ agentRef, onViewDeclaration }: {
   readonly agentRef: string
   readonly onViewDeclaration?: (() => void) | undefined
-  /** Still passed by the workspace; both go with its call site when the tab shell lands. */
-  readonly ux?: UxTelemetry
-  readonly resourcesDock?: { readonly host: HTMLElement | null; readonly open: boolean; readonly onOpenChange: (open: boolean) => void }
 }) => {
   const feed = useAgent(agentRef)
   const [declarationOpen, setDeclarationOpen] = React.useState(false)

@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Tab, TabList, TabPanel, Tabs } from 'react-aria-components'
-import { RegistryContext, useAtom } from '@effect/atom-react'
+import { RegistryContext } from '@effect/atom-react'
 import { DetailsPane, DetailsWhy } from '@fractal/ui/assistant-ui'
 import type { DetailsLayoutIntent, DetailsVariants } from '@fractal/ui/assistant-ui'
 import { SystemNotice } from '@fractal/ui/assistant-ui/shell'
@@ -22,7 +22,7 @@ import type { OpenOperation, UxTelemetry } from '../telemetry/ux.ts'
 import { AgentResourcesView, retainedResourceAtoms, useResourcesCount } from './AgentResourcesPanel.tsx'
 import { capturedChanges } from './capturedChanges.ts'
 import { ChangesInspector } from './ChangesInspector.tsx'
-import { inspectorViewPreference } from './conversationPreferences.ts'
+import { AgentMissions } from './AgentMissions.tsx'
 import { markStart } from './perfMarks.ts'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 
@@ -32,8 +32,11 @@ export const liveDetailsVariants: DetailsVariants = {
 }
 export type InspectorView = 'details' | 'changes' | 'resources'
 
-/** Sections shown with the agent's resources rather than among its facts. */
-const notFacts: ReadonlySet<string> = new Set(['Reviews', 'Declared bindings'])
+/**
+ * Sections shown elsewhere: Reviews and Declared bindings with the agent's resources, Missions as the shared mission
+ * rows. The queue read behind the reported Missions section keeps its own loading and Try again until it settles.
+ */
+const notFacts: ReadonlySet<string> = new Set(['Reviews', 'Declared bindings', 'Missions'])
 
 export interface AgentDetailsPanelProps {
   readonly agentRef: string
@@ -62,8 +65,9 @@ export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants =
   const narrow = React.useContext(NarrowLayoutContext)
   const source = useDataSource()
   const registry = React.useContext(RegistryContext)
-  const [lastView, setLastView] = useAtom(inspectorViewPreference)
-  const selected = view ?? lastView
+  // Hosts own the tab through the app-wide right panel setting; a host that does not keeps it for this mount.
+  const [localView, setLocalView] = React.useState<InspectorView>('details')
+  const selected = view ?? localView
   const [intent, setIntent] = React.useState<DetailsLayoutIntent>({ hiddenSections: [] })
   // Details portals its sync status and Visible sections into this row, as it does into a kit pane header.
   const [accessoryHost, setAccessoryHost] = React.useState<HTMLDivElement | null>(null)
@@ -72,7 +76,7 @@ export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants =
   const changesCount = useChangesCount(agentRef)
   const select = (next: InspectorView) => {
     if (next === selected) return
-    setLastView(next)
+    setLocalView(next)
     onViewChange?.(next)
     if (next !== 'resources') onSelectedViewChange?.(next)
     opening?.operation?.cancel()
@@ -138,7 +142,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen,
   const narrow = React.useContext(NarrowLayoutContext)
   const native = useNativeDetails({ agentRef })
   const protectedSections = useDetailsSections({ agentRef })
-  const suppliedSections = native.sections.filter(section => !notFacts.has(section.title)).map(section => protectedSections.find(contribution => contribution.title === section.title) ?? section)
+  const suppliedSections = native.sections.filter(section => !notFacts.has(section.title) || (section.title === 'Missions' && (section.failure !== undefined || section.pending === true))).map(section => protectedSections.find(contribution => contribution.title === section.title) ?? section)
   const now = useNowSnapshot()
   const [requestedAt] = React.useState(now)
   const gateway = useGatewaySync()
@@ -186,6 +190,7 @@ function NativeDetailsPane({ agentRef, variants, intent, onIntentChange, onOpen,
       <span data-details-accounting-summary {...stylex.props(styles.noteSummary)}>{data.accountingNote.summary}</span>
       <DetailsWhy explains="Agent and total spend" reasons={data.accountingNote.reasons} />
     </div>}
+    <AgentMissions agentRef={agentRef} onOpen={ref => onOpen(ref, false)} />
     <DetailsPane overview={data.overview} sections={suppliedSections} trace={data.trace} now={now}
       variants={variants} state={native.state} intent={intent} onIntentChange={onIntentChange}
       onOpen={onOpen} onRetry={native.onRetry} syncStatus={status}

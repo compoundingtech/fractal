@@ -6,7 +6,6 @@ import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as Atom from 'effect/reactivity/Atom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ResourceObservation, decodeUnknownSync } from '@fractal/client/schema'
-import { inspectorViewPreference } from './conversationPreferences.ts'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { gatewayResources } from '../resources/agent/source.ts'
@@ -188,17 +187,12 @@ describe('the Resources tab', () => {
     await act(async () => rows()[1]!.dispatchEvent(new MouseEvent('click', { bubbles: true, metaKey: true })))
     expect(onOpen).toHaveBeenLastCalledWith('resource/custom/board/3', true)
   })
-  it('remembers the last tab across panels when the host does not own it', async () => {
-    const uncontrolled = (ref: string) => act(async () => root.render(<DataSourceProvider source={withItems} registry={registry}><AgentDetailsPanel key={ref} agentRef={ref} width="dock" scheme="dark" onClose={() => undefined} onOpen={onOpen} /></DataSourceProvider>))
-    registry.set(inspectorViewPreference, 'details')
-    await uncontrolled('agent/one')
+  it('keeps its own tab for the mount when the host does not own it', async () => {
+    await act(async () => root.render(<DataSourceProvider source={withItems} registry={registry}><AgentDetailsPanel agentRef="agent/one" width="dock" scheme="dark" onClose={() => undefined} onOpen={onOpen} /></DataSourceProvider>))
     await settle()
-    const tab = document.querySelector<HTMLElement>('[role="tab"][aria-label^="Resources"]')!
-    await act(async () => tab.click())
-    expect(registry.get(inspectorViewPreference)).toBe('resources')
-    await uncontrolled('agent/two')
-    await settle()
+    expect(document.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('Details')
+    await act(async () => document.querySelector<HTMLElement>('[role="tab"][aria-label^="Resources"]')!.click())
     expect(document.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toBe('Resources')
-    registry.set(inspectorViewPreference, 'details')
   })
+
 })
