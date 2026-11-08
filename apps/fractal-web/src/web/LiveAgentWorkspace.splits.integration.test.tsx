@@ -187,7 +187,7 @@ it('opens a sidebar row in a split to the right on Cmd or Ctrl-click', async () 
   expect(window.location.pathname).toBe('/w/agent/b')
 })
 
-it('keeps one top bar unsplit, and once split gives every pane its own controls but only the first the sidebar\'s', async () => {
+it('keeps one top bar unsplit, and once split gives every pane its own controls while app-wide notices stay in the global area', async () => {
   await mount()
   expect(host.querySelectorAll('[data-testid="thread-header"]')).toHaveLength(1)
   await act(async () => row('agent/b').click())
@@ -195,8 +195,10 @@ it('keeps one top bar unsplit, and once split gives every pane its own controls 
   const bars = [...host.querySelectorAll<HTMLElement>('[data-testid="thread-header"]')]
   expect(bars).toHaveLength(2)
   for (const bar of bars) expect(bar.querySelector('button[aria-label="Toggle right panel"]')).not.toBeNull()
-  expect(host.querySelectorAll('[data-testid="global-bands"]')).toHaveLength(1)
-  expect(bars[0]!.querySelector('[data-testid="global-bands"]') ?? bars[0]!.parentElement!.querySelector('[data-testid="global-bands"]')).not.toBeNull()
+  // The connection and Usage live in the sidebar's footer, never in whichever pane is top-left.
+  const sidebar = host.querySelector<HTMLElement>('aside[aria-label="Agents"]')!
+  expect(sidebar.querySelector(':scope > footer [data-usage-section]')).not.toBeNull()
+  for (const pane of host.querySelectorAll('[data-pane]')) expect(pane.querySelector('[data-usage-section], [data-connection-line], [data-testid="alert-flash"]')).toBeNull()
 })
 
 const pointer = async (target: EventTarget, type: string, init: { clientX?: number; clientY?: number } = {}) => {

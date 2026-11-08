@@ -72,7 +72,7 @@ const trackFocusNavigation = (document: Document): FocusNavigation => {
   }, true)
   return navigation
 }
-export type TooltipProps = { label: string; shortcut?: string; placement?: 'top' | 'bottom'; delay?: number; isOpen?: boolean; onOpenChange?: (isOpen: boolean) => void; navigationFocusOnly?: boolean; children: React.ReactNode; style?: stylex.StyleXStyles }
+export type TooltipProps = { label: string; shortcut?: string; placement?: 'top' | 'bottom' | 'right'; delay?: number; isOpen?: boolean; onOpenChange?: (isOpen: boolean) => void; navigationFocusOnly?: boolean; children: React.ReactNode; style?: stylex.StyleXStyles }
 /** `isOpen` lets a trigger hold its tooltip open to acknowledge an action, e.g. "Copied". */
 export function Tooltip({ label, shortcut, placement = 'bottom', delay = 350, isOpen: controlledOpen, onOpenChange, navigationFocusOnly = false, children, style }: TooltipProps) {
   const id = React.useId()

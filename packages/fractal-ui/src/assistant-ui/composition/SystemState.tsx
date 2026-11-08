@@ -1,6 +1,7 @@
 // Loading, empty, offline, stale and error outside the conversation. Explicit-fact presentation only.
-// One amber band under the thread header owns the gateway connection; panes keep quiet one-line rows,
-// never repeat the connection, and only a pane's own error turns red.
+// One line in the sidebar's footer owns the gateway connection (`ConnectionLine`), with a band in the focused pane
+// once it is gone (`ConnectionStatus`); panes keep quiet one-line rows, never repeat the connection, and only a
+// pane's own error turns red.
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
@@ -23,7 +24,7 @@ export interface SystemNoticeProps extends DataAttributes {
   readonly detail?: string
   /** `pane` fills a pane body or side panel; `rail` sits in the sidebar. */
   readonly scope?: 'pane' | 'rail'
-  /** The state comes from the shared gateway connection, which the connection banner owns: the row names only what it still shows. */
+  /** The state comes from the shared gateway connection, which the connection line owns: the row names only what it still shows. */
   readonly connection?: boolean
   readonly onRetry?: () => void
 }
@@ -59,11 +60,12 @@ export interface ConnectionStatusProps {
   readonly onReconnect?: () => void
 }
 
-const connectionTitle: Readonly<Record<Exclude<ConnectionState, 'live'>, string>> = { offline: 'You are offline', reconnecting: 'Reconnecting', stale: 'Live updates paused', failed: 'Connection lost' }
+/** Each lost state's headline, for every surface that names the connection: the line, the band and a rail control. */
+export const connectionTitle: Readonly<Record<Exclude<ConnectionState, 'live'>, string>> = { offline: 'You are offline', reconnecting: 'Reconnecting', stale: 'Live updates paused', failed: 'Connection lost' }
 const connectionDetail = 'Showing what was last observed'
 
 /**
- * The shared gateway connection as one band under the thread header; nothing while live. The live region holds only
+ * The shared gateway connection as one band at the top of a pane; nothing while live. The live region holds only
  * the state's headline, so a screen reader hears one announcement per transition, never the ticking countdown; the
  * detail sits beside it, readable but not announced.
  */
@@ -76,6 +78,23 @@ export function ConnectionStatus({ state, text, onReconnect }: ConnectionStatusP
       <strong role="status" {...stylex.props(styles.bannerTitle)}>{connectionTitle[state]}</strong>
       <span aria-hidden="true" {...stylex.props(styles.toneMuted)}>·</span>
       <span data-connection-detail {...stylex.props(styles.bannerDetail)}>{detail}</span>
+    </span>
+    {onReconnect !== undefined && <Button onPress={onReconnect} {...stylex.props(styles.outlineButton, styles.focusable)}>Reconnect</Button>}
+  </div>
+}
+
+/**
+ * The same connection as one compact line for the sidebar footer, the app's global area; nothing while live. The
+ * headline is the live region and the detail sits under it, readable but not announced, so a countdown never chatters.
+ */
+export function ConnectionLine({ state, text, onReconnect }: ConnectionStatusProps) {
+  if (state === 'live') return null
+  const detail = (state === 'reconnecting' || state === 'failed') && text !== undefined ? text : connectionDetail
+  return <div data-connection-line={state} {...stylex.props(styles.line, state === 'failed' ? styles.lineFailed : styles.lineWarning)}>
+    <span {...stylex.props(styles.bannerIcon, styles.lineIcon, state === 'failed' ? styles.toneError : styles.toneWarning)}><Icon name="alert" size={14} /></span>
+    <span {...stylex.props(styles.lineWords)}>
+      <strong role="status" {...stylex.props(styles.bannerTitle)}>{connectionTitle[state]}</strong>
+      <span data-connection-detail {...stylex.props(styles.lineDetail)}>{detail}</span>
     </span>
     {onReconnect !== undefined && <Button onPress={onReconnect} {...stylex.props(styles.outlineButton, styles.focusable)}>Reconnect</Button>}
   </div>
@@ -99,4 +118,11 @@ const styles = stylex.create({
   bannerIcon: { display: 'inline-flex', flexShrink: 0 },
   bannerTitle: { flexShrink: 0, fontWeight: t.weightMedium },
   bannerDetail: { minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', color: ink.fgSoft },
+  // A tinted card inside the sidebar's footer: the band's tint over the sidebar surface, inset from its edges.
+  line: { display: 'flex', alignItems: 'center', gap: s.sm, marginInline: s.md, marginBlock: s.xs, paddingInline: s.md, paddingBlock: s.sm, boxSizing: 'border-box', borderRadius: r.md, borderWidth: g.hairline, borderStyle: 'solid', color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
+  lineWarning: { borderColor: `color-mix(in srgb, ${tone.attention} 24%, transparent)`, backgroundColor: `color-mix(in srgb, ${tone.attention} 10%, ${surface.sidebar})` },
+  lineFailed: { borderColor: `color-mix(in srgb, ${tone.dangerFg} 24%, transparent)`, backgroundColor: `color-mix(in srgb, ${tone.dangerFg} 10%, ${surface.sidebar})` },
+  lineIcon: { alignSelf: 'flex-start', paddingBlockStart: s.xs2 },
+  lineWords: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0 },
+  lineDetail: { minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', color: ink.fgSoft, fontSize: t.denseSize },
 })
