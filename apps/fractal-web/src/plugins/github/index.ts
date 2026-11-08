@@ -6,13 +6,14 @@
  */
 import * as React from 'react'
 
-import { claimsKind, parseGithubUrl, parseSubjectRef, type GithubKind, type GithubRef } from './refs.ts'
+import { claimsKind, parseGithubUrl, parseSubjectRef, refOf, type GithubKind, type GithubRef } from './refs.ts'
 
 export { githubSubjectRef, parseGithubUrl, parseSubjectRef, refOf, type GithubRef } from './refs.ts'
 export { gatewayGithubReader, GithubReaderProvider, sharedGithubReader, type GithubReader } from './data.ts'
 
 const views = () => import('./views.tsx')
 const LazyHoverLink = React.lazy(() => views().then(module => ({ default: module.GithubHoverLink })))
+const LazyEntityCard = React.lazy(() => views().then(module => ({ default: module.GithubEntityCard })))
 const LazySurface = React.lazy(() => views().then(module => ({ default: module.GithubSurface })))
 
 /**
@@ -23,6 +24,17 @@ export const githubLinkPreview = (href: string, link: React.ReactElement): React
   const target = parseGithubUrl(href)
   if (target === undefined) return undefined
   return React.createElement(React.Suspense, { fallback: link }, React.createElement(LazyHoverLink, { target, children: link }))
+}
+
+/**
+ * For the kit's `EntityCardSource`: a resource whose id is a GitHub subject ref resolves to the GitHub card, so a
+ * resource row, a tab and a mention of the same PR show one card. Other entities are left to outer sources.
+ */
+export const githubEntityCard = (entity: { readonly kind: string; readonly id: string }): React.ReactNode | undefined => {
+  if (entity.kind !== 'resource') return undefined
+  const target = parseSubjectRef(entity.id) ?? parseGithubUrl(entity.id)
+  if (target === undefined) return undefined
+  return React.createElement(React.Suspense, { fallback: null }, React.createElement(LazyEntityCard, { subjectRef: refOf(target), target }))
 }
 
 /** The tab surface for a claimed subject ref, with the host's `onOpen`. */
