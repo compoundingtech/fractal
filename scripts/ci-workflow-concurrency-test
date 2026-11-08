@@ -105,6 +105,9 @@ for event, ref in [('push', 'refs/tags/v1.2.3'), ('workflow_dispatch', 'refs/hea
     assert first[0] != second[0] and not first[1] and not second[1]
 assert policy('release-fractal.yml', 'pull_request', 100, 42, ref='refs/pull/42/merge')[1]
 release = (ROOT / '.github/workflows/release-fractal.yml').read_text()
+# Shared provenance changes must trigger native release/installer PR checks.
+pr_filter = re.search(r'^  pull_request:\n(.*?)(?=^  \S|\Z)', release, re.M | re.S).group(1)
+assert re.search(r'^      - scripts/release_artifact\.py$', pr_filter, re.M), pr_filter
 assert release.index('nix build .#release-cc^out') < release.index('name: Test installer')
 assert 'packages.release-cc = pkgs.stdenv.cc;' in (ROOT / 'flake.nix').read_text()
 print('passed: newest pending main release retained; active, tag and pinned manual releases preserved; host compiler provided')
@@ -116,6 +119,9 @@ def jobs(workflow):
 
 daily_jobs = jobs('release-daily.yml')
 native_jobs = jobs('release-fractal.yml')
+assert re.search(r"^    timeout-minutes: \$\{\{ matrix.runner == 'macos-15' && 10 \|\| 5 \}\}$",
+                 native_jobs['installer'], re.M), native_jobs['installer']
+print('passed: macOS installer receives ten minutes while Linux retains five')
 for block in (daily_jobs['release'], daily_jobs['publish'],
               native_jobs['publishEmbed'], native_jobs['publishEdge']):
     assert re.search(r'^      group: fractal-release-mutation$', block, re.M), block
@@ -124,6 +130,22 @@ for block in (daily_jobs['release'], daily_jobs['publish'],
 # One run can never queue both development publishers on the single pending mutex slot.
 edge_needs = re.search(r'^    needs: \[([^\]]+)\]$', native_jobs['publishEdge'], re.M).group(1)
 assert set(edge_needs.split(', ')) == {'assemble', 'publishEmbed'}
+# Immutable archive selection survives rerunning only a downstream publisher:
+# the successful assembler's output remains its original artifact ID.
+assert 'name: "fractal-release-attempt-${{ github.run_attempt }}"' in native_jobs['assemble']
+assert 'artifact-id: ${{ steps.release.outputs.artifact-id }}' in native_jobs['assemble']
+assert 'id: release' in native_jobs['assemble']
+assert 'artifact-ids: ${{ needs.assemble.outputs.artifact-id }}' in native_jobs['publishEdge']
+# ID selection does not imply the named-artifact flat layout in download-artifact.
+# Both consumers read root files in dist/, never dist/<artifact-name>/.
+for job in ('assemble', 'publishEdge'):
+    download = re.search(
+        r'^      - uses: actions/download-artifact@v4\n(.*?)(?=^      - |\Z)',
+        native_jobs[job], re.M | re.S).group(1)
+    assert re.search(r'^          merge-multiple: true$', download, re.M), download
+    assert re.search(r'^          path: dist$', download, re.M), download
+assert '--dist dist' in native_jobs['publishEdge']
+assert 'fractal-release-attempt-' not in native_jobs['publishEdge']
 for name in ('publishEmbed', 'publishEdge'):
     assert "github.event_name == 'push'" in native_jobs[name]
     assert "github.ref == 'refs/heads/main'" in native_jobs[name]
@@ -173,9 +195,11 @@ for job, block in daily_jobs.items():
             expression = condition.removeprefix('${{').removesuffix('}}').strip()
             for name, value in (
                     ('github.event_name', 'workflow_dispatch'), ('github.ref', 'refs/heads/other'),
-                    ('inputs.mode', mode), ('inputs.sha', 'a' * 40), ('needs.build.result', build_result)):
+                    ('inputs.mode', mode), ('inputs.sha', 'a' * 40), ('inputs.run', ''),
+                    ('needs.build.result', build_result)):
                 expression = expression.replace(name, repr(value))
-            expression = expression.replace('!cancelled()', 'True').replace('&&', ' and ').replace('||', ' or ')
+            expression = expression.replace('!cancelled()', 'True').replace('always()', 'True')
+            expression = expression.replace('&&', ' and ').replace('||', ' or ')
             assert not eval(expression, {'__builtins__': {}}, {}), (job, mode, build_result)
 assert policy('release-fractal.yml', 'workflow_dispatch', 100, sha='a' * 40) == (
     'fractal-release-candidate-' + 'a' * 40, False)

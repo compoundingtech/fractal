@@ -684,6 +684,11 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         )
         .route("/v1/client/launches/{id}", get(client_reads::client_launches_detail))
         .route("/v1/client/work", get(client_reads::client_work))
+        .route(
+            "/v1/client/ready-work",
+            // Axum otherwise runs GET for HEAD, which does not pass the paired GET scope gate.
+            get(client_reads::client_ready_work).head(|| async { StatusCode::METHOD_NOT_ALLOWED }),
+        )
         .route("/v1/client/changes", get(changes::list))
         .route("/v1/client/changes/sync", post(changes::sync))
         .route("/v1/client/change", get(changes::show))
@@ -2038,6 +2043,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "cursor-gap"
         | "page-cursor-expired"
         | "agent-roster-not-ready"
+        | "ready-work-unavailable"
         | "agent-roster-cut-not-ready"
         | "rate-limited"
         | "mission-list-not-ready"
@@ -4233,6 +4239,17 @@ pub type ManagedSessionOwner = (String, Option<String>, Option<String>);
 thread_local! {
     static MANAGED_OWNER_AFTER_PIN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+    static MANAGED_OWNER_MAP_BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static MANAGED_OWNER_MAP_BUILD_COUNT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+/// Process-wide counter for the isolated daemon cost harness, including index workers.
+#[cfg(any(test, feature = "test-support"))]
+pub fn managed_owner_map_build_count_for_test() -> usize {
+    MANAGED_OWNER_MAP_BUILD_COUNT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -4247,25 +4264,66 @@ pub fn managed_session_owner_at(
     snapshot_index: u64,
     session_id: &str,
 ) -> anyhow::Result<Option<ManagedSessionOwner>> {
-    // Pin identity/repair state and bypass the shared logical-cut owner cache.
+    // Pin identity/repair state; the memo belongs to this SQLite snapshot, not its cut
+    // or pooled connection. A repair may rebuild a shared logical-cut cache concurrently.
     crate::performance::task("conversation/owner", || store.read_snapshot(|_| {
         #[cfg(test)]
         managed_owner_after_pin();
-        let connection = store.readers.get();
-        let owners = crate::store::conversation_reads::owners_from_connection(&connection, snapshot_index)?;
-        for owner in owners.values() {
-            if !store.generic_status_subject_visible_at(&owner.subject, snapshot_index)? {
-                continue;
+        let owners = store.readers.pinned_memo(snapshot_index, || {
+            #[cfg(test)]
+            MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(count.get() + 1));
+            #[cfg(any(test, feature = "test-support"))]
+            MANAGED_OWNER_MAP_BUILD_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let connection = store.readers.get();
+            let owners = crate::store::conversation_reads::owners_from_connection(&connection, snapshot_index)?;
+            let mut sessions = std::collections::HashMap::with_capacity(owners.len());
+            for (_, owner) in owners {
+                let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
+                    continue;
+                };
+                // Preserve subject order for ambiguous owner:identity concatenations.
+                sessions.entry(managed_session_id(&owner.subject, identity))
+                    .or_insert_with(Vec::new)
+                    .push((owner.subject, owner.incarnation, owner.origin));
             }
-            let Some(identity) = owner.incarnation.as_deref().or(owner.runtime.as_deref()) else {
-                continue;
-            };
-            if managed_session_id(&owner.subject, identity) == session_id {
-                return Ok(Some((owner.subject.clone(), owner.incarnation.clone(), owner.origin.clone())));
+            Ok(sessions)
+        })?;
+        let Some(candidates) = owners.get(session_id) else {
+            return Ok(None);
+        };
+        for owner in candidates {
+            // Visibility belongs to the lookup, not the snapshot's shared routing memo.
+            if store.generic_status_subject_visible_at(&owner.0, snapshot_index)? {
+                return Ok(Some(owner.clone()));
             }
         }
         Ok(None)
     }))
+}
+
+/// Resolve an inventory's subject again on the page reader's own snapshot. Only an
+/// unambiguous owner:incarnation encoding may bypass the generic candidate scan.
+pub fn managed_session_owner_for_timeline_at(
+    store: &Store,
+    snapshot_index: u64,
+    session_id: &str,
+    subject: &str,
+) -> anyhow::Result<Option<ManagedSessionOwner>> {
+    store.read_snapshot(|_| {
+        if let Some(owner) = managed_session_owner_for_subject_at(
+            store, snapshot_index, session_id, subject,
+        )? {
+            // More than one ':' admits alternative owner/identity splits. Runtime-only
+            // owners also use the generic path because the tuple omits their runtime ID.
+            if !owner.0.contains(':')
+                && owner.1.as_deref().is_some_and(|identity| !identity.contains(':'))
+            {
+                return Ok(Some(owner));
+            }
+        }
+        // Missing, hidden, stale or ambiguous subjects cannot shortcut authorization.
+        managed_session_owner_at(store, snapshot_index, session_id)
+    })
 }
 
 pub fn managed_session_owner_for_subject_at(
@@ -7153,7 +7211,10 @@ async fn serve_reserved_unix_with_ancestor_ready(
         let peer_pid = local_peer_pid(&stream);
         // This must precede dispatch: the numeric peer PID can be recycled while
         // a descendant continues using the connector's inherited socket.
-        let peer_process = local_peer_process(&stream).ok();
+        let (peer_process, peer_capture_error) = match local_peer_process(&stream) {
+            Ok(peer) => (Some(peer), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
         let app = app.clone();
         tokio::spawn(async move {
             if let Some(connection) = &mut diagnostic_connection {
@@ -7173,7 +7234,9 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     let ancestry = if !bind_ancestry {
                         HarnessAncestry::Person
                     } else if ancestry_peer.is_none() {
-                        HarnessAncestry::Unavailable
+                        ancestry_or_record(Err(AncestryUnavailableCause { pid: Some(pid),
+                            reason: peer_capture_error.map_or(AncestryUnavailableReason::WitnessMissing,
+                                AncestryUnavailableReason::WitnessCaptureFailed) }), AncestryUnavailableCause::record)
                     } else {
                         ancestor(pid, ancestry_peer.as_ref())
                     };
@@ -7188,8 +7251,21 @@ async fn serve_reserved_unix_with_ancestor_ready(
                     (ancestry, caller, delivery_peer, diagnostic_connection)
                 })
                 .await
-                .unwrap_or_default(),
-                None => (if bind_ancestry { HarnessAncestry::Unavailable } else { HarnessAncestry::Person }, None, None, diagnostic_connection),
+                .unwrap_or_else(|error| {
+                    let ancestry = if bind_ancestry {
+                        ancestry_or_record(Err(AncestryUnavailableCause { pid: Some(pid),
+                            reason: AncestryUnavailableReason::LookupTaskFailed(error.to_string()) }),
+                            AncestryUnavailableCause::record)
+                    } else { HarnessAncestry::Unavailable };
+                    (ancestry, None, None, None)
+                }),
+                None => {
+                    let ancestry = if bind_ancestry {
+                        ancestry_or_record(Err(AncestryUnavailableCause { pid: None,
+                            reason: AncestryUnavailableReason::PeerPidUnavailable }), AncestryUnavailableCause::record)
+                    } else { HarnessAncestry::Person };
+                    (ancestry, None, None, diagnostic_connection)
+                }
             };
             let service = hyper::service::service_fn(move |request: Request<Incoming>| {
                 let app = app.clone();
@@ -7302,104 +7378,217 @@ impl HarnessAncestry {
     }
 }
 
+/// Diagnostic data is deliberately limited to operation names, PIDs and OS errors.
+/// In particular, identity parsing must never attach environment values.
+#[derive(Debug, PartialEq, Eq)]
+struct AncestryUnavailableCause {
+    pid: Option<u32>,
+    reason: AncestryUnavailableReason,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AncestryUnavailableReason {
+    PeerPidUnavailable,
+    WitnessCaptureFailed(String),
+    WitnessMissing,
+    LookupTaskFailed(String),
+    ProcessReadFailed { operation: &'static str, error: String },
+    ProcessMetadataInvalid(&'static str),
+    ProcessTerminal,
+    EmptyEnvironment,
+    TruncatedEnvironment,
+    InvalidIdentity,
+    GenerationUnavailable,
+    WitnessRejected(String),
+    AncestorCycle,
+    AncestorGenerationChanged,
+    ConnectorGenerationChanged(String),
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    UnsupportedPlatform,
+}
+
+impl AncestryUnavailableCause {
+    fn reason_code(&self) -> &'static str {
+        match &self.reason {
+            AncestryUnavailableReason::PeerPidUnavailable => "peer-pid-unavailable",
+            AncestryUnavailableReason::WitnessCaptureFailed(_) => "witness-capture-failed",
+            AncestryUnavailableReason::WitnessMissing => "witness-missing",
+            AncestryUnavailableReason::LookupTaskFailed(_) => "lookup-task-failed",
+            AncestryUnavailableReason::ProcessReadFailed { operation, .. } => operation,
+            AncestryUnavailableReason::ProcessMetadataInvalid(_) => "process-metadata-invalid",
+            AncestryUnavailableReason::ProcessTerminal => "process-terminal",
+            AncestryUnavailableReason::EmptyEnvironment => "empty-environment",
+            AncestryUnavailableReason::TruncatedEnvironment => "truncated-environment",
+            AncestryUnavailableReason::InvalidIdentity => "invalid-or-conflicting-identity",
+            AncestryUnavailableReason::GenerationUnavailable => "generation-unavailable",
+            AncestryUnavailableReason::WitnessRejected(_) => "initial-witness-rejected",
+            AncestryUnavailableReason::AncestorCycle => "ancestor-cycle",
+            AncestryUnavailableReason::AncestorGenerationChanged => "ancestor-generation-changed",
+            AncestryUnavailableReason::ConnectorGenerationChanged(_) => "connector-generation-changed",
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            AncestryUnavailableReason::UnsupportedPlatform => "unsupported-platform",
+        }
+    }
+
+    fn record(&self) {
+        use std::io::Write as _;
+        // The default daemon has no tracing subscriber without telemetry export.
+        // Diagnostic write failures must not interrupt the fail-closed response.
+        let _ = writeln!(std::io::stderr(),
+            "st3: local caller ancestry unavailable pid={:?} reason={} detail={:?}",
+            self.pid, self.reason_code(), self.reason);
+    }
+}
+
+fn ancestry_or_record(
+    result: Result<HarnessAncestry, AncestryUnavailableCause>,
+    mut record: impl FnMut(&AncestryUnavailableCause),
+) -> HarnessAncestry {
+    result.unwrap_or_else(|cause| {
+        record(&cause);
+        HarnessAncestry::Unavailable
+    })
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct HarnessProcess {
     uid: u32,
     generation: Option<(u32, u64)>,
+    generation_error: Option<AncestryUnavailableReason>,
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn walk_harness_ancestry(
     mut pid: u32,
     peer: Option<&fractal_runtime::PeerProcessIdentity>,
-    mut inspect: impl FnMut(u32) -> Option<HarnessProcess>,
-    identity: impl Fn(u32) -> Option<HarnessAncestry>,
-) -> HarnessAncestry {
-    let Some(first) = inspect(pid) else { return HarnessAncestry::Unavailable; };
-    let Some(peer) = peer else { return HarnessAncestry::Unavailable; };
-    let Some((_, birth)) = first.generation else { return HarnessAncestry::Unavailable; };
-    if peer.validate_generation(pid, birth).is_err() { return HarnessAncestry::Unavailable; }
+    mut inspect: impl FnMut(u32) -> Result<HarnessProcess, AncestryUnavailableReason>,
+    identity: impl Fn(u32) -> Result<HarnessAncestry, AncestryUnavailableReason>,
+) -> Result<HarnessAncestry, AncestryUnavailableCause> {
+    let cause = |pid, reason| AncestryUnavailableCause { pid: Some(pid), reason };
+    let first = inspect(pid).map_err(|reason| cause(pid, reason))?;
+    let peer = peer.ok_or_else(|| cause(pid, AncestryUnavailableReason::WitnessMissing))?;
+    let (_, birth) = first.generation.ok_or_else(|| cause(pid, first.generation_error.clone()
+        .unwrap_or(AncestryUnavailableReason::GenerationUnavailable)))?;
+    peer.validate_generation(pid, birth)
+        .map_err(|error| cause(pid, AncestryUnavailableReason::WitnessRejected(error.to_string())))?;
     let connector = pid;
     let uid = first.uid;
     let mut first = Some(first);
     let mut observed = std::collections::BTreeMap::new();
     let mut binding = HarnessAncestry::Person;
     while pid > 1 && pid != std::process::id() {
-        let Some(process) = first.take().or_else(|| inspect(pid)) else {
-            return HarnessAncestry::Unavailable;
+        let process = match first.take() {
+            Some(process) => process,
+            None => inspect(pid).map_err(|reason| cause(pid, reason))?,
         };
         // An observed ownership transition ends this caller's cooperative ancestry.
         if process.uid != uid { break; }
-        let Some((parent, birth)) = process.generation else { return HarnessAncestry::Unavailable; };
-        if observed.insert(pid, birth).is_some() { return HarnessAncestry::Unavailable; }
-        match identity(pid) {
-            Some(HarnessAncestry::Person) => {}
-            Some(ancestry) => { binding = ancestry; break; }
-            None => return HarnessAncestry::Unavailable,
+        let (parent, birth) = process.generation.ok_or_else(|| cause(pid, process.generation_error
+            .unwrap_or(AncestryUnavailableReason::GenerationUnavailable)))?;
+        if observed.insert(pid, birth).is_some() {
+            return Err(cause(pid, AncestryUnavailableReason::AncestorCycle));
+        }
+        match identity(pid).map_err(|reason| cause(pid, reason))? {
+            HarnessAncestry::Person => {}
+            HarnessAncestry::Unavailable => return Err(cause(pid, AncestryUnavailableReason::InvalidIdentity)),
+            ancestry => { binding = ancestry; break; }
         }
         pid = parent;
     }
-    if observed.into_iter().any(|(pid, birth)| {
-        !inspect(pid).is_some_and(|current| current.uid == uid && current.generation.is_some_and(|(_, token)| token == birth))
-    }) {
-        return HarnessAncestry::Unavailable;
+    for (pid, birth) in observed {
+        let current = inspect(pid).map_err(|reason| cause(pid, reason))?;
+        if current.uid != uid || !current.generation.is_some_and(|(_, token)| token == birth) {
+            return Err(cause(pid, current.generation_error
+                .unwrap_or(AncestryUnavailableReason::AncestorGenerationChanged)));
+        }
     }
-    if !inspect(connector).and_then(|process| process.generation)
-        .is_some_and(|(_, token)| peer.validate_generation(connector, token).is_ok())
-    {
-        return HarnessAncestry::Unavailable;
-    }
-    binding
+    let current = inspect(connector).map_err(|reason| cause(connector, reason))?;
+    let (_, token) = current.generation.ok_or_else(|| cause(connector, current.generation_error
+        .unwrap_or(AncestryUnavailableReason::GenerationUnavailable)))?;
+    peer.validate_generation(connector, token).map_err(|error| cause(connector,
+        AncestryUnavailableReason::ConnectorGenerationChanged(error.to_string())))?;
+    Ok(binding)
 }
 
 #[cfg(target_os = "linux")]
-fn local_harness_process(pid: u32) -> Option<HarnessProcess> {
-    let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    let uid = status.lines().find_map(|line| line.strip_prefix("Uid:"))?
-        .split_whitespace().nth(1)?.parse().ok()?;
+fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailableReason> {
+    let read = |file, operation| fs::read_to_string(format!("/proc/{pid}/{file}"))
+        .map_err(|error| AncestryUnavailableReason::ProcessReadFailed { operation, error: error.to_string() });
+    let invalid = AncestryUnavailableReason::ProcessMetadataInvalid;
+    let status = read("status", "proc-status-read")?;
+    let uid = status.lines().find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok()).ok_or_else(|| invalid("effective-uid"))?;
     let generation = (|| {
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        let mut fields = stat.rsplit_once(") ")?.1.split_whitespace();
-        if matches!(fields.next()?, "Z" | "X" | "x") { return None; }
-        let parent = fields.next()?.parse().ok()?;
-        let birth = fields.nth(17)?.parse().ok()?;
-        Some((parent, birth))
+        let stat = read("stat", "proc-stat-read")?;
+        let mut fields = stat.rsplit_once(") ").ok_or_else(|| invalid("stat-fields"))?.1.split_whitespace();
+        if matches!(fields.next().ok_or_else(|| invalid("state"))?, "Z" | "X" | "x") {
+            return Err(AncestryUnavailableReason::ProcessTerminal);
+        }
+        let parent = fields.next().and_then(|value| value.parse().ok()).ok_or_else(|| invalid("parent-pid"))?;
+        let birth = fields.nth(17).and_then(|value| value.parse().ok()).ok_or_else(|| invalid("start-time"))?;
+        Ok((parent, birth))
     })();
-    Some(HarnessProcess { uid, generation })
+    let (generation, generation_error) = match generation {
+        Ok(generation) => (Some(generation), None),
+        Err(error) => (None, Some(error)),
+    };
+    Ok(HarnessProcess { uid, generation, generation_error })
 }
 
 #[cfg(target_os = "macos")]
-fn local_harness_process(pid: u32) -> Option<HarnessProcess> {
+fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailableReason> {
     match fractal_runtime::macos_process_identity(pid) {
-        Ok((parent, birth, uid)) => Some(HarnessProcess { uid, generation: Some((parent, birth)) }),
-        Err(_) => Some(HarnessProcess { uid: fractal_runtime::macos_process_owner(pid).ok()?, generation: None }),
+        Ok((parent, birth, uid)) => Ok(HarnessProcess { uid, generation: Some((parent, birth)), generation_error: None }),
+        Err(error) => {
+            let failure = |operation, error: String| AncestryUnavailableReason::ProcessReadFailed { operation, error };
+            let uid = fractal_runtime::macos_process_owner(pid)
+                .map_err(|error| failure("process-owner-read", error.to_string()))?;
+            Ok(HarnessProcess { uid, generation: None,
+                generation_error: Some(failure("process-identity-read", error.to_string())) })
+        }
     }
 }
 
 #[cfg(target_os = "linux")]
-fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
-    let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-    Some(HarnessAncestry::of_linux_environment(&environment))
+fn local_harness_identity(pid: u32) -> Result<HarnessAncestry, AncestryUnavailableReason> {
+    let environment = fs::read(format!("/proc/{pid}/environ"))
+        .map_err(|error| AncestryUnavailableReason::ProcessReadFailed {
+            operation: "proc-environ-read", error: error.to_string(),
+        })?;
+    if environment.is_empty() { return Err(AncestryUnavailableReason::EmptyEnvironment); }
+    if !environment.ends_with(&[0]) { return Err(AncestryUnavailableReason::TruncatedEnvironment); }
+    match HarnessAncestry::of_linux_environment(&environment) {
+        HarnessAncestry::Unavailable => Err(AncestryUnavailableReason::InvalidIdentity),
+        ancestry => Ok(ancestry),
+    }
 }
 
 #[cfg(target_os = "macos")]
-fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
-    let (_, environment) = local_process_arguments(pid)?;
-    Some(HarnessAncestry::of_environment(&|name| environment.iter().find_map(|entry| {
+fn local_harness_identity(pid: u32) -> Result<HarnessAncestry, AncestryUnavailableReason> {
+    let (_, environment) = local_process_arguments(pid)
+        .ok_or(AncestryUnavailableReason::ProcessMetadataInvalid("argument-environment"))?;
+    let ancestry = HarnessAncestry::of_environment(&|name| environment.iter().find_map(|entry| {
         let (key, value) = entry.split_once('=')?;
         (key == name).then_some(value)
-    })))
+    }));
+    match ancestry {
+        HarnessAncestry::Unavailable => Err(AncestryUnavailableReason::InvalidIdentity),
+        ancestry => Ok(ancestry),
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn harness_ancestor(pid: u32, peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
-    walk_harness_ancestry(pid, peer, local_harness_process, local_harness_identity)
+    ancestry_or_record(walk_harness_ancestry(pid, peer, local_harness_process, local_harness_identity),
+        AncestryUnavailableCause::record)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn harness_ancestor(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
-    HarnessAncestry::Unavailable
+fn harness_ancestor(pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
+    ancestry_or_record(Err(AncestryUnavailableCause { pid: Some(pid),
+        reason: AncestryUnavailableReason::UnsupportedPlatform }), AncestryUnavailableCause::record)
 }
 
 #[derive(Clone)]
@@ -10877,12 +11066,15 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
         .and_then(|reloaded| reloaded.ok())
         .and_then(|config| crate::store::LimitsPolicy::from_config(&config))
         .map_or(crate::store::ACCOUNT_READING_WINDOW_MS, |policy| policy.fresh_ms);
+    let now = client_now_ms() as u64;
     let mut rows = crate::objectives::rows(
         &request_latency_target_windows(),
         &limits,
-        client_now_ms() as u64,
+        now,
         fresh_ms,
     );
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, crate::credit_objectives::rows(store, now, fresh_ms)?));
     if let Some(open) = store.open_divergences_at_last_check() {
         // Objectives come before budgets.
         let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
@@ -12568,6 +12760,8 @@ pub fn normalize_message_party(value: &str) -> String {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ready_work_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests_shared;
 
