@@ -437,6 +437,10 @@ impl Runtime for FractalRuntime {
         BTreeMap::from([("mission_run_deadlines".into(), 3)])
     }
 
+    fn requires_keyed_envelope(&self, kind: &str) -> bool {
+        kind == crate::pairing::OPERATION_AUTHORIZED
+    }
+
     fn classify_replicated_claim(
         &self,
         _connection: &Connection,
