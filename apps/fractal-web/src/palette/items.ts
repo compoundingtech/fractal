@@ -139,7 +139,7 @@ export const commandItems = ({ state, commands }: { readonly state: WorkspaceSta
     row({ id, section: 'commands', label, search: `${label} ${search}` }, { action: { _tag: 'Workspace', commands }, key: id, icon, shortcut })
   return [
     ...commands.map(command => row(
-      { id: command.id, section: command.section, label: command.label, detail: command.detail, search: command.search ?? command.label },
+      { id: command.id, section: command.section, label: command.label, detail: command.detail, search: command.search === undefined ? command.label : `${command.label} ${command.search}` },
       { action: { _tag: 'Run', run: command.run }, key: command.id, icon: command.icon ?? (command.section === 'start' ? 'plus' : 'sliders'), shortcut: command.shortcut },
     )),
     ...(tab === undefined ? [] : [

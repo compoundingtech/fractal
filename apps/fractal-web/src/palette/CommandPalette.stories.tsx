@@ -12,7 +12,7 @@ import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { fixtureProjections } from '../fixtures/projections.ts'
 import { CommandPalette, PaletteButton, usePaletteOpen, type SaidSearch } from './CommandPalette.tsx'
-import { useLivePalette } from './live.ts'
+import { useLiveHostCommands, useLivePalette } from './live.ts'
 import type { HostCommand, PaletteWorld } from './items.ts'
 
 const world: PaletteWorld = {
@@ -54,7 +54,8 @@ interface HarnessProps {
 }
 
 /** A palette over a real workspace transition; the readout below shows what it dispatched. */
-const Harness = ({ scheme, phone = false, recent = [] }: HarnessProps) => {
+const noRecent: readonly string[] = []
+const Harness = ({ scheme, phone = false, recent = noRecent }: HarnessProps) => {
   const [state, setState] = React.useState(initial)
   const [ran, setRan] = React.useState<string | undefined>(undefined)
   const [recentStore] = React.useState(() => memoryRecentStore(recent))
@@ -100,6 +101,7 @@ export const scenarioExemptions: readonly string[] = [
   'EmptyLight:contract-fixture',
   'LiveFixtures:contract-fixture',
   'Naming:contract-fixture',
+  'NoMatches:contract-fixture',
   'Phone:contract-fixture',
   'PhoneLight:contract-fixture',
   'SaidInConversations:contract-fixture',
@@ -149,6 +151,18 @@ export const Typing: Story = {
     await userEvent.keyboard('{Enter}')
     await closed()
     await expect(within(canvasElement).getByTestId('ran')).toHaveTextContent('new-mission')
+  },
+}
+
+/** Nothing matches: the list says so, and Enter does nothing. */
+export const NoMatches: Story = {
+  play: async ({ canvasElement }) => {
+    const { dialog, input } = await openPalette(canvasElement)
+    // Unscoped, the space rows that use what was typed always show; scoped to agents, nothing does.
+    await userEvent.type(input, '@zzqx')
+    await expect(await within(dialog).findByText('No matches.')).toBeVisible()
+    await userEvent.keyboard('{Enter}')
+    await expect(within(document.body).getByRole('dialog', { name: 'Command palette' })).toBeVisible()
   },
 }
 
@@ -257,25 +271,43 @@ const LivePalette = () => {
   const [state, setState] = React.useState(initial)
   const palette = usePaletteOpen()
   const live = useLivePalette()
+  const commands = useLiveHostCommands()
   return <main data-scheme="dark" {...stylex.props(styles.root, liveLegacyTheme, assistantDarkTheme)}>
     <header {...stylex.props(styles.bar)}><button type="button" onClick={palette.open}>Open palette</button></header>
-    <CommandPalette {...palette} {...live} state={state} dispatch={command => setState(current => transition(current, command, config))} />
+    <CommandPalette {...palette} {...live} commands={commands} state={state} dispatch={command => setState(current => transition(current, command, config))} />
   </main>
+}
+
+const LiveFixturesHarness = () => {
+  const [registry] = React.useState(() => AtomRegistry.make())
+  const [source] = React.useState(() => fixtureSource({ world: fixtureProjections }))
+  return <DataSourceProvider source={source} registry={registry}><LivePalette /></DataSourceProvider>
 }
 
 /** Bound to the data source: the shared fixture roster's agents, missions and alerts reach the palette. */
 export const LiveFixtures: Story = {
-  render: () => {
-    const [registry] = React.useState(() => AtomRegistry.make())
-    const [source] = React.useState(() => fixtureSource({ world: fixtureProjections }))
-    return <DataSourceProvider source={source} registry={registry}><LivePalette /></DataSourceProvider>
-  },
+  render: () => <LiveFixturesHarness />,
   play: async ({ canvasElement }) => {
     const { dialog, input } = await openPalette(canvasElement)
     await waitFor(() => expect(sectionsOf(dialog)).toEqual(expect.arrayContaining(['Alerts', 'Agents', 'Missions'])))
     await userEvent.type(input, '@')
     await waitFor(() => expect(sectionsOf(dialog)).toEqual(['Agents']))
     await expect(within(dialog).getAllByRole('option').length).toBe(fixtureProjections.agents.length)
+    // The theme command writes the same preference Settings does.
+    await userEvent.clear(input)
+    await userEvent.type(input, '>light')
+    await waitFor(() => expect(selected(dialog)).toBe('theme-light'))
+    await userEvent.keyboard('{Enter}')
+    await closed()
+    const again = await openPalette(canvasElement)
+    await userEvent.type(again.input, '>theme')
+    await waitFor(() => expect(again.dialog.querySelector('[data-palette-row="theme-light"]')).toBeNull())
+    await expect(within(again.dialog).getByRole('option', { name: /Use dark theme/u })).toBeVisible()
+    // Leave the shared preference as the other stories expect it.
+    await userEvent.clear(again.input)
+    await userEvent.type(again.input, '>use dark')
+    await userEvent.keyboard('{Enter}')
+    await closed()
   },
 }
 

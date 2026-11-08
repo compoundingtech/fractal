@@ -2,4 +2,4 @@ export { CommandPalette, PaletteButton, usePaletteOpen, type CommandPaletteProps
 export { namingCommand, openCommands } from './dispatch.ts'
 export { paletteSections, type HostCommand, type PaletteWorld } from './items.ts'
 export { cellRecentStore, paletteRecent, recentLimit } from './recent.ts'
-export { paletteWorld, useLivePalette } from './live.ts'
+export { paletteWorld, useLiveHostCommands, useLivePalette, type HostActions } from './live.ts'

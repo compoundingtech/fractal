@@ -34,8 +34,9 @@ export interface CommandPaletteProps {
   /** Full-text search of what was said in conversations, asked from three characters. */
   readonly search?: SaidSearch | undefined
   /**
-   * Opens a conversation found at what was said. Without it the conversation opens where asked, at its
-   * end: the web has no find-in-conversation seam yet.
+   * Opens a conversation found at what was said, as the TUI's `find_in` does. Without it the conversation
+   * opens where asked, at its end: the transcript's find keeps its query inside each Transcript, so
+   * nothing outside can open it at a query yet.
    */
   readonly onSaid?: ((ref: string, query: string, target: OpenTarget) => void) | undefined
   /** Per person and gateway (`cellRecentStore`); in memory when absent. */
@@ -75,7 +76,10 @@ export function CommandPalette({ isOpen, onOpenChange, ...props }: CommandPalett
     <Aria.ModalOverlay isOpen={isOpen && mounted} onOpenChange={onOpenChange} isDismissable isKeyboardDismissDisabled {...stylex.props(styles.overlay, phone && styles.overlayPhone)}>
       <Aria.Modal {...stylex.props(styles.modal, phone && styles.modalPhone)}>
         <Aria.Dialog aria-label="Command palette" data-testid="command-palette" data-phone={phone ? '' : undefined} data-shortcuts-paused="" {...stylex.props(styles.dialog)}>
-          <PaletteBody {...props} phone={phone} onClose={() => onOpenChange(false)} />
+          {/* The input's Escape leaves naming or a section jump first; anywhere else in the palette it closes. */}
+          <div onKeyDown={event => { if (event.key === 'Escape' && !event.defaultPrevented) { event.preventDefault(); onOpenChange(false) } }} {...stylex.props(styles.dialog)}>
+            <PaletteBody {...props} phone={phone} onClose={() => onOpenChange(false)} />
+          </div>
         </Aria.Dialog>
       </Aria.Modal>
     </Aria.ModalOverlay>
@@ -128,8 +132,10 @@ function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands =
         for (const command of action.commands) dispatch(command)
         break
       case 'Run':
-        action.run()
-        break
+        // Close first: a command may open a dialog of its own, or change what the page is drawn with.
+        onClose()
+        setTimeout(action.run, 0)
+        return
     }
     onClose()
   }
@@ -171,11 +177,11 @@ function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands =
       />
       {palette.loading && <span role="status" {...stylex.props(styles.muted)}>Searching…</span>}
     </div>
-    {phone && naming === undefined && <div role="radiogroup" aria-label="Open in" {...stylex.props(styles.tapTargets)}>
-      {phoneTargets.map(target => <button key={target} type="button" role="radio" aria-checked={tapTarget === target} onClick={() => setTapTarget(target)} {...stylex.props(styles.tapTarget, tapTarget === target && styles.tapTargetOn)}>
+    {phone && naming === undefined && <Aria.RadioGroup aria-label="Open in" orientation="horizontal" value={tapTarget} onChange={value => setTapTarget(value as OpenTarget)} {...stylex.props(styles.tapTargets)}>
+      {phoneTargets.map(target => <Aria.Radio key={target} value={target} {...stylex.props(styles.tapTarget, tapTarget === target && styles.tapTargetOn)}>
         {target === 'here' ? 'Here' : 'New tab'}
-      </button>)}
-    </div>}
+      </Aria.Radio>)}
+    </Aria.RadioGroup>}
     <div {...palette.getListProps()} {...stylex.props(styles.list)}>
       {naming !== undefined
         ? <NamingRow label={palette.query.trim() === '' ? undefined : namingItem(state, naming.intent, palette.query.trim())} />
@@ -183,9 +189,10 @@ function PaletteBody({ state, dispatch, identity, world = emptyWorld, commands =
           <div aria-hidden="true" {...stylex.props(styles.sectionLabel)}>{group.section.label}</div>
           {group.items.map(({ item }) => <Row key={item.id} item={item} props={palette.getItemProps(item)} />)}
         </div>)}
-      {naming === undefined && palette.results.length === 0 && !palette.loading && <p {...stylex.props(styles.empty)}>
-        {palette.query.trim() === '' ? 'Nothing here yet.' : 'No matches.'}
-      </p>}
+      {/* A listbox needs an option child; an empty one says why, and cannot be chosen. */}
+      {naming === undefined && palette.results.length === 0 && <div role="option" aria-disabled="true" aria-selected="false" {...stylex.props(styles.empty)}>
+        {palette.loading ? 'Searching…' : palette.query.trim() === '' ? 'Nothing here yet.' : 'No matches.'}
+      </div>}
     </div>
     {!phone && <Hints naming={naming !== undefined} />}
   </>
@@ -208,7 +215,7 @@ function Row({ item, props }: { readonly item: PaletteRow; readonly props: React
 }
 
 function NamingRow({ label }: { readonly label: string | undefined }) {
-  if (label === undefined) return <p {...stylex.props(styles.empty)}>Type a name, then Enter. Escape goes back.</p>
+  if (label === undefined) return <div role="option" aria-disabled="true" aria-selected="false" {...stylex.props(styles.empty)}>Type a name, then Enter. Escape goes back.</div>
   return <div role="option" aria-selected data-selected="" {...stylex.props(styles.row, styles.rowSelected)}>
     <span aria-hidden="true" {...stylex.props(styles.glyph)}><CompositionIcon name="plus" size={14} /></span>
     <span {...stylex.props(styles.label)}>{label}</span>
@@ -274,8 +281,8 @@ const styles = stylex.create({
   },
   tapTargets: { display: 'flex', gap: s.xs, paddingInline: s.lg, paddingBlock: s.sm, borderBlockEndWidth: g.hairline, borderBlockEndStyle: 'solid', borderBlockEndColor: border.border },
   tapTarget: {
-    minHeight: g.controlMd, paddingInline: s.lg, borderWidth: s.zero, borderRadius: r.sm, backgroundColor: 'transparent', color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.uiSize, cursor: 'pointer',
-    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
+    display: 'inline-flex', alignItems: 'center', minHeight: g.controlMd, paddingInline: s.lg, borderRadius: r.sm, color: ink.fgMuted, fontSize: t.uiSize, cursor: 'pointer', outlineStyle: 'none',
+    ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
   },
   tapTargetOn: { backgroundColor: surface.rowActive, color: ink.fg },
   list: { flexGrow: 1, minHeight: s.zero, overflowY: 'auto', overscrollBehavior: 'contain', paddingBlock: s.xs, paddingInline: s.xs },
