@@ -27,6 +27,29 @@ Each archive has the physical `bin/fractal`, temporary `bin/st3` and `bin/st` re
 libc functions do not add GLIBC_2.39 requirements or loader noise. These
 archives need neither Nix nor Rust installed. Harness CLIs and their logins remain separate.
 
+Before each native Cargo build, `scripts/release-zig-preseed.py` checks out the Ghostty
+revision pinned by `vendor/libghostty-vt-sys/build.rs` and reads its
+`flatpak/zig-packages.json` package-cache pins, including every host and transitive
+dependency. All archives retry after 1 and 3 seconds; GitHub archives additionally
+fall back to the equivalent `codeload.github.com` transport. Each archive enters the default Zig global cache
+through `zig fetch`; its printed content hash must equal the upstream pin or the
+job fails. Cargo reuses that exact source checkout through `GHOSTTY_SOURCE_DIR`,
+without modifying dependency URLs or hashes. The loopback-only regression test is
+`python3 scripts/release-zig-preseed-test.py`.
+Truncated bodies are transport failures and follow the same retry/fallback path.
+The vaxis dependency also pins an older uucode Git source: it is fetched using
+`git+https` at the manifest's exact commit, with 1- and 3-second retries and the
+same content-hash comparison. Git sources never substitute a codeload archive.
+Each archive attempt has a 60-second elapsed deadline, and each `zig fetch`
+subprocess has a 60-second timeout. The cache phase has a shared 660-second
+budget; source clone and checkout each have a 120-second timeout (15 minutes
+total workload budget, plus process cleanup). Subprocesses own their process groups;
+timeouts send the whole group SIGTERM, allow up to 0.2 seconds, then send SIGKILL
+and reap the direct child so Git helpers cannot outlive the deadline.
+Unavailable transports warn with the package name and leave fetching to
+the normal Zig build; reaching the shared deadline warns and stops seeding.
+Printed content-hash mismatches remain fatal integrity errors.
+
 The embedded web UI ships in `share/fractal-web` in both release archives and
 the complete Nix `fractal` package (also selected by transitional `st3` package attributes). The archive installer preserves that tree at
 `../share/fractal-web` relative to the chosen bin directory, including upgrade
