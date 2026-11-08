@@ -816,6 +816,8 @@ pub fn authenticate(
         .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
         .map_err(ApiError::internal)?;
     let paired = pairings.claims.iter().find(|claim| {
+        fractal_store::trusted_pairing_fields(claim.actor.as_deref(), &claim.body["fields"])
+            &&
         claim
             .body
             .pointer("/fields/credential_hash")
@@ -867,6 +869,9 @@ pub fn paired_client_session(
     transport: &'static str,
     custom_forms: bool,
 ) -> Result<ClientSession, ApiError> {
+    if !fractal_store::trusted_pairing_fields(paired.actor.as_deref(), &paired.body["fields"]) {
+        return Err(credential_rejected("the client credential requires a new pairing"));
+    }
     // Revoked wins: any revocation of the grant ends it, whatever order a member admitted the
     // pairing and the revocation in. Completing refuses a used grant, so nothing re-grants it.
     let revoked = !state.store.claims_for_subject_kind_at(

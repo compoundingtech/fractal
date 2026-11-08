@@ -339,6 +339,7 @@ mod tests {
         let claim = state.store.append_claim(&ClaimInput {
             subject: "custom/client/retention-test".into(), kind: "custom.client.pairing-completed".into(), actor: Some("person/ada".into()),
             fields: serde_json::from_value(json!({"session_actor":"client/retention-phone","person_id":"person/ada",
+                "pairing_operation_version":1,
                 "device_id":"device/test","scopes":["read.projections"],"expires_at_unix_ms":(now + 600_000) as u64})).unwrap(),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();

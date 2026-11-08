@@ -5636,6 +5636,7 @@ pub async fn pairing_begin(
         }
     };
     let mut begun_fields = BTreeMap::from([
+        (fractal_store::PAIRING_OPERATION_VERSION.into(), json!(1)),
         ("pairing_id".into(), Value::String(pairing_id.clone())),
         ("device_name".into(), Value::String(request.device_name)),
         ("person_id".into(), Value::String(person_id.clone())),
@@ -5858,6 +5859,9 @@ pub async fn pairing_complete(
             details: Box::default(),
         });
     }
+    if !fractal_store::trusted_pairing_fields(begun.actor.as_deref(), &begun.body["fields"]) {
+        return Err(forbidden("the pairing challenge requires a new pairing"));
+    }
     let used = !state
         .store
         .claims_for_subject_kind_at(&subject, "custom.client.pairing-completed", None, true, 1)
@@ -5902,8 +5906,7 @@ pub async fn pairing_complete(
         .to_owned();
     let session_actor = format!("{person_id}/session/{actor_suffix}");
     let expires_at = client_now_ms() + 30 * 24 * 60 * 60 * 1_000;
-    // The concrete scope list was sealed into the authenticated local begin
-    // claim. Legacy pending challenges retain their original limited grant.
+    // The concrete scope list was sealed into the authenticated local begin claim.
     let scopes = match begun.body.pointer("/fields/scopes") {
         Some(Value::Array(values)) => values
             .iter()
@@ -5974,6 +5977,7 @@ pub async fn pairing_complete(
         None
     };
     let mut fields = BTreeMap::from([
+            (fractal_store::PAIRING_OPERATION_VERSION.into(), json!(1)),
             ("pairing_id".into(), Value::String(pairing_id)),
             ("device_id".into(), Value::String(device_id.clone())),
             ("session_actor".into(), Value::String(session_actor.clone())),
@@ -11486,6 +11490,7 @@ mission "differential" state="ready" {
                 subject: "custom/client/admission-preparation".into(),
                 kind: "custom.client.pairing-completed".into(), actor: Some("person/ada".into()),
                 fields: serde_json::from_value(json!({
+                    "pairing_operation_version":1,
                     "session_actor":"client/admission-preparation", "person_id":"person/ada",
                     "credential_hash":"test-not-a-secret", "expires_at_unix_ms":u64::MAX,
                     "scopes":["read.projections","read.arrangements"],
@@ -13289,6 +13294,45 @@ mission "differential" state="ready" {
         }
     }
 
+    #[tokio::test]
+    async fn pairing_operations_issue_authenticated_sessions() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        let app = super::super::router(state.clone());
+        let response = app.clone().oneshot(Request::builder()
+            .method("POST").uri("/v1/client/pairings")
+            .header(LOCAL_PERSON_HEADER, "person/ada")
+            .header("Content-Type", "application/json")
+            .body(Body::from(json!({
+                "api_version": CLIENT_API_VERSION, "device_name": "Test phone",
+                "person_id": "person/ada", "scopes": ["read.projections"]
+            }).to_string())).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        let begun: Value = serde_json::from_slice(&bytes).unwrap();
+        let challenge = &begun["value"];
+        let id = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
+        let response = app.oneshot(Request::builder()
+            .method("POST").uri(format!("/v1/client/pairings/{id}/complete"))
+            .header("Content-Type", "application/json")
+            .body(Body::from(json!({
+                "api_version": CLIENT_API_VERSION, "code": challenge["code"],
+                "device_public_key": "test-device-public-key-with-at-least-32-characters"
+            }).to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        let completed: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status, StatusCode::OK, "{completed}");
+        let credential = completed["value"]["credential"].as_str().unwrap();
+        let request = Request::builder().uri("/v1/client/agents")
+            .header(AUTHORIZATION, format!("Bearer {credential}"))
+            .body(Body::empty()).unwrap();
+        let session = authenticate(&state, &request, "fabric-loopback").unwrap();
+        assert_eq!(session.authority_actor, "person/ada");
+        assert!(session.allows("read.projections"));
+        assert!(revalidate_session(&state, &session).is_ok());
+    }
+
     #[test]
     fn a_timeline_page_stays_under_its_byte_budget_and_keeps_the_newest_entries() {
         let entry = |size: usize| (json!({"body": "x".repeat(size)}), ());
@@ -13632,6 +13676,7 @@ mission "differential" state="ready" {
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/ada".into()),
                 fields: BTreeMap::from([
+                    ("pairing_operation_version".into(), json!(1)),
                     ("credential_hash".into(), json!(credential_digest(credential))),
                     ("session_actor".into(), json!("client/resources-reader")),
                     ("person_id".into(), json!("person/ada")),
@@ -16198,6 +16243,33 @@ subscription "watch/source" {
     }
 
     #[test]
+    fn unmarked_pairing_records_require_a_new_pairing() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state(root.path());
+        for actor in [Some("agent/example"), Some("person/alex"), None] {
+            let credential = format!("legacy-{actor:?}");
+            // Retained records use the same internal append seam as historical admission.
+            state.store.append_claim(&ClaimInput {
+                subject: format!("custom/client/legacy-{}", credential_digest(&credential)),
+                kind: "custom.client.pairing-completed".into(),
+                actor: actor.map(str::to_owned),
+                fields: BTreeMap::from([
+                    ("credential_hash".into(), json!(credential_digest(&credential))),
+                    ("person_id".into(), json!("person/alex")),
+                    ("session_actor".into(), json!("client/legacy-session")),
+                    ("scopes".into(), json!(["read.projections"])),
+                    ("expires_at_unix_ms".into(), json!(client_now_ms() as u64 + 60_000)),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            let request = Request::builder().uri("/v1/client/agents")
+                .header(AUTHORIZATION, format!("Bearer {credential}"))
+                .body(Body::empty()).unwrap();
+            assert!(authenticate(&state, &request, "fabric-loopback").is_err());
+        }
+    }
+
+    #[test]
     fn paired_authentication_uses_pairing_claims_and_honors_revocation() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
@@ -16210,6 +16282,7 @@ subscription "watch/source" {
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/alex".into()),
                 fields: BTreeMap::from([
+                    (fractal_store::PAIRING_OPERATION_VERSION.into(), json!(1)),
                     (
                         "credential_hash".into(),
                         Value::String(credential_digest(credential)),

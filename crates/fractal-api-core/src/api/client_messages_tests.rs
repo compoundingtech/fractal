@@ -8,6 +8,7 @@ fn paging_reader(state: &AppState, credential: &str, scopes: &[&str]) {
         "custom.client.pairing-completed",
         "person/alex",
         BTreeMap::from([
+            ("pairing_operation_version".into(), json!(1)),
             ("credential_hash".into(), json!(hex::encode(Sha256::digest(credential.as_bytes())))),
             ("session_actor".into(), json!(format!("client/{credential}"))),
             ("person_id".into(), json!("person/alex")),

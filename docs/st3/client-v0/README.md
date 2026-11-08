@@ -2259,6 +2259,13 @@ Errors have `error_version: st3.client.error.v0`, a stable kebab-case code, safe
 `remote-unavailable`, `terminal-unavailable`, `terminal-ended`,
 `response-budget-exceeded` (HTTP 413), `content-not-text` (HTTP 422), and `internal`.
 
+Pairing records are reserved for the dedicated pairing operations: ordinary claim writes
+cannot use a `custom.client.pairing*` kind or a `custom/client/pairing*` subject.
+The pairing operation stamps `pairing_operation_version: 1` on its challenge and session
+records. Authentication requires this marker and the concrete person actor matching
+`person_id`. Unmarked challenges and credentials, including previously retained pairings,
+require a new pairing. There is no automatic legacy admission.
+
 Unknown, expired, or revoked paired-device credentials return HTTP 403, `code: forbidden`,
 `retryable: false`, and `details.reason: credential-rejected`. Pair the device again to restore
 access. A valid credential missing a required scope still returns ordinary `forbidden` without
