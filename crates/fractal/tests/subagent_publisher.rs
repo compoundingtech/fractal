@@ -27,6 +27,7 @@ async fn serve(
 ) {
     let store = Arc::new(Store::open(&root.join("graph.db"), "publisher-test").unwrap());
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
