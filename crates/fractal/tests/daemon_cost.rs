@@ -1852,9 +1852,12 @@ async fn populated_ready_work_cost_by_cohort_size() {
     // dev5 fixture observation: cohorts 1/8/32/64 yielded ready 2/16/64/128,
     // VM 247/1458/5610/11146 and statements 13/62/230/454, all with zero scans.
     let (small_rows, small) = &sizes[0];
-    let (large_rows, large) = sizes.last().unwrap();
-    assert_within(large.vm_steps * small_rows, small.vm_steps * large_rows, 1, "VM per ready row");
-    assert_within(large.statements * small_rows, small.statements * large_rows, 1, "statements per cohort step");
+    // Check every cohort: an intermediate non-monotone spike must not hide
+    // behind a cheap largest-cohort sample.
+    for (rows, sample) in &sizes {
+        assert_within(sample.vm_steps * small_rows, small.vm_steps * rows, 1, "VM per ready row");
+        assert_within(sample.statements * small_rows, small.statements * rows, 1, "statements per cohort step");
+    }
 
     // Keep the measured cohort and answer fixed while growing both event kinds
     // tenfold on real work subjects assigned only to seats outside that cohort.
