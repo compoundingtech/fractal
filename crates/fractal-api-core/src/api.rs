@@ -1988,6 +1988,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "custody-pending"
         | "not-found"
         | "forbidden"
+        | "pairing-origin-required"
         | "attention-migrated"
         | "unsupported-capability"
         | "peer-too-old"
@@ -7217,6 +7218,19 @@ impl HarnessAncestry {
         match self { Self::Bound(agent) => Some(agent), _ => None }
     }
 
+    #[cfg(target_os = "linux")]
+    fn of_linux_environment(environment: &[u8]) -> Self {
+        // An empty or unterminated read cannot establish absence of agent markers.
+        // Fork-only children may legitimately retain a complete parent environment.
+        if environment.is_empty() || !environment.ends_with(&[0]) {
+            return Self::Unavailable;
+        }
+        Self::of_environment(&|name| environment.split(|byte| *byte == 0).find_map(|entry| {
+            let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
+            (key == name).then_some(value)
+        }))
+    }
+
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn of_environment<'a>(lookup: &impl Fn(&str) -> Option<&'a str>) -> Self {
         let primary = lookup("ST_AGENT");
@@ -7313,10 +7327,7 @@ fn local_harness_process(pid: u32) -> Option<HarnessProcess> {
 #[cfg(target_os = "linux")]
 fn local_harness_identity(pid: u32) -> Option<HarnessAncestry> {
     let environment = fs::read(format!("/proc/{pid}/environ")).ok()?;
-    Some(HarnessAncestry::of_environment(&|name| environment.split(|byte| *byte == 0).find_map(|entry| {
-        let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
-        (key == name).then_some(value)
-    })))
+    Some(HarnessAncestry::of_linux_environment(&environment))
 }
 
 #[cfg(target_os = "macos")]

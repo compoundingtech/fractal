@@ -113,3 +113,60 @@ fn members_revalidate_a_grant_against_the_same_completion() {
 fn later_of(claim: &ClaimRecord) -> u64 {
     claim.body.pointer("/fields/expires_at_unix_ms").and_then(Value::as_u64).unwrap()
 }
+
+#[tokio::test]
+async fn person_pairing_completes_only_on_the_beginning_member() {
+    let (left_root, right_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let left = super::tests::test_state_named(left_root.path(), "pairing-left");
+    let right = super::tests::test_state_named(right_root.path(), "pairing-right");
+    let session = ClientSession::local(Some(PERSON)).unwrap();
+    let Json(challenge) = pairing_begin(
+        State(left.clone()),
+        Extension(session.clone()),
+        Json(serde_json::from_value(json!({
+            "api_version": CLIENT_API_VERSION, "device_name": "Phone", "person_id": PERSON,
+        })).unwrap()),
+    ).await.unwrap();
+    replicate(&left, &right);
+    let id = challenge["pairing_id"].as_str().unwrap().trim_start_matches("pairing/");
+    let subject = format!("custom/client/pairing-{id}");
+    let begun = right.store.claims_for_subject_kind_at(
+        &subject, "custom.client.pairing-begun", None, true, 1,
+    ).unwrap().claims.remove(0);
+    assert_eq!(begun.origin, left.store.origin());
+    assert_ne!(begun.origin, right.store.origin());
+    let request = |code: Value| serde_json::from_value(json!({
+        "api_version": CLIENT_API_VERSION, "code": code,
+        "device_public_key": "a".repeat(64),
+    })).unwrap();
+    let before = right.store.index().unwrap();
+    // Even an incorrect code gets the origin refusal: no verifier work or issuance happens.
+    for code in [json!("incorrect"), challenge["code"].clone()] {
+        let error = pairing_complete(
+            State(right.clone()), Extension(session.clone()), AxumPath(id.into()), Json(request(code)),
+        ).await.unwrap_err();
+        assert_eq!(error.status, StatusCode::FORBIDDEN);
+        assert_eq!(error.code, "pairing-origin-required");
+        assert_eq!(error.message, "complete pairing on the member that began it");
+        let envelope = crate::api::client_error_envelope(
+            error.status, &json!({"code": error.code, "message": error.message}), "origin-test",
+        );
+        assert_eq!(envelope["code"], "pairing-origin-required");
+        assert_eq!(envelope["retryable"], false);
+        let typed: fractal_client::ErrorEnvelope = serde_json::from_value(envelope).unwrap();
+        assert_eq!(typed.code, fractal_client::ErrorCode::PairingOriginRequired);
+        assert_eq!(right.store.index().unwrap(), before);
+        assert!(right.store.claims_for_subject_kind_at(
+            &subject, "custom.client.pairing-completed", None, true, 1,
+        ).unwrap().claims.is_empty());
+    }
+    let Json(completed) = pairing_complete(
+        State(left.clone()), Extension(session), AxumPath(id.into()), Json(request(challenge["code"].clone())),
+    ).await.unwrap();
+    assert_eq!(completed["kind"], "paired-session");
+    assert_eq!(completed["person_id"], PERSON);
+    assert!(completed["credential"].as_str().unwrap().len() >= 32);
+    assert_eq!(left.store.claims_for_subject_kind_at(
+        &subject, "custom.client.pairing-completed", None, true, 1,
+    ).unwrap().claims.len(), 1);
+}
