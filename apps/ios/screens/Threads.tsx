@@ -142,7 +142,7 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
       <T numberOfLines={1} style={{ flex: 1 }}><T bold color={theme.accent}>{title}</T>{threads[0] ? <T dim> · {threads[0].title}</T> : null}</T>
       <T dim>{show ? '▾ hide' : '▸ show'}</T>
     </Pressable>
-    {show ? <ScrollView style={{ maxHeight: Math.round(height * 0.4), flexGrow: 0 }} contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 8 }}>
+    {show ? <ScrollView keyboardShouldPersistTaps="handled" style={{ maxHeight: Math.round(height * 0.4), flexGrow: 0 }} contentContainerStyle={{ paddingHorizontal: 12, paddingBottom: 8 }}>
       {threads.map(thread => {
         const open = expanded.has(thread.id);
         return <View key={thread.id}>
