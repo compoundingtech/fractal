@@ -9,7 +9,6 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
-import { rightPanelAtom } from './rightPanel.ts'
 import type { GlassGateway } from '../workspace/glassSync.ts'
 import type { CollectionStream, Glass } from '@fractal/client'
 
@@ -71,7 +70,6 @@ beforeEach(() => {
   window.localStorage.clear()
   window.history.replaceState(null, '', '/w/agent/a')
   registry = AtomRegistry.make()
-  registry.set(rightPanelAtom, { open: false, tab: 'details' })
   host = document.createElement('div')
   document.body.append(host)
 })
@@ -127,17 +125,15 @@ const glassStore = () => {
   return { gateway, glasses }
 }
 
-it('starts from the person\'s glasses after a reload; faces and the shared panel are this page\'s', async () => {
+it('starts from the person\'s glasses after a reload; faces are this page\'s', async () => {
   const st = glassStore()
   await mount(st.gateway())
   await act(async () => row('agent/b').click())
   await vi.waitFor(() => expect([...st.glasses.values()].map(glass => JSON.stringify(glass.body))).toEqual([expect.stringContaining('agent:agent/b')]))
-  await act(async () => button('Toggle right panel').click())
   await unmount()
   window.history.replaceState(null, '', '/')
   await mount(st.gateway())
   expect(titles()).toEqual(['Agent A', 'Agent B'])
-  expect(button('Toggle right panel').getAttribute('aria-pressed')).toBe('true')
 })
 
 it('says when the layout is not syncing, and a retry that reaches the glasses starts from them', async () => {

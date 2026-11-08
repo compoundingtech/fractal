@@ -60,8 +60,10 @@ try {
   assert(await darkFrame.evaluate(() => window.innerWidth) >= 1000, 'narrow branch must work inside a wide iframe')
   await page.waitForTimeout(350)
   assert.equal(await page.evaluate(() => localStorage.getItem('wf.ui@1')), sentinel)
-  await light.getByRole('button', { name: 'Toggle right panel', exact: true }).click()
-  await light.getByRole('separator', { name: 'Resize Details', exact: true }).press('ArrowLeft')
+  // The pane's side panel may already be open by default at this width.
+  const panelToggle = light.getByRole('button', { name: 'Toggle right panel', exact: true })
+  if (await panelToggle.getAttribute('aria-pressed') !== 'true') await panelToggle.click()
+  await light.getByRole('separator', { name: 'Resize side panel', exact: true }).press('ArrowLeft')
   assert.deepEqual(await page.evaluate(() => Object.keys(localStorage)), ['wf.ui@1'])
   await light.getByRole('button', { name: 'Toggle right panel', exact: true }).click()
   assert.equal(await darkFrame.locator('.embed-narrow').evaluate(node => Math.round(node.getBoundingClientRect().width)), 440)

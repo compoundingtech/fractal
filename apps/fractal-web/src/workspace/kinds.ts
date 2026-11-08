@@ -3,6 +3,7 @@ import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { makeKindRegistry, type KindPolicy } from './registry.ts'
 import type { KindDescriptor, PresentationWorld } from './presentation.ts'
+import { AgentAside, type AsidePanelProps } from '../web/AgentAside.tsx'
 import type { Subject, SubjectKind } from './subject.ts'
 import { githubContributions, GithubTab } from '../plugins/github/index.ts'
 import { AgentSurface, AlertSurface, DeclarationSurface, DocumentSurface, InboxSurface, MissionsSurface, ResourceSurface, UnsupportedSurface, UsageSurface } from './surfaces.tsx'
@@ -38,9 +39,24 @@ export interface KindSurface {
   readonly Row?: (props: { readonly ref: string }) => React.ReactNode
   /** The hover card for one of this kind's refs. */
   readonly Card?: (props: { readonly ref: string }) => React.ReactNode
+  /** The pane's side panel for this kind: its own tabs and sections. */
+  readonly Aside?: KindAside
 }
 
-const agent: KindSurface = { Surface: AgentSurface, hidden: 'content-visibility', scrollMemory: false }
+export interface KindAside {
+  /**
+   * The pane width (px) from which the panel shows by default: what the content needs plus the panel. The TUI shows
+   * details beside a conversation from 90 columns and beside a terminal from 120; at the web's denser type a reading
+   * column and the panel need about 960px, a terminal grid and the panel about 1080px.
+   */
+  readonly threshold: (view: { readonly terminal: boolean }) => number
+  readonly Panel: (props: AsidePanelProps) => React.ReactNode
+}
+
+const agent: KindSurface = {
+  Surface: AgentSurface, hidden: 'content-visibility', scrollMemory: false,
+  Aside: { threshold: ({ terminal }) => terminal ? 1080 : 960, Panel: AgentAside },
+}
 const missions: KindSurface = { Surface: MissionsSurface, hidden: 'activity', scrollMemory: true }
 
 const views: Readonly<Record<SubjectKind, KindSurface>> = {

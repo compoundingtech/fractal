@@ -133,27 +133,25 @@ const loadedInspector = async (scope: HTMLElement) => {
   const inspector = views.closest<HTMLElement>('aside[aria-label="Agent inspector"]')!
   return { inspector, views, tab: (name: 'Changes' | 'Details') => within(views).getByRole('tab', { name }) }
 }
-/** The docked inspector opens on Details; its separator names the visible view and follows the tab selection. */
+/** The pane's own side panel opens on Details and remembers the tab for its kind across a close and reopen. */
 const openWideDetails = async (canvasElement: HTMLElement) => {
   await assertWide(canvasElement)
   const { canvas, header } = await workspace(canvasElement)
-  await userEvent.click(header.getByRole('button', { name: 'Toggle right panel' }))
+  const toggle = header.getByRole('button', { name: 'Toggle right panel' })
+  if (toggle.getAttribute('aria-pressed') !== 'true') await userEvent.click(toggle)
   const { inspector, tab } = await loadedInspector(canvasElement)
-  await expect(tab('Details')).toHaveAttribute('aria-selected', 'true')
-  await expect(canvas.getByRole('separator', { name: 'Resize Details' })).toBeVisible()
+  await expect(inspector.closest('[data-pane-aside]')?.closest('[data-pane]')).not.toBeNull()
+  await expect(canvas.getByRole('separator', { name: 'Resize side panel' })).toBeVisible()
   await userEvent.click(tab('Changes'))
   await expect(tab('Changes')).toHaveAttribute('aria-selected', 'true')
   await expect(await within(inspector).findByRole('complementary', { name: 'Changes' }, { timeout: 15000 })).toBeVisible()
-  await expect(canvas.getByRole('separator', { name: 'Resize Changes' })).toBeVisible()
-  await expect(canvas.queryByRole('separator', { name: 'Resize Details' })).toBeNull()
   await expect(canvas.queryByRole('dialog', { name: 'Agent details' })).toBeNull()
-  // A remounted inspector starts on Details again, and so does its separator.
   await userEvent.click(within(inspector).getByRole('button', { name: 'Close agent inspector' }))
   await waitFor(() => expect(canvas.queryByRole('complementary', { name: 'Agent inspector' })).toBeNull())
   await userEvent.click(header.getByRole('button', { name: 'Toggle right panel' }))
   const reopened = await loadedInspector(canvasElement)
-  await expect(reopened.tab('Details')).toHaveAttribute('aria-selected', 'true')
-  await expect(canvas.getByRole('separator', { name: 'Resize Details' })).toBeVisible()
+  await expect(reopened.tab('Changes')).toHaveAttribute('aria-selected', 'true')
+  await userEvent.click(reopened.tab('Details'))
 }
 
 /**
