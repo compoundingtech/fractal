@@ -78,11 +78,12 @@ afterEach(async () => { await act(async () => root.unmount()); registry.dispose(
 
 describe('live header parity', () => {
   it('keeps only the overflow, terminal and panel controls in the owning header, with system events in Settings', async () => {
+    // The tab strip is the one top bar; the conversation's controls are its trailing cluster.
     const header = host.querySelector('[data-testid="thread-header"]')!
-    const names = [...header.querySelectorAll('button')].map(node => node.getAttribute('aria-label') ?? node.textContent?.trim())
+    const names = [...header.querySelectorAll('[data-thread-actions] button')].map(node => node.getAttribute('aria-label') ?? node.textContent?.trim())
     expect(names).toEqual(['More actions', 'Show terminal', 'Toggle right panel'])
-    // A calm agent carries no status mark beside its title; only amber and red ones do.
-    expect(header.querySelector('[data-status]')).toBeNull()
+    // A calm agent's tab carries its status circle, never the amber or red mark.
+    expect(header.querySelector('[data-mark="needs-you"], [data-mark="failed"]')).toBeNull()
     const setting = await openSettings()
     expect(setting.checked).toBe(false)
     // The conversation pane loads lazily; wait for its first transcript frame.

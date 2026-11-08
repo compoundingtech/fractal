@@ -40,7 +40,7 @@ import { MilestoneAgentRow } from '../../../../packages/fractal-ui/src/assistant
 import { SidebarMissionChildRow, missionChildAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarMissionLine.tsx'
 import { SidebarQueryContext, sidebarRowAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/rowPresentation.tsx'
 import { SystemNotice, ConnectionStatus } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
-import { ThreadHeader, PhoneTerminalToggle, ResizableSplit } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Shell.tsx'
+import { ThreadActions, ThreadBreadcrumb, PhoneTerminalToggle, ResizableSplit } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Shell.tsx'
 import { DockedSplit } from '../../../../packages/fractal-ui/src/assistant-ui/composition/DockedSplit.tsx'
 import { NarrowSheet } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { darkTheme as assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-theme.ts'
@@ -386,6 +386,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const [panel, writePanel] = useAtom(rightPanelAtom)
   const setPanel = React.useCallback((change: Partial<RightPanel>) => writePanel(value => ({ ...value, ...change })), [writePanel])
   const [sheetOpen, setSheetOpen] = React.useState(false)
+  const [phoneSheet, setPhoneSheet] = React.useState<{ readonly open: boolean; readonly id: string }>({ open: false, id: '' })
   const [openedTool, setOpenedTool] = React.useState<WorkLogCall | undefined>(undefined)
   // A tool detail belongs to its agent and a phone's sheet to what was showing, however the tab changed: Back counts.
   const shownTab = activeRow?.id
@@ -588,7 +589,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // The panes stay outside changing shell providers, whose context propagation would scan every retained turn.
   // Only the stable header DOM host and narrow geometry cross that boundary.
   return (<OpenProvider value={openRef}><NarrowLayoutContext.Provider value={narrow}>
-    <ThreadHeaderSlotContext.Provider value={narrow ? null : headerSlot}>
+    <ThreadHeaderSlotContext.Provider value={headerSlot}>
     <WorkbenchContextProvider value={{ open, focusedRef: activeSubject === undefined ? null : subjectRef(activeSubject), subjects: byRef, platform: navigator.platform.includes('Mac') ? 'mac' : 'other' }}>
       <ResourcePanelProvider value={{ state: resourcePanel, onChange: (change) => setResourcePanel((value) => ({ ...value, ...change })) }}>
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
@@ -601,11 +602,24 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
                 </React.Suspense>
               ) : undefined}>
               <section aria-label={workspaceLabel} onPointerOverCapture={prefetchTerminalIntent} onFocusCapture={prefetchTerminalIntent} {...stylex.props(styles.workspace)}>
-                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} headerActions={sidebarHeaderActions} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} needsMe={agent !== undefined && needsYou.has(agent.ref)} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarToggleRef={sidebarOpener} sidebarSheet={sheet} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? activeLabel ?? 'Select an agent'} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} terminalOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setSheetOpen(true) }} onToggleTerminal={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} needsMe={agent !== undefined && needsYou.has(agent.ref)} sidebarCollapsed={collapsed} onToggleSidebar={toggleSidebar} sidebarToggleRef={sidebarOpener} terminalAvailable={terminalRef !== undefined || terminalOpen} {...(shownTerminalDisabledReason === undefined ? {} : { terminalDisabledReason: shownTerminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? activeLabel ?? 'Select an agent'} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={panel.open} terminalOpen={terminalOpen} onTogglePanel={() => setPanel({ open: !panel.open })} onToggleTerminal={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}
-                <GatewayConnectionStatus />
-                <AlertFlashBand onOpen={openAlert} />
-                {/* One strip and one portal host at every width: the breakpoint never remounts a surface. */}
-                <WorkspaceStrip items={tabItems} active={activeRow?.id ?? null} group={workspace.focus} narrow={narrow} dispatch={go} open={openRef} trailing={narrow && (terminalRef !== undefined || terminalDisabledReason !== undefined || terminalOpen) ? <PhoneTerminalToggle pressed={terminalOpen} onPress={toggleTerminal} {...(shownTerminalDisabledReason === undefined ? {} : { disabledReason: shownTerminalDisabledReason })} /> : undefined}>
+                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} headerActions={sidebarHeaderActions} onSheetChange={setPhoneSheet}>{sidebarBody}</PhoneAgentDrawer> : null}
+                {/* One strip and one portal host at every width: the breakpoint never remounts a surface. The strip is the window's one top bar, so the conversation's controls live at its end. */}
+                <WorkspaceStrip bar items={tabItems} active={activeRow?.id ?? null} group={workspace.focus} narrow={narrow} dispatch={go} open={openRef}
+                  leading={<>
+                    {narrow
+                      ? <ChromeControl ref={sidebarOpener} icon="panel-left" label="Expand sidebar" tooltip="Show agents" edge="lead" popup="dialog" expanded={phoneSheet.open} {...(phoneSheet.open ? { controls: phoneSheet.id } : {})} onPress={() => agentsDrawer.current?.open()} />
+                      : collapsed ? <ChromeControl ref={sidebarOpener} icon="panel-left" label="Expand sidebar" tooltip="Expand sidebar (⌘/Ctrl+B)" edge="lead" onPress={toggleSidebar} /> : null}
+                    <ThreadBreadcrumb {...(agent?.host === undefined ? {} : { folder: agent.host })} title={agent?.name ?? activeLabel ?? 'Select an agent'} label={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />
+                  </>}
+                  trailing={narrow
+                    ? <>
+                      {(terminalRef !== undefined || terminalDisabledReason !== undefined || terminalOpen) ? <PhoneTerminalToggle pressed={terminalOpen} onPress={toggleTerminal} {...(shownTerminalDisabledReason === undefined ? {} : { disabledReason: shownTerminalDisabledReason })} /> : undefined}
+                      <div data-testid="native-action-slot" ref={setHeaderSlot} {...stylex.props(styles.barSlot)}>{agentHeaderActions}</div>
+                      <ChromeControl icon="panel" label="Agent details" edge="trail" popup="dialog" expanded={narrowDetailsOpen} active={narrowDetailsOpen} onPress={() => { if (narrowDetailsOpen) closeDetails(); else setSheetOpen(true) }} />
+                    </>
+                    : <ThreadActions nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} terminalAvailable={terminalRef !== undefined || terminalOpen} {...(shownTerminalDisabledReason === undefined ? {} : { terminalDisabledReason: shownTerminalDisabledReason })} panelOpen={panel.open} terminalOpen={terminalOpen} onTogglePanel={() => setPanel({ open: !panel.open })} onToggleTerminal={toggleTerminal} />}>
+                  <GatewayConnectionStatus />
+                  <AlertFlashBand onOpen={openAlert} />
                   <div ref={setPaneHost} {...stylex.props(styles.body)} />
                 </WorkspaceStrip>
               </section>
@@ -633,14 +647,6 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   </NarrowLayoutContext.Provider></OpenProvider>)
 }
 
-/** Only time-bearing surfaces subscribe to the wall clock, not the workspace providers. */
-function ClockedThreadHeader({ agent, stale, needsMe, ...props }: Omit<React.ComponentProps<typeof ThreadHeader>, 'now' | 'status' | 'statusLabel' | 'statusSince'> & { readonly agent?: Agent; readonly stale: boolean; readonly needsMe: boolean }) {
-  const row = agent === undefined ? undefined : sidebarRow({ agent, stale, needsMe })
-  // Beside the title only what asks for attention, from the same needs-you set as the sidebar: amber when the agent's own
-  // ask waits on the person, red when it failed. A merely waiting harness, like every calm state, shows nothing.
-  const status = row?.status === 'failed' ? 'failed' : needsMe && row !== undefined ? 'waiting' : undefined
-  return <ThreadHeader {...props} status={status} statusLabel={status === 'waiting' ? 'Needs you' : row?.statusLabel} statusSince={status === undefined ? undefined : row?.statusSince} />
-}
 
 
 
@@ -694,6 +700,7 @@ const styles = stylex.create({
   skeletonName: { gridRow: '1', width: '68%' },
   skeletonHost: { gridRow: '2', width: '44%' },
   workspace: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0 },
+  barSlot: { display: 'flex', alignItems: 'center', minWidth: 0 },
   body: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },
   changesPanel: { display: 'flex', flexDirection: 'column', flexShrink: 0, minWidth: 0, minHeight: 0, overflowY: 'auto', borderLeftWidth: 1, borderLeftStyle: 'solid', borderLeftColor: c.border },
   sheetPanel: { flexGrow: 1, borderLeftWidth: 0 },

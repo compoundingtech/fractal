@@ -408,8 +408,10 @@ it.each([
   registry.set(agents, observed({ value: [agent] }))
   window.history.replaceState(null, '', '/w/agent/example')
   await mount(1440)
+  // The tab's status circle turns amber only for the needs-you set, and red for failure.
   const header = host.querySelector('section[aria-label="Agent workspace"] header')!
-  expect(header.querySelector('[data-status]')?.getAttribute('data-status') ?? null).toBe(expected)
+  const mark = header.querySelector('[role="tab"][aria-selected="true"] [data-mark]')?.getAttribute('data-mark')
+  expect(mark === 'needs-you' ? 'waiting' : mark === 'failed' ? 'failed' : null).toBe(expected)
 })
 
 it('keeps a calm agent\'s status, and its clock, out of ClockedThreadHeader without rendering the header projection', async () => {
@@ -425,8 +427,8 @@ it('keeps a calm agent\'s status, and its clock, out of ClockedThreadHeader with
     const header = host.querySelector('section[aria-label="Agent workspace"] header')!
     expect(header).not.toBeNull()
     const count = projectedRows.mock.calls.length
-    // Suspended is calm: no mark beside the title, so no status clock there either, before or after its boundary.
-    expect(header.querySelector('[data-status]')).toBeNull()
+    // Suspended is calm: its tab's circle is neither amber nor red, and it draws no status clock, before or after its boundary.
+    expect(header.querySelector('[data-mark="needs-you"], [data-mark="failed"]')).toBeNull()
     expect(header.querySelector('time')).toBeNull()
     await act(async () => registry.set(now, 6000))
     expect(header.querySelector('time')).toBeNull()
