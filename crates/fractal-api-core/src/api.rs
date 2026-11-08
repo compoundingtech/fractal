@@ -7373,8 +7373,12 @@ impl AncestryUnavailableCause {
     }
 
     fn record(&self) {
-        tracing::warn!(pid = ?self.pid, reason = self.reason_code(), detail = ?self.reason,
-            "local caller ancestry unavailable");
+        use std::io::Write as _;
+        // The default daemon has no tracing subscriber without telemetry export.
+        // Diagnostic write failures must not interrupt the fail-closed response.
+        let _ = writeln!(std::io::stderr(),
+            "st3: local caller ancestry unavailable pid={:?} reason={} detail={:?}",
+            self.pid, self.reason_code(), self.reason);
     }
 }
 
