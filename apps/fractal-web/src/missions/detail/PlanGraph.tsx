@@ -168,7 +168,7 @@ const styles = stylex.create({
   toolbar: { display: 'flex', flexWrap: 'wrap', justifyContent: 'flex-end', alignItems: 'center', gap: s.xs, paddingInline: s.md, paddingBlock: s.sm, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   label: { marginInlineEnd: 'auto', color: ink.fgMuted, fontSize: t.denseSize, fontWeight: 500 },
   replaying: { marginInlineEnd: s.xs, color: ink.fg, fontSize: t.denseSize },
-  svg: { display: 'block', cursor: 'grab', touchAction: 'none', outline: 'none', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: '-2px' } },
+  svg: { display: 'block', cursor: 'grab', touchAction: 'none', outline: 'none', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
   arrow: { fill: ink.fgMuted },
   edge: { stroke: ink.fgMuted, strokeWidth: 1.25, strokeOpacity: 0.6, transitionProperty: 'stroke-opacity', transitionDuration: '120ms' },
   edgeLit: { stroke: ink.fg, strokeWidth: 2, strokeOpacity: 1 },

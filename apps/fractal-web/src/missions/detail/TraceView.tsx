@@ -251,7 +251,7 @@ const styles = stylex.create({
   rowHeader: { position: 'sticky', left: 0, zIndex: 2, flexShrink: 0, display: 'flex', minWidth: 0, backgroundColor: surface.canvas, borderInlineEndWidth: g.hairline, borderInlineEndStyle: 'solid', borderInlineEndColor: border.border },
   rowHeaderSelected: { backgroundColor: surface.rowActive },
   rowButton: { display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '1px', width: '100%', minWidth: 0, margin: 0, paddingInline: s.md, borderWidth: 0, backgroundColor: 'transparent', color: ink.fg, fontFamily: 'inherit', fontSize: 'inherit', textAlign: 'start', cursor: 'pointer',
-    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: '-2px' } },
+    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
   line1: { display: 'flex', alignItems: 'center', gap: s.sm, minWidth: 0 },
   line2: { display: 'flex', minWidth: 0, paddingInlineStart: `calc(10px + ${s.sm})`, color: ink.fgMuted, fontSize: t.denseSize, fontVariantNumeric: 'tabular-nums' },
   line2Selected: { color: ink.fgSoft },
