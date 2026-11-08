@@ -1811,6 +1811,9 @@ pub struct Agent {
     pub activity: Option<String>,
     pub host_id: Option<String>,
     pub last_activity_at: Option<String>,
+    /// When the agent last said something itself; absent on older daemons.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_prose_at: Option<String>,
     pub silent_since: Option<String>,
     #[serde(default)]
     pub down_since: Option<String>,

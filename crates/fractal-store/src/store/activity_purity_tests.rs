@@ -252,3 +252,38 @@ fn last_activity_reads_do_not_scan_growing_completed_history() {
         );
     }
 }
+
+fn append_at(store: &Store, time: u128, subject: &str, kind: &str, fields: Value) {
+    store.set_write_clock_at(time).unwrap();
+    let mut connection = store.connection.write();
+    let tx = connection.transaction().unwrap();
+    append_claim_tx(&tx, &store.origin, subject, kind, Some(AGENT), &json!({"fields": fields}), &[], None).unwrap();
+    tx.commit().unwrap();
+}
+
+fn timeline(entry: usize, entry_type: &str, role: &str) -> Value {
+    json!({
+        "incarnation_id": INCARNATION, "driver": "codex", "entry_id": format!("prose-{entry}"),
+        "entry_type": entry_type, "operation": "append", "revision": 1,
+        "role": role, "final": true, "body": {"text": "Words"}
+    })
+}
+
+/// "New since you last looked" compares with the agent's own prose: its assistant timeline text and the
+/// mail it sends. Tool calls, the person's prompts and mail to the agent are activity, not prose.
+#[test]
+fn last_prose_is_the_agents_own_words_only() {
+    let store = activity_source(4, &[]);
+    let prose = |store: &Store| store.agent_last_prose_at(AGENT, Some(INCARNATION), store.index().unwrap()).unwrap();
+    assert_eq!(prose(&store), None);
+    append_at(&store, 100, AGENT, "harness.timeline", timeline(1, "message", "assistant"));
+    append_at(&store, 200, AGENT, "harness.timeline", timeline(2, "tool_call", "assistant"));
+    append_at(&store, 300, AGENT, "harness.timeline", timeline(3, "message", "user"));
+    append_at(&store, 400, "message/to-agent", "message.sent", json!({"from": "person/ada", "to": AGENT, "content": "Hi", "status": "sent"}));
+    assert_eq!(prose(&store), Some(100));
+    assert_eq!(store.agent_last_activity_at(AGENT, Some(INCARNATION), store.index().unwrap()).unwrap(), Some(400));
+    append_at(&store, 500, "message/from-agent", "message.sent", json!({"from": AGENT, "to": "person/ada", "content": "Done", "status": "sent"}));
+    assert_eq!(prose(&store), Some(500));
+    append_at(&store, 600, AGENT, "harness.timeline", timeline(4, "content", "assistant"));
+    assert_eq!(prose(&store), Some(600));
+}
