@@ -90,16 +90,16 @@ const startFields = { ...baseThreadFields, title: 'Worker test', thread_origin_a
 const replyFields = { ...baseThreadFields, thread_quote_id: 'message/original' };
 const threadHash = async bytes => new Uint8Array(createHash('sha256').update(bytes).digest());
 for (const [fields, expectedSubject, expectedNames] of [
-  [startFields, 'message/c07e68f7def32fe2', ['content', 'from', 'thread_id', 'thread_origin_ask', 'thread_origin_episode', 'title', 'to']],
-  [replyFields, 'message/366e001f45c5c8cd', ['content', 'from', 'thread_id', 'thread_quote_id', 'to']],
-  [baseThreadFields, 'message/366e001f45c5c8cd', ['content', 'from', 'thread_id', 'to']],
+  [startFields, 'message/c07e68f7def32fe2', ['content', 'from', 'thread_id', 'thread_origin_ask', 'thread_origin_episode', 'thread_reader_version', 'title', 'to']],
+  [replyFields, 'message/366e001f45c5c8cd', ['content', 'from', 'thread_id', 'thread_quote_id', 'thread_reader_version', 'to']],
+  [baseThreadFields, 'message/366e001f45c5c8cd', ['content', 'from', 'thread_id', 'thread_reader_version', 'to']],
 ]) {
   const subject = await threadMessageSubject(fields, 'action/ios-1', threadHash);
   assert.equal(subject, expectedSubject);
   const message = { subject, signer: fields.from, fields, key, chain: [], nonce: 'fixture', signedAt: 123 };
   assert.deepEqual(signatureParameter(message, 'signature').signed_fields, expectedNames);
   assert.deepEqual(signedBytes(message).split('\n').slice(4, 4 + expectedNames.length),
-    expectedNames.map(name => `${name}=${JSON.stringify(fields[name])}`));
+    expectedNames.map(name => `${name}=${JSON.stringify({ ...fields, thread_reader_version: 2 }[name])}`));
   assert.doesNotMatch(signedBytes(message), /in_reply_to/);
 }
 

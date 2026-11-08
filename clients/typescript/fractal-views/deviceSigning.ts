@@ -124,7 +124,12 @@ export async function threadMessageSubject(
   return messageSubject(hex(await sha256(utf8.encode(`thread-message:${digest}`))));
 }
 
-function claimFieldNames(fields: SignedFields | ThreadMessageFields): readonly string[] {
+function canonicalMessageFields(fields: SignedFields | ThreadMessageFields) {
+  // Readers predating this version quarantine the signed claim during replication.
+  return 'thread_id' in fields ? { ...fields, thread_reader_version: 2 } : fields;
+}
+
+function claimFieldNames(fields: ReturnType<typeof canonicalMessageFields>): readonly string[] {
   return 'thread_id' in fields ? Object.keys(fields).sort() : signedFieldNames(fields);
 }
 
@@ -140,12 +145,13 @@ export type Unsigned = {
 
 /** The UTF-8 lines the device signs, joined by `\n`, with no trailing newline. */
 export function signedBytes(message: Unsigned): string {
+  const fields = canonicalMessageFields(message.fields);
   return [
     'smallclaims-claim-fields-v1',
     message.subject,
     'message.sent',
     message.signer,
-    ...claimFieldNames(message.fields).map(field => `${field}=${canonical((message.fields as Record<string, string | number | null | string[]>)[field])}`),
+    ...claimFieldNames(fields).map(field => `${field}=${canonical((fields as Record<string, string | number | null | string[]>)[field])}`),
     message.signer,
     '',
     message.key,
@@ -165,7 +171,7 @@ export function signatureParameter(message: Unsigned, signature: string): Device
     signed_at_unix_ms: message.signedAt,
     signature,
     format: 'fields-v1',
-    signed_fields: [...claimFieldNames(message.fields)],
+    signed_fields: [...claimFieldNames(canonicalMessageFields(message.fields))],
   };
 }
 
