@@ -18,6 +18,49 @@ pub(super) fn parse_gateway(value: &str) -> Result<reqwest::Url, String> {
     Ok(url)
 }
 
+/// Reject a known different member offline, before contacting the gateway.
+pub(super) fn check_begin_member(
+    gateway: &reqwest::Url,
+    local_member: &str,
+    peers: &[fractal_daemon::config::PeerConfig],
+) -> Result<()> {
+    for peer in peers {
+        let Ok(url) = parse_gateway(&peer.url) else { continue };
+        if url.as_str().trim_end_matches('/') == gateway.as_str().trim_end_matches('/')
+            && peer.name.trim_start_matches("host/") != local_member.trim_start_matches("host/")
+        {
+            anyhow::bail!(
+                "pairing would begin on {local_member}, but the gateway names member {}; run the pair command on {}",
+                peer.name, peer.name,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Probe public identity without sending person authority or a device credential.
+/// Three seconds bounds gateway reachability only; it is not a pairing retry timeout.
+pub(super) async fn gateway_is_begin_member(
+    gateway: &reqwest::Url,
+    local_member: &str,
+) -> Result<bool> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()?;
+    let url = format!("{}/v1/health", gateway.as_str().trim_end_matches('/'));
+    let Ok(response) = client.get(url).send().await else { return Ok(false) };
+    let Ok(health) = response.json::<serde_json::Value>().await else { return Ok(false) };
+    let Some(node) = health["node"].as_str().filter(|node| !node.is_empty()) else {
+        return Ok(false);
+    };
+    if node.trim_start_matches("host/") != local_member.trim_start_matches("host/") {
+        anyhow::bail!(
+            "pairing would begin on {local_member}, but the gateway serves member {node}; run the pair command on {node}",
+        );
+    }
+    Ok(true)
+}
+
 fn payload(gateway: &reqwest::Url, challenge: &PairingChallenge, expires_at_unix_ms: i64) -> Result<String> {
     // A struct, rather than a JSON map, fixes the wire field order as well as the field set.
     #[derive(Serialize)]
@@ -69,6 +112,71 @@ pub(super) fn render(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn known_other_member_is_refused_before_begin_but_unknown_gateway_is_allowed() {
+        let peers = vec![fractal_daemon::config::PeerConfig {
+            name: "member-b".into(), url: "https://member-b.example/base/".into(),
+        }];
+        let gateway = parse_gateway("https://MEMBER-B.example:443/base").unwrap();
+        let error = check_begin_member(&gateway, "host/member-a", &peers).unwrap_err().to_string();
+        assert!(error.contains("host/member-a"));
+        assert!(error.contains("member-b"));
+        assert!(error.contains("run the pair command on member-b"));
+        assert!(check_begin_member(&gateway, "host/member-b", &peers).is_ok());
+        assert!(check_begin_member(&parse_gateway("https://unknown.example").unwrap(), "host/member-a", &peers).is_ok());
+        // A base path can route to a different daemon: don't infer identity from hostname alone.
+        assert!(check_begin_member(&parse_gateway("https://member-b.example/other").unwrap(), "host/member-a", &peers).is_ok());
+    }
+
+    async fn health_server(body: &'static str) -> (reqwest::Url, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = parse_gateway(&format!("http://{}/base/", listener.local_addr().unwrap())).unwrap();
+        let served = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(stream.read_u8().await.unwrap());
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /base/v1/health HTTP/1.1\r\n"));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            stream.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            ).as_bytes()).await.unwrap();
+        });
+        (url, served)
+    }
+
+    #[tokio::test]
+    async fn gateway_health_matching_member_continues_without_warning() {
+        let (gateway, served) = health_server(r#"{"node":"member-a"}"#).await;
+        assert!(gateway_is_begin_member(&gateway, "host/member-a").await.unwrap());
+        served.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gateway_health_other_member_is_refused_even_without_a_configured_peer() {
+        let (gateway, served) = health_server(r#"{"node":"member-b"}"#).await;
+        let error = gateway_is_begin_member(&gateway, "host/member-a").await.unwrap_err().to_string();
+        assert!(error.contains("host/member-a"));
+        assert!(error.contains("member-b"));
+        assert!(error.contains("run the pair command on member-b"));
+        served.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gateway_health_without_node_or_unreachable_requires_warning() {
+        let (gateway, served) = health_server(r#"{"status":"ready"}"#).await;
+        assert!(!gateway_is_begin_member(&gateway, "host/member-a").await.unwrap());
+        served.await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let gateway = parse_gateway(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        drop(listener);
+        assert!(!gateway_is_begin_member(&gateway, "host/member-a").await.unwrap());
+    }
 
     fn challenge() -> PairingChallenge {
         serde_json::from_value(serde_json::json!({
