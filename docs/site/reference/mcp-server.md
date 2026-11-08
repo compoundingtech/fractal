@@ -162,6 +162,12 @@ The table summarizes the descriptions published by the adapter. A scope listed h
 | `fractal_conversation_search` | `read.assistant.conversation` | Read | Search bounded plain conversation text snippets. |
 | `fractal_conversation_read` | `read.assistant.conversation` | Read | Read one bounded revision-pinned conversation content range. |
 | `fractal_message_send` | `write.assistant.messages` | Write | Send one exact message to any existing agent; person recipients are refused. |
+| `fractal_threads_list` | `read.assistant.conversation` | Read | List threads for one selected conversation. |
+| `fractal_thread_get` | `read.assistant.conversation` | Read | Read one thread's title, lifecycle state and revisions. |
+| `fractal_thread_timeline` | `read.assistant.conversation` | Read | Page messages and accepted rename, close and reopen events for a thread. Use a message’s `next_content_cursor` as `cursor` without `limit` to fetch remaining text. |
+
+These thread tools are available through the `fractal-mcp` stdio server. Use the agent
+and current session IDs returned by conversation discovery for all three.
 
 The corresponding `st_*` tool names are hidden, deprecated aliases for cached clients and are removed in `fractal-chatgpt` 0.2.0. Refresh client tool discovery and use `fractal_*`; aliases do not grant additional authority. This tool-name deprecation is separate from the bridged executable alias.
 

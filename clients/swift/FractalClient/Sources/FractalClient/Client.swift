@@ -355,6 +355,9 @@ public actor FractalClient {
     public func assistantMissions(_ params: AssistantPageRequest, proof: ScgReadAuthorization) async throws -> Envelope<AssistantMissionPage> { try await assistantRead("missions", params, proof: proof) }
     public func assistantAgents(_ params: AssistantPageRequest, proof: ScgReadAuthorization) async throws -> Envelope<AssistantAgentPage> { try await assistantRead("agents", params, proof: proof) }
     public func assistantConversations(_ params: AssistantPageRequest, proof: ScgReadAuthorization) async throws -> Envelope<JSONValue> { try await assistantRead("conversations", params, proof: proof) }
+    public func assistantThreadDetail(_ params: AssistantThreadDetailRequest, proof: ScgReadAuthorization) async throws -> Envelope<JSONValue> { try await assistantRead("thread-detail", params, proof: proof) }
+    public func assistantThreadTimeline(_ params: AssistantThreadTimelineRequest, proof: ScgReadAuthorization) async throws -> Envelope<JSONValue> { try await assistantRead("thread-timeline", params, proof: proof) }
+    public func assistantThreads(_ params: AssistantThreadsRequest, proof: ScgReadAuthorization) async throws -> Envelope<JSONValue> { try await assistantRead("threads", params, proof: proof) }
     public func assistantConversationDetail(_ params: AssistantAgentDetailRequest, proof: ScgReadAuthorization) async throws -> Envelope<JSONValue> { try await assistantRead("conversation-detail", params, proof: proof) }
     public func assistantConversationTimeline(_ params: AssistantConversationTimelineRequest, proof: ScgReadAuthorization) async throws -> Envelope<JSONValue> { try await assistantRead("conversation-timeline", params, proof: proof) }
     public func assistantConversationSearch(_ params: AssistantConversationSearchRequest, proof: ScgReadAuthorization) async throws -> Envelope<JSONValue> { try await assistantRead("conversation-search", params, proof: proof) }

@@ -2909,6 +2909,27 @@ impl Client {
     ) -> Result<Envelope<serde_json::Value>, ClientError> {
         self.assistant_read("conversations", params, proof).await
     }
+    pub async fn assistant_thread_detail(
+        &self,
+        params: &AssistantThreadDetailRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("thread-detail", params, proof).await
+    }
+    pub async fn assistant_thread_timeline(
+        &self,
+        params: &AssistantThreadTimelineRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("thread-timeline", params, proof).await
+    }
+    pub async fn assistant_threads(
+        &self,
+        params: &AssistantThreadsRequest,
+        proof: &ScgReadAuthorization,
+    ) -> Result<Envelope<serde_json::Value>, ClientError> {
+        self.assistant_read("threads", params, proof).await
+    }
     pub async fn assistant_conversation_detail(
         &self,
         params: &AssistantAgentDetailRequest,

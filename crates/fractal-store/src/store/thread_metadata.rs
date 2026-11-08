@@ -4,7 +4,7 @@ use super::*;
 
 #[path = "thread_message_window.rs"]
 mod message_window;
-pub use message_window::{ThreadMessage, TimelineItem, TimelinePage, mixed_timeline};
+pub use message_window::{ThreadMessage, TimelineItem, TimelinePage, mixed_message_content, mixed_timeline};
 
 pub enum Edit<'a> {
     Create {
@@ -429,16 +429,42 @@ pub struct Summary {
 pub fn summary(store: &Store, person: &str, subject: &str) -> Result<Summary, FractalError> {
     store
         .graph
-        .read_snapshot_unindexed(|| Ok(summary_conn(&store.readers.get(), person, subject)))
+        .read_snapshot_unindexed(|| Ok(summary_conn(&store.readers.get(), person, subject, None)))
         .map_err(internal)?
+}
+
+/// Select an exact conversation before evaluating lifecycle claims. An ambiguous
+/// creation cannot establish membership in that conversation.
+pub fn summary_for_conversation(
+    store: &Store,
+    person: &str,
+    agent: &str,
+    subject: &str,
+) -> Result<Summary, FractalError> {
+    store.graph.read_snapshot_unindexed(|| {
+        Ok(summary_conn(&store.readers.get(), person, subject, Some(agent)))
+    }).map_err(internal)?
 }
 
 fn summary_conn(
     connection: &Connection,
     person: &str,
     subject: &str,
+    selected_agent: Option<&str>,
 ) -> Result<Summary, FractalError> {
-    let creation = owned_creation(connection, subject, person, false)?.ok_or_else(unavailable)?;
+    let creation = owned_creation(connection, subject, person, false)
+        .map_err(|error| {
+            if selected_agent.is_some() && error.code == "idempotency-conflict" {
+                unavailable()
+            } else {
+                error
+            }
+        })?
+        .ok_or_else(unavailable)?;
+    let agent = creation.body["fields"]["agent"].as_str().ok_or_else(unavailable)?;
+    if selected_agent.is_some_and(|selected| selected != agent) {
+        return Err(unavailable());
+    }
     let state = match latest_applied_claim(connection, subject, "thread.state-set")?
         .as_ref()
         .and_then(|claim| claim.body["fields"]["state"].as_str())
@@ -461,7 +487,6 @@ fn summary_conn(
             |row| row.get(0),
         )
         .map_err(internal)?;
-    let agent = creation.body["fields"]["agent"].as_str().ok_or_else(unavailable)?;
     let (message_count, unread) = message_window::message_summary(
         connection, person, agent, subject, &creation,
     )?;
@@ -572,8 +597,10 @@ pub fn list_context(
         let has_more = subjects.len() > limit;
         subjects.truncate(limit);
         let next_cursor = subjects.last().filter(|_| has_more).map(|subject| format!("{scope}:{subject}"));
-        let items = subjects.into_iter().map(|subject| summary_conn(&connection, &person, &subject))
-            .collect::<Result<Vec<_>, FractalError>>()?;
+        let selected_agent = matches!(context, ThreadContext::Agent(_)).then_some(key.as_str());
+        let items = subjects.into_iter().map(|subject| {
+            summary_conn(&connection, &person, &subject, selected_agent)
+        }).collect::<Result<Vec<_>, FractalError>>()?;
         Ok(SummaryPage { items, next_cursor })
     })())).map_err(internal)?
 }
@@ -699,7 +726,7 @@ fn recently_closed(
         }
         let state = latest_applied_claim(connection, &subject, "thread.state-set")?;
         if state.is_some_and(|current| current.id == id) {
-            items.push(summary_conn(connection, person, &subject)?);
+            items.push(summary_conn(connection, person, &subject, None)?);
         }
     }
     Ok(SummaryPage {

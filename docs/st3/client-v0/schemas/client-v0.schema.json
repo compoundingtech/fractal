@@ -3907,6 +3907,36 @@
       "type": "object", "additionalProperties": false, "required": ["agent_id"],
       "properties": { "agent_id": { "$ref": "#/$defs/AgentId" }, "max_response_bytes": { "$ref": "#/$defs/AssistantResponseBytes" } }
     },
+    "AssistantThreadDetailRequest": {
+      "type": "object", "additionalProperties": false, "required": ["agent_id", "session_id", "thread_id"],
+      "properties": {
+        "agent_id": {"$ref": "#/$defs/AgentId"},
+        "session_id": {"$ref": "#/$defs/Id"},
+        "thread_id": {"type": "string", "pattern": "^thread/[A-Za-z0-9_-]{1,128}$"},
+        "max_response_bytes": {"$ref": "#/$defs/AssistantResponseBytes"}
+      }
+    },
+    "AssistantThreadTimelineRequest": {
+      "type": "object", "additionalProperties": false, "required": ["agent_id", "session_id", "thread_id"],
+      "properties": {
+        "agent_id": {"$ref": "#/$defs/AgentId"},
+        "session_id": {"$ref": "#/$defs/Id"},
+        "thread_id": {"type": "string", "pattern": "^thread/[A-Za-z0-9_-]{1,128}$"},
+        "cursor": {"$ref": "#/$defs/Cursor"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        "max_response_bytes": {"$ref": "#/$defs/AssistantResponseBytes"}
+      }
+    },
+    "AssistantThreadsRequest": {
+      "type": "object", "additionalProperties": false, "required": ["agent_id", "session_id"],
+      "properties": {
+        "agent_id": {"$ref": "#/$defs/AgentId"},
+        "session_id": {"$ref": "#/$defs/Id"},
+        "cursor": {"$ref": "#/$defs/Cursor"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+        "max_response_bytes": {"$ref": "#/$defs/AssistantResponseBytes"}
+      }
+    },
     "AssistantConversationTimelineRequest": {
       "type": "object", "additionalProperties": false, "required": ["agent_id"],
       "properties": {
@@ -3965,7 +3995,10 @@
         "conversations",
         "conversation-detail",
         "conversation-timeline",
-        "conversation-search"
+        "conversation-search",
+        "thread-detail",
+        "thread-timeline",
+        "threads"
       ]
     },
     "ScgReadAuthorizationPayload": {

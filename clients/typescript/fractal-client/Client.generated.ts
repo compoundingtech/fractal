@@ -14,7 +14,7 @@ import type {
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, PrivateNotesSubject, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
     ScgReadAuthorization, AssistantSummaryRequest, AssistantPageRequest, AssistantConversationContentRequest, AssistantTerminalContentRequest,
-    AssistantAgentDetailRequest, AssistantConversationTimelineRequest, AssistantConversationSearchRequest,
+    AssistantAgentDetailRequest, AssistantThreadDetailRequest, AssistantThreadTimelineRequest, AssistantThreadsRequest, AssistantConversationTimelineRequest, AssistantConversationSearchRequest,
     AssistantSummary, AssistantAttentionPage, AssistantMissionPage, AssistantAgentPage, AssistantContentPage,
 } from './Models.generated.ts';
 
@@ -753,6 +753,9 @@ export class FractalClient {
     async assistantMissions(params: AssistantPageRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AssistantMissionPage>> { return this.assistantRead<AssistantMissionPage>('missions', params, proof, requestOptions); }
     async assistantAgents(params: AssistantPageRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AssistantAgentPage>> { return this.assistantRead<AssistantAgentPage>('agents', params, proof, requestOptions); }
     async assistantConversations(params: AssistantPageRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<unknown>> { return this.assistantRead<unknown>('conversations', params, proof, requestOptions); }
+    async assistantThreadDetail(params: AssistantThreadDetailRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<unknown>> { return this.assistantRead<unknown>('thread-detail', params, proof, requestOptions); }
+    async assistantThreadTimeline(params: AssistantThreadTimelineRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<unknown>> { return this.assistantRead<unknown>('thread-timeline', params, proof, requestOptions); }
+    async assistantThreads(params: AssistantThreadsRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<unknown>> { return this.assistantRead<unknown>('threads', params, proof, requestOptions); }
     async assistantConversationDetail(params: AssistantAgentDetailRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<unknown>> { return this.assistantRead<unknown>('conversation-detail', params, proof, requestOptions); }
     async assistantConversationTimeline(params: AssistantConversationTimelineRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<unknown>> { return this.assistantRead<unknown>('conversation-timeline', params, proof, requestOptions); }
     async assistantConversationSearch(params: AssistantConversationSearchRequest, proof: ScgReadAuthorization, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<unknown>> { return this.assistantRead<unknown>('conversation-search', params, proof, requestOptions); }
