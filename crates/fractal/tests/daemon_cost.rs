@@ -20,6 +20,9 @@
 //! [`GROWTH`] times its work at the smaller, after dividing by how much larger its answer grew: a
 //! list that answers ten times more rows may read ten times more, and a request that answers the
 //! same must read about the same. Small differences under [`SLACK`] steps pass.
+//! Cold search index construction visits every local conversation, including those without
+//! searchable text. Its separate row normalizes by that conversation count and strictly caps
+//! per-conversation VM/full-scan work growth at 1.5x; warm search requests retain their flat bound.
 //!
 //! Additive work/mission `progress_at` serialization uses timestamps already hydrated by these
 //! routes; lightweight mission cards return null and do not add summary reads.
@@ -1397,8 +1400,11 @@ const SEAT_RUNTIME: &str = "cost-seat-0-runtime";
 
 /// The same agent list, after one seat changes at each scale.
 const COLD_AGENTS: &str = "GET /v1/client/agents (after harness observation)";
-/// First native search through worker completion, normalized by indexed text bytes.
+/// First native search through worker completion, normalized by local conversations.
 const COLD_SEARCH: &str = "conversation search cold build";
+/// Indexing must visit even empty conversations, so indexed bytes are not its work unit.
+/// The 1.5x per-conversation cap permits linear construction, but rejects content × agents.
+const COLD_SEARCH_GROWTH: f64 = 1.5;
 const ARRANGEMENT_OWNER: &str = "person/ada";
 const ARRANGEMENT_SUBJECT: &str = "arrangement/person/ada/019a0000-0000-7000-8000-000000000001";
 const ARRANGEMENT_PATH: &str = "/v1/client/arrangements/ada/019a0000-0000-7000-8000-000000000001";
@@ -1531,7 +1537,7 @@ struct Cost {
     sorts: u64,
     autoindex_rows: u64,
     statements: u64,
-    /// The answer's size in bytes, or the rows a trim deleted.
+    /// The answer's size in bytes, rows a trim deleted, or local conversations for cold search.
     answer: u64,
     /// How many things the answer returned ([`item_count`]), at least one.
     items: u64,
@@ -1873,10 +1879,12 @@ async fn no_request_does_work_that_grows_with_the_store() {
         } else {
             (after.answer.max(1) as f64 / before.answer.max(1) as f64).max(1.0)
         };
+        let growth_limit = if name == COLD_SEARCH { COLD_SEARCH_GROWTH } else { GROWTH };
         let grew = |field: fn(&Cost) -> u64| {
             let (before, after) = (field(before), field(after));
             let ratio = after as f64 / before.max(1) as f64 / answered;
-            (ratio, ratio > GROWTH && after > before + SLACK)
+            // Cold indexing has a strict per-conversation bound, not the warm-row slack.
+            (ratio, ratio > growth_limit && (name == COLD_SEARCH || after > before + SLACK))
         };
         let (steps, steps_grew) = grew(|cost| cost.vm_steps);
         let (scans, scans_grew) = grew(|cost| cost.fullscan_steps);
@@ -1890,13 +1898,14 @@ async fn no_request_does_work_that_grows_with_the_store() {
             ));
         }
         let summary = format!(
-            "{} -> {} VM steps, {} -> {} full-scan steps, answer {} -> {} bytes",
+            "{} -> {} VM steps, {} -> {} full-scan steps, answer {} -> {} {}",
             before.vm_steps,
             after.vm_steps,
             before.fullscan_steps,
             after.fullscan_steps,
             before.answer,
-            after.answer
+            after.answer,
+            if name == COLD_SEARCH { "local conversations" } else { "bytes" },
         );
         match KNOWN_GROWTH.iter().find(|(route, _)| route == name) {
             Some((_, limit)) if steps.max(scans) > *limit => failures.push(format!(
@@ -1906,6 +1915,10 @@ async fn no_request_does_work_that_grows_with_the_store() {
                 "{name}: no longer grows with the store; remove it from KNOWN_GROWTH: {summary}"
             )),
             Some(_) => {}
+            None if name == COLD_SEARCH && (steps_grew || scans_grew) => failures.push(format!(
+                "{name}: per-conversation work exceeds {COLD_SEARCH_GROWTH}x \
+                 (VM {steps:.2}x, full-scan {scans:.2}x): {summary}"
+            )),
             None if steps_grew || scans_grew => {
                 failures.push(format!("{name}: work grows with the store: {summary}"))
             }
@@ -1936,6 +1949,7 @@ async fn no_request_does_work_that_grows_with_the_store() {
             "usage_window": {"since_ms": usage_window.0, "until_ms": usage_window.1},
             "claims": [small.claims, large.claims],
             "growth_limit": GROWTH,
+            "cold_search": {"growth_limit": COLD_SEARCH_GROWTH, "normalization": "local conversations"},
             "slack": SLACK,
             "small": small.costs,
             "large": large.costs,
@@ -3110,11 +3124,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
                  {local_conversations} local conversations",
             );
             assert!(indexed_bytes > 0, "cold search must index the generated content");
+            assert!(local_conversations > 0, "cold search must visit local conversations");
             let (max_repeat, top_shape) = most_repeated_shape();
             costs.insert(COLD_SEARCH.to_owned(), Cost {
                 max_repeat,
                 top_shape,
-                ..Cost::from_work(spent, indexed_bytes as u64, None)
+                ..Cost::from_work(spent, local_conversations as u64, None)
             });
         }
         let mut samples = Vec::new();
