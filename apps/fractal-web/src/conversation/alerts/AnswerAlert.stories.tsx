@@ -101,13 +101,13 @@ export const AnnotatedAnswer: S = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await expect(await canvas.findByRole('radio', { name: /Thread the session through/ })).toBeChecked()
-    await userEvent.click(canvas.getByRole('button', { name: 'Add note to Thread the session through' }))
+    await userEvent.click(canvas.getByRole('button', { name: /^Add note(?: n)? to Thread the session through$/ }))
     await userEvent.keyboard('Start with packages/worker')
     await userEvent.keyboard('{Enter}')
     await expect(canvas.getByTestId('acted').textContent).toBe('')
     // Asking for changes carries the person's words already, so it offers no note.
     await userEvent.click(canvas.getByText('Do something else'))
-    await expect(canvas.queryByRole('button', { name: /Add note to/ })).toBeNull()
+    await expect(canvas.queryByRole('button', { name: /^Add note(?: n)? to/ })).toBeNull()
     await userEvent.click(canvas.getByText('Thread the session through'))
     await expect(canvas.getByRole('textbox', { name: 'Note for Thread the session through' })).toHaveValue('Start with packages/worker')
     // Words in the answer field take the answer's place; the card says the note is not sent with them.
@@ -134,7 +134,7 @@ export const MultipleQuestions: S = {
     await expect(canvas.getByRole('button', { name: 'Next' })).toBeDisabled()
     // A harness question's answer is positions only (docs/st3/harness-questions.md): nothing would carry a note.
     await userEvent.click(canvas.getByRole('checkbox', { name: /packages\/web/ }))
-    await expect(canvas.queryByRole('button', { name: /Add note to/ })).toBeNull()
+    await expect(canvas.queryByRole('button', { name: /^Add note(?: n)? to/ })).toBeNull()
     await userEvent.click(canvas.getByRole('checkbox', { name: /packages\/web/ }))
     await userEvent.click(canvas.getByRole('checkbox', { name: /packages\/api/ }))
     await userEvent.click(canvas.getByRole('checkbox', { name: /packages\/worker/ }))

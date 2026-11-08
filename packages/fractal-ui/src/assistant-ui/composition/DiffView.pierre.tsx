@@ -35,12 +35,14 @@ const unsafeCSS = `
 [data-deletions-count] { color: var(--fractal-diff-deletion-ink); }
 [data-line-type='change-addition'] [data-diff-span] { text-decoration: underline 1px var(--fractal-diff-addition); text-underline-offset: 3px; }
 [data-line-type='change-deletion'] [data-diff-span] { text-decoration: underline 1px var(--fractal-diff-deletion); text-underline-offset: 3px; }
+[data-code]:focus-visible { outline: 2px solid currentColor; outline-offset: -2px; }
 `
 
 export interface PierrePatchProps {
   readonly file: NormalizedDiffFile
   readonly layout: 'unified' | 'split'
   readonly wrap: boolean
+  readonly focusable: boolean
   readonly header: boolean
   readonly lineNumbers: boolean
   readonly scheme: 'light' | 'dark'
@@ -48,7 +50,7 @@ export interface PierrePatchProps {
   readonly renderHeaderMetadata?: () => React.ReactNode
 }
 
-export default function PierrePatch({ file, layout, wrap, header, lineNumbers, scheme, collapsed, renderHeaderMetadata }: PierrePatchProps) {
+export default function PierrePatch({ file, layout, wrap, focusable, header, lineNumbers, scheme, collapsed, renderHeaderMetadata }: PierrePatchProps) {
   const options = React.useMemo(() => ({
     theme: { dark: `${FRACTAL_DIFF_THEME}-dark`, light: `${FRACTAL_DIFF_THEME}-light` },
     themeType: scheme,
@@ -62,6 +64,12 @@ export default function PierrePatch({ file, layout, wrap, header, lineNumbers, s
     lineDiffType: 'word' as const,
     collapsed: collapsed ?? false,
     unsafeCSS,
-  }), [layout, wrap, header, lineNumbers, scheme, collapsed])
+    // Each split column scrolls independently inside Pierre's shadow root.
+    onPostRender: (node: HTMLElement) => {
+      for (const code of node.shadowRoot?.querySelectorAll<HTMLElement>('[data-code]') ?? []) {
+        code.tabIndex = !wrap && focusable ? 0 : -1
+      }
+    },
+  }), [layout, wrap, focusable, header, lineNumbers, scheme, collapsed])
   return <PatchDiff patch={file.patch} options={options} renderHeaderMetadata={renderHeaderMetadata} />
 }

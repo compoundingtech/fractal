@@ -107,12 +107,12 @@ export const ConversationOverflowMenu = ({ agent, onViewDeclaration, sections = 
                 (label in name). Plain spans, not label/description slots, which would name it by the label alone. */}
             {rows.map((row) => (
               <Aria.MenuItem key={row.key} id={row.key} textValue={row.label} aria-label={`${row.label}, ${row.what}`} {...stylex.props(styles.menuItem)}>
-                <span {...stylex.props(styles.label)}>{row.label}</span>
+                <span {...stylex.props(styles.label)}>{row.label},{' '}</span>
                 <span {...stylex.props(styles.what)}>{row.what}</span>
               </Aria.MenuItem>
             ))}
             {onViewDeclaration === undefined ? null : <Aria.MenuItem id="declaration" textValue="View KDL" aria-label="View KDL, read its whole declaration" {...stylex.props(styles.menuItem, rows.length > 0 && styles.menuItemApart)}>
-              <span {...stylex.props(styles.label)}>View KDL</span>
+              <span {...stylex.props(styles.label)}>View KDL,{' '}</span>
               <span {...stylex.props(styles.what)}>read its whole declaration</span>
             </Aria.MenuItem>}
             {sections.map((section, index) => <Aria.MenuSection key={section.title} aria-label={section.title} {...stylex.props((index > 0 || rows.length > 0 || onViewDeclaration !== undefined) && styles.sectionApart)}>
