@@ -9,6 +9,13 @@ struct OperationalFailures(Mutex<Option<FoldedFailures>>);
 
 type FoldedFailures = ((u64, u64), Arc<Vec<AttentionRequestView>>);
 
+/// The visible item and its routing policy, taken from the same failure claim.
+#[derive(Clone, serde::Serialize)]
+pub(super) struct OperationalFault {
+    pub(super) item: AttentionItemView,
+    pub(super) explicit_reviewer_only: bool,
+}
+
 #[cfg(any(test, feature = "test-support"))]
 pub type FaultIncarnationReadHook = Box<dyn FnMut(&str)>;
 
@@ -105,22 +112,42 @@ impl Store {
         person: Option<&str>,
         now: u128,
     ) -> Result<(Vec<AttentionItemView>, Option<u128>)> {
-        let eventual = self.attention_snapshot(person, u128::MAX)?;
+        // Ask resolution eligibility uses SQLite's signed millisecond clock. Do not wrap its
+        // upper bound to -1 by passing u128::MAX through that reducer.
+        let eventual = self.attention_snapshot(person, i64::MAX as u128)?;
         let connection = self.readers.get();
-        let mut starts = Vec::with_capacity(eventual.len());
-        for item in &eventual {
-            let mut starts_at = item.requested_at_unix_ms;
-            if item.kind == "person-step"
-                && let Some(ask) = person_work::request(&connection, &item.subject)?
-            {
-                starts_at = starts_at.max(ask.accepted_at_unix_ms);
-            }
-            starts.push(starts_at);
-        }
+        let subjects: BTreeSet<_> = eventual.iter()
+            .filter(|item| item.kind == "person-step")
+            .map(|item| item.subject.as_str())
+            .collect();
+        let accepted: BTreeMap<String, u128> = if subjects.is_empty() {
+            BTreeMap::new()
+        } else {
+            let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha8edfbce8177 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &canonical_sql(
+                "SELECT claims.subject, claims.accepted_at_unix_ms
+                 FROM json_each(?1) requested JOIN claims ON claims.id=(
+                   SELECT claims.id FROM claims
+                   WHERE claims.subject=requested.value AND claims.kind='work.person-asked'
+                   ORDER BY CANONICAL_ASC(claims) LIMIT 1)",
+            ))?;
+            query.query_map([serde_json::to_string(&subjects)?], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?.map(|row| {
+                let (subject, at) = row?;
+                Ok((subject, at.parse()?))
+            }).collect::<Result<_>>()?
+        };
         let mut valid_until = None;
         let rows = eventual
             .into_iter()
-            .zip(starts)
+            .map(|item| {
+                let starts_at = if item.kind == "person-step" {
+                    item.requested_at_unix_ms.max(accepted.get(&item.subject).copied().unwrap_or(0))
+                } else {
+                    item.requested_at_unix_ms
+                };
+                (item, starts_at)
+            })
             .filter(|(_, starts_at)| {
                 if *starts_at > now {
                     valid_until =
@@ -341,6 +368,12 @@ impl Store {
         Ok(if holders.len() == 1 { holders.pop() } else { None })
     }
 
+    /// Is the selected reviewer still an active declaration? Runtime reachability is separate.
+    pub fn fault_reviewer_is_declared(&self, reviewer: &str) -> Result<bool> {
+        let connection = self.readers.get();
+        fault_reviewer_is_declared(&connection, reviewer)
+    }
+
     /// The agent that owns `fault`: the agent it names, as a broken gate names the agent that
     /// published it, else the agent assigned to the failed step, else the requester of its run
     /// or of a run above it when that is an agent, else `fallback`. Only a live agent
@@ -349,16 +382,19 @@ impl Store {
         &self,
         fault: &AttentionItemView,
         fallback: Option<&str>,
+        explicit_reviewer_only: bool,
     ) -> Result<Option<String>> {
         let connection = self.readers.get();
         let owns = |agent: &str| -> Result<bool> {
-            Ok(agent.starts_with("agent/")
-                && agent != fault.subject
-                && current_desired_row(&connection, agent)?.is_some_and(|row| row.kind == "agent")
-                && person_work::declaration_live(&connection, agent)?)
+            Ok(agent != fault.subject && fault_reviewer_is_declared(&connection, agent)?)
         };
         if owns(&fault.person)? {
             return Ok(Some(fault.person.clone()));
+        }
+        // An explicitly owned API readiness fault keeps its recorded reviewer.
+        // A stopped or retired declaration makes it undeliverable, not generic.
+        if explicit_reviewer_only {
+            return Ok(None);
         }
         let mut step = fault.step.clone().or_else(|| {
             fault
@@ -1253,7 +1289,7 @@ impl Store {
         let mut items = self.operational_fault_families(person, as_of)?;
         let failures = self.operational_failures()?;
         for failure in &failures {
-            items.extend(self.operational_failure_item::<MEMOIZE>(&connection, failure, person, as_of, &mut incarnations)?);
+            items.extend(self.operational_failure_item::<MEMOIZE>(&connection, failure, person, as_of, &mut incarnations)?.map(|fault| fault.item));
         }
         Ok((items, failures))
     }
@@ -1281,7 +1317,7 @@ impl Store {
         person: Option<&str>,
         as_of: u128,
         incarnations: &mut BTreeMap<String, Option<String>>,
-    ) -> Result<Option<AttentionItemView>> {
+    ) -> Result<Option<OperationalFault>> {
         if failure.requested_at_unix_ms > as_of {
             smallclaims::touched::note_due(failure.requested_at_unix_ms);
         }
@@ -1498,7 +1534,10 @@ impl Store {
                 attention_action("inspect seat history", &["st", "trace", "show", &diagnostic.subject, "--limit", "20"]),
             ];
         }
-        Ok(Some(item))
+        let explicit_reviewer_only = source.starts_with("daemon/")
+            && claim.kind == "operational.failure"
+            && f["condition"] == API_READINESS_SLO_MISSED;
+        Ok(Some(OperationalFault { item, explicit_reviewer_only }))
     }
 
     fn current_exhausted_work_wake<const MINIMAL: bool>(
@@ -1712,6 +1751,12 @@ pub fn fault_agent_holders(connection: &Connection) -> Result<Vec<String>> {
         }
     }
     Ok(holders)
+}
+
+fn fault_reviewer_is_declared(connection: &Connection, reviewer: &str) -> Result<bool> {
+    Ok(reviewer.starts_with("agent/")
+        && current_desired_row(connection, reviewer)?.is_some_and(|row| row.kind == "agent")
+        && person_work::declaration_live(connection, reviewer)?)
 }
 
 /// Whether `desired` declares a running agent that handles faults.
