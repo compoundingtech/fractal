@@ -365,7 +365,9 @@ describe('ConversationPane conversation demand', () => {
     expect(paneText()).not.toContain('Older history unavailable')
   })
 
-  it('renders the live workspace transcript and opens and closes its sibling tool panel', async () => {
+  it('renders the live workspace transcript and opens and closes its tool detail in the pane side panel', async () => {
+    // A measured pane: the side panel only shows once the pane has a width.
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) { return this.hasAttribute('data-pane') ? new DOMRect(0, 0, 1024, 800) : new DOMRect() })
     window.history.replaceState(null, '', '/w/agent/route')
     open()
     root = createRoot(container)
@@ -392,11 +394,11 @@ describe('ConversationPane conversation demand', () => {
     const button = container.querySelector('button[aria-label="Open Reading information tool detail"]') as HTMLButtonElement
     expect(button).not.toBeNull()
     flushSync(() => button.click())
+    await until(() => container.querySelector('aside[aria-label="Tool detail"]') !== null)
     const panel = container.querySelector('aside[aria-label="Tool detail"]')!
     expect(panel.textContent).toContain('export const rows = []')
-    // The workspace now sits inside the stable Changes split; tool detail stays outside it.
-    expect(panel.parentElement).toBe(workspace.closest('[data-testid="live-agent-workspace"]'))
-    expect(workspace.contains(panel)).toBe(false)
+    // Tool detail opens in the side panel of the pane it came from, as a contextual tab.
+    expect(panel.closest('[data-pane-aside]')?.closest('[data-pane]')).not.toBeNull()
     flushSync(() => (panel.querySelector('button[aria-label="Close tool detail"]') as HTMLButtonElement).click())
     expect(container.querySelector('aside[aria-label="Tool detail"]')).toBeNull()
     expect(workspace.querySelector('[data-testid="agent-message"]')).not.toBeNull()

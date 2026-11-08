@@ -225,13 +225,14 @@ export function ThreadActions({ nativeActions, actionPortalRef, terminalAvailabl
   terminalOpen: boolean
   onToggleTerminal: () => void
   panelOpen: boolean
-  onTogglePanel: () => void
+  /** Absent when the shown subject has no side panel: the toggle is left out. */
+  onTogglePanel?: (() => void) | undefined
 }) {
   return <div data-thread-actions {...stylex.props(styles.barActions)}>
     <div data-testid="native-action-slot" ref={actionPortalRef} {...stylex.props(styles.actionSlot)}>{nativeActions}</div>
     {terminalAvailable && <ChromeControl icon={terminalOpen ? 'message' : 'terminal'} label={terminalOpen ? 'Show conversation' : 'Show terminal'} active={terminalOpen} onPress={onToggleTerminal} />}
     {!terminalAvailable && terminalDisabledReason !== undefined && <ChromeControl icon="terminal" label="Show terminal" disabledReason={terminalDisabledReason} />}
-    <ChromeControl icon="panel" label="Toggle right panel" pressed={panelOpen} onPress={onTogglePanel} />
+    {onTogglePanel === undefined ? null : <ChromeControl icon="panel" label="Toggle right panel" pressed={panelOpen} onPress={onTogglePanel} />}
   </div>
 }
 

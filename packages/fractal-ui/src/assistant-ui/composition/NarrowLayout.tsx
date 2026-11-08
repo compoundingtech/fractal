@@ -23,7 +23,8 @@ export function NarrowSheet({ id, label, side = 'end', isOpen, onOpenChange, wid
   /** The dialog's id, for the opener's `aria-controls`. */
   readonly id?: string
   readonly label: string
-  readonly side?: 'start' | 'end'
+  /** `bottom` rises from the bottom edge at full width, for a panel that belongs to what is shown above it. */
+  readonly side?: 'start' | 'end' | 'bottom'
   readonly isOpen: boolean
   readonly onOpenChange: (open: boolean) => void
   readonly width: number
@@ -33,9 +34,9 @@ export function NarrowSheet({ id, label, side = 'end', isOpen, onOpenChange, wid
   readonly actions?: React.ReactNode
   readonly children: React.ReactNode
 }) {
-  return <ModalOverlay isOpen={isOpen} onOpenChange={onOpenChange} isDismissable UNSTABLE_portalContainer={portalContainer} {...stylex.props(styles.overlay, side === 'start' && styles.overlayStart)}>
-    <Modal style={{ width }} {...stylex.props(styles.sheet, side === 'start' ? styles.sheetStart : styles.sheetEnd)}>
-      <Dialog {...(id === undefined ? {} : { id })} aria-label={label} data-narrow-sheet={side} {...stylex.props(styles.dialog, side === 'start' ? styles.dialogStart : styles.dialogEnd)}>
+  return <ModalOverlay isOpen={isOpen} onOpenChange={onOpenChange} isDismissable UNSTABLE_portalContainer={portalContainer} {...stylex.props(styles.overlay, side === 'start' && styles.overlayStart, side === 'bottom' && styles.overlayBottom)}>
+    <Modal style={side === 'bottom' ? undefined : { width }} {...stylex.props(styles.sheet, side === 'start' ? styles.sheetStart : side === 'bottom' ? styles.sheetBottom : styles.sheetEnd)}>
+      <Dialog {...(id === undefined ? {} : { id })} aria-label={label} data-narrow-sheet={side} {...stylex.props(styles.dialog, side === 'start' ? styles.dialogStart : side === 'bottom' ? styles.dialogBottom : styles.dialogEnd)}>
         <header {...stylex.props(styles.sheetHeader)}>
           <Heading slot="title" {...stylex.props(styles.sheetTitle)}>{label}</Heading>
           <Button aria-label={`Close ${label.toLowerCase()}`} onPress={() => onOpenChange(false)} {...stylex.props(styles.iconButton)}><Icon name="x" /></Button>
@@ -55,12 +56,16 @@ export function NarrowActionRow({ label, children }: { readonly label: string; r
 const styles = stylex.create({
   overlay: { position: 'fixed', insetInline: 0, insetBlockStart: 0, insetBlockEnd: 'var(--wf-devbar-space, 0px)', zIndex: 90, display: 'flex', justifyContent: 'flex-end', backgroundColor: surface.scrim },
   overlayStart: { justifyContent: 'flex-start' },
+  overlayBottom: { flexDirection: 'column', justifyContent: 'flex-end' },
   // The visible strip of thread beside the sheet (40px) tells you the sheet is on top of it.
   sheet: { height: '100%', maxWidth: 'calc(100% - 40px)', display: 'flex', backgroundColor: surface.canvas, color: text.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
   sheetEnd: { borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.borderStrong },
+  // The thread stays visible above it (64px), saying the sheet belongs to what it shows.
+  sheetBottom: { width: '100%', maxWidth: '100%', height: 'auto', maxHeight: 'calc(100% - 64px)', minHeight: '50%', borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.borderStrong, borderStartStartRadius: r.lg, borderStartEndRadius: r.lg },
   sheetStart: { backgroundColor: surface.sidebar, borderInlineEndWidth: g.hairline, borderInlineEndStyle: 'solid', borderInlineEndColor: border.borderStrong },
   // Top and bottom insets clear the status bar and home indicator; the sheet's own edge clears a landscape notch.
   dialog: { flexGrow: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', outline: 'none', paddingBlockStart: 'env(safe-area-inset-top, 0px)', paddingBlockEnd: 'env(safe-area-inset-bottom, 0px)' },
+  dialogBottom: { paddingBlockStart: 0, paddingInline: 'env(safe-area-inset-left, 0px) env(safe-area-inset-right, 0px)' },
   dialogStart: { paddingInlineStart: 'env(safe-area-inset-left, 0px)' },
   dialogEnd: { paddingInlineEnd: 'env(safe-area-inset-right, 0px)' },
   sheetHeader: { height: g.band, flexShrink: 0, display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
