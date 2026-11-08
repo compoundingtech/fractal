@@ -25,6 +25,32 @@ export interface Wait {
   readonly reason: string
 }
 
+/** Spend on a step. Served today only for seats a step or run owns (Work.usage); NOT SERVED for standing agents, which
+ * usagePeriod rows attribute by `step` and the web would have to sum. */
+export interface StepUsage {
+  readonly costUsd: number
+  readonly tokens: number
+}
+
+/** A line from the conversation that matters for a step. NOT SERVED: needs timeline entries addressed by step. */
+export interface Excerpt {
+  readonly kind: 'decision' | 'failure' | 'answer' | 'note'
+  readonly at: number
+  readonly who: string
+  readonly text: string
+  readonly turn: string
+}
+
+/** Work a step produced or cites. Served: DeclaredResource (declared links); NOT SERVED: links a step produced. */
+export interface LinkedWork {
+  readonly kind: 'pull-request' | 'issue' | 'run' | 'doc'
+  readonly owner?: string
+  readonly repo?: string
+  readonly number?: number
+  readonly runId?: number
+  readonly title: string
+}
+
 export interface PlanStep {
   readonly id: string
   readonly title: string
@@ -37,6 +63,17 @@ export interface PlanStep {
   readonly expectedMs?: number
   /** Revision that introduced this step. NOT SERVED (derivable by diffing declarations). */
   readonly since: number
+  readonly usage?: StepUsage
+  readonly excerpts?: readonly Excerpt[]
+  readonly work?: readonly LinkedWork[]
+}
+
+/** An agent on the mission with its live state (served: agents collection). */
+export interface MissionAgent {
+  readonly id: string
+  readonly name: string
+  readonly state: 'working' | 'idle' | 'needs-you' | 'failed' | 'stopped'
+  readonly step?: string
 }
 
 export interface PlanChange {
@@ -76,7 +113,40 @@ export interface ExploreMission {
   readonly steps: readonly PlanStep[]
   readonly revisions: readonly PlanRevision[]
   readonly problems: readonly Problem[]
+  readonly agents?: readonly MissionAgent[]
+  /** The published declaration (served: missionDeclarationGet). */
+  readonly kdl?: string
+  /** The TypeScript source it was published from. NOT SERVED to the web (a mission.provenance claim names repo, commit, path). */
+  readonly source?: { readonly repo: string; readonly path: string; readonly commit: string }
 }
+
+/** A step's state at time `t`, replayed from its attempts and waits (needs per-attempt history and wait intervals). */
+export const stateAt = (step: PlanStep, t: number, now: number): StepState => {
+  if (step.state === 'cancelled') return 'cancelled'
+  if (step.attempts.some(a => a.start <= t && (a.end ?? now) > t)) return 'running'
+  const wait = step.waits.find(w => w.start <= t && (w.end ?? now) > t)
+  if (wait !== undefined) return wait.kind === 'you' ? 'waiting-you' : 'waiting'
+  const ended = step.attempts.filter(a => a.end !== undefined && a.end <= t).at(-1)
+  if (ended?.outcome === 'done') return 'done'
+  if (ended?.outcome === 'failed') return 'failed'
+  return 'pending'
+}
+
+/** Did the step run (any attempt) inside [a, b]? */
+export const ranIn = (step: PlanStep, a: number, b: number, now: number) => step.attempts.some(x => x.start < b && (x.end ?? now) > a)
+
+/** Every step upstream and downstream of `id`, and `id`. */
+export const lineage = (steps: readonly PlanStep[], id: string): ReadonlySet<string> => {
+  const out = new Set<string>([id])
+  const up = (s: string) => { for (const dep of steps.find(x => x.id === s)?.after ?? []) if (!out.has(dep)) { out.add(dep); up(dep) } }
+  const down = (s: string) => { for (const x of steps) if (x.after.includes(s) && !out.has(x.id)) { out.add(x.id); down(x.id) } }
+  up(id)
+  down(id)
+  return out
+}
+
+export const usd = (n: number) => `$${n < 10 ? n.toFixed(2) : n.toFixed(0)}`
+export const tokenCount = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`
 
 export const stepEnd = (step: PlanStep, now: number): number | undefined => {
   const ends = [...step.attempts.map(a => a.end ?? now), ...step.waits.map(w => w.end ?? now)]
