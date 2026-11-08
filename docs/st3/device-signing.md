@@ -51,7 +51,7 @@ Every client's tests check against that file.
 
 ## CLI and terminal client pairing
 
-On the trusted machine, begin a pairing as the person:
+On the trusted member whose paired-only gateway the device will use, begin a pairing as the person:
 
 ```sh
 fractal devices pair cli-device --as person/avery --full-control
@@ -65,6 +65,15 @@ and expiry; never the person-root fingerprint. Copy that fingerprint independent
 the trusted machine. A scan fills a candidate, not a trusted root or an automatic pairing.
 No QR or QR payload is emitted with `--json` or redirected stdout; JSON output is unchanged.
 Without `--gateway`, the CLI prints the usual manual instructions and a QR hint.
+The pair command always begins on its local member. A gateway URL matching a different
+configured member is refused offline before creating a challenge. Otherwise an anonymous
+`GET <gateway>/v1/health` checks the serving node in the native response's `value` envelope,
+retaining the gateway's base path. A different node is refused; a matching node continues
+without a warning. The request's three-second timeout bounds reachability, not pairing
+completion. Redirects are never followed: a redirect, unreachable gateway, or response
+without a node leaves identity unverified and produces a warning.
+Forwarders must reach the beginning member.
+Completion on any other member returns `pairing-origin-required` without consuming the code.
 
 On the device, complete it using the member gateway's HTTP or HTTPS origin and the returned
 pairing ID. The command prompts privately for the single-use code, or reads it from stdin:
@@ -72,6 +81,8 @@ pairing ID. The command prompts privately for the single-use code, or reads it f
 ```sh
 fractal devices complete https://member.example pairing/PAIRING_ID --fingerprint sha256:FINGERPRINT
 ```
+`MEMBER_URL` is an explicit argument to `devices complete`, not an instruction to begin
+remotely. It must reach the member where `devices pair` ran.
 
 HTTP is allowed by default for loopback, private addresses and tailnet addresses, including
 Tailscale's `100.64.0.0/10` range. Hostnames must resolve entirely to those addresses.
