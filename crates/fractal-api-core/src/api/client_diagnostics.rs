@@ -176,6 +176,7 @@ mod tests {
 
     fn state(root: &std::path::Path) -> AppState {
         AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             store:Arc::new(crate::store::Store::open(&root.join("graph.db"),"diagnostic-test").unwrap()),
             notify:Arc::new(tokio::sync::Notify::new()),event_notify:tokio::sync::watch::channel(0).0,

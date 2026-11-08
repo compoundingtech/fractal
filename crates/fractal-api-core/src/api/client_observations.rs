@@ -632,6 +632,7 @@ mod tests {
     async fn observation_paired_session_transport_reader_doctor_and_body_limits() {
         let root = tempfile::tempdir().unwrap();
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: Arc::new(
