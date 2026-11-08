@@ -1,24 +1,36 @@
 //! Metadata reserved for participant-authorized thread reads.
 
+/// Version 1 reserves thread routing fields and protects generic graph reads.
+/// Version 2 also protects canonical thread messages on conversation read paths.
+pub const READ_PRIVACY_VERSION: u32 = 2;
+
+// A v2 writer may only advertise on a store older serving builds cannot reopen.
+const _: () =
+    assert!(!read_privacy_supports_writes(READ_PRIVACY_VERSION) || super::STORAGE_VERSION >= 22);
+
+pub const fn read_privacy_supports_writes(version: u32) -> bool {
+    version >= 2
+}
+
+/// Every thread message carries this signed marker. Older closed schemas hold the
+/// envelope instead of applying a message their conversation readers cannot protect.
+pub const MESSAGE_READER_VERSION_FIELD: &str = "thread_reader_version";
+pub const MESSAGE_READER_VERSION: u64 = 2;
+
 pub const MESSAGE_RELATION_FIELDS: &[&str] = &[
     "thread_id",
     "thread_quote_id",
     "thread_origin_ask",
     "thread_origin_episode",
+    MESSAGE_READER_VERSION_FIELD,
 ];
 
-/// Remove thread relations from a serving projection of a message.
-pub fn redact_message_relations(body: &mut serde_json::Value) {
-    if let Some(fields) = body.get_mut("fields").and_then(serde_json::Value::as_object_mut) {
-        for field in MESSAGE_RELATION_FIELDS {
-            fields.remove(*field);
-        }
-    }
-    if let Some(fields) = body.as_object_mut() {
-        for field in MESSAGE_RELATION_FIELDS {
-            fields.remove(*field);
-        }
-    }
+/// Whether a message body contains a private thread relation, including legacy flat claims.
+pub fn message_has_relation(body: &serde_json::Value) -> bool {
+    MESSAGE_RELATION_FIELDS.iter().any(|field| {
+        body.get(*field).is_some()
+            || body.get("fields").and_then(|fields| fields.get(*field)).is_some()
+    })
 }
 
 pub fn is_reserved_subject(subject: &str) -> bool {

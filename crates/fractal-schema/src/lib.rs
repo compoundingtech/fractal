@@ -730,6 +730,19 @@ impl Registry {
                 self.validate_reference(kind, name, value, field)?;
             }
         }
+        if replicated
+            && kind == "message.sent"
+            && spec.fields.contains_key(threads::MESSAGE_READER_VERSION_FIELD)
+            && threads::MESSAGE_RELATION_FIELDS.iter().any(|name| fields.contains_key(*name))
+            && (fields.get(threads::MESSAGE_READER_VERSION_FIELD).and_then(Value::as_u64)
+                != Some(threads::MESSAGE_READER_VERSION)
+                || fields.get("thread_id").and_then(Value::as_str).is_none())
+        {
+            return Err(error(
+                "invalid-thread-reader-version",
+                "replicated thread messages require the current signed reader marker",
+            ));
+        }
         private_notes::validate_observation(kind, fields)?;
         review::validate_claim(self, kind, fields)?;
         deploy::validate_claim(kind, fields)?;
@@ -4203,6 +4216,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("thread_quote_id", reference_to(&["message"])),
             ("thread_origin_ask", reference_to(&["step-run"])),
             ("thread_origin_episode", string()),
+            (threads::MESSAGE_READER_VERSION_FIELD, integer()),
         ],
         "message.staged" => &[
             ("status", required_enum(&["staged"])),
@@ -4224,6 +4238,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("title", required_string()),
             ("origin_ask", reference_to(&["step-run"])),
             ("origin_ask_episode", string()),
+            ("mission", reference_to(&["mission"])),
             ("first_message", reference_to(&["message"])),
         ],
         "thread.title-set" => &[

@@ -182,8 +182,9 @@ pub mod tests {
     #[test]
     fn starting_thread_from_real_ask_commits_one_first_message_and_leaves_ask_pending() {
         use crate::store::thread_metadata::{StartFromAsk, TimelineItem, mixed_timeline, start_from_ask};
+        use crate::store::thread_metadata::{ThreadContext, list_context};
 
-        let (store, _, input) = fixture();
+        let (store, origin_run, input) = fixture();
         store.configure_thread_write_rollout([]);
         let ask = store.ask_person(&input).unwrap();
         let original = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
@@ -210,6 +211,14 @@ pub mod tests {
         assert!(appended);
         assert_eq!(created.body["fields"]["origin_ask_episode"], original.id);
         assert_eq!(created.body["fields"]["first_message"], message.subject);
+        let origin = ThreadContext::Ask { id: &ask.subject, episode: &original.id };
+        assert_eq!(list_context(&store, person, origin, None, 20).unwrap().items[0].id, "thread/worker");
+        assert!(list_context(&store, person, ThreadContext::Ask { id: &ask.subject, episode: "wrong" }, None, 20).unwrap().items.is_empty());
+        assert!(list_context(&store, "person/robin", ThreadContext::Ask { id: &ask.subject, episode: &original.id }, None, 20).unwrap().items.is_empty());
+        let mission = store.mission_run(&origin_run.run).unwrap().unwrap().mission;
+        assert_eq!(created.body["fields"]["mission"], mission);
+        assert_eq!(list_context(&store, person, ThreadContext::Mission(&mission), None, 20).unwrap().items[0].id, "thread/worker");
+
         let read = mixed_timeline(&store, person, "thread/worker", None, 1).unwrap();
         assert_eq!(read.items.len(), 1);
         let TimelineItem::Message(first) = &read.items[0] else { panic!("expected the first message") };
@@ -353,6 +362,10 @@ pub mod tests {
                 ("thread_id".into(), json!(thread)),
                 ("thread_origin_ask".into(), json!(ask.subject)),
                 ("thread_origin_episode".into(), json!(original.id)),
+                (
+                    fractal_schema::threads::MESSAGE_READER_VERSION_FIELD.into(),
+                    json!(fractal_schema::threads::MESSAGE_READER_VERSION),
+                ),
             ]),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         };
@@ -386,6 +399,10 @@ pub mod tests {
                 ("content".into(), json!("The worker checks are ready.")),
                 ("status".into(), json!("sent")),
                 ("thread_id".into(), json!(thread)),
+                (
+                    fractal_schema::threads::MESSAGE_READER_VERSION_FIELD.into(),
+                    json!(fractal_schema::threads::MESSAGE_READER_VERSION),
+                ),
             ]);
             if let Some(quote) = quote {
                 fields.insert("thread_quote_id".into(), json!(quote));
@@ -481,6 +498,9 @@ pub mod tests {
         let (retry, appended) = attach_ask(&store, agent, link()).unwrap();
         assert!(!appended);
         assert_eq!(retry.id, attached.id);
+        assert_eq!(attach_ask(&store, agent, AttachAsk {
+            key: "attach-ask-second-key", ..link()
+        }).unwrap_err().code, "thread-ask-already-linked");
         assert_eq!(store.latest_claim_id(thread).unwrap().as_deref(), Some(closed.id.as_str()));
         assert!(current(&store.readers.get(), &original, now_ms()).unwrap());
         assert!(current(&store.readers.get(), &fresh, now_ms()).unwrap());

@@ -496,6 +496,76 @@ async fn serve_for_test(socket: &Path, router: axum::Router) -> tokio::task::Joi
     server
 }
 
+#[tokio::test]
+async fn bound_work_link_thread_cli_attaches_exact_pending_episode_without_reopening() {
+    use fractal_daemon::store::thread_metadata::{self, Edit};
+
+    let root = tempfile::tempdir().unwrap();
+    let state = test_state(root.path());
+    state.store.configure_thread_write_rollout([]);
+    let person = "person/avery";
+    let agent = "agent/garden/reviewer";
+    let thread = "thread/worker";
+    let source = "version 2\nagent \"garden/reviewer\" { workspace \"/work/garden\"; harness \"omp\" {} }\n";
+    let intent = fractal_daemon::graph::parse_intent(source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, source).unwrap();
+    let (created, _) = thread_metadata::apply(
+        &state.store, person, thread, "create-link-cli",
+        Edit::Create { agent, title: "Worker tests" },
+    ).unwrap();
+    let (closed, _) = thread_metadata::apply(
+        &state.store, person, thread, "close-link-cli", Edit::Close { revision: &created.id },
+    ).unwrap();
+    let socket = root.path().join("thread-link.sock");
+    let app = fractal_daemon::api::router(state.clone())
+        .layer(axum::Extension(fractal_daemon::api::BoundAgent(agent.into())));
+    let server = serve_for_test(&socket, app).await;
+    let ask = value(&run_cli(&socket, &[
+        "work", "ask", "--as", agent, "--for", person,
+        "--title", "Check the latest result", "--reason", "Can we proceed?",
+        "--idempotency-key", "link-cli-fresh-ask",
+    ]).await);
+    let ask_id = ask["subject"].as_str().unwrap();
+    let trace = run_cli(&socket, &["trace", "show", ask_id]).await;
+    assert!(trace.status.success(), "{trace:?}");
+    let ask_claim = String::from_utf8(trace.stdout).unwrap().lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|claim| claim["kind"] == "work.person-asked").unwrap();
+    let episode = ask_claim["id"].as_str().unwrap();
+    let before = state.store.latest_claim_id(ask_id).unwrap();
+
+    let link = |episode, actor| [
+        "work", "link-thread", ask_id, "--thread", thread, "--episode", episode, "--as", actor,
+    ];
+    let wrong = run_cli(&socket, &link("claim/other-episode", agent)).await;
+    assert!(!wrong.status.success(), "{wrong:?}");
+    let wrong_actor = run_cli(&socket, &link(episode, "agent/garden/other")).await;
+    assert!(!wrong_actor.status.success(), "{wrong_actor:?}");
+    let first = value(&run_cli(&socket, &link(episode, agent)).await);
+    let retry = value(&run_cli(&socket, &link(episode, agent)).await);
+    assert_eq!(first["status"], "completed");
+    assert_eq!(first["operation_id"], retry["operation_id"]);
+    let link_id = fractal_daemon::store::thread_links::ask_link_subject(ask_id, episode).unwrap();
+    let links = state.store.claims_for(&link_id, Some("thread.ask-linked")).unwrap();
+    assert_eq!(links.len(), 1);
+    assert_eq!(links[0].body["fields"]["ask_episode"], episode);
+    assert_eq!(state.store.latest_claim_id(ask_id).unwrap(), before);
+    assert_eq!(state.store.latest_claim_id(thread).unwrap().as_deref(), Some(closed.id.as_str()));
+    let reply = value(&run_cli_with_agent_env(&socket, agent, &[
+        "conversations", "reply-in-thread", thread, "--body", "Worker tests passed.",
+        "--idempotency-key", "link-cli-thread-reply",
+    ]).await);
+    let message_id = reply["affected_ids"][1].as_str().unwrap();
+    let sent = state.store.claims_for(message_id, Some("message.sent")).unwrap();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].actor.as_deref(), Some(agent));
+    assert_eq!(sent[0].body["fields"]["thread_id"], thread);
+    assert_eq!(state.store.latest_claim_id(ask_id).unwrap(), before);
+    assert_eq!(state.store.latest_claim_id(thread).unwrap().as_deref(),
+        Some(closed.id.as_str()));
+    server.abort();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn agent_burst_cli_answers_none_where_the_agent_holds_no_lane_and_only_the_agent_asks() {
     let root = tempfile::tempdir().unwrap();

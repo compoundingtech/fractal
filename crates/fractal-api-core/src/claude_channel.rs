@@ -260,6 +260,7 @@ pub async fn run(
                                     fractal_drivers::ding::NotificationMetadata {
                                         attachments: &attachments,
                                         assistant: message.assistant_metadata().as_ref(),
+                                        delivery_thread: message.delivery_thread.as_deref(),
                                     }), &message.tags)))
                         }.await;
                         match prepared {
@@ -1046,6 +1047,7 @@ mod tests {
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
         let fence = Fence::new("agent/worker", "current", "delivery");
         let mut message = MessageView {
+            delivery_thread: None,
             subject: "message/head".into(), from: "person/sender".into(), to: fence.subject.clone(),
             content: "doc/missing".into(), status: "staged".into(), title: None, in_reply_to: None,
             tags: Vec::new(), body_ref: None, body_bytes: None, body_origin: None,
@@ -1093,6 +1095,7 @@ mod tests {
     #[test]
     fn claude_unprepared_fifo_head_preserves_later_mail_until_recovery() {
         let mut messages: Vec<MessageView> = ["head", "later", "last"].into_iter().enumerate().map(|(index, name)| MessageView {
+            delivery_thread: None,
             subject: format!("message/{name}"), from: "person/sender".into(), to: "agent/worker".into(),
             content: name.into(), status: "staged".into(), title: None, in_reply_to: None,
             tags: Vec::new(), body_ref: None, body_bytes: None, body_origin: None,
@@ -1375,6 +1378,7 @@ mod tests {
             ("closed", false),
         ] {
             let message = MessageView {
+                delivery_thread: None,
                 subject: "message/replay".into(),
                 from: "person/eval".into(),
                 to: fence.subject.clone(),

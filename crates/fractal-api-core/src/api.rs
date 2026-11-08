@@ -7633,7 +7633,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"thread_read_privacy":1,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":2},
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION,"bounded_legacy_events":1,"person_directive_note":1,"github_plugin":2},
     });
     // How far this member's messages stream has come. Absent when it holds no shard, so a
     // client that waits on both indexes knows there is only the graph to wait on.
@@ -10844,6 +10844,10 @@ pub fn prepare_inline_thread_message(
         ("to".into(), json!(draft.to)),
         ("content".into(), json!(draft.content)),
         ("thread_id".into(), json!(draft.thread)),
+        (
+            fractal_schema::threads::MESSAGE_READER_VERSION_FIELD.into(),
+            json!(fractal_schema::threads::MESSAGE_READER_VERSION),
+        ),
     ]);
     if let Some(title) = draft.title { fields.insert("title".into(), json!(title)); }
     if let Some(quote) = draft.quote { fields.insert("thread_quote_id".into(), json!(quote)); }
@@ -10958,6 +10962,14 @@ pub fn accept_message_receipt_with_upload_owner(
     } else {
         (receipt_recipient(&state.store, &requested_from)?.1, recipient_identity.clone())
     };
+    if request.tags.iter().any(|tag| {
+        tag.starts_with(fractal_drivers::ding::FRACTAL_DELIVERY_THREAD_TAG)
+    }) {
+        return Err(ApiError::bad(FractalError::new(
+            "reserved-message-tag",
+            "topic delivery tags are generated from admitted thread messages",
+        )));
+    }
     if !from.starts_with("daemon/")
         && request
             .tags
@@ -11198,6 +11210,7 @@ pub fn accept_message_receipt_with_upload_owner(
         recipient_identity,
         kind: Some(kind.into()),
         message: MessageView {
+            delivery_thread: None,
             subject,
             from,
             to,
@@ -11359,11 +11372,12 @@ struct EventPage {
     messages_frontier: Option<u64>,
 }
 
-/// Generic event projections can retain ordinary message delivery without its thread routing.
-fn redact_event_message_thread_relations(event: &mut EventRecord) {
-    if event.kind == "message.sent" {
-        fractal_schema::threads::redact_message_relations(&mut event.body);
-    }
+fn generic_event_visible(event: &EventRecord) -> bool {
+    !fractal_schema::notice::is_reserved_subject(&event.subject)
+        && !fractal_schema::notice::is_reserved_kind(&event.kind)
+        && !fractal_schema::threads::is_reserved_record(&event.subject, &event.kind)
+        && !(event.kind == "message.sent"
+            && fractal_schema::threads::message_has_relation(&event.body))
 }
 
 async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPage, ApiError> {
@@ -11403,12 +11417,7 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
             let (mut items, next_after, has_more) =
                 store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
             // Events retain their bounded last-inspected cursor contract, even when hidden.
-            items.retain(|event| {
-                !fractal_schema::notice::is_reserved_subject(&event.subject)
-                    && !fractal_schema::notice::is_reserved_kind(&event.kind)
-                    && !fractal_schema::threads::is_reserved_record(&event.subject, &event.kind)
-            });
-            items.iter_mut().for_each(redact_event_message_thread_relations);
+            items.retain(generic_event_visible);
             // Stream items have no run owner, so an owner-filtered page has none of them.
             let stream = match messages_after {
                 Some(messages_after) if owner.is_none() => {
@@ -11421,16 +11430,8 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     .items
                     .iter()
                     .filter(|event| subject.as_deref().is_none_or(|subject| event.subject == subject))
-                    .filter(|event| {
-                        !fractal_schema::notice::is_reserved_subject(&event.subject)
-                            && !fractal_schema::notice::is_reserved_kind(&event.kind)
-                            && !fractal_schema::threads::is_reserved_record(&event.subject, &event.kind)
-                    })
+                    .filter(|event| generic_event_visible(event))
                     .cloned()
-                    .map(|mut event| {
-                        redact_event_message_thread_relations(&mut event);
-                        event
-                    })
                     .collect()
             });
             Ok(Ok(EventPage {
