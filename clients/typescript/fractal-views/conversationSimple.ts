@@ -13,30 +13,41 @@ export type SimpleRow =
 /** The id that opens a run of calls starting at `first`, as the Fractal terminal UI's `bundle_id`. */
 export const bundleId = (first: string) => `bundle:${first}`;
 
+/** The tool call an entry folds into a run as, or undefined when it reads as in full. */
+const foldedCall = (entry: ConversationEntry): Tool | undefined => {
+  const body = entry.body;
+  if (body.kind !== 'tool' || body.title.startsWith('assistant error') || body.title.startsWith('compaction') || body.title.startsWith('write ')) return undefined;
+  return body;
+};
+
 /** Entries, oldest first, as simplified rows; `open` holds the ids of opened runs. */
 export function simplify(entries: readonly ConversationEntry[], open: ReadonlySet<string>): SimpleRow[] {
   const rows: SimpleRow[] = [];
-  for (let index = 0; index < entries.length;) {
-    const calls: Array<{ entry: ConversationEntry; tool: Tool }> = [];
-    while (index + calls.length < entries.length) {
-      const entry = entries[index + calls.length];
-      if (entry.body.kind !== 'tool' || entry.body.title.startsWith('assistant error') || entry.body.title.startsWith('compaction') || entry.body.title.startsWith('write ')) break;
-      calls.push({ entry, tool: entry.body });
-    }
-    if (!calls.length) {
-      rows.push({ kind: 'entry', entry: entries[index] });
-      index += 1;
-      continue;
-    }
-    index += calls.length;
+  let calls: Array<{ entry: ConversationEntry; tool: Tool }> = [];
+  const closeRun = () => {
+    const first = calls[0];
+    const last = calls.at(-1);
+    if (first === undefined || last === undefined) return;
     if (calls.length === 1) {
-      rows.push({ kind: 'call', ...calls[0] });
+      rows.push({ kind: 'call', ...first });
+    } else {
+      const run = calls;
+      const id = bundleId(first.entry.id);
+      const count = (state: Tool['state']) => run.filter(call => call.tool.state === state).length;
+      rows.push({ kind: 'bundle', id, calls: run, ok: count('ok'), failed: count('failed'), running: count('running'), last: last.tool.title, open: open.has(id) });
+      if (open.has(id)) for (const call of run) rows.push({ kind: 'call', ...call });
+    }
+    calls = [];
+  };
+  for (const entry of entries) {
+    const tool = foldedCall(entry);
+    if (tool !== undefined) {
+      calls.push({ entry, tool });
       continue;
     }
-    const id = bundleId(calls[0].entry.id);
-    const count = (state: Tool['state']) => calls.filter(call => call.tool.state === state).length;
-    rows.push({ kind: 'bundle', id, calls, ok: count('ok'), failed: count('failed'), running: count('running'), last: calls[calls.length - 1].tool.title, open: open.has(id) });
-    if (open.has(id)) for (const call of calls) rows.push({ kind: 'call', ...call });
+    closeRun();
+    rows.push({ kind: 'entry', entry });
   }
+  closeRun();
   return rows;
 }

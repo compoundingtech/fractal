@@ -323,7 +323,8 @@ describe('Storybook scenario binding', () => {
     expect(() => scenarioStoryCheck({ render, parameters: { scenario: { _tag, reason: ' ' } } }, {})).toThrow('requires a reason')
     const scenario = { _tag, reason: 'Isolated contract' }
     expect(() => scenarioStoryCheck({ render, parameters: { scenario: { ...scenario, slices: [] } } }, {})).toThrow('cannot declare slices')
-    for (const args of [{ roster: 'default' }, { conversation: undefined }]) {
+    const argSets: readonly Record<string, string | undefined>[] = [{ roster: 'default' }, { conversation: undefined }]
+    for (const args of argSets) {
       expect(() => scenarioStoryCheck({ render, args, parameters: { scenario } }, {})).toThrow('cannot supply scenario args')
     }
     expect(() => scenarioStoryCheck({ render, parameters: { scenario } }, { args: { sync: 'default' } })).toThrow('cannot supply scenario args')

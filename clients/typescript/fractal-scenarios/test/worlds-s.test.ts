@@ -56,7 +56,7 @@ describe.each(definitions)('$id', (definition) => {
         const read = () => http.route === 'capabilities' ? client.discover()
           : http.route === 'resources' ? client.resourcesList({})
           : http.route === 'events' ? client.eventsList()
-          : client.timelineList(thread.session_id, { limit: 1, cursor: olderCursor })
+          : client.timelineList(thread.session_id, { limit: 1, ...(olderCursor === undefined ? {} : { cursor: olderCursor }) })
         let olderCursor: string | undefined
         if (http.route === 'timeline') {
           const first = await client.timelineList(thread.session_id, { limit: 1 })

@@ -13,6 +13,9 @@ export const UNICODE_LONG_NAME = '界'.repeat(200)
 export const UNICODE_PATH = `~/src/atlas/${'display-width/'.repeat(16)}fixtures`
 export const UNICODE_TEXT = `واجهة العربية — 日本語の表示 — Cafe\u0301 — 👩🏽‍💻 🚀 — ${UNICODE_LONG_NAME} — ${UNICODE_PATH}`
 
+// The unicode cast names its own agents, so it leaves out the base world's role list.
+const { roles: _baseRoles, ...baseCast } = syntheticFleetMidRefactor.cast
+
 /** Display text stresses shaping and width; public identifiers remain ASCII. */
 export const unicode: WorldDefinition = {
   ...syntheticFleetMidRefactor,
@@ -20,8 +23,7 @@ export const unicode: WorldDefinition = {
   title: 'Unicode display and content',
   narrative: 'An internationalization review exercises RTL, CJK, decomposed accents, emoji and unusually long labels.',
   cast: {
-    ...syntheticFleetMidRefactor.cast,
-    roles: undefined,
+    ...baseCast,
     agents: [
       { key: 'builder', role: 'builder', name: UNICODE_LONG_NAME, workspace: UNICODE_PATH },
       { key: 'reviewer', role: 'reviewer', name: UNICODE_TEXT },

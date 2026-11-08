@@ -58,7 +58,7 @@ export async function listSessionPages(
     let cursor: string | undefined;
     try {
       for (let pageNumber = 0; pageNumber < 5; pageNumber++) {
-        const page = (await list({ limit, cursor, history })).value;
+        const page = (await list({ limit, history, ...(cursor === undefined ? {} : { cursor }) })).value;
         sessions.push(...page.items.filter((item): item is Session => item.kind === 'session'));
         if (!page.page.has_more) break;
         const next = page.page.next_cursor;
@@ -164,7 +164,7 @@ export function applyConversation<T extends Entry>(
     older = noOlder;
     live = true;
   }
-  return { entries, hasOlder: moreBefore(older, live), newestSequence, sessionId, historyVersion, ...(header ? { header } : {}), older };
+  return { entries, hasOlder: moreBefore(older, live), newestSequence, ...(sessionId === undefined ? {} : { sessionId }), historyVersion, ...(header ? { header } : {}), older };
 }
 
 /** An earlier page from the current history snapshot; entries already held win. Responses from
@@ -188,7 +188,8 @@ function sameHistory(conversation: Conversation<Entry>, request: OlderRequest): 
 
 export function olderLoading<T extends Entry>(conversation: Conversation<T>, request: OlderRequest): Conversation<T> {
   if (!sameHistory(conversation, request)) return conversation;
-  return { ...conversation, older: { ...conversation.older, loading: true, failed: undefined } };
+  const { failed: _cleared, ...older } = conversation.older;
+  return { ...conversation, older: { ...older, loading: true } };
 }
 
 export function olderFailed<T extends Entry>(conversation: Conversation<T>, request: OlderRequest, reason: string): Conversation<T> {

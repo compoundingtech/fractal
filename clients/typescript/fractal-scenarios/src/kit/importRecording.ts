@@ -56,6 +56,8 @@ const text = (value: JsonValue | undefined, pointer = ''): string => typeof valu
 const number = (value: JsonValue | undefined, pointer = ''): number => typeof value === 'number' && Number.isFinite(value) ? value : fail(pointer, 'expected number')
 const integer = (value: JsonValue | undefined, pointer = ''): number => Number.isInteger(number(value, pointer)) ? number(value, pointer) : fail(pointer, 'expected integer')
 const bool = (value: JsonValue | undefined, pointer = ''): boolean => typeof value === 'boolean' ? value : fail(pointer, 'expected boolean')
+/** A recorded row's socket as an optional field: rows outside any socket carry none. */
+const socketOf = (row: RecordingRow): { readonly socket_id?: string } => row.socket_id === null ? {} : { socket_id: row.socket_id }
 const definitions = object(object(json(clientSchema, '')).$defs)
 const node = (name: string): JsonObject => object(definitions[name], `/$defs/${name}`)
 const resolve = (schema: JsonObject): JsonObject => typeof schema.$ref === 'string' ? node(schema.$ref.split('/').at(-1) ?? '') : schema
@@ -259,7 +261,7 @@ export const importRecording = (script: Pick<RecordingScript, 'format_version' |
       const items = entries(v.items)
       const replace = bool(v.replace)
       const selector = { collection: 'conversation', conversation: agent } as const
-      const boundary = { ordinal: row.ordinal, at_ms: row.receive_ms, selector, socket_id: row.socket_id ?? undefined, subscription_id: text(v.id), kind: 'conversation', replace, ...(v.has_more === undefined ? {} : { has_more: bool(v.has_more) }) } as const
+      const boundary = { ordinal: row.ordinal, at_ms: row.receive_ms, selector, ...socketOf(row), subscription_id: text(v.id), kind: 'conversation', replace, ...(v.has_more === undefined ? {} : { has_more: bool(v.has_more) }) } as const
       if (row.receive_ms <= 0) {
         const previous = threads.find((thread) => thread.agent === agent)
         const accumulated = new Map(previous?.items.map((item) => [item.id, item]))
@@ -307,7 +309,7 @@ export const importRecording = (script: Pick<RecordingScript, 'format_version' |
         else terminals[index] = record
         knownTerminals.add(screen.terminal_id)
         const screen_index = pastScreens.findIndex((item) => item.at_ms === row.receive_ms && equalJson(json(item.screen, '/screen'), json(screen, '/screen')))
-        frames.push({ ordinal: row.ordinal, at_ms: row.receive_ms, selector, socket_id: row.socket_id ?? undefined, subscription_id: text(v.id), kind: 'screen', snapshot, screen_index })
+        frames.push({ ordinal: row.ordinal, at_ms: row.receive_ms, selector, ...socketOf(row), subscription_id: text(v.id), kind: 'screen', snapshot, screen_index })
       } else {
         if (!knownTerminals.has(screen.terminal_id)) {
           const firstScreen = pastScreens[0]
@@ -318,7 +320,7 @@ export const importRecording = (script: Pick<RecordingScript, 'format_version' |
         }
         const event = terminal.length
         terminal.push({ _tag: 'screen', terminal: screen.terminal_id, screen, at_ms: row.receive_ms, store })
-        frames.push({ ordinal: row.ordinal, at_ms: row.receive_ms, selector, socket_id: row.socket_id ?? undefined, subscription_id: text(v.id), kind: 'screen', snapshot, event })
+        frames.push({ ordinal: row.ordinal, at_ms: row.receive_ms, selector, ...socketOf(row), subscription_id: text(v.id), kind: 'screen', snapshot, event })
       }
     } else if (v.kind === 'snapshot') {
       const collection = text(v.collection)
@@ -326,7 +328,7 @@ export const importRecording = (script: Pick<RecordingScript, 'format_version' |
       const snapshot = numericSnapshot(v.snapshot)
       store = snapshot.store_index
       const resources = captureResources(v.items, row.receive_ms, store)
-      frames.push({ ordinal: row.ordinal, at_ms: row.receive_ms, selector: { collection }, socket_id: row.socket_id ?? undefined, subscription_id: text(v.id), kind: 'snapshot', snapshot,
+      frames.push({ ordinal: row.ordinal, at_ms: row.receive_ms, selector: { collection }, ...socketOf(row), subscription_id: text(v.id), kind: 'snapshot', snapshot,
         history: rosterHistory.length - 1, item_ids: resources.map((item) => item.id), order: array(v.order).map((id) => text(id)), has_more: bool(v.has_more) })
     } else fail(`/ordinal/${row.ordinal}`, 'unsupported frame capture')
   }
@@ -347,7 +349,9 @@ export const importRecording = (script: Pick<RecordingScript, 'format_version' |
     sync: { ...common, kind: 'sync', state: { expected: [] }, timeline: [] },
   }, recording: { frames, http,
     subscriptions: rows.filter((row) => row.kind === 'command' && row.value.kind === 'subscribe')
-      .map((row) => ({ at_ms: row.receive_ms, socket_id: row.socket_id ?? undefined, command: row.value })),
+      .map((row) => row.socket_id === null
+        ? { at_ms: row.receive_ms, command: row.value }
+        : { at_ms: row.receive_ms, socket_id: row.socket_id, command: row.value }),
     socket_ids: [...new Set(rows.filter((row) => row.kind === 'command').flatMap((row) => row.socket_id === null ? [] : [row.socket_id]))] } }
 }
 
