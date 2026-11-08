@@ -369,8 +369,8 @@ async fn service_selectors_match_only_disclosed_claim_kinds() {
     for (subject,owner) in [(hidden_subject,hidden_owner),(mixed_subject,mixed_owner)] {
         for n in 0..7 {
             let claim = state.store.append_claim(&ClaimInput {
-                subject:subject.into(),kind:"custom.service-test.v1.item".into(),
-                actor:None,fields:serde_json::from_value(json!({"number":n})).unwrap(),
+                subject:subject.into(),kind:"gate.reviewer-reassigned".into(),
+                actor:None,fields:serde_json::from_value(json!({"request":format!("request-{n}")})).unwrap(),
                 evidence:vec![],expected_subject:None,idempotency_key:None,
             }).unwrap();
             withheld_indexes.push(claim.store_index);
