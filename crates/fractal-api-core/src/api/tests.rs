@@ -13751,7 +13751,7 @@ fn managed_owner_collision_keeps_the_first_visible_subject_and_exact_path_equiva
         if hide_first {
             // A retained reserved fact hides the subject without changing its routing ID.
             state.store.connection.write().execute(
-                "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+                /* sqlite-large-value: allow-for-now lv-hc075bae4b26b owner=fractal_api_core::api::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
                  SELECT 'collision-notice',batch_id,subject,'attention.notice',origin,
                         '{\"fields\":{}}','[]',accepted_at_unix_ms
                  FROM claims WHERE subject=?1 LIMIT 1", [first],
@@ -13844,7 +13844,7 @@ fn managed_owner_memo_expires_before_a_same_cut_repair_snapshot() {
     }).unwrap();
     assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 1);
     store.connection.write().execute(
-        "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)", [&repaired],
+        /* sqlite-large-value: allow-for-now lv-he543d968a9fa owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)", [&repaired],
     ).unwrap();
     smallclaims::Runtime::forget_views(store.fractal.as_ref());
     assert_eq!(store.index().unwrap(), through);
