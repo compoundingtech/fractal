@@ -22,6 +22,7 @@ import tempfile
 import time
 import uuid
 
+from release_artifact import assert_current_attempt, download_release, get_attempt
 from release_gh import gh as gh_call, missing
 from release_notes import FIELDS, ImpactError, render
 
@@ -152,17 +153,6 @@ def discard_partial_draft(tag):
     return False
 
 
-def download_release(run_id, repository, dist):
-    # arn:lmig:smalltalk:2026-10-26-release-artifact-name
-    # Accept successful pre-rename runs until their 7-day artifacts expire; sunset 2026-11-01.
-    artifacts = json.loads(run('gh', 'api', f'repos/{repository}/actions/runs/{run_id}/artifacts',
-                               '--paginate', '--slurp'))
-    names = {artifact['name'] for page in artifacts for artifact in page['artifacts']
-             if not artifact['expired']}
-    name = next((name for name in ('fractal-release', 'smalltalk-release') if name in names), None)
-    if name is None:
-        raise CommandFailed(f'run {run_id} has no unexpired release artifact')
-    run('gh', 'run', 'download', str(run_id), '--name', name, '--dir', str(dist))
 
 
 def latest_release_tag():
@@ -346,7 +336,16 @@ def main():
     if (build['status'] != 'completed' or build['conclusion'] != 'success'
             or type(build['run_attempt']) is not int or build['run_attempt'] <= 0):
         raise CommandFailed('selected build attempt is not successful')
-    download_release(run_id, os.environ.get('GH_REPO', 'compoundingtech/fractal'), dist)
+    attempt = build['run_attempt']
+    verified = get_attempt(run_id, repository, attempt, run)
+    exact_source = (verified['head_sha'] == sha if verified['event'] == 'push'
+                    else verified['event'] == 'workflow_dispatch'
+                    and verified['display_title'].startswith(f'Fractal candidate {sha} '))
+    if (verified['workflow_id'] != build['workflow_id']
+            or verified['head_sha'] != build['head_sha']
+            or verified['head_branch'] != 'main' or not exact_source):
+        raise CommandFailed('selected build attempt differs from the selected source or workflow')
+    artifact_id = download_release(run_id, repository, attempt, dist, run)
     # The same checks the tag workflow makes, so the bytes are proven before they are published.
     run('sha256sum', '--check', 'SHA256SUMS', cwd=dist)
     say(run('python3', str(repo / 'scripts/release-fractal-manifest.py'), sha, cwd=dist))
@@ -357,7 +356,8 @@ def main():
     body_notes.write_text(body + '\n\n<!-- fractal-daily-candidate -->\n')
     (dist / 'UPGRADE-IMPACT.json').write_text(json.dumps(impact, indent=2) + '\n')
     (dist / 'CANDIDATE.json').write_text(json.dumps({
-        'source': sha, 'build_run': run_id, 'build_attempt': build['run_attempt']}) + '\n')
+        'source': sha, 'build_run': run_id, 'build_attempt': attempt,
+        'build_artifact': artifact_id}) + '\n')
     assets = sorted(str(p) for pattern in ('*.tar.gz', '*.sha256') for p in dist.glob(pattern))
     assets += [str(dist / 'SHA256SUMS'), str(dist / 'RELEASE.json'), str(dist / 'UPGRADE-IMPACT.json'),
                str(dist / 'CANDIDATE.json'), str(notes)]
@@ -369,6 +369,7 @@ def main():
         say(f'dry run: would draft {tag} at {sha} with {len(assets)} assets, including RELEASE-NOTES.md')
         return 0
 
+    assert_current_attempt(run_id, repository, attempt, run)
     gh('release', 'create', tag, '--target', sha, '--draft', '--title', f'Fractal {tag}',
        '--notes-file', str(body_notes), *assets, done=lambda: discard_partial_draft(tag))
     cleanup_superseded_drafts(tag, drafts)
@@ -379,7 +380,7 @@ def main():
 def entry():
     try:
         return main()
-    except CommandFailed as error:
+    except (CommandFailed, ValueError, OSError, KeyError, subprocess.CalledProcessError) as error:
         say(str(error))
         return 1
 

@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
 sys.dont_write_bytecode = True
 from release_notes import FIELDS, ImpactError, check_pull_request, collect, render, validate, version
@@ -464,20 +465,32 @@ class ReleaseNotes(unittest.TestCase):
             if args[:5] == ('gh', 'api', '--paginate', '--slurp',
                              'repos/compoundingtech/fractal/releases?per_page=100'):
                 return json.dumps([drafts])
-            if args == ('gh', 'api', 'repos/compoundingtech/fractal/actions/runs/1'):
-                return json.dumps({'status': 'completed', 'conclusion': 'success', 'run_attempt': 2})
+            if args in (('gh', 'api', 'repos/compoundingtech/fractal/actions/runs/1'),
+                        ('gh', 'api', 'repos/compoundingtech/fractal/actions/runs/1/attempts/2')):
+                return json.dumps({'id': 1, 'status': 'completed', 'conclusion': 'success',
+                                   'run_attempt': 2, 'workflow_id': 42, 'head_sha': source,
+                                   'head_branch': 'main', 'event': 'push', 'display_title': 'Main build'})
             if args == ('gh', 'api', 'repos/compoundingtech/fractal/actions/runs/1/artifacts',
                         '--paginate', '--slurp'):
-                return json.dumps([{'artifacts': [{'name': 'fractal-release', 'expired': False}]}])
-            if args[:3] == ('gh', 'run', 'download'):
-                (downloads / 'example.tar.gz').write_bytes(b'archive fixture')
-                (downloads / 'example.tar.gz.sha256').write_text('checksum fixture')
-                (downloads / 'SHA256SUMS').write_text('checksum fixture')
-                (downloads / 'RELEASE.json').write_text(json.dumps({'source': source}))
-                return ''
+                return json.dumps([{'artifacts': [{'id': 102, 'name': 'fractal-release-attempt-2',
+                                                  'expired': False}]}])
             if args[0] in ('sha256sum', 'python3'):
                 return 'Existing artifact proof fixture'
             raise AssertionError(f'Unexpected publication command in dry run: {args}')
+        subprocess_run = subprocess.run
+        def download(args, **kwargs):
+            if args[:2] != ['gh', 'api']:
+                return subprocess_run(args, **kwargs)
+            self.assertEqual(args, ['gh', 'api', 'repos/compoundingtech/fractal/actions/artifacts/102/zip'])
+            self.assertEqual(set(kwargs), {'check', 'stdout'})
+            self.assertTrue(kwargs['check'])
+            with zipfile.ZipFile(kwargs['stdout'], 'w') as archive:
+                archive.writestr('example.tar.gz', b'archive fixture')
+                archive.writestr('example.tar.gz.sha256', 'checksum fixture')
+                archive.writestr('SHA256SUMS', 'checksum fixture')
+                archive.writestr('RELEASE.json', json.dumps({'source': source}))
+            return subprocess.CompletedProcess(args, 0)
+
         for drafts, tag, summary in [
             ([], 'v0.3.1', ''),
             ([{'draft': True, 'prerelease': False, 'tag_name': 'v0.3.4'}], 'v0.3.5',
@@ -495,14 +508,18 @@ class ReleaseNotes(unittest.TestCase):
                      patch.object(daily, 'run', side_effect=run), \
                      patch.object(daily, 'render', wraps=render) as classify, \
                      patch.object(daily.tempfile, 'mkdtemp', return_value=str(downloads)), \
+                     patch('release_artifact.subprocess.run', side_effect=download) as binary_download, \
                      contextlib.redirect_stdout(output):
                     self.assertEqual(daily.main(), 0)
                 classify.assert_called_once()
+                binary_download.assert_any_call(
+                    ['gh', 'api', 'repos/compoundingtech/fractal/actions/artifacts/102/zip'],
+                    check=True, stdout=unittest.mock.ANY)
                 self.assertIn(expected, output.getvalue())
                 self.assertEqual((downloads / 'RELEASE-NOTES.md').read_text(), expected)
                 self.assertEqual(json.loads((downloads / 'UPGRADE-IMPACT.json').read_text()), report)
                 self.assertEqual(json.loads((downloads / 'CANDIDATE.json').read_text()), {
-                    'source': source, 'build_run': 1, 'build_attempt': 2})
+                    'source': source, 'build_run': 1, 'build_attempt': 2, 'build_artifact': 102})
         self.assertFalse(any(args[:2] == ('gh', 'release') for args in commands))
         workflow = (ROOT / '.github/workflows/release-fractal.yml.genie.ts').read_text()
         # Tag runs now produce verified artifacts only; stable publication belongs
@@ -510,6 +527,9 @@ class ReleaseNotes(unittest.TestCase):
         self.assertNotIn('"publish": {', workflow)
         self.assertNotIn('gh release create', workflow)
         self.assertNotIn('python3 scripts/release_notes.py --source', workflow)
+        self.assertIn('"name": "fractal-release-attempt-${{ github.run_attempt }}"', workflow)
+        self.assertNotIn('"name": "fractal-release"', workflow)
+        self.assertIn('"artifact-ids": "${{ needs.assemble.outputs.artifact-id }}"', workflow)
 
     def test_daily_rejects_missing_classification_before_download_or_release(self):
         self.write('unclassified.rs', '// change')
