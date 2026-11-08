@@ -3,6 +3,8 @@
 use super::*;
 pub use fractal_delivery::store::missions::*;
 use fractal_store::store::identities::resolve_reference_conn;
+use fractal_store::store::missions::seat_step_rows_literal_tx;
+use fractal_store::store::{work_actor_matches, work_actor_spellings_json};
 
 mod run_review;
 #[doc(hidden)]
@@ -82,6 +84,33 @@ impl ObservationBatches {
 fn physical_actor(connection: &Connection, actor: &str) -> Result<String, FractalError> {
     let actor = normalize_actor(actor, "agent");
     resolve_reference_conn(connection, &actor)
+}
+
+/// Read filters historically accept bare seat names as well as qualified actors.
+/// Canonicalization is read-only; work-action writes retain main's physical actor spelling.
+fn physical_read_actor(connection: &Connection, actor: &str) -> Result<String, FractalError> {
+    canonical_work_actor(&physical_actor(connection, actor)?)
+}
+
+fn canonical_work_actor(actor: &str) -> Result<String, FractalError> {
+    fractal_schema::canonical_agent_actor(actor)
+        .map(std::borrow::Cow::into_owned)
+        .ok_or_else(|| {
+            FractalError::new("invalid-work-actor", format!("invalid agent actor `{actor}`"))
+        })
+}
+
+fn validate_work_write_actor(actor: &str) -> Result<(), FractalError> {
+    let canonical = fractal_schema::canonical_agent_actor(actor).ok_or_else(|| {
+        FractalError::new("invalid-work-actor", format!("invalid agent actor `{actor}`"))
+    })?;
+    if canonical != actor {
+        return Err(FractalError::new(
+            "invalid-work-actor",
+            format!("work writes require the prefixed actor spelling `{canonical}`; retry with that actor"),
+        ));
+    }
+    Ok(())
 }
 
 // One query preserves the native collection's indexed latest/live probes and shallow
@@ -897,15 +926,16 @@ fn seat_order_conflict_tx(
     agent: &str,
     subject: &str,
 ) -> Result<Option<String>> {
-    let order = seat_run_orders_tx(connection, Some(agent))?
+    let order = fractal_store::store::seat_queue_inputs_literal_tx(connection, Some(agent))?
         .remove(agent)
-        .unwrap_or_default();
-    let rows = seat_step_rows_tx(connection, Some(agent))?;
+        .unwrap_or_default()
+        .live_order();
+    let rows = seat_step_rows_literal_tx(connection, agent)?;
     let steps = rows
         .iter()
         .map(RosterStepRow::seat_step)
         .collect::<Vec<_>>();
-    let selection = seat_queue::select(agent, &steps, &order);
+    let selection = seat_queue::select_literal(agent, &steps, &order);
     let Some(next) = selection.next() else {
         return Ok(None);
     };
@@ -1768,6 +1798,9 @@ pub trait MissionsStore {
     fn seat_run_orders(&self) -> Result<BTreeMap<String, Vec<String>>>;
     /// The live mission runs queued for one seat, in seat-queue order.
     fn seat_run_order(&self, agent: &str) -> Result<Vec<String>>;
+    /// Literal queue order for wake decisions that must agree with claim admission.
+    fn seat_run_orders_for_mutation(&self) -> Result<BTreeMap<String, Vec<String>>>;
+    fn seat_run_order_for_mutation(&self, agent: &str) -> Result<Vec<String>>;
     /// Record one move in a seat's queue. The move never touches a claim: a
     /// held step stays held, and the new order applies to the next selection.
     fn move_seat_queue_run(
@@ -5121,25 +5154,26 @@ impl MissionsStore for Store {
     }
 
     fn work_for_renewal(&self, actor: &str) -> Result<Vec<StepRunView>> {
-        let actor = normalize_actor(actor, "agent");
         let snapshot = now_ms();
         let connection = self.readers.get();
-        let actor = physical_actor(&connection, &actor)?;
+        let actor = physical_read_actor(&connection, actor)?;
         let views = connection
             .prepare_cached(
                 "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                         lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
                  FROM step_runs INDEXED BY step_runs_lease_index
-                 WHERE lease_owner=?1 AND agentless=0
+                 WHERE lease_owner IN (SELECT value FROM json_each(?1)) AND agentless=0
                    AND generation_id=(SELECT current_generation_id FROM mission_runs WHERE id=step_runs.run_id)
                  ORDER BY subject",
             )?
-            .query_map([&actor], step_run_from_row)?
+            .query_map([work_actor_spellings_json(&actor)], step_run_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut held = Vec::with_capacity(views.len());
         for mut view in views {
             apply_effective_step_state(&connection, &mut view, snapshot)?;
-            if view.work_claim_is_held_by(&actor) {
+            if matches!(view.status.as_str(), "claimed" | "working" | "verifying" | "blocked")
+                && work_actor_matches(view.claimant.as_deref(), &actor)
+            {
                 held.push(view);
             }
         }
@@ -5213,6 +5247,25 @@ impl MissionsStore for Store {
         Ok(seat_run_orders_tx(&connection, Some(&agent))?
             .remove(&agent)
             .unwrap_or_default())
+    }
+
+    fn seat_run_orders_for_mutation(&self) -> Result<BTreeMap<String, Vec<String>>> {
+        let connection = self.readers.get();
+        Ok(fractal_store::store::seat_queue_inputs_literal_tx(&connection, None)?
+            .into_iter()
+            .map(|(agent, inputs)| (agent, inputs.live_order()))
+            .collect())
+    }
+
+    fn seat_run_order_for_mutation(&self, agent: &str) -> Result<Vec<String>> {
+        smallclaims::touched::note_read(|| format!("kind:{}", seat_queue::MOVED_CLAIM));
+        let agent = normalize_seat(agent);
+        let connection = self.readers.get();
+        let agent = physical_actor(&connection, &agent)?;
+        Ok(fractal_store::store::seat_queue_inputs_literal_tx(&connection, Some(&agent))?
+            .remove(&agent)
+            .unwrap_or_default()
+            .live_order())
     }
 
     fn move_seat_queue_run(
@@ -5351,7 +5404,8 @@ impl MissionsStore for Store {
             selected: Option<&BTreeSet<String>>,
         ) -> Result<Vec<StepRunView>> {
         let connection = self.readers.get();
-        let actor = actor.map(|value| physical_actor(&connection, value)).transpose()?;
+        let actor = actor.map(|value| physical_read_actor(&connection, value)).transpose()?;
+        let actor_spellings = actor.as_deref().map(work_actor_spellings_json);
         let views = match selected {
             None => {
                 let query = if actor.is_some() {
@@ -5361,7 +5415,7 @@ impl MissionsStore for Store {
                 };
                 let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc51ec5c7f089 owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &query)?;
                 let rows = statement.query_map(
-                    params![actor.as_deref(), include_terminal, include_agentless],
+                    params![actor_spellings.as_deref(), include_terminal, include_agentless],
                     step_run_from_row,
                 )?;
                 rows.collect::<Result<Vec<_>, _>>()?
@@ -5372,7 +5426,7 @@ impl MissionsStore for Store {
                 let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hfb225899064e owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &query)?;
                 let rows = statement.query_map(
                     params![
-                        actor.as_deref(),
+                        actor_spellings.as_deref(),
                         include_terminal,
                         include_agentless,
                         serde_json::to_string(selected)?
@@ -5431,10 +5485,10 @@ impl MissionsStore for Store {
                 continue;
             }
             let visible_to_actor = actor.as_ref().is_none_or(|actor| {
-                view.assigned_to.as_deref() == Some(actor.as_str())
-                    || view.claimant.as_deref() == Some(actor.as_str())
+                work_actor_matches(view.assigned_to.as_deref(), actor)
+                    || work_actor_matches(view.claimant.as_deref(), actor)
                     || (matches!(view.status.as_str(), "ready" | "blocked")
-                        && view.available_to.iter().any(|candidate| candidate == actor))
+                        && view.available_to.iter().any(|candidate| work_actor_matches(Some(candidate), actor)))
             });
             if visible_to_actor
                 && (include_terminal
@@ -5487,8 +5541,9 @@ impl MissionsStore for Store {
             limit: usize,
             after: Option<&(u128, String)>,
         ) -> Result<(Vec<StepRunView>, bool)> {
-        let actor = actor.map(|value| normalize_actor(value, "agent"));
         let connection = self.readers.get();
+        let actor = actor.map(|value| physical_read_actor(&connection, value)).transpose()?;
+        let actor_spellings = actor.as_deref().map(work_actor_spellings_json);
         // Enrichment can clear a step's claimant, through its effective state alone, but
         // never changes its assignee, its candidates or its update time. So this finds every
         // step the actor can see, in the order the history shows them, and a step it matches
@@ -5497,17 +5552,17 @@ impl MissionsStore for Store {
             let Some(actor) = actor.as_deref() else {
                 return Ok(true);
             };
-            if view.assigned_to.as_deref() == Some(actor)
-                || view.available_to.iter().any(|candidate| candidate == actor)
+            if work_actor_matches(view.assigned_to.as_deref(), actor)
+                || view.available_to.iter().any(|candidate| work_actor_matches(Some(candidate), actor))
             {
                 return Ok(true);
             }
-            if view.claimant.as_deref() != Some(actor) {
+            if !work_actor_matches(view.claimant.as_deref(), actor) {
                 return Ok(false);
             }
             let mut effective = view.clone();
             apply_effective_step_state(&connection, &mut effective, snapshot_unix_ms)?;
-            Ok(effective.claimant.as_deref() == Some(actor))
+            Ok(work_actor_matches(effective.claimant.as_deref(), actor))
         };
         let mut statement = connection.prepare_cached(
             "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
@@ -5517,13 +5572,13 @@ impl MissionsStore for Store {
                     OR (length(updated_at_unix_ms)=length(?2) AND updated_at_unix_ms<?2)
                     OR (updated_at_unix_ms=?2 AND subject>?3))
                AND (agentless=0 OR ?1 IS NULL)
-               AND (?1 IS NULL OR assignee=?1 OR lease_owner=?1
-                    OR EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value=?1))
+               AND (?1 IS NULL OR assignee IN (SELECT value FROM json_each(?1)) OR lease_owner IN (SELECT value FROM json_each(?1))
+                    OR EXISTS (SELECT 1 FROM json_each(step_runs.available_to) WHERE value IN (SELECT value FROM json_each(?1))))
              ORDER BY length(updated_at_unix_ms) DESC, updated_at_unix_ms DESC, subject",
         )?;
         let rows = statement.query_map(
             params![
-                actor.as_deref(),
+                actor_spellings.as_deref(),
                 after.map(|key| key.0.to_string()),
                 after.map(|key| key.1.as_str())
             ],
@@ -5555,8 +5610,8 @@ impl MissionsStore for Store {
             actor: Option<&str>,
             snapshot_unix_ms: u128,
         ) -> Result<Option<StepRunView>> {
-        let actor = actor.map(|value| normalize_actor(value, "agent"));
         let connection = self.readers.get();
+        let actor = actor.map(|value| physical_read_actor(&connection, value)).transpose()?;
         let view = connection
             .prepare_cached(
                 "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
@@ -5571,9 +5626,9 @@ impl MissionsStore for Store {
         };
         enrich_step_queue_at(&connection, &mut view, snapshot_unix_ms)?;
         let visible_to_actor = actor.as_ref().is_none_or(|actor| {
-            view.assigned_to.as_deref() == Some(actor.as_str())
-                || view.claimant.as_deref() == Some(actor.as_str())
-                || view.available_to.iter().any(|candidate| candidate == actor)
+            work_actor_matches(view.assigned_to.as_deref(), actor)
+                || work_actor_matches(view.claimant.as_deref(), actor)
+                || view.available_to.iter().any(|candidate| work_actor_matches(Some(candidate), actor))
         });
         Ok(visible_to_actor.then_some(view))
     }
@@ -5584,8 +5639,8 @@ impl MissionsStore for Store {
             snapshot_unix_ms: u128,
             include_agentless: bool,
         ) -> Result<Vec<StepRunView>> {
-        let actor = actor.map(|value| normalize_actor(value, "agent"));
         let connection = self.readers.get();
+        let actor = actor.map(|value| physical_read_actor(&connection, value)).transpose()?;
         let mut statement = connection.prepare(
             "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                     lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
@@ -5603,9 +5658,9 @@ impl MissionsStore for Store {
             let mut view = row?;
             enrich_step_queue_cached(&connection, &mut view, snapshot_unix_ms, &mut definitions)?;
             let visible_to_actor = actor.as_ref().is_none_or(|actor| {
-                view.assigned_to.as_deref() == Some(actor.as_str())
-                    || view.claimant.as_deref() == Some(actor.as_str())
-                    || view.available_to.iter().any(|candidate| candidate == actor)
+                work_actor_matches(view.assigned_to.as_deref(), actor)
+                    || work_actor_matches(view.claimant.as_deref(), actor)
+                    || view.available_to.iter().any(|candidate| work_actor_matches(Some(candidate), actor))
             });
             if visible_to_actor {
                 visible.push(view);
@@ -5889,12 +5944,9 @@ impl MissionsStore for Store {
             ));
         }
         let subject = normalize_step_run(subject);
-        let actor = normalize_actor(
-            request.actor.as_deref().ok_or_else(|| {
-                FractalError::new("missing-work-actor", "a work action needs an actor")
-            })?,
-            "agent",
-        );
+        let actor = request.actor.as_deref().ok_or_else(|| {
+            FractalError::new("missing-work-actor", "a work action needs an actor")
+        })?;
         let requested_incarnation = request
             .incarnation
             .as_deref()
@@ -5910,7 +5962,8 @@ impl MissionsStore for Store {
         let committed = self
             .connection
             .batched(|transaction| -> Result<(StepRunView, Option<u128>), FractalError> {
-                let actor = physical_actor(transaction, &actor)?;
+                let actor = physical_actor(transaction, actor)?;
+                validate_work_write_actor(&actor)?;
                 #[cfg(any(test, feature = "test-support"))]
                 let _writer_work = WorkActionWriterProbe::start(&request.idempotency_key);
                 if let Some(response) = smallclaims::store::idempotency::cached_response(transaction, &request.idempotency_key)?
@@ -6034,10 +6087,7 @@ impl MissionsStore for Store {
                     return Err(FractalError::new("handoff-not-acknowledged", "read the handoff note and acknowledge its message before claiming this work"));
                 }
                 let eligible = current.assigned_to.as_deref() == Some(actor.as_str())
-                    || current
-                        .available_to
-                        .iter()
-                        .any(|candidate| candidate == &actor);
+                    || current.available_to.iter().any(|candidate| candidate == &actor);
                 if current.agentless || !eligible {
                     return Err(FractalError::new(
                         "work-not-available",
@@ -6126,6 +6176,7 @@ impl MissionsStore for Store {
                 let lease_valid = current
                     .claim_expires_at_unix_ms
                     .is_some_and(|expiry| expiry > now);
+                // Expansion preserves main's literal ownership admission for every mutation.
                 if lease_valid && current.claimant.as_deref() != Some(actor.as_str()) {
                     return Err(FractalError::new(
                         "work-already-claimed",
@@ -6175,6 +6226,10 @@ impl MissionsStore for Store {
                         ));
                     }
                 }
+                // LIVE-MIGRATION BRIDGE arn:lmig:fractal:2026-11-07-agent-actor-ownership — DELETE at contraction — https://github.com/compoundingtech/fractal/pull/5582
+                // Expand comparisons and admission only; writes retain main's physical actor
+                // spelling. A later spelling switch requires a durable one-way fleet fence.
+                // LIVE-MIGRATION END arn:lmig:fractal:2026-11-07-agent-actor-ownership
                 let (status, worker_reported, claimant, claim_incarnation, claim_expiry) = match action {
                     "claim" => {
                         if current.status != "ready" && current.status != "claimed" {
