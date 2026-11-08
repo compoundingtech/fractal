@@ -32,7 +32,7 @@ What a space shares and what stays on the client:
 
 - A space has at most one tab per `config.identity(ref)`. Opening an entity that is already open focuses its existing tab, wherever that tab is.
 - Splits made here are binary.
-- A pane emptied by a local close or move collapses, and its sibling takes the space. The last pane stays, empty.
+- A pane emptied by a local close or move collapses, and its sibling takes the space. `ClosePane` closes a pane with its tabs. The last pane stays, empty.
 - `Receive` keeps empty panes exactly as received.
 - `Receive` adopts another writer's body wholesale. Local ids, the shown tabs and the focus are kept by entity identity and position. Unknown refs are always kept.
 - `FocusDirection` finds the nearest pane in a direction from the sizes alone. At an edge it does nothing, and `neighbour()` returns `undefined`, so the host can, for example, focus a sidebar.
@@ -92,7 +92,7 @@ Each `SpaceSync` is an external store that keeps spaces as whole bodies. The sto
 - **Keys.**
   - `useWorkspaceKeys` binds the defaults:
     - Mod+D splits right, and Mod+Shift+D splits down;
-    - Alt+W closes the tab, and Alt+Shift+T reopens the last closed one;
+    - Alt+W closes the tab (or an empty pane), and Alt+Shift+T reopens the last closed one;
     - Alt+arrows move the focus, Alt+O zooms, and Alt+[ and Alt+] cycle tabs;
     - Mod+K opens the palette everywhere; Ctrl+T also opens it, on a Mac only.
   - Alt+T (new tab), Alt+G (switch space) and the palette are host `handlers`.

@@ -47,6 +47,7 @@ export const scenarioExemptions: readonly string[] = [
   'Offline:contract-fixture',
   'Populated:contract-fixture',
   'ScriptedRepair:contract-fixture',
+  'Splits:contract-fixture',
   'TabSwitchGeometry:contract-fixture',
   'Unavailable:contract-fixture',
 ]
@@ -88,6 +89,58 @@ export const TabSwitchGeometry: Story = {
       await waitFor(() => expect(tabs()[index]!.getAttribute('aria-selected')).toBe('true'))
       expect(stripGeometry(canvasElement)).toEqual(before)
     }
+    canvasElement.dataset.proof = 'passed'
+  },
+}
+
+const mac = () => /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
+const press = (init: KeyboardEventInit, target: EventTarget = document.body) =>
+  target.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }))
+
+/**
+ * Splits, cmux style: a tab moves into a split from its menu, Alt+O zooms and back, Alt+Left moves to the
+ * other split, a divider resizes from the keyboard, Mod+D makes an empty split and Alt+W closes it. The
+ * moved tab's surface is the same node throughout: nothing remounts.
+ */
+export const Splits: Story = {
+  args: { state: 'populated' },
+  play: async ({ canvasElement, args }) => {
+    await waitFor(() => assertProductionAppState(canvasElement, args.state, true), { timeout: 60000 })
+    const other = fixtureProjections.agents.find(row => row.id !== appStoryAgent(args.state))!
+    window.history.pushState(null, '', `/w/${other.id}`)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    const strips = () => [...canvasElement.querySelectorAll<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"]')]
+    const tabs = () => strips().flatMap(strip => [...strip.querySelectorAll<HTMLElement>('[role="tab"]')])
+    const shownPanes = () => [...canvasElement.querySelectorAll('[data-pane]')].filter(pane => pane.closest('[hidden]') === null)
+    await waitFor(() => expect(tabs()).toHaveLength(2))
+    const moved = tabs()[1]!
+    const surface = () => canvasElement.querySelector(`[data-tab-surface="agent:${other.id}"]`)
+    await waitFor(() => expect(surface()).not.toBeNull())
+    const node = surface()
+    moved.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
+    await waitFor(() => expect([...document.querySelectorAll('[role="menuitem"]')].some(item => item.textContent === 'Split right')).toBe(true))
+    ;[...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(item => item.textContent === 'Split right')!.click()
+    await waitFor(() => expect(strips()).toHaveLength(2))
+    expect(surface()).toBe(node)
+    press({ key: 'o', code: 'KeyO', altKey: true })
+    await waitFor(() => expect(shownPanes()).toHaveLength(1))
+    press({ key: 'o', code: 'KeyO', altKey: true })
+    await waitFor(() => expect(shownPanes()).toHaveLength(2))
+    expect(surface()).toBe(node)
+    const focusedPane = () => canvasElement.querySelector('[data-pane][data-focused]')
+    const right = focusedPane()
+    press({ key: 'ArrowLeft', code: 'ArrowLeft', altKey: true })
+    await waitFor(() => expect(focusedPane()).not.toBe(right))
+    const divider = canvasElement.querySelector<HTMLElement>('[data-divider]')!
+    const before = divider.getAttribute('aria-valuenow')
+    divider.focus()
+    press({ key: 'ArrowLeft', code: 'ArrowLeft' }, divider)
+    await waitFor(() => expect(divider.getAttribute('aria-valuenow')).not.toBe(before))
+    press({ key: 'd', code: 'KeyD', metaKey: mac(), ctrlKey: !mac() })
+    await waitFor(() => expect(strips()).toHaveLength(3))
+    press({ key: 'w', code: 'KeyW', altKey: true })
+    await waitFor(() => expect(strips()).toHaveLength(2))
+    expect(surface()).toBe(node)
     canvasElement.dataset.proof = 'passed'
   },
 }
