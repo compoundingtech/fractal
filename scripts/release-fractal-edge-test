@@ -73,6 +73,7 @@ elif args[:2] == ['release', 'edit']:
     state['release']['latest'] = '--latest=false' not in args
 elif args[0] == 'api' and 'PATCH' in args:
     assert any(a == 'force=true' for a in args), args
+    state['assets_at_patch'] = dict(state['release']['assets']) if state['release'] is not None else None
     state['tag'] = [a for a in args if a.startswith('sha=')][0][4:]
 elif args[0] == 'api':
     if state['tag'] is None: fail('Not Found')
@@ -285,6 +286,19 @@ with tempfile.TemporaryDirectory() as temporary:
     fixed = [index for index, call in enumerate(recorded)
              if call[:2] == ['release', 'upload'] and Path(call[-1]).name in first['release']['assets']]
     assert staged and fixed and staged[0] < moved < min(fixed), recorded
+    assert json.loads(current()['release']['assets']['RELEASE.json'])['source'] == commits[2]
+    staged_assets = current()['assets_at_patch']
+    ledger_name = commits[2] + '-STAGING-LEDGER.sha256'
+    expected_names = {commits[2] + '-' + name for name in first['release']['assets']}
+    assert set(staged_assets) == expected_names | {ledger_name}, staged_assets
+    for line in staged_assets[ledger_name].splitlines():
+        digest, name = line.split('  ', 1)
+        assert hashlib.sha256(staged_assets[commits[2] + '-' + name].encode('latin1')).hexdigest() == digest
+    manifest_writes = [index for index in fixed if Path(recorded[index][-1]).name == 'RELEASE.json']
+    assert manifest_writes == [max(fixed)], recorded
+    final_ref_reads = [index for index, call in enumerate(recorded)
+                       if call == ['api', 'repos/example/project/git/ref/tags/edge']]
+    assert moved < manifest_writes[0] < final_ref_reads[-1], recorded
     print('passed: test_missing_release_with_retained_older_tag_converges')
     for retained, candidate, label in ((divergent, commits[2], 'divergent'),
                                        (commits[2], commits[1], 'newer')):
