@@ -1,3 +1,4 @@
+import { inlineFromPlain, markdownSource, type MarkdownInline } from '@fractal/client/markdown'
 import { useAtomValue } from '@effect/atom-react'
 import type * as Fractal from '@fractal/client/schema'
 import type { DecodedAgent } from '@fractal/sdk/read'
@@ -191,8 +192,10 @@ const StepMark = ({ word, spinning }: { readonly word: StepWord; readonly spinni
 /** `compact`: one of several parallel steps in a column; owner and duration move under the title. */
 const StepRow = ({ step, now, expanded, onToggle, onOpen, visible, compact = false }: { readonly step: PlanStep; readonly now: number; readonly expanded: boolean; readonly onToggle: () => void; readonly onOpen: MissionDetailViewProps['onOpen']; readonly visible: boolean; readonly compact?: boolean }) => {
   const duration = stepDuration(step, now)
-  const output = [step.progress, step.blockedReason, step.note].filter((item, index, all): item is string => item !== undefined && item !== null && item !== '' && all.indexOf(item) === index)
-  const detail = step.goal !== undefined && step.goal !== step.title ? [step.goal, ...output] : output
+  // Progress and goal are Markdown as written; the blocked reason and note are plain text, escaped to render as written.
+  const lines = [step.goal !== undefined && markdownSource(step.goal) !== step.title ? step.goal : undefined, step.progress,
+    step.blockedReason === undefined ? undefined : inlineFromPlain(step.blockedReason), step.note === null ? undefined : inlineFromPlain(step.note)]
+  const detail = lines.filter((line, index): line is MarkdownInline => line !== undefined && markdownSource(line) !== '' && lines.findIndex(other => other !== undefined && markdownSource(other) === markdownSource(line)) === index)
   return <li data-step-id={step.id} data-step-word={step.word} {...stylex.props(styles.step, step.word === 'needs_you' && styles.stepYou, step.word === 'failed' && styles.stepFailed)}>
     <div {...stylex.props(styles.stepLine, compact && styles.stepLineCompact)}>
       <StepMark word={step.word} spinning={visible} />

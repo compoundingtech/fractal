@@ -1,4 +1,5 @@
 /** The GitHub hover card over the normative plugin fixtures: every read state, and a Markdown link that opens it on hover or focus. Synthetic `acme/garden` data only. */
+import { markdownBlock } from '@fractal/client/markdown'
 import type { Meta, StoryObj } from '@storybook/react'
 import * as stylex from '@stylexjs/stylex'
 import * as React from 'react'
@@ -112,7 +113,7 @@ const markdown = 'Fixes [the PR](https://github.com/acme/garden/pull/7), see [is
 /** Links in Markdown: GitHub ones get the card on hover or keyboard focus and lose the native title; others are untouched. */
 export const MarkdownLinks: Story = {
   args: { target: pr, loaded: { _tag: 'Loading' } },
-  render: () => <Canvas><GithubReaderProvider value={fixtureReader}><MarkdownLinkPreviewContext.Provider value={preview}><div {...stylex.props(styles.prose)}><Markdown text={markdown} /></div></MarkdownLinkPreviewContext.Provider></GithubReaderProvider></Canvas>,
+  render: () => <Canvas><GithubReaderProvider value={fixtureReader}><MarkdownLinkPreviewContext.Provider value={preview}><div {...stylex.props(styles.prose)}><Markdown text={markdownBlock(markdown)} /></div></MarkdownLinkPreviewContext.Provider></GithubReaderProvider></Canvas>,
   play: async ({ canvasElement }) => {
     const page = within(canvasElement)
     const link = page.getByRole('link', { name: 'the PR' })
@@ -132,7 +133,7 @@ const olderDaemon: GithubReader = { item: unsupported, conversation: unsupported
 /** A daemon from before the plugin reads: focusing a GitHub link shows no card and no error, just the link. */
 export const OlderDaemon: Story = {
   args: { target: pr, loaded: { _tag: 'Loading' } },
-  render: () => <Canvas><GithubReaderProvider value={olderDaemon}><MarkdownLinkPreviewContext.Provider value={preview}><div {...stylex.props(styles.prose)}><Markdown text={markdown} /></div></MarkdownLinkPreviewContext.Provider></GithubReaderProvider></Canvas>,
+  render: () => <Canvas><GithubReaderProvider value={olderDaemon}><MarkdownLinkPreviewContext.Provider value={preview}><div {...stylex.props(styles.prose)}><Markdown text={markdownBlock(markdown)} /></div></MarkdownLinkPreviewContext.Provider></GithubReaderProvider></Canvas>,
   play: async ({ canvasElement }) => {
     const link = within(canvasElement).getByRole('link', { name: 'the PR' })
     await userEvent.tab()
