@@ -1,9 +1,10 @@
 import { Effect, Layer } from 'effect'
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { activeTab, groupsOf, tabsOf, type Layout } from './model.ts'
 import { createWorkspaceStore, memoryStorage, WorkspaceStorage } from './store.ts'
 
-const settle = () => Effect.runPromise(Effect.sleep(30))
+// Drain the persistence debounce and any writes triggered by adoption in the other window.
+const settle = () => vi.runAllTimersAsync()
 
 /** Two stores over one document, each told about the other's writes, like two browser windows. */
 const sharedDocument = () => {
@@ -30,6 +31,9 @@ const sharedDocument = () => {
 const panes = (layout: Layout) => tabsOf(layout).map(tab => tab.pane)
 
 describe('workspace store', () => {
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
   it('survives a reload: splits, each group\'s tab, focus, view state and the panel', () => {
     let saved: string | undefined
     const layer = Layer.succeed(WorkspaceStorage, WorkspaceStorage.of({
