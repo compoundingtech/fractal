@@ -510,7 +510,8 @@ pub fn prepare(
                     blockers.join("; "))));
         }
     }
-    validate_fact(tx, &input.subject, &m, &input.kind, input.actor.as_deref(), &f, creation)
+    validate_fact(tx, &input.subject, &m, &input.kind, input.actor.as_deref(), &f,
+        creation.map(|opening| (opening, false)))
         .map_err(|e| fail(e.to_string()))?;
     Ok(Some(f))
 }
@@ -552,6 +553,17 @@ fn decision_import_opening(
     Ok(true)
 }
 
+/// An imported opening records its writer, but grants ownership only to its canonical seat.
+fn claim_owner<'a>(subject: &str, creation: Option<&'a ClaimRecord>) -> Result<Option<&'a str>> {
+    let Some(creation) = creation else { return Ok(None); };
+    let seat = creation.body.pointer("/fields/seat").and_then(Value::as_str);
+    if creation.kind == "custom.decision.tree.v2.opened" && creation.actor.as_deref() != seat
+        && decision_import_opening(subject, &creation.kind, creation.actor.as_deref(), &fields(creation))? {
+        return Ok(seat);
+    }
+    Ok(creation.actor.as_deref())
+}
+
 fn validate_fact(
     connection: &Connection,
     subject: &str,
@@ -559,8 +571,11 @@ fn validate_fact(
     kind: &str,
     actor: Option<&str>,
     f: &BTreeMap<String, Value>,
-    creation: Option<&ClaimRecord>,
+    // The flag identifies the original opening by claim ID, never by repeated fields.
+    creation: Option<(&ClaimRecord, bool)>,
 ) -> Result<()> {
+    let (creation, is_creation) = creation
+        .map_or((None, false), |(opening, same)| (Some(opening), same));
     let spec = m
         .claims
         .get(kind)
@@ -576,6 +591,12 @@ fn validate_fact(
         "typed actor must be a person or agent"
     );
     notice_authority::validate(connection, subject, m, kind, actor, f, creation)?;
+    let owner = claim_owner(subject, creation)?;
+    if let Some(creation) = creation {
+        anyhow::ensure!(is_creation || creation.actor.as_deref() == owner
+            || creation.actor.as_deref() != Some(actor),
+            "the decision import actor may write only the opening");
+    }
     match spec.authority {
         Authority::Creator => {
             if let Some(c) = creation {
@@ -587,7 +608,7 @@ fn validate_fact(
         }
         Authority::Owner => {
             anyhow::ensure!(
-                creation.and_then(|c| c.actor.as_deref()) == Some(actor),
+                owner == Some(actor),
                 "only the request owner may write this claim"
             );
         }
@@ -775,9 +796,14 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
         && pinned.iter().filter(|claim| claim.kind == m.creation_kind).count() != 1 {
         Some("notices unavailable: missing or duplicate source creation".to_owned())
     } else { None };
+    let owner = match claim_owner(subject, creation) {
+        Ok(owner) => owner,
+        Err(e) => { error = Some(e.to_string()); None }
+    };
     let mut valid = Vec::new();
     for c in &pinned {
-        match validate_fact(tx, subject, &m, &c.kind, c.actor.as_deref(), &fields(c), creation) {
+        match validate_fact(tx, subject, &m, &c.kind, c.actor.as_deref(), &fields(c),
+            creation.map(|opening| (opening, opening.id == c.id))) {
             Ok(()) => valid.push(c.clone()),
             Err(e) => {
                 error = Some(e.to_string());
@@ -914,7 +940,7 @@ fn refresh_source(tx: &Transaction<'_>, subject: &str) -> Result<()> {
         .iter()
         .map(|(n, e)| (n.clone(), eval(e, &slots)))
         .collect::<BTreeMap<_, _>>();
-    let mut body = json!({"kind":"custom-subject","id":subject,"registered_kind":m.kind,"schema_version":m.version,"registration":hash,"revision":revision,"state":state,"owner":creation.and_then(|c|c.actor.as_deref()),"fields":output,"provenance":slots.iter().map(|(n,c)|(n.clone(),json!({"claim_id":c.id,"actor":c.actor}))).collect::<BTreeMap<_,_>>(),"input_count":pinned.len()});
+    let mut body = json!({"kind":"custom-subject","id":subject,"registered_kind":m.kind,"schema_version":m.version,"registration":hash,"revision":revision,"state":state,"owner":owner,"fields":output,"provenance":slots.iter().map(|(n,c)|(n.clone(),json!({"claim_id":c.id,"actor":c.actor}))).collect::<BTreeMap<_,_>>(),"input_count":pinned.len()});
     if !reply_conflicts.is_empty() {
         body["reply_conflicts"] = json!(reply_conflicts);
     }
@@ -1134,9 +1160,7 @@ impl Store {
         let seat_path = seat.strip_prefix("agent/")
             .ok_or_else(|| anyhow::anyhow!("decision seat must be an agent"))?;
         anyhow::ensure!(
-            (creation.actor.as_deref() == Some(seat)
-                || decision_import_opening(subject, &creation.kind,
-                    creation.actor.as_deref(), &creation_fields)?)
+            claim_owner(subject, Some(creation))? == Some(seat)
                 && (subject == format!("custom/decision/tree/v{version}/{seat_path}")
                     || (version == 2 && subject.strip_prefix("custom/decision/tree/v2/legacy/")
                         .is_some_and(|spelling| !spelling.is_empty()))),
@@ -1153,7 +1177,7 @@ impl Store {
         );
         for claim in &history {
             validate_fact(&snapshot, subject, &manifest, &claim.kind,
-                claim.actor.as_deref(), &fields(claim), Some(creation))?;
+                claim.actor.as_deref(), &fields(claim), Some((creation, claim.id == creation.id)))?;
         }
         let kinds = schema::decisions::input_kinds(version);
         let revision = basis_revision_from_history(subject, &kinds, &history)?;

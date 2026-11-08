@@ -243,15 +243,45 @@ fn import_tree_claim(store: &Store, subject: &str, kind: &str, actor: &str, fiel
 }
 
 #[test]
-fn decision_import_opening_is_readable_and_owner_rules_remain_unchanged() {
+fn decision_import_opening_is_readable_and_owned_only_by_the_canonical_seat() {
     let store = import_tree_store();
     let opened = import_tree_claim(&store, IMPORT_TREE, "opened", IMPORT_ACTOR,
         import_opening_fields()).unwrap();
     assert_eq!(store.decision_inputs(IMPORT_TREE).unwrap().claims[0].id, opened.id);
     let raw = tree_document(&store, "doc/example/import-owner", b"unreadable source");
     let damage = json!({"raw":raw, "records":1, "imported":0, "malformed":1});
-    assert!(import_tree_claim(&store, IMPORT_TREE, "damaged", SEAT, damage.clone()).is_err());
-    import_tree_claim(&store, IMPORT_TREE, "damaged", IMPORT_ACTOR, damage).unwrap();
+    assert_eq!(store.custom_subject(IMPORT_TREE).unwrap().unwrap()["owner"], SEAT);
+    assert!(import_tree_claim(&store, IMPORT_TREE, "damaged", IMPORT_ACTOR, damage.clone())
+        .unwrap_err().to_string().contains("only the opening"));
+    import_tree_claim(&store, IMPORT_TREE, "damaged", SEAT, damage).unwrap();
+    assert_eq!(store.decision_inputs(IMPORT_TREE).unwrap().claims.len(), 2);
+}
+
+#[test]
+fn concurrent_import_and_native_opening_keep_owner_check_and_append_atomic() {
+    let store = import_tree_store();
+    let start = std::sync::Barrier::new(2);
+    let outcomes = std::thread::scope(|scope| {
+        let native = scope.spawn(|| {
+            start.wait();
+            import_tree_claim(&store, IMPORT_TREE, "opened", SEAT,
+                json!({"seat":SEAT,"recipient":DECIDER}))
+        });
+        let imported = scope.spawn(|| {
+            start.wait();
+            import_tree_claim(&store, IMPORT_TREE, "opened", IMPORT_ACTOR, import_opening_fields())
+        });
+        [native.join().unwrap(), imported.join().unwrap()]
+    });
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    let history = store.decision_inputs(IMPORT_TREE).unwrap();
+    assert_eq!(history.claims.len(), 1);
+    assert_eq!(store.custom_subject(IMPORT_TREE).unwrap().unwrap()["owner"], SEAT);
+    let raw = tree_document(&store, "doc/example/concurrent-import-owner", b"unreadable");
+    let damage = json!({"raw":raw,"records":1,"imported":0,"malformed":1});
+    assert!(import_tree_claim(&store, IMPORT_TREE, "damaged", IMPORT_ACTOR, damage.clone()).is_err());
+    import_tree_claim(&store, IMPORT_TREE, "damaged", SEAT, damage).unwrap();
+    assert_eq!(store.decision_inputs(IMPORT_TREE).unwrap().claims.len(), 2);
 }
 
 #[test]
@@ -352,6 +382,28 @@ fn decision_import_replication_and_reader_use_stateless_checks() {
         import_opening_fields()).unwrap_err().to_string().contains("no earlier claim"));
     signed_sync(&source, &replica);
     assert_eq!(replica.decision_inputs(IMPORT_TREE).unwrap().claims[0].id, opened.id);
+    assert_eq!(replica.custom_subject(IMPORT_TREE).unwrap().unwrap()["owner"], SEAT);
+    let raw = tree_document(&replica, "doc/example/replicated-import-owner", b"unreadable");
+    let damage = json!({"raw":raw,"records":1,"imported":0,"malformed":1});
+    assert!(import_tree_claim(&replica, IMPORT_TREE, "damaged", IMPORT_ACTOR, damage.clone())
+        .unwrap_err().to_string().contains("only the opening"));
+    import_tree_claim(&replica, IMPORT_TREE, "damaged", SEAT, damage.clone()).unwrap();
+    signed_sync(&replica, &source);
+    assert_eq!(source.decision_inputs(IMPORT_TREE).unwrap().claims.len(), 2);
+
+    // Bypass local admission to model a peer transmitting an unauthorized later fact.
+    let mut forged_fields = damage;
+    forged_fields["_registration"] = fields(&opened)["_registration"].clone();
+    replica.connection.batched(|tx| -> Result<()> {
+        append_claim_tx(tx, replica.origin(), IMPORT_TREE, "custom.decision.tree.v2.damaged",
+            Some(IMPORT_ACTOR), &json!({"fields":forged_fields}), &[], None)?;
+        flush(tx)
+    }).unwrap().unwrap();
+    signed_sync(&replica, &source);
+    for store in [&source, &replica] {
+        assert_eq!(store.custom_subject(IMPORT_TREE).unwrap().unwrap()["state"], "invalid");
+        assert!(store.decision_inputs(IMPORT_TREE).is_err());
+    }
 }
 
 #[test]

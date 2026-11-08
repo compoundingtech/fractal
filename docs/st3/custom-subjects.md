@@ -61,8 +61,9 @@ Unsupported or unavailable manifests stay in raw history, with pinned sources pe
 supported manifest dependencies arrive.
 
 Each claim schema declares an authority (`creator`, `owner`, or `recipient`) and fields using
-existing schema types. Creation fixes the owner actor and addressed person. Only creation
-claims have creator authority. Owner claims require that original actor; recipient claims
+existing schema types. Creation fixes the owner actor and addressed person, except for the
+canonical-seat ownership of migration-marked decision v2 openings described below. Only creation
+claims have creator authority. Owner claims require that owner; recipient claims
 require the original person. Raw `fractal claim` writes receive the same validation as generic
 replies. Fields support required/optional values, scalar types, enum strings, arrays with
 `min_items`/`max_items`, subject reference families, immutable documents (`document: true`)
@@ -231,7 +232,12 @@ subject must be `custom/decision/tree/v2/` plus the seat without `agent/`, never
 earlier claim of any kind on that subject, in the same transaction, including repaired raw
 claims. Replicated validation and reader recognition enforce only the stateless conditions:
 arrival order must not change acceptance. Seat-authored openings must omit `import`.
-The exception is for `opened` only; all later owner and recipient authority rules are unchanged.
+The exception is for `opened` only. An imported tree's owner is its canonical subject seat,
+not the import writer. One owner derivation is shared by local admission, replicated projection
+and the decision reader, including projected owner/ask requester identity. The canonical seat
+can write later owner facts; the importer cannot write any later claim, including another
+opening. Owner validation and append share the same write transaction, so concurrent native
+and import openings cannot both pass the first-opening check. Recipient authority is unchanged.
 
 Every daemon advertises `decision-tree-import-opened=1` in `daemon.started`. Local import-opened
 admission reuses the strict fleet feature barrier in the append transaction: current members,
