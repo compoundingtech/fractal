@@ -6,6 +6,6 @@
   "rules": {"status": "none", "detail": "No rule changes."},
   "compatibility": {"status": "none", "detail": "Pinned SHA256 and BUILD.json source/target validation remain mandatory, including restored cache entries."},
   "downtime": {"status": "none", "detail": "No runtime service changes."},
-  "manual": {"status": "none", "detail": "Workflow preparation and bounded browser download retries are automatic."},
+  "manual": {"status": "none", "detail": "Workflow preparation and bounded browser download retries are automatic. Archive producers participate in draft admission, queue dependency observation and projected proof graphs; source-history checkout/fetch steps remain adjacent."},
   "recovery": {"status": "none", "detail": "Corrupt cache entries fail closed."}
 }

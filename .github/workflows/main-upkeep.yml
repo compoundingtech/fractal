@@ -3510,28 +3510,6 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
-      - name: Require successful archive preparation
-        shell: bash
-        env:
-          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
-        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
-      - name: Identify the pinned messaging archive
-        id: compat-identity
-        shell: bash
-        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
-      - name: Require an explicit prepared archive name
-        shell: bash
-        env:
-          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
-        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
-      - name: Download the prepared compatibility archive
-        id: compat-archive
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
-          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
-        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -3558,6 +3536,28 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -3742,28 +3742,6 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
-      - name: Require successful archive preparation
-        shell: bash
-        env:
-          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
-        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
-      - name: Identify the pinned messaging archive
-        id: compat-identity
-        shell: bash
-        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
-      - name: Require an explicit prepared archive name
-        shell: bash
-        env:
-          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
-        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
-      - name: Download the prepared compatibility archive
-        id: compat-archive
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
-          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
-        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -3790,6 +3768,28 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -4016,28 +4016,6 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
-      - name: Require successful archive preparation
-        shell: bash
-        env:
-          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
-        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
-      - name: Identify the pinned messaging archive
-        id: compat-identity
-        shell: bash
-        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
-      - name: Require an explicit prepared archive name
-        shell: bash
-        env:
-          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
-        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
-      - name: Download the prepared compatibility archive
-        id: compat-archive
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
-          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
-        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -4064,6 +4042,28 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -4287,28 +4287,6 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
-      - name: Require successful archive preparation
-        shell: bash
-        env:
-          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
-        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
-      - name: Identify the pinned messaging archive
-        id: compat-identity
-        shell: bash
-        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
-      - name: Require an explicit prepared archive name
-        shell: bash
-        env:
-          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
-        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
-      - name: Download the prepared compatibility archive
-        id: compat-archive
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
-          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
-        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -4335,6 +4313,28 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -4558,28 +4558,6 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
-      - name: Require successful archive preparation
-        shell: bash
-        env:
-          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
-        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
-      - name: Identify the pinned messaging archive
-        id: compat-identity
-        shell: bash
-        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
-      - name: Require an explicit prepared archive name
-        shell: bash
-        env:
-          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
-        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
-      - name: Download the prepared compatibility archive
-        id: compat-archive
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
-          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
-        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -4606,6 +4584,28 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned messaging archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity messaging x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-messaging'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-messaging'] }}
+        run: 'python3 scripts/ci-compat-archive download messaging x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -5061,28 +5061,6 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
-      - name: Require successful archive preparation
-        shell: bash
-        env:
-          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
-        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
-      - name: Identify the pinned fleet archive
-        id: compat-identity
-        shell: bash
-        run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
-      - name: Require an explicit prepared archive name
-        shell: bash
-        env:
-          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-fleet'] }}
-        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
-      - name: Download the prepared compatibility archive
-        id: compat-archive
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-fleet'] }}
-          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-fleet'] }}
-        run: 'python3 scripts/ci-compat-archive download fleet x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Fetch the whole history without evidence tags
         env:
           FETCH_TOKEN: ${{ github.token }}
@@ -5109,6 +5087,28 @@ jobs:
           fi
           rm -f "$shallow.full-fetch"
           git fsck --connectivity-only --no-dangling --no-progress
+      - name: Require successful archive preparation
+        shell: bash
+        env:
+          PRODUCER_RESULT: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.result }}
+        run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }'
+      - name: Identify the pinned fleet archive
+        id: compat-identity
+        shell: bash
+        run: python3 scripts/ci-compat-archive identity fleet x86_64-unknown-linux-gnu
+      - name: Require an explicit prepared archive name
+        shell: bash
+        env:
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-fleet'] }}
+        run: '[ -n "$COMPAT_ARCHIVE_NAME" ] || { echo "::error::compatibility archive producer returned an empty artifact name; refusing to download all run artifacts"; exit 1; }'
+      - name: Download the prepared compatibility archive
+        id: compat-archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMPAT_ARCHIVE_NAME: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-fleet'] }}
+          CI_TEST_ARCHIVE_ARTIFACT_ID: ${{ needs.proof-compat-archives-x86_64-unknown-linux-gnu.outputs['artifact-id-fleet'] }}
+        run: 'python3 scripts/ci-compat-archive download fleet x86_64-unknown-linux-gnu "${{ steps[''compat-identity''].outputs.path }}"'
       - name: Use the runner's own caches
         run: |
           if [ -n "${CI_LOCAL_CARGO_HOME:-}" ]; then echo CI_LOCAL_CACHES=1 >> "$GITHUB_ENV"; fi
@@ -6432,5 +6432,5 @@ jobs:
         env:
           CACHE_ENTRIES: '[{"name":"Restore messaging archive","outcome":"${{ steps.archive-0.outcome }}","hit":"${{ steps.archive-0.outputs.cache-hit }}","matched":"${{ steps.archive-0.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false},{"name":"Restore fleet archive","outcome":"${{ steps.archive-1.outcome }}","hit":"${{ steps.archive-1.outputs.cache-hit }}","matched":"${{ steps.archive-1.outputs.cache-matched-key }}","opaqueFallback":false,"sourceOnly":false,"avoidable":"","lookup":false}]'
         run: 'python3 "${CI_CACHE_AUDIT_SCRIPT:-scripts/ci-cache-audit}"'
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && ( (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) ) }}
     needs: [main-checks]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true' && (success()) }}

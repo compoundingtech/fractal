@@ -37,8 +37,10 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
     const needs = job.needs == null ? [] : typeof job.needs === 'string' ? [job.needs] : job.needs
     const checkout = job.steps.findIndex((step) => step.uses?.startsWith('actions/checkout@'))
     if (checkout < 0) throw new Error(`Compatibility consumer ${id} needs a checkout`)
+    // Keep the checkout/full-history fetch pair adjacent for source provenance.
+    const checkoutEnd = checkout + (job.steps[checkout + 1]?.name === 'Fetch the whole history without evidence tags' ? 2 : 1)
     jobs[id] = { ...job, needs: [...needs, producer], steps: [
-      ...job.steps.slice(0, checkout + 1),
+      ...job.steps.slice(0, checkoutEnd),
       { name: 'Require successful archive preparation', shell: 'bash',
         env: { PRODUCER_RESULT: `\${{ needs['${producer}'].result }}` },
         run: '[ "$PRODUCER_RESULT" = success ] || { echo "::error::compatibility archive producer failed or was skipped"; exit 1; }' },
@@ -51,7 +53,7 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
           COMPAT_ARCHIVE_NAME: `\${{ needs['${producer}'].outputs['artifact-${kind}'] }}`,
           CI_TEST_ARCHIVE_ARTIFACT_ID: `\${{ needs['${producer}'].outputs['artifact-id-${kind}'] }}` },
         run: `python3 scripts/ci-compat-archive download ${kind} ${target} "\${{ steps['compat-identity'].outputs.path }}"` },
-      ...job.steps.slice(checkout + 1),
+      ...job.steps.slice(checkoutEnd),
     ] }
   }
   for (const [target, kinds] of targets) {

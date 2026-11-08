@@ -28,8 +28,8 @@ import {
 
 const proofId = (id: string) => `proof-${id}`
 const proofSelected = "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.main-checks.outputs.evidence-skipped == 'true'"
-// Compose archive producers before projection so hosted proof retains the complete queue graph.
-const fleetWorkflow = withCompatArchives(buildFleetWorkflow({ topology: 'merge-group' }))
+// The fleet builder includes archive producers before projection, retaining the complete queue graph.
+const fleetWorkflow = buildFleetWorkflow({ topology: 'merge-group' })
 // Queue-ref cancellation and PR-only advice cannot apply to a landed main commit.
 const proofOmissions: Record<string, string> = {
   'namespace-capacity': 'The ephemeral queue ref no longer controls landed proof.',

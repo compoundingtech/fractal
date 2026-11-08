@@ -12,7 +12,7 @@ import { buildEnv, macosRunner, saveMainDependencyCaches, workspacePreparationSt
 
 // Optional on PRs and never required. A separate workflow lets label changes start macOS without
 // restarting the required Linux gate.
-export default githubWorkflow(withCompatArchives(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
+export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(withCompatArchives(auditCaches({
   name: 'macOS CI',
   on: {
     pull_request: { types: [...readyPullRequestTypes, 'labeled'] },
