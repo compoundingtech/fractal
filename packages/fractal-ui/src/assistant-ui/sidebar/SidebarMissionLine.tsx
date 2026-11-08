@@ -18,7 +18,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Button, Dialog, DialogTrigger, VisuallyHidden } from 'react-aria-components'
 import { Popover } from '../composition/Controls'
 import { HumanClockProvider, HumanTime, fixedClock } from '../../time/HumanTime'
-import { accentVars as accent, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { accentVars as accent, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../composition-tokens.stylex'
 import { MissionEtaLabel } from '../MissionEta'
 import { isAdHocMissionSlug, type SidebarMissionContext, type SidebarMissionInfo, type SidebarMissionProgress, type SidebarOtherMission } from './model'
 
@@ -195,14 +195,14 @@ const styles = stylex.create({
   open: {
     display: 'inline-flex', alignItems: 'center', flex: '0 1 auto', minWidth: 0, margin: 0, padding: 0, paddingInline: s.xs, marginInlineStart: `calc(-1 * ${s.xs})`, height: g.controlSm, boxSizing: 'border-box', borderWidth: 0, borderRadius: r.sm,
     backgroundColor: { default: surface.transparent, ':hover': surface.rowActive }, color: { default: 'inherit', ':hover': ink.fg }, fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', cursor: 'pointer', outline: 'none',
-    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` },
+    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset },
   },
   openTouch: { height: g.touchTarget },
   // The mark's own box on fine pointers; the rounded focus ring follows it.
   trigger: {
     display: 'inline-flex', alignItems: 'center', gap: s.xs, minWidth: 0, maxWidth: '100%', margin: 0, padding: 0, borderWidth: 0, borderRadius: r.sm,
     backgroundColor: surface.transparent, color: 'inherit', fontFamily: 'inherit', fontSize: 'inherit', lineHeight: 'inherit', cursor: 'pointer', outline: 'none',
-    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '1px' },
+    ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset },
   },
   // Touch: at least 44 × 44 and the whole line-2 track tall; the ring stays 12px, centred in it.
   triggerTouch: { minHeight: g.touchTarget, minWidth: g.touchTarget, justifyContent: 'center' },

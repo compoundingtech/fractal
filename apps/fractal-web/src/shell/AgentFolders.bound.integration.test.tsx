@@ -10,7 +10,7 @@ import { fleetFromAgents } from '../data/projections.ts'
 import { Agent, decodeUnknownSync } from '@fractal/client/schema'
 import { openAgent } from '@fractal/sdk/read'
 
-vi.mock('@stylexjs/stylex', () => ({ create: (styles: Record<string, unknown>) => styles, defineVars: (vars: unknown) => vars, createTheme: () => ({}), keyframes: () => '', props: () => ({}) }))
+vi.mock('@stylexjs/stylex', () => ({ create: (styles: Record<string, unknown>) => styles, defineVars: (vars: unknown) => vars, createTheme: () => ({}), keyframes: () => '', props: () => ({}), when: { ancestor: () => ':focus-visible' }, defaultMarker: () => ({}) }))
 import { AgentFolders } from './AgentFolders.tsx'
 
 const viewport = { width: 340, height: 800 }

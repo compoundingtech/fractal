@@ -215,7 +215,7 @@ const styles = stylex.create({
   targetCompact: { maxWidth: '72px', paddingInline: s.xs, gap: s.xs2 },
   targetIcon: { width: g.controlMd, minWidth: g.controlMd, maxWidth: g.controlMd, paddingInline: s.xs, justifyContent: 'center' },
   readoutCompact: { maxWidth: '72px', fontSize: t.denseSize },
-  readout: { maxWidth: g.crumbMax, minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, color: text.fg, ':focus-visible': { outline: `${g.focusRing} solid ${interaction.focusRing}`, outlineOffset: g.focusOffset } },
+  readout: { maxWidth: g.crumbMax, minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, color: text.fg, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   iconCompact: { paddingInline: s.xs },
   targetPopup: { maxWidth: `min(${g.modalMax},90vw)`, maxHeight: g.commandMaxHeight, overflowY: 'auto' },
   targetTooltip: { width: 'max-content', maxWidth: `min(${g.tooltipMax}, calc(100vw - ${s.lg}))`, boxSizing: 'border-box', overflowWrap: 'anywhere' },

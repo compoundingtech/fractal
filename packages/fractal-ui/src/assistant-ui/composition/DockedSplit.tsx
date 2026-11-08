@@ -166,6 +166,6 @@ export function DockedSplit({ persistKey, label, children, dock, min = dockedSpl
 const styles = stylex.create({
   root: { display: 'flex', flex: '1 1 0', minWidth: 0, minHeight: 0, ':is([data-resizing])': { cursor: 'col-resize', userSelect: 'none' } },
   main: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0 },
-  separator: { position: 'relative', zIndex: 1, flexShrink: 0, width: g.hairline, alignSelf: 'stretch', touchAction: 'none', cursor: 'col-resize', backgroundColor: border.border, '::after': { content: '""', position: 'absolute', insetInline: `calc(-1 * ${g.separatorHitSlop})`, insetBlock: 0 }, ':hover': { backgroundColor: border.borderStrong }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: `calc(-1 * ${g.focusOffset})` } },
+  separator: { position: 'relative', zIndex: 1, flexShrink: 0, width: g.hairline, alignSelf: 'stretch', touchAction: 'none', cursor: 'col-resize', backgroundColor: border.border, '::after': { content: '""', position: 'absolute', insetInline: `calc(-1 * ${g.separatorHitSlop})`, insetBlock: 0 }, ':hover': { backgroundColor: border.borderStrong }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusInset } },
   dock: { display: 'flex', flexDirection: 'column', flexShrink: 0, width: 'var(--dock-size)', minWidth: 0, minHeight: 0, overflow: 'hidden' },
 })

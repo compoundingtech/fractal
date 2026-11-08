@@ -138,7 +138,8 @@ const styles = stylex.create({
     boxSizing: 'border-box',
     width: '100%',
     borderRadius: 6,
-    ':focus-visible': { outline: `2px solid ${interaction.focusRing}`, outlineOffset: 2 },
+    outlineStyle: 'none',
+    ':focus': { borderColor: interaction.focusRing },
   },
   // Desktop density: the field shares the controls' height and text size on the one line.
   searchWithHint: { height: g.controlMd, paddingBlock: 0, paddingInlineEnd: g.controlSm, fontSize: t.metaSize },

@@ -5,7 +5,7 @@ import { useAtomValue } from '@effect/atom-react'
 import { ThemePortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/ThemePortal.tsx'
 import { deferredLoader, DeferredSurfaceBoundary } from '../../../../packages/fractal-ui/src/assistant-ui/composition/DeferredSurfaceBoundary.tsx'
 import type { DeclarationPanelProps } from '../../../../packages/fractal-ui/src/assistant-ui/declaration/DeclarationPanel.tsx'
-import { colorVars as c, typeVars as t, spaceVars as s } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, typeVars as t, spaceVars as s, interactionVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useDataSource } from '../data/react.tsx'
 import { agentDeclarationState, declarationSubject, missionDeclarationState } from '../declarations/model.ts'
 const loadDeclarationDialog = deferredLoader<{ readonly subject: string }>(() => import('../../../../packages/fractal-ui/src/assistant-ui/declaration/DeclarationPanel.tsx').then(module => ({
@@ -68,5 +68,5 @@ const styles = stylex.create({
   modal: { width: 736, maxWidth: 'calc(100vw - 24px)', height: '100%', backgroundColor: c.raised, color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize, outline: 'none' },
   dialog: { height: '100%', outline: 'none' },
   pane: { flexGrow: 1, minHeight: 0, minWidth: 0, overflow: 'auto' },
-  button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` } },
+  button: { display: 'inline-flex', alignItems: 'center', gap: s.xs, padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outlineWidth: geometryVars.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing } },
 })

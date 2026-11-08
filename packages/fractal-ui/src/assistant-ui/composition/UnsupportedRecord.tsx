@@ -2,7 +2,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Disclosure, DisclosurePanel } from 'react-aria-components'
 import type { UnsupportedItem } from '../embrace-data/model.ts'
-import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, interactionVars } from '../composition-tokens.stylex'
 import { Icon } from './Icons'
 
 /** F2 marker: diagnostic previews are already redacted and capped by the app, never raw records. */
@@ -28,7 +28,7 @@ const styles = stylex.create({
   base: { minWidth: 0, color: ink.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   row: { display: 'flex', alignItems: 'center', gap: s.sm, minHeight: t.uiLeading },
   label: { minWidth: 0, overflowWrap: 'anywhere' },
-  trigger: { flexShrink: 0, minHeight: t.uiLeading, padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  trigger: { flexShrink: 0, minHeight: t.uiLeading, padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } },
   time: { marginInlineStart: 'auto', flexShrink: 0, color: ink.fgMuted, fontVariantNumeric: 'tabular-nums' },
   panel: { marginTop: s.sm, paddingBlock: s.sm, paddingInline: s.md, maxHeight: 'min(32rem, 60vh)', overflowY: 'auto', borderRadius: r.sm, backgroundColor: surface.washSubtle, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border },
   preview: { margin: 0, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', fontFamily: t.fontMono, fontSize: t.metaSize, color: ink.fgSoft },

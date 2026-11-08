@@ -7,7 +7,7 @@ import * as Atom from 'effect/reactivity/Atom'
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
 
-import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, spaceVars as s, typeVars as t, interactionVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import type { ObjectivesSource } from '../data/objectivesSource.ts'
 import { useDataSource, useNow } from '../data/react.tsx'
 import { credentialExpiredMessage, credentialNotice, waiting, type Feed } from '../data/source.ts'
@@ -162,12 +162,12 @@ const styles = stylex.create({
   header: { display: 'flex', alignItems: 'baseline', gap: s.md, paddingInline: s.lg, paddingBlock: s.md, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border, flexShrink: 0 },
   heading: { margin: 0, fontSize: t.uiSize, fontWeight: t.weightSemibold },
   body: { flexGrow: 1, minHeight: 0, overflowY: 'auto', scrollbarGutter: 'stable', padding: s.md, display: 'flex', flexDirection: 'column', gap: s.md },
-  button: { marginInlineStart: 'auto', padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` } },
+  button: { marginInlineStart: 'auto', padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outlineWidth: geometryVars.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusOffset } },
   stale: { margin: 0, color: c.attention, fontSize: t.metaSize },
   section: { margin: 0, paddingInline: s.md, paddingBlock: s.sm, fontSize: t.metaSize, fontWeight: t.weightSemibold, color: c.fgMuted },
   list: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 2 },
-  row: { width: '100%', display: 'grid', gridTemplateColumns: '1rem minmax(0, 1fr) auto', alignItems: 'baseline', columnGap: s.md, rowGap: 2, padding: s.md, borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fg, textAlign: 'start', fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` } },
-  rowButton: { padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: c.fg, font: 'inherit', textAlign: 'start', cursor: 'pointer', ':focus-visible': { outline: `2px solid ${c.primary}` } },
+  row: { width: '100%', display: 'grid', gridTemplateColumns: '1rem minmax(0, 1fr) auto', alignItems: 'baseline', columnGap: s.md, rowGap: 2, padding: s.md, borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fg, textAlign: 'start', fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outlineWidth: geometryVars.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusOffset } },
+  rowButton: { padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: c.fg, font: 'inherit', textAlign: 'start', cursor: 'pointer', ':focus-visible': { outlineWidth: geometryVars.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusOffset } },
   dot: { textAlign: 'center' },
   name: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: t.weightMedium },
   left: { fontWeight: t.weightSemibold, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
@@ -183,5 +183,5 @@ const styles = stylex.create({
   account: { display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', columnGap: s.md, rowGap: 2, padding: s.md, fontSize: t.metaSize },
   budget: { marginInlineEnd: s.md },
   // Brand blue alone is 4.3:1 on the dark canvas; mixing a fifth of the scheme's ink gives #5b87f2 on dark (5.8:1) and #1d46b5 on light (7.9:1).
-  link: { alignSelf: 'flex-start', paddingInline: s.md, color: `color-mix(in srgb, ${c.primary} 80%, ${c.fg})`, fontSize: t.metaSize, textDecoration: 'none', ':hover': { textDecoration: 'underline' }, ':focus-visible': { outline: `2px solid ${c.primary}` } },
+  link: { alignSelf: 'flex-start', paddingInline: s.md, color: `color-mix(in srgb, ${c.primary} 80%, ${c.fg})`, fontSize: t.metaSize, textDecoration: 'none', ':hover': { textDecoration: 'underline' }, ':focus-visible': { outlineWidth: geometryVars.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusOffset } },
 })

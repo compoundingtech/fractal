@@ -397,11 +397,11 @@ const styles = stylex.create({
   host: { display: 'flex', flexDirection: 'column', gap: s.md, flexShrink: 0, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   wide: { width: g.polishWide }, narrow: { width: g.polishNarrow },
   toolbar: { display: 'flex', alignItems: 'center', gap: s.md },
-  button: { minHeight: g.controlMd, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
+  button: { minHeight: g.controlMd, paddingInline: s.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', outlineStyle: 'none', ':focus': { borderColor: interaction.focusRing } },
   output: { color: ink.fgMuted, fontVariantNumeric: 'tabular-nums' },
   frame: { display: 'flex', flexDirection: 'column', height: '360px', overflow: 'hidden', borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border, borderRadius: r.md },
   conversation: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, padding: s.lg, gap: s.lg },
   transcript: { flex: '1 1 0', margin: s.zero, color: ink.fgSoft },
   composer: { display: 'flex' },
-  input: { flex: '1 1 0', minWidth: 0, minHeight: g.controlLg, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: surface.message, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing } },
+  input: { flex: '1 1 0', minWidth: 0, minHeight: g.controlLg, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: surface.message, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
 })

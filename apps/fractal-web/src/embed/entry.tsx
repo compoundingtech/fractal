@@ -5,6 +5,9 @@ import { createRoot } from 'react-dom/client'
 import { I18nProvider } from 'react-aria/I18nProvider'
 import { setTheme } from '../ui-compat/foundations.ts'
 import { Embed, fragments } from './Embed.tsx'
+import { installFocusModality } from '../../../../packages/fractal-ui/src/focus-modality.ts'
+
+installFocusModality()
 
 /** The production entry and tests share exactly the same CSS, theme and lifecycle setup. */
 export const mountEmbed = (rootElement: HTMLElement): (() => void) => {

@@ -18,7 +18,7 @@ import {
 
 import { BrandText } from '../workbench-kit/brand-icons.tsx'
 import { TerminalViewport } from './TerminalViewport.tsx'
-import { borderVars, interactionVars, surfaceVars, textVars, radiusVars, spaceVars, typeVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars, interactionVars, surfaceVars, textVars, radiusVars, spaceVars, typeVars , geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** Viewer state of a pane: waiting for the first screen, following frames, quiet, showing an old snapshot, or frozen for good. */
 export type PaneState = 'connecting' | 'live' | 'idle' | 'stale' | 'ended'
@@ -74,9 +74,9 @@ const styles = stylex.create({
     },
     cursor: 'pointer',
     outlineStyle: { default: 'none', ':is([data-focus-visible])': 'solid' },
-    outlineWidth: '2px',
+    outlineWidth: geometryVars.focusRing,
     outlineColor: interactionVars.focusRing,
-    outlineOffset: '-2px',
+    outlineOffset: geometryVars.focusInset,
     flexShrink: 0,
     whiteSpace: 'nowrap',
     fontFamily: typeVars.fontMono,

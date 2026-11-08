@@ -3,7 +3,7 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Disclosure, DisclosurePanel } from 'react-aria-components'
 import { backgroundJobGroupLead, backgroundJobStateLabel, harnessOutcomeTone, type EventItem, type HarnessNotice as HarnessNoticeData, type HarnessOutcomeTone, type HarnessWeight } from '../embrace-data/model.ts'
-import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
+import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, statusVars as status, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, interactionVars } from '../composition-tokens.stylex'
 import { Icon, type IconName } from './Icons'
 import { InlineMarkdown, Markdown } from './Markdown'
 
@@ -74,7 +74,7 @@ const styles = stylex.create({
   label: { minWidth: 0, flex: 1, overflowWrap: 'anywhere', fontWeight: 500 },
   time: { flexShrink: 0, color: ink.fgMuted, fontVariantNumeric: 'tabular-nums' },
   excerpt: { marginBlock: s.xs, color: ink.fgMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-  trigger: { display: 'flex', alignItems: 'center', gap: s.xs, padding: 0, minHeight: g.toolRow, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  trigger: { display: 'flex', alignItems: 'center', gap: s.xs, padding: 0, minHeight: g.toolRow, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } },
   payload: { marginTop: s.sm, paddingBlock: s.sm, paddingInline: s.md, maxHeight: 'min(32rem, 60vh)', overflowY: 'auto', overflowWrap: 'anywhere' },
   cardPayload: { borderRadius: r.sm, backgroundColor: surface.washSubtle, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.border },
   rowPayload: { marginInlineStart: s.xl, borderInlineStartWidth: 2, borderInlineStartStyle: 'solid', borderInlineStartColor: border.borderStrong },

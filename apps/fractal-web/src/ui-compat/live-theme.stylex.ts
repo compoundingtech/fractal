@@ -1,6 +1,6 @@
 import * as stylex from '@stylexjs/stylex'
 import { tokens } from './tokens.stylex.ts'
-import { colorVars as c } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, geometryVars, interactionVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 export const liveLegacyTheme = stylex.createTheme(tokens, {
 '--ds-amber-100': c.message,
 '--ds-amber-200': c.message,
@@ -17,8 +17,8 @@ export const liveLegacyTheme = stylex.createTheme(tokens, {
 '--ds-blue-600': c.primary,
 '--ds-blue-700': c.primary,
 '--ds-blue-900': c.primary,
-'--ds-focus-color': c.primary,
-'--ds-focus-ring': `0 0 0 2px ${c.primary}`,
+'--ds-focus-color': interactionVars.focusRing,
+'--ds-focus-ring': `0 0 0 ${geometryVars.focusRing} ${interactionVars.focusRing}`,
 '--ds-foreground': c.fg,
 '--ds-gray-1000': c.fg,
 '--ds-gray-200': c.message,

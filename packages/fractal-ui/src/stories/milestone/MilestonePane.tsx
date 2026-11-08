@@ -10,7 +10,7 @@ import { EmbraceRuntimeProvider } from '../../assistant-ui/EmbraceRuntime'
 import { SidebarStatus } from '../../assistant-ui/sidebar/SidebarStatus'
 import type { AgentStatus } from '../../assistant-ui/sidebar/model'
 import type { ThreadResource } from '../../assistant-ui/workbench/workbench-model'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../../assistant-ui/composition-tokens.stylex'
 
 /** A pane tab: an agent conversation carries a status glyph; a tool surface (Changes) does not. */
 export interface PaneTab { readonly key: string; readonly title: string; readonly status?: AgentStatus; readonly statusLabel?: string }
@@ -92,7 +92,7 @@ export function AgentResultCard({ tab, summary, onOpen }: { readonly tab: PaneTa
 }
 
 const dockTheme = stylex.createTheme(g, { blur: '0px' })
-const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } as const
+const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } as const
 const styles = stylex.create({
   glyph: { display: 'inline-flex', flexShrink: 0 },
   unavailable: { display: 'flex', alignItems: 'center', gap: s.md, minWidth: 0 },

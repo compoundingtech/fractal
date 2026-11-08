@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as Aria from 'react-aria-components'
 import * as stylex from '@stylexjs/stylex'
-import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, typeVars as type, geometryVars as geometry, geometryNumbers, radiusVars as radius, spaceVars as space, elevationVars as elevation } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { surfaceVars as surface, textVars as ink, borderVars as border, accentVars as accent, typeVars as type, geometryVars as geometry, geometryNumbers, radiusVars as radius, spaceVars as space, elevationVars as elevation, interactionVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { lightTheme as assistantLightTheme } from '../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
 import { darkTheme as assistantDarkTheme } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-theme.ts'
 import type { ChangelogEntry, ChangelogManifest } from './contract.ts'
@@ -87,7 +87,7 @@ export const ChangelogPopover = ({ dark, isOpen, onOpenChange, onPrefetch, hasUn
   </Aria.DialogTrigger>
 }
 const styles = stylex.create({
-  trigger: { display: 'inline-flex', alignItems: 'center', gap: space.sm, borderWidth: 0, paddingBlock: space.xs2, paddingInline: space.xs, backgroundColor: 'transparent', color: 'inherit', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit', outline: { default: 'none', ':focus-visible': `${geometry.focusRing} solid ${accent.primary}` }, outlineOffset: geometry.focusRing },
+  trigger: { display: 'inline-flex', alignItems: 'center', gap: space.sm, borderWidth: 0, paddingBlock: space.xs2, paddingInline: space.xs, backgroundColor: 'transparent', color: 'inherit', cursor: 'pointer', fontFamily: 'inherit', fontSize: 'inherit', outline: { default: 'none', ':focus-visible': `${geometry.focusRing} solid ${interactionVars.focusRing}` }, outlineOffset: geometry.focusOffset },
   dot: { width: geometry.statusDot, height: geometry.statusDot, borderRadius: radius.full, backgroundColor: accent.primary, flexShrink: 0 },
   popover: { width: `min(${geometry.changelogMax}, calc(100vw - ${space.section}))`, backgroundColor: `color-mix(in srgb, ${surface.raised} 80%, transparent)`, color: ink.fg, borderWidth: geometry.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: radius.base, backdropFilter: `blur(${geometry.blur})`, boxShadow: elevation.popover, zIndex: 1100, fontFamily: type.fontSans },
   popoverLight: { borderColor: border.border },
@@ -99,6 +99,6 @@ const styles = stylex.create({
   kind: { display: 'inline-flex', alignItems: 'center', borderWidth: geometry.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: radius.full, paddingBlock: space.xxxs, paddingInline: space.sm, backgroundColor: surface.controlFill, color: ink.fgSoft, fontSize: type.denseSize, lineHeight: type.metaLeading, fontWeight: type.weightMedium, whiteSpace: 'nowrap' },
   title: { fontSize: type.uiSize, fontWeight: type.weightSemibold, lineHeight: type.uiLeading, marginBlock: space.sm, marginInline: 0 }, summary: { fontSize: type.uiSize, color: ink.fgSoft, lineHeight: type.bodyLeading, marginTop: space.xs, marginInline: 0, marginBottom: 0 },
   build: { fontSize: type.metaSize, color: ink.fgMuted, marginTop: space.xs, marginInline: 0, marginBottom: 0, overflowWrap: 'anywhere' },
-  notice: { paddingBlock: space.xxl, paddingInline: 0, fontSize: type.uiSize, lineHeight: type.bodyLeading }, button: { border: `${geometry.hairline} solid ${border.borderStrong}`, backgroundColor: surface.controlFill, color: ink.fg, borderRadius: radius.sm, fontSize: type.metaSize, paddingBlock: space.xs, paddingInline: space.md, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `${geometry.focusRing} solid ${accent.primary}` }, outlineOffset: geometry.focusRing },
-  link: { display: 'inline-block', marginTop: space.md, color: ink.fg, fontSize: type.metaSize, textDecoration: 'underline' },
+  notice: { paddingBlock: space.xxl, paddingInline: 0, fontSize: type.uiSize, lineHeight: type.bodyLeading }, button: { border: `${geometry.hairline} solid ${border.borderStrong}`, backgroundColor: surface.controlFill, color: ink.fg, borderRadius: radius.sm, fontSize: type.metaSize, paddingBlock: space.xs, paddingInline: space.md, cursor: 'pointer', outline: { default: 'none', ':focus-visible': `${geometry.focusRing} solid ${interactionVars.focusRing}` }, outlineOffset: geometry.focusOffset },
+  link: { display: 'inline-block', marginTop: space.md, color: ink.fg, fontSize: type.metaSize, textDecoration: 'underline', ':focus-visible': { outlineWidth: geometry.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: geometry.focusOffset } },
 })

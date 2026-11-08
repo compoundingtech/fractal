@@ -16,6 +16,7 @@ vi.mock('@stylexjs/stylex', () => ({
   defineVars: (variables: unknown) => variables,
   createTheme: () => ({}),
   keyframes: () => 'animation',
+  when: { ancestor: () => ':focus-visible' }, defaultMarker: () => ({}),
   props: (...styles: unknown[]) => {
     const merged = Object.assign({}, ...styles.flat(Infinity).filter(style => typeof style === 'object' && style !== null))
     return { style: Object.fromEntries(Object.entries(merged).filter(([key, value]) => !key.startsWith(':') && !key.startsWith('@') && (typeof value === 'string' || typeof value === 'number'))) }

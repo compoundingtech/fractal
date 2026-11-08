@@ -4,7 +4,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../composition-tokens.stylex'
 import { Icon } from './Icons'
 import { LiveRing } from './LiveRing'
 import { loadingGlyphDelayMs } from './loading-glyph-delay'
@@ -83,7 +83,7 @@ export function ConnectionStatus({ state, text, onReconnect }: ConnectionStatusP
 
 const styles = stylex.create({
   ringPending: { visibility: 'hidden' },
-  focusable: { ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.hairline } },
+  focusable: { ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } },
   toneMuted: { color: ink.fgMuted },
   toneWarning: { color: tone.attention },
   toneError: { color: tone.dangerFg },

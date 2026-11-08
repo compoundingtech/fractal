@@ -7,7 +7,7 @@ import { sidebarRowAccessibleName } from '../../assistant-ui/sidebar/rowPresenta
 import { MilestoneAgentRow } from '../../assistant-ui/sidebar/MilestoneAgentRow'
 import type { SidebarAgentRow as Row } from '../../assistant-ui/sidebar/model'
 import { Icon } from '../../assistant-ui/composition/Icons'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../../assistant-ui/composition-tokens.stylex'
 export interface RosterFolder { readonly id: string; readonly label: string; readonly rows: readonly Row[] }
 
 export type RosterState = 'ready' | 'loading' | 'empty' | 'error' | 'stale'
@@ -118,7 +118,7 @@ function AgentItem({ row, frozen, ...props }: AgentItemProps) {
 }
 
 
-const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } as const
+const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } as const
 const styles = stylex.create({
   sidebar: { display: 'flex', flexDirection: 'column', height: '100%', minWidth: 0, minHeight: 0, backgroundColor: surface.sidebar, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   header: { display: 'flex', alignItems: 'center', gap: s.xs, height: g.controlLg, flexShrink: 0, paddingInline: s.md, paddingBlockStart: s.xs },

@@ -4,7 +4,7 @@ import * as React from 'react'
 import * as Aria from 'react-aria-components'
 
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
-import { colorVars as c, geometryVars as g, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, geometryVars as g, spaceVars as s, typeVars as t, interactionVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
 import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
@@ -181,7 +181,7 @@ const AlertRow = ({ row, selected, onSelect, onFocusWithin, onOpen }: {
   )
 }
 
-const focus = { ':focus-visible': { outline: `2px solid ${c.primary}`, outlineOffset: '-2px' } }
+const focus = { ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } }
 const styles = stylex.create({
   // Fills a column parent and scrolls itself; minHeight 0 lets a `minHeight: 0` flex parent bound it instead of growing.
   scroll: { flex: '1 1 0', minWidth: 0, minHeight: 0, overflowY: 'auto', overscrollBehavior: 'contain' },

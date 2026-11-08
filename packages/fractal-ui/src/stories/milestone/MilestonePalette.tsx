@@ -6,7 +6,7 @@ import { Autocomplete, Dialog, Header, Input, Keyboard, Label, Menu, MenuItem, M
 import { SidebarStatus } from '../../assistant-ui/sidebar/SidebarStatus'
 import type { SidebarAgentRow as Row } from '../../assistant-ui/sidebar/model'
 import { Icon } from '../../assistant-ui/composition/Icons'
-import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../../assistant-ui/composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../../assistant-ui/composition-tokens.stylex'
 
 export interface PaletteCommand { readonly id: string; readonly label: string; readonly shortcut?: string; readonly run: () => void }
 export interface PaletteAgent { readonly row: Row; readonly folder: string }
@@ -77,7 +77,7 @@ const styles = stylex.create({
   input: { flex: '1 1 0', minWidth: 0, padding: 0, borderWidth: 0, backgroundColor: surface.transparent, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, outline: 'none', '::placeholder': { color: ink.fgMuted }, '::-webkit-search-cancel-button': { display: 'none' } },
   menu: { maxHeight: g.commandMaxHeight, overflowY: 'auto', padding: s.xs, outline: 'none' },
   section: { paddingInline: s.md, paddingBlockStart: s.md, paddingBlockEnd: s.xs, color: ink.fgMuted, fontSize: t.denseSize, fontWeight: t.weightMedium },
-  item: { display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr) auto`, alignItems: 'center', columnGap: s.md, height: g.menuRow, paddingInline: s.md, borderRadius: r.sm, cursor: 'pointer', outline: 'none', ':is([data-focused])': { backgroundColor: surface.rowActive }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } },
+  item: { display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr) auto`, alignItems: 'center', columnGap: s.md, height: g.menuRow, paddingInline: s.md, borderRadius: r.sm, cursor: 'pointer', outline: 'none', ':is([data-focused])': { backgroundColor: surface.rowActive }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
   glyphSlot: { display: 'inline-flex', justifyContent: 'center', color: ink.fgMuted },
   label: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize, color: ink.fg },
   // The first result is always highlighted, so row meta must clear 4.5:1 on the rowActive wash as well as the dialog surface.

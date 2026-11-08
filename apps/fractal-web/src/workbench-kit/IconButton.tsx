@@ -8,7 +8,7 @@ import { Button as AriaButton, type ButtonProps as AriaButtonProps } from 'react
 
 import { Tooltip, TooltipTrigger } from '../ui-compat/components.tsx'
 
-import { interactionVars, surfaceVars, textVars, radiusVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { interactionVars, surfaceVars, textVars, radiusVars , geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const styles = stylex.create({
   button: {
@@ -27,9 +27,9 @@ const styles = stylex.create({
     },
     cursor: 'pointer',
     outlineStyle: { default: 'none', ':is([data-focus-visible])': 'solid' },
-    outlineWidth: '2px',
+    outlineWidth: geometryVars.focusRing,
     outlineColor: interactionVars.focusRing,
-    outlineOffset: '-2px',
+    outlineOffset: geometryVars.focusInset,
   },
   sm: { width: '1.375rem', height: '1.375rem' },
   md: { width: '1.75rem', height: '1.75rem' },

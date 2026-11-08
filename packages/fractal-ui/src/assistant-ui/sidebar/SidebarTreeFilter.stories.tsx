@@ -8,7 +8,7 @@ import { SidebarAgentRow } from './SidebarAgentRow'
 import { SidebarQueryContext } from './rowPresentation.tsx'
 import { matchPositions, type SidebarAgentRow as Row } from './model'
 import { lightTheme } from '../composition-theme'
-import { borderVars as border, geometryVars as g, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { borderVars as border, geometryVars as g, interactionVars, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { sidebarTreeStoryVars as sizes } from './sidebar-tree-story-tokens.stylex'
 
 interface Agent extends SidebarTreeItem<Agent> {}
@@ -444,7 +444,7 @@ const styles = stylex.create({
   narrow: { width: sizes.narrow },
   wide: { width: sizes.small },
   toolbar: { display: 'flex', flexDirection: 'column', gap: s.sm, padding: s.md },
-  input: { boxSizing: 'border-box', width: '100%', minWidth: 0, height: g.controlLg, paddingInline: s.md, color: ink.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, fontFamily: t.fontSans, fontSize: t.uiSize, outlineColor: ink.fgMuted },
+  input: { boxSizing: 'border-box', width: '100%', minWidth: 0, height: g.controlLg, paddingInline: s.md, color: ink.fg, backgroundColor: surface.controlFill, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, fontFamily: t.fontSans, fontSize: t.uiSize, outlineColor: interactionVars.focusRing },
   viewport: { height: sizes.viewport, minHeight: 0 },
   row: { display: 'flex', alignItems: 'center', height: sizes.row, paddingInline: s.sm, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', minWidth: 0 },
 })

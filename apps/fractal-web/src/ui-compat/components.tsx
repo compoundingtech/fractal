@@ -3,6 +3,7 @@ import * as React from 'react'
 import * as Aria from 'react-aria-components'
 import * as Kit from '@fractal/ui'
 import * as stylex from '@stylexjs/stylex'
+import { geometryVars, interactionVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 export { CheckIcon, CopyIcon, XCircleIcon } from '@fractal/ui'
 export { Tabs, TabList, Tab, TabPanel, MenuTrigger, TooltipTrigger } from 'react-aria-components'
@@ -85,8 +86,8 @@ const styles = stylex.create({
  entity: { display: 'flex', alignItems: 'center', gap: 10 },
  avatar: { minWidth: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'var(--selection)', color: 'var(--accent)', borderRadius: 'var(--radius)', fontSize: 11 },
  detail: { color: 'var(--muted)', fontSize: 11, marginTop: 2 },
- input: { width: '100%', minWidth: 0, padding: '6px 8px', color: 'var(--ink)', backgroundColor: 'var(--panel)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--line)', borderRadius: 'var(--radius)', fontFamily: 'var(--sans)' },
- checkbox: { display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12, color: 'var(--ink)' },
+ input: { width: '100%', minWidth: 0, padding: '6px 8px', color: 'var(--ink)', backgroundColor: 'var(--panel)', borderWidth: 1, borderStyle: 'solid', borderColor: { default: 'var(--line)', ':focus': interactionVars.focusRing }, borderRadius: 'var(--radius)', fontFamily: 'var(--sans)', outlineStyle: 'none' },
+ checkbox: { outlineStyle: { default: 'none', ':is([data-focus-visible])': 'solid' }, outlineWidth: geometryVars.focusRing, outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusOffset, display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 12, color: 'var(--ink)' },
  checkMark: { width: 16, height: 16, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--line)', borderRadius: 3, backgroundColor: 'var(--panel)' },
  checked: { backgroundColor: 'var(--accent)', color: 'var(--on-accent)', borderColor: 'var(--accent)' },
  switchTrack: { position: 'relative', width: 30, height: 18, borderRadius: 99, backgroundColor: 'var(--recess)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--line)' },
@@ -95,7 +96,7 @@ const styles = stylex.create({
  tooltip: { zIndex: 100, padding: '6px 9px', borderRadius: 'var(--radius)', color: 'var(--panel)', backgroundColor: 'var(--ink)', fontSize: 12, maxWidth: 360 },
  popover: { zIndex: 100, padding: 6, borderRadius: 'var(--panel-radius)', borderWidth: 1, borderStyle: 'solid', borderColor: 'var(--line)', color: 'var(--ink)', backgroundColor: 'var(--panel)', boxShadow: '0 8px 24px rgb(0 0 0 / .18)', maxWidth: 420 },
  menu: { minWidth: 160, outline: 'none' },
- menuItem: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '7px 10px', cursor: 'pointer', borderRadius: 'var(--radius)', backgroundColor: { default: 'transparent', ':hover': 'var(--selection)' }, color: 'var(--ink)' },
+ menuItem: { outlineStyle: { default: 'none', ':is([data-focus-visible])': 'solid' }, outlineWidth: geometryVars.focusRing, outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusInset, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, padding: '7px 10px', cursor: 'pointer', borderRadius: 'var(--radius)', backgroundColor: { default: 'transparent', ':hover': 'var(--selection)' }, color: 'var(--ink)' },
  selected: { backgroundColor: 'var(--selection)' },
  table: { width: '100%', borderCollapse: 'collapse', fontSize: 12, textAlign: 'left', color: 'var(--ink)' },
  cell: { padding: '6px 9px', borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: 'var(--line)' },

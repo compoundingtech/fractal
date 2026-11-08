@@ -4,7 +4,7 @@ import * as stylex from '@stylexjs/stylex'
 import { Button, Focusable } from 'react-aria-components'
 import { Tooltip } from '../composition/Controls'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../composition-tokens.stylex'
 import { rowAttention, rowHasUnread, rowStatusLabel, rowUnreadLabel, type SidebarActions, type SidebarAgentRow as Row } from './model'
 import { AgentHoverCard, AgentRowActions } from './DeferredRowActions.tsx'
 import { Highlight } from './rowPresentation.tsx'
@@ -111,7 +111,7 @@ export const MilestoneAgentRow = React.memo(function MilestoneAgentRow({ row, ac
     onFocus={displayOnly ? undefined : event => { if (menuTrigger.current?.contains(event.target) === true) setMenuFocused(true) }} onBlur={displayOnly ? undefined : event => { if (menuTrigger.current?.contains(event.target) === true) setMenuFocused(false) }}
     onContextMenu={displayOnly ? undefined : event => { event.preventDefault(); event.stopPropagation(); setHovered(false); menuTrigger.current?.click() }}
     style={depth > 0 ? { paddingInlineStart: `calc(${s.xl} * ${depth})` } : undefined}
-    {...stylex.props(styles.row, !displayOnly && styles.interactive, !displayOnly && chevron !== undefined && styles.withChevron, touchRow && styles.touchRow, touchRow && chevron !== undefined && styles.touchWithChevron, !displayOnly && touchDisclosure !== undefined && styles.touchWithDisclosure, touchMission && styles.touchMissionRow, !displayOnly && active && styles.active, !displayOnly && focused && styles.focused)}>
+    {...stylex.props(styles.row, !displayOnly && styles.interactive, !displayOnly && chevron !== undefined && styles.withChevron, touchRow && styles.touchRow, touchRow && chevron !== undefined && styles.touchWithChevron, !displayOnly && touchDisclosure !== undefined && styles.touchWithDisclosure, touchMission && styles.touchMissionRow, !displayOnly && styles.treeFocus, !displayOnly && focused && styles.focused, !displayOnly && active && styles.active)}>
     {/* One themed portal layer for the whole row: the count's tooltip mounts here, never inside the clipping name column. */}
     <ThemePortal>
     <span data-row-column="status" data-row-field="status" {...stylex.props(styles.glyph)}><SidebarStatus status={row.status} statusLabel={statusLabel} statusSince={row.statusSince} variant="Marks" needsYou={attention === 'needs-you'} freshness={row.freshness} frozen={frozen} iconOnly /></span>
@@ -188,7 +188,7 @@ const styles = stylex.create({
   row: { position: 'relative', display: 'grid', gridTemplateColumns: `${g.icon} minmax(0, 1fr) auto`, gridTemplateRows: `${g.controlSm} ${g.controlSm}`, alignItems: 'center', columnGap: s.sm, height: g.sidebarRow, minWidth: 0, width: '100%', boxSizing: 'border-box', paddingInline: s.sm, borderRadius: r.sm, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading },
   interactive: { ':hover': { backgroundColor: surface.rowHover } },
   // Ghost trigger overlaying the end of line 2 (no track of its own); line 2 fades out beneath it while it shows.
-  menuButton: { gridColumn: '-2 / -1', gridRow: '2', justifySelf: 'end', zIndex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.icon, padding: 0, boxSizing: 'border-box', borderWidth: 0, borderRadius: r.sm, backgroundColor: { default: surface.transparent, ':hover': surface.rowActive, ':is([data-pressed])': surface.rowActive }, color: { default: ink.fgMuted, ':hover': ink.fg }, cursor: 'pointer', opacity: 0, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted } },
+  menuButton: { gridColumn: '-2 / -1', gridRow: '2', justifySelf: 'end', zIndex: 1, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.icon, padding: 0, boxSizing: 'border-box', borderWidth: 0, borderRadius: r.sm, backgroundColor: { default: surface.transparent, ':hover': surface.rowActive, ':is([data-pressed])': surface.rowActive }, color: { default: ink.fgMuted, ':hover': ink.fg }, cursor: 'pointer', opacity: 0, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing } },
   menuVisible: { opacity: 1 },
   withChevron: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) auto ${g.icon}` },
   touchRow: { gridTemplateColumns: `${g.icon} minmax(0, 1fr) auto ${g.touchTarget}` },
@@ -199,9 +199,11 @@ const styles = stylex.create({
   touchMissionRow: { gridTemplateRows: `${g.controlSm} ${g.touchTarget}`, height: `calc(${g.controlSm} + ${g.touchTarget})` },
   touchDisclosureLine2: { gridColumn: '2 / -3' },
   touchMenuButton: { gridRow: '1 / -1', width: g.touchTarget, height: g.touchTarget, opacity: 1 },
+  // The tree row owns focus and spans the indent; this surface shows it, above its own fill.
+  treeFocus: { outlineStyle: { default: null, [stylex.when.ancestor(':is([data-focus-visible])')]: 'solid' }, outlineWidth: g.focusRing, outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset, backgroundColor: { default: null, [stylex.when.ancestor(':is([data-focus-visible])')]: interactionVars.focusFill } },
   active: { backgroundColor: surface.rowActive },
   // Sidebar rows ring keyboard focus in neutral fgMuted, never the accent, so focus does not read as selection.
-  focused: { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` },
+  focused: { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset, backgroundColor: interactionVars.focusFill },
   glyph: { gridColumn: '1', gridRow: '1', display: 'flex', alignItems: 'center', justifyContent: 'center' },
   // Line 1's name column: the title truncates first; the count fits the column (see `SubagentCount`) and the column
   // clips, so the count can never cover the trailing slot.
@@ -212,9 +214,9 @@ const styles = stylex.create({
   // The hit area is line 1's full 24px track; the visible tag inside it is an outlined 11px label with no fill.
   countHit: { flexShrink: 0, display: { default: 'inline-flex', [hiddenCount]: 'none' }, alignItems: 'center', height: g.controlSm, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: surface.transparent, color: ink.fgSoft, fontFamily: t.fontSans },
   // Inset ring: the clipping name column would cut an outset one.
-  countButton: { cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  countButton: { cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
   // The static unreported count's own focus stop, for its tooltip: line 1's full track, ringed inset like the button.
-  countFocus: { display: 'inline-flex', alignItems: 'center', height: g.controlSm, borderRadius: r.sm, outlineStyle: 'none', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  countFocus: { display: 'inline-flex', alignItems: 'center', height: g.controlSm, borderRadius: r.sm, outlineStyle: 'none', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
   // fgSoft, not fgMuted: 11px text must clear 4.5:1 on the hover and active-row washes too. Inline-block, not flex, so the
   // space before the word survives in the text and the accessible name. Relative: the compacted word stays inside the tag.
   countTag: { position: 'relative', display: 'inline-block', paddingInline: s.xs, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, fontSize: t.denseSize, lineHeight: t.metaLeading, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },

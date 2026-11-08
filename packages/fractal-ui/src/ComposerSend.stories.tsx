@@ -13,7 +13,7 @@ import type { SendState, TextItem } from './assistant-ui/embrace-data/model'
 import { workLogTurnFromItems } from './assistant-ui/taste/work-log'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, surfaceVars as surface, textVars as ink, spaceVars as s, typeVars as t, interactionVars } from './assistant-ui/composition-tokens.stylex'
 
 /* Synthetic fixture identities; the kit receives every fact through props and reports intent through callbacks. */
 const roster = [
@@ -701,5 +701,5 @@ const styles = stylex.create({
   fixtureBar: { display: 'flex', flexWrap: 'wrap', gap: s.md, paddingInline: s.lg },
   fixture: { display: 'flex', flexDirection: 'column', gap: s.sm, padding: s.lg, borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.border, color: ink.fgSoft, fontSize: t.metaSize },
   log: { margin: 0, paddingInlineStart: s.lg, overflowWrap: 'anywhere' },
-  button: { alignSelf: 'flex-start', minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary } },
+  button: { alignSelf: 'flex-start', minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } },
 })

@@ -31,9 +31,6 @@ function SurfacePrimitivesStory({ scheme = 'dark', width = 440, selectionMode = 
     <Button onPress={() => setRevised(value => !value)}>Update labels</Button>
     <output aria-label="Label revision">{revised ? 'Updated' : 'Original'}</output>
     <span data-testid="surface-reference" aria-hidden="true" {...stylex.props(styles.reference)} />
-    {/* LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback — DELETE at contraction — https://www.notion.so/3f7e3d41f4a381839fa5f7b257ba8f3c */}
-    <span data-testid="bridge-ring" data-focus-visible="" aria-hidden="true" {...stylex.props(styles.probe)} />
-    {/* LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback */}
   </main>
 }
 const meta = { excludeStories: ['scenarioExemptions'], title: 'Fractal UI/Surface primitives', component: SurfacePrimitivesStory, parameters: { scenario: { _tag: 'primitive', reason: "Exercises selection, focus, shortcuts and surface tokens without domain state." }, layout: 'fullscreen' }, args: { scheme: 'dark', width: 440, selectionMode: 'multiple', shortcut: '⌘K' }, argTypes: { scheme: { options: ['light', 'dark'], control: 'radio' }, width: { options: [440, 1440], control: 'radio' }, selectionMode: { options: ['single', 'multiple'], control: 'radio' } } } satisfies Meta<typeof SurfacePrimitivesStory>
@@ -117,13 +114,6 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(root).toHaveAttribute('data-scheme', args.scheme)
   await expect(root.getBoundingClientRect().width).toBeLessThanOrEqual(args.width!)
   const reference = getComputedStyle(canvas.getByTestId('surface-reference'))
-  // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback — DELETE at contraction — https://www.notion.so/3f7e3d41f4a381839fa5f7b257ba8f3c
-  // The tokens.css fallback ring for app controls resolves to the same scheme-aware token.
-  const bridgeRing = getComputedStyle(canvas.getByTestId('bridge-ring'))
-  await expect(bridgeRing.outlineStyle).toBe('solid')
-  await expect(bridgeRing.outlineWidth).toBe('2px')
-  await expect(bridgeRing.outlineColor).toBe(reference.outlineColor)
-  // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback
   const checkbox = canvas.getByRole('checkbox', { name: 'Wrap long lines' })
   const mark = checkbox.closest('label')!.querySelector<HTMLElement>('span[aria-hidden="true"]')!
   await expect(checkbox).not.toBeChecked()
@@ -187,8 +177,8 @@ const exercise: NonNullable<Story['play']> = async ({ canvasElement, args }) => 
   await expect(parseFloat(getComputedStyle(first).height)).toBe(28)
   await expect(parseFloat(getComputedStyle(first).fontSize)).toBe(14)
   await expect(parseFloat(getComputedStyle(first).lineHeight)).toBe(20)
-  await expect(parseFloat(getComputedStyle(first).outlineWidth)).toBe(2)
-  await expect(parseFloat(getComputedStyle(first).outlineOffset)).toBe(-2)
+  await expect(parseFloat(getComputedStyle(first).outlineWidth)).toBe(1)
+  await expect(parseFloat(getComputedStyle(first).outlineOffset)).toBe(-1)
   await assertMotion(canvas.getByTestId('menu-surface'))
   const second = canvas.getByRole(role, { name: /Show details/ })
   const shortcut = second.querySelector('kbd')!
@@ -341,7 +331,4 @@ const styles = stylex.create({
   width: (width: number) => ({ width, maxWidth: '100%' }),
   heading: { margin: 0, fontSize: type.headingSize, lineHeight: type.headingLeading, fontWeight: type.weightMedium },
   reference: { position: 'absolute', visibility: 'hidden', color: accent.primary, backgroundColor: interaction.wash, outlineColor: interaction.focusRing, boxShadow: elevation.popover },
-  // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback — DELETE at contraction — https://www.notion.so/3f7e3d41f4a381839fa5f7b257ba8f3c
-  probe: { position: 'absolute', visibility: 'hidden' },
-  // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-12-fractal-focus-ring-fallback
 })

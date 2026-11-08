@@ -1,7 +1,7 @@
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
 import { SidebarStatus } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarStatus.tsx'
-import { accentVars as accent, borderVars as border, geometryVars, radiusVars as r, spaceVars, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { accentVars as accent, borderVars as border, geometryVars, radiusVars as r, spaceVars, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { ObservedAge, useConversationLastObservedAt } from './lastObserved.tsx'
 import type { LastSeenActivity } from './conversationTranscript.ts'
 
@@ -39,7 +39,7 @@ function LastSeen({ agentRef, lastSeen }: { readonly agentRef: string; readonly 
   </div>
 }
 
-const focusRing = { outlineWidth: geometryVars.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: '-2px' } as const
+const focusRing = { outlineWidth: geometryVars.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusInset } as const
 const styles = stylex.create({
   lane: { width: '100%', maxWidth: geometryVars.lane, boxSizing: 'border-box', paddingInline: spaceVars.lg, marginInline: 'auto', flexShrink: 0 },
   notice: { paddingBlock: spaceVars.lg },

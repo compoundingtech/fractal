@@ -11,7 +11,7 @@ import {
 
 import { readScrollAnchor, saveScrollAnchor, ScrollController } from './embrace-virtual/ScrollController'
 import { accentTokens, tokens } from './embrace-tokens.stylex'
-import { interactionVars as interaction } from './composition-tokens.stylex'
+import { interactionVars as interaction, geometryVars } from './composition-tokens.stylex'
 
 export interface EmbraceVirtualConversationProps<T extends { readonly id: string }> {
   readonly items: readonly T[]
@@ -139,8 +139,10 @@ const styles = stylex.create({
     backgroundColor: tokens.canvas,
   },
   row: {
-    outlineStyle: 'none',
-    boxShadow: { default: null, ':focus-visible': `inset 0 0 0 2px ${accentTokens.accent}` },
+    outlineStyle: { default: 'none', ':focus-visible': 'solid' },
+    outlineWidth: geometryVars.focusRing,
+    outlineColor: interaction.focusRing,
+    outlineOffset: geometryVars.focusInset,
   },
   entry: {
     display: 'flow-root',

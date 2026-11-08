@@ -6,7 +6,7 @@ import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { NarrowActionRow, NarrowSheet } from './assistant-ui/composition/NarrowLayout'
 import { baselineTheme } from './assistant-ui/neutral-theme'
 import { lightTheme, type Scheme } from './assistant-ui/composition-theme'
-import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from './assistant-ui/composition-tokens.stylex'
+import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t, interactionVars } from './assistant-ui/composition-tokens.stylex'
 
 /** A phone thread's two edge sheets as a host opens them: Agents from the start edge, Agent details from the end edge. */
 function NarrowSheetStory({ scheme = 'dark', side = 'end' }: { scheme?: Scheme; side?: 'start' | 'end' }) {
@@ -71,6 +71,6 @@ export const AgentsStartLight: Story = { ...AgentsStart, args: { side: 'start', 
 
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', padding: s.lg, backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize },
-  opener: { minHeight: g.touchTarget, paddingInline: s.lg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.borderStrong, borderRadius: r.control, backgroundColor: c.raised, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: c.primary } },
+  opener: { minHeight: g.touchTarget, paddingInline: s.lg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.borderStrong, borderRadius: r.control, backgroundColor: c.raised, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } },
   body: { margin: 0, padding: s.lg },
 })

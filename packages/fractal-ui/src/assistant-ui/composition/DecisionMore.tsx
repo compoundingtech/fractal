@@ -2,7 +2,7 @@ import { markdownInline } from './markdown-text'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import * as Aria from 'react-aria-components'
-import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../composition-tokens.stylex.ts'
+import { colorVars as c, geometryVars as g, interactionVars, radiusVars as r, spaceVars as s, typeVars as t } from '../composition-tokens.stylex.ts'
 import { DecisionRef } from './DecisionCard'
 import { Icon, type IconName } from './Icons'
 import { InlineMarkdown } from './Markdown'
@@ -126,7 +126,7 @@ const styles = stylex.create({
   subjects: { display: 'flex', flexDirection: 'column', gap: s.xs2, marginInlineStart: `calc(-1 * ${s.sm})` },
   subject: { display: 'flex', alignItems: 'center', gap: s.md, width: '100%', boxSizing: 'border-box', minHeight: g.controlMd, paddingBlock: s.xs, paddingInline: s.sm, borderWidth: 0, borderRadius: r.sm, backgroundColor: 'transparent', color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading, textAlign: 'start', textDecoration: 'none' },
   subjectTouch: { minHeight: g.touchTarget },
-  subjectOpens: { cursor: 'pointer', ':hover': { backgroundColor: c.rowHover } },
+  subjectOpens: { cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset },
   subjectIcon: { flexShrink: 0, display: 'inline-flex', color: c.fgMuted },
   subjectLabel: { flexShrink: 0, maxWidth: '70%', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   subjectKind: { flexShrink: 0, color: c.fgMuted, fontSize: t.denseSize },

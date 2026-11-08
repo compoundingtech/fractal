@@ -12,6 +12,7 @@ vi.mock('@stylexjs/stylex', () => {
   return {
     create: (styles: unknown) => styles,
     keyframes: () => 'animation',
+    when: { ancestor: () => ':focus-visible' }, defaultMarker: () => ({}),
     defineVars: (vars: Record<string, string>) => {
       const group = sx.groups++
       return Object.fromEntries(Object.entries(vars).map(([key, value]) => {

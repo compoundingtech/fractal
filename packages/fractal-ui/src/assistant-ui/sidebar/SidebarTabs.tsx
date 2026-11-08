@@ -158,7 +158,7 @@ function SidebarTabButton({ tab, state, prefix, narrow, showCount, showIcon }: {
   return <div {...mergeProps(tabProps, focusProps)} ref={ref} id={`${prefix}-tab-${tab.id}`} aria-controls={`${prefix}-panel-${tab.id}`} aria-label={sidebarTabName(tab)} data-sidebar-tab={tab.id} data-selected={isSelected || undefined} data-focus-visible={isFocusVisible || undefined} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount={showCount} showIcon={showIcon} /></div>
 }
 
-const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: '-2px' } as const
+const focusRing = { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusInset } as const
 const styles = stylex.create({
   root: { position: 'relative', display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0 },
   bar: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'auto', alignItems: 'center', gap: 0, flexShrink: 0, boxSizing: 'border-box', height: g.controlLg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },

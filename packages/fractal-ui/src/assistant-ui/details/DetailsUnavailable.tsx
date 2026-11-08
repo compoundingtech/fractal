@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Tooltip, TooltipTrigger, VisuallyHidden, type ButtonProps } from 'react-aria-components'
-import { accentVars as accent, borderVars as border, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type } from '../composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as geometry, radiusVars as radius, spaceVars as space, surfaceVars as surface, textVars as text, typeVars as type, interactionVars } from '../composition-tokens.stylex'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { Icon } from '../composition/Icons'
 import { detailsReasonText } from './trace-reasons'
@@ -174,13 +174,13 @@ export function DetailsNotReported({ group, summary, area = 'Details', fields, n
 export const notReportedNotesSummary = (area: string): string => `Some ${area.toLowerCase()} details aren’t reported.`
 
 const styles = stylex.create({
-  trigger: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: space.zero, minWidth: geometry.icon, borderWidth: 0, borderRadius: radius.sm, backgroundColor: surface.transparent, color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, cursor: 'help', ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: geometry.focusOffset } },
+  trigger: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', padding: space.zero, minWidth: geometry.icon, borderWidth: 0, borderRadius: radius.sm, backgroundColor: surface.transparent, color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, cursor: 'help', ':focus-visible': { outlineWidth: geometry.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: geometry.focusOffset } },
   word: { minWidth: 0, flexShrink: 0, whiteSpace: 'nowrap' },
   // Names flow as prose; a multi-word name never splits across lines.
   inlineTrigger: { display: 'inline', minWidth: 0, whiteSpace: 'nowrap' },
   nowrap: { whiteSpace: 'nowrap' },
   // Quiet, recognizable disclosure: muted ink, a chevron and a full 44px phone hit area, aligned with the line's text.
-  why: { display: 'inline-flex', alignItems: 'center', gap: space.xs, minWidth: geometry.touchTarget, minHeight: geometry.touchTarget, padding: space.zero, borderWidth: 0, backgroundColor: surface.transparent, color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, cursor: 'pointer', ':hover': { color: text.fg }, ':focus-visible': { outline: `2px solid ${accent.primary}`, outlineOffset: geometry.focusOffset } },
+  why: { display: 'inline-flex', alignItems: 'center', gap: space.xs, minWidth: geometry.touchTarget, minHeight: geometry.touchTarget, padding: space.zero, borderWidth: 0, backgroundColor: surface.transparent, color: text.fgMuted, fontFamily: type.fontSans, fontSize: type.metaSize, lineHeight: type.metaLeading, cursor: 'pointer', ':hover': { color: text.fg }, ':focus-visible': { outlineWidth: geometry.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: geometry.focusOffset } },
   // Desktop keeps its dense row height.
   whyDense: { minWidth: 0, minHeight: geometry.toolRow },
   pendingWhy: { visibility: 'hidden' },

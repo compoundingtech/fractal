@@ -3,6 +3,9 @@ import type { Decorator, Preview } from '@storybook/react-vite'
 import * as React from 'react'
 import { I18nProvider } from 'react-aria/I18nProvider'
 import '../src/tokens.css'
+import { installFocusModality } from '../src/focus-modality.ts'
+
+if (typeof document !== 'undefined') installFocusModality()
 
 /**
  * An explicit Theme toolbar choice overrides a story's scheme args. Unset leaves the story and

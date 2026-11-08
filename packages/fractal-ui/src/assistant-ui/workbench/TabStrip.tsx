@@ -4,7 +4,7 @@ import { TabList, Tab, TooltipTrigger, Tooltip, Focusable } from 'react-aria-com
 import { useFocusVisible } from 'react-aria'
 import { Icon, type IconName } from '../composition/Icons'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
-import { surfaceVars as sf, textVars as tx, accentVars as ac, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, geometryNumbers as geo } from '../composition-tokens.stylex'
+import { surfaceVars as sf, textVars as tx, accentVars as ac, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g, geometryNumbers as geo, interactionVars } from '../composition-tokens.stylex'
 import { paneKey, paneKind, type WorkbenchPane } from './workbench-model'
 import { layoutTabStrip, layoutTabStripViewport, type TabStripMode } from './tab-strip-layout'
 
@@ -246,7 +246,7 @@ const TabTooltipBridge = React.forwardRef<HTMLDivElement, TabTooltipBridgeProps>
 const styles = stylex.create({
   root: { position: 'relative', flex: '1 1 0', minWidth: 0, maxWidth: '100%', height: g.controlSm },
   list: { display: 'flex', alignItems: 'center', gap: s.xs2, height: '100%', width: '100%', minWidth: 0, overflowX: 'auto', overflowY: 'hidden', scrollbarWidth: 'none', scrollSnapType: 'x mandatory', scrollBehavior: 'auto' },
-  tab: { position: 'relative', boxSizing: 'border-box', width: `var(--tab-cell-width, ${g.controlSm})`, height: g.controlSm, flexShrink: 0, paddingInline: s.sm, borderWidth: 0, borderRadius: r.control, backgroundColor: sf.transparent, color: tx.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', scrollSnapAlign: 'start', scrollSnapStop: 'always', opacity: { default: 1, ':is([data-tab-clipped])': 0 }, pointerEvents: { default: 'auto', ':is([data-tab-clipped])': 'none' }, ':hover': { color: tx.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ac.primary, outlineOffset: `calc(-1 * ${g.focusRing})` } },
+  tab: { position: 'relative', boxSizing: 'border-box', width: `var(--tab-cell-width, ${g.controlSm})`, height: g.controlSm, flexShrink: 0, paddingInline: s.sm, borderWidth: 0, borderRadius: r.control, backgroundColor: sf.transparent, color: tx.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, cursor: 'pointer', scrollSnapAlign: 'start', scrollSnapStop: 'always', opacity: { default: 1, ':is([data-tab-clipped])': 0 }, pointerEvents: { default: 'auto', ':is([data-tab-clipped])': 'none' }, ':hover': { color: tx.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset } },
   selected: { backgroundColor: sf.washSubtle, color: tx.fg },
   label: { position: 'absolute', insetBlock: 0, insetInline: s.sm, display: 'block', lineHeight: g.controlSm, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', visibility: { default: 'visible', ':is([data-icon-only])': 'hidden' }, pointerEvents: 'none' },
   icon: { position: 'absolute', inset: 0, display: 'grid', placeItems: 'center', visibility: { default: 'hidden', ':is([data-icon-only])': 'visible' }, pointerEvents: 'none' },

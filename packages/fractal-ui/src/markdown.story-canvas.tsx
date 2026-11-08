@@ -80,6 +80,6 @@ export const styles = stylex.create({
   canvas: { minHeight: '100vh', boxSizing: 'border-box', padding: s.xl, backgroundColor: surface.canvas, color: ink.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
   lane: { width: '100%', maxWidth: g.lane, minWidth: 0, marginInline: 'auto' },
   toolbar: { display: 'flex', alignItems: 'center', gap: s.md, marginBlockEnd: s.lg },
-  button: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing }, ':disabled': { color: ink.fgMuted, cursor: 'default' } },
+  button: { minHeight: g.controlMd, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.sm, backgroundColor: surface.controlFill, color: ink.fg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset }, ':disabled': { color: ink.fgMuted, cursor: 'default' } },
   heading: { marginBlock: s.lg, fontSize: t.headingSize, lineHeight: t.headingLeading },
 })

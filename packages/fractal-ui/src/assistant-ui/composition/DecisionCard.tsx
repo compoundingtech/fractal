@@ -2,7 +2,7 @@ import { markdownInline } from './markdown-text'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import * as Aria from 'react-aria-components'
-import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t } from '../composition-tokens.stylex.ts'
+import { colorVars as c, geometryVars as g, radiusVars as r, spaceVars as s, typeVars as t, interactionVars } from '../composition-tokens.stylex.ts'
 import { Icon } from './Icons'
 import { InlineMarkdown } from './Markdown'
 import { NarrowLayoutContext } from './NarrowLayout'
@@ -249,7 +249,7 @@ export function DecisionCard(card: DecisionCardProps): React.ReactNode {
 }
 
 const narrow = '@container decision-card (max-width: 480px)'
-const focusRing = { ':focus-visible': { outline: `${g.focusRing} solid ${c.primary}`, outlineOffset: g.focusOffset } }
+const focusRing = { ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } }
 const quietButton = { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', minHeight: g.controlMd, paddingInline: s.row, borderRadius: r.sm, borderWidth: 0, fontFamily: t.fontSans, fontSize: t.metaSize, fontWeight: t.weightMedium, cursor: 'pointer', whiteSpace: 'nowrap', ...focusRing, ':disabled': { opacity: 0.45, cursor: 'default' } }
 
 const styles = stylex.create({
@@ -287,7 +287,7 @@ const styles = stylex.create({
   optionTouch: { minHeight: g.touchTarget, boxSizing: 'border-box' },
   optionHover: { backgroundColor: c.rowHover },
   optionOn: { backgroundColor: c.rowActive },
-  optionFocus: { outline: `${g.focusRing} solid ${c.primary}`, outlineOffset: `calc(-1 * ${g.focusRing})` },
+  optionFocus: { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusInset },
   optionDisabled: { cursor: 'default' },
   key: { flexShrink: 0, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.icon, height: g.icon, marginBlockStart: s.xs2, borderRadius: r.keyboard, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.borderStrong, color: c.fgSoft, fontSize: t.denseSize, lineHeight: 1, fontVariantNumeric: 'tabular-nums' },
   keySquare: { color: c.onPrimary },
@@ -308,7 +308,7 @@ const styles = stylex.create({
   // A long decision scrolls its page; its controls stay on screen, as they do docked.
   quietFull: { position: 'sticky', bottom: 0, backgroundColor: c.canvas },
   spacer: { flexGrow: 1 },
-  field: { flexGrow: 1, flexShrink: 1, flexBasis: { default: 0, [narrow]: '100%' }, minWidth: 0, minHeight: g.controlMd, maxHeight: g.editorMax, boxSizing: 'border-box', resize: 'none', paddingBlock: s.xs, paddingInline: s.md, borderRadius: r.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border, backgroundColor: 'transparent', color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, '::placeholder': { color: c.fgSoft }, ':focus-visible': { outline: 'none', borderColor: c.primary }, ':disabled': { opacity: 0.6 } },
+  field: { flexGrow: 1, flexShrink: 1, flexBasis: { default: 0, [narrow]: '100%' }, minWidth: 0, minHeight: g.controlMd, maxHeight: g.editorMax, boxSizing: 'border-box', resize: 'none', paddingBlock: s.xs, paddingInline: s.md, borderRadius: r.sm, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border, backgroundColor: 'transparent', color: c.fg, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, '::placeholder': { color: c.fgSoft }, outlineStyle: 'none', ':focus': { borderColor: interactionVars.focusRing }, ':disabled': { opacity: 0.6 } },
   fieldTouch: { minHeight: g.touchTarget, fontSize: t.touchInputSize, lineHeight: t.uiLeading },
   actions: { flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: s.xs },
   dismiss: { ...quietButton, backgroundColor: 'transparent', color: c.fgSoft, ':hover': { backgroundColor: c.rowHover, color: c.fg } },

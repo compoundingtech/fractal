@@ -8,7 +8,7 @@ import * as React from 'react'
 import * as Aria from 'react-aria-components'
 
 import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
-import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, spaceVars as s, typeVars as t, interactionVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useMissionsDecode, useNow } from '../data/react.tsx'
 import { DecodeNotice } from '../web/LiveRoster.tsx'
 import { MissionFeedNotice, missionsTruncatedText } from './MissionFeedNotice.tsx'
@@ -133,7 +133,7 @@ const styles = stylex.create({
   button: { marginInlineStart: 'auto', padding: '4px 8px', borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover } },
   list: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 2 },
   item: { borderRadius: 6 },
-  row: { width: '100%', display: 'grid', gridTemplateColumns: '1.25rem 6.5rem minmax(0, 1fr) auto', alignItems: 'baseline', columnGap: s.md, padding: s.md, borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fg, textAlign: 'start', fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outline: `2px solid ${c.primary}` } },
+  row: { width: '100%', display: 'grid', gridTemplateColumns: '1.25rem 6.5rem minmax(0, 1fr) auto', alignItems: 'baseline', columnGap: s.md, padding: s.md, borderWidth: 0, borderRadius: 6, backgroundColor: 'transparent', color: c.fg, textAlign: 'start', fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover }, ':focus-visible': { outlineWidth: geometryVars.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusOffset } },
   glyph: { color: c.fgMuted, textAlign: 'center' },
   person: { color: c.attention },
   fault: { color: c.dangerFg },

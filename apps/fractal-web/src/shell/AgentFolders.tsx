@@ -44,6 +44,7 @@ import { SidebarToolbar } from './sidebar/Toolbar.tsx'
 import type { Workspace, WindowAction } from './workspaces.ts'
 import type { AgentFoldersProps, SidebarNode, SidebarMoveTarget } from '../folders/sidebarContract.ts'
 import { useClockLabel } from '../../../../packages/fractal-ui/src/time/clock.tsx'
+import { geometryVars, interactionVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 const unfiled = 'wf/unfiled'
 const styles = stylex.create({
@@ -168,7 +169,7 @@ const styles = stylex.create({
     backgroundColor: tokens['--ds-gray-alpha-200'],
     fontWeight: 600,
   },
-  drag: { position: 'absolute', insetInlineEnd: 0, top: 0, opacity: { default: 0, ':focus-visible': 1 }, width: 16, height: 16 },
+  drag: { position: 'absolute', insetInlineEnd: 0, top: 0, opacity: { default: 0, ':focus-visible': 1 }, width: 16, height: 16, outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: geometryVars.focusRing, outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusInset },
   treeContent: { position: 'relative', width: '100%' },
 })
 

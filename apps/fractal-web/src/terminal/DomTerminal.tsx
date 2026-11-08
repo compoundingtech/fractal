@@ -17,7 +17,7 @@ import { terminalRunStyle, type TerminalPalette } from './palette.ts'
 import { TERMINAL_FONT_FAMILY, terminalFontsReady } from './terminalFonts.ts'
 
 import { terminalMetrics } from './terminalMetrics.stylex.ts'
-import { interactionVars, textVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { interactionVars, textVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
 /** Inputs of the DOM renderer: the screen frame and the palette its colours resolve against. */
 export type DomTerminalProps = {
@@ -134,7 +134,7 @@ const styles = stylex.create({
     tabSize: 8,
     outline: {
       default: 'none',
-      ':focus-visible': `2px solid ${interactionVars.focusRing}`,
+      ':focus-visible': `${geometryVars.focusRing} solid ${interactionVars.focusRing}`,
     },
   },
   line: {

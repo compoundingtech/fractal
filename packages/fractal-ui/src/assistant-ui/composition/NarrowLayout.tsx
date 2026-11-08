@@ -2,7 +2,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button, Dialog, Heading, Modal, ModalOverlay, Toolbar } from 'react-aria-components'
-import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as text, typeVars as t } from '../composition-tokens.stylex'
+import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as text, typeVars as t, interactionVars } from '../composition-tokens.stylex'
 import { Icon } from './Icons'
 
 /**
@@ -66,7 +66,7 @@ const styles = stylex.create({
   sheetHeader: { height: g.band, flexShrink: 0, display: 'flex', alignItems: 'center', gap: s.md, paddingInline: s.lg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   sheetTitle: { margin: 0, flexGrow: 1, fontSize: t.uiSize, lineHeight: t.uiLeading, fontWeight: t.weightMedium },
   // A 44px target whose glyph stays where a 28px control would put it: the extra hit area overhangs the header's padding.
-  iconButton: { width: g.touchTarget, height: g.touchTarget, flexShrink: 0, marginInlineEnd: `calc((${g.controlMd} - ${g.touchTarget}) / 2)`, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderWidth: 0, borderRadius: r.control, backgroundColor: surface.transparent, color: text.fgMuted, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: text.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.focusOffset } },
+  iconButton: { width: g.touchTarget, height: g.touchTarget, flexShrink: 0, marginInlineEnd: `calc((${g.controlMd} - ${g.touchTarget}) / 2)`, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', borderWidth: 0, borderRadius: r.control, backgroundColor: surface.transparent, color: text.fgMuted, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover, color: text.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: g.focusOffset } },
   actionRow: { flexShrink: 0, display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: s.xs, paddingBlock: s.md, paddingInline: s.lg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
   body: { flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column', overflowY: 'auto', overscrollBehavior: 'contain' },
 })

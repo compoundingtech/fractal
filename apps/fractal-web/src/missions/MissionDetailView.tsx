@@ -9,7 +9,7 @@ import * as Aria from 'react-aria-components'
 
 import { InlineMarkdown } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx'
 import { LiveRing } from '../../../../packages/fractal-ui/src/assistant-ui/composition/LiveRing.tsx'
-import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t, interactionVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { formatDuration } from '../../../../packages/fractal-ui/src/time/human-time.ts'
 import { leafText } from '../data/projections.ts'
 import { useDataSource, useGrants, useNow } from '../data/react.tsx'
@@ -320,7 +320,7 @@ const styles = stylex.create({
   stepMark: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, width: g.statusSm, height: g.statusSm },
   doneDot: { display: 'block', width: '7px', height: '7px', borderRadius: r.full, backgroundColor: ink.fgSoft },
   srOnly: { position: 'absolute', width: '1px', height: '1px', overflow: 'hidden', clipPath: 'inset(50%)', whiteSpace: 'nowrap' },
-  stepTitle: { display: 'flex', flex: '1 1 0', minWidth: 0, margin: 0, padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: 'inherit', fontFamily: 'inherit', fontSize: 'inherit', textAlign: 'start', cursor: { default: 'pointer', ':is([data-disabled])': 'default' }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted } },
+  stepTitle: { display: 'flex', flex: '1 1 0', minWidth: 0, margin: 0, padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: 'inherit', fontFamily: 'inherit', fontSize: 'inherit', textAlign: 'start', cursor: { default: 'pointer', ':is([data-disabled])': 'default' }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing } },
   ellipsis: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   owner: { flexShrink: 1, minWidth: 0, maxWidth: '40%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgSoft, fontSize: t.denseSize },
   ownerYou: { color: tone.attention },
@@ -332,7 +332,7 @@ const styles = stylex.create({
   output: { marginInlineStart: `calc(${g.statusSm} + ${s.sm})`, marginBlockEnd: s.sm, paddingInline: s.sm, paddingBlock: s.xs, borderRadius: r.sm, backgroundColor: surface.rowHover, color: ink.fgSoft, fontSize: t.metaSize },
   outputLine: { margin: 0, overflowWrap: 'anywhere' },
   plainList: { margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column' },
-  linkRow: { display: 'flex', alignItems: 'center', gap: s.sm, width: '100%', minHeight: g.controlMd, paddingInline: s.xs, borderWidth: 0, borderRadius: r.sm, backgroundColor: 'transparent', color: ink.fg, fontFamily: 'inherit', fontSize: t.metaSize, textAlign: 'start', cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted } },
+  linkRow: { display: 'flex', alignItems: 'center', gap: s.sm, width: '100%', minHeight: g.controlMd, paddingInline: s.xs, borderWidth: 0, borderRadius: r.sm, backgroundColor: 'transparent', color: ink.fg, fontFamily: 'inherit', fontSize: t.metaSize, textAlign: 'start', cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing } },
   grow: { flex: '1 1 0', minWidth: 0 },
   state: { flexShrink: 0 },
   kind: { flexShrink: 0, minWidth: '4rem', color: ink.fgMuted, fontSize: t.denseSize },
@@ -347,6 +347,6 @@ const styles = stylex.create({
   eventTime: { flexShrink: 0, fontVariantNumeric: 'tabular-nums' },
   more: { alignSelf: 'flex-start', padding: 0, borderWidth: 0, backgroundColor: 'transparent', color: ink.fgSoft, fontFamily: 'inherit', fontSize: t.denseSize, cursor: 'pointer', ':hover': { color: ink.fg } },
   actions: { display: 'flex', flexWrap: 'wrap', gap: s.sm },
-  action: { height: g.controlSm, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: 'transparent', color: ink.fg, fontFamily: 'inherit', fontSize: t.denseSize, cursor: { default: 'pointer', ':is([data-disabled])': 'not-allowed' }, opacity: { default: 1, ':is([data-disabled])': 0.5 }, ':hover': { backgroundColor: surface.rowHover }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: ink.fgMuted } },
+  action: { height: g.controlSm, paddingInline: s.md, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, borderRadius: r.control, backgroundColor: 'transparent', color: ink.fg, fontFamily: 'inherit', fontSize: t.denseSize, cursor: { default: 'pointer', ':is([data-disabled])': 'not-allowed' }, opacity: { default: 1, ':is([data-disabled])': 0.5 }, ':hover': { backgroundColor: surface.rowHover }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing } },
   primary: { borderColor: tone.attention, backgroundColor: tone.attention, color: '#1a1205', ':hover': { backgroundColor: tone.attention } },
 })
