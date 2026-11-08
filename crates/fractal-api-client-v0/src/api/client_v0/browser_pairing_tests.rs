@@ -115,7 +115,7 @@ async fn browser_pairing_pending_deny_and_exact_single_use_grant_revocation() {
     })).unwrap();
     assert!(action(State(state.clone()),Extension(snapshot),Extension(browser.clone()),Json(mission)).await.is_err());
     assert!(completion.body["fields"]["expires_at_unix_ms"].as_u64().unwrap() > client_now_ms() as u64 + 29*24*60*60*1000);
-    revoke_current(State(state.clone()),Extension(browser)).await.unwrap();
+    assert_eq!(revoke_current(State(state.clone()),Extension(browser)).await.unwrap().0["revoked"], true);
     assert!(paired_client_session(&state,&completion,"fabric-loopback",false).is_err());
 }
 
@@ -271,7 +271,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         .unwrap().unwrap();
 
     let (publisher, publisher_bearer) = paired_device_with_key(
-        &state, &["read.projections"], "thread-read-only-publisher", "opaque:publisher".into(),
+        &state, &["read.projections"], "thread-read-only-publisher", "opaque-publisher-identity-without-signing-key".into(),
     ).await;
     let key = "c".repeat(64);
     let pairing = start(&state, &publisher, &key).await;
