@@ -353,6 +353,10 @@ pub mod tests {
                 ("thread_id".into(), json!(thread)),
                 ("thread_origin_ask".into(), json!(ask.subject)),
                 ("thread_origin_episode".into(), json!(original.id)),
+                (
+                    fractal_schema::threads::MESSAGE_READER_VERSION_FIELD.into(),
+                    json!(fractal_schema::threads::MESSAGE_READER_VERSION),
+                ),
             ]),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         };
@@ -386,6 +390,10 @@ pub mod tests {
                 ("content".into(), json!("The worker checks are ready.")),
                 ("status".into(), json!("sent")),
                 ("thread_id".into(), json!(thread)),
+                (
+                    fractal_schema::threads::MESSAGE_READER_VERSION_FIELD.into(),
+                    json!(fractal_schema::threads::MESSAGE_READER_VERSION),
+                ),
             ]);
             if let Some(quote) = quote {
                 fields.insert("thread_quote_id".into(), json!(quote));

@@ -709,7 +709,7 @@ pub async fn status(
                 ).with_detail("reason", "notices-unavailable")));
             }
             let mut status = store.status_harness_only(subject)?;
-            crate::store::redact_generic_status_message_relations(&mut status);
+            crate::store::hide_thread_messages_from_generic_status(&mut status);
             status
         } else if query.summary && !query.history && query.owner_run.is_none()
             && let Some(subject) = subject.as_deref().filter(|subject| subject.starts_with("agent/"))

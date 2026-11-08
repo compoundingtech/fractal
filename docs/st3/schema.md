@@ -3,8 +3,8 @@
 This file is generated from `fractal-schema`.
 
 Schema: `st3.v1`
-Storage version: `21`
-Storage digest: `609edac1efb627a350b844e3f2a999475c72ca5024224ad61394d4eaf256bb06`
+Storage version: `22`
+Storage digest: `8eb8283f193489e337dd6abf40ba6bbd17b97213ee8ad4830d864bf58faeed0a`
 
 ## Subject families
 
@@ -153,7 +153,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `message.closed` | `message` | `authorized-participant` | `once-per-actor` | `durable` | `acted_for:subject-reference(person)`, `acting_for:subject-reference(agent)`, `delegation:object`, `status!:string` |  |
 | `message.delivered` | `message` | `system-only` | `once-per-actor` | `durable` | `recipient:subject-reference`, `runtime_id:string`, `status!:string`, `transport:string` | `message` |
 | `message.read` | `message` | `authorized-participant` | `once-per-actor` | `durable` | `acting_for:subject-reference(agent)`, `status!:string` |  |
-| `message.sent` | `message` | `ordinary-client` | `once` | `durable` | `assistant_grant_id:string`, `assistant_owner:subject-reference`, `assistant_session_actor:string`, `attachments:array`, `content:string`, `from:subject-reference`, `in_reply_to:subject-reference`, `sender_class:string`, `session_id:string`, `status!:string`, `tags:array`, `thread_id:subject-reference(thread)`, `thread_origin_ask:subject-reference(step-run)`, `thread_origin_episode:string`, `thread_quote_id:subject-reference(message)`, `title:string`, `to:subject-reference` | `message` |
+| `message.sent` | `message` | `ordinary-client` | `once` | `durable` | `assistant_grant_id:string`, `assistant_owner:subject-reference`, `assistant_session_actor:string`, `attachments:array`, `content:string`, `from:subject-reference`, `in_reply_to:subject-reference`, `sender_class:string`, `session_id:string`, `status!:string`, `tags:array`, `thread_id:subject-reference(thread)`, `thread_origin_ask:subject-reference(step-run)`, `thread_origin_episode:string`, `thread_quote_id:subject-reference(message)`, `thread_reader_version:integer`, `title:string`, `to:subject-reference` | `message` |
 | `message.staged` | `message` | `system-only` | `once-per-actor` | `durable` | `recipient:subject-reference`, `runtime_id:string`, `status!:string`, `transport:string` | `message` |
 | `mission-run.created` | `mission-run` | `system-only` | `once` | `durable` | `ad_hoc_title:string`, `after:subject-reference`, `current_generation:subject-reference`, `deadline_at_unix_ms:integer`, `default_selector:object`, `generation:subject-reference`, `initial_revision:string`, `inputs:object`, `mission:subject-reference`, `mission_spec:object`, `mode:string`, `parent_step_run:subject-reference`, `report_completed:boolean`, `report_stalls:boolean`, `report_to:subject-reference`, `requester:subject-reference`, `revision:string`, `root_mission_run:subject-reference`, `root_revision:string`, `stalled_after_ms:integer`, `status:string`, `timeout_ms:integer`, `workspace:string` | `mission-run` |
 | `mission-run.report-to` | `mission-run` | `system-only` | `state-transition` | `durable` | `report_completed:boolean`, `report_stalls:boolean`, `report_to:subject-reference`, `stalled_after_ms:integer` |  |

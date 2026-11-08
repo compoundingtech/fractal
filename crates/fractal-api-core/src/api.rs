@@ -10839,6 +10839,10 @@ pub fn prepare_inline_thread_message(
         ("to".into(), json!(draft.to)),
         ("content".into(), json!(draft.content)),
         ("thread_id".into(), json!(draft.thread)),
+        (
+            fractal_schema::threads::MESSAGE_READER_VERSION_FIELD.into(),
+            json!(fractal_schema::threads::MESSAGE_READER_VERSION),
+        ),
     ]);
     if let Some(title) = draft.title { fields.insert("title".into(), json!(title)); }
     if let Some(quote) = draft.quote { fields.insert("thread_quote_id".into(), json!(quote)); }
@@ -11363,11 +11367,12 @@ struct EventPage {
     messages_frontier: Option<u64>,
 }
 
-/// Generic event projections can retain ordinary message delivery without its thread routing.
-fn redact_event_message_thread_relations(event: &mut EventRecord) {
-    if event.kind == "message.sent" {
-        fractal_schema::threads::redact_message_relations(&mut event.body);
-    }
+fn generic_event_visible(event: &EventRecord) -> bool {
+    !fractal_schema::notice::is_reserved_subject(&event.subject)
+        && !fractal_schema::notice::is_reserved_kind(&event.kind)
+        && !fractal_schema::threads::is_reserved_record(&event.subject, &event.kind)
+        && !(event.kind == "message.sent"
+            && fractal_schema::threads::message_has_relation(&event.body))
 }
 
 async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPage, ApiError> {
@@ -11407,12 +11412,7 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
             let (mut items, next_after, has_more) =
                 store.events_page(after, through, subject.as_deref(), owner.as_deref(), limit)?;
             // Events retain their bounded last-inspected cursor contract, even when hidden.
-            items.retain(|event| {
-                !fractal_schema::notice::is_reserved_subject(&event.subject)
-                    && !fractal_schema::notice::is_reserved_kind(&event.kind)
-                    && !fractal_schema::threads::is_reserved_record(&event.subject, &event.kind)
-            });
-            items.iter_mut().for_each(redact_event_message_thread_relations);
+            items.retain(generic_event_visible);
             // Stream items have no run owner, so an owner-filtered page has none of them.
             let stream = match messages_after {
                 Some(messages_after) if owner.is_none() => {
@@ -11425,16 +11425,8 @@ async fn read_event_page(state: &AppState, query: &EventQuery) -> Result<EventPa
                     .items
                     .iter()
                     .filter(|event| subject.as_deref().is_none_or(|subject| event.subject == subject))
-                    .filter(|event| {
-                        !fractal_schema::notice::is_reserved_subject(&event.subject)
-                            && !fractal_schema::notice::is_reserved_kind(&event.kind)
-                            && !fractal_schema::threads::is_reserved_record(&event.subject, &event.kind)
-                    })
+                    .filter(|event| generic_event_visible(event))
                     .cloned()
-                    .map(|mut event| {
-                        redact_event_message_thread_relations(&mut event);
-                        event
-                    })
                     .collect()
             });
             Ok(Ok(EventPage {
