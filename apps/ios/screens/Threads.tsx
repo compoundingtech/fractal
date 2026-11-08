@@ -204,7 +204,7 @@ export function ThreadScreen({ route }: RootScreen<'Thread'>) {
 
 function ThreadDetail({ client, id }: { client: ThreadClient; id: string }) {
   const { threadRefresh } = useStore();
-  return <ScrollView contentInsetAdjustmentBehavior="automatic" keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 8 }}>
+  return <ScrollView contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 8 }}>
     <InlineThread client={client} id={id} refresh={threadRefresh} />
   </ScrollView>;
 }
