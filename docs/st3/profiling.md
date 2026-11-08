@@ -498,6 +498,8 @@ Measured weekly recovery closes failure receipts without another owner notice;
 Unknown preserves the case. Pending legacy cuts are first imported into the
 shared journal and replayed before reading a newer publication. Existing weekly
 episodes are adopted by native receipt identity before early admission.
+Adoption records must be daemon-authored and bound to the original failure;
+phase-specific delivery is only selected while the shared route is enabled.
 Keep `readiness-case.json` across
 restart: it journals phase transitions and notice intents before delivery and
 recognizes native receipts on replay. The legacy weekly checkpoint remains

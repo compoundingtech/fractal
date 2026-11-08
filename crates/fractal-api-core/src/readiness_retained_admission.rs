@@ -526,13 +526,16 @@ fn import_legacy(admission: &mut Admission, policy: &Policy, store: &Store, jour
 
 /// The enabled shared route replaces (and never calls) the legacy weekly dispatcher.
 pub(super) fn run_sampler(policy: &Policy, store: &Store, now: u64) -> Result<Value> {
+    ensure!(policy.config.shared_case, "shared readiness routing is disabled");
+    store.readiness_shared_case.store(true, Ordering::Relaxed);
     let config = &policy.config;
     let retained_path = config.retained_pairs_file.as_ref().context("retained pair path missing")?;
     let journal = policy.checkpoint.with_file_name("readiness-case.json");
     let mut admission = Admission::load(&journal, config)?;
     import_legacy(&mut admission, policy, store, &journal)?;
-    if let Some(opening) = &admission.case {
-        if let Some(receipt) = &opening.adopted {
+    if let Some(opening) = &admission.case
+        && let Some(receipt) = &opening.adopted
+    {
             store.append_claim(&ClaimInput {
                 subject: format!("daemon/{}", store.origin()),
                 kind: "readiness.case.adopted".into(),
@@ -541,7 +544,6 @@ pub(super) fn run_sampler(policy: &Policy, store: &Store, now: u64) -> Result<Va
                 evidence: vec![receipt.clone()], expected_subject: None,
                 idempotency_key: Some(format!("{receipt}:readiness-case")),
             })?;
-        }
     }
     // Admitted work remains replayable even while the publisher is unavailable.
     admission.replay(&journal, |opening| record(store, config, opening))?;
@@ -639,6 +641,7 @@ fn skipped_retained_miss_is_admitted_before_clear_and_replayed_exactly_once() {
             "retained-admission-owners",
         )
         .unwrap();
+    store.readiness_shared_case.store(true, Ordering::Relaxed);
 
     let mut admission = Admission::load(&journal, &policy.config).unwrap();
     let source = || retained.fresh_through(&anchor, anchor.end_ms);
@@ -659,6 +662,7 @@ fn skipped_retained_miss_is_admitted_before_clear_and_replayed_exactly_once() {
     drop(store);
 
     let store = Store::open(&db, "fixture").unwrap();
+    store.readiness_shared_case.store(true, Ordering::Relaxed);
     let mut admission = Admission::load(&journal, &policy.config).unwrap();
     // Crash again, this time after native acceptance and before the journal receipt.
     assert!(
@@ -680,6 +684,7 @@ fn skipped_retained_miss_is_admitted_before_clear_and_replayed_exactly_once() {
     drop(store);
 
     let store = Store::open(&db, "fixture").unwrap();
+    store.readiness_shared_case.store(true, Ordering::Relaxed);
     let mut admission = Admission::load(&journal, &policy.config).unwrap();
     assert!(!admission.case.as_ref().unwrap().recorded);
     let drain = |opening: &Opening| record(&store, &policy.config, opening);
@@ -741,6 +746,7 @@ fn skipped_retained_miss_is_admitted_before_clear_and_replayed_exactly_once() {
     drop(store);
 
     let store = Store::open(&db, "fixture").unwrap();
+    store.readiness_shared_case.store(true, Ordering::Relaxed);
     assert_eq!(
         send_backup(&store, opening, &first.request, "early", Some(backup))
             .unwrap()
@@ -791,6 +797,7 @@ fn skipped_retained_miss_is_admitted_before_clear_and_replayed_exactly_once() {
     drop(store);
 
     let store = Store::open(&db, "fixture").unwrap();
+    store.readiness_shared_case.store(true, Ordering::Relaxed);
     let mut admission = Admission::load(&journal, &policy.config).unwrap();
     let mut unknown: Reading =
         serde_json::from_value(pair(end + 6 * MINUTE_MS, 0)["weekly"].clone()).unwrap();
@@ -862,6 +869,7 @@ fn skipped_retained_miss_is_admitted_before_clear_and_replayed_exactly_once() {
     drop(store);
 
     let store = Store::open(&db, "fixture").unwrap();
+    store.readiness_shared_case.store(true, Ordering::Relaxed);
     let mut admission = Admission::load(&journal, &policy.config).unwrap();
     assert!(
         admission
@@ -882,6 +890,7 @@ fn skipped_retained_miss_is_admitted_before_clear_and_replayed_exactly_once() {
     drop(store);
 
     let store = Store::open(&db, "fixture").unwrap();
+    store.readiness_shared_case.store(true, Ordering::Relaxed);
     let mut admission = Admission::load(&journal, &policy.config).unwrap();
     admission
         .weekly(
@@ -930,6 +939,51 @@ fn skipped_retained_miss_is_admitted_before_clear_and_replayed_exactly_once() {
 #[cfg(test)]
 mod migration_tests {
     use super::*;
+
+    #[test]
+    fn sampler_adopts_pending_legacy_failure_through_registered_kind() {
+        let (dir, policy, store) = fixture();
+        let end = (MINUTES + 10) * MINUTE_MS;
+        policy.checkpoint(&reading(end, 11), true).unwrap();
+        // Fresh root-controlled publisher evidence is deliberately unavailable.
+        // The real sampler must still finish native adoption and notice replay first.
+        assert!(run_sampler(&policy, &store, end + MINUTE_MS).is_err());
+        let admission = Admission::load(
+            &dir.path().join("readiness-case.json"), &policy.config,
+        ).unwrap();
+        let opening = admission.case.as_ref().unwrap();
+        let receipt = opening.adopted.as_ref().unwrap();
+        let adoption = store.operation_claim(&format!("{receipt}:readiness-case")).unwrap().unwrap();
+        assert_eq!(adoption.kind, "readiness.case.adopted");
+        assert_eq!(adoption.actor.as_deref(), Some("daemon/runtime"));
+        let faults = store.fault_snapshot(u128::from(now_ms()) + 1).unwrap();
+        assert!(faults.iter().any(|fault| fault.item.episode == opening.episode));
+        assert_eq!(store.messages(Some(&policy.config.reviewer), true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn ordinary_marker_and_default_off_keep_normal_fault_delivery() {
+        let (_dir, policy, store) = fixture();
+        let end = (MINUTES + 10) * MINUTE_MS;
+        policy.route(&store, &reading(end, 11)).unwrap();
+        let legacy = crate::objective_faults::episode(
+            store.origin(), &format!("{OBJECTIVE}/{}", policy.config.member),
+        );
+        let failure = store.operational_failure(&legacy).unwrap().unwrap();
+        store.append_claim(&ClaimInput {
+            subject: "custom/fixture/record".into(), kind: "custom.fixture.record".into(),
+            actor: Some(policy.config.reviewer.clone()),
+            fields: BTreeMap::from([("episode".into(), json!("slo-objective/readiness-case/example"))]),
+            evidence: vec![failure.request.clone()], expected_subject: None,
+            idempotency_key: Some(format!("{}:readiness-case", failure.request)),
+        }).unwrap();
+        store.readiness_shared_case.store(true, Ordering::Relaxed);
+        let faults = store.fault_snapshot(u128::from(now_ms()) + 1).unwrap();
+        assert!(faults.iter().any(|fault| fault.item.episode == failure.request));
+        assert!(faults.iter().all(|fault| !store.readiness_case_manages(&fault.item.episode)));
+        store.readiness_shared_case.store(false, Ordering::Relaxed);
+        assert!(!store.readiness_case_manages("slo-objective/readiness-case/example"));
+    }
 
     fn fixture() -> (tempfile::TempDir, Policy, Store) {
         let dir = tempfile::tempdir().unwrap();

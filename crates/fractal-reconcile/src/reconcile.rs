@@ -2480,7 +2480,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         );
         for fault in faults {
             // These durable cases own phase-specific delivery, including replay.
-            if fault.item.episode.starts_with("slo-objective/readiness-case/")
+            if self.store.readiness_case_manages(&fault.item.episode)
             {
                 continue;
             }
