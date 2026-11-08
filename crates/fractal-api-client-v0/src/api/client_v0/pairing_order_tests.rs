@@ -380,7 +380,7 @@ async fn legacy_person_pairing_requires_an_unexpired_bounded_lifetime() {
         let now = client_now_ms() as i64;
         state.store.set_write_clock_at(now as u128).unwrap();
         let pairing_id = format!("pairing/{suffix}");
-        let begun = state.store.append_claim(&ClaimInput {
+        let begun = state.store.append_client_operation_claim(&ClaimInput {
             subject: format!("custom/client/pairing-{suffix}"), kind: "custom.client.pairing-begun".into(),
             actor: Some(PERSON.into()),
             fields: serde_json::from_value(json!({
@@ -389,6 +389,8 @@ async fn legacy_person_pairing_requires_an_unexpired_bounded_lifetime() {
             })).unwrap(),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();
+        // Admit the historical payload so completion reaches the verifier, not the reservation guard.
+        assert!(state.store.client_operation_is_trusted(&begun).unwrap());
         assert_eq!(begun.accepted_at_unix_ms, now as u128);
         assert_eq!(begun.body["fields"]["expires_at_unix_ms"].as_i64().unwrap()
             - begun.accepted_at_unix_ms as i64, expiry_delta);
@@ -411,7 +413,7 @@ async fn unknown_or_malformed_verifier_marker_never_uses_the_legacy_digest() {
         let now = client_now_ms();
         state.store.set_write_clock_at(now).unwrap();
         // A valid, unexpired legacy digest would succeed if marker handling fell back.
-        state.store.append_claim(&ClaimInput {
+        let begun = state.store.append_client_operation_claim(&ClaimInput {
             subject: "custom/client/pairing-marker".into(),
             kind: "custom.client.pairing-begun".into(),
             actor: Some(PERSON.into()),
@@ -422,6 +424,7 @@ async fn unknown_or_malformed_verifier_marker_never_uses_the_legacy_digest() {
             })).unwrap(),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         }).unwrap();
+        assert!(state.store.client_operation_is_trusted(&begun).unwrap());
         let before = state.store.index().unwrap();
         let error = finish_person(&state, &json!({"pairing_id":"pairing/marker"}), "ABCDEFGH")
             .await.unwrap_err();
