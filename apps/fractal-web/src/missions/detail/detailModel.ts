@@ -430,3 +430,39 @@ export const span = (ms: number): string => {
 export const usd = (n: number): string => n < 10 ? `$${n.toFixed(2)}` : `$${Math.round(n).toLocaleString('en-US')}`
 /** `920`, `61k`, `2.2M`. */
 export const tokenCount = (n: number): string => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : `${n}`
+
+/** When the shown run started: what a spend read starts from. */
+export const missionRunStart = (mission: Fractal.Mission): number | undefined => {
+  const run = shownRun(mission)
+  if (run === undefined) return undefined
+  const starts = Option.getOrElse(run.steps, () => [] as readonly RawStep[]).flatMap(step => millis(step.started_at) ?? [])
+  return millis(run.started_at) ?? (starts.length === 0 ? undefined : Math.min(...starts))
+}
+
+export interface HistoryEntry {
+  readonly at: number
+  readonly kind: 'started' | 'done' | 'failed' | 'asked' | 'answered' | 'run'
+  readonly text: string
+  readonly step: string | undefined
+}
+
+/** What happened, newest first, from the known attempts and waits: nothing without a time is invented. */
+export const missionHistory = (model: MissionDetailModel): readonly HistoryEntry[] => {
+  const entries: HistoryEntry[] = []
+  const label = (agent: string | undefined) => agent === undefined ? undefined : model.agents.find(each => each.id === agent)?.label ?? agent.split('/').pop()
+  for (const step of model.steps) {
+    for (const attempt of step.attempts) {
+      const who = label(attempt.agent)
+      entries.push({ at: attempt.start, kind: 'started', step: step.id, text: `${who === undefined ? 'Started' : `${who} took`} ${step.title}${attempt.n > 1 ? ` (attempt ${attempt.n})` : ''}` })
+      if (attempt.end !== undefined && attempt.outcome === 'done') entries.push({ at: attempt.end, kind: 'done', step: step.id, text: `${step.title} done` })
+      if (attempt.end !== undefined && attempt.outcome === 'failed') entries.push({ at: attempt.end, kind: 'failed', step: step.id, text: `${step.title} failed${attempt.n > 1 ? ` on attempt ${attempt.n}` : ''}${attempt.reason === undefined ? '' : `: ${attempt.reason}`}` })
+    }
+    for (const wait of step.waits) {
+      if (wait.kind !== 'you') continue
+      entries.push({ at: wait.start, kind: 'asked', step: step.id, text: `Asked you${wait.reason === undefined ? ` on ${step.title}` : `: ${wait.reason}`}` })
+      if (wait.end !== undefined) entries.push({ at: wait.end, kind: 'answered', step: step.id, text: `You answered on ${step.title}` })
+    }
+  }
+  if (model.run?.startedAt !== undefined) entries.push({ at: model.run.startedAt, kind: 'run', step: undefined, text: `Run ${model.run.id.split('/').pop()} started` })
+  return entries.sort((a, b) => b.at - a.at)
+}
