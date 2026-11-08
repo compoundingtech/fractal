@@ -3867,8 +3867,8 @@
         "disclosure_consent": { "type": "boolean" },
         "consent_evidence": { "type": "string", "minLength": 1, "maxLength": 512 },
         "revoked": { "type": "boolean" },
-        "conflict": { "anyOf": [{ "$ref": "#/$defs/GrantProfileConflictWitness" }, { "type": "null" }], "description": "Current opposite-profile conflict, or null when no active conflict exists. Absent on older servers." },
-        "cleared_conflicts": { "type": "array", "items": { "$ref": "#/$defs/ClearedGrantProfileConflictWitness" }, "description": "Revoked or expired opposite-profile witnesses; emitted only when conflict is null." },
+        "conflict": { "anyOf": [{ "$ref": "#/$defs/GrantProfileConflictWitness" }, { "type": "null" }], "description": "Current opposite-profile conflict, or null when no active conflict exists. Present only on grant inspection with witness=1; omitted from default inspection, pairing and mutation responses." },
+        "cleared_conflicts": { "type": "array", "items": { "$ref": "#/$defs/ClearedGrantProfileConflictWitness" }, "description": "Revoked or expired opposite-profile witnesses; emitted only on grant inspection with witness=1 when conflict is null." },
         "read_trust": { "$ref": "#/$defs/AssistantReadTrust", "description": "Owner-provisioned public pins for SCG read proofs. Absent means every assistant read is denied." }
       }
     },

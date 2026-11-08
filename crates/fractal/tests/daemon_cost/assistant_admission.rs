@@ -34,17 +34,7 @@ const GRANTED: &str = "custom.client.assistant.v1.granted";
 const INDEX: &str = "claims_assistant_v1_principal_index";
 const CREATE_INDEX: &str = "CREATE INDEX claims_assistant_v1_principal_index ON claims(kind,COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'))";
 const A_QUERY: &str = "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2";
-const INDEXED_QUERY: &str =
-    "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
-     AND (?5 IS NULL OR NOT EXISTS (SELECT 1 FROM claims AS revoked WHERE revoked.subject=claims.subject AND revoked.kind=?3))
-     AND (?5 IS NULL OR COALESCE(
-         (SELECT CASE WHEN json_type(policy.body,'$.fields') IS NULL THEN 1 ELSE
-             COALESCE(json_type(policy.body,'$.fields.expires_at_unix_ms')='integer'
-                 AND json_extract(policy.body,'$.fields.expires_at_unix_ms')>?5,0) END
-          FROM claims AS policy WHERE policy.subject=claims.subject AND policy.kind=?4 ORDER BY policy.store_index DESC LIMIT 1),
-         CASE WHEN json_type(body,'$.fields') IS NULL THEN 1 ELSE
-             COALESCE(json_type(body,'$.fields.expires_at_unix_ms')='integer'
-                 AND json_extract(body,'$.fields.expires_at_unix_ms')>?5,0) END))";
+const INDEXED_QUERY: &str = api::client_v0::external_grants::admission_query_for_test();
 const PATH: &str = "/v1/client/assistant/summary";
 
 fn number(name: &str, default: usize) -> usize {
@@ -106,7 +96,7 @@ fn explain(connection: &rusqlite::Connection, query: &str) -> Vec<String> {
     } else {
         statement.query(rusqlite::params![GRANTED, "assistant/chatgpt", "custom.client.assistant.v1.revoked",
             "custom.client.assistant.v1.policy",
-            u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap()]).unwrap()
+            u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap(), NODE]).unwrap()
     };
     let mut plan = Vec::new();
     while let Some(row) = rows.next().unwrap() { plan.push(row.get::<_, String>(3).unwrap()); }
@@ -278,6 +268,32 @@ async fn authenticated_get_during_pairing() {
         let count: u64 = connection.query_row("SELECT count(*) FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2", rusqlite::params![GRANTED,principal], |r| r.get(0)).unwrap();
         principal_rows.insert(principal, count);
     }
+    // Isolate indexed SQL from claim/policy loading, provenance and locks.
+    // Diagnostic work stays outside HTTP samples; no request-path cache.
+    let mut diagnostics = Vec::new();
+    if indexed { for _ in 0..8 {
+        let started = Instant::now();
+        let candidate_ids = connection.prepare(query).unwrap().query_map(rusqlite::params![
+            GRANTED,"assistant/chatgpt","custom.client.assistant.v1.revoked","custom.client.assistant.v1.policy",
+            u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap(),NODE
+        ], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+        let candidate_sql_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let credential = sessions[0].1["credential"].as_str().unwrap();
+        let digest = hex::encode(ring::digest::digest(&ring::digest::SHA256, credential.as_bytes()).as_ref());
+        let started = Instant::now();
+        assert!(api::client_v0::external_grants::authenticate(&state, &digest, "http").unwrap().is_some());
+        diagnostics.push(json!({"candidate_count":candidate_ids.len(),"candidate_sql_ms":candidate_sql_ms,
+            "direct_auth_ms":started.elapsed().as_secs_f64()*1000.0}));
+    }}
+    let inspected = store.claims_for_subject_kind_at(&template_subject, GRANTED, None, true, 1).unwrap().claims.pop().unwrap();
+    let started = Instant::now();
+    api::client_v0::external_grants::projection(&state, &inspected).unwrap();
+    let legacy_projection_ms = started.elapsed().as_secs_f64()*1000.0;
+    let started = Instant::now();
+    api::client_v0::external_grants::projection_with_witness(&state, &inspected).unwrap();
+    let witness_projection_ms = started.elapsed().as_secs_f64()*1000.0;
+    println!("ADMISSION_DIAGNOSTICS {}", json!({"plan":explain(&connection, query),"samples":diagnostics,
+        "legacy_projection_ms":legacy_projection_ms,"witness_projection_ms":witness_projection_ms}));
     drop(connection);
     api::wait_published_lists_at_least(&store, store.index().unwrap()).await.unwrap();
     let mut measurements = Vec::new();
@@ -338,6 +354,8 @@ async fn authenticated_get_during_pairing() {
         "fixture_person_ids":[OWNER],"verified_foreign_same_profile_active_grants":foreign_active,
         "history_grants_per_principal":history,"initial_total_claim_rows":total_rows,"initial_granted_rows_by_principal":principal_rows,
         "final_total_claim_rows":final_rows,"admission_query":query,
+        "conflict_fold_diagnostics":diagnostics,
+        "legacy_projection_ms":legacy_projection_ms,"witness_projection_ms":witness_projection_ms,
         "explain_without_index":before,"explain_with_index":after,"synthetic_startup_index_build_ms":build_ms,
         "measurements":measurements});
     println!("ADMISSION_MEASUREMENT {}", serde_json::to_string_pretty(&report).unwrap());

@@ -357,6 +357,71 @@ fn sealed_fleet_cache_tracks_batch_signers_after_envelope_identity_changes() {
     }
 }
 
+#[test]
+fn sealed_membership_cache_reuses_cold_folds_and_recomputes_on_generation_changes() {
+    let mut connection = fixture();
+    connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hf348da4e378d owner=smallclaims::store::membership_query_tests TODO=trace-statement-and-value-representation */ &fleet_generation_schema()).unwrap();
+    let anchor = admitted("anchor", "birch", "anchor-key", "anchor", "birch", 3);
+    insert_claim(&connection, &anchor);
+    let mut cache = None;
+    connection.trace(Some(|sql| {
+        if sql.starts_with("SELECT claims.id, claims.kind, claims.subject, claims.body,") {
+            STATEMENTS.with(|count| count.set(count.get() + 1));
+        }
+    }));
+    STATEMENTS.with(|count| count.set(0));
+    // Even an empty fold with local unsealed claims must be cached.
+    for _ in 0..8 {
+        assert!(!sealed_membership_tx(&connection, &mut cache).unwrap().counts("anchor"));
+    }
+    STATEMENTS.with(|count| assert_eq!(count.get(), 1));
+    let unsealed_generation = cache.as_ref().unwrap().0;
+    envelope(&connection, &anchor, "sealed", &["anchor-key"]);
+    for _ in 0..8 {
+        assert!(sealed_membership_tx(&connection, &mut cache).unwrap().counts("anchor"));
+    }
+    assert!(cache.as_ref().unwrap().0 > unsealed_generation);
+    STATEMENTS.with(|count| assert_eq!(count.get(), 2));
+    connection.execute(/* sqlite-large-value: allow-for-now lv-hbea4b67b6a13 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_envelope_signatures", []).unwrap();
+    for _ in 0..8 {
+        assert!(!sealed_membership_tx(&connection, &mut cache).unwrap().counts("anchor"));
+    }
+    STATEMENTS.with(|count| assert_eq!(count.get(), 3));
+    connection.trace(None);
+}
+
+#[test]
+fn sealed_membership_request_cache_does_not_bypass_local_batch_sealing() {
+    let store = Store::open_memory("birch", Arc::new(super::runtime::Plain)).unwrap();
+    store.bind_fleet("3e7a9c41-5d2b-4f86-b0c3-9a1e6d4f2b58").unwrap();
+    let key = Arc::new(crate::fleet::MemberKey::generate().unwrap().0);
+    store.load_member_key(Some(key.clone())).unwrap();
+    store.pin_fleet_anchor(key.public()).unwrap();
+    let mut anchor = admitted("anchor", "birch", key.public(), "anchor", "birch", 1);
+    anchor.fields.insert(
+        "fleet_id".into(),
+        serde_json::json!("3e7a9c41-5d2b-4f86-b0c3-9a1e6d4f2b58"),
+    );
+    let claim = store.append_claim(&ClaimInput {
+        subject: anchor.subject,
+        kind: anchor.kind,
+        actor: None,
+        fields: anchor.fields,
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    assert!(store.membership_cache.lock().unwrap().is_none());
+    assert!(store.sealed_membership_cache.lock().unwrap().is_none());
+    for _ in 0..3 {
+        assert!(!store.fleet_membership_sealed().unwrap().counts(&claim.id));
+    }
+    assert!(store.sealed_membership_cache.lock().unwrap().is_some());
+    assert!(store.membership_cache.lock().unwrap().is_none());
+    assert!(store.fleet_membership().unwrap().counts(&claim.id));
+    assert!(store.fleet_membership_sealed().unwrap().counts(&claim.id));
+}
+
 fn cache_member_window(store: &Store, key: &str, start: u64) {
     let mut anchor = admitted("anchor", "birch", key, "anchor", "birch", start.max(1));
     anchor.fields.insert("writer_floor".into(), serde_json::json!(start.saturating_sub(1)));
@@ -408,6 +473,23 @@ fn authenticated_member_writer_accepts_a_foreign_origin_from_sealed_membership()
 }
 
 #[test]
+fn authenticated_member_writer_accepts_valid_records_in_a_degraded_envelope() {
+    let (store, claim, key) = authenticated_member_fixture();
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h6d03218a7182 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+        "UPDATE replica_envelopes SET receipt_state='degraded'", [],
+    ).unwrap();
+    cache_member_window(&store, key.public(), 0);
+    assert!(store.claim_has_authenticated_member_writer(&claim).unwrap());
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-h9e7e7a841384 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+        "UPDATE replica_envelope_signatures SET signature='invalid'", [],
+    ).unwrap();
+    cache_member_window(&store, key.public(), 0);
+    assert!(!store.claim_has_authenticated_member_writer(&claim).unwrap());
+}
+
+#[test]
 fn authenticated_member_writer_rejects_legacy_wrong_key_and_outside_window() {
     let (store, claim, key) = authenticated_member_fixture();
     assert!(store.claim_has_authenticated_member_writer(&claim).unwrap());
@@ -422,17 +504,19 @@ fn authenticated_member_writer_rejects_legacy_wrong_key_and_outside_window() {
 }
 
 #[test]
-fn authenticated_member_writer_requires_origin_valid_record_validated_envelope_and_signature() {
+fn authenticated_member_writer_requires_origin_valid_record_admitted_envelope_and_signature() {
     for sql in [
         /* sqlite-large-value: allow-for-now lv-h908d794ad3e8 owner=smallclaims::store::membership_query_tests TODO=prepare-body-and-predecessor-values */
         "UPDATE claims SET origin='forged-origin'",
         /* sqlite-large-value: allow-for-now lv-h6ff49ec4f026 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
         "UPDATE replica_records SET state='invalid'",
+        /* sqlite-large-value: allow-for-now lv-h98f2eff88ab2 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+        "UPDATE replica_records SET state='pending'",
         /* sqlite-large-value: allow-for-now lv-ha41272fe6b10 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
         "UPDATE replica_envelopes SET receipt_state='pending'",
-        /* sqlite-large-value: allow-for-now lv-hbea4b67b6a13 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+        /* sqlite-large-value: allow-for-now lv-h93f4bed1c2b4 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
         "DELETE FROM replica_envelope_signatures",
-        /* sqlite-large-value: allow-for-now lv-h9e7e7a841384 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+        /* sqlite-large-value: allow-for-now lv-h1c91a0dec004 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
         "UPDATE replica_envelope_signatures SET signature='invalid'",
         /* sqlite-large-value: allow-for-now lv-hc8361ab9b858 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
         "UPDATE replica_envelope_signatures SET envelope_hash='other-envelope'",

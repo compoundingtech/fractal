@@ -3706,6 +3706,19 @@ impl Client {
         ))
         .await
     }
+    /// Inspect with optional conflict witnesses; the default method retains the legacy wire shape.
+    pub async fn assistant_grant_with_witness(
+        &self,
+        id: &str,
+        witness: bool,
+    ) -> Result<Envelope<AssistantGrant>, ClientError> {
+        let query = if witness { "?witness=1" } else { "" };
+        self.get(&format!(
+            "/v1/client/assistant/grants/{}{query}",
+            percent_encode_segment(id.strip_prefix("assistant-grant/").unwrap_or(id))
+        ))
+        .await
+    }
     pub async fn assistant_grant_revoke(
         &self,
         id: &str,

@@ -124,7 +124,7 @@ fn disconnected_opposite_profiles_conflict_on_both_members_and_revocation_recove
             assert_conflict(&error);
             assert_witness(&Value::Object((*error.details).clone())["conflict"]);
             assert_witness(&profile_conflict(state, grant).unwrap().unwrap());
-            assert_witness(&projection(state, grant).unwrap()["conflict"]);
+            assert_witness(&projection_with_witness(state, grant).unwrap()["conflict"]);
         }
     }
     append(&b, service.subject.clone(), REVOKED, OWNER,
@@ -133,10 +133,10 @@ fn disconnected_opposite_profiles_conflict_on_both_members_and_revocation_recove
     for state in [&a, &b] {
         for grant in [&assistant, &service] {
             assert!(profile_conflict(state, grant).unwrap().is_none());
-            assert!(projection(state, grant).unwrap()["conflict"].is_null());
+            assert!(projection_with_witness(state, grant).unwrap()["conflict"].is_null());
         }
         assert!(authenticate_id(state, SERVICE_ID).is_err());
-        let inspected = projection(state, &assistant).unwrap();
+        let inspected = projection_with_witness(state, &assistant).unwrap();
         let cleared = inspected["cleared_conflicts"].as_array().unwrap();
         assert_eq!(cleared.len(), 1);
         assert_eq!(cleared[0]["cause"], "revoked");
@@ -173,7 +173,7 @@ fn expiry_boundary_clears_conflict_and_disconnected_reissue_recomputes_it() {
         assert_eq!(unexpired(fields(&effective(&a, &service).unwrap()).unwrap(), now), conflicted);
     }
     assert!(authenticate_id(&a, ASSISTANT_ID).unwrap().is_some());
-    let inspected = projection(&a, &assistant).unwrap();
+    let inspected = projection_with_witness(&a, &assistant).unwrap();
     assert!(inspected["conflict"].is_null());
     let cleared = inspected["cleared_conflicts"].as_array().unwrap();
     assert_eq!(cleared.len(), 1);
@@ -194,7 +194,7 @@ fn expiry_boundary_clears_conflict_and_disconnected_reissue_recomputes_it() {
     for id in [ASSISTANT_ID, replacement_id] {
         assert_conflict(&authenticate_id(&a, id).err().unwrap());
     }
-    let inspected = projection(&a, &assistant).unwrap();
+    let inspected = projection_with_witness(&a, &assistant).unwrap();
     assert_eq!(inspected["conflict"], witness);
     assert!(inspected["cleared_conflicts"].is_null());
 }
@@ -245,7 +245,7 @@ fn malformed_authenticated_foreign_grants_cannot_suspend_a_local_credential() {
             source[invalid] = Value::Null;
         }
         let foreign = raw_claim(&b, &subject(SERVICE_ID).unwrap(), GRANTED,
-            if invalid == "actor" { "person/attacker" } else { OWNER }, source);
+            if invalid == "actor" { "person/intruder" } else { OWNER }, source);
         replicate(&b, &a);
         assert!(a.store.claim_by_id(&foreign.id).unwrap().is_some(), "{invalid}");
         assert!(a.store.claim_has_authenticated_member_writer(&foreign.id).unwrap(), "{invalid}");
@@ -255,7 +255,7 @@ fn malformed_authenticated_foreign_grants_cannot_suspend_a_local_credential() {
 }
 
 #[test]
-fn foreign_policy_with_mismatched_identity_cannot_suspend_a_local_credential() {
+fn foreign_policy_with_mismatched_identity_cannot_clear_a_conflict() {
     let _service = ServiceFixture::enable();
     let root = tempfile::tempdir().unwrap();
     let (a, b) = admitted_pair(root.path());
@@ -265,7 +265,96 @@ fn foreign_policy_with_mismatched_identity_cannot_suspend_a_local_credential() {
     policy["session_actor"] = json!("assistant/chatgpt/session/333333333333333333333333");
     raw_claim(&b, &foreign.subject, POLICY, OWNER, policy);
     replicate(&b, &a);
-    assert!(profile_conflict(&a, &local).unwrap().is_none());
+    assert!(profile_conflict(&a, &local).unwrap().is_some());
+    assert_conflict(&authenticate_id(&a, ASSISTANT_ID).err().unwrap());
+}
+
+#[test]
+fn wrong_origin_revocation_and_expired_policy_cannot_clear_conflict() {
+    let _service = ServiceFixture::enable();
+    let root = tempfile::tempdir().unwrap();
+    for kind in [REVOKED, POLICY] {
+        let (a, b) = admitted_pair(root.path());
+        let local = issue(&a, ASSISTANT_ID, "assistant").unwrap();
+        let foreign = issue(&b, SERVICE_ID, "service").unwrap();
+        replicate(&a, &b);
+        replicate(&b, &a);
+        let mut overlay = fields(&foreign).unwrap().clone();
+        if kind == POLICY {
+            overlay["expires_at_unix_ms"] = json!(1_u64);
+        }
+        // An admitted, signed writer with an owner-shaped actor still cannot
+        // mutate another member's grant lifecycle.
+        let malicious = raw_claim(&a, &foreign.subject, kind, OWNER, overlay);
+        replicate(&a, &b);
+        for state in [&a, &b] {
+            assert!(state.store.claim_has_authenticated_member_writer(&malicious.id).unwrap());
+            assert_eq!(effective(state, &foreign).unwrap().id, foreign.id);
+            assert_witness(&profile_conflict(state, &local).unwrap().unwrap());
+            for id in [ASSISTANT_ID, SERVICE_ID] {
+                assert_conflict(&authenticate_id(state, id).err().unwrap());
+            }
+            let inspected = projection_with_witness(state, &local).unwrap();
+            assert!(inspected["conflict"].is_object());
+            assert!(inspected["cleared_conflicts"].is_null());
+        }
+    }
+}
+
+#[test]
+fn malformed_same_origin_expired_policy_keeps_the_last_valid_live_policy() {
+    let _service = ServiceFixture::enable();
+    let root = tempfile::tempdir().unwrap();
+    let (a, b) = admitted_pair(root.path());
+    let local = issue(&a, ASSISTANT_ID, "assistant").unwrap();
+    let foreign = issue(&b, SERVICE_ID, "service").unwrap();
+    let mut live = fields(&foreign).unwrap().clone();
+    live["policy_revision"] = json!(2);
+    let live = append(&b, foreign.subject.clone(), POLICY, OWNER, live, Some(&foreign)).unwrap();
+    let mut malformed = fields(&live).unwrap().clone();
+    malformed["expires_at_unix_ms"] = json!(1_u64);
+    malformed["session_actor"] = json!("assistant/chatgpt/session/not-this-grant");
+    raw_claim(&b, &foreign.subject, POLICY, OWNER, malformed);
+    replicate(&a, &b);
+    replicate(&b, &a);
+    for state in [&a, &b] {
+        assert_eq!(effective(state, &foreign).unwrap().id, live.id);
+        assert_witness(&profile_conflict(state, &local).unwrap().unwrap());
+        assert_conflict(&authenticate_id(state, ASSISTANT_ID).err().unwrap());
+    }
+}
+
+#[test]
+fn signed_revocation_arriving_before_its_grant_converges_without_conflict() {
+    let root = tempfile::tempdir().unwrap();
+    let (a, b) = admitted_pair(root.path());
+    let local = issue(&a, ASSISTANT_ID, "assistant").unwrap();
+    replicate(&a, &b);
+    let source = grant_fields(SERVICE_ID, "service");
+    let subject = subject(SERVICE_ID).unwrap();
+    // Replicated custom lifecycle claims are open data. Import the authentic
+    // revocation first, while its grant is absent, then import that grant.
+    let revoked = raw_claim(&b, &subject, REVOKED, OWNER, source.clone());
+    replicate(&b, &a);
+    assert!(latest(&a, &subject, GRANTED).unwrap().is_none());
+    assert!(a.store.claim_by_id(&revoked.id).unwrap().is_some());
+    assert!(authenticate_id(&a, ASSISTANT_ID).unwrap().is_some());
+    let granted = raw_claim(&b, &subject, GRANTED, OWNER, source);
+    replicate(&b, &a);
+    for state in [&a, &b] {
+        let revoked = state.store.claim_by_id(&revoked.id).unwrap().unwrap();
+        let granted = state.store.claim_by_id(&granted.id).unwrap().unwrap();
+        assert!(revoked.store_index < granted.store_index);
+        assert!(state.store.claim_has_authenticated_member_writer(&revoked.id).unwrap());
+        assert!(state.store.claim_has_authenticated_member_writer(&granted.id).unwrap());
+        assert!(profile_conflict(state, &local).unwrap().is_none());
+        assert!(profile_conflict(state, &granted).unwrap().is_none());
+        let inspected = projection_with_witness(state, &local).unwrap();
+        let cleared = inspected["cleared_conflicts"].as_array().unwrap();
+        assert_eq!(cleared.len(), 1);
+        assert_eq!(cleared[0]["cause"], "revoked");
+        assert_witness(&cleared[0]);
+    }
     assert!(authenticate_id(&a, ASSISTANT_ID).unwrap().is_some());
 }
 
@@ -294,7 +383,7 @@ fn admission_scan_uses_the_real_principal_index() {
     let connection = state.store.readers.get();
     let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-hf4201606586b owner=fractal_api_core::api::client_v0::external_grants::conflict_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {ADMISSION_QUERY}")).unwrap();
     let plan = query.query_map(rusqlite::params![GRANTED, PRINCIPAL, REVOKED, POLICY,
-        Some(client_now_ms() as u64)], |row| row.get::<_, String>(3)).unwrap()
+        Some(client_now_ms() as u64), state.store.origin()], |row| row.get::<_, String>(3)).unwrap()
         .collect::<Result<Vec<_>, _>>().unwrap();
     println!("external grant admission query plan:\n{}", plan.join("\n"));
     assert!(plan.iter().any(|step| step.contains("claims_assistant_v1_principal_index")),

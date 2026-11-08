@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Adds the typed client error grant-profile-conflict (GrantProfileConflict in Rust), returned as HTTP 409, plus optional AssistantGrant conflict and cleared_conflicts projection witnesses with typed assistant/service profiles and revoked/expired causes. No grant claim shape or storage migration changes."
+    "detail": "Adds the typed client error grant-profile-conflict (GrantProfileConflict in Rust), returned as HTTP 409, plus inspect-only ?witness=1 opt-in conflict and cleared_conflicts witnesses with typed assistant/service profiles and revoked/expired causes. Default grant responses retain their previous shape for old strict clients. No grant claim shape or storage migration changes."
   },
   "rules": {
     "status": "changed",
@@ -15,7 +15,7 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Conflict admission counts only well-formed foreign owner grants and matching effective policies with authenticated envelope provenance from a keyed, admitted fleet writer. Unverifiable or malformed replicated custom claims cannot acquire suspension authority by naming an owner. Tokens remain issuer-local. Older members do not enforce this suspension rule, so upgrade all serving members before relying on it."
+    "detail": "Conflict admission counts only well-formed foreign owner grants with authenticated envelope provenance from a keyed, admitted fleet writer, including valid records in degraded envelopes. Policies and revocations count only from the grant's own origin and owner with consistent immutable identity; foreign transitions also require authenticated provenance. Invalid overlays are ignored, retaining the last valid policy. This restriction also applies to local grants. Request-side sealed membership folds populate a separate generation-keyed cache without weakening local sealing. Tokens remain issuer-local. Older members do not enforce suspension, so upgrade all serving members before relying on it."
   },
   "downtime": {
     "status": "changed",

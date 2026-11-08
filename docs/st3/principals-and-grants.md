@@ -117,7 +117,7 @@ Several active grants of a principal's own profile are allowed. Admission refuse
 a known opposite-profile grant, including one replicated from another issuer.
 If disconnected issuers create opposite-profile grants, authentication suspends
 every conflicting grant with `grant-profile-conflict`; there is no winner.
-Inspect exposes a `conflict.grants` witness with both grant IDs, origins and
+Inspect with `?witness=1` exposes a `conflict.grants` witness with both grant IDs, origins and
 profiles. Once an owner's revoke replicates (or the opposite grant expires),
 the remaining grant works again on its authoritative issuer; replication never
 makes foreign credentials authenticate on another member.
@@ -129,15 +129,28 @@ issued opposite-profile grant reintroduces the conflict by computation.
 
 Only well-formed foreign grants attributed to the configured concrete owner
 count as witnesses. Their grant and effective policy must have matching immutable
-identity/profile, and each must have validated envelope provenance signed by a
+identity/profile, and each must have authenticated envelope provenance signed by a
 key in its writer's admitted fleet membership window. Legacy unsigned,
 unverifiable and malformed custom claims do not gain suspension authority merely
 by naming an owner or origin. This intentionally favors verifiable issuer claims
-over allowing arbitrary replicated custom fields to deny service. The fold uses
-the principal expression index and removes expired/revoked history in SQL on
-every admission/authentication/inspect read, including after replication catches
-up. Historical `custom.client.assistant.v1.*` claim kinds and absent-principal
-legacy ChatGPT grants retain their existing meaning.
+over allowing arbitrary replicated custom fields to deny service. A valid record
+in a degraded envelope still counts when its signature and writer window verify;
+an unrelated rejected record cannot hide the grant.
+
+Only transitions from the grant's own origin, by its owner, with consistent
+immutable identity can revoke it or change its effective policy. Foreign
+transitions additionally require authenticated provenance. Invalid overlays are
+ignored; the last valid policy (or original grant) stays in force. This applies to
+local grants too: an unauthorized newer overlay no longer replaces their policy.
+The principal expression index prunes expired base grants without issuer policy
+candidates, and matching local revocations, before the authenticated Rust fold.
+Foreign revocations and policy candidates reach Rust because SQL cannot verify
+signatures. The sealed membership fold has a separate generation-keyed cache:
+request-side cold folds populate it without populating the sealing-path cache.
+Every admission/authentication/witness read recomputes conflict, including after
+replication catches up. Default grant responses preserve their pre-witness shape
+for old strict clients. Historical `custom.client.assistant.v1.*` claim kinds and
+absent-principal legacy ChatGPT grants retain their existing meaning.
 Claims persist credential/code digests, never bearer tokens or pairing codes;
 grant projections expose neither credential material nor its digests.
 

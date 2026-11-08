@@ -70,25 +70,36 @@ fn digest_only(source: &Value) -> Result<(), ApiError> {
 
 // Admission and authentication share the principal-indexed active-grant fold.
 // append owns the admission lock; several grants of the same profile are allowed.
-// Filter revoked/expired history before loading claim bodies into Rust. Expiry
-// uses the latest policy, not the original grant.
+// Expired base grants without issuer policies are pruned in SQL. A policy
+// candidate must reach the authenticated fold: SQL cannot verify its signature.
+// Foreign revocations likewise reach Rust. Local revocations can be prefiltered
+// only when their origin, owner and immutable grant identity match.
 const ADMISSION_QUERY: &str =
     "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
-     AND (?5 IS NULL OR NOT EXISTS (SELECT 1 FROM claims AS revoked WHERE revoked.subject=claims.subject AND revoked.kind=?3))
-     AND (?5 IS NULL OR COALESCE(
-         (SELECT CASE WHEN json_type(policy.body,'$.fields') IS NULL THEN 1 ELSE
-             COALESCE(json_type(policy.body,'$.fields.expires_at_unix_ms')='integer'
-                 AND json_extract(policy.body,'$.fields.expires_at_unix_ms')>?5,0) END
-          FROM claims AS policy WHERE policy.subject=claims.subject AND policy.kind=?4 ORDER BY policy.store_index DESC LIMIT 1),
-         CASE WHEN json_type(body,'$.fields') IS NULL THEN 1 ELSE
+     AND (?5 IS NULL OR origin<>?6 OR NOT EXISTS (
+         SELECT 1 FROM claims AS revoked WHERE revoked.subject=claims.subject AND revoked.kind=?3
+         AND revoked.origin=claims.origin AND revoked.actor=claims.actor
+         AND (json_type(revoked.body,'$.fields.principal') IS NULL OR json_extract(revoked.body,'$.fields.principal') IN ('assistant/chatgpt','assistant/mcp'))
+         AND (json_type(revoked.body,'$.fields.profile') IS NULL OR json_extract(revoked.body,'$.fields.profile') IN ('assistant','service'))
+         AND json_extract(revoked.body,'$.fields.issuer') IS json_extract(claims.body,'$.fields.issuer')
+         AND json_extract(revoked.body,'$.fields.grant_id') IS json_extract(claims.body,'$.fields.grant_id')
+         AND COALESCE(json_extract(revoked.body,'$.fields.principal'),'assistant/chatgpt')=COALESCE(json_extract(claims.body,'$.fields.principal'),'assistant/chatgpt')
+         AND COALESCE(json_extract(revoked.body,'$.fields.profile'),'assistant')=COALESCE(json_extract(claims.body,'$.fields.profile'),'assistant')))
+     AND (?5 IS NULL OR EXISTS (
+         SELECT 1 FROM claims AS policy WHERE policy.subject=claims.subject AND policy.kind=?4 AND policy.origin=claims.origin)
+         OR CASE WHEN json_type(body,'$.fields') IS NULL THEN 1 ELSE
              COALESCE(json_type(body,'$.fields.expires_at_unix_ms')='integer'
-                 AND json_extract(body,'$.fields.expires_at_unix_ms')>?5,0) END))";
+                 AND json_extract(body,'$.fields.expires_at_unix_ms')>?5,0) END)";
+
+#[cfg(feature = "test-support")]
+pub const fn admission_query_for_test() -> &'static str { ADMISSION_QUERY }
+
 fn candidate_grants(state: &AppState, principal: &str, expiry_cut: Option<u64>) -> Result<Vec<(ClaimRecord, Profile)>, ApiError> {
     let owner = owning_person(state)?;
     let ids = {
         let connection = state.store.readers.get();
         let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h99f1a302c7b1 owner=fractal_api_core::api::client_v0::external_grants TODO=trace-statement-and-value-representation */ ADMISSION_QUERY).map_err(ApiError::internal)?;
-        query.query_map(rusqlite::params![GRANTED, principal, REVOKED, POLICY, expiry_cut], |row| row.get::<_, String>(0))
+        query.query_map(rusqlite::params![GRANTED, principal, REVOKED, POLICY, expiry_cut, state.store.origin()], |row| row.get::<_, String>(0))
             .map_err(ApiError::internal)?.collect::<Result<Vec<_>, _>>().map_err(ApiError::internal)?
     };
     let mut active = Vec::new();
@@ -96,7 +107,7 @@ fn candidate_grants(state: &AppState, principal: &str, expiry_cut: Option<u64>) 
         let grant = state.store.claim_by_id(&id).map_err(ApiError::internal)?
             .ok_or_else(|| forbidden("external grant is absent"))?;
         if grant.actor.as_deref() != Some(owner)
-            || (expiry_cut.is_some() && latest(state, &grant.subject, REVOKED)?.is_some()) {
+            || (expiry_cut.is_some() && revoked(state, &grant)?) {
             continue;
         }
         let policy = effective(state, &grant)?;
@@ -106,8 +117,7 @@ fn candidate_grants(state: &AppState, principal: &str, expiry_cut: Option<u64>) 
         // Only well-formed owner grants carried by a signed, admitted issuer
         // count; policies must have the same provenance and immutable identity.
         if foreign && (!valid_foreign_grant(state, &grant, &policy)?
-            || !state.store.claim_has_authenticated_member_writer(&grant.id).map_err(ApiError::internal)?
-            || (policy.id != grant.id && !state.store.claim_has_authenticated_member_writer(&policy.id).map_err(ApiError::internal)?)) {
+            || !state.store.claim_has_authenticated_member_writer(&grant.id).map_err(ApiError::internal)?) {
             continue;
         }
         let source = fields(&policy)?;
@@ -299,8 +309,43 @@ pub fn audit<T>(state: &AppState, operation: &str, actor: &str, transport: &str,
     Ok(())
 }
 
+// Ignore unauthoritative overlays, including a newer malformed policy. Walk
+// backwards to the last valid issuer transition rather than dropping the grant.
+fn transition(state: &AppState, granted: &ClaimRecord, kind: &str) -> Result<Option<ClaimRecord>, ApiError> {
+    let mut before = None;
+    loop {
+        let page = state.store.claims_for_subject_kind_at(&granted.subject, kind, before, true, 32)
+            .map_err(ApiError::internal)?;
+        for candidate in page.claims {
+            if candidate.origin != granted.origin || candidate.actor.as_deref() != Some(owning_person(state)?) {
+                continue;
+            }
+            let (Ok(original), Ok(source)) = (fields(granted), fields(&candidate)) else { continue };
+            let consistent = principal(source).ok().zip(principal(original).ok()).is_some_and(|(a, b)| a == b)
+                && Profile::stored(source).ok().zip(Profile::stored(original).ok()).is_some_and(|(a, b)| a == b)
+                && ["grant_id", "issuer"].iter().all(|key| source[*key] == original[*key]);
+            if !consistent || source["issuer"] != owning_person(state)? { continue; }
+            if kind == POLICY && (!valid_foreign_grant(state, granted, &candidate)?
+                || source["expires_at_unix_ms"].as_u64().is_none()) {
+                continue;
+            }
+            if granted.origin != state.store.origin()
+                && !state.store.claim_has_authenticated_member_writer(&candidate.id).map_err(ApiError::internal)? {
+                continue;
+            }
+            return Ok(Some(candidate));
+        }
+        let Some(cursor) = page.next_cursor else { return Ok(None) };
+        before = Some(cursor);
+    }
+}
+
+pub fn revoked(state: &AppState, granted: &ClaimRecord) -> Result<bool, ApiError> {
+    Ok(transition(state, granted, REVOKED)?.is_some())
+}
+
 pub fn effective(state: &AppState, granted: &ClaimRecord) -> Result<ClaimRecord, ApiError> {
-    Ok(latest(state, &granted.subject, POLICY)?.unwrap_or_else(|| granted.clone()))
+    Ok(transition(state, granted, POLICY)?.unwrap_or_else(|| granted.clone()))
 }
 pub fn projection(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiError> {
     let policy = effective(state, granted)?;
@@ -308,7 +353,7 @@ pub fn projection(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiE
     let mut value = json!({"kind":"assistant-grant","id":source["grant_id"],
         "principal":principal(source)?,"sender_class":"external-assistant","issuer":source["issuer"],
         "expires_at":client_timestamp(source["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0)),
-        "revoked":latest(state, &granted.subject, REVOKED)?.is_some()});
+        "revoked":revoked(state, granted)?});
     for name in ["session_actor","device_id","key_id","scopes","policy_revision",
                  "minimal_read_mode","recipient_allowlist","disclosure_consent","consent_evidence"] {
         value[name] = source[name].clone();
@@ -316,6 +361,13 @@ pub fn projection(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiE
     if let Some(trust) = source.get("read_trust") {
         value["read_trust"] = trust.clone();
     }
+    Ok(value)
+}
+
+pub fn projection_with_witness(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiError> {
+    let mut value = projection(state, granted)?;
+    let policy = effective(state, granted)?;
+    let source = fields(&policy)?;
     let now = client_now_ms() as u64;
     value["conflict"] = profile_conflict_at(state, granted, now)?.unwrap_or(Value::Null);
     if value["conflict"].is_null() {
@@ -324,8 +376,7 @@ pub fn projection(state: &AppState, granted: &ClaimRecord) -> Result<Value, ApiE
         for (other, other_profile) in candidate_grants(state, principal(source)?, None)? {
             if profile == other_profile { continue; }
             let policy = effective(state, &other)?;
-            let cause = if latest(state, &other.subject, REVOKED)?.is_some()
-                || latest(state, &granted.subject, REVOKED)?.is_some() { Some("revoked") }
+            let cause = if revoked(state, &other)? || revoked(state, granted)? { Some("revoked") }
                 else if !unexpired(fields(&policy)?, now) || !unexpired(source, now) { Some("expired") } else { None };
             if let Some(cause) = cause {
                 cleared.push(json!({"grants":[witness(granted, profile),witness(&other, other_profile)],"cause":cause}));
@@ -369,7 +420,7 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         || granted.actor.as_deref() != Some(owning_person(state)?) || policy.actor.as_deref() != Some(owning_person(state)?) {
         return Err(forbidden("assistant requests require the authoritative grant issuer"));
     }
-    if latest(state, &granted.subject, REVOKED)?.is_some()
+    if revoked(state, granted)?
         || !unexpired(source, now)
         || source["issuer"] != owning_person(state)?
         || !matches!(source["minimal_read_mode"].as_str(), Some("approval-once" | "caller-bound-allow")) || source["disclosure_consent"] != true {
@@ -453,10 +504,10 @@ mod tests {
     }
 
     #[test]
-    fn admission_sql_filters_only_inactive_effective_policies() {
+    fn admission_sql_keeps_policy_candidates_for_the_authenticated_fold() {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection.execute_batch(
-            "CREATE TABLE claims(id TEXT,subject TEXT,kind TEXT,body TEXT,store_index INTEGER PRIMARY KEY);
+            "CREATE TABLE claims(id TEXT,subject TEXT,kind TEXT,body TEXT,origin TEXT DEFAULT 'local',actor TEXT DEFAULT 'person/owner',store_index INTEGER PRIMARY KEY);
              CREATE INDEX principal_scan ON claims(kind,COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'));
              CREATE INDEX subject_kind ON claims(subject,kind,store_index);"
         ).unwrap();
@@ -474,7 +525,7 @@ mod tests {
             ("renewed", json!({"fields":{"expires_at_unix_ms":99}}),
                 Some(json!({"fields":{"expires_at_unix_ms":101}})), true),
             ("shortened", json!({"fields":{"expires_at_unix_ms":101}}),
-                Some(json!({"fields":{"expires_at_unix_ms":99}})), false),
+                Some(json!({"fields":{"expires_at_unix_ms":99}})), true),
             ("invalid-policy", json!({"fields":{"expires_at_unix_ms":99}}),
                 Some(json!({})), true),
         ];
@@ -489,13 +540,13 @@ mod tests {
             if included { expected.push(id.to_owned()); }
         }
         let mut found = connection.prepare(ADMISSION_QUERY).unwrap()
-            .query_map(rusqlite::params![GRANTED, PRINCIPAL, REVOKED, POLICY, 100_u64],
+            .query_map(rusqlite::params![GRANTED, PRINCIPAL, REVOKED, POLICY, 100_u64, "local"],
                 |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
         found.sort();
         expected.sort();
         assert_eq!(found, expected);
         let unfiltered = connection.prepare(ADMISSION_QUERY).unwrap()
-            .query_map(rusqlite::params![GRANTED, PRINCIPAL, REVOKED, POLICY, Option::<u64>::None],
+            .query_map(rusqlite::params![GRANTED, PRINCIPAL, REVOKED, POLICY, Option::<u64>::None, "local"],
                 |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(unfiltered.len(), 12, "invalid owner configuration must not hide validation errors");
     }
@@ -535,13 +586,13 @@ mod tests {
         assert!(latest(&state, &next, GRANTED).unwrap().is_none());
         state.store.append_claim(&ClaimInput {
             subject: service_subject, kind: REVOKED.into(), actor: Some("person/owner".into()),
-            fields: BTreeMap::new(), evidence: vec![grant.id.clone()],
+            fields: serde_json::from_value(fields(&grant).unwrap().clone()).unwrap(), evidence: vec![grant.id.clone()],
             expected_subject: Some(Some(grant.id.clone())), idempotency_key: None,
         }).unwrap();
         let candidates = {
             let connection = state.store.readers.get();
             connection.prepare(ADMISSION_QUERY).unwrap()
-                .query_map(rusqlite::params![GRANTED, PRINCIPAL, REVOKED, POLICY, client_now_ms() as u64], |row| row.get::<_, String>(0))
+                .query_map(rusqlite::params![GRANTED, PRINCIPAL, REVOKED, POLICY, client_now_ms() as u64, state.store.origin()], |row| row.get::<_, String>(0))
                 .unwrap().collect::<Result<Vec<_>, _>>().unwrap()
         };
         assert_eq!(candidates.len(), 2);
