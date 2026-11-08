@@ -79,7 +79,7 @@ function Surfaces() {
         <EntityHoverCard entity={folderRef} placement="right top"><Button data-surface="folder-row" {...stylex.props(styles.row)}>Web app</Button></EntityHoverCard>
       </section>
       <section aria-label="Workspace" {...stylex.props(styles.panel)}>
-        <div role="tablist" aria-label="Workspace tabs" {...stylex.props(styles.tabs)}>
+        <div {...stylex.props(styles.tabs)}>
           <EntityHoverCard entity={agentRef} placement="bottom start"><Button data-surface="tab" {...stylex.props(styles.tab)}>{agent.title}</Button></EntityHoverCard>
           <EntityHoverCard entity={missionRef} placement="bottom start"><Button data-surface="mission-tab" {...stylex.props(styles.tab)}>{mission.title}</Button></EntityHoverCard>
         </div>
@@ -149,10 +149,14 @@ export const KeyboardFocusOpens: Story = {
     await userEvent.tab({ shift: true })
     await userEvent.tab()
     await expect(trigger).toHaveFocus()
-    await cardFor(agentRef)
+    const card = await cardFor(agentRef)
+    // The open card is the trigger's description; closing it removes the reference.
+    const surface = card.closest<HTMLElement>('[data-hover-card]')!
+    await expect(trigger.getAttribute('aria-describedby')?.split(' ')).toContain(surface.id)
     await userEvent.keyboard('{Escape}')
     await settleClosed()
     await expect(trigger).toHaveFocus()
+    await expect(trigger).not.toHaveAttribute('aria-describedby')
     await userEvent.tab()
     await settleClosed()
   },

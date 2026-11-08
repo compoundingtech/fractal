@@ -73,6 +73,8 @@ export interface HoverCardSurfaceProps {
   readonly offset?: number
   /** Names the card for assistive tech, e.g. "Reported details for Polish the sidebar". */
   readonly label?: string
+  /** The surface's id, for a trigger that names it in `aria-describedby`. */
+  readonly id?: string
   readonly children: React.ReactNode
 }
 
@@ -81,13 +83,13 @@ export interface HoverCardSurfaceProps {
  * the host's `ThemePortal` (mounted before the card opens) so the card paints the host's theme. It is a passive
  * `tooltip` named by `label`: assistive tech reads it as the trigger's supplementary description, never a focus stop.
  */
-export function HoverCardSurface({ triggerRef, isOpen, onOpenChange, placement = 'right top', offset = 8, label, children }: HoverCardSurfaceProps) {
+export function HoverCardSurface({ triggerRef, isOpen, onOpenChange, placement = 'right top', offset = 8, label, id, children }: HoverCardSurfaceProps) {
   const close = React.useCallback(() => onOpenChange?.(false), [onOpenChange])
   const state = React.useMemo<TooltipTriggerState>(() => ({ isOpen, shouldSkipAnimation: false, open: () => onOpenChange?.(true), close }), [isOpen, onOpenChange, close])
   if (!isOpen) return null
   return <TooltipTriggerStateContext.Provider value={state}>
       <Tooltip isOpen triggerRef={triggerRef as React.RefObject<Element>} placement={placement} offset={offset} containerPadding={8} shouldFlip
-        aria-label={label} data-hover-card {...stylex.props(styles.frame)}>
+        id={id} aria-label={label} data-hover-card {...stylex.props(styles.frame)}>
         {children}
       </Tooltip>
     </TooltipTriggerStateContext.Provider>
@@ -112,6 +114,7 @@ export interface HoverCardProps {
 /** Wraps one trigger with the canonical card: pointer rest or keyboard focus opens it, leaving closes it. */
 export function HoverCard({ children, content, placement = 'bottom start', label, isOpen: controlled, onOpenChange, isDisabled = false }: HoverCardProps) {
   const intent = useHoverCardIntent()
+  const surfaceId = React.useId()
   const { isFocusVisible } = useFocusVisible()
   const triggerRef = React.useRef<Element | null>(null)
   const enabled = intent.enabled && !isDisabled
@@ -141,10 +144,19 @@ export function HoverCard({ children, content, placement = 'bottom start', label
     window.addEventListener('scroll', onScroll, true)
     return () => window.removeEventListener('scroll', onScroll, true)
   }, [open, intent.setOpen])
+  // While open, the card describes its trigger, so assistive tech reads it without a focus stop inside the card.
+  const described = body !== null && body !== undefined
+  React.useLayoutEffect(() => {
+    const trigger = scope.current?.firstElementChild
+    if (!described || trigger === null || trigger === undefined) return
+    const previous = trigger.getAttribute('aria-describedby')
+    trigger.setAttribute('aria-describedby', previous === null ? surfaceId : `${previous} ${surfaceId}`)
+    return () => { if (previous === null) trigger.removeAttribute('aria-describedby'); else trigger.setAttribute('aria-describedby', previous) }
+  }, [described, surfaceId])
   // The portal layer mounts with the trigger, so it exists before the card first opens.
   return <ThemePortal>
     <span ref={setScope} data-hover-card-trigger {...handlers} {...stylex.props(styles.scope)}>{children}</span>
-    {body !== null && body !== undefined && <HoverCardSurface triggerRef={triggerRef} isOpen onOpenChange={intent.setOpen} placement={placement} label={label}>{body}</HoverCardSurface>}
+    {described && <HoverCardSurface id={surfaceId} triggerRef={triggerRef} isOpen onOpenChange={intent.setOpen} placement={placement} label={label}>{body}</HoverCardSurface>}
   </ThemePortal>
 }
 

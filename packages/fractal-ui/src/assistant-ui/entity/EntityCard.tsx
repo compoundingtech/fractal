@@ -54,7 +54,8 @@ export function EntityCardText({ icon = 'message', children, ...data }: { readon
 
 /** A labelled group, e.g. Missions. */
 export function EntityCardSection({ label, icon, testId, children }: { readonly label: string; readonly icon: IconName; readonly testId?: string; readonly children: React.ReactNode }) {
-  return <section aria-label={label} data-testid={testId} {...stylex.props(styles.section)}>
+  // A group, not a region landmark: several cards (or one card twice) on a page would repeat the landmark name.
+  return <section role="group" aria-label={label} data-testid={testId} {...stylex.props(styles.section)}>
     <div {...stylex.props(styles.label)}><Icon name={icon} size={12} />{label}</div>
     {children}
   </section>
