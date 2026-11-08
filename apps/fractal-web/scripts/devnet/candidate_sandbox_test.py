@@ -104,6 +104,57 @@ class RunnerTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'direct revision/PID child'):
             sandbox.prepare_removal(self.worktree, root)
 
+    def test_bootstrap_cache_survives_isolated_homes(self):
+        cache = self.state / 'nix-bootstrap-cache'
+        with patch.dict(os.environ, {'XDG_CACHE_HOME': '/agent-cache', 'GH_TOKEN': 'secret'}):
+            for prefix in ('bootstrap-', 'package-'):
+                with tempfile.TemporaryDirectory(prefix=prefix, dir=self.state) as home:
+                    environment = sandbox.bootstrap_env(home, self.state)
+                    self.assertEqual(environment['HOME'], home)
+                    self.assertEqual(environment['XDG_CACHE_HOME'], str(cache))
+                    self.assertNotIn('GH_TOKEN', environment)
+                    self.assertEqual(stat.S_IMODE(cache.stat().st_mode), 0o700)
+                    marker = cache / 'fetcher-metadata'
+                    if prefix == 'bootstrap-':
+                        marker.write_text('persistent')
+                    else:
+                        self.assertEqual(marker.read_text(), 'persistent')
+                self.assertFalse(Path(home).exists())
+        self.assertNotIn('XDG_CACHE_HOME', sandbox.bootstrap_env('/nonexistent'))
+
+    def test_tools_build_uses_persistent_cache(self):
+        self.tools.stop()
+        with patch.dict(os.environ, {
+                'FRACTAL_INTEGRATOR_SANDBOX': 'bwrap',
+                'FRACTAL_INTEGRATOR_SANDBOX_STATE_ROOT': str(self.state),
+                'FRACTAL_INTEGRATOR_PNPM_STORE': str(self.store)}), \
+                patch.object(sandbox.shutil, 'which', return_value='/nix/store/test-nix/bin/nix'), \
+                patch.object(Path, 'is_file', return_value=True), \
+                patch.object(sandbox.subprocess, 'run',
+                             return_value=subprocess.CompletedProcess([], 0, '/nix/store/test-tools\n')) as execute:
+            sandbox.tools.__wrapped__()
+        environment = execute.call_args.kwargs['env']
+        self.assertEqual(environment['XDG_CACHE_HOME'], str(self.state / 'nix-bootstrap-cache'))
+        self.assertEqual(Path(environment['HOME']).parent, self.state)
+        self.assertFalse(Path(environment['HOME']).exists())
+
+    def test_bootstrap_cache_is_not_exposed_by_candidate_mounts(self):
+        cache = Path(sandbox.bootstrap_env('/isolated-home', self.state)['XDG_CACHE_HOME'])
+        (self.worktree / '.git').mkdir()
+        with patch.object(sandbox.subprocess, 'run', side_effect=[
+                subprocess.CompletedProcess([], 0, ''),
+                subprocess.CompletedProcess([], 1)]) as execute:
+            sandbox.run(['true'], worktree=self.worktree, shell='web',
+                        output=self.root / 'builds/revision', readonly_dependencies=True)
+        argv = execute.call_args.args[0]
+        self.assertNotIn('XDG_CACHE_HOME', argv)
+        self.assertNotIn(str(cache), argv)
+        for index, argument in enumerate(argv):
+            if argument in ('--bind', '--ro-bind'):
+                source = Path(argv[index + 1]).resolve()
+                self.assertFalse(cache.is_relative_to(source),
+                                 f'bootstrap cache exposed through mount {source}')
+
     def test_default_networkless_and_environment_allowlist(self):
         with patch.dict(os.environ, {'GH_CONFIG_DIR': '/secret', 'ST_SECRET': 'bad', 'SCG_SECRET': 'bad'}), \
                 patch.object(sandbox.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0)) as execute:
@@ -188,6 +239,10 @@ class RunnerTest(unittest.TestCase):
         pin = sandbox.json.loads((sandbox.TRUSTED_CHECKOUT / 'flake.lock').read_text())['nodes']['effect-utils']['locked']
         self.assertEqual(execute.call_args.args[0][-1],
                          f"github:overengineeringstudio/effect-utils/{pin['rev']}#megarepo")
+        environment = execute.call_args.kwargs['env']
+        self.assertEqual(environment['XDG_CACHE_HOME'], str(self.state / 'nix-bootstrap-cache'))
+        self.assertEqual(Path(environment['HOME']).parent, self.state)
+        self.assertFalse(Path(environment['HOME']).exists())
 
     def test_output_is_promoted_only_after_success(self):
         output = self.root / 'production/builds/revision'

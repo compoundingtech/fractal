@@ -107,11 +107,17 @@ def directory(name):
     return path.resolve()
 
 
-def bootstrap_env(home):
+def bootstrap_env(home, state=None):
     # Nix evaluates outside bwrap; never give it agent credentials or configuration.
-    return {'PATH': str(Path(shutil.which('nix') or '/missing-nix').resolve().parent),
-            'HOME': str(home), 'USER': 'builder', 'LANG': 'C.UTF-8',
-            'NIX_CONFIG': 'experimental-features = nix-command flakes\n'}
+    environment = {'PATH': str(Path(shutil.which('nix') or '/missing-nix').resolve().parent),
+                   'HOME': str(home), 'USER': 'builder', 'LANG': 'C.UTF-8',
+                   'NIX_CONFIG': 'experimental-features = nix-command flakes\n'}
+    if state is not None:
+        # Reuse fetcher metadata across temporary HOMEs, outside candidate mounts.
+        cache = Path(state) / 'nix-bootstrap-cache'
+        cache.mkdir(mode=0o700, exist_ok=True)
+        environment['XDG_CACHE_HOME'] = str(cache)
+    return environment
 
 
 def capacity_precheck():
@@ -147,7 +153,7 @@ def tools():
         result = subprocess.run([nix, 'build', *NIX_OPTIONS, '--no-link', '--print-out-paths',
                                  base + '#bubblewrap', base + '#bash', base + '#coreutils',
                                  base + '#gitMinimal', base + '#python3'],
-                                env=bootstrap_env(home), check=True, capture_output=True, text=True)
+                                env=bootstrap_env(home, state), check=True, capture_output=True, text=True)
     paths = result.stdout.splitlines()
     binaries = {}
     for name in ('bwrap', 'bash', 'env', 'git', 'python3'):
@@ -172,7 +178,7 @@ def realize_megarepo():
     with tempfile.TemporaryDirectory(prefix='package-', dir=state) as home:
         result = subprocess.run([shutil.which('nix'), 'build', *NIX_OPTIONS, '--no-link',
                                  '--print-out-paths', '--no-write-lock-file', installable],
-                                env=bootstrap_env(home), check=True, capture_output=True, text=True)
+                                env=bootstrap_env(home, state), check=True, capture_output=True, text=True)
     paths = result.stdout.splitlines()
     if len(paths) != 1 or not paths[0].startswith('/nix/store/'):
         raise RuntimeError('candidate package realization did not return one store path')
