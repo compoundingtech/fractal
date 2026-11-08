@@ -560,6 +560,8 @@ pub fn run(context: Context) -> Result<()> {
     ui.drafts_path = super::drafts_store::path();
     let (_run, earlier) = super::lastrun::begin(&crate::version::short(crate::version::now()));
     ui.load_drafts();
+    ui.reads = super::read_store::ReadPositions::load(super::read_store::path());
+    ui.refresh_tab_statuses();
     ui.quality = super::slo::Draw::new(process_started);
     if earlier.is_some() {
         super::slo::METRICS.add("drafts_restored_unclean", ui.drafts_saved.len() as u64);
@@ -2056,6 +2058,7 @@ pub fn run(context: Context) -> Result<()> {
         for at in landed_answers.drain(..) {
             super::slo::METRICS.observe("alert_landed_ms", at.elapsed());
         }
+        ui.read_presented_conversations();
         let visible = ui.visible_messages();
         let incoming: HashSet<_> = timelines
             .values()
