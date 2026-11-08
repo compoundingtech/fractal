@@ -387,7 +387,7 @@ mod tests {
         for kind in ["custom.client.pairing-begun", "custom.client.pairing-completed",
             "custom.client.terminal-attached"] {
             let input = ClaimInput {
-                subject:format!("custom/client/record-{kind}"), kind:kind.into(),
+                subject:format!("custom/client/record-{}", kind.rsplit('.').next().unwrap()), kind:kind.into(),
                 actor:Some("person/example".into()),
                 fields:serde_json::from_value(json!({
                     "person_id":"person/example","pairing_operation_version":1,

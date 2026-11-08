@@ -5,7 +5,7 @@ use super::*;
 const GRANT: &str = "custom/client/pairing-order";
 const PERSON: &str = "person/avery";
 
-fn replicate(from: &AppState, to: &AppState) {
+pub(super) fn replicate(from: &AppState, to: &AppState) {
     if from.store.member_key.read().unwrap().is_none() {
         let anchor = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
         let peer = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
@@ -19,6 +19,7 @@ fn replicate(from: &AppState, to: &AppState) {
         from.store.append_claim(&ClaimInput {
             subject:format!("host/{}", to.store.origin()),kind:"fleet.member-admitted".into(),actor:None,
             fields:serde_json::from_value(json!({
+                "fleet_id":"pairing-fleet",
                 "member_key":peer.public(),"via":"member","sponsor":from.store.origin(),
                 "writer_floor":0,"mode":"listening",
             })).unwrap(),
