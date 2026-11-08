@@ -24,6 +24,7 @@ fn append(node: &Node, id: &str, kind: &str, fields: Value, previous: Option<&st
         fractal_daemon::fleet::join::standalone_node_key(&node.state_dir()).unwrap(),
     )).unwrap();
     store.use_key_directory(&fractal_daemon::fleet::join::key_directory(&node.state_dir())).unwrap();
+    store.ensure_principal_key(PERSON).unwrap();
     let claim = store.append_claim(&ClaimInput {
         subject: format!("custom/client/assistant-v1-{id}"),
         kind: kind.into(), actor: Some(PERSON.into()),
