@@ -74,29 +74,41 @@ fn digest_only(source: &Value) -> Result<(), ApiError> {
 // candidate must reach the authenticated fold: SQL cannot verify its signature.
 // Foreign revocations likewise reach Rust. Local revocations can be prefiltered
 // only when their origin, owner and immutable grant identity match.
-// Materialize issuer-policy subjects once per principal, not once per expired
-// grant. CASE gates revocation probes behind expiry eligibility. Pin the
-// subject/kind index: the principal expression index is a quadratic revoke plan.
+// UNION builds only candidate IDs: indexed expiry ranges prune expired base
+// bodies, and the issuer-policy branch preserves renewals for verification.
+// Pin revocation's subject/kind index, never its principal-wide expression index.
 const ADMISSION_QUERY: &str =
-    "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
-     AND (?5 IS NULL OR CASE WHEN
-         (CASE WHEN json_type(body,'$.fields') IS NULL THEN 1 ELSE
-             COALESCE(json_type(body,'$.fields.expires_at_unix_ms')='integer'
-                 AND json_extract(body,'$.fields.expires_at_unix_ms')>?5,0) END)
-         OR (origin,subject) IN (
-             SELECT policy.origin,policy.subject FROM claims AS policy
-             WHERE policy.kind=?4 AND COALESCE(json_extract(policy.body,'$.fields.principal'),'assistant/chatgpt')=?2)
-         THEN origin<>?6 OR NOT EXISTS (
+    "WITH eligible(id) AS (
+         SELECT id FROM claims INDEXED BY claims_assistant_v1_principal_index
+         WHERE ?5 IS NULL AND kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
+         UNION
+         SELECT id FROM claims
+         WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
+             AND json_extract(body,'$.fields.expires_at_unix_ms')>?5
+             AND json_type(body,'$.fields.expires_at_unix_ms')='integer'
+         UNION
+         SELECT id FROM claims
+         WHERE ?5 IS NOT NULL AND kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
+             AND json_extract(body,'$.fields.expires_at_unix_ms') IS NULL AND json_type(body,'$.fields') IS NULL
+         UNION
+         SELECT granted.id FROM claims AS policy INDEXED BY claims_assistant_v1_principal_index
+         JOIN claims AS granted INDEXED BY claims_subject_kind_accepted_index
+             ON granted.subject=policy.subject AND granted.kind=?1
+         WHERE ?5 IS NOT NULL AND policy.kind=?4 AND policy.origin=granted.origin
+             AND COALESCE(json_extract(policy.body,'$.fields.principal'),'assistant/chatgpt')=?2
+             AND COALESCE(json_extract(granted.body,'$.fields.principal'),'assistant/chatgpt')=?2)
+     SELECT claims.id FROM eligible JOIN claims ON claims.id=eligible.id
+     WHERE ?5 IS NULL OR claims.origin<>?6 OR NOT EXISTS (
          SELECT 1 FROM claims AS revoked INDEXED BY claims_subject_kind_accepted_index
          WHERE revoked.subject=claims.subject AND revoked.kind=?3
          AND revoked.origin=claims.origin AND revoked.actor=claims.actor
+         AND json_extract(revoked.body,'$.fields.issuer')=revoked.actor
          AND (json_type(revoked.body,'$.fields.principal') IS NULL OR json_extract(revoked.body,'$.fields.principal') IN ('assistant/chatgpt','assistant/mcp'))
          AND (json_type(revoked.body,'$.fields.profile') IS NULL OR json_extract(revoked.body,'$.fields.profile') IN ('assistant','service'))
          AND json_extract(revoked.body,'$.fields.issuer') IS json_extract(claims.body,'$.fields.issuer')
          AND json_extract(revoked.body,'$.fields.grant_id') IS json_extract(claims.body,'$.fields.grant_id')
          AND COALESCE(json_extract(revoked.body,'$.fields.principal'),'assistant/chatgpt')=COALESCE(json_extract(claims.body,'$.fields.principal'),'assistant/chatgpt')
-         AND COALESCE(json_extract(revoked.body,'$.fields.profile'),'assistant')=COALESCE(json_extract(claims.body,'$.fields.profile'),'assistant'))
-         ELSE 0 END)";
+         AND COALESCE(json_extract(revoked.body,'$.fields.profile'),'assistant')=COALESCE(json_extract(claims.body,'$.fields.profile'),'assistant'))";
 
 #[cfg(feature = "test-support")]
 pub const fn admission_query_for_test() -> &'static str { ADMISSION_QUERY }
@@ -515,7 +527,8 @@ mod tests {
         let connection = rusqlite::Connection::open_in_memory().unwrap();
         connection.execute_batch(
             "CREATE TABLE claims(id TEXT,subject TEXT,kind TEXT,body TEXT,origin TEXT DEFAULT 'local',actor TEXT DEFAULT 'person/owner',store_index INTEGER PRIMARY KEY);
-             CREATE INDEX principal_scan ON claims(kind,COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'));
+             CREATE INDEX claims_assistant_v1_principal_index ON claims(kind,COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'));
+             CREATE INDEX claims_assistant_v1_principal_expiry_index ON claims(kind,COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'),json_extract(body,'$.fields.expires_at_unix_ms'));
              CREATE INDEX claims_subject_kind_accepted_index ON claims(subject,kind,store_index);"
         ).unwrap();
         let fixtures = [

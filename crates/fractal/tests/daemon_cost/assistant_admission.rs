@@ -31,8 +31,8 @@ use tokio::sync::Barrier;
 const OWNER: &str = "person/bench-operator";
 const NODE: &str = "benchmark-member";
 const GRANTED: &str = "custom.client.assistant.v1.granted";
-const INDEX: &str = "claims_assistant_v1_principal_index";
-const CREATE_INDEX: &str = "CREATE INDEX claims_assistant_v1_principal_index ON claims(kind,COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'))";
+const INDEX: &str = "claims_assistant_v1_principal_expiry_index";
+const CREATE_INDEX: &str = "CREATE INDEX claims_assistant_v1_principal_expiry_index ON claims(kind,COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'),json_extract(body,'$.fields.expires_at_unix_ms'))";
 const A_QUERY: &str = "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2";
 const INDEXED_QUERY: &str = api::client_v0::external_grants::admission_query_for_test();
 const PATH: &str = "/v1/client/assistant/summary";
@@ -253,7 +253,7 @@ async fn authenticated_get_during_pairing() {
     let index_exists: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)", [INDEX], |r| r.get(0)).unwrap();
     assert_eq!(index_exists, indexed, "build baseline on 98e550cb; indexed on PR3-B");
     let (before, after, build_ms) = if indexed {
-        connection.execute_batch("DROP INDEX claims_assistant_v1_principal_index").unwrap();
+        connection.execute_batch("DROP INDEX claims_assistant_v1_principal_expiry_index").unwrap();
         let before = explain(&connection, query);
         let started = Instant::now();
         connection.execute_batch(CREATE_INDEX).unwrap();
@@ -402,7 +402,7 @@ fn synthetic_large_store_index_build() {
         [INDEX], |row| row.get(0),
     ).unwrap();
     assert!(installed, "run the large-store index probe on the indexed branch");
-    connection.execute_batch("DROP INDEX claims_assistant_v1_principal_index").unwrap();
+    connection.execute_batch("DROP INDEX claims_assistant_v1_principal_expiry_index").unwrap();
     // Copy every native required column rather than depending on a second claims schema.
     // The native autoincrement store_index, claim ID and subject must remain unique.
     let columns = {

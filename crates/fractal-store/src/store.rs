@@ -780,7 +780,7 @@ pub struct AgentWorkQueue {
 
 /// Fractal's projection tables, and the indexes its folds read the claim log through. The
 /// graph creates its own tables first; see `smallclaims::store::SCHEMA`.
-const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-hb9696ca837f7 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
+const SCHEMA: &str = /* sqlite-large-value: allow-for-now lv-h7e7937d8fad1 owner=fractal_store::store TODO=chunk-or-reference-variable-columns */ r#"
 -- An unmanaged member's staging check needs tagged claims, not its runtime history.
 CREATE INDEX IF NOT EXISTS claims_owned_set_subject_index ON claims(subject)
 WHERE json_extract(body,'$.owned_set') IS NOT NULL;
@@ -933,6 +933,10 @@ WHERE kind='custom.client.assistant.v1.granted';
 -- Match parameterized admission by kind and effective principal, including legacy ChatGPT grants.
 CREATE INDEX IF NOT EXISTS claims_assistant_v1_principal_index
 ON claims(kind, COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'));
+-- Seek live base grants without loading expired JSON bodies on each authentication.
+CREATE INDEX IF NOT EXISTS claims_assistant_v1_principal_expiry_index
+ON claims(kind, COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'),
+    json_extract(body,'$.fields.expires_at_unix_ms'));
 -- A runtime incarnation's claims about a subject by acceptance time, so when a session began
 -- and last changed are two seeks instead of a read of every claim the subject has. The
 -- expression is INCARNATION_OF_CLAIM, which queries repeat so the planner uses this index.

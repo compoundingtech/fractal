@@ -390,6 +390,7 @@ fn admission_scan_uses_the_real_principal_index() {
         "principal admission must use its production index: {plan:?}");
     assert!(plan.iter().any(|step| step.contains("revoked USING INDEX claims_subject_kind_accepted_index")),
         "revocation must seek by subject rather than scan the principal: {plan:?}");
-    assert!(plan.iter().any(|step| step.contains("LIST SUBQUERY")),
-        "issuer-policy candidates must be materialized once: {plan:?}");
+    assert!(plan.iter().any(|step| step.contains("claims_assistant_v1_principal_expiry_index")
+        && step.contains("<expr>>?")),
+        "expired grant bodies must be pruned by an index range: {plan:?}");
 }

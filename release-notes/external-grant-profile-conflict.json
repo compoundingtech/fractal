@@ -7,7 +7,7 @@
   },
   "schema": {
     "status": "changed",
-    "detail": "Adds the typed client error grant-profile-conflict (GrantProfileConflict in Rust), returned as HTTP 409, plus inspect-only ?witness=1 opt-in conflict and cleared_conflicts witnesses with typed assistant/service profiles and revoked/expired causes. Default grant responses retain their previous shape for old strict clients. No grant claim shape or storage migration changes."
+    "detail": "Adds the typed client error grant-profile-conflict (GrantProfileConflict in Rust), returned as HTTP 409, plus inspect-only ?witness=1 opt-in conflict and cleared_conflicts witnesses with typed assistant/service profiles and revoked/expired causes. Default grant responses retain their previous shape for old strict clients. Adds a principal/expiry expression index at store open without rewriting grant claims."
   },
   "rules": {
     "status": "changed",
@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "changed",
-    "detail": "No migration downtime is required. Affected people cannot authenticate with any external grant while a profile conflict remains visible; a partition can extend this interruption until revocations replicate. Unaffected people retain existing authentication behavior."
+    "detail": "No migration downtime is required, but the first store open builds the additive principal/expiry index over existing claims; its duration depends on retained history. Affected people cannot authenticate with any external grant while a profile conflict remains visible; a partition can extend this interruption until revocations replicate. Unaffected people retain existing authentication behavior."
   },
   "manual": {
     "status": "changed",

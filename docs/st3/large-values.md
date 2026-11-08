@@ -478,11 +478,11 @@ Inline storage here proves neither encoded size nor execution-cost bounds.
 
 ## Assistant principal admission index review
 
-`fractal_store::store` owns schema site `lv-hb9696ca837f7`, replacing
-`lv-h22c8c670811c`. The added principal admission index retains claim-kind TEXT
+`fractal_store::store` owns schema site `lv-h7e7937d8fad1`, replacing
+`lv-hb9696ca837f7`. The principal admission indexes retain claim-kind TEXT
 and the effective principal JSON field inline; absent principals use the fixed
-`assistant/chatgpt` key. The composite seek changes neither claim bodies nor
-admission semantics. These keys remain variable-size, and SQLite maintains them
+`assistant/chatgpt` key. The added expiry suffix supports live-grant range seeks.
+These indexes change neither claim bodies nor admission semantics. Keys remain variable-size, and SQLite maintains them
 on insertion and deletion; indexed lookup is not a byte-size or startup-cost
 proof. The producer maintainer retains `chunk-or-reference-variable-columns`
 responsibility while preserving effective-principal matching and claim authority.

@@ -836,18 +836,42 @@ mod schema_install_tests {
         const REVOKED: &str = "custom.client.assistant.v1.revoked";
         const POLICY: &str = "custom.client.assistant.v1.policy";
         const INDEX: &str = "claims_assistant_v1_principal_index";
+        const EXPIRY_INDEX: &str = "claims_assistant_v1_principal_expiry_index";
         const SELECT: &str = "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2";
+        // Keep this differential reference identical to the production constant;
+        // the API-core real-Store plan test covers that constant directly.
         const ACTIVE: &str =
-            "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
-     AND (?5 IS NULL OR NOT EXISTS (SELECT 1 FROM claims AS revoked WHERE revoked.subject=claims.subject AND revoked.kind=?3))
-     AND (?5 IS NULL OR COALESCE(
-         (SELECT CASE WHEN json_type(policy.body,'$.fields') IS NULL THEN 1 ELSE
-             COALESCE(json_type(policy.body,'$.fields.expires_at_unix_ms')='integer'
-                 AND json_extract(policy.body,'$.fields.expires_at_unix_ms')>?5,0) END
-          FROM claims AS policy WHERE policy.subject=claims.subject AND policy.kind=?4 ORDER BY policy.store_index DESC LIMIT 1),
-         CASE WHEN json_type(body,'$.fields') IS NULL THEN 1 ELSE
-             COALESCE(json_type(body,'$.fields.expires_at_unix_ms')='integer'
-                 AND json_extract(body,'$.fields.expires_at_unix_ms')>?5,0) END))";
+    "WITH eligible(id) AS (
+         SELECT id FROM claims INDEXED BY claims_assistant_v1_principal_index
+         WHERE ?5 IS NULL AND kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
+         UNION
+         SELECT id FROM claims
+         WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
+             AND json_extract(body,'$.fields.expires_at_unix_ms')>?5
+             AND json_type(body,'$.fields.expires_at_unix_ms')='integer'
+         UNION
+         SELECT id FROM claims
+         WHERE ?5 IS NOT NULL AND kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
+             AND json_extract(body,'$.fields.expires_at_unix_ms') IS NULL AND json_type(body,'$.fields') IS NULL
+         UNION
+         SELECT granted.id FROM claims AS policy INDEXED BY claims_assistant_v1_principal_index
+         JOIN claims AS granted INDEXED BY claims_subject_kind_accepted_index
+             ON granted.subject=policy.subject AND granted.kind=?1
+         WHERE ?5 IS NOT NULL AND policy.kind=?4 AND policy.origin=granted.origin
+             AND COALESCE(json_extract(policy.body,'$.fields.principal'),'assistant/chatgpt')=?2
+             AND COALESCE(json_extract(granted.body,'$.fields.principal'),'assistant/chatgpt')=?2)
+     SELECT claims.id FROM eligible JOIN claims ON claims.id=eligible.id
+     WHERE ?5 IS NULL OR claims.origin<>?6 OR NOT EXISTS (
+         SELECT 1 FROM claims AS revoked INDEXED BY claims_subject_kind_accepted_index
+         WHERE revoked.subject=claims.subject AND revoked.kind=?3
+         AND revoked.origin=claims.origin AND revoked.actor=claims.actor
+         AND json_extract(revoked.body,'$.fields.issuer')=revoked.actor
+         AND (json_type(revoked.body,'$.fields.principal') IS NULL OR json_extract(revoked.body,'$.fields.principal') IN ('assistant/chatgpt','assistant/mcp'))
+         AND (json_type(revoked.body,'$.fields.profile') IS NULL OR json_extract(revoked.body,'$.fields.profile') IN ('assistant','service'))
+         AND json_extract(revoked.body,'$.fields.issuer') IS json_extract(claims.body,'$.fields.issuer')
+         AND json_extract(revoked.body,'$.fields.grant_id') IS json_extract(claims.body,'$.fields.grant_id')
+         AND COALESCE(json_extract(revoked.body,'$.fields.principal'),'assistant/chatgpt')=COALESCE(json_extract(claims.body,'$.fields.principal'),'assistant/chatgpt')
+         AND COALESCE(json_extract(revoked.body,'$.fields.profile'),'assistant')=COALESCE(json_extract(claims.body,'$.fields.profile'),'assistant'))";
 
         fn snapshot(connection: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
             connection
@@ -863,7 +887,7 @@ mod schema_install_tests {
 
         fn plan(connection: &Connection, sql: &str, active: bool) -> Vec<String> {
             let parameters: Vec<&dyn rusqlite::ToSql> = if active {
-                vec![&GRANTED, &"assistant/chatgpt", &REVOKED, &POLICY, &100_u64]
+                vec![&GRANTED, &"assistant/chatgpt", &REVOKED, &POLICY, &100_u64, &"node"]
             } else {
                 vec![&GRANTED, &"assistant/chatgpt"]
             };
@@ -883,28 +907,28 @@ mod schema_install_tests {
             let connection = Connection::open(&path).unwrap();
             connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
             install_initial_schema(&connection, true).unwrap();
-            connection.execute_batch("DROP INDEX claims_assistant_v1_principal_index;").unwrap();
+            connection.execute_batch("DROP INDEX claims_assistant_v1_principal_index; DROP INDEX claims_assistant_v1_principal_expiry_index;").unwrap();
             connection.pragma_update(None, "user_version", version).unwrap();
             connection.execute(
                 "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES('batch','node',1,'hash','1')",
                 [],
             ).unwrap();
             for (id, subject, kind, body) in [
-                ("legacy", "custom/client/legacy", GRANTED, r#"{"fields":{"expires_at_unix_ms":200}}"#),
-                ("chatgpt", "custom/client/chatgpt", GRANTED, r#"{"fields":{"principal":"assistant/chatgpt","expires_at_unix_ms":50}}"#),
-                ("mcp", "custom/client/mcp", GRANTED, r#"{"fields":{"principal":"assistant/mcp","expires_at_unix_ms":200}}"#),
-                ("policy", "custom/client/chatgpt", POLICY, r#"{"fields":{"expires_at_unix_ms":200}}"#),
-                ("revoked", "custom/client/legacy", REVOKED, r#"{"fields":{}}"#),
+                ("legacy", "custom/client/legacy", GRANTED, r#"{"fields":{"issuer":"person/owner","expires_at_unix_ms":200}}"#),
+                ("chatgpt", "custom/client/chatgpt", GRANTED, r#"{"fields":{"issuer":"person/owner","principal":"assistant/chatgpt","expires_at_unix_ms":50}}"#),
+                ("mcp", "custom/client/mcp", GRANTED, r#"{"fields":{"issuer":"person/owner","principal":"assistant/mcp","expires_at_unix_ms":200}}"#),
+                ("policy", "custom/client/chatgpt", POLICY, r#"{"fields":{"issuer":"person/owner","expires_at_unix_ms":200}}"#),
+                ("revoked", "custom/client/legacy", REVOKED, r#"{"fields":{"issuer":"person/owner"}}"#),
                 ("unrelated", "custom/test/unrelated", "custom.test.recorded", r#"{"fields":{}}"#),
             ] {
                 connection.execute(
-                    "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms) VALUES(?1,'batch',?2,?3,'node',?4,'[]','1')",
+                    "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms) VALUES(?1,'batch',?2,?3,'node','person/owner',?4,'[]','1')",
                     params![id, subject, kind, body],
                 ).unwrap();
             }
             let before = snapshot(&connection);
-            let plans_before = [plan(&connection, SELECT, false), plan(&connection, ACTIVE, true)];
-            assert!(plans_before.iter().flatten().all(|detail| !detail.contains(INDEX)));
+            let plans_before = [plan(&connection, SELECT, false)];
+            assert!(plans_before.iter().flatten().all(|detail| !detail.contains(INDEX) && !detail.contains(EXPIRY_INDEX)));
             drop(connection);
 
             let connection = Connection::open(&path).unwrap();
@@ -915,7 +939,7 @@ mod schema_install_tests {
                 connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(),
                 version,
             );
-            for (sql, active, previous) in [(SELECT, false, &plans_before[0]), (ACTIVE, true, &plans_before[1])] {
+            for (sql, active, previous) in [(SELECT, false, &plans_before[0]), (ACTIVE, true, &plans_before[0])] {
                 let current = plan(&connection, sql, active);
                 eprintln!("assistant admission version={version} active={active} before={previous:?} after={current:?}");
                 assert!(
@@ -924,6 +948,8 @@ mod schema_install_tests {
                     "version {version}: before={previous:?}; after={current:?}",
                 );
             }
+            assert!(plan(&connection, ACTIVE, true).iter().any(|step|
+                step.contains(EXPIRY_INDEX) && step.contains("<expr>>?")));
             for (principal, mut expected) in [
                 ("assistant/chatgpt", vec!["chatgpt".to_owned(), "legacy".to_owned()]),
                 ("assistant/mcp", vec!["mcp".to_owned()]),
@@ -936,11 +962,11 @@ mod schema_install_tests {
                 assert_eq!(found, expected);
             }
             let active = connection.prepare(ACTIVE).unwrap()
-                .query_map(params![GRANTED, "assistant/chatgpt", REVOKED, POLICY, 100_u64], |row| row.get::<_, String>(0))
+                .query_map(params![GRANTED, "assistant/chatgpt", REVOKED, POLICY, 100_u64, "node"], |row| row.get::<_, String>(0))
                 .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
             assert_eq!(active, vec!["chatgpt"]);
             let unfiltered = connection.prepare(ACTIVE).unwrap()
-                .query_map(params![GRANTED, "assistant/chatgpt", REVOKED, POLICY, Option::<u64>::None], |row| row.get::<_, String>(0))
+                .query_map(params![GRANTED, "assistant/chatgpt", REVOKED, POLICY, Option::<u64>::None, "node"], |row| row.get::<_, String>(0))
                 .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
             assert_eq!(unfiltered.len(), 2, "no cutoff preserves unfiltered validation candidates");
             let cookie: u32 = connection.pragma_query_value(None, "schema_version", |row| row.get(0)).unwrap();
