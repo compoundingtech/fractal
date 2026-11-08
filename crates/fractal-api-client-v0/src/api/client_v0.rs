@@ -8183,10 +8183,9 @@ async fn dispatch_action(
         }
         action @ ("work.done" | "work.cancel-ask") => {
             let target = parameter_string(p, "target_id")?;
-            browser_pairing::authorize_answer(state, session, &target)?;
             let result = state
                 .store
-                .finish_person_step_authorized(
+                .finish_person_step_kind(
                     &PersonStepResponse {
                         delegation: None,
                         subject: target,
@@ -8220,6 +8219,8 @@ async fn dispatch_action(
                     },
                     action == "work.cancel-ask",
                     session.assistant_write.as_ref(),
+                    false,
+                    session.pairing_grant.as_deref().filter(|_| !session.local_peer).map(|grant| (grant, session.actor.as_str())),
                 )
                 .map_err(|error| {
                     if error.code == "forbidden" {

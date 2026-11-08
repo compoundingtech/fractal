@@ -30,9 +30,12 @@ the login must match the identity admitted by the tailnet for the pairing reques
 The publisher creates a five-minute browser request with a random request-key
 digest. The owning person receives an ordinary decision ask showing the device,
 login, request ID, and display code, with **Approve** and **Deny** answers in the
-TUI and native inbox. Answering requires an existing owner device with
-`control.pairing`; the trusted local-owner TUI already has this scope.
-An agent, assistant, attention-only device, or browser grant cannot approve it.
+TUI and native inbox. Approval requires a paired device with `control.pairing`,
+checked at the completion boundary. The existing paired native inbox can answer
+the ask. Local-owner Unix sessions and the embedded local browser cannot approve;
+neither can an agent, assistant, attention-only device, or browser grant.
+The person must compare the display code with the browser they are using:
+device labels and login text are requester-supplied metadata, not identity proof.
 
 Approval permits one redemption into a 30-day device grant with
 `read.projections`, `read.declarations`, `read.glasses`, `read.arrangements`,

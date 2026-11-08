@@ -1,12 +1,24 @@
 use super::browser_pairing::*;
 use super::*;
 
+fn paired_device(state: &AppState, scopes: &[&str], name: &str) -> ClientSession {
+    let actor = format!("person/operator/session/{name}");
+    let paired = state.store.append_claim(&ClaimInput {
+        subject: format!("custom/client/pairing-{name}"), kind: "custom.client.pairing-completed".into(),
+        actor: Some("person/operator".into()), fields: serde_json::from_value(json!({
+            "person_id":"person/operator","session_actor":actor,"device_id":format!("device/{name}"),
+            "credential_hash":credential_digest(name),"expires_at_unix_ms":client_now_ms()+30*24*60*60*1000u128,
+            "scopes":scopes,"delegated_scopes":scopes,"delegated_by":"person/operator"
+        })).unwrap(), evidence:vec![], expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    paired_client_session(state,&paired,"fabric-loopback",false).unwrap()
+}
 fn fixture() -> (tempfile::TempDir, AppState, ClientSession) {
     let root = tempfile::tempdir().unwrap();
     let mut state = super::tests::test_state_named(root.path(), "browser-issuer");
     state.owning_person = Some("person/operator".into());
     state.browser_pairing_login = Some("owner@example.test".into());
-    let session = ClientSession::local(Some("person/operator")).unwrap();
+    let session = paired_device(&state, ALL_SCOPES, "owner-phone");
     (root, state, session)
 }
 async fn start(state: &AppState, session: &ClientSession, key: &str) -> Value {
@@ -20,12 +32,12 @@ fn begun(state: &AppState, started: &Value) -> ClaimRecord {
 fn answer(state: &AppState, session: &ClientSession, started: &Value, choice: &str) -> Result<(), ApiError> {
     let request = begun(state, started);
     let target = request.body["fields"]["browser_ask"].as_str().unwrap();
-    authorize_answer(state, session, target)?;
     let ask = state.store.claims_for_subject_kind_at(target, "work.person-asked", None, true, 1).unwrap().claims.remove(0);
-    state.store.finish_person_step(&serde_json::from_value(json!({
+    state.store.finish_person_step_kind(&serde_json::from_value(json!({
         "subject":target,"actor":session.authority_actor,"summary":choice,"evidence":[],"episode":ask.id,
         "idempotency_key":format!("answer:{choice}"),"answer":{"id":choice}
-    })).unwrap(), false).map_err(ApiError::bad)?;
+    })).unwrap(), false, session.assistant_write.as_ref(), false,
+        session.pairing_grant.as_deref().filter(|_|!session.local_peer).map(|grant|(grant,session.actor.as_str()))).map_err(ApiError::bad)?;
     Ok(())
 }
 async fn poll(state: &AppState, session: &ClientSession, started: &Value, key: &str) -> Result<Json<Value>, ApiError> {
@@ -93,11 +105,12 @@ async fn browser_pairing_pending_deny_and_exact_single_use_grant_revocation() {
 async fn browser_pairing_refuses_insufficient_devices_agents_and_local_harnesses() {
     let (_root,state,owner) = fixture();
     let started = start(&state,&owner,&"a".repeat(64)).await;
-    for scopes in [vec!["read.projections","control.attention"], SCOPES.to_vec()] {
-        let mut limited = owner.clone();
-        limited.scopes = scopes.into_iter().map(str::to_owned).collect();
+    for (name,scopes) in [("attention",vec!["read.projections","control.attention"]),("browser",SCOPES.to_vec())] {
+        let limited = paired_device(&state,&scopes,name);
         assert!(answer(&state,&limited,&started,"approve").is_err());
     }
+    let local = ClientSession::local(Some("person/operator")).unwrap();
+    assert!(answer(&state,&local,&started,"approve").is_err());
     let mut agent = owner.clone();
     agent.authority_actor = "agent/helper".into();
     assert!(answer(&state,&agent,&started,"approve").is_err());
@@ -121,4 +134,42 @@ async fn browser_pairing_expiry_refuses_redeem_even_after_approval() {
     let mut request = begun(&state,&started);
     request.body["fields"]["expires_at_unix_ms"] = json!(1);
     assert_eq!(approval(&state,&request).unwrap(),"expired");
+}
+
+#[tokio::test]
+async fn browser_pairing_completion_boundary_requires_paired_device_for_every_target_form() {
+    let (_root,state,owner) = fixture();
+    let started = start(&state,&owner,&"a".repeat(64)).await;
+    let request = begun(&state,&started);
+    let target = request.body["fields"]["browser_ask"].as_str().unwrap();
+    let ask = state.store.claims_for_subject_kind_at(target,"work.person-asked",None,true,1).unwrap().claims.remove(0);
+    let attention = paired_device(&state,&["read.projections","control.attention"],"attention-only");
+    for target in [target, target.strip_prefix("step-run/").unwrap()] {
+        let snapshot = new_client_snapshot(&state);
+        let action_request: ActionRequest = serde_json::from_value(json!({
+            "api_version":CLIENT_API_VERSION,"id":"action/refused-pairing","type":"work.done",
+            "idempotency_key":format!("refused:{target}"),
+            "fence":{"snapshot_id":snapshot.id,"subject_revisions":{}},
+            "parameters":{"target_id":target,"episode":ask.id,"summary":"Approve","answer":{"id":"approve"}}
+        })).unwrap();
+        let error = action(State(state.clone()),Extension(snapshot),Extension(attention.clone()),Json(action_request)).await.unwrap_err();
+        assert_eq!(error.status,StatusCode::FORBIDDEN);
+    }
+    let legacy = serde_json::from_value(json!({
+        "subject":target,"actor":"person/operator","summary":"Approve","answer":{"id":"approve"},
+        "evidence":[],"episode":ask.id,"idempotency_key":"legacy-approval"
+    })).unwrap();
+    assert!(fractal_api_core::api::work::done_person_step(State(state.clone()),Json(legacy)).await.is_err());
+    let mut request = axum::http::Request::builder().method("POST").uri("/v1/client/actions")
+        .body(axum::body::Body::empty()).unwrap();
+    request.extensions_mut().insert(LocalWebSession {
+        person:"person/operator".into(),id:"embedded-browser".into(),expires_at:client_now_ms()+60_000,
+    });
+    let embedded = authenticate(&state,&request,"unix").unwrap();
+    assert_eq!(embedded.transport,"local-web");
+    assert!(embedded.pairing_grant.is_none());
+    assert!(answer(&state,&embedded,&started,"approve").is_err());
+    assert_eq!(poll(&state,&owner,&started,&"a".repeat(64)).await.unwrap().0["status"],"pending");
+    answer(&state,&owner,&started,"approve").unwrap();
+    assert!(poll(&state,&owner,&started,&"a".repeat(64)).await.unwrap().0["bearer"].is_string());
 }

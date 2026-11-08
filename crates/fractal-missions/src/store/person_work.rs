@@ -364,6 +364,8 @@ pub trait PersonWorkStore {
             cancel: bool,
             authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
             update_only: bool,
+            // Authenticated paired-device grant subject and its session actor, never JSON input.
+            device: Option<(&str, &str)>,
         ) -> Result<StepRunView, FractalError>;
     /// The images an ask's request carries, found by the ask's person step, with who asked and
     /// whom it asks: what a blob read needs to authorize the person looking at them.
@@ -508,7 +510,7 @@ impl PersonWorkStore for Store {
     }
 
     fn withdraw_person_update(&self, input: &PersonStepResponse) -> Result<StepRunView, FractalError> {
-        self.finish_person_step_kind(input, true, None, true)
+        self.finish_person_step_kind(input, true, None, true, None)
     }
 
     fn finish_person_step_authorized(
@@ -517,7 +519,7 @@ impl PersonWorkStore for Store {
             cancel: bool,
             authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
         ) -> Result<StepRunView, FractalError> {
-        self.finish_person_step_kind(input, cancel, authorization, false)
+        self.finish_person_step_kind(input, cancel, authorization, false, None)
     }
 
     fn finish_person_step_kind(
@@ -526,6 +528,7 @@ impl PersonWorkStore for Store {
             cancel: bool,
             authorization: Option<&super::assistant_write::AssistantWriteAuthorization>,
             update_only: bool,
+            device: Option<(&str, &str)>,
         ) -> Result<StepRunView, FractalError> {
         if let Some(authorization) = authorization
             && (authorization.scope != "write.assistant.answers" || authorization.owner != input.actor || cancel)
@@ -555,10 +558,25 @@ impl PersonWorkStore for Store {
             if update_only && ask.as_ref().is_none_or(|ask| !is_update(ask)) {
                 return Err(FractalError::new("invalid-update-withdrawal", "withdraw names an informational update, not an ask or authored work"));
             }
-            if ask.as_ref().is_some_and(|ask| ask.actor.as_deref() == Some("daemon/browser-pairing"))
-                && (authorization.is_some() || input.delegation.is_some() || !input.actor.starts_with("person/"))
-            {
-                return Err(FractalError::new("forbidden", "only an owner device can answer browser pairing asks"));
+            if ask.as_ref().is_some_and(|ask| ask.actor.as_deref() == Some("daemon/browser-pairing")) {
+                let refused = || FractalError::new("forbidden", "browser pairing approval requires a paired device with control.pairing");
+                if authorization.is_some() || input.delegation.is_some() || !input.actor.starts_with("person/") {
+                    return Err(refused());
+                }
+                let (grant, session_actor) = device.ok_or_else(refused)?;
+                let paired = tx.query_row(
+                    &canonical_sql("SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='custom.client.pairing-completed' ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
+                    [grant], claim_from_row).optional().map_err(internal)?.ok_or_else(refused)?;
+                let fields = &paired.body["fields"];
+                let revoked: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='custom.client.pairing-revoked')", [grant], |row| row.get(0)).map_err(internal)?;
+                let allows = |name: &str| fields[name].as_array().is_some_and(|scopes| scopes.iter().any(|scope| scope == "control.pairing"));
+                if revoked || fields["person_id"] != input.actor || fields["session_actor"] != session_actor
+                    || fields["expires_at_unix_ms"].as_u64().is_none_or(|expiry| u128::from(expiry) <= now_ms())
+                    || !allows("scopes") || !allows("delegated_scopes")
+                    || ask.as_ref().is_none_or(|ask| ask.body["fields"]["deadline_unix_ms"].as_u64().is_none_or(|expiry| u128::from(expiry) <= now_ms()))
+                {
+                    return Err(refused());
+                }
             }
             if let Some(authorization) = authorization {
                 let ask = ask.as_ref().filter(|ask| ask.kind == "work.person-asked"

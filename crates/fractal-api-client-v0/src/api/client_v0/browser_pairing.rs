@@ -58,12 +58,12 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
     let ask = state.store.ask_person(&PersonAskRequest {
         person: session.authority_actor.clone(), actor: REQUESTER.into(),
         title: format!("Pair browser: {}", body.device_label),
-        reason: format!("Approve only if you started this request.\n\nDevice: {}\nTailnet login: {}\nDisplay code: {display}\nRequest: {id}\n\nGrants web read access and message sending for 30 days; revocable in Devices.", body.device_label, body.tailnet_login),
+        reason: format!("Approve only after comparing this display code with the browser you are using. Device labels and login text are supplied by the requester, not proof of browser identity.\n\nDevice: {}\nTailnet login: {}\nDisplay code: {display}\nRequest: {id}\n\nGrants web read access and message sending for 30 days; revocable in Devices.", body.device_label, body.tailnet_login),
         step: None, new_run: None, incarnation: None, legacy_request: None,
         idempotency_key: format!("browser-pairing:{id}"), deadline_ms: Some(300_000), default_answer: Some("deny".into()),
         request: Some(json!({"version":1,"type":"decision",
             "question":format!("Pair {} ({display})?", body.device_label),
-            "why_person":"Only you can confirm that you initiated this browser pairing.",
+            "why_person":"Only you can compare this display code with the browser you are using. The requester supplies the device label and login text.",
             "answers":[
                 {"id":"approve","label":"Approve","outcome":"accept","consequence":"Grant this browser read access and message sending for 30 days."},
                 {"id":"deny","label":"Deny","outcome":"decline","consequence":"Refuse this browser pairing."}
@@ -126,19 +126,6 @@ pub async fn redeem(State(state): State<AppState>, Extension(session): Extension
     Ok(Json(json!({"bearer":paired["credential"],"scopes":paired["scopes"],"expiresAt":paired["expires_at"]})))
 }
 
-/// Called before any person answer is written; a read-only or message-only device cannot approve.
-pub fn authorize_answer(state: &AppState, session: &ClientSession, target: &str) -> Result<(), ApiError> {
-    let asks = state.store.claims_for_subject_kind_at(target, "work.person-asked", None, true, 1).map_err(ApiError::internal)?;
-    if asks.claims.first().is_some_and(|ask| ask.actor.as_deref() == Some(REQUESTER)) {
-        owner(state, session)?;
-        require_scope(session, "control.pairing")?;
-        let ask = &asks.claims[0];
-        if ask.body["fields"]["deadline_unix_ms"].as_u64().is_none_or(|expiry| u128::from(expiry) <= client_now_ms()) {
-            return Err(forbidden("browser pairing request has expired"));
-        }
-    }
-    Ok(())
-}
 
 pub async fn revoke_current(State(state): State<AppState>, Extension(session): Extension<ClientSession>) -> Result<Json<Value>, ApiError> {
     owner(&state, &session)?;
