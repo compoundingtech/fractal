@@ -37,6 +37,18 @@ describe('one tab per agent', () => {
     expect(showsTerminal(tab, currentSpace(state).local.views[tab.id])).toBe(true)
   })
 
+  it('keeps one tab per agent when a terminal ref replaces a tab or splits, as the palette does', () => {
+    const { run, open } = setup()
+    let state = open('list:home')
+    state = run(state, [{ _tag: 'Replace', tab: activeTab(state)!.id, ref: 'terminal:agent/a' }])
+    expect(refs(state)).toEqual(['agent:agent/a'])
+    expect(showsTerminal(activeTab(state)!, currentSpace(state).local.views[activeTab(state)!.id])).toBe(true)
+    state = run(state, [{ _tag: 'Split', side: 'right', ref: 'terminal:agent/b' }])
+    expect(refs(state)).toEqual(['agent:agent/a', 'agent:agent/b'])
+    expect(activeTab(state)?.ref).toBe('agent:agent/b')
+    expect(showsTerminal(activeTab(state)!, currentSpace(state).local.views[activeTab(state)!.id])).toBe(true)
+  })
+
   it('remembers the face per tab across focus', () => {
     const { run, open } = setup()
     let state = open('agent:agent/a', 'agent:agent/b')

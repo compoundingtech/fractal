@@ -1,7 +1,7 @@
 import * as Workspace from '@fractal/ui/workspace'
 import { createWorkspaceStore as createSharedStore, memoryPersistence, type SpaceSync } from '@fractal/ui/workspace/store'
-import { currentSpace, emptyWorkspace, workspaceConfig, workspaceSchema, type Command, type TabView, type WorkspaceState } from './model.ts'
-import { isAgentTerminalPane, paneIdentity } from './subject.ts'
+import { currentSpace, emptyWorkspace, terminalRefOf, towardAgent, workspaceConfig, workspaceSchema, type Command, type TabView, type WorkspaceState } from './model.ts'
+import { paneIdentity } from './subject.ts'
 
 export interface WorkspaceStore {
   /** Synchronous, so an activation commits in the event that caused it. */
@@ -34,10 +34,11 @@ export const createWorkspaceStore = ({ initial, sync, debounceMs, newId }: {
   return {
     ...shared,
     dispatch: command => {
-      if (command._tag !== 'Open' || !isAgentTerminalPane(command.ref)) return shared.dispatch(command)
-      // A terminal link opens the agent's one tab on its terminal face: the same as `model.ts::transition`.
-      const key = paneIdentity(command.ref)
-      shared.dispatch({ ...command, ref: key })
+      const terminal = terminalRefOf(command)
+      if (terminal === undefined) return shared.dispatch(command)
+      // A terminal ref opens, replaces with or splits to the agent's one tab, on its terminal face: as `model.ts::transition`.
+      const key = paneIdentity(terminal)
+      shared.dispatch(towardAgent(command, terminal))
       const found = Workspace.locateTab(currentSpace(shared.getState()).layout, tab => paneIdentity(tab.ref) === key)
       if (found !== undefined) shared.dispatch({ _tag: 'SetView', tab: found.tab.id, view: { terminal: true } })
     },

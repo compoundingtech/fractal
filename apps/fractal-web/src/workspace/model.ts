@@ -53,12 +53,23 @@ export const showsTerminal = (tab: Pick<Tab, 'ref'>, view: TabView | undefined):
   view?.terminal ?? isAgentTerminalPane(tab.ref)
 
 /**
- * A terminal link opens the agent's one tab, on its terminal face: the shared reducer opens the agent's key,
+ * The ref a command opens that names an agent's terminal: Open, Replace and Split all open the agent's one
+ * tab, on its terminal face. `undefined` for every other command.
+ */
+export const terminalRefOf = (command: Command): string | undefined =>
+  (command._tag === 'Open' || command._tag === 'Replace' || command._tag === 'Split') && command.ref !== undefined && isAgentTerminalPane(command.ref) ? command.ref : undefined
+
+/** The command opening the agent's key instead, so the shared reducer keeps one tab per agent. */
+export const towardAgent = (command: Command, ref: string): Command => ({ ...command, ref: paneIdentity(ref) } as Command)
+
+/**
+ * A terminal ref opens the agent's one tab, on its terminal face: the shared reducer opens the agent's key,
  * and the face is this tab's view. Every other command passes through unchanged.
  */
 export const transition = (state: WorkspaceState, command: Command, config: Workspace.WorkspaceConfig): WorkspaceState => {
-  if (command._tag !== 'Open' || !isAgentTerminalPane(command.ref)) return Workspace.transition(state, command, config)
-  const opened = Workspace.transition(state, { ...command, ref: paneIdentity(command.ref) }, config)
-  const tab = Workspace.locateTab(currentSpace(opened).layout, row => paneIdentity(row.ref) === paneIdentity(command.ref))
+  const terminal = terminalRefOf(command)
+  if (terminal === undefined) return Workspace.transition(state, command, config)
+  const opened = Workspace.transition(state, towardAgent(command, terminal), config)
+  const tab = Workspace.locateTab(currentSpace(opened).layout, row => paneIdentity(row.ref) === paneIdentity(terminal))
   return tab === undefined ? opened : Workspace.transition(opened, { _tag: 'SetView', tab: tab.tab.id, view: { terminal: true } }, config)
 }
