@@ -98,6 +98,9 @@ pub struct Config {
     pub planner: PlannerSpec,
     /// The local observation log of this node.
     pub observations: ObservationsConfig,
+    /// Opt-in, operator-bound evidence for the rolling API-readiness objective.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness_slo: Option<ReadinessSloConfig>,
     /// Daemon GitHub HTTP authentication. Omitted unless an explicit credential source is configured.
     #[serde(skip_serializing_if = "GithubConfig::is_default")]
     pub github: GithubConfig,
@@ -140,6 +143,16 @@ pub struct Config {
     /// `STATE/fleet/fleet.toml`, merged by `apply_fleet_file` after command-line overrides.
     #[serde(skip)]
     pub fleet: Option<FleetFile>,
+}
+
+/// A single operator-selected readiness source, execution member and response owner.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadinessSloConfig {
+    pub executor: String,
+    pub member: String,
+    pub reviewer: String,
+    pub evidence_file: PathBuf,
 }
 
 /// An operator-selected external quota source; clients cannot override its URL.
@@ -690,6 +703,7 @@ impl Default for Config {
             peers: Vec::new(),
             planner: PlannerSpec::default(),
             observations: ObservationsConfig::default(),
+            readiness_slo: None,
             github: GithubConfig::default(),
             changes: changes::Config::default(),
             checkpoint: CheckpointConfig::default(),
