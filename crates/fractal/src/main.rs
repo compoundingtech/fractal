@@ -4869,9 +4869,6 @@ struct FeedbackReviewArgs {
 struct DriverArgs {
     #[arg(value_parser = ["claude", "claude-mcp", "codex", "pi", "pi-channel", "omp", "omp-channel", "opencode", "exec"])]
     driver: String,
-    /// Use the daemon-managed seat's runtime-profile wrapper contract.
-    #[arg(long, hide = true)]
-    managed_launch: bool,
     #[arg(long, env = "ST_AGENT")]
     subject: Option<String>,
     #[arg(long)]

@@ -49,19 +49,6 @@ fn resolve_from_source(
     prefixed_path(bin, env("PATH").as_deref())
 }
 
-pub fn is_managed_harness(daemon_managed: bool, harness: &str) -> bool {
-    daemon_managed && matches!(harness, "omp" | "claude" | "codex")
-}
-
-/// Mark only the daemon's typed-driver launch, never a person-owned terminal invocation.
-pub fn mark_daemon_launch(argv: &mut Vec<String>) -> Result<()> {
-    let separator = argv.iter().position(|arg| arg == "--")
-        .context("managed driver launch has no provider separator")?;
-    if !argv[..separator].iter().any(|arg| arg == "--managed-launch") {
-        argv.insert(separator, "--managed-launch".into());
-    }
-    Ok(())
-}
 
 fn profile_path_from(env: &impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<PathBuf> {
     if let Some(profile) = env("AGENT_RUNTIME_PROFILE") {

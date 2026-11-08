@@ -7884,14 +7884,6 @@ impl<R: RuntimeControl> Reconciler<R> {
         } else {
             crate::environment::remove_aliases(&mut launch_member.environment, "ST_AGENT");
         }
-        if fractal_drivers::managed_launch::is_managed_harness(
-            subject.kind == "agent", member.driver.as_deref().unwrap_or(""),
-        ) {
-            let crate::model::LaunchSpec::Argv(argv) = &mut launch_member.launch else {
-                anyhow::bail!("managed typed driver requires an argv launch");
-            };
-            fractal_drivers::managed_launch::mark_daemon_launch(argv)?;
-        }
         let executable = launch_executable()?;
         let st_binary = self.st_binary.as_ref().unwrap_or(&executable);
         crate::environment::set(&mut launch_member.environment, "ST3_BIN", st_binary.to_string_lossy().into_owned());

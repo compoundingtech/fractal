@@ -1,21 +1,6 @@
 use super::*;
 
 #[test]
-fn only_daemon_launches_select_managed_harnesses() {
-    let person = vec!["fractal", "driver", "claude", "--subject", "agent/example", "--", "/native/claude"]
-        .into_iter().map(str::to_owned).collect::<Vec<_>>();
-    let mut daemon = person.clone();
-    fractal_drivers::managed_launch::mark_daemon_launch(&mut daemon).unwrap();
-    for (argv, managed) in [(person, false), (daemon, true)] {
-        let Command::Driver(args) = Cli::try_parse_from(argv).unwrap().command else {
-            panic!("driver command expected");
-        };
-        assert_eq!(fractal_drivers::managed_launch::is_managed_harness(args.managed_launch, &args.driver), managed);
-        assert_eq!(args.argv, ["/native/claude"]);
-    }
-}
-
-#[test]
 fn seed_recovery_uses_agent_control_cli_and_requires_reason() {
     let cli = Cli::try_parse_from([
         "st", "agents", "acknowledge-seed", "example",
@@ -39,7 +24,6 @@ fn rejects_effective_resume_environment_before_receipt() {
         let client = Client::new(Endpoint::Unix(root.join("no-daemon.sock")));
         let args = DriverArgs {
             driver: "omp".into(),
-            managed_launch: false,
             subject: Some("agent/example".into()),
             identity: None,
             initial_message: None,

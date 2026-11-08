@@ -79,7 +79,26 @@ fn capture_with(store: &Store, desired: &DesiredSubject, member: &MemberSpec, ru
         }
     };
     let mut provider = Cow::Borrowed(provider);
-    if let Some(harness @ ("omp" | "claude" | "codex")) = member.driver.as_deref() {
+    let binding = crate::terminal_binding::from_desired(&desired.desired)?;
+    let person_bound = if let Some(binding) = &binding {
+        let owner = fractal_schema::owned_terminals::owner(&binding.subject)
+            .map_err(|error| anyhow::anyhow!(error.message))?;
+        anyhow::ensure!(
+            owner.is_some_and(|owner| owner.starts_with("person/"))
+                && member.terminal_binding.as_ref() == Some(binding)
+                && member.lifecycle == crate::model::MemberLifecycle::TerminalBound,
+            "native launch contract requires a validated person-terminal binding",
+        );
+        true
+    } else {
+        anyhow::ensure!(member.terminal_binding.is_none()
+            && member.lifecycle != crate::model::MemberLifecycle::TerminalBound,
+            "native launch contract is missing its person-terminal binding");
+        false
+    };
+    if let Some(harness @ ("omp" | "claude" | "codex")) = member.driver.as_deref()
+        && !person_bound
+    {
         // Measure the provider child, not the raw executable in the authored expansion.
         // Wrapper selection and its interpreter PATH must agree with driver startup without
         // changing the daemon's environment or selecting process-global driver state.
@@ -264,6 +283,28 @@ mod tests {
         member.environment.remove("AGENT_RUNTIME_PROFILE");
         member.environment.insert("HOME".into(), root.path().join("no-profile").display().to_string());
         // Native env shebang resolution still needs its authored interpreter PATH.
+        member.environment.insert("PATH".into(), bin.display().to_string());
+        isolated_capture(&store, &desired, false, &|_| Ok(())).unwrap().unwrap();
+    }
+
+    #[test]
+    fn person_bound_contract_keeps_native_provider_without_a_managed_profile() {
+        let (root, mut desired, bin) = managed_fixture("claude", false);
+        let store = Store::open_memory("node").unwrap();
+        let binding = crate::model::TerminalBinding {
+            subject: "pty/person/avery/019a0000-0000-7000-8000-000000000001".into(),
+            incarnation: "42:created".into(),
+            id: "019a0000-0000-7000-8000-000000000002".into(),
+        };
+        desired.desired["children"].as_array_mut().unwrap().push(serde_json::json!({
+            "name": "bind-terminal", "arguments": [binding.subject],
+            "properties": {"incarnation": binding.incarnation, "id": binding.id}, "children": [],
+        }));
+        let member = desired.member.as_mut().unwrap();
+        member.lifecycle = crate::model::MemberLifecycle::TerminalBound;
+        member.terminal_binding = Some(binding);
+        member.environment.remove("AGENT_RUNTIME_PROFILE");
+        member.environment.insert("HOME".into(), root.path().join("no-profile").display().to_string());
         member.environment.insert("PATH".into(), bin.display().to_string());
         isolated_capture(&store, &desired, false, &|_| Ok(())).unwrap().unwrap();
     }

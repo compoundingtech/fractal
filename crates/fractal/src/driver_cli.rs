@@ -10,6 +10,25 @@ fn managed_declaration_result(
     }
 }
 
+fn person_terminal_exemption(
+    binding: Option<&fractal_daemon::model::TerminalBinding>,
+    session_actor: Option<&str>,
+    current_incarnation: Option<&str>,
+) -> Result<bool> {
+    let Some(binding) = binding else { return Ok(false) };
+    let owner = fractal_schema::owned_terminals::owner(&binding.subject)
+        .map_err(|error| anyhow::anyhow!(error.message))?
+        .filter(|owner| owner.starts_with("person/"))
+        .context("native launch exemption requires a person-owned terminal binding")?;
+    let actor = session_actor.context("native launch exemption requires an authenticated person")?;
+    anyhow::ensure!(actor == owner || actor.strip_prefix(owner).is_some_and(|suffix| {
+        suffix.strip_prefix("/session/").is_some_and(|id| !id.is_empty())
+    }), "native launch exemption requires the bound terminal's person owner");
+    anyhow::ensure!(current_incarnation == Some(binding.agent_incarnation().as_str()),
+        "native launch exemption requires the current bound terminal incarnation");
+    Ok(true)
+}
+
 #[cfg(test)]
 mod managed_declaration_tests {
     use super::*;
@@ -42,6 +61,55 @@ mod managed_declaration_tests {
         }
         assert!(managed_declaration_result(Err(GeneratedClientError::Transport("unavailable".into()))).is_err());
         assert!(managed_declaration_result(Err(GeneratedClientError::Protocol("invalid JSON".into()))).is_err());
+    }
+
+    #[test]
+    fn person_owned_native_exemption_requires_authoritative_owner_and_binding_fence() {
+        let binding = fractal_daemon::model::TerminalBinding {
+            subject: "pty/person/avery/019a0000-0000-7000-8000-000000000001".into(),
+            incarnation: "42:created".into(),
+            id: "019a0000-0000-7000-8000-000000000002".into(),
+        };
+        let incarnation = binding.agent_incarnation();
+        assert!(person_terminal_exemption(Some(&binding), Some("person/avery"), Some(&incarnation)).unwrap());
+        assert!(person_terminal_exemption(Some(&binding), Some("person/avery/session/device"), Some(&incarnation)).unwrap());
+        assert!(person_terminal_exemption(Some(&binding), Some("agent/example"), Some(&incarnation)).is_err());
+        assert!(person_terminal_exemption(Some(&binding), Some("person/other"), Some(&incarnation)).is_err());
+        assert!(person_terminal_exemption(Some(&binding), Some("person/avery"), Some("stale")).is_err());
+        assert!(person_terminal_exemption(Some(&binding), None, Some(&incarnation)).is_err());
+        assert!(!person_terminal_exemption(None, Some("person/avery"), None).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_resume_and_flagless_agent_calls_select_the_managed_wrapper() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let bin = root.path().join("managed/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let wrapper = bin.join("codex");
+        std::fs::write(&wrapper, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let profile = root.path().join("profile.json");
+        std::fs::write(&profile, serde_json::to_vec(&json!({
+            "personas": {"launch": {"generalist": {"harnessBin": bin}}},
+        })).unwrap()).unwrap();
+        let environment = BTreeMap::from([
+            ("AGENT_RUNTIME_PROFILE".into(), profile.display().to_string()),
+            ("PATH".into(), "/native/bin".into()),
+        ]);
+        for program in ["codex", "/native/bin/codex"] {
+            // Legacy re-exec preserves these flagless arguments from the previous image.
+            let Command::Driver(mut args) = Cli::try_parse_from([
+                "fractal", "driver", "codex", "--subject", "agent/example", "--", program,
+            ]).unwrap().command else { panic!("driver expected") };
+            let declaration = managed_declaration_result(Err(api_error(ClientErrorCode::NotFound))).unwrap();
+            assert!(!person_terminal_exemption(None, Some("agent/example"), None).unwrap());
+            fractal_drivers::managed_launch::resolve_with_environment(
+                &args.driver, &mut args.argv, &declaration, &environment,
+            ).unwrap();
+            assert_eq!(Path::new(&args.argv[0]), wrapper);
+        }
     }
 }
 
@@ -195,12 +263,22 @@ pub(super) async fn run_driver(client: &Client, args: DriverArgs, catalog: Optio
         if let Some(drivers) = std::env::var_os("ST3_DRIVER_STATE_DIR") {
             fractal_drivers::run::use_harness_state_root(PathBuf::from(drivers).join("sessions"));
         }
-        if fractal_drivers::managed_launch::is_managed_harness(args.managed_launch, &args.driver) {
+        if matches!(args.driver.as_str(), "omp" | "claude" | "codex") {
             let gateway = generated_client(&client.endpoint, None)?;
             let declaration = managed_declaration_result(
                 gateway.agent_declaration_get(subject, None, false).await.map(|reply| reply.value.tree),
             )?;
-            fractal_drivers::managed_launch::resolve(&args.driver, &mut argv, &declaration)?;
+            let binding = fractal_daemon::terminal_binding::from_desired(&declaration)?;
+            let native = if let Some(binding) = &binding {
+                let actor = gateway.capabilities().await?.value.session_actor;
+                let incarnation = current_agent_incarnation(client, subject).await?;
+                person_terminal_exemption(Some(binding), Some(&actor), incarnation.as_deref())?
+            } else {
+                false
+            };
+            if !native {
+                fractal_drivers::managed_launch::resolve(&args.driver, &mut argv, &declaration)?;
+            }
         }
         if let Some(state) = fractal_drivers::reexec::resume_path(fractal_drivers::reexec::DRIVER_RESUME_ENV) {
             return resume_native_driver(client, subject, &args.driver, argv, &state).await;

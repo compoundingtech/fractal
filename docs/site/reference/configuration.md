@@ -131,10 +131,17 @@ managed launch. Prelaunch contract capture measures the selected wrapper, not a
 raw executable from login PATH. Driver re-exec uses the managed wrapper for helper
 commands while adopting, without restarting the running provider.
 
-The daemon marks managed typed-driver invocations explicitly. Person-owned
-terminal invocations such as
+Wrapper selection follows the authoritative seat declaration, not a launch flag
+or an environment-based guess. Flagless invocations and legacy driver re-exec
+are managed too. A native exemption requires a validated `bind-terminal`
+declaration for a person-owned terminal, an authenticated session belonging to
+that person, and the seat's current incarnation matching the binding exactly.
+Missing or mismatched proof refuses the exemption.
+
+For a positively verified person-terminal binding,
 `fractal driver claude --subject agent/example -- /native/claude`
-are not marked and retain their native executable and PATH.
+retains its native executable and PATH. Merely naming an agent subject from a
+person shell does not establish a native exemption.
 
 Before upgrading a host to this launch contract, publish and activate a runtime
 profile containing `personas.launch.<persona>.harnessBin` for its managed seats.
