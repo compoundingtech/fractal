@@ -245,17 +245,66 @@ ruleset refuses moving a tag but not deleting one, so GC deletes with its host's
 administrator's login. Nathan's call: cheap and fast first. Nothing guards yet against someone who deletes a newer
 failure to let an older pass decide; the signed evidence log reports a record that disappears without GC's line.)
 
-**Where it runs.** `scripts/evidence-gc.timer` (daily, 03:40 UTC) starts `scripts/evidence-gc.service`, a systemd
-user unit on a host we hold, never a GitHub workflow. Both are installed in `~/.config/systemd/user/`, and
-`scripts/evidence-gc-timer` in `~/.local/bin/`. The wrapper keeps a bare repository under
-`~/.local/state/evidence-gc/`, reads `scripts/evidence-gc` and `scripts/evidence-verify` from `origin/main` (a branch
-cannot change what deletes). For a new plan it reads the open pull requests' heads from the GitHub API without a login (if that
-fails, nothing runs), runs GC with `--fetch --apply --open-heads-from`, keeps 30 days of summaries and plans, and
-stores each summary as a new version of the Fractal document `doc/fleet/factory/evidence-gc/runs`. On a host that also runs the evidence log (`~/.local/bin/evidence-log-timer`
-and `~/.config/evidence-log/signer.json` present), the wrapper passes `--before-delete`, so `evidence-log gc --publish`
-writes GC's lines and publishes the log before anything is deleted; if that fails, nothing is deleted.
+**Where it runs.** The Home Manager module owns the Linux user timer when
+`services.smalltalk.enable` and `services.smalltalk.evidenceGc.enable` are true.
+Enable it on one designated, always-on host, not every signer:
 
-The wrapper passes `--resume-state` with `pending-plan.json` in its state directory. The complete original plan is fsynced before
+```nix
+services.smalltalk.evidenceGc = {
+  enable = true;
+  dryRun = true;
+};
+```
+
+The default `dryRun = true` runs `scripts/evidence-gc-timer --dry-run` daily at
+03:40 UTC. The timer is persistent, so a missed run may start after activation.
+There is no GitHub workflow schedule or dispatch involved. The wrapper also
+defaults to dry-run when called without arguments. Dry-run fetches main, open PR
+heads and evidence into its local bare repository, writes the plan, JSON summary
+and stderr log under `~/.local/state/evidence-gc/runs/`, and prints the summary.
+It never applies deletions or migrations, consumes an apply journal, publishes
+signed GC lines, or writes a Fractal summary document. A pending apply journal
+refuses dry-run rather than silently resuming deletions.
+
+Before allowing deletion, review the latest `*.plan.json`, `*.json` and `*.log`
+there: distinguish logical records, tag refs, note aliases and input indexes.
+The snapshot's tag count alone cannot predict the eligible set; live keys and
+open PR heads can retain observations of any age. Dry-run's plan is advisory:
+the first apply recomputes liveness and may have different counts.
+
+After operator approval, configure the designated host's signed evidence-log
+publisher to continue the trusted published chain, then set `dryRun = false`.
+The applying Home Manager service requires `~/.local/bin/evidence-log-timer`
+and `~/.config/evidence-log/signer.json` (or the configured XDG config root).
+The wrapper reads `scripts/evidence-gc` and `scripts/evidence-verify` from
+`origin/main`, never a branch's deletion code. It reads all open PR heads from
+the API before a new plan; failure refuses deletion.
+
+For apply, the wrapper passes `--before-delete`: `evidence-log gc --publish`
+writes GC lines and publishes the signed head before any refs disappear.
+Otherwise a log pull with `--restore` could report legitimate collection as
+missing and recreate those refs. A failed log publication or lock acquisition
+refuses deletion. Apply summaries are also written as versions of
+`doc/fleet/factory/evidence-gc/runs`; local artifacts are retained for 30 days.
+The standalone wrapper keeps its existing optional-log behavior for hosts with
+no evidence log; do not use that path against a repository whose log restores
+missing evidence.
+
+**Rollback.** Set `dryRun = true` to stop future deletions while retaining the
+daily inventory, or set `enable = false` to remove the managed timer. Stop an
+in-progress applying service before activating a mode change; changing the
+timer alone does not cancel it. Preserve `pending-plan.json` and the log's state:
+a later approved `--apply` resumes the saved operation, whereas dry-run refuses
+it. Disabling collection cannot resurrect deleted refs; retain a ref/object
+archive if restoration is required, and coordinate restoration with the signed
+log rather than reviving only a subset of a removed group.
+
+Manual installations may still install `scripts/evidence-gc.timer` and
+`scripts/evidence-gc.service` into `~/.config/systemd/user/`, with the wrapper in
+`~/.local/bin/`. Those units now also default to dry-run; explicit `--apply`
+requires the same approval and signed-log coordination.
+
+In apply mode the wrapper passes `--resume-state` with `pending-plan.json` in its state directory. The complete original plan is fsynced before
 its hook runs and held under a file lock. A killed or failed deletion leaves that journal in place. The next run finishes it
 before reading another open-head list, fetching the evidence namespace, or recomputing record and input-key protection. Remote
 progress is authoritative: refs already gone need no push, and every remaining deletion is leased to its original object id.

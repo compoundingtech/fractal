@@ -1,5 +1,5 @@
 [Unit]
-Description=Evidence GC: delete the dead evidence trees of scripts/evidence-gc's plan
+Description=Evidence GC: plan collection of dead evidence trees (dry-run by default)
 Wants=network-online.target
 After=network-online.target
 

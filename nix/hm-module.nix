@@ -299,6 +299,14 @@ in
         this limit restarts into the same catch-up.
       '';
     };
+    evidenceGc = {
+      enable = mkEnableOption "the daily evidence garbage-collection timer on this Linux host";
+      dryRun = mkOption {
+        type = types.bool;
+        default = true;
+        description = "Only write a deletion plan; disable after reviewing the plan and configuring the signed evidence log.";
+      };
+    };
     declarations = {
       seats = mkOption { type = types.listOf types.path; default = [ ]; description = "Seat KDL files to apply."; };
       missions = mkOption { type = types.listOf types.path; default = [ ]; description = "Mission KDL files to publish."; };
@@ -738,7 +746,40 @@ in
         };
         Install = lib.optionalAttrs completed { WantedBy = [ "default.target" ]; };
       };
-    }));
+    }) // lib.optionalAttrs cfg.evidenceGc.enable {
+      evidence-gc = {
+        Unit = {
+          Description = "Plan or apply liveness-aware evidence garbage collection";
+          Wants = [ "network-online.target" ];
+          After = [ "network-online.target" ];
+        };
+        Service = {
+          Type = "oneshot";
+          ExecStart = "${pkgs.bash}/bin/bash ${../scripts/evidence-gc-timer} ${if cfg.evidenceGc.dryRun then "--dry-run" else "--apply"}";
+          # An applying installation must publish GC lines before deleting logged refs.
+          ExecStartPre = lib.optionals (!cfg.evidenceGc.dryRun) [
+            "${pkgs.coreutils}/bin/test -f ${config.home.homeDirectory}/.local/bin/evidence-log-timer"
+            "${pkgs.coreutils}/bin/test -f ${config.xdg.configHome}/evidence-log/signer.json"
+          ];
+          Environment = [
+            "PATH=${binDir}:${lib.makeBinPath [ pkgs.bash pkgs.git pkgs.openssh pkgs.python3 pkgs.curl pkgs.coreutils pkgs.findutils ]}:${config.home.profileDirectory}/bin:/run/current-system/sw/bin"
+            "EVIDENCE_GC_STATE=${config.xdg.stateHome}/evidence-gc"
+            "EVIDENCE_LOG_CONFIG=${config.xdg.configHome}/evidence-log"
+          ];
+          TimeoutStartSec = "1h";
+          Nice = 10;
+        };
+      };
+    });
+
+    systemd.user.timers.evidence-gc = mkIf (pkgs.stdenv.hostPlatform.isLinux && cfg.evidenceGc.enable) {
+      Unit.Description = "Daily liveness-aware evidence garbage collection";
+      Timer = {
+        OnCalendar = "*-*-* 03:40:00 UTC";
+        Persistent = true;
+      };
+      Install.WantedBy = [ "timers.target" ];
+    };
 
     home.activation.smalltalkLogs = mkIf pkgs.stdenv.hostPlatform.isDarwin (
       lib.hm.dag.entryAfter [ "writeBoundary" ] ''

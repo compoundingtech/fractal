@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 # Run the evidence GC once, as main has it (scripts/evidence-gc.service, daily from scripts/evidence-gc.timer). Never a checkout's
 # copy: the script and the verifier it loads are read from origin/main in a bare repository this host keeps, so a branch cannot
-# change what deletes. It deletes with this host's own git login: the evidence-tags ruleset refuses moving a tag, not deleting
-# one. Every open pull request's head, read from the GitHub API without a login, keeps its records however old it is; if that list
-# cannot be read, nothing runs. Each run's summary is kept under the state directory and stored as a new
-# version of one st document, so the graph holds the log. When this host runs the evidence log (evidence-log-timer installed and
-# ~/.config/evidence-log/signer.json present), GC's lines go into it before anything is deleted, and the new head is published:
+# change what deletes. With --apply it deletes with this host's own git login: the evidence-tags ruleset refuses moving a tag,
+# not deleting one. Every open pull request's head, read from the GitHub API without a login, keeps its records however old it
+# is; if that list cannot be read, nothing runs. Each run's summary is kept under the state directory; applying runs also store
+# it as a version of one st document. When this host runs the evidence log (evidence-log-timer installed and
+# ~/.config/evidence-log/signer.json present), applying GC's lines go into it before deletion and the new head is published:
 # a pull then neither reports what GC deleted as missing nor restores it, and if that step fails nothing is deleted.
 #
-#   evidence-gc-timer                 one run (the unit's ExecStart)
+#   evidence-gc-timer [--dry-run|--apply]   dry-run by default; --apply requires operator approval
 set -euo pipefail
+mode=${1:---dry-run}
+if [ "$#" -gt 1 ] || { [ "$mode" != --dry-run ] && [ "$mode" != --apply ]; }; then
+  echo 'usage: evidence-gc-timer [--dry-run|--apply]' >&2
+  exit 2
+fi
 state=${EVIDENCE_GC_STATE:-$HOME/.local/state/evidence-gc}
 remote=${EVIDENCE_GC_REMOTE:-https://github.com/compoundingtech/fractal.git}
 repository=${EVIDENCE_GC_REPOSITORY:-compoundingtech/fractal}
@@ -33,7 +38,15 @@ done
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 open_heads=$state/runs/$stamp.open-heads
 resume_state=$state/pending-plan.json
-resume_args=(--resume-state "$resume_state")
+resume_args=()
+if [ "$mode" = --apply ]; then
+  resume_args=(--apply --resume-state "$resume_state")
+fi
+# Dry runs never consume an outstanding deletion journal or publish its GC lines.
+if [ "$mode" = --dry-run ] && [ -e "$resume_state" ]; then
+  echo 'evidence-gc-timer: pending apply journal; preserve it and explicitly resume with --apply' >&2
+  exit 1
+fi
 # Resume before reading a new live set; if another run finishes the plan meanwhile, refuse instead of planning without it.
 if [ -e "$resume_state" ]; then
   resume_args+=(--resume-only)
@@ -53,14 +66,16 @@ while True:  # curl fails on an HTTP error, and then so does this run: without t
 PY
 fi
 before_args=()
-if [ -f "$log_timer" ] && [ -f "$log_config/signer.json" ]; then
+if [ "$mode" = --apply ] && [ -f "$log_timer" ] && [ -f "$log_config/signer.json" ]; then
   before_args=(--before-delete "$(python3 -I -c 'import json, sys; print(json.dumps(sys.argv[1:]))' bash "$log_timer" gc --publish --no-wait --plan)")
 fi
 status=0
-python3 -I "$tools/evidence-gc" --repo "$repo" --remote origin --main origin/main --fetch --apply --open-heads-from "$open_heads" "${before_args[@]}" \
+python3 -I "$tools/evidence-gc" --repo "$repo" --remote origin --main origin/main --fetch --open-heads-from "$open_heads" "${before_args[@]}" \
   "${resume_args[@]}" --plan-out "$state/runs/$stamp.plan.json" > "$state/runs/$stamp.json" 2> "$state/runs/$stamp.log" || status=$?
 cat "$state/runs/$stamp.log" >&2
-if [ -s "$state/runs/$stamp.json" ]; then
+if [ "$mode" = --dry-run ]; then
+  cat "$state/runs/$stamp.json"
+elif [ -s "$state/runs/$stamp.json" ]; then
   st documents put "$state/runs/$stamp.json" --as "$document" >&2 || echo "evidence-gc-timer: could not store the summary in $document" >&2
 fi
 find "$state/runs" -type f -mtime +30 -delete
