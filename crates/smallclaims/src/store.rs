@@ -2114,12 +2114,13 @@ pub fn reject_old_schema(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub fn claims_page_query(subject: bool, descending: bool) -> String {
+pub fn claims_page_query(subject: bool, descending: bool, kinds: bool) -> String {
     let subject_filter = if subject { "subject=?3 AND " } else { "" };
+    let kind_filter = if kinds { "kind IN (SELECT value FROM json_each(?5)) AND " } else { "" };
     let order = if descending { "DESC" } else { "ASC" };
     format!(
         "SELECT id, store_index, batch_id, subject, kind, origin, actor, body, predecessors, accepted_at_unix_ms
-         FROM claims WHERE subject NOT LIKE 'glass/%' AND {subject_filter}store_index>?1 AND (?2 IS NULL OR store_index<?2)
+         FROM claims WHERE subject NOT LIKE 'glass/%' AND {subject_filter}{kind_filter}store_index>?1 AND (?2 IS NULL OR store_index<?2)
          ORDER BY store_index {order} LIMIT ?4"
     )
 }
