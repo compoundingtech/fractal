@@ -53,7 +53,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
+          name: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -277,7 +277,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
+          name: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -497,7 +497,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
+          name: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -706,7 +706,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
+          name: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -915,7 +915,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
+          name: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-messaging'] }}
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -1115,7 +1115,7 @@ jobs:
         id: compat-archive
         uses: actions/download-artifact@v4
         with:
-          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}"
+          name: ${{ needs['compat-archives-x86_64-unknown-linux-gnu'].outputs['artifact-fleet'] }}
           path: ${{ steps['compat-identity'].outputs.directory }}
       - name: Verify the prepared compatibility archive
         shell: bash
@@ -1906,6 +1906,9 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+    outputs:
+      artifact-messaging: "${{ steps['identity-0'].outputs.key }}-attempt-${{ github.run_attempt }}"
+      artifact-fleet: "${{ steps['identity-1'].outputs.key }}-attempt-${{ github.run_attempt }}"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1942,7 +1945,7 @@ jobs:
           name: "${{ steps['identity-0'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['identity-0'].outputs.path }}
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
           compression-level: 0
       - name: Restore fleet archive
         id: archive-1
@@ -1971,7 +1974,7 @@ jobs:
           name: "${{ steps['identity-1'].outputs.key }}-attempt-${{ github.run_attempt }}"
           path: ${{ steps['identity-1'].outputs.path }}
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 7
           compression-level: 0
       - name: Report compatibility archive cache coverage
         shell: bash

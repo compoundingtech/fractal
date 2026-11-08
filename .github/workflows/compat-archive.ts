@@ -43,7 +43,7 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
       identity(kind, target, 'compat-identity'),
       { name: 'Download the prepared compatibility archive', id: 'compat-archive',
         uses: 'actions/download-artifact@v4', with: {
-          name: "${{ steps['compat-identity'].outputs.key }}-attempt-${{ github.run_attempt }}",
+          name: `\${{ needs['${producer}'].outputs['artifact-${kind}'] }}`,
           path: "${{ steps['compat-identity'].outputs.directory }}",
         } },
       { name: 'Verify the prepared compatibility archive', shell: 'bash',
@@ -57,6 +57,10 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
       name: `Prepare verified compatibility archives (${target})`,
       'runs-on': 'ubuntu-latest', 'timeout-minutes': 15,
       permissions: { contents: 'read' },
+      outputs: Object.fromEntries([...kinds].map((kind, index) => [
+        `artifact-${kind}`,
+        `\${{ steps['identity-${index}'].outputs.key }}-attempt-\${{ github.run_attempt }}`,
+      ])),
       steps: [
         { uses: 'actions/checkout@v4', with: { 'persist-credentials': false } },
         ...[...kinds].map((kind, index) => identity(kind, target, `identity-${index}`)),
@@ -77,7 +81,7 @@ export const withCompatArchives = <T extends { jobs: Record<string, Job> }>(work
               uses: 'actions/upload-artifact@v4', with: {
                 name: `\${{ steps['identity-${index}'].outputs.key }}-attempt-\${{ github.run_attempt }}`,
                 path: `\${{ steps['identity-${index}'].outputs.path }}`,
-                'if-no-files-found': 'error', 'retention-days': 1, 'compression-level': 0,
+                'if-no-files-found': 'error', 'retention-days': 7, 'compression-level': 0,
               } },
           ]
         }),

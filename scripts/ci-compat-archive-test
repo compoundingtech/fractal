@@ -133,6 +133,30 @@ class ArchiveTests(unittest.TestCase):
             for block in compatibility:
                 self.assertIn(".outputs.key }}-attempt-${{ github.run_attempt }}", block, workflow)
                 self.assertNotIn("overwrite:", block, workflow)
+                self.assertIn("retention-days: 7", block, workflow)
+
+    def test_partial_rerun_consumers_keep_the_producer_attempt(self):
+        for workflow in ("fleet", "main-upkeep", "daily-long", "debug-assertions-daily", "macos"):
+            text = (ROOT / f".github/workflows/{workflow}.yml").read_text()
+            producer_outputs = dict(re.findall(r"artifact-(fleet|messaging): (.+)", text))
+            downloads = re.findall(
+                r"uses: actions/download-artifact@v4\n(.*?)(?=\n      - |\n  [\w-]+:|\Z)",
+                text, re.S)
+            compatibility = [block for block in downloads if "outputs['artifact-" in block]
+            self.assertTrue(compatibility, workflow)
+            for block in compatibility:
+                self.assertNotIn("github.run_attempt", block, workflow)
+                kind = re.search(r"outputs\['artifact-(fleet|messaging)'\]", block).group(1)
+                self.assertRegex(block, r"needs\['compat-archives-[^']+'\]\.outputs")
+                output = producer_outputs[kind]
+                self.assertIn("-attempt-${{ github.run_attempt }}", output)
+                # GitHub preserves successful producer outputs when only the failed
+                # consumer reruns: producer attempt 1, consumer attempt 2.
+                produced_name = re.sub(r"\$\{\{ steps\[[^}]+\.outputs\.key \}\}", "pinned-archive", output)
+                retained_output = produced_name.replace("${{ github.run_attempt }}", "1").strip('"')
+                needs = {f"artifact-{kind}": retained_output}
+                self.assertEqual(needs[f"artifact-{kind}"], "pinned-archive-attempt-1")
+                self.assertNotEqual(needs[f"artifact-{kind}"], "pinned-archive-attempt-2")
 
 
 if __name__ == "__main__":
