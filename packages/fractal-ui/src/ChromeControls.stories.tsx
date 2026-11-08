@@ -246,15 +246,18 @@ export const TooltipReleasedWithPointer: Story = { tags: ['critical'], play: asy
   const filter = sidebar.getByRole('button', { name: 'Filter agents · 1 active' })
   const resources = within(header(canvasElement)).getByRole('button', { name: 'Resources' })
   const tooltips = () => within(document.body).queryAllByRole('tooltip', { hidden: true }).map(tooltip => tooltip.textContent)
+  const namedTooltip = async (step: string, anchor: HTMLElement, label: string) => {
+    try { return await tooltipFor(anchor, label) } catch (cause) { throw new Error(`${step}: tooltip did not open`, { cause }) }
+  }
 
   // The page's very first hover opens no tooltip.
   await userEvent.hover(canvasElement)
   await userEvent.hover(sort)
-  await tooltipFor(sort, 'Sort agents · Manual')
+  await namedTooltip('Initial sort hover', sort, 'Sort agents · Manual')
   needsMe.focus()
   await userEvent.tab()
   await expect(filter).toHaveFocus()
-  await tooltipFor(filter, 'Filter agents · 1 active')
+  await namedTooltip('Tab from Needs me to filter while sort is hovered', filter, 'Filter agents · 1 active')
   await userEvent.unhover(sort)
   await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
   await expect(tooltips()).not.toContain('Sort agents · Manual')
@@ -264,7 +267,7 @@ export const TooltipReleasedWithPointer: Story = { tags: ['critical'], play: asy
   // The pointer is what moves next, which ends keyboard modality.
   await userEvent.hover(canvasElement)
   await userEvent.hover(sort)
-  await tooltipFor(sort, 'Sort agents · Manual')
+  await namedTooltip('Sort hover before opening resources dialog', sort, 'Sort agents · Manual')
   resources.focus()
   await userEvent.keyboard('{Enter}')
   const dialog = await within(document.body).findByRole('dialog', { name: 'Agent resources' })
@@ -285,25 +288,27 @@ export const TooltipReleasedWithPointer: Story = { tags: ['critical'], play: asy
   // A tooltip its control still holds by keyboard focus outlives the pointer that also hovered it.
   await userEvent.hover(canvasElement)
   await userEvent.hover(filter)
-  await tooltipFor(filter, 'Filter agents · 1 active')
+  await namedTooltip('Filter hover after dialog dismissal', filter, 'Filter agents · 1 active')
   needsMe.focus()
   await userEvent.tab()
   await expect(filter).toHaveFocus()
-  await tooltipFor(filter, 'Filter agents · 1 active')
+  await namedTooltip('Keyboard ownership of hovered filter', filter, 'Filter agents · 1 active')
   await userEvent.unhover(filter)
   const heldUntil = performance.now() + 600
   while (performance.now() < heldUntil) {
     await expect(tooltips()).toContain('Filter agents · 1 active')
-    const { promise, resolve } = Promise.withResolvers<void>()
-    requestAnimationFrame(() => resolve())
-    await promise
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
   }
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(tooltips()).toEqual([]))
 
   // Pointer release must not resurrect a tooltip Escape already dismissed, even while keyboard focus remains.
+  await userEvent.hover(canvasElement)
   await userEvent.hover(filter)
-  await tooltipFor(filter, 'Filter agents · 1 active')
+  needsMe.focus()
+  await userEvent.tab()
+  await expect(filter).toHaveFocus()
+  await namedTooltip('Keyboard ownership before Escape and pointer release', filter, 'Filter agents · 1 active')
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(tooltips()).toEqual([]))
   await userEvent.unhover(filter)

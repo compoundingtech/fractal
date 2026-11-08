@@ -80,6 +80,7 @@ export function Tooltip({ label, shortcut, placement = 'bottom', delay = 350, is
   const lastScroll = React.useRef(Number.NEGATIVE_INFINITY)
   const reopenRequest = React.useRef(0)
   const focusFromNavigation = React.useRef(false)
+  const pointerLeaving = React.useRef(false)
   const setScope = React.useCallback((element: HTMLSpanElement | null) => {
     scope.current = element
     if (element !== null && navigationFocusOnly) trackFocusNavigation(element.ownerDocument)
@@ -137,15 +138,17 @@ export function Tooltip({ label, shortcut, placement = 'bottom', delay = 350, is
   const changeOpen = (open: boolean) => {
     if (open && navigationFocusOnly && !focusFromNavigation.current) return
     if (open && scope.current?.closest(hiddenByModal) != null) return
+    // RAC clears focus intent on hover end. Veto that close through its controlled API, not by reopening
+    // afterwards; key presses, blur, other tooltips and modal dismissal must still be allowed to close.
+    if (!open && pointerLeaving.current && keyboardFocused()) return
     setOpen(open)
     if (open) return
     const closedAt = performance.now()
     const request = ++reopenRequest.current
     window.setTimeout(() => { if (request === reopenRequest.current && Math.abs(closedAt - lastScroll.current) < scrollSettleMs && keyboardFocused()) setSettling(true) })
   }
-  // RAC's hover-end handler clears its focus intent too; the wrapper runs after it and preserves the open
-  // state when keyboard focus still owns the tooltip, without reopening a tooltip already dismissed by Escape.
-  return <ThemePortal><span ref={setScope} onPointerEnter={() => { focusFromNavigation.current = true }} onPointerLeave={() => { if (isOpen) setOpen(keyboardFocused()) }} onFocusCapture={event => {
+  // Pointer-out capture precedes the child's hover-end handler; pointer-leave clears the reason afterwards.
+  return <ThemePortal><span ref={setScope} onPointerEnter={() => { focusFromNavigation.current = true }} onPointerOutCapture={event => { pointerLeaving.current = !(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) }} onPointerLeave={() => { pointerLeaving.current = false; if (isOpen && !keyboardFocused()) setOpen(false) }} onFocusCapture={event => {
     const navigation = focusNavigationByDocument.get(event.currentTarget.ownerDocument)
     focusFromNavigation.current = navigation?.target === event.target && navigation.userMoved
   }} onKeyDownCapture={event => { if (event.key === 'Escape') { reopenRequest.current++; lastScroll.current = Number.NEGATIVE_INFINITY; setSettling(false); setOpen(false) } }} {...stylex.props(styles.tooltipScope)}><TooltipTrigger delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={changeOpen}>{children}<TooltipSurface placement={placement} style={style}><span>{label}</span>{shortcut && <>{' '}<kbd {...stylex.props(styles.shortcut, styles.tooltipShortcut)}>{shortcut}</kbd></>}</TooltipSurface></TooltipTrigger></span></ThemePortal>
