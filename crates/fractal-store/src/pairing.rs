@@ -51,6 +51,11 @@ pub fn operation_is_trusted(
     while let Some(row) = rows.next()? {
         let receipt: String = row.get(0)?;
         if row.get::<_, String>(1)? != expected { continue; }
+        let quarantined: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_records AS records JOIN replica_restore_quarantine AS quarantine USING(writer,sequence,envelope_hash) WHERE records.claim_id=?1)",
+            [&receipt], |row| row.get(0),
+        )?;
+        if quarantined { continue; }
         let local: bool = connection.query_row(
             "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1 AND value=?2)",
             params![format!("client_operation_local/{receipt}"), expected], |row| row.get(0),
