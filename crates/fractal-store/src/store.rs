@@ -67,6 +67,7 @@ pub mod glasses;
 pub mod mailbox_wakes;
 pub mod mailbox_changes;
 pub mod mailbox_lease;
+mod roster_actual;
 #[cfg(test)]
 pub mod message_send_tests;
 // Qualification only: no production caller or Source registration.
@@ -1632,6 +1633,7 @@ pub(crate) static RUNTIME_ID_INDEX: std::sync::LazyLock<String> = std::sync::Laz
              WHERE {ACTUAL_STATE_CLAIM} AND {predicate};"
         ));
     }
+    indexes.push_str(&roster_actual::indexes());
     indexes
 });
 
@@ -1758,12 +1760,16 @@ pub struct SubjectCache {
 
 const AGENT_CARD_STATUS_LIMIT: usize = 4096;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CardShape { Internal, Generic, Roster }
+
 /// One subject's reduction, read at snapshot `read_at`, so it holds from there on. The claims
 /// mode is part of the answer: a summary reduction and a full one are cached side by side.
 pub struct StatusEntry {
     read_at: u64,
     owners: Vec<String>,
     claims: ClaimsReduction,
+    card_shape: CardShape,
     status: SubjectStatus,
     action: Option<PlannedAction>,
 }
@@ -5223,21 +5229,21 @@ impl Store {
         newest: bool,
         claims: ClaimsReduction,
     ) -> Result<(SubjectStatus, Option<PlannedAction>)> {
-        if let Some(kept) = self.kept_subject_status(subject, store_index, claims, false) {
+        if let Some(kept) = self.kept_subject_status(subject, store_index, claims, CardShape::Internal) {
             return Ok(kept);
         }
         let (status, action) =
             subject_status_at(connection, subject, Some(store_index), None, claims)?
                 .expect("a reduction without an owner filter always has a status");
         if newest {
-            self.keep_subject_status(subject, store_index, claims, &status, &action, false);
+            self.keep_subject_status(subject, store_index, claims, &status, &action, CardShape::Internal);
         }
         Ok((status, action))
     }
 
     /// `subject`'s kept status reduction, if one holds at `store_index`.
     fn kept_subject_status(
-        &self, subject: &str, store_index: u64, claims: ClaimsReduction, serving_card: bool,
+        &self, subject: &str, store_index: u64, claims: ClaimsReduction, card_shape: CardShape,
     ) -> Option<(SubjectStatus, Option<PlannedAction>)> {
         let cache = self.fractal
             .subject_cache
@@ -5249,13 +5255,14 @@ impl Store {
             ClaimsReduction::Full => &cache.statuses,
             ClaimsReduction::Summary => &cache.summary_statuses,
             ClaimsReduction::Runtime => &cache.runtime_statuses,
-            ClaimsReduction::AgentCard if serving_card => &cache.serving_card_statuses,
+            ClaimsReduction::AgentCard if card_shape != CardShape::Internal => &cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &cache.card_statuses,
             ClaimsReduction::Incarnation => return None,
         };
         entries.get(subject)
             .filter(|entry| {
                 entry.claims == claims
+                    && entry.card_shape == card_shape
                     && entry.read_at <= store_index
                     && store_index <= cache.through
             })
@@ -5265,7 +5272,7 @@ impl Store {
     /// Keep a reduction read at the newest applied snapshot, `store_index`.
     fn keep_subject_status(
         &self, subject: &str, store_index: u64, claims: ClaimsReduction,
-        status: &SubjectStatus, action: &Option<PlannedAction>, serving_card: bool,
+        status: &SubjectStatus, action: &Option<PlannedAction>, card_shape: CardShape,
     ) {
         let mut cache = self.fractal
             .subject_cache
@@ -5285,7 +5292,7 @@ impl Store {
             ClaimsReduction::Full => &mut cache.statuses,
             ClaimsReduction::Summary => &mut cache.summary_statuses,
             ClaimsReduction::Runtime => &mut cache.runtime_statuses,
-            ClaimsReduction::AgentCard if serving_card => &mut cache.serving_card_statuses,
+            ClaimsReduction::AgentCard if card_shape != CardShape::Internal => &mut cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &mut cache.card_statuses,
             ClaimsReduction::Incarnation => return,
         };
@@ -5301,6 +5308,7 @@ impl Store {
                 read_at: store_index,
                 owners,
                 claims,
+                card_shape,
                 status: status.clone(),
                 action: action.clone(),
             },

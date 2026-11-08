@@ -15,6 +15,13 @@ in scope. Existing producer-specific limits remain in effect and must not be
 removed or generalized to other producers. Chunk size is a physical format
 choice to qualify later, not a logical input cap.
 
+The roster actual-field indexes deliberately reuse the existing variable subject/timestamp keys;
+they do not copy claim bodies into index keys. Their predicates inspect the existing JSON body.
+Field reads return only one JSON field per seek; source authority reads one runtime body per
+origin plus one nonterminal candidate. Neither field bytes, origin count nor source-body bytes
+are proven bounded. `roster_actual` owns these transitional catalog exceptions; this optimization
+reduces history-sized decoding, not the admitted logical value domain or the large-value debt.
+
 ## Inventory and transitional exceptions
 
 [large-value-sites.json](large-value-sites.json) is the machine-readable source
