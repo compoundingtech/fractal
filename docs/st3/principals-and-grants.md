@@ -165,8 +165,8 @@ semantics. No declaration, assistant, action, upgrade, HEAD or unknown route is 
 The daemon writes only `custom.client.service.v1.read-window` as
 `daemon/{origin}`, at most once per grant per 60-second wall-clock window.
 Admission-refused requests write no audit claim. Service identity is never an acting party,
-and browser ingress refuses an admitted cookie combined with Authorization rather
-than discarding the bearer and exercising person authority. Service-grant fixtures
+and browser ingress refuses a browser cookie or launch token combined with
+Authorization. Browser admission requires a single credential source. Service-grant fixtures
 are inside `#[cfg(test)]` modules; production
 grant append still rejects service issuance. This is not an OS sandbox:
 same-UID callers dropping the credential on an unrestricted socket remain

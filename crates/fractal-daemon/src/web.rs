@@ -131,8 +131,8 @@ async fn admit(web: &Web, mut request: Request, next: Next) -> Response {
     let cookie = request.headers().get(header::COOKIE).and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').find_map(|part| part.trim().strip_prefix("fractal_local=")))
         .map(str::to_owned);
-    if cookie.is_some() && request.headers().contains_key(header::AUTHORIZATION) {
-        // Refuse before token redemption too: mixed authority must not mint a browser session.
+    if (cookie.is_some() || token.is_some()) && request.headers().contains_key(header::AUTHORIZATION) {
+        // Browser admission requires a single credential source.
         return StatusCode::FORBIDDEN.into_response();
     }
     let mut expires_at = None;
@@ -298,14 +298,18 @@ mod tests {
                 .body(Body::from("{}")).unwrap()).await.unwrap();
             assert_eq!(response.status(),StatusCode::FORBIDDEN,"{method}");
         }
-        let login = app.oneshot(Request::builder().uri("/?token=once")
-            .header(header::HOST,"127.0.0.1:7410")
-            .header(header::COOKIE,"fractal_local=admitted")
-            .header(header::AUTHORIZATION,"Bearer service-credential")
-            .body(Body::empty()).unwrap()).await.unwrap();
-        assert_eq!(login.status(),StatusCode::FORBIDDEN);
-        assert_eq!(web.credentials.lock().unwrap().token,"once");
-        assert!(!web.credential_path.exists());
+        for cookie in [Some("fractal_local=admitted"),None] {
+            let mut login = Request::builder().uri("/?token=once")
+                .header(header::HOST,"127.0.0.1:7410")
+                .header(header::AUTHORIZATION,"Bearer service-credential");
+            if let Some(cookie) = cookie { login = login.header(header::COOKIE,cookie); }
+            let response = app.clone().oneshot(login.body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(),StatusCode::FORBIDDEN);
+            let credentials = web.credentials.lock().unwrap();
+            assert_eq!(credentials.token,"once");
+            assert_eq!(credentials.sessions.len(),1);
+            assert!(!web.credential_path.exists());
+        }
         assert_eq!(dispatched.load(std::sync::atomic::Ordering::SeqCst),0);
     }
 }
