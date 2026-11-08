@@ -72,18 +72,19 @@ const fitSlack = 0.5
 
 /**
  * How the row gives way as the sidebar narrows, widest first; the first that fits, padding and gaps included, wins.
- * Icons only repeat the label, so they go first; then counts drop to compact badges (attention stays as a dot). Only
- * when even that cannot fit does each tab become its icon and count, the label moving to a tooltip and staying in its
- * name. The icon steps apply only when every tab has an icon.
+ * Numbers carry information and icons only repeat the label, so icons go first; then labels, each tab becoming its icon
+ * and count with the label in a tooltip and still first in its name; counts drop to compact badges (attention stays as a
+ * dot) only at the narrowest step. Without an icon on every tab, labels stay and the last step is label and badge.
  */
 export const sidebarTabFits = [
   { fit: 'full', icon: true, label: true, counts: true },
   { fit: 'labels', icon: false, label: true, counts: true },
-  { fit: 'compact', icon: false, label: true, counts: false },
   { fit: 'icons', icon: true, label: false, counts: true },
   { fit: 'icons-compact', icon: true, label: false, counts: false },
 ] as const
-type Fit = typeof sidebarTabFits[number]
+/** The narrowest step when some tab has no icon to stand for its label. */
+const labelledCompact = { fit: 'compact', icon: false, label: true, counts: false } as const
+type Fit = typeof sidebarTabFits[number] | typeof labelledCompact
 
 function TabFace({ tab, showCount, showIcon = true, showLabel = true }: { readonly tab: SidebarTab; readonly showCount: boolean; readonly showIcon?: boolean; readonly showLabel?: boolean }) {
   const marker = markerOf(tab)
@@ -109,7 +110,7 @@ export function CountPill({ count, needsYou = false }: { readonly count: number;
  */
 export function SidebarTabs({ tabs, selectedId, onSelectionChange, panelHasTabbableContent = false, children }: SidebarTabsProps) {
   const narrow = React.useContext(NarrowLayoutContext)
-  const fits = React.useMemo(() => tabs.every(tab => tab.icon !== undefined) ? sidebarTabFits : sidebarTabFits.filter(step => step.label), [tabs])
+  const fits = React.useMemo<readonly Fit[]>(() => tabs.every(tab => tab.icon !== undefined) ? sidebarTabFits : [...sidebarTabFits.filter(step => step.label), labelledCompact], [tabs])
   const [fit, setFit] = React.useState<Fit>(sidebarTabFits[0])
   const bar = React.useRef<HTMLDivElement>(null)
   const replicas = React.useRef<(HTMLDivElement | null)[]>([])

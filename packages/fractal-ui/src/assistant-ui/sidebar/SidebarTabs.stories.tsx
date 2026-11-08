@@ -286,7 +286,7 @@ async function overlayFocusPlay({ canvasElement }: { readonly canvasElement: HTM
   await expect(within(section).getByRole('tab', { name: names[0] })).toHaveAttribute('aria-selected', 'true')
 }
 
-/** At the row's exact natural width every icon and count shows; one pixel less drops the icons and keeps the counts; below the iconless row every count drops together. No label truncates. */
+/** At the row's exact natural width every icon and count shows; one pixel less drops the icons and keeps the counts; below the iconless row the labels go and the counts stay; below that every count drops together. No label truncates. */
 async function countFitPlay({ canvasElement }: { readonly canvasElement: HTMLElement }) {
   const section = await within(canvasElement).findByRole('region', { name: /^Sidebar tabs / })
   const host = section.querySelector<HTMLElement>('[data-sidebar-host]')!
@@ -297,10 +297,11 @@ async function countFitPlay({ canvasElement }: { readonly canvasElement: HTMLEle
   const frame = host.getBoundingClientRect().width - root.getBoundingClientRect().width
   host.style.width = `${Math.ceil(natural + frame)}px`
   await expect(root.getBoundingClientRect().width).toBeGreaterThanOrEqual(natural)
-  await waitFor(() => expect(root).toHaveAttribute('data-sidebar-tab-counts', 'shown'))
+  // Wait for the step itself: the narrower icon step shows counts too, so counts alone do not prove the refit.
+  await waitFor(() => expect(root).toHaveAttribute('data-sidebar-tab-fit', 'full'))
+  await expect(root).toHaveAttribute('data-sidebar-tab-counts', 'shown')
   await expect(visibleText(tablist)).toEqual(withCounts)
   await assertNoClip(tablist)
-  await expect(root).toHaveAttribute('data-sidebar-tab-fit', 'full')
   host.style.width = `${Math.floor(natural + frame) - 1}px`
   await expect(root.getBoundingClientRect().width).toBeLessThan(natural)
   await waitFor(() => expect(root).toHaveAttribute('data-sidebar-tab-fit', 'labels'))
@@ -309,10 +310,18 @@ async function countFitPlay({ canvasElement }: { readonly canvasElement: HTMLEle
   await expect(tablist.querySelectorAll('[data-sidebar-tab-icon]')).toHaveLength(0)
   await assertNoClip(tablist)
   const iconless = root.querySelector('[data-sidebar-tabs-measure-fit="labels"]')!.getBoundingClientRect().width
+  // Labels give way before counts: each tab paints its icon and count, and its name still leads with the label.
   host.style.width = `${Math.floor(iconless + frame) - 1}px`
-  await waitFor(() => expect(root).toHaveAttribute('data-sidebar-tab-counts', 'dropped'))
-  await expect(visibleText(tablist)).toEqual(withoutCounts)
+  await waitFor(() => expect(root).toHaveAttribute('data-sidebar-tab-fit', 'icons'))
+  await expect(root).toHaveAttribute('data-sidebar-tab-counts', 'shown')
+  await expect(visibleText(tablist)).toEqual(withCounts.map((text, index) => text.slice(names[index]!.split(',')[0]!.length)))
   await expect(within(tablist).getAllByRole('tab').map(tab => tab.getAttribute('aria-label'))).toEqual(names)
+  await assertNoClip(tablist)
+  const iconsOnly = root.querySelector('[data-sidebar-tabs-measure-fit="icons"]')!.getBoundingClientRect().width
+  host.style.width = `${Math.floor(iconsOnly + frame) - 1}px`
+  await waitFor(() => expect(root).toHaveAttribute('data-sidebar-tab-counts', 'dropped'))
+  await expect(root).toHaveAttribute('data-sidebar-tab-fit', 'icons-compact')
+  await expect(visibleText(tablist)).toEqual(withoutCounts.map((text, index) => text.slice(names[index]!.split(',')[0]!.length)))
   await assertNoClip(tablist)
   host.style.width = ''
   await assertMarkers(section, plain)
