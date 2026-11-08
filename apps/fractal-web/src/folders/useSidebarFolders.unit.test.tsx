@@ -483,7 +483,9 @@ it('A failed layout read offers Retry, and Retry reads again', async () => {
 it('An interrupted layout stream says it is reconnecting and offers no Retry, since the client reconnects itself', async () => {
   const h = await mount()
   try {
-    await React.act(async () => h.stream().onEnd(new Error('socket closed')))
+    const end = h.stream().onEnd
+    if (end === undefined) throw new TypeError('The inventory follow registered no onEnd handler')
+    await React.act(async () => end(new Error('socket closed')))
     expect(h.registry.get(h.source).unavailableReason).toBe('interrupted')
     expect(h.binding().unavailable).toBe('Reconnecting to folder layout…')
     expect(h.binding().onRetryUnavailable).toBeUndefined()
