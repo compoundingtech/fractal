@@ -1824,6 +1824,7 @@ async fn populated_ready_work_cost_by_cohort_size() {
     }
 
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
