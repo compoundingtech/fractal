@@ -29,12 +29,20 @@ const sidebarTabs = (ctx: FactoryContext): AttentionState => {
   const person = ctx.cast.people[0]
   if (asker === undefined || person === undefined) throw new Error('the sidebar-tabs variant requires an agent and person in the cast')
   const question = resources.attention(ctx, { key: 'sidebar-question', kind: 'harness-prompt', person, source: asker.session, title: 'Allow edits outside the workspace?', detail: 'The harness asks before writing to packages/worker.', priority: 'high', requestedMs: -45_000, actions: ['prompt.respond'] })
-  const needsYou = others.map((member, index) => resources.attention(ctx, {
-    key: `sidebar-needs-you-${member.key}`, kind: index % 2 === 0 ? 'agent-request' : 'human-gate', person, requester: member, source: member.id,
-    ...(index === 0 && ctx.cast.missions[0] !== undefined ? { mission: ctx.cast.missions[0] } : {}),
-    title: index % 2 === 0 ? `Review ${member.name}'s change` : `Approve ${member.name}'s next step`, detail: 'Waiting on you before it continues.',
-    priority: 'normal', requestedMs: -120_000 - index * 60_000, actions: ['custom.reply'],
-  }))
+  // The card holding the first mission also names the step waiting on it, as a mission step's own ask does.
+  const mission = ctx.cast.missions[0]
+  const waiting = mission?.steps.at(-2) ?? mission?.steps.at(-1)
+  const needsYou = others.map((member, index) => {
+    const card = resources.attention(ctx, {
+      key: `sidebar-needs-you-${member.key}`, kind: index % 2 === 0 ? 'agent-request' : 'human-gate', person, requester: member, source: member.id,
+      ...(index === 0 && mission !== undefined ? { mission } : {}),
+      title: index % 2 === 0 ? `Review ${member.name}'s change` : `Approve ${member.name}'s next step`, detail: 'Waiting on you before it continues.',
+      priority: 'normal', requestedMs: -120_000 - index * 60_000, actions: ['custom.reply'],
+    })
+    return index === 0 && waiting !== undefined
+      ? { ...card, blocked: { step: waiting.path, goal: waiting.title, step_run_id: waiting.stepRun, attempt: 0 } } as unknown as AttentionState['attention'][number]
+      : card
+  })
   return { attention: [question, ...needsYou], messages: [] }
 }
 

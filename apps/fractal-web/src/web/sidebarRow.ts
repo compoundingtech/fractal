@@ -133,6 +133,24 @@ export const sidebarMissionContext = ({ agent, missions = [], attention = [] }: 
   }
 }
 
+/**
+ * A mission as its hover card shows it, from the missions feed: its reader title (never a content hash), progress and current
+ * step from its open run (else its latest), and the agents whose current work is on it.
+ */
+export const missionCardOf = ({ mission, agents }: { readonly mission: Mission; readonly agents: readonly Agent[] }): { readonly mission: SidebarOtherMission; readonly agents: readonly string[] } => {
+  const runs = mission.run_details ?? []
+  const run = runs.find(each => Option.isNone(each.completed_at)) ?? runs.at(-1)
+  const step = run?.current_steps.map(current => Option.getOrUndefined(current.title)).find(title => title !== undefined && title !== '')
+  return {
+    mission: {
+      id: mission.id, slug: missionSlug(mission.id), title: missionDisplayTitle({ title: mission.title, work: undefined }),
+      progress: run === undefined ? { _tag: 'Unknown' } : { _tag: 'Known', ...run.progress },
+      step: step === undefined ? { _tag: 'Unknown' } : { _tag: 'Step', name: step },
+    },
+    agents: agents.filter(agent => agent.currentWork?.some(work => work.missionId === mission.id) === true || agent.mission === mission.id).map(agent => agent.name),
+  }
+}
+
 /** Harness IDs are only unique within their parent seat; never use them as graph subjects. */
 export const subagentRowId = ({ parent, id }: { readonly parent: string; readonly id: string }): string =>
   `wf/subagent/${encodeURIComponent(parent)}/${encodeURIComponent(id)}`
@@ -149,6 +167,18 @@ export const sidebarSubagentRow = ({ parent, child, stale }: {
   usage: { _tag: 'Unknown' }, duration: { _tag: 'Unknown' }, lastTurn: { _tag: 'Unknown' },
   subagentObservation: { _tag: 'NotReported', reason: { _tag: 'Harness' } }, children: [],
 })
+
+/**
+ * What a waiting agent waits on, from served facts only: its current step's state (verifying is CI, blocked is a
+ * dependency, waiting-person is a person) or a harness blocked on a person. A wait on you is "Needs you" instead, from the
+ * counted needs-you set (`rowStatusLabel`). Anything else stays plain "Waiting".
+ */
+const waitingLabel = (agent: Agent): string => {
+  const state = agent.currentWork?.[0]?.state
+  const on = state === 'verifying' ? 'CI' : state === 'blocked' ? 'dependency'
+    : state === 'waiting-person' || (agent.blockedOn._tag === 'Known' && agent.blockedOn.value === 'human') ? 'a person' : undefined
+  return on === undefined ? statuses.waiting.label : `${statuses.waiting.label} on ${on}`
+}
 
 /** Presentation of one actual roster observation. A stale roster retains its last-observed status. */
 export const sidebarRow = ({ agent, stale, needsMe, missions, attention, missionInfo, missionUnavailable = false, now = Date.now(), unread }: {
@@ -172,7 +202,7 @@ export const sidebarRow = ({ agent, stale, needsMe, missions, attention, mission
   const statusSince = validTimestamp(agent.statusSince)
   const lastObserved = stale || !agent.connected
   // Lifecycle takes precedence over harness activity unless Fractal reports a fault.
-  const statusLabel = statuses[status].label
+  const statusLabel = status === 'waiting' ? waitingLabel(agent) : statuses[status].label
   // Preserve the real projection's driver capability; visual harness metadata can omit non-observing/unknown drivers.
   const observesSubagents = agent.driver?._tag === 'Observing'
   const awaitingFirstReport = observesSubagents && (agent.state === 'desired' || agent.state === 'starting')

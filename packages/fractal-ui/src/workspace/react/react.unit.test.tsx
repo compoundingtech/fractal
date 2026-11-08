@@ -5,7 +5,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { currentSpace, emptyWorkspace, panesOf, tabsOf, transition, type Command, type Layout, type WorkspaceConfig, type WorkspaceState } from '../mod.ts'
 import type { WorkspaceStore } from '../store.ts'
-import { actionFor, defaultBindings, matchesCombo, Pane, PaneAside, PaneBody, PaneContent, Tab, TabStrip, useEntityDrag, usePaneAside, useWorkspaceKeys, Workspace, WorkspaceProvider } from './mod.ts'
+import { actionFor, defaultBindings, matchesCombo, Pane, PaneAside, PaneBody, PaneContent, Tab, TabStrip, useDragState, useDropTarget, useEntityDrag, usePaneAside, useWorkspaceKeys, Workspace, WorkspaceProvider } from './mod.ts'
 
 ;(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 // jsdom has no CSS.escape, which React Aria's keyboard navigation uses.
@@ -248,6 +248,78 @@ describe('pointer drag and drop', () => {
     expect(panesOf(currentSpace(store.getState()).layout).map(pane => pane.tabs.map(tab => tab.ref))).toEqual([['doc:b'], ['doc:a', 'doc:c']])
   })
 
+  it('lets a host drop target claim the point ahead of the panes behind it, or refuse it there', () => {
+    const store = memoryStore(['doc:a'])
+    const dropped: unknown[] = []
+    let accept = true
+    const Shelf = () => {
+      useDropTarget({
+        id: 'shelf',
+        resolve: (element, point, payload) => element.closest('[data-shelf]') === null ? undefined : accept ? { ref: payload.ref, at: point.y < 50 ? 'before' : 'after' } : null,
+        drop: (payload, data) => { dropped.push([payload.ref, payload.data, data]) },
+      })
+      const over = useDragState(state => state.over?._tag === 'Target' && state.over.target === 'shelf' ? state.over.data as { readonly at: string } : undefined)
+      return <div data-shelf="" data-testid="shelf">{over?.at ?? 'idle'}</div>
+    }
+    const Folder = () => <div data-testid="folder" {...useEntityDrag({ ref: 'list:home', opens: false, data: { folder: 'home' } })}>home</div>
+    render(<WorkspaceProvider store={store} describe={describeRef} renderDragChip={entity => <span data-testid="chip">{entity.title}</span>}>
+      <Shelf />
+      <Folder />
+      <Workspace renderPane={pane => <Pane key={pane.id} pane={pane}><PaneBody><PaneContent renderDropOverlay={({ zone }) => <div data-testid="overlay">{zone._tag}</div>}>{() => null}</PaneContent></PaneBody></Pane>} />
+    </WorkspaceProvider>)
+    const shelf = container.querySelector<HTMLElement>('[data-testid="shelf"]')!
+    const content = container.querySelector<HTMLElement>('[data-drop-content]')!
+    vi.spyOn(content, 'getBoundingClientRect').mockReturnValue(rect(0, 0, 400, 300))
+    document.elementsFromPoint = () => [shelf, content]
+    const folder = container.querySelector('[data-testid="folder"]')!
+    pointer(folder, 'pointerdown', { clientX: 0, clientY: 0 })
+    pointer(window, 'pointermove', { clientX: 100, clientY: 80 })
+    expect(shelf.textContent).toBe('after')
+    expect(document.querySelector('[data-testid="chip"]')?.textContent).toBe('LIST:HOME')
+    pointer(window, 'pointerup', { clientX: 100, clientY: 80 })
+    expect(dropped).toEqual([['list:home', { folder: 'home' }, { ref: 'list:home', at: 'after' }]])
+    expect(tabsOf(currentSpace(store.getState()).layout).map(tab => tab.ref)).toEqual(['doc:a'])
+    accept = false
+    pointer(folder, 'pointerdown', { clientX: 0, clientY: 0 })
+    pointer(window, 'pointermove', { clientX: 100, clientY: 20 })
+    expect(shelf.textContent, 'a refusing target shows nothing, and nothing behind it shows either').toBe('idle')
+    expect(container.querySelector('[data-testid="overlay"]')).toBeNull()
+    pointer(window, 'pointerup', { clientX: 100, clientY: 20 })
+    expect(dropped).toHaveLength(1)
+  })
+
+  it('never lands a drag that does not open in a pane', () => {
+    const store = memoryStore(['doc:a'])
+    const Folder = () => <div data-testid="folder" {...useEntityDrag({ ref: 'list:home', opens: false })}>home</div>
+    render(<WorkspaceProvider store={store} describe={describeRef}>
+      <Folder />
+      <Workspace renderPane={pane => <Pane key={pane.id} pane={pane}><TabStrip>{tab => <Tab tab={tab}>{tab.ref}</Tab>}</TabStrip><PaneBody><PaneContent renderDropOverlay={() => <div data-testid="overlay" />}>{() => null}</PaneContent></PaneBody></Pane>} />
+    </WorkspaceProvider>)
+    const content = container.querySelector<HTMLElement>('[data-drop-content]')!
+    const strip = container.querySelector<HTMLElement>('[data-drop-strip]')!
+    vi.spyOn(content, 'getBoundingClientRect').mockReturnValue(rect(0, 0, 400, 300))
+    const folder = container.querySelector('[data-testid="folder"]')!
+    for (const target of [content, strip]) {
+      document.elementsFromPoint = () => [target]
+      pointer(folder, 'pointerdown', { clientX: 0, clientY: 0 })
+      pointer(window, 'pointermove', { clientX: 390, clientY: 150 })
+      expect(container.querySelector('[data-testid="overlay"]')).toBeNull()
+      expect(container.querySelector('[data-drop-before], [data-drop-after]')).toBeNull()
+      pointer(window, 'pointerup', { clientX: 390, clientY: 150 })
+    }
+    expect(panesOf(currentSpace(store.getState()).layout).map(pane => pane.tabs.map(tab => tab.ref))).toEqual([['doc:a']])
+  })
+
+  it('lets a draggable live outside any workspace, where a press is only a press', () => {
+    const Row = () => <div data-testid="lonely" {...useEntityDrag({ ref: 'note:x' })}>row</div>
+    render(<Row />)
+    const row = container.querySelector('[data-testid="lonely"]')!
+    pointer(row, 'pointerdown', { clientX: 0, clientY: 0 })
+    pointer(window, 'pointermove', { clientX: 300, clientY: 0 })
+    pointer(window, 'pointerup', { clientX: 300, clientY: 0 })
+    expect(document.querySelector('[data-drag-chip]')).toBeNull()
+  })
+
   it('cancels on Escape and drops nothing where nothing would change', () => {
     const store = memoryStore(['doc:a'])
     render(<App store={store} />)
@@ -319,5 +391,16 @@ describe('keys', () => {
     expect((currentSpace(store.getState()).layout as Extract<Layout, { axis: string }>).axis).toBe('row')
     key(document.body, { key: 'k', code: 'KeyK', metaKey: mac, ctrlKey: !mac })
     expect(onPalette).toHaveBeenCalledOnce()
+  })
+
+  it('closes an empty pane with Alt+W', () => {
+    const store = memoryStore(['doc:a'])
+    render(<App store={store} />)
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
+    key(document.body, { key: 'd', code: 'KeyD', metaKey: mac, ctrlKey: !mac })
+    expect(panesOf(currentSpace(store.getState()).layout)).toHaveLength(2)
+    key(document.body, { key: '∑', code: 'KeyW', altKey: true })
+    expect(panesOf(currentSpace(store.getState()).layout)).toHaveLength(1)
+    expect(tabsOf(currentSpace(store.getState()).layout).map(tab => tab.ref)).toEqual(['doc:a'])
   })
 })

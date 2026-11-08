@@ -51,14 +51,20 @@ interface HarnessProps {
   readonly scheme: 'dark' | 'light'
   readonly phone?: boolean
   readonly recent?: readonly string[]
+  /** How many agents the roster holds beyond the fixed three. */
+  readonly extraAgents?: number
 }
 
 /** A palette over a real workspace transition; the readout below shows what it dispatched. */
 const noRecent: readonly string[] = []
-const Harness = ({ scheme, phone = false, recent = noRecent }: HarnessProps) => {
+const Harness = ({ scheme, phone = false, recent = noRecent, extraAgents = 0 }: HarnessProps) => {
   const [state, setState] = React.useState(initial)
   const [ran, setRan] = React.useState<string | undefined>(undefined)
   const [recentStore] = React.useState(() => memoryRecentStore(recent))
+  const roster = React.useMemo((): PaletteWorld => extraAgents === 0 ? world : {
+    ...world,
+    agents: [...world.agents, ...Array.from({ length: extraAgents }, (_, index) => ({ ref: `agent/example/fleet/worker-${index + 1}`, name: `Worker ${index + 1}`, detail: 'omp · dev5' }))],
+  }, [extraAgents])
   const palette = usePaletteOpen()
   const dispatch = React.useCallback((command: Command) => setState(current => transition(current, command, config)), [])
   const commands = React.useMemo((): readonly HostCommand[] => [
@@ -78,7 +84,7 @@ const Harness = ({ scheme, phone = false, recent = noRecent }: HarnessProps) => 
       {panesOf(space.layout).map((pane, index) => <div key={pane.id} data-testid={`pane-${index}`}>{pane.tabs.map(tab => `${tab.ref}${tab.id === pane.active ? '*' : ''}`).join(' | ')}</div>)}
       {ran !== undefined && <div data-testid="ran">{ran}</div>}
     </section>
-    <CommandPalette {...palette} state={state} dispatch={dispatch} world={world} commands={commands} search={said} recentStore={recentStore} phone={phone} />
+    <CommandPalette {...palette} state={state} dispatch={dispatch} world={roster} commands={commands} search={said} recentStore={recentStore} phone={phone} />
   </main>
 }
 
@@ -97,9 +103,11 @@ export default meta
 
 // Reviewed scenario exemptions by story export and mode; scenario.story-check.test.ts requires an exact match.
 export const scenarioExemptions: readonly string[] = [
+  'CappedSections:contract-fixture',
   'Empty:contract-fixture',
   'EmptyLight:contract-fixture',
   'LiveFixtures:contract-fixture',
+  'LongSection:contract-fixture',
   'Naming:contract-fixture',
   'NoMatches:contract-fixture',
   'Phone:contract-fixture',
@@ -151,6 +159,41 @@ export const Typing: Story = {
     await userEvent.keyboard('{Enter}')
     await closed()
     await expect(within(canvasElement).getByTestId('ran')).toHaveTextContent('new-mission')
+  },
+}
+
+/** The empty list shows six rows a section, then Show all; choosing it shows the rest. Scoped, all show at once. */
+export const CappedSections: Story = {
+  args: { extraAgents: 27 },
+  play: async ({ canvasElement }) => {
+    const { dialog, input } = await openPalette(canvasElement)
+    const agents = () => within(within(dialog).getByRole('group', { name: 'Agents' })).getAllByRole('option')
+    await waitFor(() => expect(agents()).toHaveLength(7))
+    const more = within(dialog).getByRole('option', { name: 'Show all 30' })
+    await userEvent.click(more)
+    await waitFor(() => expect(agents()).toHaveLength(30))
+    await expect(within(document.body).getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+    await userEvent.type(input, '@')
+    await waitFor(() => expect(sectionsOf(dialog)).toEqual(['Agents']))
+    await expect(agents()).toHaveLength(30)
+  },
+}
+
+/** A section past two hundred rows renders in chunks near the view; the selected row is always there and in view. */
+export const LongSection: Story = {
+  args: { extraAgents: 597 },
+  play: async ({ canvasElement }) => {
+    const { dialog, input } = await openPalette(canvasElement)
+    await userEvent.type(input, '@')
+    await waitFor(() => expect(dialog.querySelectorAll('[data-palette-chunk="placeholder"]').length).toBeGreaterThan(0))
+    await expect(dialog.querySelectorAll('[role="option"]').length).toBeLessThan(300)
+    // Up from the first row wraps to the last, which renders and scrolls into view.
+    await userEvent.keyboard('{ArrowUp}')
+    const last = await within(dialog).findByRole('option', { name: /Worker 597/u })
+    await expect(last).toHaveAttribute('aria-selected', 'true')
+    await expect(input).toHaveAttribute('aria-activedescendant', last.id)
+    const list = within(dialog).getByRole('listbox').getBoundingClientRect(), row = last.getBoundingClientRect()
+    await expect(row.top >= list.top - 1 && row.bottom <= list.bottom + 1).toBe(true)
   },
 }
 
@@ -290,6 +333,8 @@ export const LiveFixtures: Story = {
   play: async ({ canvasElement }) => {
     const { dialog, input } = await openPalette(canvasElement)
     await waitFor(() => expect(sectionsOf(dialog)).toEqual(expect.arrayContaining(['Alerts', 'Agents', 'Missions'])))
+    // The web has no fleet surface yet, so the kind registry keeps the Fleet rows out.
+    await expect(sectionsOf(dialog)).not.toContain('Fleet')
     await userEvent.type(input, '@')
     await waitFor(() => expect(sectionsOf(dialog)).toEqual(['Agents']))
     await expect(within(dialog).getAllByRole('option').length).toBe(fixtureProjections.agents.length)

@@ -52,6 +52,7 @@ const NearCommand = Schema.Union([
   Schema.TaggedStruct('ActivatePrevious', {}),
   Schema.TaggedStruct('Close', { tab: Id }),
   Schema.TaggedStruct('CloseOthers', { tab: Id }),
+  Schema.TaggedStruct('ClosePane', { pane: Id }),
   Schema.TaggedStruct('Replace', { tab: Id, ref: Ref }),
   Schema.TaggedStruct('ReopenClosed', {}),
   Schema.TaggedStruct('Move', { tab: Id, to: NearDrop }),
@@ -264,6 +265,23 @@ describe('moving and splitting', () => {
     state = run(state, [{ _tag: 'Close', tab: tabOf(state, 'doc:b').id }])
     expect(panesOf(space(state).layout).map(pane => pane.id)).toEqual([root])
     expect(focus(state)).toBe(root)
+  })
+
+  it('closes a whole pane, empty or not, remembering its tabs, and empties the last one in place', () => {
+    let state = open('doc:a', 'doc:b')
+    state = run(state, [{ _tag: 'Split', side: 'right' }])
+    const fresh = focus(state)
+    state = run(state, [{ _tag: 'ClosePane', pane: fresh }])
+    expect(shape(state)).toEqual([['doc:a', 'doc:b']])
+    expect(focus(state)).toBe(root)
+    state = run(state, [{ _tag: 'Move', tab: tabOf(state, 'doc:b').id, to: edge(root, 'right') }], counter(300))
+    const right = focus(state)
+    state = run(state, [{ _tag: 'ClosePane', pane: right }])
+    expect(shape(state)).toEqual([['doc:a']])
+    expect(space(state).local.closed[0]).toBe('doc:b')
+    state = run(state, [{ _tag: 'ClosePane', pane: root }])
+    expect(shape(state)).toEqual([[]])
+    expect(panesOf(space(state).layout).map(pane => pane.id)).toEqual([root])
   })
 })
 

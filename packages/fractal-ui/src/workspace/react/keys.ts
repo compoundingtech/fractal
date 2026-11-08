@@ -1,6 +1,7 @@
 import * as React from 'react'
 import type { Direction } from '../geometry.ts'
 import { neighbour, paneRects } from '../geometry.ts'
+import { panesOf } from '../layout.ts'
 import { activeTab, currentSpace, type Command, type WorkspaceState } from '../model.ts'
 import { isMac } from '../palette/core.ts'
 import { useWorkspaceContext } from './context.tsx'
@@ -100,7 +101,9 @@ export const commandFor = (action: WorkspaceAction, state: WorkspaceState<unknow
     case 'splitDown': return { _tag: 'Split', side: 'bottom' }
     case 'closeTab': {
       const tab = activeTab(space)
-      return tab === undefined ? undefined : { _tag: 'Close', tab: tab.id }
+      if (tab !== undefined) return { _tag: 'Close', tab: tab.id }
+      // An empty pane goes, unless it is the last one.
+      return panesOf(space.layout).length > 1 ? { _tag: 'ClosePane', pane: space.local.focus } : undefined
     }
     case 'reopenClosed': return { _tag: 'ReopenClosed' }
     case 'nextTab': return { _tag: 'Cycle', by: 1 }

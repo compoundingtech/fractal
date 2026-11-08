@@ -2,8 +2,6 @@ import { useAtomValue } from '@effect/atom-react'
 import { Devbar } from '@overeng/devbar'
 import type { DevbarPanel, DevbarSegment } from '@overeng/devbar'
 import { BuildIdentitySegment } from '@overeng/devbar/build-identity'
-import { darkDevbarTheme, lightDevbarTheme } from '@overeng/devbar/themes'
-import { devbarTokens } from '@overeng/devbar/tokens.stylex'
 import { makeMeters, makeSeries } from '@overeng/meters'
 import type { FpsValue } from '@overeng/meters'
 import { darkMeterTheme, frameBlock, heapBlock, jankBlock, lightMeterTheme } from '@overeng/meters/canvas'
@@ -22,13 +20,10 @@ import { buildIdentity, deploymentId } from 'virtual:build-identity'
 
 import { Changelog, useChangelogUnseen } from '../changelog/Changelog.tsx'
 import { reserveDevbarSpace } from './devbarSpace.ts'
+import { devbarTheme } from './devbarTheme.ts'
 import { counters } from './measurement/index.ts'
 import { setDevBarDefault, toggleDevBar, useDevBarVisible } from './devBarPreference.ts'
 import { RequestDetails, SocketDetails, tileHistoryMs, transportDetailBlocks, transportMeterDescriptions, transportSegments, transportSources } from './transportMeters.tsx'
-import { interactionVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
-
-/** The devbar draws its own focus ring; give it the app's focus ink so every ring shares one colour. */
-const devbarFocus = stylex.createTheme(devbarTokens, { focusRing: interactionVars.focusRing })
 
 export const DevBar = (props: { readonly defaultVisible?: boolean }) => <DevBarContent {...props} />
 
@@ -190,7 +185,7 @@ const DevBarContent = ({ defaultVisible = import.meta.env?.DEV ?? false }: { rea
   React.useLayoutEffect(() => host.current === null ? undefined : reserveDevbarSpace(host.current), [shown])
   if (!shown) return null
   return (
-    <div ref={host} data-testid="wf-devbar" {...stylex.props(dark ? darkDevbarTheme : lightDevbarTheme, devbarFocus)}>
+    <div ref={host} data-testid="wf-devbar" {...stylex.props(devbarTheme(dark))}>
       <MetersProvider meters={meters}>
         <Devbar panels={panels} segments={segments} openPanel={openPanel} onOpenPanelChange={setOpenPanel} stripMinWidth={0} style={styles.root} />
       </MetersProvider>

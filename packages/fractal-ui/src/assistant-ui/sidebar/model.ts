@@ -120,9 +120,15 @@ export const needsYouLabel = 'Needs you'
 /** Color means act: amber for a real ask (the same `needsMe` the counts use), red for failure, nothing else. Failure outranks the ask. */
 export const rowAttention = (row: Pick<SidebarAgentRow, 'status' | 'needsMe'>): 'needs-you' | 'failed' | undefined =>
   row.status === 'failed' ? 'failed' : row.needsMe === true ? 'needs-you' : undefined
-/** The row's status word: its reported label, with the status word swapped for "Needs you" on a real ask (a "Last verified" prefix stays). */
+/** A retained observation's prefix on a status label, which a real ask keeps. */
+export const lastVerifiedPrefix = 'Last verified · '
+/**
+ * The row's status word: its reported label, or "Needs you" on a real ask. The whole label is replaced, so a
+ * "Waiting on CI" never reads "Needs you on CI"; a "Last verified" prefix stays.
+ */
 export const rowStatusLabel = (row: Pick<SidebarAgentRow, 'status' | 'statusLabel' | 'needsMe'>): string =>
-  rowAttention(row) === 'needs-you' ? row.statusLabel.replace(statuses[row.status].label, needsYouLabel) : row.statusLabel
+  rowAttention(row) !== 'needs-you' ? row.statusLabel
+    : `${row.statusLabel.startsWith(lastVerifiedPrefix) ? lastVerifiedPrefix : ''}${needsYouLabel}`
 export const compactTime = ({ at, now }: { readonly at: number; readonly now: number }): string => {
   const seconds = Math.max(0, Math.floor((now - at) / 1000))
   return seconds < 60

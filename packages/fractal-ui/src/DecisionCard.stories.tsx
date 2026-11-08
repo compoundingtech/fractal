@@ -33,10 +33,13 @@ const base: DecisionCardProps = {
 }
 
 /** A host's state: the card owns none of it. Recommended is preselected; sending is a separate act. */
-function Live({ start = ['thread'], placeholder = 'Or tell it something else…', ...card }: Partial<DecisionCardProps> & { readonly start?: readonly string[]; readonly placeholder?: string }) {
+function Live({ start = ['thread'], placeholder = 'Or tell it something else…', noting = false, ...card }: Partial<DecisionCardProps> & { readonly start?: readonly string[]; readonly placeholder?: string; readonly noting?: boolean }) {
   const [selected, setSelected] = React.useState(start)
   const [words, setWords] = React.useState('')
+  const [notes, setNotes] = React.useState<Readonly<Record<string, string>>>({})
   const [sent, setSent] = React.useState<string>()
+  // A note goes with the answer it annotates, and only while that answer is chosen.
+  const answer = (ids: readonly string[]) => ids.map((id) => notes[id]?.trim() ? `${id}:${notes[id]!.trim()}` : id).join(',')
   return <>
     <DecisionCard
       {...base}
@@ -44,7 +47,8 @@ function Live({ start = ['thread'], placeholder = 'Or tell it something else…'
       onSelect={setSelected}
       words={{ value: words, placeholder, label: 'Your answer to example/atlas/builder', onChange: setWords }}
       dismiss={{ label: 'Dismiss', onPress: () => setSent('dismiss') }}
-      send={{ label: 'Send', disabled: selected.length === 0 && words.trim() === '', onPress: () => setSent(words.trim() || selected.join(',')) }}
+      send={{ label: 'Send', disabled: selected.length === 0 && words.trim() === '', onPress: () => setSent(words.trim() || answer(selected)) }}
+      {...(noting ? { notes: { values: notes, onChange: (id: string, value: string) => setNotes((current) => ({ ...current, [id]: value })) } } : {})}
       {...card}
     />
     <output data-testid="sent" hidden>{sent}</output>
@@ -78,6 +82,8 @@ export const scenarioExemptions: readonly string[] = [
   'Failed:primitive',
   'Full:primitive',
   'NarrowContainer:primitive',
+  'NarrowHeader:primitive',
+  'Notes:primitive',
   'Pager:primitive',
   'Phone:primitive',
   'ReadOnly:primitive',
@@ -97,22 +103,45 @@ const hueless = (color: string) => {
   return Math.max(r!, g!, b!) - Math.min(r!, g!, b!) < 24
 }
 
+/** An answer's whole row, its note included: what carries the selection. */
+const rowOf = (input: HTMLElement): HTMLElement => input.closest('[data-answer]')!
+/** The visible part of an answer's radio or checkbox: what carries the keyboard ring. */
+const ringOf = (input: HTMLElement): HTMLElement => input.closest('label')!.lastElementChild as HTMLElement
+/** Painted, not transparent: the computed colour has alpha. */
+const painted = (color: string) => color !== 'transparent' && !/rgba\([^)]*,\s*0\)$/.test(color)
+
 /** The focused card: one heading, one line of context, one group with each rationale in its row, a quiet row. */
 export const Docked: Story = {
   args: { children: <Live /> },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
-    await expect(canvas.getByRole('radio', { name: /Thread the session through/ })).toBeChecked()
+    const thread = canvas.getByRole('radio', { name: /Thread the session through/ })
+    const overload = canvas.getByRole('radio', { name: /Keep an overload/ })
+    await expect(thread).toBeChecked()
     // Recommended is a fact about an option, not a call to act: a neutral pill, not the accent.
     const recommended = getComputedStyle(canvas.getByText('Recommended'))
     await expect(hueless(recommended.color) && hueless(recommended.borderTopColor)).toBe(true)
-    // Selecting answers nothing; sending is its own act.
-    await userEvent.click(canvas.getByRole('radio', { name: /Keep an overload/ }))
+    // The chosen answer reads as chosen: its row carries the selection colour, the others stay unpainted.
+    const chosen = getComputedStyle(rowOf(thread)).backgroundColor
+    await expect(painted(chosen) && !hueless(chosen)).toBe(true)
+    await expect(painted(getComputedStyle(rowOf(overload)).backgroundColor)).toBe(false)
+    // Selecting answers nothing; sending is its own act. A pointer leaves no ring.
+    await userEvent.click(canvas.getByText('Keep an overload'))
+    await expect(overload).toBeChecked()
     await expect(canvas.getByTestId('sent').textContent).toBe('')
+    await expect(getComputedStyle(ringOf(overload)).outlineStyle).toBe('none')
     await userEvent.keyboard('1')
-    await expect(canvas.getByRole('radio', { name: /Thread the session through/ })).toBeChecked()
+    await expect(thread).toBeChecked()
+    // Keys do draw the ring, on the row they moved to.
     await userEvent.keyboard('{ArrowDown}')
-    await expect(canvas.getByRole('radio', { name: /Keep an overload/ })).toBeChecked()
+    await expect(overload).toBeChecked()
+    await expect(getComputedStyle(ringOf(overload)).outlineStyle).toBe('solid')
+    // Escape clears the choice and sends nothing; a number key chooses again.
+    await userEvent.keyboard('{Escape}')
+    await expect(canvas.queryByRole('radio', { checked: true })).toBeNull()
+    await expect(canvas.getByTestId('sent').textContent).toBe('')
+    await userEvent.keyboard('2')
+    await expect(overload).toBeChecked()
     await userEvent.keyboard('{Enter}')
     await expect(canvas.getByTestId('sent').textContent).toBe('overload')
   },
@@ -148,11 +177,66 @@ export const ReadOnly: Story = {
 }
 export const WordsOnly: Story = { args: { children: <Live options={[]} start={[]} placeholder="Tell it what to do…" /> } }
 export const Pager: Story = { args: { children: <Live pager={{ index: 0, count: 3, onPrevious: () => undefined, onNext: () => undefined }} /> } }
-export const Stepper: Story = { args: { children: <Live stepper={{ index: 1, count: 3, onPrevious: () => undefined, onNext: () => undefined }} send={{ label: 'Next', disabled: false, onPress: () => undefined }} /> } }
+/** Several questions in one ask: the stepper names the question and shows how far along it is. */
+export const Stepper: Story = {
+  args: { children: <Live stepper={{ index: 1, count: 3, onPrevious: () => undefined, onNext: () => undefined }} send={{ label: 'Next', disabled: false, onPress: () => undefined }} /> },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const position = canvas.getByRole('group', { name: 'question 2 of 3' })
+    await expect(within(position).getByText('Question')).toBeVisible()
+    await expect(within(position).getByText('2 of 3')).toBeVisible()
+    await expect(position.querySelectorAll('[data-step="done"]')).toHaveLength(2)
+  },
+}
 export const ChooseAny: Story = { args: { children: <Live mode="any" start={['thread', 'hold']} /> } }
 /** Stacking follows the card's container, not the viewport. */
 export const NarrowContainer: Story = { args: { width: 320, children: <Live /> } }
 export const Phone: Story = { args: { width: 360, touch: true, children: <Live /> } }
+/** Each answer can carry a note, sent with it while it is chosen; `n` notes the answer the keys are on. */
+export const Notes: Story = {
+  args: { children: <Live noting /> },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const overload = canvas.getByRole('radio', { name: /Keep an overload/ })
+    // Pointer: the chosen answer offers a note; the others do not until chosen.
+    await expect(canvas.queryByRole('button', { name: 'Add a note to Keep an overload' })).toBeNull()
+    await userEvent.click(canvas.getByRole('button', { name: 'Add a note to Thread the session through' }))
+    const threadNote = canvas.getByRole('textbox', { name: 'Note for Thread the session through' })
+    await expect(threadNote).toHaveFocus()
+    await userEvent.keyboard('only in the worker')
+    // Enter keeps the note and returns to the answers; it sends nothing.
+    await userEvent.keyboard('{Enter}')
+    await expect(canvas.getByRole('radio', { name: /Thread the session through/ })).toHaveFocus()
+    await expect(canvas.getByTestId('sent').textContent).toBe('')
+    // Keys: `n` on another answer chooses it and opens its note; the first note stays but is no longer sent.
+    await userEvent.keyboard('{ArrowDown}')
+    await userEvent.keyboard('n')
+    await expect(overload).toBeChecked()
+    const overloadNote = canvas.getByRole('textbox', { name: 'Note for Keep an overload' })
+    await expect(overloadNote).toHaveFocus()
+    await expect(canvas.queryByRole('textbox', { name: 'Note for Thread the session through' })).toBeNull()
+    await userEvent.keyboard('keep it for one release')
+    // Escape also keeps the note and returns to the answer.
+    await userEvent.keyboard('{Escape}')
+    await expect(overload).toHaveFocus()
+    await expect(canvas.getByRole('textbox', { name: 'Note for Keep an overload' })).toHaveValue('keep it for one release')
+    await userEvent.keyboard('{Enter}')
+    await expect(canvas.getByTestId('sent').textContent).toBe('overload:keep it for one release')
+  },
+}
+/** A narrow card with every header control: who asked stays whole, and Send stays in a short room. */
+export const NarrowHeader: Story = {
+  args: { width: 440, touch: true, children: <Live maxBlockSize={360} onFold={() => undefined} pager={{ index: 1, count: 5, onPrevious: () => undefined, onNext: () => undefined }} stepper={{ index: 0, count: 3, onPrevious: () => undefined, onNext: () => undefined }} /> },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const sender = canvas.getByText('example/atlas/builder')
+    await expect(sender.scrollWidth).toBeLessThanOrEqual(sender.clientWidth)
+    const card = canvas.getByRole('region', { name: base.label })
+    const send = canvas.getByRole('button', { name: 'Send' })
+    await expect(send.getBoundingClientRect().bottom).toBeLessThanOrEqual(card.getBoundingClientRect().bottom)
+    await expect(canvas.getByRole('button', { name: 'Fold this decision' }).getBoundingClientRect().right).toBeLessThanOrEqual(card.getBoundingClientRect().right)
+  },
+}
 
 const styles = stylex.create({
   root: { minHeight: '100vh', boxSizing: 'border-box', display: 'flex', justifyContent: 'center', alignItems: 'flex-start', padding: s.section, backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans },

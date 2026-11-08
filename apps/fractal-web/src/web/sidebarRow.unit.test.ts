@@ -427,3 +427,49 @@ describe('the row system', () => {
     expect(sidebarRowAccessibleName(adHoc)).not.toContain(hash)
   })
 })
+
+describe('mission hover card data', () => {
+  it('titles the mission, takes progress and the step from its open run, and lists the agents on it', async () => {
+    const { missionCardOf } = await import('./sidebarRow.ts')
+    const mission = fixtureMissions[0]!
+    const run = { ...(mission.run_details?.[0] ?? {}), id: 'mission-run/example/open', progress: { done: 2, total: 5 }, completed_at: Option.none(),
+      current_steps: [{ id: 'step-run/example/review', title: Option.some('Review the rename'), since: '2026-10-20T12:00:00Z', state: 'claimed', assignee: Option.none(), claimant: Option.none(), progress_at: Option.none() }] } as unknown as MissionRunSummary
+    const on = { ...agent, ref: 'agent/example-on', name: 'On it', currentWork: [{ id: 'work/x', missionId: mission.id, runId: run.id, path: 'review', state: 'claimed' }] }
+    const off = { ...agent, ref: 'agent/example-off', name: 'Elsewhere' }
+    const card = missionCardOf({ mission: { ...mission, run_details: [run] }, agents: [on, off] })
+    expect(card.mission).toMatchObject({ id: mission.id, progress: { _tag: 'Known', done: 2, total: 5 }, step: { _tag: 'Step', name: 'Review the rename' } })
+    expect(card.agents).toEqual(['On it'])
+  })
+  it('never titles a mission by its content hash', async () => {
+    const { missionCardOf } = await import('./sidebarRow.ts')
+    const hash = 'd45524b5ff5388299cd145fd8bef8c7e'
+    const card = missionCardOf({ mission: { ...fixtureMissions[0]!, id: `mission/person-ask/${hash}`, title: `person-ask/${hash}`, run_details: [] } as never, agents: [] })
+    expect(card.mission.title).not.toContain(hash)
+    expect(card.mission.progress).toEqual({ _tag: 'Unknown' })
+  })
+})
+
+describe('what a waiting agent waits on', () => {
+  const waiting = (state: string | undefined, fields: Partial<Agent> = {}): Agent => ({ ...agent, activity: 'waiting', status: 'waiting',
+    ...(state === undefined ? {} : { currentWork: [{ id: 'work/x', missionId: 'mission/example/x', runId: 'run/x', path: 'x', state }] }), ...fields })
+  it.each([
+    ['verifying', 'Waiting on CI'],
+    ['blocked', 'Waiting on dependency'],
+    ['waiting-person', 'Waiting on a person'],
+    ['claimed', 'Waiting'],
+    [undefined, 'Waiting'],
+  ] as const)('reads %s work as %s', (state, label) => {
+    expect(sidebarRow({ agent: waiting(state), stale: false }).statusLabel).toBe(label)
+  })
+  it('reads a harness blocked on a person who is not you as waiting on a person', () => {
+    expect(sidebarRow({ agent: waiting(undefined, { blockedOn: { _tag: 'Known', value: 'human' } }), stale: false }).statusLabel).toBe('Waiting on a person')
+  })
+  it('says Needs you on a real ask, never "Needs you on …", and keeps the last-verified prefix', () => {
+    expect(rowStatusLabel(sidebarRow({ agent: waiting('verifying'), stale: false, needsMe: true }))).toBe('Needs you')
+    expect(rowStatusLabel(sidebarRow({ agent: waiting('blocked'), stale: true, needsMe: true }))).toBe('Last verified · Needs you')
+    expect(rowStatusLabel(sidebarRow({ agent: waiting('blocked'), stale: true }))).toBe('Last verified · Waiting on dependency')
+  })
+  it('names only waiting agents by what they wait on', () => {
+    expect(sidebarRow({ agent: { ...waiting('verifying'), activity: 'working' }, stale: false }).statusLabel).toBe('Working')
+  })
+})

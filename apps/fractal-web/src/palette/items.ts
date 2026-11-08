@@ -42,6 +42,8 @@ export type PaletteAction =
   /** Asks for a name, for a space to make, rename or copy. */
   | { readonly _tag: 'Name'; readonly intent: NamingIntent }
   | { readonly _tag: 'Run'; readonly run: () => void }
+  /** Shows a capped section of the empty list in full. */
+  | { readonly _tag: 'Expand'; readonly section: string }
 
 export interface PaletteEntry {
   readonly action: PaletteAction
@@ -228,3 +230,14 @@ export const leads: Leads<PaletteEntry> = (item, query) => {
   const command = item.action.action._tag !== 'Open' || ['list:home', 'usage:', 'list:fleet'].includes(item.id)
   return command && ['start', 'commands', 'spaces', 'sidebar', 'alerts', 'fleet'].includes(item.section) && item.label.toLowerCase().startsWith(query.trim().toLowerCase())
 }
+
+/** How many rows a section shows in the empty list before its Show all row. */
+export const sectionCap = 6
+
+/** The Show all row closing a capped section of the empty list. */
+export const showAllItem = (section: PaletteSection, total: number): PaletteRow =>
+  row({ id: `more:${section.id}`, section: section.id, label: `Show all ${total}`, search: '' }, { action: { _tag: 'Expand', section: section.id }, icon: 'chevron-down' })
+
+/** Rows whose pane key this client can open; the rest are hidden, not opened as placeholder tabs. */
+export const openableRows = (rows: readonly PaletteRow[], canOpen: (ref: string) => boolean): readonly PaletteRow[] =>
+  rows.filter(item => item.action.action._tag !== 'Open' || canOpen(item.action.action.ref))

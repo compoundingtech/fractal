@@ -100,7 +100,7 @@ export const OwnSendFollows: Story = { ...contractFixture, tags: ['critical'], r
   // This play starts with a reader in older history, so reveal the deliberately deferred turns first.
   await userEvent.click(await canvas.findByRole('button', { name: 'Show all messages' }))
   const viewport = await committedTranscriptHistory(canvasElement, historyTurns.length, abortSignal)
-  const jump = canvas.getByText('New messages ↓')
+  const jump = canvas.getByTestId('jump-to-latest')
   await waitFor(() => expect(viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop).toBeLessThanOrEqual(2))
   // The reader scrolls up into history.
   viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -viewport.scrollHeight }))

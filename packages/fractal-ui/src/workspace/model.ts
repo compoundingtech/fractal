@@ -88,6 +88,8 @@ export type Command<V = unknown> =
   | { readonly _tag: 'Close'; readonly tab: string }
   /** Closes the rest of this tab's pane, and shows this tab. */
   | { readonly _tag: 'CloseOthers'; readonly tab: string }
+  /** Closes a pane's tabs and the pane, its sibling taking the space; the last pane stays, empty. */
+  | { readonly _tag: 'ClosePane'; readonly pane: string }
   /** The tab gives way to another entity in place; not a closed tab to reopen. */
   | { readonly _tag: 'Replace'; readonly tab: string; readonly ref: string }
   | { readonly _tag: 'ReopenClosed' }
@@ -397,6 +399,20 @@ const spaceStep = <V>(command: Command<V>, config: WorkspaceConfig): SpaceStep<V
         if (found === undefined) return space
         const closed = found.pane.tabs.filter(tab => tab.id !== command.tab).reduce((current, tab) => close(current, tab.id, config), space)
         return reveal(closed, found.pane.id, command.tab)
+      }
+    case 'ClosePane':
+      return space => {
+        const pane = findPane(space.layout, command.pane)
+        if (pane === undefined) return space
+        // Closing each tab collapses the pane with its last one, as a close does.
+        const closed = pane.tabs.reduce((current, tab) => close(current, tab.id, config), space)
+        if (findPane(closed.layout, pane.id) === undefined || panesOf(closed.layout).length === 1) return closed
+        const panes = panesOf(closed.layout)
+        const layout = removePane(closed.layout, pane.id)
+        if (layout === undefined) return closed
+        const index = panes.findIndex(row => row.id === pane.id)
+        const focus = closed.local.focus === pane.id ? panes[index === 0 ? 1 : index - 1]!.id : closed.local.focus
+        return settle({ ...closed, layout, local: { ...closed.local, focus } })
       }
     case 'Replace':
       return space => {

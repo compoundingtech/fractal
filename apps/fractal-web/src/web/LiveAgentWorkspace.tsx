@@ -1,15 +1,16 @@
 import { selectedFaviconState, tabTitle, useTabMetadata } from './useTabMetadata.ts'
 import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
 import { prefetchChangelog } from '../changelog/load.ts'
-import { agentSeatChildren, sidebarMissionChild, sidebarRow, sidebarSubagentRow, subagentRowId, sidebarMissionFeedsAtom } from './sidebarRow.ts'
+import { agentSeatChildren, missionCardOf, sidebarMissionChild, sidebarRow, sidebarSubagentRow, subagentRowId, sidebarMissionFeedsAtom } from './sidebarRow.ts'
 import { subagentThreadFocus } from './subagentThreadFocus.ts'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
 import { DeclarationDialog } from './DeclarationDialog.tsx'
 import type * as SidebarMissionsListModule from '../missions/SidebarMissionsList.tsx'
 import { alertTabMarkers } from './alertsTab.ts'
 import { missionTabMarkersAtom } from './missionsTab.ts'
-import { focusedPane } from '@fractal/ui/workspace'
-import { activeTab, currentSpace, showsTerminal, tabsOf, workspaceConfig, type Command, type TabView, type WorkspaceState as WorkspaceStateValue } from '../workspace/model.ts'
+import { findPane, locateTab, neighbour, paneRects, type EntityDescriptor, type Pane as PaneData } from '@fractal/ui/workspace'
+import { Pane, WorkspaceProvider, useWorkspaceKeys as useSplitKeys, type WorkspaceKeysOptions } from '@fractal/ui/workspace/react'
+import { activeTab, currentSpace, showsTerminal, tabsOf, visibleTabIds, workspaceConfig, type Command, type TabView, type WorkspaceState as WorkspaceStateValue } from '../workspace/model.ts'
 import { bootGlassesOnce, type GlassGateway } from '../workspace/glassSync.ts'
 import type { SpaceSync } from '@fractal/ui/workspace/store'
 import { OpenProvider, openCommand, type Open } from '../workspace/openable.ts'
@@ -22,12 +23,14 @@ import { useWorkspaceResources, useWorkspaceRoute, useWorkspaceState, useWorkspa
 import { useWorkspaceKeys } from '../workspace/useWorkspaceKeys.ts'
 import { WorkspaceBody } from '../workspace/WorkspaceBody.tsx'
 import { WorkspaceEmpty, WorkspaceStrip } from '../workspace/WorkspaceStrip.tsx'
+import { PaneSlot, PaneSlots, WorkspaceSplits, leadPane } from '../workspace/WorkspaceSplits.tsx'
+import type { HostActions, HostCommand } from '../palette/mod.ts'
+import { shortcutsPausedSelector } from './shortcuts.ts'
 import { narrowLayoutQuery } from './narrowLayout.ts'
 import { rightPanelAtom, type RightPanel } from './rightPanel.ts'
 import { AlertFlashBand } from './AlertFlashBand.tsx'
 import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
 import { LiveAlertNames } from '../conversation/alerts/LiveAlertNames.tsx'
-import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g, geometryNumbers, sidebarRowSize, interactionVars as interaction } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import * as React from 'react'
@@ -55,7 +58,8 @@ import { PinsSection } from '../../../../packages/fractal-ui/src/assistant-ui/si
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { terminalSubjectForAgent } from '../data/projections.ts'
 import { sidebarPins } from '../data/sidebarPins.ts'
-import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useDataSource, useRosterDecode, useAskingAgents } from '../data/react.tsx'
+import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useDataSource, useRosterDecode, useAskingAgents, useMissions } from '../data/react.tsx'
+import { MissionEntityCard } from '../../../../packages/fractal-ui/src/assistant-ui/entity/MissionCard.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { leftSidebar } from '../state/cells/panels.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
@@ -146,6 +150,16 @@ const LiveAgentCard = (props: { readonly agentRef: string; readonly needsMe: boo
   const stale = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
   const row = React.useMemo(() => agent === undefined ? undefined : sidebarRow({ agent, stale, needsMe: props.needsMe, ...mission }), [agent, stale, props.needsMe, mission])
   return row === undefined ? null : <AgentHoverCard row={row} reportedStatusOnly now={props.now} />
+}
+
+/** The mission hover card, for every surface that names a mission (alerts, rows, tabs): read only while the card shows. */
+const LiveMissionCard = (props: { readonly missionRef: string; readonly now: number | undefined }) => {
+  const missions = useMissions()
+  const fleet = useFleet()
+  const view = missions._tag === 'Observed' ? missions.value.find(each => each.mission.id === props.missionRef) : undefined
+  if (view === undefined) return null
+  const card = missionCardOf({ mission: view.mission, agents: fleet._tag === 'Observed' ? fleet.value.agents : [] })
+  return <MissionEntityCard mission={card.mission} agents={card.agents} {...(props.now === undefined ? {} : { now: props.now })} />
 }
 
 /** One further current mission of an agent, as its own 48px tree row. */
@@ -390,10 +404,10 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     let cancelIdle: (() => void) | undefined
     const cancelPaint = afterNextPaint(() => {
       if (typeof window.requestIdleCallback === 'function') {
-        const idle = window.requestIdleCallback(prefetchChangelog)
+        const idle = window.requestIdleCallback(prefetchIdle)
         cancelIdle = () => window.cancelIdleCallback(idle)
       } else {
-        const timer = window.setTimeout(prefetchChangelog, 0)
+        const timer = window.setTimeout(prefetchIdle, 0)
         cancelIdle = () => window.clearTimeout(timer)
       }
     })
@@ -409,13 +423,17 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     return failure !== undefined && failure.runtimeKey === row.runtimeKey ? failure.reason : undefined
   }
   // A canonical subject address is not proof of a terminal. Keep the control disabled
-  // from its first render until the roster can establish the selected agent's runtime.
-  const terminalDisabledReason = terminalSubjectForAgent(current) === undefined ? undefined
-    : credentialNotice(fleet) ?? (fleet._tag === 'Waiting' ? 'Waiting for the live agent roster to find this agent’s terminal.'
-      : fleet._tag === 'Unavailable' ? 'The agent roster is unavailable, so this agent’s terminal cannot be found.'
-        : agent === undefined ? 'This agent is not in the live agent roster, so it has no terminal.'
-          : agent.terminalDisabledReason ?? failedAttach(agent))
-  const terminalRef = terminalDisabledReason === undefined ? agent?.terminal : undefined
+  // from its first render until the roster can establish the agent's runtime.
+  const terminalOf = (agentRef: string): { readonly disabledReason: string | undefined; readonly ref: string | undefined } => {
+    const row = agents.find(candidate => candidate.ref === agentRef)
+    const disabledReason = terminalSubjectForAgent(agentRef) === undefined ? undefined
+      : credentialNotice(fleet) ?? (fleet._tag === 'Waiting' ? 'Waiting for the live agent roster to find this agent’s terminal.'
+        : fleet._tag === 'Unavailable' ? 'The agent roster is unavailable, so this agent’s terminal cannot be found.'
+          : row === undefined ? 'This agent is not in the live agent roster, so it has no terminal.'
+            : row.terminalDisabledReason ?? failedAttach(row))
+    return { disabledReason, ref: disabledReason === undefined ? row?.terminal : undefined }
+  }
+  const terminalRef = terminalOf(current).ref
   const terminalSource = useDataSource()
   // After first paint, idle time warms the terminal chunk and fonts; data waits for explicit intent.
   React.useLayoutEffect(() => {
@@ -438,8 +456,11 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     prefetchTerminalDetail()
     terminalSource.prefetchTerminal?.(terminalRef)
   }
-  const [headerSlot, setHeaderSlot] = React.useState<HTMLDivElement | null>(null)
+  // Where each pane's content is: every surface stays in one host and sits over its pane's slot.
+  const [slots] = React.useState(() => new PaneSlots())
+  React.useEffect(() => () => slots.dispose(), [slots])
   const [paneHost, setPaneHost] = React.useState<HTMLDivElement | null>(null)
+  const headerSlots = React.useSyncExternalStore(slots.subscribeHeaders, slots.getHeaders, slots.getHeaders)
   const [resourcesAgent, setResourcesAgent] = React.useState<string>()
   const [resourcePanel, setResourcePanel] = React.useState<ResourcePanelState>({ expanded: false, size: 288 })
   // The panel is one app-wide setting on desktop, so it stays as it is across tabs and windows. A phone's sheet closes on a switch instead.
@@ -556,7 +577,8 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const offline = connection._tag !== 'Live'
   // Agents resolve to the sidebar row's card; other kinds fall through to an outer source, if any.
   const resolveCard = React.useCallback<EntityCardResolver>(entity =>
-    entity.kind === 'agent' ? <LiveAgentCard agentRef={entity.id} needsMe={needsYou.has(entity.id)} now={frozenAt} /> : undefined, [needsYou, frozenAt])
+    entity.kind === 'agent' ? <LiveAgentCard agentRef={entity.id} needsMe={needsYou.has(entity.id)} now={frozenAt} />
+      : entity.kind === 'mission' ? <LiveMissionCard missionRef={entity.id} now={frozenAt} /> : undefined, [needsYou, frozenAt])
   useTabMetadata({
     title: tabTitle({ agentName: agent?.name, needsYouCount: needsYou.size, offline }),
     faviconState: selectedFaviconState({ agent, needsYou: agent !== undefined && needsYou.has(agent.ref), offline }),
@@ -566,16 +588,26 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const showRows = React.useMemo(() => liveShowRows({ agents, needsYou, asking, filters: deferredFilters, stale }), [agents, needsYou, asking, deferredFilters, stale])
   const selectLatest = React.useRef(openRef)
   selectLatest.current = openRef
+  // A row's own press reaches here without its modifiers: the roster notes Cmd or Ctrl as the press starts.
+  const splitIntent = React.useRef(false)
+  const noteSplitIntent = (event: React.PointerEvent | React.KeyboardEvent) => { splitIntent.current = event.metaKey || event.ctrlKey }
+  const takeSplitIntent = () => {
+    const split = splitIntent.current
+    splitIntent.current = false
+    return split ? { split: 'right' as const } : undefined
+  }
+  const openFromSidebar = React.useCallback((ref: string) => selectLatest.current(ref, takeSplitIntent()), [])
   const selectAgent = React.useCallback((ref: string) => {
     if (previousRoster.current?.some(seat => seat.children?.some(child => child.id === ref))) return
-    selectLatest.current(ref)
+    selectLatest.current(ref, takeSplitIntent())
   }, [])
   const byRef = React.useMemo(() => new Map(subjects.map((subject) => [subject.ref, subject])), [subjects])
   const allTabs = React.useMemo(() => tabsOf(workspace), [space.layout])
-  const stripTabs = focusedPane(space)?.tabs ?? allTabs
   const unread = useUnreadMarks(agents)
-  const tabItems = React.useMemo(() => stripTabs.map(tab => ({ ...tabPresentation({ tab, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef, unread }), ...(space.local.views[tab.id]?.dirty === true ? { dirty: true } : {}) })), [stripTabs, space.local.views, agents, fleet._tag, needsYou, attention, byRef, unread])
+  const tabItems = React.useMemo(() => allTabs.map(tab => ({ ...tabPresentation({ tab, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef, unread }), ...(space.local.views[tab.id]?.dirty === true ? { dirty: true } : {}) })), [allTabs, space.local.views, agents, fleet._tag, needsYou, attention, byRef, unread])
   const activeLabel = tabItems.find(item => item.id === activeRow?.id)?.title
+  const itemById = React.useMemo(() => new Map(tabItems.map(item => [item.id, item])), [tabItems])
+  const refById = React.useMemo(() => new Map(allTabs.map(tab => [tab.id, tab.ref])), [allTabs])
   const previousNames = React.useRef<ReadonlyMap<string, string>>(new Map())
   const names = React.useMemo(() => {
     const next = new Map(agents.map(row => [row.ref, row.name]))
@@ -588,31 +620,15 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const width = Math.min(maxSidebar, Math.max(sidebarMinimumWidth, dragWidth ?? Math.round(ratio * viewport)))
   const maxPanel = Math.max(240, viewport - (narrow || collapsed ? 0 : width) - 640)
   const panelSize = dragPanel ?? Math.min(maxPanel, Math.max(240, Math.round(panelFraction * viewport)))
-  const terminalOpen = activeRow !== undefined && current !== '' && showsTerminal(activeRow, space.local.views[activeRow.id])
-  // The control stays enabled while the terminal is shown: it is the way back, even from a deep link to a terminal this agent lacks.
-  const shownTerminalDisabledReason = terminalOpen ? undefined : terminalDisabledReason
-  // An attach that finds no terminal disables the control with its reason and turns the tab back to the conversation.
-  const shownTerminalRef = terminalOpen ? terminalSubjectForAgent(current) : undefined
-  const shownTerminal = useAtomValue(shownTerminalRef === undefined ? idleTerminal : terminalSource.terminal(shownTerminalRef))
-  const missingTerminal = shownTerminalRef !== undefined && shownTerminal._tag === 'Unavailable' && shownTerminal.code === 'no-terminal'
-    ? shownTerminal.detail.trim() || 'This agent has no terminal.' : undefined
-  const activeId = activeRow?.id
-  React.useEffect(() => {
-    if (missingTerminal === undefined || activeId === undefined) return
-    setTerminalFailures(failures => new Map(failures).set(current, { runtimeKey: agent?.runtimeKey, reason: missingTerminal }))
-    store.dispatch({ _tag: 'SetView', tab: activeId, view: { terminal: false } })
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- react to a new failure only, not to each roster frame.
-  }, [missingTerminal, current, activeId, store])
   const focusShownFace = React.useRef(false)
-  const toggleTerminal = () => {
-    if (activeRow === undefined || current === '' || (!terminalOpen && terminalRef === undefined)) return
-    focusShownFace.current = true
-    store.dispatch({ _tag: 'SetView', tab: activeRow.id, view: { terminal: !terminalOpen } })
+  // An attach that finds no terminal disables the control with its reason and turns the tab back to the conversation.
+  const onMissingTerminal = (agentRef: string, tab: string, reason: string) => {
+    setTerminalFailures(failures => new Map(failures).set(agentRef, { runtimeKey: agents.find(row => row.ref === agentRef)?.runtimeKey, reason }))
+    store.dispatch({ _tag: 'SetView', tab, view: { terminal: false } })
   }
   // Details, Changes and Resources are the panel's tabs; which one shows is part of the one app-wide setting.
   const dockedInspector = !narrow && panel.open && openedTool === undefined && current !== '' ? current : undefined
   const dockLabel = panel.tab === 'resources' ? 'Resize Resources' : panel.tab === 'changes' ? 'Resize Changes' : 'Resize Details'
-  const agentHeaderActions = current === '' ? undefined : <><ConversationHeaderActions key={current} agentRef={current} onViewDeclaration={() => openRef(`declaration/${current}`)} /></>
   // Below the breakpoint Details is a sheet over the thread, never an inline panel beside it.
   const narrowDetailsOpen = narrow && current !== '' && (sheetOpen || openedTool !== undefined)
   const closeDetails = () => { setSheetOpen(false); setOpenedTool(undefined) }
@@ -627,8 +643,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     </header>
     <pre {...stylex.props(styles.toolDetailOutput)}>{call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
   </aside>
+  const [settingsOpen, setSettingsOpen] = React.useState(false)
   const sidebarHeaderActions = <>
-    <SettingsControl scheme={preference} onSchemeChange={setPreference} build={build} />
+    <SettingsControl scheme={preference} onSchemeChange={setPreference} build={build} isOpen={settingsOpen} onOpenChange={setSettingsOpen} />
   </>
   // The Agents toolbar and tree provide tab stops even while loading or empty; Alerts may have none, so its panel takes focus itself.
   const sidebarBody = <SidebarTabs panelHasTabbableContent={sidebarTab === 'agents' || sidebarTab === 'fleet'} selectedId={sidebarTab === 'alerts' || sidebarTab === 'missions' ? sidebarTab : 'agents'} onSelectionChange={id => setSidebarTab(id === 'alerts' || id === 'missions' ? id : 'agents')} tabs={[{ id: 'agents', label: 'Agents', icon: 'person', count: agents.length, questionCount: agents.filter(agent => agent.ask._tag === 'Known' && agent.ask.value === 'question').length, needsYouCount: needsYou.size }, { id: 'alerts', label: 'Alerts', icon: 'bell', ...alertTabMarkers(attention) }, { id: 'missions', label: 'Missions', icon: 'checklist', ...missionMarkers }]}>
@@ -642,7 +659,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
           : visibleSidebarTree.length === 0 ? <SidebarEmptyState kind="no-match" query={deferredFilters.query} onClear={() => setFilters({ ...defaultFilters, sort: filters.sort })} />
           : null}
       </>}
-    <nav ref={rosterCommit} aria-label="Agent roster" onMouseOverCapture={rememberHoverOwner} onFocusCapture={rememberHoverOwner} {...stylex.props(styles.roster)}>
+    <nav ref={rosterCommit} aria-label="Agent roster" onPointerDownCapture={noteSplitIntent} onKeyDownCapture={noteSplitIntent} onMouseOverCapture={rememberHoverOwner} onFocusCapture={rememberHoverOwner} {...stylex.props(styles.roster)}>
       <PinsSection items={pinnedItems} editable={pins.editable} onOpen={ref => open({ ref })} onUnpin={pins.toggle} detail={pins.state.phase === 'unavailable' ? 'Pins are unavailable. Reconnect to make changes.' : undefined} onRetry={pins.retry} />
       {fleet._tag === 'Waiting' ? <>
         <RosterLoading />
@@ -655,17 +672,130 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
         </div>
       </> : null}
       <RosterFrozenAt.Provider value={frozenAt}>
-        <LiveSidebarTreeView binding={sidebarFolders} tree={visibleSidebarTree} agents={agents} stale={stale} needsYou={needsYou} current={current} query={sidebarQuery.text} revealKey={deferredFilters.query} select={selectAgent} openMission={openRef} {...(activeSubject?._tag === 'Mission' ? { currentMission: activeSubject.ref } : {})} actions={sidebarActions} />
+        <LiveSidebarTreeView binding={sidebarFolders} tree={visibleSidebarTree} agents={agents} stale={stale} needsYou={needsYou} current={current} query={sidebarQuery.text} revealKey={deferredFilters.query} select={selectAgent} openMission={openFromSidebar} {...(activeSubject?._tag === 'Mission' ? { currentMission: activeSubject.ref } : {})} actions={sidebarActions} />
       </RosterFrozenAt.Provider>
     </nav>
     {fleet._tag === 'Observed' ? <DecodeNotice noun="agent" decode={rosterDecode} shown={shownRosterRefs(fleet)} /> : null}
     </>}
     <LiveUsageSection onOpenUsage={() => openRef('monitor/quota')} />
   </SidebarTabs>
+  // The shared primitives dispatch through routing, so pane focus, resizes and keys reach the URL as a person's own commands do.
+  const splitStore = React.useMemo(() => ({ dispatch: go, getState: store.getState, subscribe: store.subscribe, flush: store.flush }), [go, store])
+  const focusPane = React.useCallback((pane: string) => {
+    if (currentSpace(store.getState()).local.focus !== pane) go({ _tag: 'FocusPane', pane })
+  }, [go, store])
+  const paneOfTab = React.useMemo(() => new Map(allTabs.flatMap(tab => {
+    const found = locateTab(space.layout, row => row.id === tab.id)
+    return found === undefined ? [] : [[tab.id, found.pane.id] as const]
+  })), [allTabs, space.layout])
+  // A phone shows the focused pane alone, so only its tab is on screen.
+  const shownTabs = narrow ? new Set(activeRow === undefined ? [] : [activeRow.id]) : visibleTabIds(workspace)
+  const lead = leadPane(workspace, narrow)
+  // The palette loads on first open: neither its code nor its reads belong to the shell's first paint.
+  const [paletteOpen, setPaletteOpen] = React.useState(false)
+  const [paletteLoaded, setPaletteLoaded] = React.useState(false)
+  const openPalette = React.useCallback(() => { setPaletteLoaded(true); setPaletteOpen(true) }, [])
+  const openSettings = React.useCallback(() => setSettingsOpen(true), [])
+  const sidebarModes = React.useMemo((): readonly HostCommand[] => sidebarModeRows.map(mode => ({
+    id: `sidebar-${mode.id}`, section: 'sidebar', label: `Sidebar: ${mode.label}`, search: `sidebar ${mode.label} show`, icon: mode.icon, run: () => showSidebarTab(mode.id),
+  })), [showSidebarTab])
+  const paletteActions = React.useMemo((): HostActions => ({ openSettings, toggleSidebar, sidebar: sidebarModes }), [openSettings, toggleSidebar, sidebarModes])
+  // Alt+arrows past the layout's left edge reach the sidebar, as in the TUI; Alt+Right from it comes back.
+  const focusPaneContent = (pane: string) => window.requestAnimationFrame(() => {
+    const frame = document.querySelector<HTMLElement>(`[data-pane="${CSS.escape(pane)}"]`)
+    const shownId = findPane(currentSpace(store.getState()).layout, pane)?.active ?? undefined
+    const surface = shownId === undefined ? null : document.querySelector<HTMLElement>(`[data-tab-surface-id="${CSS.escape(shownId)}"]`)
+    const target = surface?.querySelector<HTMLElement>('[data-wf-shown-pane] textarea:not(:disabled)') ?? frame?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]') ?? frame?.querySelector<HTMLElement>('button')
+    target?.focus({ preventScroll: true })
+  })
+  const focusSidebar = () => {
+    if (narrow) agentsDrawer.current?.open()
+    else setCollapsed(false)
+    window.requestAnimationFrame(() => {
+      const sidebar = document.querySelector<HTMLElement>('aside[aria-label="Agents"]')
+      const target = sidebar?.querySelector<HTMLElement>('nav[aria-label="Agent roster"] [role="row"][aria-selected="true"]')
+        ?? sidebar?.querySelector<HTMLElement>('nav[aria-label="Agent roster"] [role="row"]')
+        ?? sidebar?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+      target?.focus()
+    })
+  }
+  const latestMove = React.useRef({ focusPaneContent, focusSidebar })
+  latestMove.current = { focusPaneContent, focusSidebar }
+  const splitHandlers = React.useMemo(() => {
+    const move = (direction: 'left' | 'right' | 'up' | 'down') => () => {
+      const before = currentSpace(store.getState())
+      const active = document.activeElement
+      if (direction === 'right' && active instanceof Element && active.closest('aside[aria-label="Agents"]') !== null) {
+        latestMove.current.focusPaneContent(before.local.focus)
+        return
+      }
+      if (before.local.zoomed === null && neighbour(paneRects(before.layout), before.local.focus, direction) === undefined) {
+        if (direction === 'left') latestMove.current.focusSidebar()
+        return
+      }
+      go({ _tag: 'FocusDirection', direction })
+      latestMove.current.focusPaneContent(currentSpace(store.getState()).local.focus)
+    }
+    return {
+      focusLeft: move('left'), focusRight: move('right'), focusUp: move('up'), focusDown: move('down'),
+      palette: openPalette,
+      // A new tab starts from the palette, which opens here or in a tab.
+      newTab: openPalette,
+      // Spaces arrive with their own slice.
+      switchSpace: () => false,
+    }
+  }, [go, store, openPalette])
+  const renderDragChip = React.useCallback((entity: EntityDescriptor) => <DragChip entity={entity} scheme={scheme} />, [scheme])
+  // One description per entity, for the drag chip as for the tab: the tab's own presentation, read live.
+  const presentLatest = React.useRef((ref: string) => tabPresentation({ tab: { id: ref, ref }, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef, unread }))
+  presentLatest.current = (ref: string) => tabPresentation({ tab: { id: ref, ref }, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef, unread })
+  const describeEntity = React.useCallback((ref: string): EntityDescriptor => {
+    const item = presentLatest.current(ref)
+    return { kind: item.kind ?? 'resource', id: ref, title: item.title, status: item.icon }
+  }, [])
+  const renderPane = (pane: PaneData) => {
+    const isLead = pane.id === lead
+    const focused = pane.id === space.local.focus
+    const shownTab = pane.tabs.find(tab => tab.id === pane.active)
+    const paneAgent = shownTab === undefined ? '' : subjectAgent(parsePane(shownTab.ref)) ?? ''
+    const terminal = paneAgent === '' ? { disabledReason: undefined, ref: undefined } : terminalOf(paneAgent)
+    const terminalShown = shownTab !== undefined && paneAgent !== '' && showsTerminal(shownTab, space.local.views[shownTab.id])
+    // The control stays enabled while the terminal is shown: it is the way back, even from a deep link to a terminal this agent lacks.
+    const disabledReason = terminalShown ? undefined : terminal.disabledReason
+    const toggleTerminal = () => {
+      if (shownTab === undefined || paneAgent === '' || (!terminalShown && terminal.ref === undefined)) return
+      focusShownFace.current = true
+      store.dispatch({ _tag: 'SetView', tab: shownTab.id, view: { terminal: !terminalShown } })
+    }
+    const nativeActions = paneAgent === '' ? undefined : <ConversationHeaderActions key={paneAgent} agentRef={paneAgent} onViewDeclaration={() => openRef(`declaration/${paneAgent}`)} />
+    const watch = terminalShown && shownTab !== undefined ? <TerminalAttachWatch key={paneAgent} agentRef={paneAgent} onMissing={reason => onMissingTerminal(paneAgent, shownTab.id, reason)} /> : null
+    const syncNote = isLead && boot.retry !== undefined ? <LayoutSyncNote retry={boot.retry} /> : null
+    return <Pane key={pane.id} pane={pane} className={stylex.props(styles.pane).className}>
+      {/* Each pane is self-contained: its strip ends with its shown tab's own controls. */}
+      <WorkspaceStrip bar items={pane.tabs.flatMap(tab => itemById.get(tab.id) ?? [])} refs={refById} active={pane.active} group={pane.id} focused={focused} narrow={narrow} dispatch={go} open={openRef}
+        leading={isLead ? <>
+          {narrow
+            ? <ChromeControl ref={sidebarOpener} icon="panel-left" label="Expand sidebar" tooltip="Show agents" edge="lead" popup="dialog" expanded={phoneSheet.open} {...(phoneSheet.open ? { controls: phoneSheet.id } : {})} onPress={() => agentsDrawer.current?.open()} />
+            : collapsed ? <ChromeControl ref={sidebarOpener} icon="panel-left" label="Expand sidebar" tooltip="Expand sidebar (⌘/Ctrl+B)" edge="lead" onPress={toggleSidebar} /> : null}
+          <ThreadBreadcrumb {...(agent?.host === undefined ? {} : { folder: agent.host })} title={agent?.name ?? activeLabel ?? 'Select an agent'} label={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />
+        </> : undefined}
+        trailing={narrow
+          ? <>
+            {syncNote}{watch}
+            {(terminal.ref !== undefined || terminal.disabledReason !== undefined || terminalShown) ? <PhoneTerminalToggle pressed={terminalShown} onPress={toggleTerminal} {...(disabledReason === undefined ? {} : { disabledReason })} /> : undefined}
+            <div data-testid="native-action-slot" ref={slots.header(pane.id)} {...stylex.props(styles.barSlot)}>{nativeActions}</div>
+            <ChromeControl icon="search" label="Search" edge="trail" popup="dialog" expanded={paletteOpen} onPress={openPalette} />
+            <ChromeControl icon="panel" label="Agent details" edge="trail" popup="dialog" expanded={narrowDetailsOpen} active={narrowDetailsOpen} onPress={() => { if (narrowDetailsOpen) closeDetails(); else setSheetOpen(true) }} />
+          </>
+          : <>{syncNote}{watch}<ThreadActions nativeActions={nativeActions} actionPortalRef={slots.header(pane.id)} terminalAvailable={terminal.ref !== undefined || terminalShown} {...(disabledReason === undefined ? {} : { terminalDisabledReason: disabledReason })} panelOpen={panel.open} terminalOpen={terminalShown} onTogglePanel={() => setPanel({ open: !panel.open })} onToggleTerminal={toggleTerminal} /></>}>
+        {isLead ? <GlobalBands onOpenAlert={openAlert} /> : null}
+        <PaneSlot pane={pane.id}>{pane.tabs.length === 0 ? <WorkspaceEmpty open={openRef} /> : null}</PaneSlot>
+      </WorkspaceStrip>
+    </Pane>
+  }
   // The panes stay outside changing shell providers, whose context propagation would scan every retained turn.
   // Only the stable header DOM host and narrow geometry cross that boundary.
-  return (<EntityCardSource resolve={resolveCard}><OpenProvider value={openRef}><NarrowLayoutContext.Provider value={narrow}>
-    <ThreadHeaderSlotContext.Provider value={headerSlot}>
+  return (<WorkspaceProvider store={splitStore} describe={describeEntity} renderDragChip={renderDragChip}><EntityCardSource resolve={resolveCard}><OpenProvider value={openRef}><NarrowLayoutContext.Provider value={narrow}>
     <WorkbenchContextProvider value={{ open, focusedRef: activeSubject === undefined ? null : subjectRef(activeSubject), subjects: byRef, platform: navigator.platform.includes('Mac') ? 'mac' : 'other' }}>
       <ResourcePanelProvider value={{ state: resourcePanel, onChange: (change) => setResourcePanel((value) => ({ ...value, ...change })) }}>
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
@@ -680,25 +810,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
               <section aria-label={workspaceLabel} onPointerOverCapture={prefetchTerminalIntent} onFocusCapture={prefetchTerminalIntent} {...stylex.props(styles.workspace)}>
                 {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} headerActions={sidebarHeaderActions} onSheetChange={setPhoneSheet}>{sidebarBody}</PhoneAgentDrawer> : null}
                 {/* One strip and one portal host at every width: the breakpoint never remounts a surface. The strip is the window's one top bar, so the conversation's controls live at its end. */}
-                <WorkspaceStrip bar items={tabItems} active={activeRow?.id ?? null} group={space.local.focus} narrow={narrow} dispatch={go} open={openRef}
-                  leading={<>
-                    {narrow
-                      ? <ChromeControl ref={sidebarOpener} icon="panel-left" label="Expand sidebar" tooltip="Show agents" edge="lead" popup="dialog" expanded={phoneSheet.open} {...(phoneSheet.open ? { controls: phoneSheet.id } : {})} onPress={() => agentsDrawer.current?.open()} />
-                      : collapsed ? <ChromeControl ref={sidebarOpener} icon="panel-left" label="Expand sidebar" tooltip="Expand sidebar (⌘/Ctrl+B)" edge="lead" onPress={toggleSidebar} /> : null}
-                    <ThreadBreadcrumb {...(agent?.host === undefined ? {} : { folder: agent.host })} title={agent?.name ?? activeLabel ?? 'Select an agent'} label={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />
-                  </>}
-                  trailing={narrow
-                    ? <>
-                      {boot.retry === undefined ? null : <LayoutSyncNote retry={boot.retry} />}
-                      {(terminalRef !== undefined || terminalDisabledReason !== undefined || terminalOpen) ? <PhoneTerminalToggle pressed={terminalOpen} onPress={toggleTerminal} {...(shownTerminalDisabledReason === undefined ? {} : { disabledReason: shownTerminalDisabledReason })} /> : undefined}
-                      <div data-testid="native-action-slot" ref={setHeaderSlot} {...stylex.props(styles.barSlot)}>{agentHeaderActions}</div>
-                      <ChromeControl icon="panel" label="Agent details" edge="trail" popup="dialog" expanded={narrowDetailsOpen} active={narrowDetailsOpen} onPress={() => { if (narrowDetailsOpen) closeDetails(); else setSheetOpen(true) }} />
-                    </>
-                    : <>{boot.retry === undefined ? null : <LayoutSyncNote retry={boot.retry} />}<ThreadActions nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} terminalAvailable={terminalRef !== undefined || terminalOpen} {...(shownTerminalDisabledReason === undefined ? {} : { terminalDisabledReason: shownTerminalDisabledReason })} panelOpen={panel.open} terminalOpen={terminalOpen} onTogglePanel={() => setPanel({ open: !panel.open })} onToggleTerminal={toggleTerminal} /></>}>
-                  <GatewayConnectionStatus />
-                  <AlertFlashBand onOpen={openAlert} />
-                  <div ref={setPaneHost} {...stylex.props(styles.body)} />
-                </WorkspaceStrip>
+                <WorkspaceSplits slots={slots} collapsed={narrow} onHost={setPaneHost} renderPane={renderPane} />
+                <SplitKeys handlers={splitHandlers} ignore={ignoreSplitKey} />
+                {paletteLoaded ? <React.Suspense fallback={null}><LivePalette isOpen={paletteOpen} onOpenChange={setPaletteOpen} state={workspace} dispatch={go} actions={paletteActions} /></React.Suspense> : null}
               </section>
               </DockedSplit>
               {!narrow && openedTool !== undefined && current !== '' ? (
@@ -719,13 +833,72 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody tabs={allTabs} active={activeRow?.id ?? null} tiers={tiers} views={space.local.views} names={names} onOpenTool={onOpenTool} onOpen={openRef} onReplace={onReplaceTab} onClose={onCloseTab} onBackToAlerts={backToAlerts} onView={onTabView} focusShownFace={focusShownFace} {...(ux === undefined ? {} : { ux })} empty={<WorkspaceEmpty open={openRef} />} /></RegisteredPortal>}
-    </ThreadHeaderSlotContext.Provider>
-  </NarrowLayoutContext.Provider></OpenProvider></EntityCardSource>)
+    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody tabs={allTabs} active={activeRow?.id ?? null} shown={shownTabs} paneOf={paneOfTab} headerSlots={headerSlots} onFocusPane={focusPane} tiers={tiers} views={space.local.views} names={names} onOpenTool={onOpenTool} onOpen={openRef} onReplace={onReplaceTab} onClose={onCloseTab} onBackToAlerts={backToAlerts} onView={onTabView} focusShownFace={focusShownFace} {...(ux === undefined ? {} : { ux })} /></RegisteredPortal>}
+  </NarrowLayoutContext.Provider></OpenProvider></EntityCardSource></WorkspaceProvider>)
 }
 
 
 
+
+/**
+ * What the pointer carries while dragging an entity: its status ring or icon and its title, as its tab
+ * shows them. It renders outside the shell, so it carries the shell's scheme itself.
+ */
+const DragChip = ({ entity, scheme }: { readonly entity: EntityDescriptor; readonly scheme: 'dark' | 'light' }) => <div data-testid="drag-chip" data-scheme={scheme} {...stylex.props(liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme, styles.dragChip)}>
+  {entity.status === undefined ? null : <span aria-hidden="true" {...stylex.props(styles.dragChipIcon)}>{entity.status as React.ReactNode}</span>}
+  <span {...stylex.props(styles.dragChipTitle)}>{entity.title}</span>
+</div>
+
+const LivePalette = React.lazy(() => import('../palette/LivePalette.tsx'))
+/** Idle work once the roster has painted: the changelog, and the palette's code so the first Mod+K does not wait for it. */
+const prefetchIdle = () => {
+  prefetchChangelog()
+  void import('../palette/LivePalette.tsx').catch(() => undefined)
+}
+
+const sidebarModeRows = [
+  { id: 'agents', label: 'Agents', icon: 'person' },
+  { id: 'alerts', label: 'Alerts', icon: 'bell' },
+  { id: 'missions', label: 'Missions', icon: 'checklist' },
+] as const
+
+const isTyping = (target: EventTarget | null) =>
+  target instanceof HTMLElement && (target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName))
+
+/**
+ * Keys the workspace leaves alone: everything over a terminal, whose programs need their input, and
+ * under a dialog that pauses shortcuts (the palette, Settings). In a text field Alt+Left/Right stay
+ * the word jump; Alt+Up/Down still move between splits.
+ */
+const ignoreSplitKey = (event: KeyboardEvent) => {
+  const target = event.target instanceof Element ? event.target : null
+  if (target?.closest('[data-testid="terminal-pane"]') != null || target?.closest(shortcutsPausedSelector) != null) return true
+  return event.altKey && !event.metaKey && !event.ctrlKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight') && isTyping(event.target)
+}
+
+/** The shared primitives' keys: splits, focus between them, zoom, tabs and the palette, cmux style. */
+const SplitKeys = ({ handlers, ignore }: { readonly handlers: WorkspaceKeysOptions['handlers']; readonly ignore: (event: KeyboardEvent) => boolean }) => {
+  useSplitKeys({ handlers, ignore })
+  return null
+}
+
+/** Watches a shown terminal's attach, and reports an agent that turns out to have none. */
+const TerminalAttachWatch = ({ agentRef, onMissing }: { readonly agentRef: string; readonly onMissing: (reason: string) => void }) => {
+  const source = useDataSource()
+  const ref = terminalSubjectForAgent(agentRef)
+  const screen = useAtomValue(ref === undefined ? idleTerminal : source.terminal(ref))
+  const missing = ref !== undefined && screen._tag === 'Unavailable' && screen.code === 'no-terminal' ? screen.detail.trim() || 'This agent has no terminal.' : undefined
+  const latest = React.useRef(onMissing)
+  latest.current = onMissing
+  React.useEffect(() => { if (missing !== undefined) latest.current(missing) }, [missing])
+  return null
+}
+
+/** App-wide notices, kept together so they move as one: the connection and the alert flash. */
+const GlobalBands = ({ onOpenAlert }: { readonly onOpenAlert: (id: string) => void }) => <div data-testid="global-bands" {...stylex.props(styles.bands)}>
+  <GatewayConnectionStatus />
+  <AlertFlashBand onOpen={onOpenAlert} />
+</div>
 
 const assumedOnline = Atom.make({ _tag: 'Online' } as const)
 /** Decoded gateway sync, never the socket's raw lifecycle tag, as the one connection band under the thread header. */
@@ -784,6 +957,11 @@ const styles = stylex.create({
   skeletonHost: { gridRow: '2', width: '44%' },
   workspace: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0 },
   barSlot: { display: 'flex', alignItems: 'center', minWidth: 0 },
+  bands: { display: 'contents' },
+  dragChip: { display: 'inline-flex', alignItems: 'center', gap: s.xs, maxWidth: 240, paddingBlock: 4, paddingInline: s.sm, borderRadius: 6, backgroundColor: c.raised, color: c.fg, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, boxShadow: '0 4px 16px rgba(0, 0, 0, 0.24)', fontFamily: t.fontSans, fontSize: t.metaSize, whiteSpace: 'nowrap' },
+  dragChipIcon: { display: 'inline-flex', flexShrink: 0 },
+  dragChipTitle: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' },
+  pane: { backgroundColor: c.canvas },
   syncNote: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, paddingInline: s.sm, color: c.fgMuted, fontSize: t.metaSize, whiteSpace: 'nowrap' },
   syncRetry: { appearance: 'none', border: 0, padding: 0, background: 'none', color: c.fg, font: 'inherit', textDecoration: 'underline', cursor: 'pointer', outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusOffset, borderRadius: 2 },
   body: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },

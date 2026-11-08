@@ -75,7 +75,7 @@ export const Pane = ({ pane, className, style, children }: PaneProps) => {
   const width = useWidth(element)
   const [aside, setAside] = React.useState<AsideControls | undefined>(undefined)
   const isFocused = space.local.focus === pane.id
-  const isDropTarget = useDragState(state => state.over?.pane === pane.id)
+  const isDropTarget = useDragState(state => state.over !== undefined && state.over._tag !== 'Target' && state.over.pane === pane.id)
   const tabs = useTabListState<TabData>({
     items: pane.tabs,
     children: tab => <Item key={tab.id} textValue={tab.title ?? tab.ref}>{tab.title ?? tab.ref}</Item>,
