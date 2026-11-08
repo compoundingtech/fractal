@@ -3453,6 +3453,7 @@
         "subjects": {"type": "array", "maxItems": 12, "items": {"$ref": "#/$defs/RequestSubject"}},
         "answers": {"type": "array", "maxItems": 5, "items": {"$ref": "#/$defs/RequestAnswerOption"}},
         "custom": {"type": "boolean", "description": "A choice also takes an answer in the person's own words."},
+        "words": {"enum": ["none", "optional", "required"], "description": "Whether the person's words go with an answer. Absent means required for feedback and optional for a decision or choice."},
         "attachments": {"type": "array", "maxItems": 4, "items": {"$ref": "#/$defs/Attachment"}, "description": "Images to look at, read with the blob route and the ask's step as the carrier (message=step-run/…)."}
       }
     },
@@ -3505,11 +3506,19 @@
     },
     "PersonAnswerInput": {
       "type": "object", "additionalProperties": false,
-      "description": "A named answer id for a decision or choice; text for feedback, a custom choice, or the changes requested.",
-      "properties": {"id": {"type": "string"}, "text": {"type": "string"}}
+      "description": "A person's answer in the one answer schema: the answers chosen, each with an optional note, and the person's own words beside them. Notes and words are independent: each is recorded or refused, never folded into the other.",
+      "properties": {
+        "choices": {"type": "array", "maxItems": 5, "items": {"$ref": "#/$defs/PersonChoiceInput"}},
+        "words": {"type": "string", "maxLength": 8000}
+      }
+    },
+    "PersonChoiceInput": {
+      "type": "object", "additionalProperties": false, "required": ["id"],
+      "description": "One chosen answer, by its id, with the person's note on it.",
+      "properties": {"id": {"type": "string"}, "note": {"type": "string", "maxLength": 600}}
     },
     "PersonAnswer": {
-      "type": "object", "required": ["type", "outcome"],
+      "type": "object", "required": ["type", "outcome", "choices"],
       "properties": {
         "type": {"enum": ["decision", "choice", "feedback", "update"]},
         "outcome": {"enum": [
@@ -3522,10 +3531,13 @@
           "read",
           "dismissed"
         ]},
-        "id": {"type": "string"},
-        "label": {"type": "string"},
-        "text": {"type": "string"}
+        "choices": {"type": "array", "items": {"$ref": "#/$defs/PersonAnswerChoice"}, "description": "The answers chosen, each with its label and the person's note; empty for words alone, a dismissal or a read update."},
+        "words": {"type": "string", "description": "The person's own words beside their answer."}
       }
+    },
+    "PersonAnswerChoice": {
+      "type": "object", "required": ["id"],
+      "properties": {"id": {"type": "string"}, "label": {"type": "string"}, "note": {"type": "string"}}
     },
     "PersonAnswerRecord": {
       "type": "object", "required": ["ask", "status", "summary", "respondent", "answered_at_unix_ms"],

@@ -393,18 +393,15 @@ agent "alder.independent" { workspace "/tmp"; command "true"; restart always; }
             evidence: vec![],
             episode: Some(episode),
             delegation: Some(proof),
-            answer: Some(crate::person_request::AnswerInput {
-                id: Some("not-offered".into()),
-                text: None,
-            }),
+            answer: Some(crate::person_request::AnswerInput::choose("not-offered")),
             idempotency_key: "choice".into(),
         };
         assert!(store.finish_person_step(&response, false).is_err());
-        response.answer.as_mut().unwrap().id = Some("friday".into());
+        response.answer = Some(crate::person_request::AnswerInput::choose("friday"));
         store.finish_person_step(&response, false).unwrap();
         let done = store.step_run(&ask.subject).unwrap().unwrap();
         assert_eq!(
-            done.person_answers[0].answer.as_ref().unwrap()["id"],
+            done.person_answers[0].answer.as_ref().unwrap()["choices"][0]["id"],
             "friday"
         );
         assert_eq!(

@@ -80,7 +80,7 @@ it('sends nothing on choosing; Send is its own act, and sends once', async () =>
   expect(onAct).not.toHaveBeenCalled()
   await act(async () => button(container, 'Send')!.click())
   expect(onAct).toHaveBeenCalledTimes(1)
-  expect(onAct.mock.calls[0]).toEqual([alert, { type: 'work.done', summary: 'Merge', answer: { id: 'merge' } }])
+  expect(onAct.mock.calls[0]).toEqual([alert, { type: 'work.done', summary: 'Merge', answer: { choices: [{ id: 'merge' }] } }])
   expect(store.getSnapshot().pending.get(alert.id)?.label).toBe('Merge')
   // A second press on a card still mounted answers nothing more.
   await act(async () => button(container, 'Send')!.click())
@@ -100,7 +100,7 @@ it('drops a choice when the alert is replaced, and keeps the person\'s words', a
   // The words still reach the answer that carries them, against the revision now on screen.
   await act(async () => button(container, 'Send')!.click())
   expect(onAct.mock.calls[0]![0]).toBe(replaced)
-  expect(onAct.mock.calls[0]![1]).toEqual({ type: 'work.done', summary: 'Only after the fix lands', answer: { id: 'change', text: 'Only after the fix lands' } })
+  expect(onAct.mock.calls[0]![1]).toEqual({ type: 'work.done', summary: 'Change it — Only after the fix lands', answer: { choices: [{ id: 'change' }], words: 'Only after the fix lands' } })
 })
 
 it('sends a request for changes only with the person\'s words', async () => {
@@ -111,7 +111,7 @@ it('sends a request for changes only with the person\'s words', async () => {
   await type(container, 'Rename the flag.')
   expect(button(container, 'Send')!.disabled).toBe(false)
   await act(async () => button(container, 'Send')!.click())
-  expect(onAct.mock.calls[0]![1]).toEqual({ type: 'work.done', summary: 'Rename the flag.', answer: { id: 'change', text: 'Rename the flag.' } })
+  expect(onAct.mock.calls[0]![1]).toEqual({ type: 'work.done', summary: 'Change it — Rename the flag.', answer: { choices: [{ id: 'change' }], words: 'Rename the flag.' } })
 })
 
 it('moves words typed on an answer that cannot carry them, and says so', async () => {
@@ -141,7 +141,7 @@ it('takes a second press to dismiss, so a stray click answers nothing', async ()
   await act(async () => button(container, 'Dismiss')!.click())
   expect(onAct).not.toHaveBeenCalled()
   await act(async () => button(container, 'Confirm dismiss')!.click())
-  expect(onAct.mock.calls[0]![1]).toEqual({ type: 'work.done', summary: 'Dismissed without an answer.', answer: { id: 'dismiss' } })
+  expect(onAct.mock.calls[0]![1]).toEqual({ type: 'work.done', summary: 'Dismissed without an answer.', answer: { choices: [{ id: 'dismiss' }] } })
 })
 
 it('answers with the keyboard inside the card: a digit chooses, Enter sends, Shift+Enter is a newline, Escape clears', async () => {
@@ -162,5 +162,5 @@ it('answers with the keyboard inside the card: a digit chooses, Enter sends, Shi
   await key(words, { key: 'Escape' })
   expect(words.value).toBe('')
   await key(section, { key: 'Enter' })
-  expect(onAct.mock.calls[0]![1]).toEqual({ type: 'work.done', summary: 'Merge', answer: { id: 'merge' } })
+  expect(onAct.mock.calls[0]![1]).toEqual({ type: 'work.done', summary: 'Merge', answer: { choices: [{ id: 'merge' }] } })
 })

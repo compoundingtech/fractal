@@ -198,17 +198,28 @@ pub fn validate_delegated_answer(
         let submitted = fields.get("answer").ok_or_else(|| {
             FractalError::new("delegation-refused", "the structured answer is missing")
         })?;
+        // The submitted record, in the one answer schema, is the input that produced it.
+        let read = crate::person_request::read_answer(submitted);
         let input = crate::person_request::AnswerInput {
-            id: submitted
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            text: submitted
-                .get("text")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            choices: read["choices"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|choice| {
+                    Some(crate::person_request::ChoiceInput {
+                        id: choice["id"].as_str()?.to_owned(),
+                        note: choice["note"].as_str().map(str::to_owned),
+                    })
+                })
+                .collect(),
+            words: read["words"].as_str().map(str::to_owned),
         };
-        if request.answer(Some(&input), fields["summary"].as_str().unwrap())? != *submitted {
+        let input = if read["outcome"] == "dismissed" {
+            crate::person_request::AnswerInput { choices: vec![crate::person_request::ChoiceInput { id: crate::person_request::DISMISS.into(), note: None }], ..input }
+        } else {
+            input
+        };
+        if request.answer(Some(&input), fields["summary"].as_str().unwrap())? != read {
             return Err(FractalError::new(
                 "delegation-refused",
                 "the answer does not match the offered structured answer",
@@ -749,10 +760,11 @@ fn enrich_response(
             summary: summary.into(),
             respondent: actor.unwrap_or_default(),
             answered_at_unix_ms: accepted.parse().unwrap_or(0),
+            // Every reader sees the one answer schema, however the record was written.
             answer: fields
                 .get("answer")
                 .filter(|answer| answer.is_object())
-                .cloned(),
+                .map(crate::person_request::read_answer),
             evidence: serde_json::from_value(body["evidence"].clone()).unwrap_or_default(),
             resolved_by: fields
                 .get("resolved_by")

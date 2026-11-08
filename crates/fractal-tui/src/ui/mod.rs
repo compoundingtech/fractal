@@ -8091,6 +8091,7 @@ mod tests {
                 },
             ],
             custom: true,
+            words: None,
             attachments: Vec::new(),
             ..Default::default()
         };
@@ -8173,6 +8174,7 @@ mod tests {
                 recommendation: None,
                 answers,
                 custom: false,
+                words: None,
                 attachments: Vec::new(),
             };
             let item = Attention {
@@ -8309,6 +8311,7 @@ mod tests {
                 },
             ],
             custom: true,
+            words: None,
             attachments: Vec::new(),
         };
         let item = Attention {
@@ -8395,6 +8398,7 @@ mod tests {
             subjects: Vec::new(),
             answers: vec![option("a", "Refresh"), option("b", "Shorten"), option("c", "Leave it")],
             custom: false,
+            words: None,
             attachments: Vec::new(),
         };
         let item = Attention {
@@ -8489,6 +8493,7 @@ mod tests {
                 },
             ],
             custom: false,
+            words: None,
             attachments: Vec::new(),
         };
         let item = Attention {

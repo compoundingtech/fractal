@@ -155,14 +155,14 @@ function down() {
 const stepAnswer = (step) => {
   const view = stJson(['work', 'show', step]).value
   const last = view.person_answers?.at(-1)
-  return { state: view.state, summary: last?.summary ?? null, answer: last?.answer?.id ?? null }
+  return { state: view.state, summary: last?.summary ?? null, answer: last?.answer?.choices?.[0]?.id ?? null }
 }
 
 /** Earlier runs' unanswered asks from the seat, so the strip shows only this run's. */
 const clearStale = () => {
   for (const item of stJson(['alerts', 'ls', '--as', person]).value.items) {
     if (item.state !== 'open' || item.requester_id !== seat || !item.actions.includes('work.done')) continue
-    st(['work', 'done', item.source_id, '--as', person, ...(item.request?.answers?.length ? ['--answer', 'dismiss'] : ['--summary', 'Cleared before a proof run.'])])
+    st(['work', 'done', item.source_id, '--as', person, ...(item.request?.answers?.length ? ['--choice', 'dismiss'] : ['--summary', 'Cleared before a proof run.'])])
   }
 }
 

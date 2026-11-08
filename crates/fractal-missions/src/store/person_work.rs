@@ -158,7 +158,7 @@ fn resolve_answer(
         let Some(answer) = &input.answer else {
             return Ok((None, input.summary.clone()));
         };
-        if cancel || answer.id.is_some() {
+        if cancel || !answer.choices.is_empty() {
             return Err(FractalError::new(
                 "invalid-person-answer",
                 if cancel {
@@ -168,10 +168,17 @@ fn resolve_answer(
                 },
             ));
         }
-        let summary = if input.summary.trim().is_empty() {
-            answer.text.clone().unwrap_or_default()
-        } else {
-            input.summary.clone()
+        // A free-text ask's answer is its words: given as the summary, the words, or both alike.
+        let words = answer.words.as_deref().map(str::trim).filter(|words| !words.is_empty());
+        let summary = match words {
+            None => input.summary.clone(),
+            Some(words) if input.summary.trim().is_empty() || input.summary.trim() == words => words.to_owned(),
+            Some(_) => {
+                return Err(FractalError::new(
+                    "invalid-person-answer",
+                    "words_conflict: a free-text ask takes one answer; send it as the summary or the words",
+                ));
+            }
         };
         return Ok((None, summary));
     }
@@ -285,18 +292,25 @@ fn send_response_tx(
             response.actor.as_deref().unwrap_or("the agent")
         ));
     }
-    match answer.filter(|answer| answer["id"].is_string()) {
-        Some(answer) => {
-            content.push_str(&format!(
-                "Answer: {} ({})",
-                answer["label"].as_str().unwrap_or_default(),
-                answer["id"].as_str().unwrap_or_default()
-            ));
-            if let Some(text) = answer["text"].as_str() {
-                content.push_str(&format!("\n{text}"));
+    let read = answer.map(crate::person_request::read_answer);
+    let chosen = read.as_ref().and_then(|answer| answer["choices"].as_array()).filter(|choices| !choices.is_empty());
+    match (chosen, read.as_ref()) {
+        (Some(choices), Some(answer)) => {
+            for choice in choices {
+                content.push_str(&format!(
+                    "Answer: {} ({})",
+                    choice["label"].as_str().unwrap_or_default(),
+                    choice["id"].as_str().unwrap_or_default()
+                ));
+                if let Some(note) = choice["note"].as_str() {
+                    content.push_str(&format!("\nNote: {note}"));
+                }
+            }
+            if let Some(words) = answer["words"].as_str() {
+                content.push_str(&format!("\n{words}"));
             }
         }
-        None => content.push_str(summary),
+        _ => content.push_str(summary),
     }
     content.push_str(&format!(
         "\n\nThe answer as data: `st work show {} --json` (person_answers).",
@@ -560,7 +574,7 @@ impl PersonWorkStore for Store {
                     && ask.body["fields"]["person"] == authorization.owner
                     && view.assigned_to.as_deref() == Some(authorization.owner.as_str()))
                     .ok_or_else(|| FractalError::new("forbidden", "assistant answers require an owner-assigned person ask"))?;
-                if structured_request(ask)?.is_none() || input.answer.as_ref().and_then(|answer| answer.id.as_ref()).is_none() {
+                if structured_request(ask)?.is_none() || input.answer.as_ref().is_none_or(|answer| answer.choices.is_empty()) {
                     return Err(FractalError::new("forbidden", "assistant answers require a supported named answer"));
                 }
             }
@@ -579,7 +593,7 @@ impl PersonWorkStore for Store {
                     if let Some(proof) = &input.delegation { super::delegation::add_evidence(tx, &mut response_evidence, proof)?; }
                     if existing.body["fields"]["summary"] != *summary || existing.body["evidence"] != json!(response_evidence)
                         || existing.body["fields"].get("delegation") != input.delegation.as_ref().map(|proof| serde_json::to_value(proof).expect("serializable proof")).as_ref()
-                        || existing.body["fields"]["answer"] != answer.clone().unwrap_or_default()
+                        || existing.body["fields"].get("answer").map(crate::person_request::read_answer) != answer.as_ref().map(crate::person_request::read_answer)
                         || existing.body["fields"]["attempt"].as_u64() != Some(view.attempt as u64)
                         || input.episode.as_ref().is_some_and(|episode| existing.body["fields"]["episode"] != *episode) {
                         return Err(FractalError::new("idempotency-conflict", "this response key already has another summary"));
@@ -616,6 +630,14 @@ impl PersonWorkStore for Store {
                 return Err(FractalError::new("work-needs-evidence", "close spontaneous work with --evidence"));
             }
             let (answer, summary) = resolved?;
+            // While a member that predates the one answer schema is in the fleet, the record also
+            // carries the fields it reads (R49), so its agents still dispatch on `id`.
+            let answer = match answer {
+                Some(answer) if !fractal_store::store::marks_switch::answer_schema_switched_tx(tx).map_err(internal)? => {
+                    Some(crate::person_request::with_legacy_mirror(answer))
+                }
+                answer => answer,
+            };
             if summary.trim().is_empty() {
                 return Err(FractalError::new("invalid-person-response", "a response needs a summary"));
             }
