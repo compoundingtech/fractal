@@ -658,9 +658,6 @@ pub struct StatusQuery {
     /// the full reduction.
     #[serde(default)]
     summary: bool,
-    /// Omit claim provenance entirely; preserve the full status fields.
-    #[serde(default)]
-    omit_claims: bool,
 }
 
 pub async fn resource_referrers(
@@ -714,8 +711,6 @@ pub async fn status(
         } else {
             store.status_for_generic_reads(
                 subject.as_deref(), query.owner_run.as_deref(), query.at_index, query.history,
-                if query.omit_claims { crate::store::ClaimsReduction::Fields }
-                else { crate::store::ClaimsReduction::Full },
             )?
         };
         if !query.history && query.at_index.is_none() {

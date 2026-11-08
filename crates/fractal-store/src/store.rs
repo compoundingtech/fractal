@@ -1919,7 +1919,7 @@ struct StatusSubjects<'a> {
 pub enum ClaimsReduction {
     Full,
     Summary,
-    /// Full status fields, without claim IDs, counts or session boundaries. Never cached.
+    /// Internal full status fields without provenance. Never cached or exposed as a status response.
     Fields,
     /// Runtime resources do not consume claim ids, counts, or session boundaries.
     Runtime,
@@ -5526,6 +5526,19 @@ impl Store {
     /// Generic serving status must not reduce reserved facts into fields or claim identities.
     /// Keep internal status and authoritative replication readers unchanged.
     pub fn status_for_generic_reads(
+        &self, selected: Option<&str>, owner: Option<&str>, at: Option<u64>, history: bool,
+    ) -> Result<StatusResponse> {
+        self.generic_status_reduction(selected, owner, at, history, ClaimsReduction::Full)
+    }
+
+    /// Owned-set member reads consume actual only: never expose an unenumerated claims vector.
+    pub fn actual_for_generic_reads(&self, subject: &str, at: Option<u64>) -> Result<Option<Value>> {
+        Ok(self.generic_status_reduction(
+            Some(subject), None, at, false, ClaimsReduction::Fields,
+        )?.subjects.into_iter().next().and_then(|status| status.actual))
+    }
+
+    fn generic_status_reduction(
         &self, selected: Option<&str>, owner: Option<&str>, at: Option<u64>,
         history: bool, claims: ClaimsReduction,
     ) -> Result<StatusResponse> {

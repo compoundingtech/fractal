@@ -481,7 +481,7 @@ agent "eval/named" { name "Quartz"; workspace "/tmp"; harness "claude" {} }
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
 }
 #[tokio::test]
-async fn status_omitting_claims_is_opt_in_and_keeps_the_status_fields() {
+async fn status_preserves_claim_provenance_even_with_an_unknown_omit_claims_query() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     state.store.apply_internal(
@@ -489,18 +489,12 @@ async fn status_omitting_claims_is_opt_in_and_keeps_the_status_fields() {
         "status-summary-fixture",
     ).unwrap();
     let app = router(state);
-    let (code, mut full) = get_request(app.clone(), "/v1/status?subject=agent/eval/named").await;
+    let (code, full) = get_request(app.clone(), "/v1/status?subject=agent/eval/named").await;
     assert_eq!(code, StatusCode::OK, "{full}");
-    let (code, mut summary) = get_request(app, "/v1/status?subject=agent/eval/named&omit_claims=true").await;
-    assert_eq!(code, StatusCode::OK, "{summary}");
+    let (code, legacy_query) = get_request(app, "/v1/status?subject=agent/eval/named&omit_claims=true").await;
+    assert_eq!(code, StatusCode::OK, "{legacy_query}");
     assert!(!full["subjects"][0]["claims"].as_array().unwrap().is_empty());
-    assert!(summary["subjects"][0]["claims"].as_array().unwrap().is_empty());
-    for response in [&mut full, &mut summary] {
-        response.as_object_mut().unwrap().remove("seat_admission");
-        response["subjects"][0].as_object_mut().unwrap().remove("claims");
-        response["subjects"][0].as_object_mut().unwrap().remove("claims_summary");
-    }
-    assert_eq!(summary, full);
+    assert_eq!(legacy_query["subjects"][0]["claims"], full["subjects"][0]["claims"]);
 }
 
 

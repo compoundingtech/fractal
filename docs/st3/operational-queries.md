@@ -2,16 +2,17 @@
 
 ## Single-subject status reads
 
-`GET /v1/status?subject=SUBJECT&omit_claims=true` preserves the desired record, actual
-state, harness, conflicts, pending actions and snapshot cut, but omits claim provenance:
-`claims` is empty and `claims_summary` remains its empty/default value. No claim count or
-canonical session-boundary query runs. `fractal show`/inspect and the CLI's other single-subject
-status consumers request this representation; recent claim bodies remain a separate bounded
-claim-page read. Owned-set member status reads also use this reduction internally without
-changing their response shape. The default HTTP status representation remains unchanged.
+`GET /v1/status?subject=SUBJECT` and the CLI's shared single-subject status helper retain
+the full canonical claim ID vector. Subject `show`, `inspect`, and successful non-verdict
+`trace wait` output therefore retain claim provenance; `claims=[]` still proves an empty
+history, not a skipped reduction. Bounded `recent_claims` reads are unchanged. There is no
+`omit_claims` HTTP mode.
 
-This avoids enumerating and canonicalizing every claim ID under the status read snapshot.
-It does not make actual-state or harness folding independent of history.
+Owned-set preview and resource/member reads use an internal `Fields` reduction instead.
+It skips claim IDs, counts and session boundaries, then returns only actual state across
+the store boundary. No `SubjectStatus` or unenumerated `claims=[]` is serialized on that path;
+owned-set wire shapes remain unchanged. This avoids provenance work under those snapshots,
+but actual-state and harness folding can still depend on history.
 A desired-only caller should use `GET /v1/desired/SUBJECT`,
 which reads the desired record without reducing actual state or claims.
 

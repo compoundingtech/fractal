@@ -12870,7 +12870,7 @@ fn confirm_service_reset(config: &Config) -> Result<()> {
 async fn status_for(client: &Client, subject: &str) -> Result<StatusResponse> {
     client
         .get(&format!(
-            "/v1/status?subject={}&omit_claims=true",
+            "/v1/status?subject={}",
             urlencoding::encode(subject)
         ))
         .await

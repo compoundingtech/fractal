@@ -38,19 +38,31 @@ fn work(read: impl FnOnce() -> StatusResponse) -> (smallclaims::sqlite::work::Sq
     (scope.finish(), status)
 }
 #[test]
-fn generic_status_fields_avoid_the_full_claim_vector_at_current_and_historical_cuts() {
+fn owned_set_member_fields_avoid_the_full_claim_vector_at_current_and_older_cuts() {
     let store = seat_with(3_000);
     let cut = store.index().unwrap();
+    observe(&store, json!({
+        "status": "running", "incarnation_id": "after-pinned-cut", "runtime_id": "after-pinned-cut",
+    }));
+    assert!(store.index().unwrap() > cut, "fixture must retain a genuinely older cut");
     for at in [None, Some(cut)] {
-        let (summary_work, summary) = work(|| store.status_for_generic_reads(
+        let (summary_work, summary) = work(|| store.generic_status_reduction(
             Some(SEAT), None, at, false, ClaimsReduction::Fields,
         ).unwrap());
-        let (full_work, full) = work(|| store.status_for_generic_reads(
+        let (full_work, full) = work(|| store.generic_status_reduction(
             Some(SEAT), None, at, false, ClaimsReduction::Full,
         ).unwrap());
         assert!(summary.subjects[0].claims.is_empty(), "hot path enumerated claim ids");
         assert_eq!(summary.subjects[0].claims_summary.count, 0);
-        assert_eq!(full.subjects[0].claims.len(), 3_000);
+        assert_eq!(full.subjects[0].claims.len(), if at.is_some() { 3_000 } else { 3_001 });
+        assert_eq!(full.subjects[0].actual.as_ref().unwrap()["incarnation_id"],
+            if at.is_some() { "incarnation-2999" } else { "after-pinned-cut" });
+        let actual_scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let actual = store.actual_for_generic_reads(SEAT, at).unwrap();
+        let actual_work = actual_scope.finish();
+        assert_eq!(actual, full.subjects[0].actual);
+        assert!(actual_work.vm_steps < full_work.vm_steps,
+            "actual={actual_work:?}, full={full_work:?}");
         assert!(summary_work.vm_steps < full_work.vm_steps,
             "summary={summary_work:?}, full={full_work:?}");
         let mut summary = serde_json::to_value(summary).unwrap();
