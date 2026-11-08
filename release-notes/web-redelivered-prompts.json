@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "The web reads native user turns that re-deliver the same Fractal message as one prompt with a count, by delivery link; the gateway now negotiates conversation-delivery-links.v1",
+  "replay": {
+    "status": "none",
+    "detail": "Web UI and gateway headers only; no replay or rebuild."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No rules changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The web gateway adds conversation-delivery-links.v1 to client reads and WebSocket upgrades, so native user turns carry the optional `delivers` link. Daemons without the capability ignore it and the web then collapses nothing. Only Claude's verified transcript binding produces the link today."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No restart-time work."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Reverting restores separate prompt rows and the previous feature header."
+  }
+}

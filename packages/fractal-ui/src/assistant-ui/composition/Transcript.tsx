@@ -172,7 +172,7 @@ export function UserMessage({ item }: { readonly item: TextItem & { readonly rol
     if (element === null || expanded || !active) return
     return observeUserMessageOverflow(element, setOverflows)
   }, [item.text, expanded, active])
-  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><div id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}><Markdown text={markdownBlock(expanded ? item.text : collapsed)} tone={item.sendState?._tag === 'Pending' ? 'muted' : 'foreground'} hardBreaks /></div>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}<TranscriptAttachments attachments={item.attachments} messageId={item.id} /><SendStatus state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} /></MessagePrimitive.Root>
+  return <MessagePrimitive.Root data-testid="user-message" data-item-id={item.id} data-send-state={(item.sendState?._tag ?? 'Sent').toLowerCase()} {...stylex.props(styles.user, item.sendState?._tag === 'Pending' && styles.userPending)}><div id={textId} ref={text} {...stylex.props(styles.userText, !expanded && styles.userClamp)}><Markdown text={markdownBlock(expanded ? item.text : collapsed)} tone={item.sendState?._tag === 'Pending' ? 'muted' : 'foreground'} hardBreaks /></div>{(long || overflows || expanded) && <Button aria-expanded={expanded} aria-controls={textId} onPress={() => setExpanded(!expanded)} {...stylex.props(styles.historyLoad, styles.userDisclosure)}>{expanded ? 'Show less' : 'Show full message'}</Button>}<TranscriptAttachments attachments={item.attachments} messageId={item.id} />{item.redelivered !== undefined && item.redelivered > 0 && <span data-testid="user-redelivered" {...stylex.props(styles.redelivered)}>{`Delivered to the agent ${item.redelivered + 1} times`}</span>}<SendStatus state={item.sendState} onRetry={onRetrySend === undefined ? undefined : () => onRetrySend(item.id)} /></MessagePrimitive.Root>
 }
 /**
  * The callback must resolve only after the host has successfully copied the answer. Only a fulfilled copy sets
@@ -647,4 +647,6 @@ const styles = stylex.create({
   unavailableDetails: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: s.xs, maxWidth: g.lane },
   unavailableDetail: { margin: 0, fontSize: t.metaSize, lineHeight: t.metaLeading, color: ink.fgMuted, overflowWrap: 'anywhere' },
   userPending: { color: ink.fgMuted },
+  // The harness read the same message again; one prompt, the repeat count in a quiet line.
+  redelivered: { color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading },
 })

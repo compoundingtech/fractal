@@ -158,6 +158,8 @@ export const ConversationItem = Schema.TaggedUnion({
     at: Schema.String,
     sender: Schema.optional(Sender),
     sendState: Schema.optional(SendState),
+    /** How many later native turns delivered the same Fractal message again (by `delivers` link); they read as this one. */
+    redelivered: Schema.optional(Schema.Int),
   },
   /**
    * A Fractal message joined into the conversation: its header (`message` entry) and, when the window
