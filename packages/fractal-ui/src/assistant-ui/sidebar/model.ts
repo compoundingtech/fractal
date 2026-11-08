@@ -124,7 +124,7 @@ export const rowAttention = (row: Pick<SidebarAgentRow, 'status' | 'needsMe'>): 
 export const lastVerifiedPrefix = 'Last verified · '
 /**
  * The row's status word: its reported label, or "Needs you" on a real ask. The whole label is replaced, so a
- * "Waiting on CI" never reads "Needs you on CI"; a "Last verified" prefix stays.
+ * "Waiting on checks" never reads "Needs you on checks"; a "Last verified" prefix stays.
  */
 export const rowStatusLabel = (row: Pick<SidebarAgentRow, 'status' | 'statusLabel' | 'needsMe'>): string =>
   rowAttention(row) !== 'needs-you' ? row.statusLabel

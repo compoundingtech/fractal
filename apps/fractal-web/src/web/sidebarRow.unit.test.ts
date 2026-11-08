@@ -453,7 +453,7 @@ describe('what a waiting agent waits on', () => {
   const waiting = (state: string | undefined, fields: Partial<Agent> = {}): Agent => ({ ...agent, activity: 'waiting', status: 'waiting',
     ...(state === undefined ? {} : { currentWork: [{ id: 'work/x', missionId: 'mission/example/x', runId: 'run/x', path: 'x', state }] }), ...fields })
   it.each([
-    ['verifying', 'Waiting on CI'],
+    ['verifying', 'Waiting on checks'],
     ['blocked', 'Waiting on dependency'],
     ['waiting-person', 'Waiting on a person'],
     ['claimed', 'Waiting'],

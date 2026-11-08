@@ -169,13 +169,13 @@ export const sidebarSubagentRow = ({ parent, child, stale }: {
 })
 
 /**
- * What a waiting agent waits on, from served facts only: its current step's state (verifying is CI, blocked is a
+ * What a waiting agent waits on, from served facts only: its current step's state (verifying is checks, blocked is a
  * dependency, waiting-person is a person) or a harness blocked on a person. A wait on you is "Needs you" instead, from the
  * counted needs-you set (`rowStatusLabel`). Anything else stays plain "Waiting".
  */
 const waitingLabel = (agent: Agent): string => {
   const state = agent.currentWork?.[0]?.state
-  const on = state === 'verifying' ? 'CI' : state === 'blocked' ? 'dependency'
+  const on = state === 'verifying' ? 'checks' : state === 'blocked' ? 'dependency'
     : state === 'waiting-person' || (agent.blockedOn._tag === 'Known' && agent.blockedOn.value === 'human') ? 'a person' : undefined
   return on === undefined ? statuses.waiting.label : `${statuses.waiting.label} on ${on}`
 }
