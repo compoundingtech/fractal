@@ -564,7 +564,7 @@ CREATE INDEX IF NOT EXISTS claims_kind_index ON claims(kind, store_index);
 CREATE INDEX IF NOT EXISTS claims_subject_kind_index ON claims(subject, kind, store_index);
 CREATE INDEX IF NOT EXISTS claims_subject_kind_accepted_index
 ON claims(subject, kind, length(accepted_at_unix_ms), accepted_at_unix_ms);
-"#, transport_pair_index!(), /* sqlite-large-value: allow-for-now lv-hb4ef462c895d owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ r#"
+"#, transport_pair_index!(), /* sqlite-large-value: allow-for-now lv-h48ab0ffcf698 owner=smallclaims::store TODO=chunk-or-reference-variable-columns */ r#"
 CREATE INDEX IF NOT EXISTS claims_batch_index ON claims(batch_id, store_index);
 -- Heals once compared claim identities through this index; nothing reads it any more.
 DROP INDEX IF EXISTS claims_batch_claim_id;
@@ -758,6 +758,13 @@ CREATE TABLE IF NOT EXISTS replica_envelope_holds (
     envelope_hash TEXT NOT NULL,
     reason TEXT NOT NULL CHECK(reason IN ('unsigned','fenced')),
     updated_at_unix_ms TEXT NOT NULL,
+    PRIMARY KEY(writer, sequence, envelope_hash)
+);
+
+CREATE TABLE IF NOT EXISTS replica_restore_quarantine (
+    writer TEXT NOT NULL,
+    sequence INTEGER NOT NULL,
+    envelope_hash TEXT NOT NULL,
     PRIMARY KEY(writer, sequence, envelope_hash)
 );
 
@@ -2483,6 +2490,9 @@ impl Store {
             let page = self.readers.get().prepare(
                 "SELECT sequence,envelope_hash FROM replica_envelopes AS envelopes
                  WHERE writer=?1 AND (sequence,envelope_hash)>(?2,?3) AND sequence<=?4
+                   AND NOT EXISTS(SELECT 1 FROM replica_restore_quarantine AS quarantine
+                     WHERE quarantine.writer=envelopes.writer AND quarantine.sequence=envelopes.sequence
+                       AND quarantine.envelope_hash=envelopes.envelope_hash)
                    AND NOT EXISTS(SELECT 1 FROM replica_envelope_signatures AS signatures
                      WHERE signatures.writer=envelopes.writer AND signatures.sequence=envelopes.sequence
                        AND signatures.envelope_hash=envelopes.envelope_hash AND signatures.member_key=?5)
@@ -2851,8 +2861,12 @@ impl Store {
     fn held_signature_requests(&self) -> Result<Vec<ReplicaEnvelopeId>> {
         let connection = self.readers.get();
         let mut statement = connection.prepare_cached(
-            "SELECT writer, sequence, envelope_hash FROM replica_envelope_holds
-             WHERE reason='unsigned' ORDER BY writer, sequence, envelope_hash LIMIT ?1",
+            "SELECT writer, sequence, envelope_hash FROM replica_envelope_holds AS holds
+             WHERE reason='unsigned' AND NOT EXISTS(
+               SELECT 1 FROM replica_restore_quarantine AS quarantine
+               WHERE quarantine.writer=holds.writer AND quarantine.sequence=holds.sequence
+                 AND quarantine.envelope_hash=holds.envelope_hash)
+             ORDER BY writer, sequence, envelope_hash LIMIT ?1",
         )?;
         let requests = statement
             .query_map([REPLICATION_SIGNATURE_LIMIT as i64], |row| {
@@ -8367,7 +8381,18 @@ impl Store {
                         continue;
                     }
                     let started = std::time::Instant::now();
-                    let hold = match (authority, shard.as_deref()) {
+                    let keyed = prepared.requires_keyed_envelope();
+                    let quarantined: bool = pass.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM replica_restore_quarantine WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3)",
+                        params![envelope.writer, envelope.sequence, envelope.hash], |row| row.get(0),
+                    )?;
+                    let hold = if quarantined || (keyed && !matches!(
+                        prepared_membership.window(&envelope.writer, envelope.sequence), crate::fleet::Window::Keyed(_),
+                    )) {
+                        Some("unsigned")
+                    } else if keyed {
+                        fleet_admission_hold(&pass, prepared_membership, envelope)?
+                    } else { match (authority, shard.as_deref()) {
                         (AdmissionAuthority::Membership, Some(shard)) => {
                             shard_admission_hold(&pass, prepared_membership, shard, envelope)?
                         }
@@ -8375,7 +8400,7 @@ impl Store {
                             fleet_admission_hold(&pass, prepared_membership, envelope)?
                         }
                         (AdmissionAuthority::Source, _) => None,
-                    };
+                    }};
                     outcome.verify += started.elapsed();
                     if let Some(reason) = hold {
                         hold_replica_envelope(&pass, envelope, reason)?;
