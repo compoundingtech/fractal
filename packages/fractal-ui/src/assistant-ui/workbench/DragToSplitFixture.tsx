@@ -4,7 +4,8 @@ import { useDrag } from 'react-aria'
 import { Button } from 'react-aria-components'
 import { Menu, MenuItem, MenuTrigger, Popover } from '../composition/Controls'
 import { Workbench } from './Workbench'
-import { AGENT_DRAG_MIME, openAgentAtPath, type AgentPlacement } from './agent-drag'
+import { openAgentAtPath, type AgentPlacement } from './agent-drag'
+import { entityDragPayload } from '../entity/entity'
 import { findGroupPath, group, split, type WorkbenchLayout } from './workbench-model'
 import { decidedAppearance, useWorkbenchFixture } from './workbench-fixtures'
 import { interactionVars as interaction, surfaceVars as sf, textVars as tx, borderVars as bd, spaceVars as s, typeVars as t, geometryVars as g, radiusVars as r } from '../composition-tokens.stylex'
@@ -16,7 +17,7 @@ const mainGroup = group([{ uri: 'agent:worker-1' }])
 const pair = split('right', mainGroup, group([{ uri: 'diff:sample/rows.ts', form: 'unified' }]))
 
 export function AgentDragRow({ onOpen, agentKey = draggedAgent, title = 'worker-2' }: { onOpen: (placement: AgentPlacement) => void; agentKey?: string; title?: string }) {
-  const getItems = React.useCallback(() => [{ [AGENT_DRAG_MIME]: agentKey, 'text/plain': agentKey }], [agentKey])
+  const getItems = React.useCallback(() => [entityDragPayload({ kind: 'agent', id: agentKey, title: agentKey })], [agentKey])
   const { dragProps } = useDrag({ getItems, getAllowedDropOperations: () => ['copy'] })
   return (
     <div {...stylex.props(styles.row)}>

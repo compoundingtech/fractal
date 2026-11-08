@@ -2,11 +2,12 @@ import * as React from 'react'
 import { RegistryContext } from '@effect/atom-react'
 import { afterNextPaint } from '../telemetry/ux.ts'
 import { useDataSource } from '../data/react.tsx'
-import { activeTab, tabsOf, type Command, type WorkspaceState } from './model.ts'
+import { activeTab, currentSpace, tabsOf, type Command, type WorkspaceState } from './model.ts'
 import { policyOf } from './kinds.ts'
 import { defaultBudget, desiredHolds, makeResourceManager, planTiers, type Budget, type ResourceStats, type Tier } from './resources.ts'
 import type { DataResource } from './registry.ts'
-import { createWorkspaceStore, localStorageLayer, memoryStorage, type WorkspaceStore } from './store.ts'
+import type { SpaceSync } from '@fractal/ui/workspace/store'
+import { createWorkspaceStore, type WorkspaceStore } from './store.ts'
 import { paneKey, parsePane, subjectHref, subjectOfLocation, subjectOfRef } from './subject.ts'
 
 export interface WorkspaceNavigation {
@@ -20,18 +21,20 @@ export interface WorkspaceNavigation {
 const disposal = new WeakMap<WorkspaceStore, number>()
 
 /** Owns the machine's lifetime. The first render already shows what the URL asks for, with no effect-driven flash. */
-export const useWorkspaceStore = ({ storageKey, location, initialRef }: {
+export const useWorkspaceStore = ({ storageKey, location, initialRef, sync }: {
   /** `undefined` keeps the workspace in memory, for embeds and stories. */
   readonly storageKey: string | undefined
   readonly location: string
   /** What an empty workspace with no subject in its URL starts on: a story's or an embed's known state. */
   readonly initialRef?: string | undefined
+  /** External space stores, such as the person's glasses; fixed for the store's lifetime. */
+  readonly sync?: readonly SpaceSync[] | undefined
 }): WorkspaceStore => {
   const [store] = React.useState(() => {
-    const created = createWorkspaceStore(storageKey === undefined ? memoryStorage() : localStorageLayer(storageKey))
+    const created = createWorkspaceStore({ storageKey, sync })
     const subject = subjectOfLocation(location)
-    if (subject !== undefined) created.dispatch({ _tag: 'Open', pane: paneKey(subject) })
-    else if (initialRef !== undefined && tabsOf(created.getState().layout).length === 0) created.dispatch({ _tag: 'Open', pane: paneKey(subjectOfRef(initialRef)) })
+    if (subject !== undefined) created.dispatch({ _tag: 'Open', ref: paneKey(subject) })
+    else if (initialRef !== undefined && tabsOf(created.getState()).length === 0) created.dispatch({ _tag: 'Open', ref: paneKey(subjectOfRef(initialRef)) })
     return created
   })
   React.useEffect(() => {
@@ -71,15 +74,15 @@ export const useWorkspaceRoute = ({ store, state, location, navigation }: {
 }) => {
   const history = React.useRef<'push' | 'replace'>('replace')
   const applied = React.useRef<string | undefined>(undefined)
-  const activePane = activeTab(state)?.pane
+  const activePane = activeTab(state)?.ref
   React.useLayoutEffect(() => {
     if (applied.current !== undefined && applied.current !== location) {
       const subject = subjectOfLocation(location)
-      if (subject !== undefined) store.dispatch({ _tag: 'Open', pane: paneKey(subject) })
+      if (subject !== undefined) store.dispatch({ _tag: 'Open', ref: paneKey(subject) })
       history.current = 'replace'
     }
     applied.current = location
-    const current = activeTab(store.getState())?.pane
+    const current = activeTab(store.getState())?.ref
     const search = location.split('?')[1] ?? ''
     const params = new URLSearchParams(search)
     params.delete('open')
@@ -138,7 +141,8 @@ export const useWorkspaceResources = ({ store, state, budget = defaultBudget }: 
     })
     return () => { cancelPaint(); cancelIdle?.() }
   }, [])
-  const tiers = React.useMemo(() => planTiers({ state, budget: warm ? budget : { dom: 0, data: 0 }, policyOf }), [state.layout, state.mru, state.views, budget, warm])
+  const space = currentSpace(state)
+  const tiers = React.useMemo(() => planTiers({ state: { layout: space.layout, mru: space.local.mru, views: space.local.views }, budget: warm ? budget : { dom: 0, data: 0 }, policyOf }), [space.layout, space.local.mru, space.local.views, budget, warm])
   const [manager] = React.useState(() => makeResourceManager({
     acquire: (resource: DataResource) => {
       if (resource._tag === 'Conversation') {
@@ -153,9 +157,9 @@ export const useWorkspaceResources = ({ store, state, budget = defaultBudget }: 
   React.useLayoutEffect(() => {
     // Hidden tabs hold no demand yet, as before tabs: a visible follow is never evicted, so a hidden one
     // could pin a gateway's only slot. The source may keep or drop their data; a reveal follows again.
-    const visible = new Map([...desiredHolds({ tabs: tabsOf(state.layout), tiers, views: state.views, policyOf })].filter(([id]) => tiers.get(id) === 'active'))
+    const visible = new Map([...desiredHolds({ tabs: tabsOf(state), tiers, views: space.local.views, policyOf })].filter(([id]) => tiers.get(id) === 'active'))
     manager.reconcile(visible)
-  }, [manager, tiers, state.layout, state.views])
+  }, [manager, tiers, space.layout, space.local.views])
   React.useEffect(() => () => manager.dispose(), [manager])
   React.useEffect(() => {
     if (!import.meta.env.DEV) return
