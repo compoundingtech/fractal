@@ -44,7 +44,7 @@ fleet_compat() {
     fleet::previous_release_conversation_and_waits_read_stream_items_across_upgrade_and_rollback \
     fleet::previous_release_and_this_build_restore_each_others_archives_until_the_shard_holds_items \
     fleet::service_grants::previous_release_refuses_service_grants_from_a_candidate_issuer \
-    fleet::service_grants::previous_release_refuses_service_grants_as_the_issuer \
+    fleet::service_grants::previous_release_refuses_offline_seeded_service_grants_with_its_own_origin \
     fleet::service_grants::previous_release_refuses_plugin_service_grants_on_same_database_rollback 2>&1 | tee "$logs/compat-result.log" || return
   grep -q "test result: ok. 9 passed" "$logs/compat-result.log" || return
   # The GitHub plugin store beside an older poller, and that poller upgraded in place.

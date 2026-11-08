@@ -46,9 +46,13 @@ The old binary ignores the profile field, but refuses plugin service grants
 through its exact `assistant/chatgpt` principal check and refuses non-assistant
 scopes through its closed assistant scope set. Replicated grants additionally
 fail its authoritative-origin check. The ignored fleet tests exercise both
-issuer roles and a candidate → old → candidate restart on the same database,
+issuer-origin roles and a candidate → old → candidate restart on the same database,
 with retained GRANTED/POLICY claims and live, expired, and revoked assistant
-controls. The rollback fixture also characterizes owner inspection: the old
+controls. Fixtures are signed offline by the candidate store using the stopped
+node's own origin and existing node/principal keys: the public claims API refuses
+these authority kinds, and the old binary cannot issue service grants. A candidate-only
+test exercises the same offline seeding, restart, replication, and refusal path.
+The rollback fixture also characterizes owner inspection: the old
 binary labels a plugin service record as an assistant grant even though its
 credential cannot authenticate.
 

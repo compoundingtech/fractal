@@ -13,19 +13,31 @@ struct Grant {
     claims: BTreeSet<String>,
 }
 
-async fn append(node: &Node, id: &str, kind: &str, fields: Value, previous: Option<&str>) -> String {
-    let claim: Value = node.client().post("/v1/claims", &ClaimInput {
+fn append(node: &Node, id: &str, kind: &str, fields: Value, previous: Option<&str>) -> String {
+    assert!(node.daemon.is_none() && node.worker.is_none(), "seed only a stopped node");
+    let store = fractal_daemon::store::Store::open(
+        &node.state_dir().join("claims.sqlite3"), &node.name,
+    ).unwrap();
+    // Legacy-config nodes have no membership member key: use their existing standalone
+    // node key and principal key directory, exactly as daemon startup does.
+    store.set_node_key(std::sync::Arc::new(
+        fractal_daemon::fleet::join::standalone_node_key(&node.state_dir()).unwrap(),
+    )).unwrap();
+    store.use_key_directory(&fractal_daemon::fleet::join::key_directory(&node.state_dir())).unwrap();
+    let claim = store.append_claim(&ClaimInput {
         subject: format!("custom/client/assistant-v1-{id}"),
         kind: kind.into(), actor: Some(PERSON.into()),
         fields: serde_json::from_value(fields).unwrap(),
         evidence: previous.into_iter().map(str::to_owned).collect(),
         expected_subject: Some(previous.map(str::to_owned)), idempotency_key: None,
-    }).await.unwrap();
-    claim["id"].as_str().unwrap().to_owned()
+    }).unwrap();
+    assert_eq!(claim.origin, node.name);
+    assert!(store.claim_signature(&claim.id).unwrap().is_some(), "fixture must be signed");
+    claim.id
 }
 
-async fn seed(node: &Node, number: u8, profile: &str, principal: &str, scope: &str,
-              expired: bool, revoked: bool) -> Grant {
+fn seed(node: &Node, number: u8, profile: &str, principal: &str, scope: &str,
+        expired: bool, revoked: bool) -> Grant {
     let id = format!("{number:024x}");
     let credential = format!("downgrade-fixture-{}-{id}", node.name);
     let mut fields = json!({
@@ -39,12 +51,12 @@ async fn seed(node: &Node, number: u8, profile: &str, principal: &str, scope: &s
         "minimal_read_mode": "approval-once", "disclosure_consent": true,
         "recipient_allowlist": [], "consent_evidence": []
     });
-    let granted = append(node, &id, GRANTED, fields.clone(), None).await;
+    let granted = append(node, &id, GRANTED, fields.clone(), None);
     fields["policy_revision"] = json!(2);
-    let policy = append(node, &id, POLICY, fields, Some(&granted)).await;
+    let policy = append(node, &id, POLICY, fields, Some(&granted));
     let mut claims = BTreeSet::from([granted, policy.clone()]);
     if revoked {
-        claims.insert(append(node, &id, REVOKED, json!({}), Some(&policy)).await);
+        claims.insert(append(node, &id, REVOKED, json!({}), Some(&policy)));
     }
     Grant { id, credential, claims }
 }
@@ -81,33 +93,42 @@ async fn wait_retained(node: &Node, grants: &[Grant]) {
     }).await;
 }
 
-async fn fixtures(node: &Node) -> Vec<Grant> {
-    vec![
-        // Principal and scope are separate fences in the profile-blind baseline.
-        seed(node, 1, "service", PLUGIN, "read.service.status", false, false).await,
-        seed(node, 2, "service", PLUGIN, "read.assistant.summary", false, false).await,
-        seed(node, 3, "service", "assistant/chatgpt", "read.service.status", false, false).await,
-        seed(node, 4, "assistant", "assistant/chatgpt", "read.assistant.summary", false, false).await,
-        seed(node, 5, "assistant", "assistant/chatgpt", "read.assistant.summary", true, false).await,
-        seed(node, 6, "assistant", "assistant/chatgpt", "read.assistant.summary", false, true).await,
-    ]
+async fn fixtures(node: &mut Node, counterexample: bool) -> Vec<Grant> {
+    node.stop();
+    // Public /v1/claims deliberately forbids these authority kinds and subjects.
+    // Fixture-only offline writes preserve that production restriction. Even the
+    // baseline-origin case is seeded by the candidate store, never old-binary issuance.
+    let mut grants = vec![
+        seed(node, 1, "service", PLUGIN, "read.service.status", false, false),
+        seed(node, 2, "service", PLUGIN, "read.assistant.summary", false, false),
+        seed(node, 3, "service", "assistant/chatgpt", "read.service.status", false, false),
+        seed(node, 4, "assistant", "assistant/chatgpt", "read.assistant.summary", false, false),
+        seed(node, 5, "assistant", "assistant/chatgpt", "read.assistant.summary", true, false),
+        seed(node, 6, "assistant", "assistant/chatgpt", "read.assistant.summary", false, true),
+    ];
+    if counterexample {
+        grants.push(seed(node, 7, "service", "assistant/chatgpt", "read.assistant.summary", false, false));
+    }
+    node.start().await;
+    grants
 }
 
-async fn mixed_pair(old_issuer: bool) {
-    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the pinned baseline"));
+async fn mixed_pair(old: Option<PathBuf>, old_issuer: bool) {
     let root = tempfile::tempdir().unwrap();
     let secret = root.path().join("fleet.secret");
     fs::write(&secret, hex::encode([7_u8; 32])).unwrap();
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
     let mut issuer = Node::new(root.path(), "issuer");
     let mut peer = Node::new(root.path(), "peer");
-    if old_issuer { issuer.binary = old; } else { peer.binary = old; }
+    if let Some(old) = old {
+        if old_issuer { issuer.binary = old; } else { peer.binary = old; }
+    }
     let fleet = "542c372d-0a13-4217-9817-4e868f45a734";
     issuer.legacy_config(fleet, &secret, &[("peer", peer.port)]);
     peer.legacy_config(fleet, &secret, &[("issuer", issuer.port)]);
     issuer.start().await;
     peer.start().await;
-    let grants = fixtures(&issuer).await;
+    let grants = fixtures(&mut issuer, false).await;
     wait_retained(&peer, &grants).await;
     for (index, grant) in grants.iter().enumerate() {
         assert_auth(&issuer, grant, index == 3).await;
@@ -122,14 +143,14 @@ async fn mixed_pair(old_issuer: bool) {
 #[ignore = "needs ST3_COMPAT_BIN: the pinned previous published release"]
 async fn previous_release_refuses_service_grants_from_a_candidate_issuer() {
     if fractal_daemon::test_support::supervise_test() { return; }
-    mixed_pair(false).await;
+    mixed_pair(Some(compat_binary()), false).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the pinned previous published release"]
-async fn previous_release_refuses_service_grants_as_the_issuer() {
+async fn previous_release_refuses_offline_seeded_service_grants_with_its_own_origin() {
     if fractal_daemon::test_support::supervise_test() { return; }
-    mixed_pair(true).await;
+    mixed_pair(Some(compat_binary()), true).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -141,10 +162,8 @@ async fn previous_release_refuses_plugin_service_grants_on_same_database_rollbac
     let mut node = Node::new(root.path(), "issuer");
     node.start().await;
     assert_candidate_issuance_grammar(&node).await;
-    let mut grants = fixtures(&node).await;
-    // This is the dangerous profile-blind counterexample, not an issuable service shape.
-    // The candidate must refuse it, and the closed pairing grammar is tested separately.
-    grants.push(seed(&node, 7, "service", "assistant/chatgpt", "read.assistant.summary", false, false).await);
+    // Includes the unissuable profile-blind counterexample; candidate must refuse it.
+    let grants = fixtures(&mut node, true).await;
     for (index, grant) in grants.iter().enumerate() {
         assert_auth(&node, grant, index == 3).await;
     }
@@ -159,9 +178,9 @@ async fn previous_release_refuses_plugin_service_grants_on_same_database_rollbac
     }
     let inspected: Value = Client::unix_as(node.socket(), PERSON).unwrap()
         .get(&format!("/v1/client/assistant/grants/{}", grants[0].id)).await.unwrap();
-    assert_eq!(inspected["value"]["kind"], "assistant-grant", "{inspected}");
-    assert_eq!(inspected["value"]["principal"], "assistant/chatgpt", "{inspected}");
-    assert_eq!(inspected["value"]["scopes"], json!(["read.service.status"]), "{inspected}");
+    assert_eq!(inspected["kind"], "assistant-grant", "{inspected}");
+    assert_eq!(inspected["principal"], "assistant/chatgpt", "{inspected}");
+    assert_eq!(inspected["scopes"], json!(["read.service.status"]), "{inspected}");
     assert_retained(&node, &grants).await;
     node.stop();
     node.binary = PathBuf::from(st3());
@@ -171,6 +190,16 @@ async fn previous_release_refuses_plugin_service_grants_on_same_database_rollbac
         assert_auth(&node, grant, index == 3).await;
     }
     assert_retained(&node, &grants).await;
+}
+
+fn compat_binary() -> PathBuf {
+    PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the pinned baseline"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn candidate_offline_service_fixtures_replicate_without_authorizing_credentials() {
+    if fractal_daemon::test_support::supervise_test() { return; }
+    mixed_pair(None, false).await;
 }
 
 async fn assert_candidate_issuance_grammar(node: &Node) {
