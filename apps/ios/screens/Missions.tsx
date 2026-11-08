@@ -1,3 +1,4 @@
+import { ThreadGroup } from './Threads';
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Alert, Pressable, ScrollView, SectionList, View } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
@@ -117,7 +118,7 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
   const waiting = homeRows(data.attention.filter(item => item.mission_id === mission.id), caps?.session_actor);
   return <Screen>
     <Banners />
-    <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ paddingBottom: 32 }}>
+    <ScrollView contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" contentContainerStyle={{ paddingBottom: 32 }}>
       <StatusLine />
       <View style={{ padding: 12, gap: 4 }}>
         <T><T bold color={wordStyle(word).color}>{wordStyle(word).glyph} {missionLabel(mission)}</T><T dim>  {mission.state} · {mission.runs.length} run{mission.runs.length === 1 ? '' : 's'}</T></T>
@@ -136,6 +137,7 @@ export function MissionScreen({ route, navigation }: RootScreen<'Mission'>) {
           onPress={() => navigation.navigate('Attention', { id: row.item.id })}
         />)}
       </> : null}
+      <ThreadGroup context={{ mission_id: mission.id }} openThread={id => navigation.navigate('Thread', { id })} />
       <SectionHeader title="steps" count={steps.length} />
       {steps.map(({ shown, step }) => {
         const style = stepStyle(shown?.word);

@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Start, read and reply to threads in native iOS Inbox, mission, agent and dedicated views",
+  "replay": {
+    "status": "none",
+    "detail": "No runtime replay change."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No database schema change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint rules change."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Thread messages use the paired device key, and live thread windows reuse the selected member’s collections socket. The iOS UI requires threads-v1 from that member and checks each action grant. Activation remains gated on daemon rollout."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional service interruption introduced."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No manual upgrade step."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "No database or runtime recovery change."
+  }
+}
