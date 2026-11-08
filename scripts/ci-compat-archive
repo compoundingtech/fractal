@@ -45,6 +45,17 @@ def prepare(kind, target, archive, *, cache_hit, root=None, run=subprocess.run):
             env=env, check=True)
 
 
+def workflow_head(environment):
+    if environment.get("GITHUB_EVENT_NAME") == "pull_request":
+        event = json.loads(Path(environment["GITHUB_EVENT_PATH"]).read_text())
+        source = event["pull_request"]["head"]["sha"]
+    else:
+        source = environment["GITHUB_SHA"]
+    if not isinstance(source, str) or not re.fullmatch(r"[a-f0-9]{40}", source):
+        raise ValueError("invalid workflow run head SHA")
+    return source
+
+
 def download(kind, target, archive, *, root=None):
     """Verify the complete private artifact ZIP before publishing any consumer input."""
     root = root or Path(__file__).resolve().parent.parent
@@ -64,7 +75,7 @@ def download(kind, target, archive, *, root=None):
     if (metadata.get("id") != int(artifact_id) or metadata.get("name") != name
             or metadata.get("expired") is not False
             or str(run.get("id")) != os.environ["GITHUB_RUN_ID"]
-            or run.get("head_sha") != os.environ["GITHUB_SHA"]
+            or run.get("head_sha") != workflow_head(os.environ)
             or type(size) is not int or size <= 0
             or not re.fullmatch(r"sha256:[a-f0-9]{64}", expected)):
         raise ValueError("compatibility artifact metadata identity/digest mismatch")

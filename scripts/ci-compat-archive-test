@@ -209,23 +209,35 @@ class ArchiveTests(unittest.TestCase):
                 self.assertTrue(cache_hit)
                 self.assertEqual(archive.read_bytes(), payload)
 
+            event_path = root / "event.json"
+            event_path.write_text(json.dumps({"pull_request": {"head": {"sha": "a" * 40}}}))
             env = {"CI_TEST_ARCHIVE_ARTIFACT_ID": "123", "COMPAT_ARCHIVE_NAME": "pinned-attempt-1",
-                   "GITHUB_REPOSITORY_ID": "789", "GITHUB_RUN_ID": "456", "GITHUB_SHA": "a" * 40}
+                   "GITHUB_REPOSITORY_ID": "789", "GITHUB_RUN_ID": "456", "GITHUB_SHA": "a" * 40,
+                   "GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_PATH": str(event_path)}
             implementation = {"transfer_zip": transfer,
                               "digest": lambda path: hashlib.sha256(path.read_bytes()).hexdigest()}
             with patch.dict(os.environ, env), patch.object(helper.subprocess, "check_output",
                     side_effect=lambda *a, **k: json.dumps(metadata).encode()), \
                  patch.object(helper.runpy, "run_path", return_value=implementation), \
                  patch.object(helper, "prepare", side_effect=verify) as verified:
-                helper.download("fleet", LINUX, destination, root=root)
-                self.assertEqual(destination.read_bytes(), payload)
-                verified.assert_called_once()
-                destination.unlink()
+                for event in ("pull_request", "push", "merge_group"):
+                    with self.subTest(event=event), patch.dict(os.environ, {
+                            "GITHUB_EVENT_NAME": event,
+                            "GITHUB_SHA": ("b" if event == "pull_request" else "a") * 40}):
+                        helper.download("fleet", LINUX, destination, root=root)
+                        self.assertEqual(destination.read_bytes(), payload)
+                        destination.unlink()
+                        metadata["workflow_run"]["head_sha"] = "c" * 40
+                        with self.assertRaisesRegex(ValueError, "metadata identity"):
+                            helper.download("fleet", LINUX, destination, root=root)
+                        metadata["workflow_run"]["head_sha"] = "a" * 40
+                        self.assertFalse(destination.exists())
+                self.assertEqual(verified.call_count, 3)
                 metadata["digest"] = "sha256:" + "0" * 64
                 with self.assertRaisesRegex(ValueError, "ZIP size/digest"):
                     helper.download("fleet", LINUX, destination, root=root)
                 self.assertFalse(destination.exists())
-                self.assertEqual(verified.call_count, 1)
+                self.assertEqual(verified.call_count, 3)
 
 
 if __name__ == "__main__":

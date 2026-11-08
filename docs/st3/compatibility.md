@@ -188,6 +188,9 @@ Downstream jobs download the producer-selected numeric artifact ID to a private 
 using the bounded transfer implementation from `scripts/ci-test-archive`. They check the
 authenticated ZIP identity, size and digest before opening it, then reverify the pinned
 archive's SHA256 and `BUILD.json` source/target before atomically publishing consumer bytes.
+Artifact metadata must match the current run ID and its event's source identity: the PR head
+from the event payload on `pull_request`, or `GITHUB_SHA` on push and merge-group runs.
+The PR merge-checkout SHA is not the artifact API's workflow-run head.
 `COMPAT_BASELINE_ARCHIVE` supplies those bytes, never a live release download. Producer job
 IDs also namespace artifact names so ordinary and projected proof producers cannot collide.
 Artifacts bridge GitHub-hosted, Namespace and macOS runners without
