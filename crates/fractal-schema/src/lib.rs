@@ -2162,6 +2162,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Cardinality::Append, None, true, &[],
         ),
         (
+            "client.operation-authorized", &["custom"], WritePolicy::SystemOnly,
+            Cardinality::Append, None, true, &[],
+        ),
+        (
             "agent.retired",
             &["agent"],
             WritePolicy::SystemOnly,
@@ -3565,6 +3569,11 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("previous_revision", string()),
             ("preserved_incarnation", string()),
             ("request", FieldSpec { required: true, ..object() }),
+        ],
+        "client.operation-authorized" => &[
+            ("record_id", required_string()),
+            ("record_hash", required_string()),
+            ("completion_id", string()),
         ],
         "custom.client.action-result" | "client.action-result" => &[
             ("authority_actor", string()),

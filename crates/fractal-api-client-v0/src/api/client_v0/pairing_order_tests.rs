@@ -21,12 +21,11 @@ fn replicate(from: &AppState, to: &AppState) {
 fn complete(state: &AppState, expires_at: u64) -> ClaimRecord {
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: GRANT.into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some(PERSON.into()),
             fields: serde_json::from_value(json!({
-                "pairing_operation_version":1,
                 "session_actor": "person/avery/session/phone", "person_id": PERSON,
                 "credential_hash": "test-not-a-secret", "expires_at_unix_ms": expires_at,
                 "scopes": ["read.projections"],
@@ -42,7 +41,7 @@ fn complete(state: &AppState, expires_at: u64) -> ClaimRecord {
 fn revoke(state: &AppState) {
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: GRANT.into(),
             kind: "custom.client.pairing-revoked".into(),
             actor: Some(PERSON.into()),
@@ -63,27 +62,28 @@ fn later() -> u64 {
 }
 
 #[test]
-fn a_revocation_ends_the_grant_on_every_member_whatever_order_they_admitted_it() {
+fn only_issuer_operation_revocations_end_grants_across_members() {
     let (left_root, right_root) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let left = super::tests::test_state_named(left_root.path(), "pairing-left");
     let right = super::tests::test_state_named(right_root.path(), "pairing-right");
-    // Each member writes its own claim first: the left pairs the grant while the right, which
-    // has not seen the pairing yet, revokes it.
     complete(&left, later());
-    revoke(&right);
+    right.store.append_claim(&ClaimInput {
+        subject:GRANT.into(),kind:"custom.client.pairing-revoked".into(),actor:Some(PERSON.into()),
+        fields:BTreeMap::new(),evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
     replicate(&left, &right);
     replicate(&right, &left);
-    for (name, state) in [("left", &left), ("right", &right)] {
+    for state in [&left, &right] {
+        let paired = newest_by_arrival(state, "custom.client.pairing-completed");
+        assert!(paired_client_session(state, &paired, "fabric-loopback", false).is_ok());
+    }
+    revoke(&left);
+    replicate(&left, &right);
+    for state in [&left, &right] {
         let paired = newest_by_arrival(state, "custom.client.pairing-completed");
         let refused = paired_client_session(state, &paired, "fabric-loopback", false).unwrap_err();
-        assert!(refused.message.contains("revoked or expired"), "{name}: {}", refused.message);
+        assert!(refused.message.contains("revoked or expired"));
     }
-    // Negative control: the arrival comparison used before answers differently on the two.
-    let revoked_by_arrival = |state: &AppState| {
-        newest_by_arrival(state, "custom.client.pairing-revoked").store_index
-            > newest_by_arrival(state, "custom.client.pairing-completed").store_index
-    };
-    assert_ne!(revoked_by_arrival(&left), revoked_by_arrival(&right), "the fixture orders arrival differently");
 }
 
 #[test]

@@ -8,7 +8,6 @@ fn paging_reader(state: &AppState, credential: &str, scopes: &[&str]) {
         "custom.client.pairing-completed",
         "person/alex",
         BTreeMap::from([
-            ("pairing_operation_version".into(), json!(1)),
             ("credential_hash".into(), json!(hex::encode(Sha256::digest(credential.as_bytes())))),
             ("session_actor".into(), json!(format!("client/{credential}"))),
             ("person_id".into(), json!("person/alex")),
@@ -281,8 +280,7 @@ fn append_fixture_claim(
     actor: &str,
     fields: BTreeMap<String, Value>,
 ) {
-    store
-        .append_claim(&ClaimInput {
+    let input = ClaimInput {
             subject: subject.into(),
             kind: kind.into(),
             actor: Some(actor.into()),
@@ -290,8 +288,12 @@ fn append_fixture_claim(
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: None,
-        })
-        .unwrap();
+        };
+    if kind.starts_with("custom.client.pairing") {
+        store.append_client_operation_claim(&input)
+    } else {
+        store.append_claim(&input)
+    }.unwrap();
 }
 
 fn send_fixture_message(store: &Store, index: usize, seed: usize) -> String {

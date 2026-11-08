@@ -2285,9 +2285,10 @@ Errors have `error_version: st3.client.error.v0`, a stable kebab-case code, safe
 
 Pairing records are reserved for the dedicated pairing operations: ordinary claim writes
 cannot use a `custom.client.pairing*` kind or a `custom/client/pairing*` subject.
-The pairing operation stamps `pairing_operation_version: 1` on its challenge and session
-records. Authentication requires this marker and the concrete person actor matching
-`person_id`. Unmarked challenges require a new pairing. Unmarked credentials also require
+Each pairing operation atomically writes a native `client.operation-authorized` receipt,
+bound to the exact operation record ID, content hash, writer and issuing member.
+Authentication requires this receipt; historical numeric admission fields confer no trust.
+Unreceipted challenges require a new pairing. Unreceipted credentials also require
 a new pairing unless an operator configures a temporary migration allowance for an exact
 existing completion record. `pairing_legacy_allowances` defaults to an empty list. Each entry
 contains `completion_id`, `record_hash`, and `until_unix_ms`. The hash is
@@ -2296,11 +2297,19 @@ Startup refuses entries whose hash does not match an existing completion. An all
 never extends recorded scopes or expiry, bypasses revocation, or lasts beyond
 2026-11-15T23:00:00Z, regardless of its configured deadline. The allowance is member-local
 and must be configured explicitly on each member where the existing credential is used.
+An allowance entry must come from an audited record: it admits exactly the recorded
+contents, not independently verified provenance. Held terminal streams use the earlier of
+the credential expiry and allowance deadline and recheck admission at continuation.
+Revocation requires its own matching operation receipt from the completion's issuing
+member. Other revocation records are counted in an operator warning, without credential data.
 
 Terminal attachment lifecycle records likewise require the dedicated terminal operations:
 `custom.client.terminal*` kinds and `custom/client/terminal-*` subjects are reserved.
-Attachments and their consumption/detachment records carry `terminal_operation_version: 1`.
-Unmarked attachments require a new attach operation; they cannot provide stream authority.
+Attachments and their consumption/detachment records require the same native receipt.
+Unreceipted attachments require a new attach operation; they cannot provide stream authority.
+The receipt kind is registered system-only and cannot be submitted through ordinary claims;
+older schemas reject it as an unknown native kind. Replication uses authenticated member
+admission, preserving the receipt's issuing origin.
 
 Unknown, expired, or revoked paired-device credentials return HTTP 403, `code: forbidden`,
 `retryable: false`, and `details.reason: credential-rejected`. Pair the device again to restore

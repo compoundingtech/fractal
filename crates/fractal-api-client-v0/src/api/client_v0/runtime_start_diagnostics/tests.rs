@@ -8,12 +8,11 @@ const OPERATION: &str = "0194b2e0-1234-7000-8000-000000000001";
 const SECRET: &str = "diagnostics-must-not-expose-this-secret";
 
 fn authorize(state: &AppState, credential: &str, scopes: Value) {
-    state.store.append_claim(&ClaimInput {
+    state.store.append_client_operation_claim(&ClaimInput {
         subject: format!("custom/client/{credential}"),
         kind: "custom.client.pairing-completed".into(),
         actor: Some("person/robin".into()),
         fields: BTreeMap::from([
-            ("pairing_operation_version".into(), json!(1)),
             ("credential_hash".into(), json!(credential_digest(credential))),
             ("session_actor".into(), json!("client/runtime-start-reader")),
             ("person_id".into(), json!("person/robin")),

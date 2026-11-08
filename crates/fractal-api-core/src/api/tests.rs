@@ -12493,6 +12493,12 @@ async fn ordinary_claim_writes_cannot_create_pairing_records() {
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{subject}: {body}");
         assert_eq!(body["code"], "claim-write-forbidden");
     }
+    let (status, body) = json_request(app, "/v1/claims", json!({
+        "subject":"custom/client/operation-example", "kind":"client.operation-authorized",
+        "actor":"person/alex", "fields":{"record_id":"example","record_hash":"example"}
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "claim-write-forbidden");
     assert!(state.store.claims_for_kind_at(
         "custom.client.pairing-completed", None, true, 10,
     ).unwrap().claims.is_empty());

@@ -81,12 +81,11 @@ pub async fn attachment(
         derive_terminal_capability(&state, &session.actor, &attachment_id, &live.owner_host_id)?;
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: terminal_attachment_subject(&attachment_id)?,
             kind: "custom.client.terminal-attached".into(),
             actor: Some(session_claim_actor(&session)),
             fields: BTreeMap::from([
-                ("terminal_operation_version".into(), json!(1)),
                 ("attachment_id".into(), json!(attachment_id)),
                 ("terminal_id".into(), json!(terminal_id)),
                 ("runtime_incarnation".into(), json!(live.incarnation_id)),
