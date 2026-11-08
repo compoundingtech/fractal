@@ -188,7 +188,7 @@ export const GlyphStates: Story = {
     // The snapshot is separate from the row's own status and freshness.
     const frozenWorking = byStatus(frozen, 'working')
     await expect(frozenWorking.getAttribute('data-observation-freshness')).toBe('live')
-    await expect(glyph(frozenWorking)).toHaveAttribute('aria-label', expect.stringMatching(/^Working; .*live observation; last-observed snapshot$/))
+    await expect(glyph(frozenWorking)).toHaveAttribute('aria-label', 'Working; last-observed snapshot')
     await expect(glyph(byStatus(live, 'working')).getAttribute('aria-label')).not.toMatch(/snapshot/)
     // Frozen times measure against the observation: 3m ago reads 1m; activity after the observation is omitted, not 0s.
     await expect(frozenWorking.querySelector('[data-row-field="last-turn"] time')?.textContent).toBe('1m')
@@ -1023,7 +1023,7 @@ export const TitleReach: StoryObj<{ scheme: Scheme }> = {
     await expect(waiting!.querySelector('[data-row-field="status-label"]')).toHaveTextContent('Waiting')
     await expect(waiting!.querySelector('[data-row-column="status"] [data-mark="waiting"]')).not.toBeNull()
     await expect(needs!.querySelector('[data-row-column="status"] [data-mark="needs-you"]')).not.toBeNull()
-    await expect(glyph(needs!)).toHaveAttribute('aria-label', expect.stringMatching(/^Needs you;/))
+    await expect(glyph(needs!)).toHaveAttribute('aria-label', 'Needs you')
     // Hover: the ghost trigger shows over line 2's end, which fades beneath it instead of reserving a column.
     const trigger = empty!.querySelector<HTMLElement>('[data-agent-menu]')!
     await expect(getComputedStyle(trigger).opacity).toBe('0')

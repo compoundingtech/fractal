@@ -37,13 +37,14 @@ const FlatCommand = Schema.TaggedUnion({
   Close: { id: Id },
   ReopenClosed: {},
   SetView: { id: Id, view: Schema.Struct({ scrollTop: between(0, 1000), terminal: Schema.Boolean }) },
-  SetPanel: { panel: Schema.Struct({ open: Schema.Boolean }) },
 })
 const NearCommand = Schema.Union([
   FlatCommand,
   Schema.TaggedStruct('Open', { pane: Pane, at: NearDrop }),
   Schema.TaggedStruct('Move', { id: Id, to: NearDrop }),
   Schema.TaggedStruct('FocusGroup', { group: GroupId }),
+  Schema.TaggedStruct('CloseOthers', { id: Id }),
+  Schema.TaggedStruct('Replace', { id: Id, pane: Pane }),
   Schema.TaggedStruct('SetRatio', { node: between(0, 4), ratio: looseRatio }),
   Schema.TaggedStruct('Receive', { layout: Received }),
 ])
@@ -167,7 +168,6 @@ describe('workspace transitions', () => {
       { _tag: 'FocusGroup', group: 'main' },
       { _tag: 'SetRatio', node: 0, ratio: 0.5 },
       { _tag: 'SetView', id: 'missing', view: { scrollTop: 1 } },
-      { _tag: 'SetPanel', panel: { open: false } },
       { _tag: 'Receive', layout: { tabs: [{ pane: 'agent:agent/a' }] } },
     ] satisfies readonly Command[]) expect(transition(state, step, context), step._tag).toBe(state)
   })
@@ -205,6 +205,34 @@ describe('workspace transitions', () => {
     const state = run(open('agent:agent/a'), [{ _tag: 'Open', pane: 'agent:agent/b', activate: false }], fresh())
     expect(paneList(state)).toEqual(['agent:agent/a', 'agent:agent/b'])
     expect(activeTab(state)?.pane).toBe('agent:agent/a')
+  })
+})
+
+describe('closing others and replacing', () => {
+  it('closes the rest of the group, remembers them, and shows the kept tab', () => {
+    let state = open('agent:agent/a', 'agent:agent/b', 'list:home')
+    state = run(state, [{ _tag: 'CloseOthers', id: tabOf(state, 'agent:agent/b').id }])
+    expect(paneList(state)).toEqual(['agent:agent/b'])
+    expect(activeTab(state)?.pane).toBe('agent:agent/b')
+    expect(state.closed).toHaveLength(2)
+  })
+
+  it('gives a tab to the next alert in place, leaving nothing to reopen', () => {
+    let state = open('agent:agent/a', 'home:one', 'list:home')
+    state = run(state, [{ _tag: 'Open', pane: 'home:one' }, { _tag: 'SetView', id: tabOf(state, 'home:one').id, view: { scrollTop: 5 } }], fresh())
+    const replaced = tabOf(state, 'home:one').id
+    state = run(state, [{ _tag: 'Replace', id: replaced, pane: 'home:two' }], fresh())
+    expect(paneList(state)).toEqual(['agent:agent/a', 'home:two', 'list:home'])
+    expect(activeTab(state)?.pane).toBe('home:two')
+    expect(state.closed).toEqual([])
+    expect(state.views[replaced]).toBeUndefined()
+  })
+
+  it('shows the subject\'s own tab when it has one, and the replaced tab goes', () => {
+    let state = open('home:one', 'home:two')
+    state = run(state, [{ _tag: 'Replace', id: tabOf(state, 'home:two').id, pane: 'home:one' }], fresh())
+    expect(paneList(state)).toEqual(['home:one'])
+    expect(state.closed).toEqual([])
   })
 })
 
@@ -247,16 +275,6 @@ describe('one tab per agent', () => {
     state = run(state, [{ _tag: 'SetView', id: tab.id, view: { terminal: false } }])
     expect(showsTerminal(tab, state.views[tab.id])).toBe(false)
     expect(glassBody({ layout: state.layout, name: 'Web' }).layout).toEqual({ tabs: [{ pane: 'terminal:agent/a' }] })
-  })
-})
-
-describe('the right sidebar', () => {
-  it('stays as it is across every tab change', () => {
-    let state = open('agent:agent/a', 'agent:agent/b')
-    state = run(state, [{ _tag: 'SetPanel', panel: { open: true, tab: 'changes', width: 420 } }])
-    const panel = state.panel
-    state = run(state, [{ _tag: 'Open', pane: 'agent:agent/a' }, { _tag: 'Cycle', by: 1 }, { _tag: 'Open', pane: 'list:home' }, { _tag: 'Close', id: tabOf(state, 'agent:agent/a').id }], fresh())
-    expect(state.panel).toBe(panel)
   })
 })
 

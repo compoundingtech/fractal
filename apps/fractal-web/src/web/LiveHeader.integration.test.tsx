@@ -13,6 +13,7 @@ import { fixtureSource } from '../data/fixtureSource.ts'
 import { credentialExpiredMessage, observed, unavailable, type Feed } from '../data/source.ts'
 import type { ResourcePage } from '../resources/agent/model.ts'
 import { LiveAgentWorkspace } from './LiveAgentWorkspace.tsx'
+import { rightPanelAtom } from './rightPanel.ts'
 import { inspectorViewPreference } from './conversationPreferences.ts'
 import type { ConversationPage } from '../data/source.ts'
 import { decodeConversationChunk } from '@fractal/sdk/read'
@@ -64,6 +65,8 @@ beforeEach(async () => {
   window.localStorage.clear()
   window.history.replaceState(null, '', '/w/agent/example?open=thread')
   registry = AtomRegistry.make()
+  // The dock is one app-wide setting; each test starts it closed.
+  registry.set(rightPanelAtom, { open: false, tab: 'details' })
   registry.set(inspectorViewPreference, 'details')
   registry.set(resources, observed({ value: { items: [resource], nextCursor: null } }))
   host = document.createElement('div')
@@ -196,31 +199,39 @@ describe('live header parity', () => {
     expect(panel.textContent).not.toContain('private diagnostic')
     expect(within(panel).queryByRole('button', { name: 'Refresh resources' })).toBeNull()
   })
-  it('opens the agent canonical KDL from the overflow menu in a labelled dialog that Escape closes', async () => {
+  const declarationPane = async () => {
+    await vi.waitFor(() => expect(document.querySelector('[data-testid="declaration-pane"] h2')).not.toBeNull())
+    return document.querySelector<HTMLElement>('[data-testid="declaration-pane"]')!
+  }
+  const backToAgent = async () => {
+    await act(async () => { window.history.pushState(null, '', '/w/agent/example'); window.dispatchEvent(new PopStateEvent('popstate')) })
+  }
+  const viewKdl = async () => {
     await click('More actions')
     await act(async () => within(document.body).getByRole('menuitem', { name: 'View KDL' }).dispatchEvent(new MouseEvent('click', { bubbles: true })))
-    const dialog = document.querySelector<HTMLElement>('[role="dialog"][data-testid="declaration-dialog"]')
-    expect(dialog).not.toBeNull()
-    const heading = dialog!.querySelector('h2')
-    expect(heading?.textContent).toBe(agent.id)
-    expect(dialog!.getAttribute('aria-labelledby')).toBe(heading?.id)
-    expect([...dialog!.querySelectorAll('[data-line] code')].map(line => line.textContent).join('\n')).toBe(kdl.trimEnd())
-    expect(dialog!.querySelector('[data-testid="declaration-language"]')?.textContent).toBe('KDL')
-    expect(dialog!.querySelector('[data-testid="declaration-source"]')?.textContent).toContain('revision rev-1')
-    // React Aria defers virtual-click dialog focus until the next animation frame.
-    await vi.waitFor(() => expect(dialog!.contains(document.activeElement)).toBe(true))
-    await act(async () => document.activeElement!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })))
+  }
+  it('opens the agent canonical KDL from the overflow menu as a new tab, and focuses that tab the next time', async () => {
+    await viewKdl()
+    const pane = await declarationPane()
+    expect(pane.querySelector('h2')?.textContent).toBe(agent.id)
+    expect([...pane.querySelectorAll('[data-line] code')].map(line => line.textContent).join('\n')).toBe(kdl.trimEnd())
+    expect(pane.querySelector('[data-testid="declaration-language"]')?.textContent).toBe('KDL')
+    expect(pane.querySelector('[data-testid="declaration-source"]')?.textContent).toContain('revision rev-1')
     expect(document.querySelector('[data-testid="declaration-dialog"]')).toBeNull()
+    expect(window.location.pathname).toBe(`/w/declaration/${agent.id}`)
+    const tabs = () => document.querySelectorAll('[role="tablist"][aria-label="Workspace tabs"] [role="tab"]').length
+    expect(tabs()).toBe(2)
+    await backToAgent()
+    await viewKdl()
+    expect(tabs()).toBe(2)
   })
-    it('opens the same declaration from the agent row context menu', async () => {
+  it('opens the same declaration from the agent row context menu', async () => {
     await click('Actions for Example Agent')
     const item = await within(document.body).findByRole('menuitem', { name: 'View KDL' })
     await act(async () => item!.dispatchEvent(new MouseEvent('click', { bubbles: true })))
-    const dialog = document.querySelector('[role="dialog"][data-testid="declaration-dialog"]')
-    expect(dialog?.querySelector('h2')?.textContent).toBe(agent.id)
-    expect(dialog?.textContent).toContain('GH_TOKEN')
-    await click('Close declaration')
-    expect(document.querySelector('[data-testid="declaration-dialog"]')).toBeNull()
+    const pane = await declarationPane()
+    expect(pane.querySelector('h2')?.textContent).toBe(agent.id)
+    expect(pane.textContent).toContain('GH_TOKEN')
   })
 })
 

@@ -13,4 +13,3 @@ export const missionDisplayTitle = ({ title, work }: {
 /** A URL-addressed mission: focuses it in the Missions screen and never accumulates in the workspace's tabs. */
 const MISSION_PREFIX = 'mission/'
 export const isMissionRef = (ref: string): boolean => ref.startsWith(MISSION_PREFIX)
-export const missionPaneId = (ref: string): string => `${ref}:detail`

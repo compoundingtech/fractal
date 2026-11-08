@@ -8,7 +8,7 @@ import { assertScreenWorld, ScenarioScreen, screenSlices } from './scenario-data
 interface WorkspaceScreenArgs { readonly scheme: 'dark' | 'light' }
 
 // The workspace is client-only (its stores have no server snapshot), so a static render resolves to this boundary.
-const WorkspaceScreen = ({ scheme }: WorkspaceScreenArgs) => <ScenarioScreen scheme={scheme}>{() => <React.Suspense fallback={null}><LiveAgentWorkspace /></React.Suspense>}</ScenarioScreen>
+const WorkspaceScreen = ({ scheme }: WorkspaceScreenArgs) => <ScenarioScreen scheme={scheme}>{world => <React.Suspense fallback={null}><LiveAgentWorkspace initialRef={world.agentRef} persistGeometry={false} /></React.Suspense>}</ScenarioScreen>
 
 const clientOnly = 'The static check cannot render the client-only workspace; the play proves the agent and thread text in the browser.'
 const invariant = { roster: clientOnly, details: clientOnly, attention: clientOnly, conversation: clientOnly, terminal: clientOnly, sync: clientOnly } as const

@@ -23,7 +23,7 @@ node --test scripts/check-sidebar-fixture-ci.test.mjs
 python3 scripts/ci-fractal-web-licenses --check-lockfile
 parallel_tests \
   ci-fractal-web-licenses-test check-sqlite-large-values-test check-public-repo-test check-native-names-test \
-  evidence-verify-test check-ci-test-paths ci-fractal-web-test rust-test-keys-test
+  evidence-verify-test check-ci-test-paths ci-fractal-web-test ci-fractal-web-effect-lint-test rust-test-keys-test
 python3 scripts/check-sqlite-large-values
 # Whole-tree lints live here, not in the Linux gate: this check's evidence key is the whole tree, while the Linux gate
 # may skip on a note for another tree with the same declared inputs, which a page under apps/ does not change.

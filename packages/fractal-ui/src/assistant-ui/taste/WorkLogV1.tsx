@@ -21,13 +21,15 @@ const CallDetailRenderer = React.createContext<WorkLogCallDetailRenderer | undef
 const CallPresentation = React.createContext({ preview: false, interactive: true })
 const timeFormat = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' })
 /** Host-owned facts and actions. Running, incomplete and failed work opens by default, and the header always toggles; a failure stays visible when folded. */
-export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail = false, interactiveCalls = true, hideLiveRow = false, expandedBody, ariaLabel = 'Work log', onRetry, onOpenOutput, summaryAnchorId, summaryMemberIds }: {
+export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail = false, interactiveCalls = true, hideLiveRow = false, hideTime = false, expandedBody, ariaLabel = 'Work log', onRetry, onOpenOutput, summaryAnchorId, summaryMemberIds }: {
   readonly turn: WorkLogTurn
   readonly listStyle?: stylex.StyleXStyles
   readonly renderCallDetail?: WorkLogCallDetailRenderer
   readonly previewCallDetail?: boolean
   readonly interactiveCalls?: boolean
   readonly hideLiveRow?: boolean
+  /** The host's episode head already carries the start time. */
+  readonly hideTime?: boolean
   readonly expandedBody?: React.ReactNode
   readonly ariaLabel?: string
   readonly onRetry?: () => void
@@ -50,12 +52,14 @@ export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail
   }
   const failedCall = turn.calls.find(call => call.status === 'error')
   const failed = turn.failed || failedCall !== undefined
-  const workLabel = turn.running ? 'Working' : settled ? `Worked${durationLabel ? ` for ${durationLabel}` : ''}` : failed ? 'Run failed' : turn.interrupted ? 'Run interrupted' : 'Work · completion unverified'
+  // Worked always carries a number: how long, else how many tools.
+  const workCount = turn.calls.length === 0 ? 'for <1s' : `· ${turn.calls.length} ${turn.calls.length === 1 ? 'tool' : 'tools'}`
+  const workLabel = turn.running ? 'Working' : settled ? `Worked ${durationLabel ? `for ${durationLabel}` : workCount}` : failed ? 'Run failed' : turn.interrupted ? 'Run interrupted' : 'Work · completion unverified'
   const summary = [workLabel, settled && turn.commands ? `${turn.commands} ${turn.commands === 1 ? 'command' : 'commands'}` : undefined, settled && turn.changedFiles ? `${turn.changedFiles} ${turn.changedFiles === 1 ? 'file changed' : 'files changed'}` : undefined].filter(value => value !== undefined).join(' · ')
   const started = turn.running ? NaN : Date.parse(turn.startedAt ?? '')
   const failedCommand = failedCall?.kind === 'run' ? failedCall.argsSummary ?? failedCall.title : undefined
   const detail = [failedCommand, failedCall?.detail, turn.failureNote].filter((value, index, values) => value !== undefined && values.indexOf(value) === index).join('\n') || undefined
-  const summaryContent = <><span {...stylex.props(styles.summaryLabel)}>{summary}</span>{Number.isFinite(started) && <time dateTime={new Date(started).toISOString()} {...stylex.props(styles.time)}>{timeFormat.format(started)}</time>}</>
+  const summaryContent = <><span {...stylex.props(styles.summaryLabel)}>{summary}</span>{!hideTime && Number.isFinite(started) && <time dateTime={new Date(started).toISOString()} {...stylex.props(styles.time)}>{timeFormat.format(started)}</time>}</>
   const summaryAnchor = summaryAnchorId === undefined ? {} : { 'data-scroll-anchor-id': summaryAnchorId, 'data-scroll-anchor-members': JSON.stringify(summaryMemberIds ?? []) }
   return <CallDetailRenderer.Provider value={renderCallDetail}><CallPresentation.Provider value={{ preview: previewCallDetail, interactive: interactiveCalls }}><section role="group" aria-label={ariaLabel} data-testid="work-log">
     {turn.running && !hideLiveRow && <div data-testid="live-work" role="status" aria-label="Response in progress" {...stylex.props(styles.live)}><span aria-hidden="true" {...stylex.props(styles.slot)}><LiveRing /></span><span>Working</span></div>}

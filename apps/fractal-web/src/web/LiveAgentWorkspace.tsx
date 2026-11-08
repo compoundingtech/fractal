@@ -3,21 +3,27 @@ import { cancelMeasure, markStart, measureEnd } from './perfMarks.ts'
 import { prefetchChangelog } from '../changelog/load.ts'
 import { agentSeatChildren, sidebarMissionChild, sidebarRow, sidebarSubagentRow, subagentRowId, sidebarMissionFeedsAtom } from './sidebarRow.ts'
 import { subagentThreadFocus } from './subagentThreadFocus.ts'
-import { ConversationPaneFallback } from './ConversationPaneFallback.tsx'
-import type * as ConversationPaneModule from './ConversationPane.tsx'
-import type * as TerminalDetailModule from '../terminal/TerminalDetail.tsx'
 import { ConversationHeaderActions } from './ConversationHeaderActions.tsx'
 import { DeclarationDialog } from './DeclarationDialog.tsx'
 import { AgentActions } from './AgentActions.tsx'
-import type * as AlertsTabModule from './AlertsTab.tsx'
 import type * as SidebarMissionsListModule from '../missions/SidebarMissionsList.tsx'
 import { alertTabMarkers } from './alertsTab.ts'
 import { missionTabMarkersAtom } from './missionsTab.ts'
-import { isMissionRef, missionPaneId } from '../missions/missionTitle.ts'
-import { isTerminalRef, retainPane, workspaceHref, workspaceView, type RetainedPane, type TerminalRef, type WorkspaceView } from './workspaceView.ts'
-import { MISSIONS_REF, alertIdOfPane, alertPaneId, isAlertRef, paneTabLabel } from './workspaceView.ts'
+import { activeTab, focusedGroup, showsTerminal, tabsOf, type Command, type TabView, type WorkspaceState as WorkspaceStateValue } from '../workspace/model.ts'
+import { OpenProvider, openCommand, type Open } from '../workspace/openable.ts'
+import { paneKey, parsePane, subjectAgent, subjectOfRef, subjectRef } from '../workspace/subject.ts'
+import { AlertsTabCodeBoundary } from '../workspace/surfaces.tsx'
+import { prefetchConversationPane, prefetchTerminalDetail } from '../workspace/chunks.ts'
+import { tabPresentation } from '../workspace/tabPresentation.tsx'
+import { useWorkspaceResources, useWorkspaceRoute, useWorkspaceState, useWorkspaceStore, type WorkspaceNavigation } from '../workspace/useWorkspace.ts'
+import { useWorkspaceKeys } from '../workspace/useWorkspaceKeys.ts'
+import { WorkspaceBody } from '../workspace/WorkspaceBody.tsx'
+import { WorkspaceEmpty, WorkspaceStrip } from '../workspace/WorkspaceStrip.tsx'
+import { narrowLayoutQuery } from './narrowLayout.ts'
+import { rightPanelAtom, type RightPanel } from './rightPanel.ts'
 import { AlertFlashBand } from './AlertFlashBand.tsx'
 import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
+import { LiveAlertNames } from '../conversation/alerts/LiveAlertNames.tsx'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
 import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g, geometryNumbers, sidebarRowSize } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -26,7 +32,7 @@ import { RegisteredPortal, usePortalContainerRegistration } from '../../../../pa
 import * as Aria from 'react-aria-components'
 import { UNSAFE_PortalProvider } from 'react-aria'
 import * as stylex from '@stylexjs/stylex'
-import { RegistryContext, useAtom, useAtomValue } from '@effect/atom-react'
+import { useAtom, useAtomValue } from '@effect/atom-react'
 import { Schema } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import { ChromeControl } from '../../../../packages/fractal-ui/src/assistant-ui/composition/ChromeControl.tsx'
@@ -42,23 +48,19 @@ import { lightTheme as compositionLightTheme } from '../../../../packages/fracta
 import type { SidebarActions } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { PinsSection } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/PinsSection.tsx'
 import type { WorkLogCall } from '@fractal/ui/assistant-ui'
-import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { terminalSubjectForAgent } from '../data/projections.ts'
 import { sidebarPins } from '../data/sidebarPins.ts'
-import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useFeedInterest, useDataSource, useRosterDecode, useAskingAgents } from '../data/react.tsx'
+import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useDataSource, useRosterDecode, useAskingAgents } from '../data/react.tsx'
 import { persistedAtom } from '../state/persistence.ts'
 import { leftSidebar } from '../state/cells/panels.ts'
-import { persistedFolds } from '../state/cells/view.ts'
 import { setTheme } from '../ui-compat/foundations.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
 import type { ResourcePanelState } from '../shell/state.ts'
 import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
 import { formatDuration } from '@fractal/ui/human-time/format'
-import { createLazyChunk, readLazyChunkAssets } from '@fractal/ui/lazy-chunk'
 import { useGatewaySync } from '../data/react.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { PhoneAgentDrawer, type PhoneAgentDrawerHandle } from './PhoneAgentDrawer.tsx'
-import { PhoneWorkspaceTabs } from './PhoneWorkspaceTabs.tsx'
 import { AgentFolders } from '../shell/AgentFolders.tsx'
 import { useSidebarFolders, type SidebarFoldersBinding } from '../folders/useSidebarFolders.ts'
 import { fixtureFolders } from '../folders/fixture.ts'
@@ -188,155 +190,16 @@ const LiveSidebarTreeView = React.memo((props: {
 })
 LiveSidebarTreeView.displayName = 'LiveSidebarTreeView'
 
-// A static import would evaluate the kit Transcript/Markdown before the shell paints.
-// Demand and speculative prefetch share one request; a rejection stays until a user retry.
-const conversationChunk = createLazyChunk({ load: () => import('./ConversationPane.tsx'), assets: () => readLazyChunkAssets('conversation') })
-const ConversationPane = React.lazy(() => {
-  // An initially selected pane and later shell prefetch must retain the same lazy identity.
-  // A second wrapper suspends on an already resolved module during the first seat switch.
-  prefetchedConversationPane ??= ConversationPane
-  return conversationChunk.load().then(module => ({ default: module.ConversationPane }))
-})
-let prefetchedConversationPane: typeof ConversationPane | undefined
-const prefetchConversationPane = () => {
-  const request = conversationChunk.load()
-  // Preserve this attempt's failure for the requested pane's honest, local error surface.
-  // A retry creates a fresh lazy wrapper, not React's permanently rejected cached wrapper.
-  prefetchedConversationPane ??= React.lazy(() => request.then(module => ({ default: module.ConversationPane })))
-  void request.catch(() => {})
-}
-
-/** The first recovery re-imports in this document; after a second rejected import, reload with fresh feature assets. Drafts and selection are already persisted. */
-const LazyChunkRecoveryAction = (props: { readonly chunk: { readonly recovery: 'retry' | 'reload'; readonly reload: () => Promise<void> }; readonly onRetry: () => void }) =>
-  props.chunk.recovery === 'reload'
-    ? <button type="button" onClick={() => void props.chunk.reload()}>Reload and retry</button>
-    : <button type="button" onClick={props.onRetry}>Try again</button>
-
-/** Acquire visible route demand outside Suspense so the socket read overlaps pane evaluation. */
-const ConversationPaneLoadBoundary = (props: React.ComponentProps<typeof ConversationPaneModule.ConversationPane>) => {
-  const source = useDataSource()
-  const interest = React.useMemo(() => source.conversationInterest?.(props.agentRef), [source, props.agentRef])
-  useFeedInterest({ interest, visible: props.visible ?? true })
-  return <ConversationPaneCodeBoundary {...props} interest={interest} />
-}
-
-class ConversationPaneCodeBoundary extends React.Component<React.ComponentProps<typeof ConversationPaneModule.ConversationPane>> {
-  state: { readonly failed: boolean; readonly Pane: typeof ConversationPane } = {
-    failed: false,
-    Pane: prefetchedConversationPane ?? ConversationPane,
-  }
-
-  static getDerivedStateFromError() {
-    return { failed: true }
-  }
-
-  render() {
-    if (this.state.failed) return <div role="alert" aria-hidden={!this.props.visible} {...stylex.props(styles.empty)}>
-      <p>This conversation view could not load.</p>
-      <LazyChunkRecoveryAction chunk={conversationChunk} onRetry={() => {
-        const Pane = React.lazy(() => conversationChunk.retry().then(module => ({ default: module.ConversationPane })))
-        prefetchedConversationPane = Pane
-        this.setState({ failed: false, Pane })
-      }} />
-    </div>
-    const Pane = this.state.Pane
-    return <React.Suspense fallback={<ConversationPaneFallback agentName={this.props.agentName} visible={this.props.visible} />}>
-      <Pane {...this.props} />
-    </React.Suspense>
-  }
-}
-
-// Load the tab on demand, not with the shell.
-const makeAlertsTab = () => React.lazy(() => import('./AlertsTab.tsx').then(module => ({ default: module.AlertsTab })))
-const AlertsTab = makeAlertsTab()
-class AlertsTabCodeBoundary extends React.Component<React.ComponentProps<typeof AlertsTabModule.AlertsTab>> {
-  state = { failed: false, Tab: AlertsTab }
-  static getDerivedStateFromError() { return { failed: true } }
-  render() {
-    if (this.state.failed) return <div role="alert" {...stylex.props(styles.empty)}>
-      <p>Alerts could not load.</p>
-      <button type="button" onClick={event => {
-        // The retry control unmounts during Suspense; keep keyboard focus on the stable selected tab.
-        event.currentTarget.closest('[data-sidebar-tabs]')?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus()
-        this.setState({ failed: false, Tab: makeAlertsTab() })
-      }}>Try again</button>
-    </div>
-    const Tab = this.state.Tab
-    return <React.Suspense fallback={<SystemNotice kind="loading" title="Loading alerts" />}>
-      <Tab {...this.props} />
-    </React.Suspense>
-  }
-}
-
 // Details, its measured resource tabs and Changes import the rich kit; keep them outside the eager shell.
 const AgentDetailsPanel = React.lazy(() => import('./AgentDetailsPanel.tsx').then(module => ({ default: module.AgentDetailsPanel })))
-const ChangesInspector = React.lazy(() => import('./ChangesInspector.tsx').then(module => ({ default: module.ChangesInspector })))
-/** Set once the module resolves, so a warm reopen renders it directly instead of suspending a fresh lazy identity. */
-let terminalDetailLoaded: typeof TerminalDetailModule | undefined
-/** Demand and idle intent share one request; a rejection stays until a user retry. */
-const terminalChunk = createLazyChunk({
-  load: () => import('../terminal/TerminalDetail.tsx').then(module => {
-    terminalDetailLoaded = module
-    return module
-  }),
-  assets: () => readLazyChunkAssets('terminal'),
-})
-const terminalDetail = (load: () => Promise<typeof TerminalDetailModule>) => React.lazy(() =>
-  load().then(module => {
-    void module.prepareTerminal()
-    return { default: module.TerminalDetail }
-  }),
-)
-const prefetchTerminalDetail = () => {
-  void terminalChunk.load().then(module => module.prepareTerminal()).catch(() => {})
-}
-
-/** The terminal grid, fonts and native key encoder stay outside the eager shell; a fresh lazy identity on retry avoids React's permanently rejected module cache. */
-class TerminalCodeBoundary extends React.Component<{ readonly terminalRef: `terminal/${string}`; readonly shown: boolean }> {
-  state = { failed: false, Detail: terminalDetail(() => terminalChunk.load()) }
-  static getDerivedStateFromError() { return { failed: true } }
-  render() {
-    if (this.state.failed) return <div role="alert">
-      <p>This terminal view could not load.</p>
-      <LazyChunkRecoveryAction chunk={terminalChunk} onRetry={() => this.setState({ failed: false, Detail: terminalDetail(() => terminalChunk.retry()) })} />
-    </div>
-    const Detail = terminalDetailLoaded?.TerminalDetail ?? this.state.Detail
-    return <React.Suspense fallback={<SystemNotice kind="loading" title="Loading terminal" />}>
-      <Detail address={{ ref: this.props.terminalRef, presentation: 'detail' }} visibility={this.props.shown ? 'visible' : 'hidden'} keepConnected />
-    </React.Suspense>
-  }
-}
-const AlertDetailsPane = React.lazy(() => import('./AlertDetailsPane.tsx').then((module) => ({ default: module.AlertDetailsPane })))
 const SidebarMissionsList = (props: React.ComponentProps<typeof SidebarMissionsListModule.SidebarMissionsList>) => <React.Suspense fallback={<SystemNotice kind="loading" title="Loading missions" />}><LazySidebarMissionsList {...props} /></React.Suspense>
 const LazySidebarMissionsList = React.lazy(() => import('../missions/SidebarMissionsList.tsx').then((module) => ({ default: module.SidebarMissionsList })))
-const MissionsPane = React.lazy(() => import('../missions/MissionsPane.tsx').then((module) => ({ default: module.MissionsPane })))
-const DocumentPane = React.lazy(() => import('../documents/DocumentPane.tsx').then((module) => ({ default: module.DocumentPane })))
-const makeUsagePane = () => React.lazy(() => import('../monitor/UsagePane.tsx'))
-class UsageCodeBoundary extends React.Component {
-  state = { failed: false, Pane: makeUsagePane() }
-  static getDerivedStateFromError() { return { failed: true } }
-  render() {
-    if (this.state.failed) return <div role="alert" {...stylex.props(styles.paneNotice)}>
-      <p>This usage view could not load.</p>
-      <button type="button" onClick={() => this.setState({ failed: false, Pane: makeUsagePane() })}>Try again</button>
-    </div>
-    const Pane = this.state.Pane
-    return <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading usage" /></div>}>
-      <Pane />
-    </React.Suspense>
-  }
-}
 
 // The sidebar's open state and width live in one boot cell so the inline script paints them on the first frame.
 const sidebarRatio = Atom.writable((get) => get(leftSidebar).ratio, (ctx, ratio: number) => { ctx.set(leftSidebar, { ...ctx.get(leftSidebar), ratio }) })
 const panelRatio = persistedAtom({ key: 'round2.panelRatio', schema: Schema.Number, defaultValue: 380 / 1440 })
 const sidebarClosed = Atom.writable((get) => !get(leftSidebar).open, (ctx, closed: boolean) => { ctx.set(leftSidebar, { ...ctx.get(leftSidebar), open: !closed }) })
-const workspacePanes = Atom.family((ref: string) => persistedAtom({ key: `round2.panes.${ref}`, schema: Schema.Array(Schema.Struct({ ref: Schema.String, presentation: Schema.optional(Schema.Literals(['detail', 'overview', 'resources'])) })), defaultValue: [] }))
-const selectedAgent = persistedAtom({ key: 'round2.agent', schema: Schema.String, defaultValue: '' })
-const phoneAgentTabs = persistedAtom({ key: 'round2.phoneAgentTabs', schema: Schema.Array(Schema.String), defaultValue: [] })
 const viewportWidth = () => window.innerWidth
-/** Below 900px the thread is the only thing on screen: agents open as a sheet from the left, the agent's actions and Details from the right. Same width as the sidebar drawer breakpoint. */
-export const narrowLayoutQuery = '(max-width: 899px)'
 const subscribeViewport = (callback: () => void) => {
   window.addEventListener('resize', callback)
   return () => window.removeEventListener('resize', callback)
@@ -355,26 +218,18 @@ const subscribeLocation = (callback: () => void) => {
   window.addEventListener('popstate', callback)
   return () => window.removeEventListener('popstate', callback)
 }
-const initialAgentFromUrl = (location: string) => {
-  const encoded = location.split('?')[0]?.match(/^\/w\/(.+)$/)?.[1]
-  try {
-    return encoded === undefined ? undefined : decodeURIComponent(encoded)
-  } catch {
-    return undefined
-  }
-}
 
 /** The app uses browser history; static embeds supply a private in-memory location. */
-export interface WorkspaceNavigation {
-  readonly getLocation: () => string
-  readonly subscribe: (callback: () => void) => () => void
-  readonly navigate: (href: string) => void
-}
+export type { WorkspaceNavigation }
 const browserNavigation: WorkspaceNavigation = {
   getLocation: locationState,
   subscribe: subscribeLocation,
   navigate: (href) => {
     window.history.pushState(null, '', href)
+    window.dispatchEvent(new PopStateEvent('popstate'))
+  },
+  replace: (href) => {
+    window.history.replaceState(null, '', href)
     window.dispatchEvent(new PopStateEvent('popstate'))
   },
 }
@@ -387,6 +242,8 @@ interface WorkspaceProps {
   readonly workspaceLabel?: string
   /** The running build, from the app entry: stories and the embed have no build identity. */
   readonly build?: SettingsBuild
+  /** What an empty workspace with no subject in its URL starts on: a story's or an embed's known state. */
+  readonly initialRef?: string
 }
 
 /**
@@ -399,14 +256,24 @@ export function LiveAgentWorkspace(props: WorkspaceProps) {
   const overlayHost = React.useRef<HTMLDivElement>(null)
   const getContainer = React.useCallback(() => overlayHost.current, [])
   usePortalContainerRegistration(getContainer)
-  return <UNSAFE_PortalProvider getContainer={getContainer}><Workspace {...props} overlayHost={overlayHost} /></UNSAFE_PortalProvider>
+  // Alerts name their senders as the roster does, in the docked card and the alert pane alike.
+  return <UNSAFE_PortalProvider getContainer={getContainer}><LiveAlertNames><Workspace {...props} overlayHost={overlayHost} /></LiveAlertNames></UNSAFE_PortalProvider>
 }
 
-/** One authoritative agent thread per workspace; local geometry never grants backend authority. */
-function Workspace({ ux, onSelectConversation, dimensions, navigation = browserNavigation, persistGeometry = true, workspaceLabel = 'Agent workspace', build, overlayHost }: WorkspaceProps & { readonly overlayHost: React.RefObject<HTMLDivElement | null> }) {
+const scopeHash = (scope: string) => {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < scope.length; index += 1) hash = Math.imul(hash ^ scope.charCodeAt(index), 0x01000193)
+  return (hash >>> 0).toString(36)
+}
+
+const activeAgentOf = (store: { readonly getState: () => WorkspaceStateValue }) => {
+  const tab = activeTab(store.getState())
+  return tab === undefined ? undefined : subjectAgent(parsePane(tab.pane))
+}
+
+/** One workspace of typed tabs; local geometry and tabs never grant backend authority. */
+function Workspace({ ux, onSelectConversation, dimensions, navigation = browserNavigation, persistGeometry = true, workspaceLabel = 'Agent workspace', build, initialRef, overlayHost }: WorkspaceProps & { readonly overlayHost: React.RefObject<HTMLDivElement | null> }) {
   const fleet = useFleet(), subjects = useSubjectList(), connection = useConnection(), rosterDecode = useRosterDecode()
-  const [storedAgent, setStoredAgent] = useAtom(selectedAgent)
-  const [phoneAgents, setPhoneAgents] = useAtom(phoneAgentTabs)
   const [ratio, setRatio] = useAtom(sidebarRatio), [collapsed, setCollapsed] = useAtom(sidebarClosed), [preference, setPreference] = useAtom(schemePreference)
   const agentsDrawer = React.useRef<PhoneAgentDrawerHandle>(null)
   const subscribeNarrow = React.useCallback((callback: () => void) => {
@@ -430,6 +297,15 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   }, [narrow, setCollapsed])
   useSidebarShortcut(toggleSidebar)
   const location = React.useSyncExternalStore(navigation.subscribe, navigation.getLocation, navigation.getLocation)
+  const workspaceSource = useDataSource()
+  const workspaceScope = `${workspaceSource.gateway ?? workspaceSource.mode}${new URLSearchParams(location.split('?')[1]).get('scenario') ?? ''}`
+  // Storage keys never carry a connection's identity; a hash keeps gateways and replays apart.
+  const store = useWorkspaceStore({ storageKey: persistGeometry ? `fractal-web.workspace.v1/${scopeHash(workspaceScope)}` : undefined, location, initialRef })
+  const workspace = useWorkspaceState(store)
+  const route = useWorkspaceRoute({ store, state: workspace, location, navigation })
+  const tiers = useWorkspaceResources({ store, state: workspace })
+  const activeRow = activeTab(workspace)
+  const activeSubject = React.useMemo(() => activeRow === undefined ? undefined : parsePane(activeRow.pane), [activeRow?.pane])
   const hoverOwner = React.useRef<HTMLElement | null>(null)
   const rememberHoverOwner = (event: React.SyntheticEvent<HTMLElement>) => {
     hoverOwner.current = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-wf-agent-ref]') : null
@@ -469,7 +345,8 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     })
     return () => { cancelTiming(); cancelCapture?.(); cancelPaint(); cancelIdle?.() }
   }, [ux, rosterObserved])
-  const current = initialAgentFromUrl(location) ?? (storedAgent || agents[0]?.ref || '')
+  /** The agent the active tab is about; panels, the header and the roster selection follow it. */
+  const current = subjectAgent(activeSubject) ?? ''
   const agent = agents.find((row) => row.ref === current)
   // A canonical subject address is not proof of a terminal. Keep the control disabled
   // from its first render until the roster can establish the selected agent's runtime.
@@ -503,16 +380,41 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   }
   const [headerSlot, setHeaderSlot] = React.useState<HTMLDivElement | null>(null)
   const [paneHost, setPaneHost] = React.useState<HTMLDivElement | null>(null)
-  const [resourcesHost, setResourcesHost] = React.useState<HTMLDivElement | null>(null)
   const [resourcesAgent, setResourcesAgent] = React.useState<string>()
-  const [panes, setPanes] = useAtom(workspacePanes(current))
-  const query = new URLSearchParams(location.split('?')[1])
-  const selectedPane = query.get('open') ?? 'thread'
   const [resourcePanel, setResourcePanel] = React.useState<ResourcePanelState>({ expanded: false, size: 288 })
-  const [diffOpen, setDiffOpen] = React.useState(false)
+  // The panel is one app-wide setting on desktop, so it stays as it is across tabs and windows. A phone's sheet closes on a switch instead.
+  const [panel, writePanel] = useAtom(rightPanelAtom)
+  const setPanel = React.useCallback((change: Partial<RightPanel>) => writePanel(value => ({ ...value, ...change })), [writePanel])
+  const [sheetOpen, setSheetOpen] = React.useState(false)
   const [openedTool, setOpenedTool] = React.useState<WorkLogCall | undefined>(undefined)
-  // The row menu opens one declaration sheet; a stable action object keeps rows memoizable.
-  const [declarationRef, setDeclarationRef] = React.useState<string | undefined>(undefined)
+  // A tool detail belongs to its agent and a phone's sheet to what was showing, however the tab changed: Back counts.
+  const shownTab = activeRow?.id
+  React.useLayoutEffect(() => setSheetOpen(false), [shownTab])
+  React.useLayoutEffect(() => setOpenedTool(undefined), [current])
+  /** Every workspace change from a person; transcript timing starts here. */
+  const lastAgent = React.useRef(activeAgentOf(store))
+  const go = React.useCallback((command: Command) => {
+    route(command)
+    const after = activeAgentOf(store)
+    if (after === undefined || after === lastAgent.current) return
+    lastAgent.current = after
+    cancelMeasure('open_transcript')
+    markStart('switch_to_tail', { key: after })
+    onSelectConversation?.(after)
+  }, [store, route, onSelectConversation])
+  // One verb for every surface: the subject decides the kind, and the machine opens or focuses its one tab.
+  const openRef: Open = React.useCallback((ref, gesture) => {
+    agentsDrawer.current?.close()
+    go(openCommand({ ref, focus: store.getState().focus, ...(gesture === undefined ? {} : { gesture }) }))
+  }, [go, store])
+  const open = React.useCallback((request: OpenRequest) => openRef(request.ref), [openRef])
+  const openAlert = React.useCallback((id: string) => openRef(`alert/${id}`), [openRef])
+  const openInbox = React.useCallback(() => openRef('inbox'), [openRef])
+  useWorkspaceKeys({ dispatch: go, getState: store.getState, openInbox })
+  const onTabView = React.useCallback((id: string, view: TabView) => store.dispatch({ _tag: 'SetView', id, view }), [store])
+  const onReplaceTab = React.useCallback((id: string, ref: string) => go({ _tag: 'Replace', id, pane: paneKey(subjectOfRef(ref)) }), [go])
+  const onCloseTab = React.useCallback((id: string) => go({ _tag: 'Close', id }), [go])
+  const onOpenTool = React.useCallback((call: WorkLogCall) => { setOpenedTool(call) }, [])
   const pins = useAtomValue(terminalSource.pins ?? sidebarPins())
   const pinned = React.useMemo(() => new Set(pins.state.members.map(item => item.member)), [pins.state.members])
   const pinnedItems = React.useMemo(() => {
@@ -520,70 +422,12 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     return pins.state.members.map(({ member }) => ({ id: member, label: names.get(member) ?? member }))
   }, [agents, pins.state.members])
   const sidebarActions = React.useMemo<SidebarActions>(() => ({
-    declaration: setDeclarationRef,
+    declaration: (ref: string) => openRef(`declaration/${ref}`),
     ...(pins.editable ? { pins: { has: (ref: string) => pinned.has(ref), toggle: pins.toggle } } : {}),
-  }), [pins.editable, pins.toggle, pinned])
+  }), [pins.editable, pins.toggle, pinned, openRef])
   const [panelFraction, setPanelFraction] = useAtom(panelRatio)
   const [dragWidth, setDragWidth] = React.useState<number | undefined>()
   const [dragPanel, setDragPanel] = React.useState<number | undefined>()
-  const navigate = (ref: string, pane = 'thread') => {
-    setStoredAgent(ref)
-    navigation.navigate(workspaceHref(ref, pane, location.split('?')[1] ?? ''))
-  }
-  // Which agents were last left on their terminal. Memory only: a reload restores the selected agent through `?open=`.
-  const terminalAgents = React.useRef(new Set<string>())
-  React.useLayoutEffect(() => {
-    if (selectedPane.startsWith('terminal/')) terminalAgents.current.add(current)
-    else if (selectedPane === 'thread') terminalAgents.current.delete(current)
-  }, [current, selectedPane])
-  const rememberedPane = (ref: string) => {
-    const terminal = terminalAgents.current.has(ref) ? agents.find(row => row.ref === ref && row.terminalDisabledReason === undefined)?.terminal : undefined
-    return terminal === undefined ? 'thread' : `${terminal}:detail`
-  }
-  const select = (ref: string, pane = rememberedPane(ref)) => {
-    if (narrow) setPhoneAgents(refs => [...new Set([...refs, current, ref])].filter(Boolean))
-    if (ref !== current) {
-      cancelMeasure('open_transcript')
-      markStart('switch_to_tail', { key: ref })
-      onSelectConversation?.(ref)
-    }
-    setDiffOpen(false)
-    setResourcesAgent(undefined)
-    setOpenedTool(undefined)
-    agentsDrawer.current?.close()
-    navigate(ref, pane)
-  }
-  const open = (request: OpenRequest) => {
-    if (request.ref.startsWith('agent/') && request.presentation === undefined) {
-      select(request.ref)
-      return
-    }
-    if (isMissionRef(request.ref)) {
-      focusMission(request.ref)
-      return
-    }
-    const id = `${request.ref}:${request.presentation ?? 'detail'}`
-    // The terminal replaces the conversation through the header control, so it never becomes a tab.
-    if (isTerminalRef(request.ref)) {
-      navigate(current, id)
-      return
-    }
-    setPanes((rows) => (rows.some((row) => `${row.ref}:${row.presentation ?? 'detail'}` === id) ? rows : [...rows, { ref: request.ref, ...(request.presentation === undefined ? {} : { presentation: request.presentation }) }]))
-    navigate(current, id)
-  }
-  // A mission is addressed by the URL alone, like an alert; collapsing it leaves the Missions screen open.
-  const focusMission = (ref: string | undefined) => {
-    agentsDrawer.current?.close()
-    navigate(current, ref === undefined ? `${MISSIONS_REF}:detail` : missionPaneId(ref))
-  }
-  const openAlert = (id: string) => {
-    agentsDrawer.current?.close()
-    navigate(current, alertPaneId(id))
-  }
-  // Stable for the memoized panes: a document named in a conversation or another document opens in a tab.
-  const openLatest = React.useRef(open)
-  openLatest.current = open
-  const openDocument = React.useCallback((ref: string) => openLatest.current({ ref, presentation: 'detail' }), [])
   const stale = fleet._tag === 'Observed' && (fleet.freshness === 'stale' || connection._tag !== 'Live')
   const rosterObservedAt = useAgentsLastObservedAt()
   const frozenAt = stale ? rosterObservedAt : undefined
@@ -598,6 +442,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     else setCollapsed(false)
   }, [setSidebarTab, narrow, setCollapsed])
   const shortcutHelp = useSidebarNavigation(showSidebarTab)
+  const backToAlerts = React.useCallback(() => showSidebarTab('alerts'), [showSidebarTab])
   const missionMarkers = useAtomValue(React.useMemo(() => missionTabMarkersAtom(folderSource), [folderSource]))
   const machineMemory = useMachineMemory()
   const asking = useAskingAgents()
@@ -641,12 +486,12 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   })
   const previousNeedsYou = React.useRef<ReadonlySet<string> | undefined>(undefined)
   const needsYou = React.useMemo(() => {
-    const next = sidebarAttention({ agents, subjects })
+    const next = sidebarAttention({ agents, subjects, asking })
     const previous = previousNeedsYou.current
     if (previous !== undefined && next.size === previous.size && [...next].every(ref => previous.has(ref))) return previous
     previousNeedsYou.current = next
     return next
-  }, [agents, subjects])
+  }, [agents, subjects, asking])
   const offline = connection._tag !== 'Live'
   useTabMetadata({
     title: tabTitle({ agentName: agent?.name, needsYouCount: needsYou.size, offline }),
@@ -655,60 +500,45 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // Filtering uses observed status, not wall time; ticking cannot change membership.
   const visibleSidebarTree = React.useMemo(() => liveSidebarTree({ tree: sidebarFolders.orderingTree, agents, needsYou, asking, filters: deferredFilters, stale }), [sidebarFolders.orderingTree, agents, needsYou, asking, deferredFilters, stale])
   const showRows = React.useMemo(() => liveShowRows({ agents, needsYou, asking, filters: deferredFilters, stale }), [agents, needsYou, asking, deferredFilters, stale])
-  const selectLatest = React.useRef(select)
-  selectLatest.current = select
+  const selectLatest = React.useRef(openRef)
+  selectLatest.current = openRef
   const selectAgent = React.useCallback((ref: string) => {
     if (previousRoster.current?.some(seat => seat.children?.some(child => child.id === ref))) return
     selectLatest.current(ref)
   }, [])
   const byRef = React.useMemo(() => new Map(subjects.map((subject) => [subject.ref, subject])), [subjects])
-  const separator = selectedPane.lastIndexOf(':')
-  const urlPresentation = selectedPane.slice(separator + 1)
-  const urlPane: OpenRequest | undefined =
-    separator > 0 && (urlPresentation === 'detail' || urlPresentation === 'overview' || urlPresentation === 'resources')
-      ? { ref: selectedPane.slice(0, separator), presentation: urlPresentation }
-      : undefined
-  const chosen = panes.find((row) => `${row.ref}:${row.presentation ?? 'detail'}` === selectedPane) ?? urlPane
-  // An alert's details are a passing view: reached by URL, never a tab.
-  const tabPanes = panes.filter(row => !isTerminalRef(row.ref))
-  const visiblePanes = chosen && !isAlertRef(chosen.ref) && !isMissionRef(chosen.ref) && !isTerminalRef(chosen.ref) && !panes.some((row) => `${row.ref}:${row.presentation ?? 'detail'}` === selectedPane) ? [...tabPanes, chosen] : tabPanes
-  const phoneTabs = React.useMemo(() => {
-    const names = new Map(agents.map(agent => [agent.ref, agent.name]))
-    return [
-      ...[...new Set([...phoneAgents, current])]
-        .filter(ref => ref === current || names.has(ref))
-        .map(ref => ({ id: ref, label: ref === current ? 'Thread' : names.get(ref)! })),
-      { id: 'changes', label: 'Changes' },
-      ...visiblePanes.map(pane => ({ id: `${pane.ref}:${pane.presentation ?? 'detail'}`, label: paneTabLabel(pane.ref, byRef.get(pane.ref)?.title) })),
-    ]
-  }, [agents, phoneAgents, current, visiblePanes, byRef])
-  const address = { ref: chosen?.ref ?? current, presentation: chosen?.presentation ?? 'detail' }
+  const allTabs = React.useMemo(() => tabsOf(workspace.layout), [workspace.layout])
+  const stripTabs = focusedGroup(workspace)?.tabs ?? allTabs
+  const tabItems = React.useMemo(() => stripTabs.map(tab => ({ ...tabPresentation({ tab, agents, rosterKnown: fleet._tag === 'Observed', needsYou, attention, subjects: byRef }), ...(workspace.views[tab.id]?.dirty === true ? { dirty: true } : {}) })), [stripTabs, workspace.views, agents, fleet._tag, needsYou, attention, byRef])
+  const activeLabel = tabItems.find(item => item.id === activeRow?.id)?.title
+  const previousNames = React.useRef<ReadonlyMap<string, string>>(new Map())
+  const names = React.useMemo(() => {
+    const next = new Map(agents.map(row => [row.ref, row.name]))
+    const previous = previousNames.current
+    if (previous.size === next.size && [...next].every(([ref, name]) => previous.get(ref) === name)) return previous
+    previousNames.current = next
+    return next
+  }, [agents])
   const maxSidebar = Math.max(sidebarMinimumWidth, Math.min(440, viewport - 640))
   const width = Math.min(maxSidebar, Math.max(sidebarMinimumWidth, dragWidth ?? Math.round(ratio * viewport)))
   const maxPanel = Math.max(240, viewport - (narrow || collapsed ? 0 : width) - 640)
   const panelSize = dragPanel ?? Math.min(maxPanel, Math.max(240, Math.round(panelFraction * viewport)))
-  const agentName = agent?.name ?? current.split('/').at(-1) ?? 'Conversation'
-  const changesWorkspace = agent?.workspace._tag === 'Known' ? JSON.stringify([agent.host, agent.workspace.value]) : current
-  const view = workspaceView(chosen)
-  const terminalOpen = view._tag === 'Terminal'
+  const terminalOpen = activeRow !== undefined && current !== '' && showsTerminal(activeRow, workspace.views[activeRow.id])
   // The control stays enabled while the terminal is shown: it is the way back, even from a deep link to a terminal this agent lacks.
   const shownTerminalDisabledReason = terminalOpen ? undefined : terminalDisabledReason
-  const focusShownView = React.useRef(false)
+  const focusShownFace = React.useRef(false)
   const toggleTerminal = () => {
-    if (terminalOpen) { focusShownView.current = true; navigate(current) }
-    else if (terminalRef !== undefined) { focusShownView.current = true; navigate(current, `${terminalRef}:detail`) }
+    if (activeRow === undefined || current === '' || (!terminalOpen && terminalRef === undefined)) return
+    focusShownFace.current = true
+    store.dispatch({ _tag: 'SetView', id: activeRow.id, view: { terminal: !terminalOpen } })
   }
-  const resourcesDockOpen = !narrow && current !== '' && resourcesAgent === current
-  // The dock separator names the inspector view on screen. Every panel mount starts on Details, so the stored
-  // view resets whenever the mounted inspector changes or goes away, before this render paints the label.
-  const dockedInspector = !resourcesDockOpen && !narrow && diffOpen && openedTool === undefined && current !== '' ? current : undefined
-  const [inspectorView, setInspectorView] = React.useState<{ readonly mount: string | undefined; readonly view: 'changes' | 'details' }>({ mount: undefined, view: 'details' })
-  if (inspectorView.mount !== dockedInspector) setInspectorView({ mount: dockedInspector, view: 'details' })
-  const dockLabel = resourcesDockOpen ? 'Resize resources' : inspectorView.view === 'changes' ? 'Resize Changes' : 'Resize Details'
-  const agentHeaderActions = current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} ux={ux} {...(narrow ? {} : { resourcesDock: { host: resourcesHost, open: resourcesDockOpen, onOpenChange: (open: boolean) => { setResourcesAgent(open ? current : undefined); if (open) { setDiffOpen(false); setOpenedTool(undefined) } } } })} /></>
+  // Details, Changes and Resources are the panel's tabs; which one shows is part of the one app-wide setting.
+  const dockedInspector = !narrow && panel.open && openedTool === undefined && current !== '' ? current : undefined
+  const dockLabel = panel.tab === 'resources' ? 'Resize Resources' : panel.tab === 'changes' ? 'Resize Changes' : 'Resize Details'
+  const agentHeaderActions = current === '' ? undefined : <>{agent === undefined ? null : <AgentActions key={`actions-${current}`} agent={agent} />}<ConversationHeaderActions key={current} agentRef={current} onViewDeclaration={() => openRef(`declaration/${current}`)} /></>
   // Below the breakpoint Details is a sheet over the thread, never an inline panel beside it.
-  const narrowDetailsOpen = narrow && current !== '' && (diffOpen || openedTool !== undefined)
-  const closeDetails = () => { setDiffOpen(false); setOpenedTool(undefined) }
+  const narrowDetailsOpen = narrow && current !== '' && (sheetOpen || openedTool !== undefined)
+  const closeDetails = () => { setSheetOpen(false); setOpenedTool(undefined) }
   const openDetailsUri = (uri: string) => {
     const ref = uri.startsWith('agent:') ? `agent/${uri.slice('agent:'.length)}` : uri
     open({ ref })
@@ -725,7 +555,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   </>
   // The Agents toolbar and tree provide tab stops even while loading or empty; Alerts may have none, so its panel takes focus itself.
   const sidebarBody = <SidebarTabs panelHasTabbableContent={sidebarTab === 'agents' || sidebarTab === 'fleet'} selectedId={sidebarTab === 'alerts' || sidebarTab === 'missions' ? sidebarTab : 'agents'} onSelectionChange={id => setSidebarTab(id === 'alerts' || id === 'missions' ? id : 'agents')} tabs={[{ id: 'agents', label: 'Agents', icon: 'person', count: agents.length, questionCount: agents.filter(agent => agent.ask._tag === 'Known' && agent.ask.value === 'question').length, needsYouCount: needsYou.size }, { id: 'alerts', label: 'Alerts', icon: 'bell', ...alertTabMarkers(attention) }, { id: 'missions', label: 'Missions', icon: 'checklist', ...missionMarkers }]}>
-    {sidebarTab === 'missions' ? <SidebarMissionsList {...(isMissionRef(address.ref) ? { current: address.ref } : {})} onOpen={focusMission} /> : sidebarTab === 'alerts' ? <AlertsTabCodeBoundary {...(alertIdOfPane(selectedPane) === undefined ? {} : { selected: alertIdOfPane(selectedPane)! })} onSelect={openAlert} onOpen={ref => { if (ref.startsWith('agent/')) select(ref, 'thread'); else { agentsDrawer.current?.close(); open({ ref }) } }} /> : <>
+    {sidebarTab === 'missions' ? <SidebarMissionsList {...(activeSubject?._tag === 'Mission' ? { current: activeSubject.ref } : {})} onOpen={ref => openRef(ref ?? 'missions')} /> : sidebarTab === 'alerts' ? <AlertsTabCodeBoundary {...(activeSubject?._tag === 'Alert' ? { selected: activeSubject.id } : {})} onSelect={openAlert} onOpen={ref => openRef(ref)} /> : <>
     <LiveSidebarToolbar filters={filters} update={updateFilters} hosts={hosts} showRows={showRows} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
     {credentialNotice(fleet) ? <RosterUnavailable reason="unauthorized" onRetry={undefined} /> : fleet._tag === 'Unavailable' ? <RosterUnavailable reason={fleet.reason} onRetry={fleet.reason === 'failed' && fleet.retryable !== false ? folderSource.retryAgents : undefined} />
       : fleet._tag !== 'Observed' ? null
@@ -748,52 +578,36 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
         </div>
       </> : null}
       <RosterFrozenAt.Provider value={frozenAt}>
-        <LiveSidebarTreeView binding={sidebarFolders} tree={visibleSidebarTree} agents={agents} stale={stale} needsYou={needsYou} current={current} query={sidebarQuery.text} revealKey={deferredFilters.query} select={selectAgent} openMission={openDocument} {...(isMissionRef(address.ref) ? { currentMission: address.ref } : {})} actions={sidebarActions} />
+        <LiveSidebarTreeView binding={sidebarFolders} tree={visibleSidebarTree} agents={agents} stale={stale} needsYou={needsYou} current={current} query={sidebarQuery.text} revealKey={deferredFilters.query} select={selectAgent} openMission={openRef} {...(activeSubject?._tag === 'Mission' ? { currentMission: activeSubject.ref } : {})} actions={sidebarActions} />
       </RosterFrozenAt.Provider>
     </nav>
     {fleet._tag === 'Observed' ? <DecodeNotice noun="agent" decode={rosterDecode} shown={shownRosterRefs(fleet)} /> : null}
     </>}
-    <LiveUsageSection onOpenUsage={() => { agentsDrawer.current?.close(); open({ ref: 'monitor/quota', presentation: 'detail' }) }} />
+    <LiveUsageSection onOpenUsage={() => openRef('monitor/quota')} />
   </SidebarTabs>
   // The panes stay outside changing shell providers, whose context propagation would scan every retained turn.
   // Only the stable header DOM host and narrow geometry cross that boundary.
-  return (<NarrowLayoutContext.Provider value={narrow}>
+  return (<OpenProvider value={openRef}><NarrowLayoutContext.Provider value={narrow}>
     <ThreadHeaderSlotContext.Provider value={narrow ? null : headerSlot}>
-    <WorkbenchContextProvider value={{ open, focusedRef: address.ref || null, subjects: byRef, platform: navigator.platform.includes('Mac') ? 'mac' : 'other' }}>
+    <WorkbenchContextProvider value={{ open, focusedRef: activeSubject === undefined ? null : subjectRef(activeSubject), subjects: byRef, platform: navigator.platform.includes('Mac') ? 'mac' : 'other' }}>
       <ResourcePanelProvider value={{ state: resourcePanel, onChange: (change) => setResourcePanel((value) => ({ ...value, ...change })) }}>
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
             <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} style={phoneViewportStyle} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
               {shortcutHelp}
               {narrow ? null : <ResponsiveAgentSidebar headerActions={sidebarHeaderActions} viewport={viewport} width={width} maxWidth={maxSidebar} collapsed={collapsed} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setDragWidth} onWidthCommit={value => { setRatio(value / viewport); setDragWidth(undefined) }} onWidthReset={() => setRatio(256 / viewport)}>{sidebarBody}</ResponsiveAgentSidebar>}
-              <DockedSplit persistKey={persistGeometry ? `live.${changesWorkspace}.${resourcesDockOpen ? 'resources' : 'changes'}` : undefined} label={dockLabel} defaultSize={resourcesDockOpen ? 380 : 440} minMainSize={geometryNumbers.panelMin} onCollapse={() => { setDiffOpen(false); setResourcesAgent(undefined) }} dock={resourcesDockOpen ? <div ref={setResourcesHost} {...stylex.props(styles.resourcesDock)} /> : dockedInspector !== undefined ? (
+              <DockedSplit persistKey={persistGeometry ? 'live.rightPanel' : undefined} label={dockLabel} defaultSize={440} minMainSize={geometryNumbers.panelMin} onCollapse={() => setPanel({ open: false })} dock={dockedInspector !== undefined ? (
                 <React.Suspense fallback={<aside aria-label="Agent inspector" {...stylex.props(styles.changesPanel, styles.sheetPanel)}><SystemNotice kind="loading" title="Loading agent details" /></aside>}>
-                  <AgentDetailsPanel key={dockedInspector} agentRef={dockedInspector} width="dock" scheme={scheme} onClose={() => setDiffOpen(false)} onOpen={openDetailsUri} onSelectedViewChange={view => setInspectorView({ mount: dockedInspector, view })} />
+                  <AgentDetailsPanel key={dockedInspector} agentRef={dockedInspector} width="dock" scheme={scheme} view={panel.tab} onViewChange={view => setPanel({ tab: view })} onClose={() => setPanel({ open: false })} onOpen={openDetailsUri} {...(ux === undefined ? {} : { ux })} />
                 </React.Suspense>
               ) : undefined}>
               <section aria-label={workspaceLabel} onPointerOverCapture={prefetchTerminalIntent} onFocusCapture={prefetchTerminalIntent} {...stylex.props(styles.workspace)}>
-                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} headerActions={sidebarHeaderActions} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarToggleRef={sidebarOpener} sidebarSheet={sheet} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} terminalOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setDiffOpen(true) }} onToggleTerminal={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} sidebarCollapsed={collapsed} onToggleSidebar={toggleSidebar} sidebarToggleRef={sidebarOpener} terminalAvailable={terminalRef !== undefined || terminalOpen} {...(shownTerminalDisabledReason === undefined ? {} : { terminalDisabledReason: shownTerminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? (current || 'Select an agent')} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={diffOpen} terminalOpen={terminalOpen} onTogglePanel={() => { setResourcesAgent(undefined); setDiffOpen(value => !value) }} onToggleTerminal={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}
+                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} headerActions={sidebarHeaderActions} header={(showAgents, sheet) => <ClockedThreadHeader agent={agent} stale={stale} narrow sidebarCollapsed onToggleSidebar={showAgents} sidebarToggleRef={sidebarOpener} sidebarSheet={sheet} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? activeLabel ?? 'Select an agent'} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={narrowDetailsOpen} terminalOpen={terminalOpen} onTogglePanel={() => { if (narrowDetailsOpen) closeDetails(); else setSheetOpen(true) }} onToggleTerminal={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}>{sidebarBody}</PhoneAgentDrawer> : <ClockedThreadHeader agent={agent} stale={stale} sidebarCollapsed={collapsed} onToggleSidebar={toggleSidebar} sidebarToggleRef={sidebarOpener} terminalAvailable={terminalRef !== undefined || terminalOpen} {...(shownTerminalDisabledReason === undefined ? {} : { terminalDisabledReason: shownTerminalDisabledReason })} nativeActions={agentHeaderActions} actionPortalRef={setHeaderSlot} folder={agent?.host} title={agent?.name ?? activeLabel ?? 'Select an agent'} freshness={stale ? 'stale' : agent === undefined ? 'unobserved' : 'live'} panelOpen={panel.open} terminalOpen={terminalOpen} onTogglePanel={() => setPanel({ open: !panel.open })} onToggleTerminal={toggleTerminal} breadcrumbLabel={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />}
                 <GatewayConnectionStatus />
                 <AlertFlashBand onOpen={openAlert} />
-                {!narrow && !terminalOpen && visiblePanes.length > 0 ? (
-                  <div role="toolbar" aria-label="Workspace views" {...stylex.props(styles.tabs)}>
-                    <Aria.Button aria-pressed={selectedPane === 'thread'} onPress={() => navigate(current)} {...stylex.props(styles.textButton)}>
-                      Thread
-                    </Aria.Button>
-                    {visiblePanes.map((pane) => {
-                      const id = `${pane.ref}:${pane.presentation ?? 'detail'}`
-                      return (
-                        <Aria.Button key={id} aria-pressed={id === selectedPane} onPress={() => navigate(current, id)} {...stylex.props(styles.textButton)}>
-                          {paneTabLabel(pane.ref, byRef.get(pane.ref)?.title)}
-                        </Aria.Button>
-                      )
-                    })}
-                  </div>
-                ) : null}
-                {/* Keep this panel and its portal container at one reconciliation position across the breakpoint. */}
-                <PhoneWorkspaceTabs enabled={narrow} tabsHidden={terminalOpen} trailing={narrow && (terminalRef !== undefined || terminalDisabledReason !== undefined || terminalOpen) ? <PhoneTerminalToggle pressed={terminalOpen} onPress={toggleTerminal} {...(shownTerminalDisabledReason === undefined ? {} : { disabledReason: shownTerminalDisabledReason })} /> : undefined} tabs={phoneTabs} selected={selectedPane === 'thread' ? current : selectedPane} onSelect={id => id === current || agents.some(row => row.ref === id) ? select(id) : navigate(current, id)}>
-                  <div ref={setPaneHost} {...stylex.props(styles.body, narrow && selectedPane === 'changes' && styles.phoneHidden)} />
-                  {narrow && selectedPane === 'changes' && current !== '' ? <React.Suspense fallback={<SystemNotice kind="loading" title="Loading captured changes" />}><ChangesInspector key={current} agentRef={current} width="fill" /></React.Suspense> : null}
-                </PhoneWorkspaceTabs>
+                {/* One strip and one portal host at every width: the breakpoint never remounts a surface. */}
+                <WorkspaceStrip items={tabItems} active={activeRow?.id ?? null} group={workspace.focus} narrow={narrow} dispatch={go} open={openRef} trailing={narrow && (terminalRef !== undefined || terminalDisabledReason !== undefined || terminalOpen) ? <PhoneTerminalToggle pressed={terminalOpen} onPress={toggleTerminal} {...(shownTerminalDisabledReason === undefined ? {} : { disabledReason: shownTerminalDisabledReason })} /> : undefined}>
+                  <div ref={setPaneHost} {...stylex.props(styles.body)} />
+                </WorkspaceStrip>
               </section>
               </DockedSplit>
               {!narrow && openedTool !== undefined && current !== '' ? (
@@ -802,8 +616,6 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
                   {toolDetail(openedTool, panelSize)}
                 </>
               ) : null}
-              {/* Always mounted: the theme portal host must exist before the sheet opens; contents render only while open. */}
-              <DeclarationDialog subject={declarationRef ?? ''} isOpen={declarationRef !== undefined} onOpenChange={(open) => { if (!open) setDeclarationRef(undefined) }} />
               {narrow ? <NarrowSheet label="Agent details" isOpen={narrowDetailsOpen} onOpenChange={(isOpen) => { if (!isOpen) closeDetails() }} width={400}>
                 {current === '' ? null : openedTool !== undefined ? toolDetail(openedTool, undefined) : (
                   <React.Suspense fallback={<SystemNotice kind="loading" title="Loading agent details" />}>
@@ -816,9 +628,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody current={current} rosterRefs={agents.map(agent => agent.ref)} view={view} hidden={narrow && selectedPane === 'changes'} focusShownView={focusShownView} agentName={agentName} onOpenTool={call => { setResourcesAgent(undefined); setOpenedTool(call) }} onOpenDocument={openDocument} onOpenAgent={ref => select(ref, 'thread')} onFocusMission={focusMission} alertControls={{ onOpenAlert: openAlert, onOpenRef: ref => { if (ref.startsWith('agent/')) select(ref, 'thread'); else open({ ref }) }, onClose: () => navigate(current), onBack: () => showSidebarTab('alerts') }} ux={ux} /></RegisteredPortal>}
+    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody tabs={allTabs} active={activeRow?.id ?? null} tiers={tiers} views={workspace.views} names={names} onOpenTool={onOpenTool} onOpen={openRef} onReplace={onReplaceTab} onClose={onCloseTab} onBackToAlerts={backToAlerts} onView={onTabView} focusShownFace={focusShownFace} {...(ux === undefined ? {} : { ux })} empty={<WorkspaceEmpty open={openRef} />} /></RegisteredPortal>}
     </ThreadHeaderSlotContext.Provider>
-  </NarrowLayoutContext.Provider>)
+  </NarrowLayoutContext.Provider></OpenProvider>)
 }
 
 /** Only time-bearing surfaces subscribe to the wall clock, not the workspace providers. */
@@ -857,109 +669,6 @@ const GatewayConnectionStatus = () => {
   />
 }
 
-/** The three most recently opened panes stay mounted in a stable DOM order; hidden ones skip
- * rendering through `content-visibility: hidden`, which keeps their style/layout state so a
- * switch back only reveals them. Hidden panes release visible follow demand; the SDK may
- * evict their follows. Render-time history updates avoid a second committed selection.
- * Locking a pane costs O(its rows) in the browser, so the outgoing pane is only covered by the
- * opaque shown pane during the switch frame and locked after that frame paints. */
-export function WorkspaceBody({ current, rosterRefs, view, hidden = false, focusShownView, agentName, onOpenTool, onOpenDocument, onOpenAgent, onFocusMission, alertControls, ux }: { readonly onFocusMission?: (ref: string | undefined) => void; readonly current: string; readonly rosterRefs: readonly string[]; readonly view: WorkspaceView; readonly hidden?: boolean; readonly focusShownView?: React.RefObject<boolean>; readonly agentName: string; readonly onOpenTool: (call: WorkLogCall) => void; readonly onOpenDocument?: (ref: string) => void; readonly onOpenAgent?: (ref: string) => void; readonly alertControls?: Omit<React.ComponentProps<typeof AlertDetailsPane>, 'id' | 'ux'>; readonly ux?: UxTelemetry }) {
-  // Reading positions belong to this surface, not its three-pane DOM cache. A new
-  // surface (including reload) starts following live; evicted panes keep memory here.
-  // Work-log folds outlive the surface and reload; reading positions stay with this surface.
-  const registry = React.useContext(RegistryContext)
-  const [viewportStore] = React.useState(() => new ViewportStore({ folds: persistedFolds(registry) }))
-  React.useEffect(() => {
-    viewportStore.open()
-    return () => viewportStore.dispose()
-  }, [viewportStore])
-  const [retained, setRetained] = React.useState<readonly RetainedPane[]>([])
-  const [switched, setSwitched] = React.useState<{ readonly shown: string; readonly covered: string | undefined }>({ shown: current, covered: undefined })
-  // The terminal replaces the conversation, which stays retained behind it like any hidden pane.
-  const visible = !hidden && current !== '' && view._tag === 'Thread'
-  // The selected agent's terminal stays mounted and connected once shown, so switching back reveals it. Leaving the agent releases it.
-  const [terminal, setTerminal] = React.useState<{ readonly owner: string; readonly ref: TerminalRef }>()
-  if (current !== '' && view._tag === 'Terminal') {
-    if (terminal?.ref !== view.ref || terminal.owner !== current) setTerminal({ owner: current, ref: view.ref })
-  } else if (terminal !== undefined && terminal.owner !== current) setTerminal(undefined)
-  const terminalShown = !hidden && view._tag === 'Terminal' && view.ref === terminal?.ref
-  const area = React.useRef<HTMLDivElement>(null)
-  const narrow = React.useContext(NarrowLayoutContext)
-  // An explicit switch moves focus to the shown view. Terminal focus stays on the pane: focusing the grid would arm typing without a gesture.
-  // A phone keeps focus on its toggle, so the switch does not raise the keyboard over the view it just revealed.
-  React.useLayoutEffect(() => {
-    if (focusShownView?.current !== true) return
-    focusShownView.current = false
-    if (narrow) return
-    area.current?.querySelector<HTMLElement>(view._tag === 'Terminal' ? '[data-testid="terminal-pane"]' : '[data-wf-shown-pane] textarea:not(:disabled)')?.focus({ preventScroll: true })
-  }, [view._tag, focusShownView, narrow])
-  React.useLayoutEffect(() => {
-    if (visible) return
-    // Abandon at the eager view boundary, even if the transcript module or data
-    // has not loaded. Effect cleanup only cancels paint (StrictMode can retry it).
-    cancelMeasure('switch_to_tail', current)
-    cancelMeasure('open_transcript', current)
-  }, [current, visible])
-  const [visited, setVisited] = React.useState<readonly string[]>([])
-  const rosterKeys = new Set(rosterRefs)
-  const recent = visited.filter(ref => rosterKeys.has(ref))
-  const readingKeys = visible && rosterKeys.has(current)
-    ? [current, ...recent.filter(ref => ref !== current)].slice(0, 32)
-    : recent
-  if (visited.length !== readingKeys.length || visited.some((ref, index) => ref !== readingKeys[index])) setVisited(readingKeys)
-  // Viewports save in mutation cleanup. Prune after those saves, including late
-  // eviction saves, rather than allowing departed keys to re-enter the memory.
-  React.useLayoutEffect(() => { viewportStore.retain(new Set(readingKeys)) })
-  const latest = retained.reduce<RetainedPane | undefined>((best, pane) => best === undefined || pane.used > best.used ? pane : best, undefined)
-  if (visible && (latest?.ref !== current || latest.name !== agentName)) {
-    setRetained(retainPane({ panes: retained, ref: current, name: agentName, limit: 3 }))
-  }
-  if (visible && switched.shown !== current) setSwitched({ shown: current, covered: switched.shown })
-  React.useEffect(() => {
-    if (switched.covered === undefined) return
-    let timer: number | undefined
-    // rAF runs before the switch frame paints; the timeout runs after it.
-    const frame = window.requestAnimationFrame(() => { timer = window.setTimeout(() => setSwitched(value => ({ shown: value.shown, covered: undefined }))) })
-    return () => { window.cancelAnimationFrame(frame); window.clearTimeout(timer) }
-  }, [switched])
-  return <ViewportStoreContext.Provider value={viewportStore}>
-    <div ref={area} {...stylex.props(styles.threadArea)}>
-      {retained.map(pane => {
-        const shown = visible && pane.ref === current
-        return <div key={pane.ref} data-wf-shown-pane={shown ? '' : undefined} {...stylex.props(styles.retainedPane, shown ? styles.shownPane : visible && pane.ref === switched.covered ? null : styles.hiddenPane)}>
-          <ConversationPaneLoadBoundary agentRef={pane.ref} agentName={pane.name} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} ux={ux} visible={shown} />
-        </div>
-      })}
-      {terminal === undefined ? null : (
-        <section key={terminal.ref} aria-label="Terminal" data-testid="terminal-pane" data-terminal-shown={terminalShown} tabIndex={-1} inert={!terminalShown} aria-hidden={!terminalShown} {...stylex.props(styles.retainedPane, styles.terminalPane, terminalShown ? styles.shownPane : styles.hiddenPane)}>
-          <TerminalCodeBoundary terminalRef={terminal.ref} shown={terminalShown} />
-        </section>
-      )}
-      {view._tag === 'Missions' ? (
-        <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading missions" /></div>}>
-          <MissionsPane {...(onOpenAgent === undefined ? {} : { onOpenAgent })} {...(view.mission === undefined ? {} : { focusedMission: view.mission })} {...(onFocusMission === undefined ? {} : { onFocusMission })} />
-        </React.Suspense>
-      ) : null}
-      {view._tag === 'Alert' && alertControls !== undefined ? (
-        <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading alert" /></div>}>
-          <AlertDetailsPane id={view.id} {...alertControls} {...(ux === undefined ? {} : { ux })} />
-        </React.Suspense>
-      ) : null}
-      {view._tag === 'Usage' ? (
-        <UsageCodeBoundary />
-      ) : null}
-      {view._tag === 'Document' && onOpenDocument !== undefined ? (
-        <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading document" /></div>}>
-          <DocumentPane key={view.ref} name={view.ref} onOpen={onOpenDocument} />
-        </React.Suspense>
-      ) : null}
-      {current === '' && view._tag !== 'Missions' && view._tag !== 'Usage' && view._tag !== 'Alert' ? <div {...stylex.props(styles.empty)}>Choose an agent to open its live thread.</div>
-        : view._tag === 'ViewUnavailable' ? <div {...stylex.props(styles.paneNotice)}><SystemNotice kind="empty" title="View not available here" detail={view.reason.replace(/\.$/, '')} /></div>
-          : null}
-    </div>
-  </ViewportStoreContext.Provider>
-}
-
 /** The shared toolbar with the live sidebar's search surface, which must stand apart from the sidebar in both schemes. */
 export function LiveSidebarToolbar(props: Omit<SidebarToolbarProps, 'searchStyle'>) {
   return <SidebarToolbar {...props} searchStyle={styles.searchField} />
@@ -971,7 +680,6 @@ const styles = stylex.create({
   // Out of flow, above the panes. Viewport-wide but zero-height: no hit area of
   // its own, yet shrink-to-fit popovers get the viewport as available width.
   overlayHost: { position: 'fixed', top: 0, left: 0, width: '100%', height: 0, zIndex: 20 },
-  textButton: { padding: '4px 8px', backgroundColor: 'transparent', color: c.fgMuted, borderWidth: 0, borderRadius: 6, cursor: 'pointer', fontSize: t.metaSize },
   iconButton: { width: 28, height: 28, display: 'inline-flex', justifyContent: 'center', alignItems: 'center', backgroundColor: 'transparent', color: c.fgMuted, borderWidth: 0, borderRadius: 6, cursor: 'pointer' },
   // Message fill plus a hairline: raised equals the sidebar surface in light mode.
   searchField: { backgroundColor: c.message, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border },
@@ -985,21 +693,7 @@ const styles = stylex.create({
   skeletonName: { gridRow: '1', width: '68%' },
   skeletonHost: { gridRow: '2', width: '44%' },
   workspace: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0 },
-  resourcesDock: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, height: '100%' },
   body: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },
-  phoneHidden: { display: 'none' },
-  // Identical geometry in both states: revealing a pane must not invalidate its layout. Only
-  // non-inherited properties toggle (no inert/pointer-events/visibility), so a reveal does not
-  // restyle the retained subtree; content-visibility already removes it from focus and a11y.
-  retainedPane: { position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', minWidth: 0, minHeight: 0, backgroundColor: c.canvas },
-  shownPane: { zIndex: 1 },
-  hiddenPane: { contentVisibility: 'hidden' },
-  threadArea: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, flexBasis: 0, minWidth: 0, minHeight: 0 },
-  terminalPane: { overflow: 'hidden', outline: 'none' },
-  tabs: { height: 32, display: 'flex', alignItems: 'center', gap: s.xs, paddingInline: s.lg, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border, flexShrink: 0 },
-  // Hidden retained panes stay absolutely positioned and opaque; pane notices sit above them.
-  paneNotice: { position: 'relative', zIndex: 2 },
-  empty: { position: 'relative', zIndex: 2, margin: 'auto', padding: s.section, color: c.fgMuted },
   changesPanel: { display: 'flex', flexDirection: 'column', flexShrink: 0, minWidth: 0, minHeight: 0, overflowY: 'auto', borderLeftWidth: 1, borderLeftStyle: 'solid', borderLeftColor: c.border },
   sheetPanel: { flexGrow: 1, borderLeftWidth: 0 },
   toolDetailHeader: { height: 40, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border },

@@ -37,7 +37,12 @@ webPkgs.mkShell {
     webPkgs.watchman
     effectUtilsPackages.buck2
     effectUtilsPackages.genie
+    # TypeScript 7 with the Effect language service compiled in (`tsgo`, and `effect-tsgo` as an
+    # LSP), plus oxlint; scripts/ci-fractal-web-effect-lint ratchets both.
+    effectUtilsPackages.effect-tsgo
+    effectUtilsPackages.oxlint-npm
   ];
+  FRACTAL_OXLINT_PLUGINS = "${effectUtilsPackages.oxlint-npm}/lib";
   BUCK2_BIN = "${effectUtilsPackages.buck2}/bin/buck2";
   FRACTAL_WEB_BUCK_ROOT = "${buckRoot}";
   PLAYWRIGHT_MODULE = "${webPkgs.playwright-driver}/index.mjs";

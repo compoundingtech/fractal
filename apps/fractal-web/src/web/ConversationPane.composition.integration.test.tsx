@@ -23,6 +23,8 @@ import { Tracer } from 'effect'
 import { makeUxTelemetry, type UxTelemetry } from '../telemetry/ux.ts'
 import { HumanClockProvider } from '../../../../packages/fractal-ui/src/time/clock.tsx'
 import * as InputPaint from '../telemetry/inputPaint.ts'
+// One stable empty roster: a fresh map per render would re-project the transcript every frame.
+const noRosterNames = vi.hoisted((): ReadonlyMap<string, string> => new Map())
 vi.mock('../telemetry/inputPaint.ts', { spy: true })
 
 // The kit compiles StyleX at build time; node tests stub only the CSS runtime, never data hooks.
@@ -51,6 +53,8 @@ vi.mock('../data/react.tsx', async () => {
   useConversation: () => source.feed,
   useConversationSync: () => source.sync,
   useConnection: () => ({ _tag: 'Live' }),
+  // Roster names for mail headers; an empty roster reads refs by their last segment.
+  useFleetSelection: () => noRosterNames,
   // A sendable view exposes attachments; the composer stays disabled otherwise.
   useDataSource: () => ({ agents, conversationInterest: undefined, agentControls: source.agentControls, ...(source.sendable ? { attachments: {} } : {}) }),
   useFeedInterest: () => {},
@@ -104,7 +108,7 @@ vi.mock('../../../../packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx', 
 })
 
 import { ConversationPane } from './ConversationPane.tsx'
-import { WorkspaceBody } from './LiveAgentWorkspace.tsx'
+import { WorkspaceBody } from '../workspace/WorkspaceBody.tsx'
 import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import { Transcript } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
 import { workLogTurnFromItems } from '../../../../packages/fractal-ui/src/assistant-ui/taste/work-log.ts'
@@ -380,9 +384,13 @@ describe('ConversationPane composition activation', () => {
         for (const callback of pending) callback(0)
       })
     }
+    // The open tabs, most recently shown first in `recent`.
     let rosterRefs = ['agent/A', 'agent/B', 'agent/C', 'agent/D']
+    let recent: readonly string[] = []
     const show = async (ref: string, surfaceKey = 'surface') => {
-      await act(async () => root!.render(<WorkspaceBody key={surfaceKey} current={ref} rosterRefs={rosterRefs} view={{ _tag: 'Thread' }} agentName={ref} onOpenTool={() => {}} />))
+      recent = [ref, ...recent.filter(other => other !== ref)]
+      const tiers = new Map(recent.map((id, index) => [id, index === 0 ? 'active' as const : index < 3 ? 'mounted' as const : 'cold' as const]))
+      await act(async () => root!.render(<WorkspaceBody key={surfaceKey} tabs={rosterRefs.map(id => ({ id, pane: `agent:${id}` }))} active={ref} tiers={tiers} views={{}} names={new Map(rosterRefs.map(id => [id, id]))} onOpenTool={() => {}} onOpen={() => {}} onReplace={() => {}} onClose={() => {}} onBackToAlerts={() => {}} onView={() => {}} focusShownFace={{ current: false }} empty={null} />))
       await flushFrames()
     }
     const lane = (ref: string) => {
@@ -424,23 +432,10 @@ describe('ConversationPane composition activation', () => {
       await show('agent/B', 'reloaded-surface')
       await show('agent/C', 'reloaded-surface')
       await show('agent/D', 'reloaded-surface')
-      // A leaves the roster after its DOM was evicted: remove only A's memory.
+      // A's tab closes after its DOM was evicted: remove only A's memory.
       rosterRefs = ['agent/B', 'agent/C', 'agent/D']
       await show('agent/D', 'reloaded-surface')
       rosterRefs = ['agent/A', ...rosterRefs]
-      await show('agent/A', 'reloaded-surface')
-      expect(lane('agent/A').scrollTop).toBe(1600)
-      await act(async () => {
-        const a = lane('agent/A')
-        a.dispatchEvent(new WheelEvent('wheel', { deltaY: -900 }))
-        a.scrollTop = 700
-        a.dispatchEvent(new Event('scroll'))
-      })
-      await flushFrames()
-      // A huge roster must not turn surface memory into an unbounded history.
-      const extraRefs = Array.from({ length: 32 }, (_, index) => `agent/extra-${index}`)
-      rosterRefs = [...rosterRefs, ...extraRefs]
-      for (const ref of extraRefs) await show(ref, 'reloaded-surface')
       await show('agent/A', 'reloaded-surface')
       expect(lane('agent/A').scrollTop).toBe(1600)
     } finally {

@@ -596,7 +596,7 @@ describe('LiveAgentWorkspace retained panes', () => {
 
     go('agent/route')
     await settle()
-    expect(container.querySelector('textarea')).toBe(input)
+    expect(container.querySelector('[data-wf-shown-pane] textarea')).toBe(input)
     expect(input.value).toBe('Retained draft')
     expect(form.inert).toBe(false)
     expect(input.closest('[aria-hidden]')?.getAttribute('aria-hidden')).toBe('false')

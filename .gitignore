@@ -45,6 +45,9 @@ packages/fractal-sdk/node_modules/
 /apps/fractal-web/.changelog/registry.generated.ts
 /apps/fractal-web/.changelog/registry.generated.ts.*.tmp
 
+# The Effect lint ratchet's transient oxlint config (scripts/ci-fractal-web-effect-lint).
+/.oxlintrc.ratchet.json
+
 # Local Alchemy cache/state metadata; remote Cloudflare state is authoritative.
 /infra/storybook/.alchemy/
 /infra/storybook/node_modules/

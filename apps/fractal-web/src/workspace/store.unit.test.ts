@@ -5,6 +5,7 @@ import { activeTab, groupsOf, tabsOf, WorkspaceState, type Layout } from './mode
 import { createWorkspaceStore, localStorageLayer, memoryStorage, WorkspaceStorage, type WorkspaceStorageLayer } from './store.ts'
 
 const settle = () => Effect.runPromise(Effect.sleep(30))
+const quiet = () => Effect.runPromise(Effect.sleep(200))
 
 const key = 'test-workspace'
 const unchanged = Layer.succeed(WorkspaceStorage, WorkspaceStorage.of({ key, changed: Stream.empty }))
@@ -48,7 +49,7 @@ const sharedDocument = () => {
 const panes = (layout: Layout) => tabsOf(layout).map(tab => tab.pane)
 
 describe('workspace store', () => {
-  it('survives a reload: splits, each group\'s tab, focus, view state and the panel', () => {
+  it('survives a reload: splits, each group\'s tab, focus, view state', () => {
     const { layer } = lasting()
     const first = createWorkspaceStore(layer, { debounceMs: 1 })
     first.dispatch({ _tag: 'Open', pane: 'agent:agent/a' })
@@ -56,7 +57,6 @@ describe('workspace store', () => {
     const home = activeTab(first.getState())!
     first.dispatch({ _tag: 'SetView', id: home.id, view: { scrollTop: 120 } })
     first.dispatch({ _tag: 'Move', id: home.id, to: { _tag: 'Edge', group: first.getState().focus, side: 'right', first: false } })
-    first.dispatch({ _tag: 'SetPanel', panel: { open: true, tab: 'changes' } })
     first.flush()
     first.dispose()
     const second = createWorkspaceStore(layer, { debounceMs: 1 })
@@ -64,7 +64,6 @@ describe('workspace store', () => {
     expect(groupsOf(state.layout).map(group => group.tabs.map(tab => tab.pane))).toEqual([['agent:agent/a'], ['list:home']])
     expect(activeTab(state)?.pane).toBe('list:home')
     expect(state.views[activeTab(state)!.id]?.scrollTop).toBe(120)
-    expect(state.panel).toEqual({ open: true, tab: 'changes' })
     second.dispose()
   })
 
@@ -94,7 +93,7 @@ describe('workspace store', () => {
     const tab = { id: 'x', pane: 'list:home' }
     const document = JSON.stringify({
       layout: { split: 'right', children: [{ id: 'left', tabs: [tab], active: 'gone' }, { id: 'right', tabs: [{ id: 'y', pane: 'list:home' }], active: 'y' }] },
-      focus: 'gone', mru: ['gone'], closed: [], views: { gone: {} }, panel: { open: false, tab: 'details' },
+      focus: 'gone', mru: ['gone'], closed: [], views: { gone: {} },
     })
     const store = createWorkspaceStore(memoryStorage(document))
     const state = store.getState()
@@ -109,12 +108,11 @@ describe('workspace store', () => {
     const tab = { id: 'x', pane: 'future-kind:x y/z', title: 'Kept' }
     const document = Schema.encodeSync(Schema.fromJsonString(WorkspaceState))({
       layout: { split: 'right', ratio: 0.3, children: [{ id: 'left', tabs: [tab], active: 'x' }, { id: 'right', tabs: [{ id: 'y', pane: 'list:home' }], active: 'y' }] },
-      focus: 'left', mru: ['x', 'y'], closed: [], views: { x: { scrollTop: 4 } }, panel: { open: true, tab: 'changes', width: 300 },
+      focus: 'left', mru: ['x', 'y'], closed: [], views: { x: { scrollTop: 4 } },
     })
     const state = createWorkspaceStore(memoryStorage(document)).getState()
     expect(groupsOf(state.layout)[0]?.tabs[0]).toEqual(tab)
     expect(state.views).toEqual({ x: { scrollTop: 4 } })
-    expect(state.panel.width).toBe(300)
   })
 
   it('does not write an unchanged document back when it loads', async () => {
@@ -148,18 +146,18 @@ describe('workspace store', () => {
     const right = createWorkspaceStore(shared.window(), { debounceMs: 1 })
     left.dispatch({ _tag: 'Open', pane: 'agent:agent/a' })
     left.dispatch({ _tag: 'Open', pane: 'agent:agent/b' })
-    await settle()
-    expect(panes(right.getState().layout)).toEqual(['agent:agent/a', 'agent:agent/b'])
+    await vi.waitFor(() => expect(panes(right.getState().layout)).toEqual(['agent:agent/a', 'agent:agent/b']))
     right.dispatch({ _tag: 'Open', pane: 'agent:agent/a' })
     await settle()
     expect(activeTab(right.getState())?.pane).toBe('agent:agent/a')
     expect(activeTab(left.getState())?.pane).toBe('agent:agent/b')
     right.dispatch({ _tag: 'Open', pane: 'list:home' })
-    await settle()
-    expect(panes(left.getState().layout)).toEqual(['agent:agent/a', 'agent:agent/b', 'list:home'])
+    await vi.waitFor(() => expect(panes(left.getState().layout)).toEqual(['agent:agent/a', 'agent:agent/b', 'list:home']))
     expect(activeTab(left.getState())?.pane).toBe('agent:agent/b')
+    // Quiet means no window writes again: wait out any exchange still in flight, then watch for another.
+    await quiet()
     const settled = shared.read()
-    await settle()
+    await quiet()
     expect(shared.read()).toBe(settled)
     left.dispose()
     right.dispose()

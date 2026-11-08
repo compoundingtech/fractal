@@ -130,7 +130,7 @@ export const convertConversationItem = (item: ConversationItem): ThreadMessageLi
       return {
         ...common, role,
         ...(role === 'assistant' ? { status: completed } : {}),
-        content: [{ type: 'text', text: item.title ?? `Message ${item.messageId}` }],
+        content: [{ type: 'text', text: item.text ?? item.title ?? `Message ${item.messageId}` }],
       }
     }
     case 'Status':

@@ -87,7 +87,7 @@ export function SidebarMissionLine({ mission, info = live, touch = false, now, f
     {mainMark && (queued.length > 0 || onOpen !== undefined
       ? <span data-line2-slot="progress" {...stylex.props(styles.missionSlot, styles.mark)}><MissionProgressMark progress={mission.progress} /></span>
       : <span data-line2-slot="mission" data-mission-info="live" {...stylex.props(styles.missionSlot, styles.mark)}><MissionProgressMark progress={mission.progress} /></span>)}
-    {adHocText !== undefined
+    <span data-line2-run {...stylex.props(styles.run)}>{adHocText !== undefined
       ? <span data-line2-slot="step" {...stylex.props(styles.stepSlot, muted && styles.mutedInk)}><span data-row-field="step" {...stylex.props(styles.ellipsis)}>{adHocText}</span></span>
       : step._tag !== 'Unknown' && !(adHoc && titleAbove && step._tag === 'Step') && <span data-line2-slot="step" {...stylex.props(styles.stepSlot, muted && styles.mutedInk)}>
         {step._tag === 'Step'
@@ -97,7 +97,7 @@ export function SidebarMissionLine({ mission, info = live, touch = false, now, f
             <span data-row-field="question" {...stylex.props(styles.ellipsis)}>{step.handle === undefined && <VisuallyHidden>Waiting on you: </VisuallyHidden>}{step.question}</span>
           </>}
       </span>}
-    {!adHoc && <span data-line2-slot="slug" {...stylex.props(styles.slugSlot)}><VisuallyHidden>Mission </VisuallyHidden><span data-row-field="mission" data-mission={slug} {...stylex.props(styles.ellipsis)}>{slug}</span></span>}
+    {!adHoc && <span data-line2-slot="slug" {...stylex.props(styles.slugSlot)}><VisuallyHidden>Mission </VisuallyHidden><span data-row-field="mission" data-mission={slug} {...stylex.props(styles.ellipsis)}>{slug}</span></span>}</span>
   </>
   return <>
     {muted && triggerSlot(true)}
@@ -183,8 +183,11 @@ const styles = stylex.create({
   // Touch: the slot is the full line-2 track, so its button box can be the 44px hit box.
   missionSlotTouch: { alignSelf: 'stretch' },
   mark: { display: 'inline-flex', alignItems: 'center', gap: s.xs },
-  stepSlot: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flex: '0 1 auto', minWidth: 0, overflow: 'hidden' },
-  slugSlot: { display: 'inline-flex', alignItems: 'center', flex: '0 1000 auto', minWidth: 0, overflow: 'hidden', paddingInlineStart: s.sm, color: ink.fgMuted },
+  stepSlot: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flex: '0 1 auto', minWidth: 0, maxWidth: '100%', height: g.controlSm, overflow: 'hidden' },
+  // Step then slug on one 24px line that wraps: the slug claims a line only when 48px of it fits beside the step, and
+  // otherwise wraps out of sight instead of showing a stub. The step always keeps the first line.
+  run: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', alignContent: 'flex-start', flex: '1 1 0', minWidth: 0, height: g.controlSm, overflow: 'hidden' },
+  slugSlot: { display: 'inline-flex', alignItems: 'center', flex: '1 1 48px', minWidth: '48px', maxWidth: 'max-content', height: g.controlSm, overflow: 'hidden', paddingInlineStart: s.sm, boxSizing: 'border-box', color: ink.fgMuted },
   ellipsis: { flex: '0 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   metric: { flexShrink: 0, fontVariantNumeric: 'tabular-nums', whiteSpace: 'nowrap' },
   ring: { display: 'block', width: `${ringBox}px`, height: `${ringBox}px`, flexShrink: 0 },
