@@ -55,7 +55,8 @@ export const tabPresentation = ({ tab, world, unread }: {
     // A person's own name for the tab wins.
     title: tab.title ?? describedTitle(descriptor),
     ...(icon === undefined ? {} : { icon }),
-    ...(descriptor.card === null ? {} : { hoverCard: <EntityHoverCard entity={descriptor.card} /> }),
+    // Only a named entity has a card to show: a loading or gone one would open an empty frame.
+    ...(descriptor.card === null || descriptor.title._tag !== 'Known' ? {} : { hoverCard: <EntityHoverCard entity={descriptor.card} /> }),
     ...(descriptor.title._tag === 'Gone' ? { status: 'unavailable' as const } : {}),
   }
   switch (subject._tag) {

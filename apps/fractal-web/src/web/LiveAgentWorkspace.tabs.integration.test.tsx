@@ -264,11 +264,12 @@ it('gives an answered alert\'s tab to the next alert, and closes it when none is
   await mount()
   await arrive('/w/agent/a')
   await arrive('/w/inbox/attention%2Fone')
-  expect(titles()).toEqual(['Alert', 'Agent A'])
+  // An alert's tab is named by what it asks, as its row is, never by its kind.
+  expect(titles()).toEqual(['First alert', 'Agent A'])
   const answer = () => host.querySelector<HTMLButtonElement>('[data-tab-surface^="home:"] [data-answer]')!
   await vi.waitFor(() => expect(answer()?.textContent).toBe('First alert'))
   await act(async () => answer().click())
-  expect(titles()).toEqual(['Alert', 'Agent A'])
+  await vi.waitFor(() => expect(titles()).toEqual(['Second alert', 'Agent A']))
   expect(window.location.pathname).toBe('/w/inbox/attention%2Ftwo')
   await vi.waitFor(() => expect(answer()?.textContent).toBe('Second alert'))
   await act(async () => answer().click())
