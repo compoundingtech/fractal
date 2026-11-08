@@ -51,6 +51,10 @@ impl Profile {
 }
 
 fn assistant_profile(source: &Value) -> Result<(), ApiError> {
+    #[cfg(test)]
+    if tests::SERVICE_PROFILE.get() && Profile::stored(source)? == Profile::Service {
+        return Ok(());
+    }
     Profile::stored(source)?.issuable()
 }
 
@@ -65,7 +69,7 @@ fn digest_only(source: &Value) -> Result<(), ApiError> {
 }
 
 // Issuance-only scan: authentication retains its existing indexed lookup and reads.
-// TRANSITIONS serializes completion; several grants of the same profile are allowed.
+// append owns the admission lock; several grants of the same profile are allowed.
 fn admit_profile(state: &AppState, source: &Value) -> Result<(), ApiError> {
     let profile = Profile::stored(source)?;
     let principal = principal(source)?;
@@ -111,6 +115,10 @@ pub const SCOPES: &[&str] = &[
 // against concurrent writers in the authoritative store.
 pub static TRANSITIONS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+// Synchronous because append never awaits. Callers may already hold TRANSITIONS:
+// always acquire that outer lifecycle lock first, never from inside admission.
+static ADMISSIONS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub fn owning_person(state: &AppState) -> Result<&str, ApiError> {
     state.owning_person.as_deref()
         .filter(|person| person.starts_with("person/") && person.matches('/').count() == 1 && person.len() > 7)
@@ -140,6 +148,13 @@ pub fn latest(state: &AppState, subject: &str, kind: &str) -> Result<Option<Clai
 }
 pub fn append(state: &AppState, subject: String, kind: &str, actor: &str,
           value: Value, previous: Option<&ClaimRecord>) -> Result<ClaimRecord, ApiError> {
+    // Subject fences do not serialize grants on independent subjects for one
+    // principal. Keep the cross-subject scan and authoritative append indivisible.
+    let _admission = if kind == GRANTED {
+        Some(ADMISSIONS.lock().map_err(|_| ApiError::internal("external grant admission lock poisoned"))?)
+    } else {
+        None
+    };
     if matches!(kind, BEGUN | GRANTED | POLICY | REVOKED) {
         assistant_profile(&value)?;
         digest_only(&value)?;
@@ -276,6 +291,57 @@ pub fn authorize_route(session: &ClientSession, request: &Request<Body>) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Only the current fixture thread can exercise the reserved profile through
+    // the real mutation/session boundary. Production issuable() stays closed.
+    thread_local! {
+        pub(super) static SERVICE_PROFILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    fn concurrent_grants(profiles: [&str; 2]) -> (usize, usize) {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = crate::api::tests_shared::state(root.path());
+        state.owning_person = Some("person/owner".into());
+        let barrier = std::sync::Barrier::new(2);
+        let results = std::thread::scope(|scope| {
+            let handles = profiles.into_iter().enumerate().map(|(index, profile)| {
+                let state = &state;
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    SERVICE_PROFILE.set(true);
+                    let id = if index == 0 { "111111111111111111111111" } else { "222222222222222222222222" };
+                    let source = json!({"profile":profile,"grant_id":id,"principal":PRINCIPAL,
+                        "issuer":"person/owner","session_actor":format!("{PRINCIPAL}/session/{id}"),
+                        "expires_at_unix_ms":u64::MAX,"minimal_read_mode":"approval-once",
+                        "disclosure_consent":true,"scopes":["read.assistant.summary"],
+                        "credential_hash":credential_digest(id)});
+                    let subject = subject(id).unwrap();
+                    let begun = append(state, subject.clone(), BEGUN, "person/owner", source.clone(), None).unwrap();
+                    barrier.wait();
+                    append(state, subject, GRANTED, "person/owner", source, Some(&begun))
+                })
+            }).collect::<Vec<_>>();
+            handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>()
+        });
+        let admitted = results.iter().filter(|result| result.is_ok()).count();
+        let usable = std::thread::spawn(move || {
+            SERVICE_PROFILE.set(true);
+            results.iter().filter_map(|result| result.as_ref().ok())
+                .filter(|grant| session(&state, grant, "http").is_ok()).count()
+        }).join().unwrap();
+        (admitted, usable)
+    }
+
+    #[test]
+    fn concurrent_opposite_profiles_have_exactly_one_usable_grant() {
+        assert_eq!(concurrent_grants(["assistant", "service"]), (1, 1));
+    }
+
+    #[test]
+    fn concurrent_same_profile_grants_remain_usable() {
+        assert_eq!(concurrent_grants(["assistant", "assistant"]), (2, 2));
+        assert_eq!(concurrent_grants(["service", "service"]), (2, 2));
+    }
 
     #[test]
     fn persisted_active_profiles_are_checked_at_grant_admission() {
