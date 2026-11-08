@@ -1,7 +1,8 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { useAui, useAuiState } from '@assistant-ui/react'
-import { Button, FileTrigger, Focusable, Input, Menu, MenuItem, MenuTrigger, Popover, TextField, Tooltip, TooltipTrigger } from 'react-aria-components'
+import { Button, FileTrigger, Focusable, Input, Menu, MenuItem, MenuTrigger, Popover, TextField, TooltipTrigger } from 'react-aria-components'
+import { TooltipSurface } from '../composition/Controls'
 import { Icon } from '../composition/Icons'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { surfaceVars as surface, textVars as text, borderVars as border, accentVars as accent, interactionVars as interaction, typeVars as t, radiusVars as r, spaceVars as s, geometryVars as g } from '../composition-tokens.stylex'
@@ -60,7 +61,7 @@ export function ComposerAttachImage({ compact = false }: { readonly compact?: bo
     <FileTrigger acceptedFileTypes={[...policy.mediaTypes]} allowsMultiple={policy.maxCount > 1} onSelect={list => { if (list !== null) intake.add([...list]) }}>
       <Button aria-label="Attach image" isDisabled={intake.disabled} {...stylex.props(styles.iconButton, compact && styles.iconCompact, narrow && styles.touchControl)}><Icon name="attach" /></Button>
     </FileTrigger>
-    <Tooltip {...stylex.props(styles.tooltip)}>Attach up to {describeImageCount(policy.maxCount)} ({describeImageTypes(policy)}), {formatImageLimit(policy.maxBytes)} each</Tooltip>
+    <TooltipSurface>Attach up to {describeImageCount(policy.maxCount)} ({describeImageTypes(policy)}), {formatImageLimit(policy.maxBytes)} each</TooltipSurface>
   </TooltipTrigger>
 }
 
@@ -109,7 +110,7 @@ export function ComposerRecipientControl({ recipient, recipients, onRecipientCha
         <Button aria-label={`To ${recipient.label}, change recipient`} aria-describedby={detailId} data-composer-recipient={recipient.ref} {...stylex.props(styles.recipient, styles.recipientButton, compact && styles.recipientCompact)}>
           {label}<Icon name="chevron-down" size={12} />
         </Button>
-        <Tooltip {...stylex.props(styles.tooltip)}>{detail}</Tooltip>
+        <TooltipSurface>{detail}</TooltipSurface>
       </TooltipTrigger>
       <Popover placement="top start" {...stylex.props(styles.popup)}>
         <Menu aria-label="Recipient" selectionMode="single" disallowEmptySelection selectedKeys={[recipient.ref]}
@@ -121,7 +122,7 @@ export function ComposerRecipientControl({ recipient, recipients, onRecipientCha
       </Popover>
     </MenuTrigger> : <TooltipTrigger delay={150} closeDelay={0}>
       <Focusable><span tabIndex={0} role="group" aria-label={`To ${recipient.label}`} aria-describedby={detailId} data-composer-recipient={recipient.ref} {...stylex.props(styles.recipient, compact && styles.recipientCompact)}>{label}</span></Focusable>
-      <Tooltip {...stylex.props(styles.tooltip)}>{detail}</Tooltip>
+      <TooltipSurface>{detail}</TooltipSurface>
     </TooltipTrigger>}
   </>
 }
@@ -204,7 +205,6 @@ const styles = stylex.create({
   iconCompact: { paddingInline: s.xs },
   // Narrow hosts: an icon-only control is never narrower than it is tall.
   touchControl: { minWidth: g.touchTarget },
-  tooltip: { width: 'max-content', maxWidth: `min(${g.tooltipMax}, calc(100vw - ${s.lg}))`, boxSizing: 'border-box', padding: s.sm, borderRadius: r.sm, backgroundColor: surface.raised, color: text.fg, borderWidth: g.hairline, borderStyle: 'solid', borderColor: border.borderStrong, fontFamily: t.fontSans, fontSize: t.metaSize, lineHeight: t.metaLeading, overflowWrap: 'anywhere' },
   recipient: {
     display: 'inline-flex', alignItems: 'center', gap: s.xs, minWidth: 0, maxWidth: g.crumbMax, flexShrink: 1, minHeight: g.controlMd,
     fontFamily: t.fontSans, fontSize: t.metaSize, color: text.fg, whiteSpace: 'nowrap', borderRadius: r.control,

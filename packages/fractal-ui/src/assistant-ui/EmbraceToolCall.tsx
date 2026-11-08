@@ -2,7 +2,10 @@ import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { makeAssistantToolUI, useAuiState } from '@assistant-ui/react'
 import type { ToolCallMessagePartProps } from '@assistant-ui/react'
-import { Button, Disclosure, DisclosurePanel } from 'react-aria-components'
+import { Button, Disclosure, DisclosurePanel, TooltipTrigger } from 'react-aria-components'
+import { TooltipSurface, TruncatedLabel, useTruncatedTooltip } from './composition/Controls'
+import { tooltipStyles } from './composition/tooltip-styles'
+import { ThemePortal } from './taste/ThemePortal'
 import type { ConversationItem } from './embrace-converter'
 import { tokens, geometry, density } from './embrace-tokens.stylex'
 import { geometryVars as g, interactionVars as interaction } from './composition-tokens.stylex'
@@ -121,22 +124,24 @@ const ToolPresentation = ({ name, input, output, mediaType, status, variant, cal
   const label = `${verbs[kind][status === 'running' ? 1 : 0]} ${target || name}`
   const promoted = status === 'error' || status === 'interrupted' || kind === 'edit' || kind === 'write' || kind === 'question'
     || /^(?:diff --git |--- [^\n]+\n\+\+\+ )/m.test(toolOutput(output))
-  const header = <>
+  const { ref: labelRef, trigger: labelTrigger } = useTruncatedTooltip()
+  // A static row's label carries its own clipped-text tooltip; a disclosure row's tooltip belongs to its trigger Button.
+  const header = (labelNode: React.ReactNode) => <>
     <span aria-hidden="true" {...stylex.props(styles.indicator, status === 'error' && styles.error, status === 'interrupted' && styles.warning)}>
       {status === 'running' ? '◌' : status === 'success' ? '✓' : status === 'error' ? '!' : '■'}
     </span>
-    <span {...stylex.props(styles.label)} title={label}>{label}</span>
+    {labelNode}
     {!callSeen ? <span {...stylex.props(styles.caption)}>Start not loaded</span> : null}
     <span {...stylex.props(styles.status, status === 'error' && styles.error, status === 'interrupted' && styles.warning)}>{status}</span>
   </>
-  if (variant === 'rows') return <div {...stylex.props(styles.row)} data-tool-status={status}>{header}</div>
+  if (variant === 'rows') return <div {...stylex.props(styles.row)} data-tool-status={status}>{header(<TruncatedLabel text={label} style={styles.label} />)}</div>
   return (
     <article {...stylex.props(styles.call, variant === 'cards' && styles.card, promoted && styles.promoted)} data-tool-status={status}>
       <Disclosure key={`${variant}:${promoted ? 'attention' : 'routine'}`} defaultExpanded={variant === 'cards' || promoted}>
         {({ isExpanded }) => <>
-          <Button slot="trigger" {...stylex.props(styles.row, styles.trigger)}>
-            {header}<span aria-hidden="true">{isExpanded ? '▾' : '▸'}</span>
-          </Button>
+          <ThemePortal><TooltipTrigger {...labelTrigger}><Button slot="trigger" {...stylex.props(styles.row, styles.trigger)}>
+            {header(<span ref={labelRef} {...stylex.props(styles.label)}>{label}</span>)}<span aria-hidden="true">{isExpanded ? '▾' : '▸'}</span>
+          </Button><TooltipSurface><span {...stylex.props(tooltipStyles.label)}>{label}</span></TooltipSurface></TooltipTrigger></ThemePortal>
           <DisclosurePanel>
             {isExpanded ? <ToolDetails name={name} input={input} output={output} mediaType={mediaType} status={status} variant={variant} /> : null}
           </DisclosurePanel>

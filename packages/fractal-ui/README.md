@@ -365,6 +365,8 @@ Focus indicators are keyboard-only and subtle. `geometryVars.focusRing` is 1px; 
 
 `scripts/check-focus-styles.mjs` (`pnpm -C packages/fractal-ui run test:focus-styles`, a CI lane) keeps that one treatment: it rejects any outline, ring-shaped box-shadow, Tailwind `ring`/`outline`/`focus:` utility or `:focus`/`:focus-within` ring in `apps/fractal-web/src` and `packages/fractal-ui/src` that does not use the shared ring tokens, including attention or selection outlines. A decorative edge that is not focus, selection or attention goes in `focus-styles.exemptions.json` with an owner and a reason; the test fails on stale exemptions. `Focus treatment` stories pin the ring, the pointer guard, the menu inset ring and the field border in both schemes at 1280 and 440.
 
+Tooltips have one tier: the kit `TooltipSurface` in `composition/Controls.tsx`, capped in width and height (`tooltipMax`, `tooltipMaxBlock`) with a clamped label, and placed inside the viewport by React Aria. Control labels use the kit `Tooltip`; clipped text uses `TruncatedLabel`, or `useTruncatedTooltip` on the enclosing trigger, so it shows only while the text is cut off. A tooltip never carries a body such as tool output. `scripts/check-tooltips.mjs` (`pnpm -C packages/fractal-ui run test:tooltips`, a CI lane) rejects a raw React Aria `Tooltip` outside the kit and a native `title=` on a DOM element, which would stack a second tooltip. Existing sites are listed in `tooltips.exemptions.json` with an owner and a reason; the list only shrinks, and the test fails on stale exemptions.
+
 The Filter menu has no search field, so it opens on its first option by keyboard or pointer, even while a later entry is checked.
 
 

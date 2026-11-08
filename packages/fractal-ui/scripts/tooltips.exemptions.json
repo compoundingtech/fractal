@@ -1,0 +1,345 @@
+[
+  {
+    "path": "apps/fractal-web/src/conversation/todos/AgentTodos.tsx",
+    "rule": "native-title",
+    "detail": "<span title={`${chipWords[part._tag]} ${part.text}`}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/conversation/todos/AgentTodos.tsx",
+    "rule": "native-title",
+    "detail": "<span title={label}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/documents/DocumentPane.tsx",
+    "rule": "native-title",
+    "detail": "<span title={state._tag === 'Text' || state._tag === 'Binary' ? state.reference : undefined}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/missions/MissionDetailView.tsx",
+    "rule": "native-title",
+    "detail": "<span title=\"Working\">",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/missions/MissionDetailView.tsx",
+    "rule": "native-title",
+    "detail": "<span title=\"Done\">",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/missions/MissionDetailView.tsx",
+    "rule": "native-title",
+    "detail": "<time title={new Date(entry.at).toLocaleString()}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/missions/MissionsPane.tsx",
+    "rule": "native-title",
+    "detail": "<span title={word.explain}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/missions/explore/RowVariants.tsx",
+    "rule": "native-title",
+    "detail": "<span title={`${step.title}: ${step.state}`}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/missions/explore/parts.tsx",
+    "rule": "native-title",
+    "detail": "<span title={`${wait.kind === 'you' ? 'Waited on you' : 'Waited'}: ${wait.reason} (${span((wait.end ?? mission.now) - wa",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/missions/explore/parts.tsx",
+    "rule": "native-title",
+    "detail": "<span title={`Attempt ${attempt.n} by ${attempt.agent}: ${attempt.outcome}${attempt.reason ? ` — ${attempt.reason}` : ''",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/missions/explore/parts.tsx",
+    "rule": "native-title",
+    "detail": "<span title={`Expected: ${span(step.expectedMs ?? 0)}`}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/shell/AgentFolders.tsx",
+    "rule": "native-title",
+    "detail": "<span title={folder.name}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/shell/AgentFolders.tsx",
+    "rule": "native-title",
+    "detail": "<span title={`${workspace.title} · ${workspace.host}`}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/shell/AgentFolders.tsx",
+    "rule": "native-title",
+    "detail": "<span title={description}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/shell/AgentFolders.tsx",
+    "rule": "native-title",
+    "detail": "<span title={`Host ${workspace.host}`}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/shell/AgentFolders.tsx",
+    "rule": "native-title",
+    "detail": "<span title={title}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/shell/AgentFolders.tsx",
+    "rule": "native-title",
+    "detail": "<time title={`Last activity ${new Date(at).toLocaleString()}`}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/shell/Sidebar.tsx",
+    "rule": "native-title",
+    "detail": "<span title={item.title}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/shell/Sidebar.tsx",
+    "rule": "native-title",
+    "detail": "<span title={`${item.unread ? 'Unread' : 'Read'} · ${item.state === 'open' ? 'Open request' : 'Resolved request'}`}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/shell/Sidebar.tsx",
+    "rule": "native-title",
+    "detail": "<span title={view.mission.title}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/shell/Sidebar.tsx",
+    "rule": "native-title",
+    "detail": "<span title={`${subject.title} · ${subject.detail ?? subject.ref}`}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/shell/sidebar/StatusIcon.tsx",
+    "rule": "native-title",
+    "detail": "<span title={statuses[status].label}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/telemetry/meters.tsx",
+    "rule": "native-title",
+    "detail": "<span title={text}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/telemetry/transportMeters.tsx",
+    "rule": "native-title",
+    "detail": "<button title={detail}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "apps/fractal-web/src/ui-compat/components.tsx",
+    "rule": "raw-tooltip",
+    "detail": "<Aria.Tooltip>",
+    "owner": "tooltip-fix",
+    "reason": "Legacy ui-compat layer kept for older app screens; retire with the compat layer."
+  },
+  {
+    "path": "apps/fractal-web/src/workbench-kit/brand-icons.tsx",
+    "rule": "native-title",
+    "detail": "<span title={brand.label}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx",
+    "rule": "native-title",
+    "detail": "<button title={attachReason}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/EmbraceComposer.tsx",
+    "rule": "native-title",
+    "detail": "<span title={stopRefusal}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/MissionEta.tsx",
+    "rule": "native-title",
+    "detail": "<span title={description}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/DiffPanel.tsx",
+    "rule": "native-title",
+    "detail": "<span title={file.path}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/MailMessage.tsx",
+    "rule": "native-title",
+    "detail": "<b title={who.ref !== undefined && who.ref !== who.label ? who.ref : undefined}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx",
+    "rule": "native-title",
+    "detail": "<a title={linkTitle}>",
+    "owner": "tooltip-fix",
+    "reason": "Markdown link title from the source document (CommonMark), content rather than chrome."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/Markdown.tsx",
+    "rule": "native-title",
+    "detail": "<span title={path}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/Pane.tsx",
+    "rule": "native-title",
+    "detail": "<span title={active.title}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/Pane.tsx",
+    "rule": "native-title",
+    "detail": "<span title={tab.title}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/Sidebar.tsx",
+    "rule": "native-title",
+    "detail": "<span title={status}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/Sidebar.tsx",
+    "rule": "native-title",
+    "detail": "<button title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/Sidebar.tsx",
+    "rule": "native-title",
+    "detail": "<button title=\"Add folder\">",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/Sidebar.tsx",
+    "rule": "native-title",
+    "detail": "<button title=\"New thread\">",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/Sidebar.tsx",
+    "rule": "native-title",
+    "detail": "<button title=\"Settings\">",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/Sidebar.tsx",
+    "rule": "native-title",
+    "detail": "<button title=\"Reviews\">",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/Sidebar.tsx",
+    "rule": "native-title",
+    "detail": "<button title=\"Usage\">",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/embrace-composer/AttachmentTray.tsx",
+    "rule": "native-title",
+    "detail": "<span title={name}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx",
+    "rule": "raw-tooltip",
+    "detail": "import { Tooltip } from 'react-aria-components'",
+    "owner": "tooltip-fix",
+    "reason": "The kit hover card: a rich card tier on react-aria Tooltip with its own bounded frame (max width and height inside the viewport), not a label tooltip."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/missions/MissionListRow.tsx",
+    "rule": "native-title",
+    "detail": "<span title={label}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/missions/MissionListRow.tsx",
+    "rule": "native-title",
+    "detail": "<span title={mission.agents.map(agent => agent.label).join(', ')}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/workbench/Workbench.tsx",
+    "rule": "native-title",
+    "detail": "<span title={details.breadcrumb}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/workbench/Workbench.tsx",
+    "rule": "native-title",
+    "detail": "<span title={breadcrumb}>",
+    "owner": "tooltip-fix",
+    "reason": "Pre-existing native title; move to TruncatedLabel (clipped text) or the kit Tooltip (control label)."
+  },
+  {
+    "path": "packages/fractal-ui/src/time/HumanTime.tsx",
+    "rule": "raw-tooltip",
+    "detail": "import { Tooltip } from 'react-aria-components'",
+    "owner": "tooltip-fix",
+    "reason": "Timestamp tooltip anchored to a non-focusable time element; already renders with the shared tooltipStyles surface and bounds. Move to TooltipSurface once it has a focusable trigger."
+  }
+]
