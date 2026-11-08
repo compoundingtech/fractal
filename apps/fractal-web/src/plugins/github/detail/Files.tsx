@@ -1,7 +1,7 @@
-/** The Files subtab: patched files in the kit DiffPanel; patchless files and partial lists link out. */
+/** The Files subtab, after diffshub: patched files in the kit DiffFiles viewer (@pierre/diffs + @pierre/trees); patchless files and partial lists link out. */
 import * as stylex from '@stylexjs/stylex'
 
-import { DiffPanel } from '@fractal/ui/assistant-ui'
+import { DiffFiles } from '@fractal/ui/assistant-ui'
 import { spaceVars as space } from '../../../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import type { GithubFiles } from '../schema.ts'
 import { filesView } from './detail-model.ts'
@@ -19,7 +19,7 @@ export function FilesPanel({ files, filesUrl, landmark }: { readonly files: Gith
       </li>)}</ul>}
     </div> : null}
     {view.diffs.length === 0 ? null : <div {...stylex.props(styles.diff)}>
-      <DiffPanel open title="Files changed" landmarkContext={landmark} showSurfaceTabs={false} branchFiles={view.diffs} scopeLabel={`${view.total} ${view.total === 1 ? 'file' : 'files'}`} />
+      <DiffFiles label={`Files changed, ${landmark}`} summary={`${view.total} ${view.total === 1 ? 'file' : 'files'}`} files={view.diffs.map(file => ({ path: file.path, patch: file.diff, added: file.added, removed: file.removed, status: file.status, previousPath: file.previousPath }))} />
     </div>}
   </>
 }
