@@ -158,6 +158,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case invalidAnswer, notAnswerable
     case issuerRequired
     case pairingOriginRequired
+    case pairingRestartRequired
     case suspendAuthoredSessionSelection
     case legacyActionReceiptUntrusted
     case arrangementExists
@@ -247,6 +248,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "stale-fence": .staleFence
         case "issuer-required": .issuerRequired
         case "pairing-origin-required": .pairingOriginRequired
+        case "pairing-restart-required": .pairingRestartRequired
         case "invalid-answer": .invalidAnswer; case "not-answerable": .notAnswerable
         case "suspend-authored-session-selection": .suspendAuthoredSessionSelection
         case "legacy-action-receipt-untrusted": .legacyActionReceiptUntrusted
@@ -338,6 +340,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .staleFence: "stale-fence"
         case .issuerRequired: "issuer-required"
         case .pairingOriginRequired: "pairing-origin-required"
+        case .pairingRestartRequired: "pairing-restart-required"
         case .invalidAnswer: "invalid-answer"; case .notAnswerable: "not-answerable"
         case .suspendAuthoredSessionSelection: "suspend-authored-session-selection"
         case .legacyActionReceiptUntrusted: "legacy-action-receipt-untrusted"

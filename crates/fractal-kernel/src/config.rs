@@ -30,6 +30,15 @@ pub enum WorkerIngressGenerationCheck {
     Enforce,
 }
 
+/// Temporary migration allowance for one exact existing pairing completion.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct LegacyPairingAllowance {
+    pub completion_id: String,
+    pub record_hash: String,
+    pub until_unix_ms: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -70,6 +79,9 @@ pub struct Config {
     pub lanes: Option<Lanes>,
     /// The concrete person represented by trusted local product commands.
     pub person: Option<String>,
+    /// Operator-selected existing pairings; each allowance has a fixed maximum deadline.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pairing_legacy_allowances: Vec<LegacyPairingAllowance>,
     pub fleet_id: Option<String>,
     pub shared_secret_file: Option<PathBuf>,
     pub state_dir: PathBuf,
@@ -188,6 +200,15 @@ pub struct ReadinessSloConfig {
     pub member: String,
     pub reviewer: String,
     pub evidence_file: PathBuf,
+    /// Optional, root-owned retained short readings for the read-only Usage row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained_pairs_file: Option<PathBuf>,
+    /// Replace independent weekly routing with a durable early/weekly readiness case.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared_case: bool,
+    /// Optional informational recipient; never becomes the actionable owner.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<String>,
 }
 
 /// An operator-selected external quota source; clients cannot override its URL.
@@ -724,6 +745,7 @@ impl Default for Config {
             seat_admission: None,
             lanes: None,
             person: None,
+            pairing_legacy_allowances: Vec::new(),
             fleet_id: None,
             shared_secret_file: None,
             state_dir,

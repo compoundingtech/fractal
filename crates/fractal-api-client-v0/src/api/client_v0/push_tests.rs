@@ -9,7 +9,7 @@ const TOKEN: &str = "a1b2c3d4e5f60123456789abcdef00112";
 fn pair(state: &AppState) {
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: GRANT.into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some(PERSON.into()),
@@ -116,7 +116,7 @@ fn push_registration_capability_is_granted_only_on_the_pairing_issuer() {
     let root = tempfile::tempdir().unwrap();
     let state = tests::test_state_named(root.path(), "push-device-test");
     pair(&state);
-    let mut grant = state
+    let grant = state
         .store
         .claims_for_subject_kind_at(GRANT, "custom.client.pairing-completed", None, true, 1)
         .unwrap()
@@ -128,9 +128,11 @@ fn push_registration_capability_is_granted_only_on_the_pairing_issuer() {
         .find(|entry| entry["id"] == "push-registration")
         .unwrap();
     assert_eq!(capability["state"], "granted");
-    grant.origin = "another-member".into();
-    let session = paired_client_session(&state, &grant, "fabric-loopback", false).unwrap();
-    let capability = capabilities(&state, &session)
+    let other_root = tempfile::tempdir().unwrap();
+    let other = tests::test_state_named(other_root.path(), "another-member");
+    super::pairing_order_tests::replicate(&state, &other);
+    let session = paired_client_session(&other, &grant, "fabric-loopback", false).unwrap();
+    let capability = capabilities(&other, &session)
         .into_iter()
         .find(|entry| entry["id"] == "push-registration")
         .unwrap();

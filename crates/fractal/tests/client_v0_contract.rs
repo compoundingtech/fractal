@@ -2257,6 +2257,12 @@ async fn nonissuer_pairing_revoke_preserves_public_error_envelope() {
     let fleet = "issuer-envelope-proof";
     issuer.store.bind_fleet(fleet).unwrap();
     receiver.store.bind_fleet(fleet).unwrap();
+    let key = Arc::new(fractal_daemon::fleet::MemberKey::generate().unwrap().0);
+    for state in [&issuer, &receiver] {
+        state.store.pin_fleet_anchor(key.public()).unwrap();
+    }
+    issuer.store.set_member_key(Some(key.clone())).unwrap();
+    issuer.store.admit_fleet_anchor(fleet, key.public(), "listening").unwrap();
     let issuer_app = fractal_daemon::api::router(issuer.clone());
     let (status, challenge) = client_post_json(
         issuer_app.clone(),
@@ -2390,7 +2396,7 @@ async fn pairing_is_single_use_and_fenced_actions_are_idempotent() {
     let device = paired["value"]["device_id"].as_str().unwrap();
     state
         .store
-        .append_claim(&fractal_daemon::model::ClaimInput {
+        .append_client_operation_claim(&fractal_daemon::model::ClaimInput {
             subject: "custom/client/pairing-expired-inventory".into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some("person/alex".into()),

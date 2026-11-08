@@ -55,6 +55,7 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         "vendor/libghostty-vt-sys/**",
         "scripts/release-fractal*",
         "scripts/release_artifact.py",
+        "scripts/release_draft_recovery.py",
         "scripts/release-fractal-embed.mjs",
         "apps/fractal-web/**",
         "scripts/release_notes*",

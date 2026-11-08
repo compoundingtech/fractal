@@ -1856,6 +1856,7 @@ export type ErrorCode = (
   | "legacy-action-receipt-untrusted"
   | "issuer-required"
   | "pairing-origin-required"
+  | "pairing-restart-required"
   | "suspend-authored-session-selection"
   | "stale-fence"
   | "cursor-gap"

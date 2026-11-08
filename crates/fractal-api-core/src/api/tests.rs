@@ -12517,6 +12517,71 @@ async fn claims_endpoint_returns_bounded_cursor_pages() {
 }
 
 #[tokio::test]
+async fn ordinary_claim_writes_cannot_create_pairing_records() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for kind in [
+        "custom.client.pairing-begun",
+        "custom.client.pairing-completed",
+        "custom.client.pairing-revoked",
+        "custom.client.pairing.device-grant",
+        "custom.client.pairing-future",
+    ] {
+        for subject in ["custom/client/example", "custom/client/pairing-example"] {
+            let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+                "subject": subject, "kind": kind, "actor": "person/alex",
+                "fields": {"pairing_operation_version": 1, "person_id": "person/alex"}
+            })).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{kind}: {body}");
+            assert_eq!(body["code"], "claim-write-forbidden");
+        }
+    }
+    for subject in ["custom/client/pairing-example", "custom/client/pairing.browser"] {
+        let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+            "subject": subject, "kind": "custom.example.note", "fields": {}
+        })).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{subject}: {body}");
+        assert_eq!(body["code"], "claim-write-forbidden");
+    }
+    let (status, body) = json_request(app, "/v1/claims", json!({
+        "subject":"custom/client/operation-example", "kind":"client.operation-authorized",
+        "actor":"person/alex", "fields":{"record_id":"example","record_hash":"example"}
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "claim-write-forbidden");
+    assert!(state.store.claims_for_kind_at(
+        "custom.client.pairing-completed", None, true, 10,
+    ).unwrap().claims.is_empty());
+}
+
+#[tokio::test]
+async fn ordinary_claim_writes_cannot_create_terminal_records() {
+    let root = tempfile::tempdir().unwrap();
+    let app = router(state(root.path()));
+    for kind in [
+        "custom.client.terminal-attached",
+        "custom.client.terminal-consumed",
+        "custom.client.terminal-detached",
+    ] {
+        for subject in ["custom/client/example", "custom/client/terminal-attachment-example"] {
+            let (status, body) = json_request(app.clone(), "/v1/claims", json!({
+                "subject": subject, "kind": kind, "actor": "person/alex",
+                "fields": {"terminal_operation_version": 1}
+            })).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{kind}: {body}");
+            assert_eq!(body["code"], "claim-write-forbidden");
+        }
+    }
+    let (status, body) = json_request(app, "/v1/claims", json!({
+        "subject": "custom/client/terminal-attachment-example", "kind": "custom.example.note",
+        "fields": {}
+    })).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+    assert_eq!(body["code"], "claim-write-forbidden");
+}
+
+#[tokio::test]
 async fn public_claim_admission_and_idempotency_use_the_exported_schema() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
