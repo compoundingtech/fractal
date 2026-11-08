@@ -92,10 +92,13 @@ export const useReadPosition = ({ conversation, items, visible, enabled, sendKey
   return { ...(unread?.firstId === undefined ? {} : { unreadFrom: unread.firstId }), onSeen }
 }
 
-/** The newest prose the roster knows of: the daemon's `last_prose_at`, else the last activity of a seat that is not working. */
+/**
+ * The newest prose the roster knows of: the daemon's `last_prose_at`, the same signal the TUI and
+ * the phone mark from. Last activity also moves on tool calls and prompts, so it stands in for
+ * nothing: without the field, only a loaded window's count marks a conversation.
+ */
 export const latestProseAt = (agent: Agent): number | undefined =>
-  agent.lastProseAt?._tag === 'Known' ? agent.lastProseAt.value
-    : agent.activity !== 'working' && agent.lastActivityAt._tag === 'Known' ? agent.lastActivityAt.value : undefined
+  agent.lastProseAt?._tag === 'Known' ? agent.lastProseAt.value : undefined
 
 /** Unread marks for conversations by agent ref: an exact count where a window saw them, else a dot. */
 export const useUnreadMarks = (agents: readonly Agent[]): ReadonlyMap<string, UnreadMark> => {
