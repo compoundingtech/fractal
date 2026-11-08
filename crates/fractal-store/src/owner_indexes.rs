@@ -23,6 +23,30 @@ pub const INDEX_NAMES: [&str; 16] = [
     "claims_roster_nonterminal_accepted_index",
 ];
 
+/// Diagnostic only: never change startup admission or schema installation on probe failure.
+pub(crate) fn warn_before_startup_build(connection: &Connection) {
+    let missing = (|| -> rusqlite::Result<usize> {
+        let mut query = connection.prepare_cached(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1",
+        )?;
+        let mut missing = 0;
+        for name in INDEX_NAMES {
+            if query.query_row([name], |_| Ok(())).optional()?.is_none() {
+                missing += 1;
+            }
+        }
+        Ok(missing)
+    })();
+    match missing {
+        Ok(0) => {}
+        Ok(missing_index_count) => tracing::warn!(
+            missing_index_count,
+            "Missing owner indexes will be built synchronously, blocking store startup; run the NEW executable's store prepare-indexes --store <existing-store> offline and fenced before starting the daemon; duration and peak space NOT MEASURED"
+        ),
+        Err(error) => tracing::warn!(%error, "Could not inspect missing owner indexes before startup build"),
+    }
+}
+
 fn install(connection: &Connection) -> Result<()> {
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h00d5d1e046d7 owner=fractal_store::owner_indexes TODO=trace-statement-and-value-representation */ smallclaims::store::TRANSPORT_PAIR_INDEX)?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc41ef8140f43 owner=fractal_store::owner_indexes TODO=trace-statement-and-value-representation */ &crate::store::RUNTIME_ID_INDEX)?;

@@ -5,7 +5,7 @@
   "schema": {"status": "changed", "detail": "Eleven additive local partial indexes on claims, installed by the existing owner-index preparation path. No replicated or claim schema change."},
   "rules": {"status": "none", "detail": "No checkpoint rule change."},
   "compatibility": {"status": "none", "detail": "Roster response fields and source authority are unchanged. Full generic status/card payloads remain unchanged. Roster and generic cached cards are separated by shape."},
-  "downtime": {"status": "none", "detail": "No required downtime; first-time index construction can delay opening large stores."},
-  "manual": {"status": "changed", "detail": "Prepare owner indexes offline on large stores before rollout; measure index space and ingest cost alongside cold-roster latency."},
-  "recovery": {"status": "none", "detail": "Reverting returns to the history fold; additive indexes may remain and are not replicated."}
+  "downtime": {"status": "changed", "detail": "Before starting the daemon on the NEW executable, stop all writers and run that NEW executable's store prepare-indexes --store <existing-store> offline under the directory lifetime fence and SQLite writer reservation. Preparation duration and peak space on a ~50e9-byte store: NOT MEASURED. Skipping preparation moves the synchronous index build into daemon startup and blocks availability until it completes."},
+  "manual": {"status": "changed", "detail": "Run the NEW executable's store prepare-indexes --store <existing-store> before starting its daemon, offline and fenced; require the schema gate and WAL checkpoint to finish. An older executable does not know these eleven indexes. Preparation duration and space cost: NOT MEASURED. Measure on a backup copy and budget peak disk before rollout; skipping this step builds missing indexes synchronously at startup."},
+  "recovery": {"status": "changed", "detail": "Rollback returns reads to the history fold but keeps the additive indexes. Older binaries continue maintaining them, retaining extra write and storage cost; rollback does not reclaim that space. Indexes are local and are not replicated."}
 }
