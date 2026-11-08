@@ -754,20 +754,20 @@ class GovernedTest(unittest.TestCase):
         self.assertEqual(governed[1:], ['BUILDS_SLICE_ACTIVE=1', 'check'], why)
         self.assertEqual(Path(governed[0]).name, 'env', why)
 
-    def test_gate_slot_heavy_argv_uses_the_host_disk_profile(self):
+    def test_gate_slot_heavy_argv_needs_no_optional_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             gate = Path(tmp, 'gate-slot')
             calls, ran = Path(tmp, 'calls'), Path(tmp, 'ran')
             gate.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > ' + shlex.quote(str(calls)) + '\n'
-                            'echo "gate-slot: waiting: disk=cargo-cold below host floor + headroom" >&2\n'
+                            'echo "gate-slot: waiting: all heavy slots occupied" >&2\n'
                             'while [ "$1" != -- ]; do shift; done\nshift\nexec "$@"\n')
             gate.chmod(0o755)
             argv = st_test.heavy_admission(['/bin/sh', '-c', f': > {shlex.quote(str(ran))}'], str(gate))
             done = subprocess.run(argv, capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertTrue(ran.exists())
-            self.assertEqual(calls.read_text().splitlines()[:5], ['--class', 'heavy', '--profile', 'disk=cargo-cold', '--'])
-            self.assertIn('gate-slot: waiting: disk=cargo-cold below host floor + headroom', done.stderr)
+            self.assertEqual(calls.read_text().splitlines(), ['--class', 'heavy', '--', '/bin/sh', '-c', f': > {shlex.quote(str(ran))}'])
+            self.assertIn('gate-slot: waiting: all heavy slots occupied', done.stderr)
 
     def test_run_admission_is_not_reacquired_for_a_continuation_or_disabled_or_light_run(self):
         for environment, checks in (({st_test.RUN_ADMITTED: '1'}, ['linux-gate']),
@@ -4086,13 +4086,13 @@ finally:
         def launch(executable, command, env):
             calls.append(command)
             self.assertEqual(executable, str(gate))
-            self.assertEqual(command[:6], [str(gate), '--class', 'heavy', '--profile', 'disk=cargo-cold', '--'])
-            self.assertEqual(command[6:8], [sys.executable, str(ROOT / 'scripts/st-test')])
+            self.assertEqual(command[:4], [str(gate), '--class', 'heavy', '--'])
+            self.assertEqual(command[4:6], [sys.executable, str(ROOT / 'scripts/st-test')])
             self.assertEqual(env[st_test.RUN_ADMITTED], '1')
             held.append(True)
             try:
                 with mock.patch.dict(os.environ, env, clear=True):
-                    return st_test.main(command[8:])
+                    return st_test.main(command[6:])
             finally:
                 held.pop()
 
@@ -4119,7 +4119,7 @@ finally:
         tmp = Path(self.tmp.name)
         bin_dir, ran = tmp / 'admission-bin', tmp / 'payload-ran'
         bin_dir.mkdir()
-        reason = 'gate-slot: refusing admission: disk=cargo-cold free=123 bytes below floor + headroom; wait for reclamation'
+        reason = 'gate-slot: refusing admission: heavy queue wait expired'
         gate = bin_dir / 'gate-slot'
         gate.write_text(f'#!/bin/sh\nprintf "%s\\n" {shlex.quote(reason)} >&2\nexit 75\n')
         gate.chmod(0o755)

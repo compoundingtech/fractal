@@ -52,8 +52,8 @@ It runs `nix develop` and `pnpm install` from the tree under test, on this machi
 signing key within reach: code in that tree runs here. That is the cooperative trust of docs/st3/gate-evidence.md
 ("Host keys"); do not run it on a branch you would not run by hand.
 
-Runs selecting heavy checks take exactly one `gate-slot --class heavy --profile disk=cargo-cold` admission when gate-slot is
-on PATH. All checks share its capped scope and disk reservation until the run ends; host wait/refusal reasons reach the terminal.
+Runs selecting heavy checks take exactly one `gate-slot --class heavy` admission when gate-slot is
+on PATH. All checks share its capped scope until the run ends; host wait/refusal reasons reach the terminal.
 Without gate-slot (standalone use), the existing per-check caller/seat/builds.slice cap is used when available, otherwise checks
 run without a host cap. ST_EVIDENCE_GOVERN=off explicitly disables this wrapping.
 
@@ -998,8 +998,8 @@ def oom_note(caps, before):
 
 
 def heavy_admission(argv, gate_slot):
-    """The host owns the disk profile and capped scope; never duplicate its capacity probes here."""
-    return [gate_slot, '--class', 'heavy', '--profile', 'disk=cargo-cold', '--'] + argv
+    """The host owns the capped scope; never duplicate its capacity probes here."""
+    return [gate_slot, '--class', 'heavy', '--'] + argv
 
 
 RUN_ADMITTED = 'ST_EVIDENCE_RUN_ADMITTED'
@@ -1016,7 +1016,7 @@ def admit_run(argv, checks, environment):
     gate_slot = shutil.which('gate-slot')
     if not gate_slot:
         return None
-    print('fractal-test: run waits for gate-slot heavy admission (disk=cargo-cold); host wait/refusal reasons follow',
+    print('fractal-test: run waits for gate-slot heavy admission; host wait/refusal reasons follow',
           file=sys.stderr, flush=True)
     child_environment = dict(environment, **{RUN_ADMITTED: '1'})
     # Replace the outside process: gate-slot owns signals and the complete runner lifetime, with no waiting parent left outside its scope.
@@ -3613,7 +3613,7 @@ def run_main(argv, cleanup):
         os.environ['ADMISSION_RUN'] = f'st-test-{os.getpid()}@{time.time_ns()}'
     parser = argparse.ArgumentParser(
         description=__doc__.split('\n\n')[0],
-        epilog='Heavy runs take one gate-slot --class heavy --profile disk=cargo-cold admission for the entire run when gate-slot is '
+        epilog='Heavy runs take one gate-slot --class heavy admission for the entire run when gate-slot is '
                'on PATH. Without gate-slot, standalone use retains the existing per-check host cap when available, otherwise no host cap. '
                'ST_EVIDENCE_GOVERN=off explicitly disables wrapping.')
     parser.add_argument('--check', action='append', default=[], metavar='NAME', help='only this check (repeatable)')
