@@ -6983,6 +6983,7 @@ fn open_daemon_store(
         None => Store::open(&config.store_path(), &config.node)?,
     };
     store.configure_pairing_legacy_allowances(&config.pairing_legacy_allowances)?;
+    store.set_usage_limits_writers(config.usage_limits.as_ref().map(|usage| usage.writers.clone()).unwrap_or_default())?;
     if let Some(person) = &config.person {
         let _ = store.question_principal_default.set(person.clone());
     }
@@ -10705,11 +10706,13 @@ fn render_slo_list(rows: &[Value]) -> String {
                     text(row, "current"),
                     text(row, "window"),
                     left(row),
+                    text(row, "source"),
+                    text(row, "host"),
                 ]
             })
             .collect::<Vec<_>>();
-        let header = ["STATUS", "ID", "TARGET", "CURRENT", "WINDOW", "LEFT"].map(str::to_owned);
-        let widths: Vec<usize> = (0..6)
+        let header = ["STATUS", "ID", "TARGET", "CURRENT", "WINDOW", "LEFT", "SOURCE", "HOST"].map(str::to_owned);
+        let widths: Vec<usize> = (0..8)
             .map(|column| {
                 std::iter::once(&header)
                     .chain(&table)
@@ -10823,6 +10826,9 @@ fn render_slo_explanation(row: &Value) -> String {
     let _ = writeln!(output, "{}  {} · {}", text("id"), text("kind"), text("status"));
     let _ = writeln!(output, "TARGET   {}", text("target"));
     let _ = writeln!(output, "CURRENT  {} · {}", text("current"), text("window"));
+    if row["source"].is_string() {
+        let _ = writeln!(output, "SOURCE   {} · {}", text("source"), text("host"));
+    }
     if let Some(left) = row["remaining_percent"].as_f64() {
         let _ = writeln!(output, "LEFT     {left:.0}% of the {}", if row["kind"] == "budget" { "allowance" } else { "error budget" });
     }
