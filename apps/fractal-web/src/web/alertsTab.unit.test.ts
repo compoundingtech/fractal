@@ -54,11 +54,35 @@ describe('Alerts tab projection', () => {
         waiting: { path: 'release/deploy', step: 'step-run/release/deploy' } },
     })
     const row = alertsTabRows([served], now)[0]!
-    expect(row.line2).toBe('builder · release/deploy · answer within 2h, or “Skip” applies')
+    // Who raised it and the step it holds have their own places on the row; line 2 keeps the deadline.
+    expect(row.line2).toBe('answer within 2h, or “Skip” applies')
+    expect(row).toMatchObject({ agentLabel: 'builder', step: 'release/deploy' })
     expect(row.conversation).toBe('agent/builder')
     expect(row.mission).toBe('mission/release')
     expect(alertsTabRows([item({ deadline_at: '2026-11-01T14:00:00Z' })], now)[0]!.line2).toBe('')
     expect(alertsTabRows([item({ default_answer: { id: 'skip', label: 'Skip' } })], now)[0]!.line2).toBe('')
     expect(alertsTabRows([item({ requester_id: 'agent/not-served', step_run_id: 'step-run/not-served' })], now)[0]!.line2).toBe('')
+  })
+})
+
+describe('Alerts tab context', () => {
+  const blocked = { step: 'review-rename', goal: 'Review the rename', step_run_id: 'step-run/rename/review', attempt: 0 }
+  it('names the asking agent, its mission and the waiting step from served fields', () => {
+    const [row] = alertsTabRows([item({ requester_id: 'agent/example/reviewer', mission_id: 'mission/example/load-user-rename', blocked,
+      presentation: { tier: 'stopped', kind: 'request', agent: null, raised_by: { id: 'agent/example/reviewer', label: 'Atlas Reviewer' }, waiting: null } })], now)
+    expect(row).toMatchObject({ agent: 'agent/example/reviewer', agentLabel: 'Atlas Reviewer', mission: 'mission/example/load-user-rename', step: 'review-rename' })
+    // The agent and step have their own places on the row; line 2's remainder does not repeat them.
+    expect(row!.line2).toBe('')
+  })
+  it('takes the step from the served waiting path when no step run is blocked', () => {
+    const [row] = alertsTabRows([item({ conversation_id: 'agent/example/builder', mission_id: 'mission/example/x',
+      presentation: { tier: 'stopped', kind: 'request', agent: null, raised_by: null, waiting: { path: 'fix-worker', step: 'step-run/x/fix' } } })], now)
+    expect(row).toMatchObject({ agent: 'agent/example/builder', step: 'fix-worker' })
+  })
+  it('leaves agent, mission and step out when nothing serves them', () => {
+    const [row] = alertsTabRows([item()], now)
+    expect(row!.agent).toBeUndefined()
+    expect(row!.mission).toBeUndefined()
+    expect(row!.step).toBeUndefined()
   })
 })
