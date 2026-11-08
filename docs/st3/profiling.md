@@ -522,17 +522,16 @@ continuations are allowed. A longer chain leaves that operation pending while
 other notices and measured recovery continue. No secret or new journal state
 is needed to replay a continuation.
 Replicated operation conflicts remain occupied. Each read retains at most 16
-native occupants, preferring local daemon receipt families before applying the
-limit. An extra row detects overflow. Expected receipts are validated even
-when other occupants overflow that window. Without a matching receipt, overflow
-blocks the operation rather than treating it as vacant.
+native occupants from a plain bounded seek of the existing operation-ID index;
+an extra row detects overflow. There is no receipt ranking or full-history sort.
+Expected receipts in the window are validated even on overflow. Without a
+matching receipt in the window, overflow blocks the operation, never marks it vacant.
 Existing continuations are searched before a new receipt is written. One shared
 64-visit allowance counts reads and occupant validations across all branches;
 exhaustion blocks that operation nonfatally. Conflict diagnostics and their log
 entry are deduplicated by the original operation key across replay and restart.
-Bounded occupant discovery uses indexed daemon-family and remaining-occupant
-windows, not a full-history priority sort. Priority is not authentication;
-every receipt still requires full expected-record validation.
+No new index or startup migration is needed for bounded occupant discovery.
+Every receipt still requires full expected-record validation.
 A blocked phase lookup is not an absent failure: measured recovery remains
 incomplete, retaining the case and pending recovery even when an existing
 continuation receipt cannot be reached within the bounded window.

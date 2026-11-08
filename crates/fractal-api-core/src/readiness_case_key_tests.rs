@@ -330,7 +330,7 @@ fn replicated_occupants(store: &Store, key: &str, count: usize, serial: &mut usi
 }
 
 #[test]
-fn overflowing_occupants_prefer_daemon_receipts_and_do_not_stop_sampler_recovery() {
+fn overflowing_occupants_block_lookup_without_stopping_sampler_or_sibling_recovery() {
     let (dir, mut policy, store) = fixture();
     let journal = dir.path().join("readiness-case.json");
     policy.config.evidence_file = dir.path().join("weekly-evidence.json");
@@ -340,16 +340,13 @@ fn overflowing_occupants_prefer_daemon_receipts_and_do_not_stop_sampler_recovery
     let end = (MINUTES + 10) * MINUTE_MS;
     let mut admission = Admission::load(&journal, &policy.config).unwrap();
     let opening = plan(&mut admission, &policy, &journal, end);
-    assert!(record(&store, &policy.config, &opening).unwrap());
-    let expected = recorded_phase(&store, &opening, "early");
     let mut serial = 0;
     let root = format!("{}:early", opening.episode);
     replicated_occupants(&store, &root, 20, &mut serial);
     let (receipts, overflow) = store.operation_claims(&root).unwrap();
     assert!(overflow);
     assert_eq!(receipts.len(), 16);
-    assert_eq!(receipts[0].id, expected.id, "daemon priority precedes immutable ID ordering");
-    assert_eq!(recorded_phase(&store, &opening, "early").id, expected.id);
+    assert!(matches!(phase_receipt(&store, &opening, "early").unwrap(), keys::Lookup::Blocked));
     let notice_root = format!("{}:notice:early", opening.episode);
     replicated_occupants(&store, &notice_root, 20, &mut serial);
     let mut remaining = keys::MAX_VISITS;
@@ -363,7 +360,10 @@ fn overflowing_occupants_prefer_daemon_receipts_and_do_not_stop_sampler_recovery
     let met = reading(end + 2 * MINUTE_MS, 0);
     fs::write(&policy.config.evidence_file, serde_json::to_vec(&met).unwrap()).unwrap();
     run_sampler(&policy, &store, met.end_ms).unwrap();
-    assert!(Admission::load(&journal, &policy.config).unwrap().weekly.recovered);
+    let pending = Admission::load(&journal, &policy.config).unwrap();
+    assert!(!pending.weekly.recovered);
+    assert!(pending.weekly.pending.is_some());
+    assert_eq!(pending.case.as_ref().unwrap().episode, opening.episode);
     assert_eq!(store.operational_failure(&opening.episode).unwrap().unwrap().status, "resolved");
     let index = store.index().unwrap();
     run_sampler(&policy, &store, met.end_ms).unwrap();

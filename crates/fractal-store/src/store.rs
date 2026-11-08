@@ -4726,55 +4726,27 @@ impl Store {
     /// Native occupants of an operation key, including divergent replicated requests.
     /// Unlike `operation_claim`, this does not interpret a conflicted registry entry as
     /// absence. Returns at most 16 occupants plus an explicit overflow flag.
-    /// Expected local daemon families take precedence over other records in the
-    /// bounded window. Replaced repair claims do not participate in ownership.
+    /// Uses only the existing operation-ID index, with no full-history sort or
+    /// receipt ranking. Replaced repair claims do not participate in ownership.
     pub fn operation_claims(&self, key: &str) -> Result<(Vec<ClaimRecord>, bool)> {
         let connection = self.readers.get();
         let operation_id = operation_id_for_key(key);
-        let mut claims = Vec::new();
-        // Equality/range seeks of the readiness occupant index avoid sorting the
-        // complete operation history. Local daemon families have their own window;
-        // this is discovery priority only, never receipt authentication.
-        macro_rules! occupant_query {
-            ($origin_filter:literal) => {
-                concat!(
-                    "SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
-                            claims.origin, claims.actor, claims.body, claims.predecessors, claims.accepted_at_unix_ms
-                     FROM claims INDEXED BY claims_operation_readiness_occupants
-                     WHERE json_extract(body, '$._operation.id')=?1
-                       AND CASE WHEN actor='daemon/runtime'
-                           AND kind IN ('operational.failure','operational.recovered','message.sent')
-                           THEN 1 ELSE 0 END=?2 AND ", $origin_filter,
-                    " AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims
-                                     WHERE projection_digest_repaired_claims.id=claims.id)
-                     ORDER BY origin, id LIMIT ?4"
-                )
-            };
-        }
-        for (family, query) in [
-            (1, occupant_query!("origin=?3")),
-            (0, occupant_query!("?3 IS NOT NULL")),
-            (1, occupant_query!("origin<?3")),
-            (1, occupant_query!("origin>?3")),
-        ] {
-            let mut statement = connection.prepare_cached(query)?;
-            let rows = statement.query_map(
-                params![operation_id, family, self.origin(), 17 - claims.len()],
-                claim_from_row,
-            )?;
-            for row in rows { claims.push(row?); }
-            if claims.len() == 17 { break; }
-        }
+        let mut statement = connection.prepare_cached(
+            "SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
+                    claims.origin, claims.actor, claims.body, claims.predecessors, claims.accepted_at_unix_ms
+             FROM claims INDEXED BY claims_operation_index
+             WHERE json_extract(body, '$._operation.id')=?1
+               AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims
+                              WHERE projection_digest_repaired_claims.id=claims.id)
+             LIMIT 17",
+        )?;
+        let mut claims = statement.query_map([&operation_id], claim_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         if let Some(shard) = messages_shard::shard(self)
             && let Some(claim) = messages_shard::stream_operations::operation_claim(&shard, &operation_id)? {
             claims.push(claim);
         }
-        claims.sort_unstable_by(|left, right| {
-            let priority = |claim: &ClaimRecord| !(claim.origin == self.origin()
-                && claim.actor.as_deref() == Some("daemon/runtime")
-                && matches!(claim.kind.as_str(), "operational.failure" | "operational.recovered" | "message.sent"));
-            priority(left).cmp(&priority(right)).then_with(|| left.id.cmp(&right.id))
-        });
+        claims.sort_unstable_by(|left, right| left.id.cmp(&right.id));
         claims.dedup_by(|left, right| left.id == right.id);
         let overflow = claims.len() > 16;
         claims.truncate(16);

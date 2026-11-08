@@ -573,13 +573,6 @@ ON claims(length(accepted_at_unix_ms), accepted_at_unix_ms, store_index);
 CREATE INDEX IF NOT EXISTS claims_operation_index
 ON claims(json_extract(body, '$._operation.id'))
 WHERE json_extract(body, '$._operation.id') IS NOT NULL;
-CREATE INDEX IF NOT EXISTS claims_operation_readiness_occupants
-ON claims(json_extract(body, '$._operation.id'),
-          CASE WHEN actor='daemon/runtime'
-               AND kind IN ('operational.failure','operational.recovered','message.sent')
-               THEN 1 ELSE 0 END,
-          origin, id)
-WHERE json_extract(body, '$._operation.id') IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS operations (
     id TEXT PRIMARY KEY,
