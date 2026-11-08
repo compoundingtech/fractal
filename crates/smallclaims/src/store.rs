@@ -878,6 +878,9 @@ pub struct Store {
     admission_schema_digest: std::sync::OnceLock<String>,
     /// The membership last folded, and the `fleet_generation` it was folded at.
     pub membership_cache: Mutex<Option<(i64, crate::fleet::Membership)>>,
+    /// Request-only sealed folds, which may omit local batches not yet sealed.
+    /// Never used by the sealing path's `membership_cache` fast path.
+    sealed_membership_cache: Mutex<Option<(i64, crate::fleet::Membership)>>,
     /// Where the scan for signatures missing on admitted envelopes stands.
     signature_backfill: Mutex<signature_backfill::SignatureBackfill>,
     /// Read-only sealed view; never populated with the client's local-signer fallback.
@@ -1336,6 +1339,7 @@ impl Store {
             admission: Mutex::new(()),
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
+            sealed_membership_cache: Mutex::new(None),
             fleet_authority: std::sync::OnceLock::new(),
             admitted_fleet_generation: AtomicI64::new(i64::MIN),
             signature_backfill: Mutex::default(),
@@ -2636,8 +2640,13 @@ impl Store {
             {
                 return Ok(membership.clone());
             }
-            // Do not populate the sealing path's cache with a fold that can omit local batches.
-            fleet_membership_tx(&connection)
+            // Keep cold request folds separate: they can omit unsealed local batches,
+            // so publishing them into membership_cache would bypass the sealing path.
+            sealed_membership_tx(
+                &connection,
+                &mut self.sealed_membership_cache.lock()
+                    .unwrap_or_else(PoisonError::into_inner),
+            )
         })
     }
 
@@ -2933,6 +2942,56 @@ impl Store {
             }
         }
         Ok(false)
+    }
+
+    /// Whether an accepted copy was signed by a keyed fleet member acting as its origin.
+    /// Requires a valid record in a validated or degraded envelope, a signature key authorized
+    /// for that writer's sequence, and a cryptographically valid signature in this store's
+    /// fleet/shard domain. Invalid sibling records do not disqualify a valid record in a
+    /// degraded envelope. Legacy and unkeyed writers do not authenticate provenance. Reads only sealed
+    /// membership; this query never seals local batches or scans the replication log.
+    pub fn claim_has_authenticated_member_writer(&self, claim_id: &str) -> Result<bool> {
+        self.read_snapshot(|_| {
+            let membership = self.fleet_membership_sealed()?;
+            let connection = self.readers.get();
+            let Some(fleet_id) = self.signing_fleet_id(&connection)? else {
+                return Ok(false);
+            };
+            let shard = fleet_meta(&connection, "shard_id")?;
+            let mut statement = connection.prepare_cached(
+                "SELECT records.writer, records.sequence, records.envelope_hash,
+                        signatures.member_key, signatures.signature
+                 FROM replica_records AS records
+                 JOIN claims ON claims.id=records.claim_id AND claims.origin=records.writer
+                 JOIN replica_envelopes AS envelopes
+                   USING (writer, sequence, envelope_hash)
+                 JOIN replica_envelope_signatures AS signatures
+                   USING (writer, sequence, envelope_hash)
+                 WHERE records.claim_id=?1 AND records.state='valid'
+                   AND envelopes.receipt_state IN ('validated', 'degraded')",
+            )?;
+            let rows = statement.query_map([claim_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, u64>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (writer, sequence, hash, key, signature) = row?;
+                if matches!(
+                    membership.window(&writer, sequence),
+                    crate::fleet::Window::Keyed(keys) if keys.contains(&key)
+                ) && VerifiedEnvelopeSignature::verify(
+                    shard.as_deref(), &fleet_id, &writer, sequence, &hash, &key, &signature,
+                ).is_some() {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
     }
 
 
@@ -3276,6 +3335,22 @@ fn fleet_generation(connection: &Connection) -> Result<i64> {
     Ok(connection
         .prepare_cached("SELECT value FROM fleet_generation WHERE id=1")?
         .query_row(/* sqlite-large-value: allow-for-now lv-h339ecb1b2413 owner=smallclaims::store TODO=trace-statement-and-value-representation */ [], |row| row.get(0))?)
+}
+
+// The caller holds one snapshot for both the generation read and membership fold.
+fn sealed_membership_tx(
+    connection: &Connection,
+    cache: &mut Option<(i64, crate::fleet::Membership)>,
+) -> Result<crate::fleet::Membership> {
+    let generation = fleet_generation(connection)?;
+    if let Some((cached_generation, membership)) = cache.as_ref()
+        && *cached_generation == generation
+    {
+        return Ok(membership.clone());
+    }
+    let membership = fleet_membership_tx(connection)?;
+    *cache = Some((generation, membership.clone()));
+    Ok(membership)
 }
 
 // The caller holds a read snapshot. Unlike the client view this has no local signer;

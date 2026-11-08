@@ -48,6 +48,8 @@
 //! - `ST_BENCH_DIR` keeps generated stores for the next run, as for `daemon_bench`.
 //! - `ST_COST_REPORT` writes the measurements as JSON to that path.
 
+mod assistant_admission;
+
 use fractal_daemon::ConversationReadsStore;
 use fractal_daemon::CustomStore;
 use fractal_daemon::AdhocWorkStore;
