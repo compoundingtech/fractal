@@ -18,6 +18,9 @@ export interface SettingsControlProps {
   readonly scheme: SettingsScheme
   readonly onSchemeChange: (scheme: SettingsScheme) => void
   readonly build?: SettingsBuild | undefined
+  /** Open from elsewhere, such as the palette; the trigger owns it when absent. */
+  readonly isOpen?: boolean | undefined
+  readonly onOpenChange?: ((isOpen: boolean) => void) | undefined
 }
 
 /**
@@ -25,8 +28,8 @@ export interface SettingsControlProps {
  * inside the themed workspace, or inside the phone drawer's focus scope, so the sheet keeps the colour scheme and contains focus.
  * Contents and their reads exist only while open.
  */
-export const SettingsControl = ({ scheme, onSchemeChange, build }: SettingsControlProps) =>
-  <Aria.DialogTrigger>
+export const SettingsControl = ({ scheme, onSchemeChange, build, isOpen, onOpenChange }: SettingsControlProps) =>
+  <Aria.DialogTrigger {...(isOpen === undefined ? {} : { isOpen })} {...(onOpenChange === undefined ? {} : { onOpenChange })}>
     <ChromeControl icon="gear" label="Settings" popup="dialog" edge="trail" />
     <ThemePortal>
       <Aria.ModalOverlay isDismissable {...stylex.props(styles.overlay)}>

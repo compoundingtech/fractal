@@ -60,13 +60,13 @@ describe('openCommand', () => {
 })
 
 describe('openableProps', () => {
-  it('gives every surface click, Cmd-click and Ctrl-click together', () => {
+  it('gives every surface click, and Cmd- or Ctrl-click into a split to the right', () => {
     const { calls, open } = recorder()
     const props = openableProps('doc/x', open)
     props.onClick({ metaKey: false, ctrlKey: false })
     props.onClick({ metaKey: true, ctrlKey: false })
     props.onClick({ metaKey: false, ctrlKey: true })
-    expect(calls).toEqual([['doc/x', {}], ['doc/x', { background: true }], ['doc/x', { background: true }]])
+    expect(calls).toEqual([['doc/x', {}], ['doc/x', { split: 'right' }], ['doc/x', { split: 'right' }]])
   })
 
   it('has a keyboard way to every gesture', () => {

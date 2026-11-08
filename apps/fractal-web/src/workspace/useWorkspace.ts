@@ -56,7 +56,9 @@ export const useWorkspaceState = (store: WorkspaceStore): WorkspaceState =>
   React.useSyncExternalStore(store.subscribe, store.getState, store.getState)
 
 /** What leaves history as it is: nothing about these is a place worth a Back stop. */
-const keepsHistory = (command: Command) => command._tag === 'Close' || command._tag === 'CloseOthers' || command._tag === 'SetView' || command._tag === 'Move'
+const keepsHistory = (command: Command) => command._tag === 'Close' || command._tag === 'CloseOthers' || command._tag === 'ClosePane' || command._tag === 'SetView' || command._tag === 'Move' ||
+  // Moving between splits, sizing and zooming them is not a place either.
+  command._tag === 'FocusPane' || command._tag === 'FocusDirection' || command._tag === 'Resize' || command._tag === 'ResetSizes' || command._tag === 'ToggleZoom' || command._tag === 'SetAside'
 
 /**
  * Routing is a projection: the URL names the active subject, and a location with a subject opens or

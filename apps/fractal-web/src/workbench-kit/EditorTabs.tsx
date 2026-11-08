@@ -209,6 +209,8 @@ const styles = stylex.create({
     // Covers the strip's bottom border so the active tab merges into the editor body.
     marginBottom: '-1px',
   },
+  // Another split's shown tab: the line stays, in grey; only the focused split's is the accent.
+  tabBarUnfocused: { boxShadow: `inset 0 2px 0 ${tokens['--ds-gray-700']}` },
   tabClassicFocused: { boxShadow: `inset 0 1px 0 ${tokens['--ds-blue-700']}` },
   tabCompact: {
     height: '1.75rem',
@@ -747,6 +749,7 @@ const TabItem = ({
                   ? styles.tabBarActive
                   : styles.tabVerticalActive),
           active && variant === 'classic' && isGroupFocused && styles.tabClassicFocused,
+          active && variant === 'bar' && !isGroupFocused && styles.tabBarUnfocused,
           tab.status === 'unavailable' && styles.unavailable,
           touch && styles.tabTouch,
           isDragging && styles.dragging,

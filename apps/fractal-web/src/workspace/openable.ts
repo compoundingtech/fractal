@@ -74,13 +74,13 @@ export interface OpenableProps {
 }
 
 /**
- * Click opens and focuses; Cmd or Ctrl-click opens behind. Enter opens, with the same modifier behind;
+ * Click opens and focuses; Cmd or Ctrl-click opens in a split to the right. Enter opens, with Cmd or Ctrl behind;
  * Alt+Enter opens in a split to the right and Alt+Shift+Enter in one below, the keyboard's answer to
  * dragging onto an edge. Enter without Alt is left to a host whose control already activates on it.
  */
 export const openableProps = (ref: string, open: Open, options?: { readonly activatesOnEnter?: boolean }): OpenableProps => ({
   draggable: true,
-  onClick: event => open(ref, event.metaKey || event.ctrlKey ? { background: true } : {}),
+  onClick: event => open(ref, event.metaKey || event.ctrlKey ? { split: 'right' } : {}),
   onKeyDown: event => {
     if (event.key !== 'Enter') return
     if (event.altKey) {

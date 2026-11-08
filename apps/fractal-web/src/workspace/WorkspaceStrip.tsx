@@ -16,10 +16,13 @@ const openable = [
 ] as const
 
 /** The tab strip at every width. The panel it hosts keeps one identity, so no activation remounts a surface. */
-export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, leading, trailing, bar = false, children }: {
+export const WorkspaceStrip = ({ items, active, group, focused = true, narrow, dispatch, open, leading, trailing, bar = false, children }: {
   readonly items: readonly EditorTabItem[]
   readonly active: string | null
+  /** The pane this strip belongs to. */
   readonly group: string
+  /** Whether its pane has the focus: its shown tab carries the accent, another split's a grey line. */
+  readonly focused?: boolean
   readonly narrow: boolean
   readonly dispatch: (command: Command) => void
   readonly open: (ref: string) => void
@@ -56,7 +59,7 @@ export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, l
       variant={bar ? "bar" : "compact"}
       leading={leading}
       end={bar ? trailing : undefined}
-      isGroupFocused
+      isGroupFocused={focused}
       dragType="application/x-fractal-workspace-tab"
       stablePanel
       touch={narrow}
@@ -84,7 +87,14 @@ export const WorkspaceStrip = ({ items, active, group, narrow, dispatch, open, l
       <Aria.Menu aria-label="Tab actions" autoFocus="first" onClose={() => setMenu(undefined)} onAction={key => {
         if (key === 'close') dispatch({ _tag: 'Close', tab: menu.id })
         else if (key === 'close-others') dispatch({ _tag: 'CloseOthers', tab: menu.id })
+        // One tab per entity, so a split from a tab moves it into the new pane.
+        else if (key === 'split-right') dispatch({ _tag: 'Split', pane: group, side: 'right', tab: menu.id })
+        else if (key === 'split-down') dispatch({ _tag: 'Split', pane: group, side: 'bottom', tab: menu.id })
       }} {...stylex.props(styles.menu)}>
+        {narrow ? null : <>
+          <Aria.MenuItem id="split-right" isDisabled={items.length < 2} {...stylex.props(styles.menuItem)}>Split right</Aria.MenuItem>
+          <Aria.MenuItem id="split-down" isDisabled={items.length < 2} {...stylex.props(styles.menuItem)}>Split down</Aria.MenuItem>
+        </>}
         <Aria.MenuItem id="close" {...stylex.props(styles.menuItem)}>Close</Aria.MenuItem>
         <Aria.MenuItem id="close-others" isDisabled={items.length < 2} {...stylex.props(styles.menuItem)}>Close others</Aria.MenuItem>
       </Aria.Menu>
