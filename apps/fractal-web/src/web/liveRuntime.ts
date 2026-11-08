@@ -1,6 +1,7 @@
 import { Effect, Layer } from 'effect'
 import { buildIdentity, deploymentId } from 'virtual:build-identity'
 import { liveSource } from '../data/liveSource.ts'
+import { browserPairingPort } from '../data/browserPairing.ts'
 import { makeTelemetry } from '../telemetry/browser.ts'
 import { setPageFoldersClientName } from '../folders/client.ts'
 import type { Replay } from '@fractal/scenarios/replay'
@@ -45,7 +46,8 @@ export const createPageRuntime = (replay?: Replay) => {
     ux: () => ux,
   })
   return {
-    live: replay === undefined ? live : {
+    // Pairing belongs to the host that served this page; a replay has no host to pair with.
+    live: replay === undefined ? { ...live, source: { ...live.source, pairing: browserPairingPort({ baseUrl: window.location.origin }) } } : {
       ...live,
       dispose: () => live.dispose().finally(() => replay.close()),
     },

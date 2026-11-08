@@ -25,6 +25,8 @@ import { recordedToolDetail } from './semanticTool.tsx'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { AgentThreadTabs, type AgentThreadTabsHandle } from '../../../../packages/fractal-ui/src/assistant-ui/composition/AgentThreadTabs.tsx'
 import { subagentThreadFocus } from './subagentThreadFocus.ts'
+import { BrowserPairing } from './BrowserPairing.tsx'
+import { pairingStoreFor } from './browserPairingState.ts'
 
 export const ConversationPane = (props: React.ComponentProps<typeof ConversationThreadPane>) => {
   const feed = useConversation(props.agentRef)
@@ -259,6 +261,8 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       markStart('keystroke_paint')
       measureEnd('keystroke_paint')
     }} style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: `calc(${geometryVars.controlLg} + ${geometryVars.controlMd} + 3 * ${spaceVars.md} + 2 * ${geometryVars.hairline} + ${spaceVars.lg})`, paddingBottom: spaceVars.lg }}>
+      {/* Absent outside the served page: fixtures, replays and hosts without pairing keep the composer as it was. */}
+      {source.pairing === undefined ? null : <BrowserPairing store={pairingStoreFor(source.pairing)} messageSend={grants.messageSend} />}
       <EmbraceComposer variant="C1" readingColumn conversationLabel={agentName} disabledReason={state._tag === 'Unavailable' && state.classification === 'not-found' ? 'Conversation not found' : binding.disabledReason} {...(binding.imageAttachments === undefined ? {} : { imageAttachments: binding.imageAttachments })} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
     </div>}
   </EmbraceRuntimeProvider>
