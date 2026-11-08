@@ -3,7 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import * as Aria from 'react-aria-components'
 import { currentSpace, panesOf, type WorkspaceState } from '@fractal/ui/workspace'
 import { useWorkspace } from '@fractal/ui/workspace/react'
-import { colorVars as c, interactionVars as interaction, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, geometryVars as g, interactionVars as interaction, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 
 const layoutOf = (state: WorkspaceState) => currentSpace(state)
@@ -47,7 +47,7 @@ const styles = stylex.create({
     display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 2, flexShrink: 0, minWidth: 44, minHeight: 44, paddingInline: s.xs,
     borderWidth: 0, borderRadius: 6, backgroundColor: { default: 'transparent', ':hover': c.rowHover }, color: c.fgMuted,
     fontFamily: t.fontSans, fontSize: t.metaSize, fontVariantNumeric: 'tabular-nums', cursor: 'pointer',
-    outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: '2px', outlineColor: interaction.focusRing, outlineOffset: '-2px',
+    outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusInset,
   },
   popover: { backgroundColor: c.raised, color: c.fg, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, borderRadius: 8, fontFamily: t.fontSans, fontSize: t.uiSize },
   menu: { padding: s.xs, outline: 'none', minWidth: 200, maxWidth: 'calc(100vw - 32px)' },

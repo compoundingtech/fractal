@@ -3,7 +3,7 @@ import * as stylex from '@stylexjs/stylex'
 import * as Aria from 'react-aria-components'
 import { currentSpace, type Command, type WorkspaceState } from '@fractal/ui/workspace'
 import { useDispatch, useWorkspace } from '@fractal/ui/workspace/react'
-import { colorVars as c, interactionVars as interaction, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { colorVars as c, geometryVars as g, interactionVars as interaction, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
 import { namingCommand, type NamingIntent } from '../palette/dispatch.ts'
 
@@ -97,7 +97,7 @@ const styles = stylex.create({
     display: 'inline-flex', alignItems: 'center', gap: s.xs, minWidth: 0, maxWidth: '100%', paddingBlock: 2, paddingInline: s.xs,
     marginInlineStart: `calc(-1 * ${s.xs})`, borderWidth: 0, borderRadius: 6, backgroundColor: { default: 'transparent', ':hover': c.rowHover },
     color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, fontWeight: 500, cursor: 'pointer',
-    outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: '2px', outlineColor: interaction.focusRing, outlineOffset: '1px',
+    outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusOffset,
   },
   name: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   popover: { backgroundColor: c.raised, color: c.fg, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, borderRadius: 8, fontFamily: t.fontSans, fontSize: t.uiSize },
@@ -114,12 +114,12 @@ const styles = stylex.create({
   input: {
     width: '100%', boxSizing: 'border-box', paddingBlock: 4, paddingInline: s.sm, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, borderRadius: 6,
     backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize,
-    outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: '2px', outlineColor: interaction.focusRing, outlineOffset: '1px',
+    outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusOffset,
   },
   action: {
     paddingBlock: 4, paddingInline: s.sm, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, borderRadius: 6, backgroundColor: 'transparent', color: c.fg,
     fontFamily: t.fontSans, fontSize: t.uiSize, cursor: 'pointer', opacity: { default: 1, ':disabled': 0.5 },
-    outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: '2px', outlineColor: interaction.focusRing, outlineOffset: '1px',
+    outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusOffset,
   },
   danger: { color: c.dangerFg },
   prompt: { margin: 0, marginBlockEnd: s.sm, maxWidth: 280, color: c.fgMuted },
