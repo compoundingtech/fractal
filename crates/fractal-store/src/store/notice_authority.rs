@@ -58,11 +58,11 @@ pub(super) fn create_invalidation_triggers(connection: &Connection) -> Result<()
             } else { "1".into() };
             let name = format!("notice_authority_{table}_{action}");
             let sql = format!(
-                /* sqlite-large-value: allow-for-now lv-h6b344b76fae0 owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */
+                /* sqlite-large-value: allow-for-now lv-h649e90500eca owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */
                 "CREATE TRIGGER {name} BEFORE {action} ON {table}
                  WHEN ({relevant}) AND ({changed}) BEGIN
                  INSERT INTO local_custom_dirty SELECT subject FROM custom_sources
-                 WHERE subject LIKE 'custom/attention/%' ON CONFLICT(subject) DO NOTHING; END"
+                 WHERE subject LIKE 'custom/attention/%' ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject; END"
             );
             let installed: Option<String> = connection.query_row(
                 "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
@@ -138,8 +138,8 @@ pub(super) fn refresh_binding(tx: &Transaction<'_>) -> Result<()> {
         "SELECT value FROM meta WHERE key='notice_runtime_binding'", [], |row| row.get(0),
     ).optional()?;
     if previous.as_deref() != Some(current.as_str()) {
-        tx.execute(/* sqlite-large-value: allow-for-now lv-h80b0a7485e7e owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_custom_dirty SELECT subject FROM custom_sources
-            WHERE subject LIKE 'custom/attention/%' ON CONFLICT(subject) DO NOTHING", [])?;
+        tx.execute(/* sqlite-large-value: allow-for-now lv-h1b62cdb0c2d2 owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_custom_dirty SELECT subject FROM custom_sources
+            WHERE subject LIKE 'custom/attention/%' ON CONFLICT(subject) DO UPDATE SET subject=excluded.subject", [])?;
         tx.execute(/* sqlite-large-value: allow-for-now lv-h9d1a487a758c owner=fractal_store::store::notice_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('notice_runtime_binding',?1)", [&current])?;
     }
     Ok(())

@@ -71,6 +71,20 @@ The active-member definition, authenticated freshness/absence evidence, durable
 activation record, and re-sync completion/write fence are unresolved protocol
 details in #4002. A local timeout alone is not authority to remove a member.
 
+### Declared admission publication
+
+Publishing `declared-priority`, `declared-lane`, or `declared-budgets` (including an
+empty budgets block) requires every active fleet incarnation to advertise
+`features.declared_admission=1` in its latest own-origin, authenticated
+`daemon.started` claim anchored to the admitted incarnation. The publication gate
+requires signed, current, unambiguous membership and fails closed on missing,
+false, conflicted, unsigned, or unanchored capability evidence and unfenced legacy
+writers. A refusal rejects the full publication before any declaration is written;
+an old member never receives a new-child publication through a refused write.
+Upgrade all active members or fence legacy peers before publishing the metadata.
+This per-feature gate does not establish the general adjacent-release guarantee
+described above. See [declared admission](priority.md#declared-admission).
+
 ### Checkpoints in a mixed fleet
 
 The current [checkpoint contract](checkpoints.md) requires exactly equal rules
@@ -216,6 +230,35 @@ the **previous published stable release → current candidate**, not a permanent
 source. Both pins record the release tag, its full source commit and native release archive
 URLs with hex SHA256 checksums. Fleet compatibility runs the extracted published `bin/st3`;
 historical messaging uses the channel source from the same release commit.
+
+CI prepares each pinned native archive once per workflow. The Ubuntu producer uses an
+`actions/cache` entry keyed by target and the pin's SHA256 across runs, then uploads the
+verified bytes as an artifact retained for seven days. Artifact names include the producer's
+`github.run_attempt`, so reruns never overwrite bytes used by another attempt. The producer
+exports each artifact name as a job output; a consumer-only rerun uses that retained output,
+not its own attempt number. Fleet and messaging share artifacts when their pins match.
+Downstream jobs download the producer-selected numeric artifact ID to a private directory,
+using the bounded transfer implementation from `scripts/ci-test-archive`. They check the
+authenticated ZIP identity, size and digest before opening it, then reverify the pinned
+archive's SHA256 and `BUILD.json` source/target before atomically publishing consumer bytes.
+Artifact metadata must match the current run ID and its event's source identity: the PR head
+from the event payload on `pull_request`, or `GITHUB_SHA` on push and merge-group runs.
+The PR merge-checkout SHA is not the artifact API's workflow-run head.
+`COMPAT_BASELINE_ARCHIVE` supplies those bytes, never a live release download. Producer job
+IDs also namespace artifact names so ordinary and projected proof producers cannot collide.
+Artifacts bridge GitHub-hosted, Namespace and macOS runners without
+assuming their cache backends are shared. Missing or corrupt artifacts fail closed;
+producer cache hits are also reverified. Evidence-only gates do not depend on archives.
+
+On a preparation cache miss, `scripts/compat-baseline` first downloads the pinned browser
+URL. HTTP 502, 503 and 504 receive two retries after 1 and 3 seconds. Once exhausted,
+or on another HTTP 5xx or a timeout, it resolves the same release asset through GitHub's
+API, with at most two attempts per API request and a 60-second timeout per request.
+`GH_TOKEN` (or `GITHUB_TOKEN`) authenticates API requests without forwarding credentials
+on redirects. Diagnostics on stderr identify which path supplied the archive. Both paths
+must pass the same SHA256 and `BUILD.json` checks; `--save-archive` atomically retains the
+verified original bytes for caching. `COMPAT_BASELINE_ARCHIVE` bypasses network access
+and its digest is checked even when the extracted binary is already present.
 
 After each stable publication, release automation opens a baseline maintenance PR against
 `main`. It derives the source from `RELEASE.json`, verifies the dereferenced tag and the two

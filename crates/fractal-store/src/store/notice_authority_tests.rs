@@ -130,6 +130,57 @@ fn notice_snapshot_and_person_control_updates_preserve_links_like_rebuild() {
 }
 
 #[test]
+fn notice_control_update_refreshes_after_external_dirty_marker_conflict() {
+    let fixture = linked_store();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("state.sqlite3");
+    let store = Store::open(&path, "birch").unwrap();
+    custom::tests_shared_delivery::legacy_sync(&fixture, &store);
+    let before = custom::source(&store.readers.get(), CONTROL).unwrap().unwrap();
+    assert_eq!(before["state"], "ready");
+    assert_eq!(before["input_count"], 1);
+    assert!(!transaction_work::custom_pending(&store.connection.write()));
+
+    let external = Connection::open(&path).unwrap();
+    configure_projection_writer(&external).unwrap();
+    assert_eq!(external.query_row(
+        "SELECT count(*) FROM sqlite_temp_master WHERE type='trigger' AND name GLOB 'custom_work_*'",
+        [], |row| row.get::<_, i64>(0),
+    ).unwrap(), 0);
+    assert_eq!(external.execute(
+        /* sqlite-large-value: allow-for-now lv-he5f2d04685a6 owner=fractal_store::store::notice_authority_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_custom_dirty(subject) VALUES(?1)", [CONTROL],
+    ).unwrap(), 1);
+    assert!(external.is_autocommit());
+    drop(external);
+    {
+        let connection = store.connection.write();
+        assert!(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject=?1)",
+            [CONTROL], |row| row.get::<_, bool>(0),
+        ).unwrap(), "the independent writer's durable marker must be visible");
+        assert!(!transaction_work::custom_pending(&connection),
+            "the external writer must not notify this connection");
+    }
+
+    let source = custom::claims(&store.readers.get(), SOURCE).unwrap();
+    let mut fields = linked(&source[0], true);
+    fields["seen_at"] = json!("2026-10-01T10:00:00Z");
+    let updated = store.append_claim(&input(
+        CONTROL, "custom.attention.control-updated", "person/example", fields,
+    )).unwrap();
+    assert_eq!(custom::fields(&updated)["seen_at"], "2026-10-01T10:00:00Z");
+    let after = custom::source(&store.readers.get(), CONTROL).unwrap().unwrap();
+    assert_eq!(after["state"], "ready");
+    assert_eq!(after["input_count"], 2);
+    assert_ne!(after["revision"], before["revision"]);
+    assert!(!store.connection.write().query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_custom_dirty WHERE subject=?1)",
+        [CONTROL], |row| row.get::<_, bool>(0),
+    ).unwrap());
+    store.connection.batched(assert_links_match_rebuild).unwrap().unwrap();
+}
+
+#[test]
 fn notice_altered_links_recipient_producer_and_manifest_are_refused() {
     let (store, source) = setup();
     for (field, value) in [("source_id", json!("custom/attention/source/other")), ("creation_claim", json!("0".repeat(64))),

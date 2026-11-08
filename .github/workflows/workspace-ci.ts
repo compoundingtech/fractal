@@ -355,6 +355,7 @@ export const testBuildSteps = [
   {
     name: 'Prepare the historical messaging channel',
     if: "runner.os == 'Linux'",
+    env: { GH_TOKEN: '${{ github.token }}' },
     // arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
     run: `binary=$(timeout 10m bash scripts/messaging-compat-binary)
 printf 'FRACTAL_MESSAGING_COMPAT_BIN=%s\\nST3_MESSAGING_COMPAT_BIN=%s\\n' "$binary" "$binary" >> "$GITHUB_ENV"`,
@@ -809,7 +810,10 @@ export const linuxStageJob = ({
       run: `printf 'Checked merge/commit: \\x60%s\\x60 on %s CPUs, %s\\n\\n| Stage | Result | Elapsed | Exit |\\n| --- | --- | --- | --- |\\n' "$(git rev-parse HEAD)" "$(nproc)" "$(free -h | awk '/^Mem:/ {print $2 " memory"}')" >> "$GITHUB_STEP_SUMMARY"`,
     },
     ...before,
-    nixDevelopStep({ name: description ?? 'Run nextest', command }),
+    {
+      ...nixDevelopStep({ name: description ?? 'Run nextest', command }),
+      ...(stage === 'fleet-compat' ? { env: { GH_TOKEN: '${{ github.token }}' } } : {}),
+    },
     ...after,
     {
       name: 'Save Nix outputs to the local Nix cache',

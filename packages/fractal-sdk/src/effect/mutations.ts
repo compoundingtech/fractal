@@ -46,7 +46,7 @@ const actionFailure = (cause: unknown): ActionFailure =>
 /** HTTP-only arrangement actions; sharing this port never opens another collections socket. */
 export interface ArrangementActionPort {
   readonly snapshot: Effect.Effect<string, ActionFailure>
-  readonly submitAction: (request: ActionOf<'arrangement.edit'>) => Effect.Effect<typeof ActionResult.Type, ActionFailure>
+  readonly submitAction: (request: ActionOf<'arrangement.edit'>) => Effect.Effect<ActionResult, ActionFailure>
 }
 
 export const arrangementActions = (client: Pick<FractalClient, 'capabilities' | 'arrangementEdit'>): ArrangementActionPort => ({

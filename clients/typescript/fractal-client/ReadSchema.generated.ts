@@ -1701,6 +1701,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "grant-profile-conflict",
   "legacy-action-receipt-untrusted",
   "issuer-required",
+  "pairing-origin-required",
   "suspend-authored-session-selection",
   "stale-fence",
   "cursor-gap",

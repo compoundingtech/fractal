@@ -1862,6 +1862,7 @@ export type ErrorCode = (
   | "grant-profile-conflict"
   | "legacy-action-receipt-untrusted"
   | "issuer-required"
+  | "pairing-origin-required"
   | "suspend-authored-session-selection"
   | "stale-fence"
   | "cursor-gap"

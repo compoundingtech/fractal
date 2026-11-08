@@ -55,6 +55,7 @@
         const url = new URL('/v1/client/collections/stream', location.href)
         url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
         url.searchParams.set('traceparent', traceparent)
+        url.searchParams.set('client', "__FRACTAL_WEB_CLIENT__")
         let socket
         try {
           // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-wire-fractal-accept-both: deploy only after every receiver runs #3430; sunset 2026-11-01.

@@ -23,6 +23,7 @@ pub mod missions;
 pub mod seats;
 pub mod helper_launchers;
 pub mod trace_principal;
+pub mod workspace_observations;
 #[cfg(test)]
 pub mod accountable_tests;
 pub mod custom;
@@ -82,6 +83,8 @@ pub mod owned_sets;
 pub mod owned_sets_tests;
 #[cfg(test)]
 pub mod usage_fold_tests;
+pub mod usage_credits;
+pub use usage_credits::{UsageCreditReading, UsageCreditSnapshot};
 pub mod resources;
 pub mod resource_preparation;
 pub mod observer_actuals;
@@ -240,6 +243,8 @@ pub mod checkpoint_status;
 pub mod human_review_reassignment;
 pub mod mission_eligibility;
 pub use mission_eligibility::MISSING_AGENT_CONDITION;
+/// The explicitly owned weekly API readiness fault.
+pub const API_READINESS_SLO_MISSED: &str = "fractal-api-readiness-slo-missed";
 pub mod person_rename;
 pub mod revision_seats;
 pub mod delegation;
@@ -1926,6 +1931,8 @@ struct StatusSubjects<'a> {
 pub enum ClaimsReduction {
     Full,
     Summary,
+    /// Internal full status fields without provenance. Never cached or exposed as a status response.
+    Fields,
     /// Runtime resources do not consume claim ids, counts, or session boundaries.
     Runtime,
     AgentCard,
@@ -1945,6 +1952,7 @@ pub fn subject_status_at(
     let _profile = crate::profile::span(match claims {
         ClaimsReduction::Full => "status/reduction-full",
         ClaimsReduction::Summary => "status/reduction-summary",
+        ClaimsReduction::Fields => "status/reduction-fields",
         ClaimsReduction::Runtime => "status/reduction-runtime",
         ClaimsReduction::AgentCard => "status/reduction-agent-card",
         ClaimsReduction::Incarnation => "status/reduction-incarnation",
@@ -2020,7 +2028,7 @@ pub fn subject_status_at(
                 at_index,
             )?,
         ),
-        ClaimsReduction::Runtime => (
+        ClaimsReduction::Runtime | ClaimsReduction::Fields => (
             current_harness_at(connection, subject, at_index)?,
             Vec::new(),
             ClaimsSummary::default(),
@@ -2305,6 +2313,7 @@ pub struct Store {
     // Fields drop in declaration order: release the backfill's queue owner before the
     // graph joins its writer. A worker retains a sender only for its current bounded step.
     _resource_backfill: Option<resource_references::BackfillWorker>,
+    usage_credit_backfill: Mutex<Option<usage_credits::BackfillWorker>>,
     pub graph: GraphStore,
     pub standby_observations: Mutex<BTreeMap<String, schedule_standby::Heartbeat>>,
     pub fractal: Arc<FractalRuntime>,
@@ -2749,7 +2758,8 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
+        Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
@@ -2772,7 +2782,8 @@ impl Store {
             resource_references::spawn_backfill(&graph.connection, &graph.readers.get())?;
         #[cfg(test)]
         let resource_backfill = None;
-        Ok(Self { _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
+        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
+        Ok(Self { usage_credit_backfill, _resource_backfill: resource_backfill, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
@@ -2796,7 +2807,8 @@ impl Store {
         publication_facts::create_schema(&graph.connection.write())?;
         graph.connection.install_transaction_maintenance(publication_facts::flush)?;
         publication_facts::install_cache_observer(&graph, &fractal);
-        Ok(Self { _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
+        let usage_credit_backfill = usage_credits::resume(&graph.connection, &graph.readers.get())?;
+        Ok(Self { usage_credit_backfill, _resource_backfill: None, graph, fractal, standby_observations: Default::default(),
             question_principal_default: Default::default(),
             default_ask_deadline_ms: person_work::DEFAULT_ASK_DEADLINE_MS.into(), ask_deadlines: false.into(), person_answers_checked: 0.into(),
             last_operation_audit: Default::default(), last_fleet_residue: Default::default(), fleet_residue_wanted: Default::default() })
@@ -2809,6 +2821,28 @@ impl Store {
             self.fractal.claim_registry.set(registry).is_ok(),
             "the registry is set once"
         );
+    }
+
+    /// Configure local observer append admission and read-time folds. Empty excludes all writers.
+    pub fn set_usage_limits_writers(&self, writers: Vec<String>) -> Result<(), FractalError> {
+        for writer in &writers {
+            let subject = fractal_schema::registry().validate_subject(writer)
+                .map_err(|e| FractalError::new(e.code, e.message))?;
+            if subject.family != "agent" {
+                return Err(FractalError::new("invalid-usage-limits-writer", "usage writers must be agent identities"));
+            }
+        }
+        *self.fractal.usage_limits_writers.lock().unwrap() = writers.into_iter().collect();
+        if !self.usage_limits_writers().is_empty() {
+            self.start_usage_credit_backfill()
+                .map_err(|error| FractalError::new("usage-credit-backfill", error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Snapshot the local writers used by usage folds; stored evidence is configuration-independent.
+    pub fn usage_limits_writers(&self) -> BTreeSet<String> {
+        self.fractal.usage_limits_writers.lock().unwrap().clone()
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -3287,6 +3321,8 @@ impl Store {
         local_receipt: Option<(&str, &Value)>,
         checks: publication::CommitChecks<'_>,
     ) -> Result<ApplyResponse, FractalError> {
+        fractal_missions_base::declared_admission::validate_publication(intent)?;
+        crate::graph::validate_mission_runtimes(intent, &self.origin)?;
         let publication::CommitChecks { owned, guard } = checks;
         self.connection
             .batched(|transaction| -> Result<ApplyResponse, FractalError> {
@@ -4276,6 +4312,7 @@ impl Store {
     }
 
     pub fn validate_claim_input(&self, input: &ClaimInput) -> Result<(), FractalError> {
+        self.fractal.validate_usage_limits_writer(&input.kind, input.actor.as_deref())?;
         validate_claim_input(input)
     }
 
@@ -5255,7 +5292,7 @@ impl Store {
             ClaimsReduction::Runtime => &cache.runtime_statuses,
             ClaimsReduction::AgentCard if serving_card => &cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &cache.card_statuses,
-            ClaimsReduction::Incarnation => return None,
+            ClaimsReduction::Incarnation | ClaimsReduction::Fields => return None,
         };
         entries.get(subject)
             .filter(|entry| {
@@ -5291,7 +5328,7 @@ impl Store {
             ClaimsReduction::Runtime => &mut cache.runtime_statuses,
             ClaimsReduction::AgentCard if serving_card => &mut cache.serving_card_statuses,
             ClaimsReduction::AgentCard => &mut cache.card_statuses,
-            ClaimsReduction::Incarnation => return,
+            ClaimsReduction::Incarnation | ClaimsReduction::Fields => return,
         };
         // At capacity, a cold summary remains correct and uncached. Invalidation
         // frees slots; no growing history map or full-status cache warming is needed.
@@ -5530,8 +5567,21 @@ impl Store {
     /// Generic serving status must not reduce reserved facts into fields or claim identities.
     /// Keep internal status and authoritative replication readers unchanged.
     pub fn status_for_generic_reads(
+        &self, selected: Option<&str>, owner: Option<&str>, at: Option<u64>, history: bool,
+    ) -> Result<StatusResponse> {
+        self.generic_status_reduction(selected, owner, at, history, ClaimsReduction::Full)
+    }
+
+    /// Owned-set member reads consume actual only: never expose an unenumerated claims vector.
+    pub fn actual_for_generic_reads(&self, subject: &str, at: Option<u64>) -> Result<Option<Value>> {
+        Ok(self.generic_status_reduction(
+            Some(subject), None, at, false, ClaimsReduction::Fields,
+        )?.subjects.into_iter().next().and_then(|status| status.actual))
+    }
+
+    fn generic_status_reduction(
         &self, selected: Option<&str>, owner: Option<&str>, at: Option<u64>,
-        history: bool,
+        history: bool, claims: ClaimsReduction,
     ) -> Result<StatusResponse> {
         self.read_snapshot(|_| {
             let connection = self.readers.get();
@@ -5556,7 +5606,7 @@ impl Store {
             }
             self.status_at_view_for_names_in_snapshot(
                 selected, owner, at, history,
-                StatusSubjects { names: None, excluded: Some(&excluded) }, ClaimsReduction::Full,
+                StatusSubjects { names: None, excluded: Some(&excluded) }, claims,
             )
         })
     }
@@ -5641,10 +5691,10 @@ impl Store {
                 )?;
             }
         }
-        // Incarnation reads are uncached: pinning their logical cut must not
+        // Uncached field/incarnation reads must not
         // scan an unrelated backlog to maintain shared caches they never use.
         let newest = match at_index {
-            Some(_) if selected_owner_run.is_none() && !matches!(claims, ClaimsReduction::Incarnation) => {
+            Some(_) if selected_owner_run.is_none() && !matches!(claims, ClaimsReduction::Incarnation | ClaimsReduction::Fields) => {
                 Some(self.advance_subject_cache(&connection, store_index)?)
             }
             _ => None,
@@ -6335,7 +6385,13 @@ impl Store {
         items.extend(self.operational_fault_families(None, as_of)?);
         // Failure episodes come from the fault cache, read again only where something changed.
         let (operational, gates) = self.cached_failure_faults(as_of)?;
-        items.extend(operational);
+        let mut explicit_reviewers = BTreeSet::new();
+        for fault in operational {
+            if fault.explicit_reviewer_only {
+                explicit_reviewers.insert(fault.item.episode.clone());
+            }
+            items.push(fault.item);
+        }
         items.extend(gates);
         items.extend(self.checkpoint_attention_items(None, as_of)?);
         items.extend(self.signature_attention_items()?);
@@ -6346,7 +6402,11 @@ impl Store {
             .filter(|item| !dismissed.contains(&(item.subject.clone(), item.episode.clone())))
             .map(|item| {
                 Ok(FaultView {
-                    owner: self.fault_owner(&item, fallback.as_deref())?,
+                    owner: self.fault_owner(
+                        &item,
+                        fallback.as_deref(),
+                        explicit_reviewers.contains(&item.episode),
+                    )?,
                     item,
                 })
             })
@@ -11365,6 +11425,7 @@ pub fn append_claim_tx_with_assistant_answer(
     predecessors: &[String],
     forced_batch: Option<&str>,
 ) -> Result<ClaimRecord> {
+    fractal_missions_base::declared_admission::validate_claim(kind, subject, body).map_err(anyhow::Error::new)?;
     declared_admission::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
     if matches!(kind, "intent.desired" | "mission.published") {
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
@@ -11378,6 +11439,7 @@ pub fn append_claim_tx_with_assistant_answer(
     fractal_schema::glasses::validate_owner(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::arrangements::validate_actor(subject, actor).map_err(anyhow::Error::new)?;
     fractal_schema::directive_notes::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
+    fractal_schema::usage_limits::validate_actor(subject, kind, actor).map_err(anyhow::Error::new)?;
     if kind == "owned-set.revised" {
         owned_sets::validate_receipt(subject, body).map_err(anyhow::Error::new)?;
     }
@@ -15949,6 +16011,8 @@ pub fn classify_replicated_claim_with_registry(
     fractal_schema::arrangements::validate_actor(&claim.subject, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::usage_limits::validate_actor(&claim.subject, &claim.kind, claim.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     if claim.subject.starts_with("glass/")
         && (!fields.contains_key("base_revision") || !fields.contains_key("replaced_revision"))
@@ -23005,6 +23069,8 @@ pub fn validate_claim_input(input: &ClaimInput) -> Result<(), FractalError> {
     fractal_schema::arrangements::validate_actor(&input.subject, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     fractal_schema::directive_notes::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
+        .map_err(|e| FractalError::new(e.code, e.message))?;
+    fractal_schema::usage_limits::validate_actor(&input.subject, &input.kind, input.actor.as_deref())
         .map_err(|e| FractalError::new(e.code, e.message))?;
     identities::claim_operation(input)?;
     Ok(())

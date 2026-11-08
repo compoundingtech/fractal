@@ -137,6 +137,7 @@ pub enum ErrorCode {
     GrantProfileConflict,
     LegacyActionReceiptUntrusted,
     IssuerRequired,
+    PairingOriginRequired,
     SuspendAuthoredSessionSelection,
     StaleFence,
     CursorGap,

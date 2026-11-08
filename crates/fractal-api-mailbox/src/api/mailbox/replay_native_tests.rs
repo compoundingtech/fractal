@@ -364,11 +364,11 @@ async fn consumed_replay_does_not_authorize_a_changed_epoch_or_replaced_peer() {
         .unwrap().failure.is_some());
 }
 
-fn request_restart(fixture: &NativeReplay, incarnation: &str) -> String {
+fn request_restart(fixture: &NativeReplay, incarnation: &str, action: &str) -> String {
     fixture.state.store.append_claim(&ClaimInput {
         subject: fixture.fence.subject.clone(), kind: "runtime.action.requested".into(),
         actor: Some("agent/example/watchdog".into()),
-        fields: serde_json::from_value(json!({"action":"restart","incarnation_id":incarnation})).unwrap(),
+        fields: serde_json::from_value(json!({"action":action,"incarnation_id":incarnation})).unwrap(),
         evidence: vec![], expected_subject: None, idempotency_key: None,
     }).unwrap().id
 }
@@ -377,7 +377,7 @@ fn request_restart(fixture: &NativeReplay, incarnation: &str) -> String {
 async fn a_drop_during_the_incarnations_own_requested_restart_raises_no_channel_fault() {
     let fixture = NativeReplay::new("eval.restart-drop");
     let incarnation = fixture.fence.incarnation.clone();
-    request_restart(&fixture, &incarnation);
+    request_restart(&fixture, &incarnation, "restart");
     authority::loss_if_current(&fixture.state, &fixture.fence, &fixture.peer).unwrap();
     assert!(
         authority::replay_proof_inputs(&fixture.state, &fixture.fence, &fixture.peer).unwrap().failure.is_none(),
@@ -388,11 +388,11 @@ async fn a_drop_during_the_incarnations_own_requested_restart_raises_no_channel_
 #[tokio::test]
 async fn a_drop_after_a_restart_of_another_incarnation_or_a_finished_one_still_raises_the_fault() {
     let other = NativeReplay::new("eval.restart-other");
-    request_restart(&other, "4242:2026-10-12T00:00:00.000Z");
+    request_restart(&other, "4242:2026-10-12T00:00:00.000Z", "restart");
     assert!(!other.loss().is_empty());
     let finished = NativeReplay::new("eval.restart-finished");
     let incarnation = finished.fence.incarnation.clone();
-    let request = request_restart(&finished, &incarnation);
+    let request = request_restart(&finished, &incarnation, "restart");
     finished.state.store.append_claim(&ClaimInput {
         subject: finished.fence.subject.clone(), kind: "runtime.action.succeeded".into(),
         actor: Some("agent/example/watchdog".into()),
@@ -401,4 +401,46 @@ async fn a_drop_after_a_restart_of_another_incarnation_or_a_finished_one_still_r
         idempotency_key: Some(format!("agent-restart-completed:{request}")),
     }).unwrap();
     assert!(!finished.loss().is_empty());
+}
+
+#[tokio::test]
+async fn a_self_restart_suppresses_channel_loss_only_after_its_own_quiescence() {
+    for (name, quiesced, same_incarnation, completed, suppress) in [
+        ("waiting", false, true, false, false),
+        ("quiesced", true, true, false, true),
+        ("other-incarnation", true, false, false, false),
+        ("completed", true, true, true, false),
+    ] {
+        let fixture = NativeReplay::new(&format!("eval.self-restart-{name}"));
+        let incarnation = if same_incarnation {
+            fixture.fence.incarnation.clone()
+        } else {
+            "4242:2026-10-12T00:00:00.000Z".into()
+        };
+        let request = request_restart(&fixture, &incarnation, crate::restart::WHEN_IDLE);
+        if quiesced {
+            fixture.state.store.append_claim(&ClaimInput {
+                subject: fixture.fence.subject.clone(), kind: "runtime.action.succeeded".into(),
+                actor: Some(fixture.fence.subject.clone()),
+                fields: serde_json::from_value(json!({"action":"restart",
+                    "incarnation_id":incarnation,"operation_status":"quiesced"})).unwrap(),
+                evidence: vec![request.clone()], expected_subject: None,
+                idempotency_key: Some(format!("agent-restart-quiesced:{request}")),
+            }).unwrap();
+        }
+        if completed {
+            fixture.state.store.append_claim(&ClaimInput {
+                subject: fixture.fence.subject.clone(), kind: "runtime.action.succeeded".into(),
+                actor: Some(fixture.fence.subject.clone()),
+                fields: serde_json::from_value(json!({"action":"restart",
+                    "incarnation_id":incarnation})).unwrap(),
+                evidence: vec![request.clone()], expected_subject: None,
+                idempotency_key: Some(format!("agent-restart-completed:{request}")),
+            }).unwrap();
+        }
+        authority::loss_if_current(&fixture.state, &fixture.fence, &fixture.peer).unwrap();
+        let failure = authority::replay_proof_inputs(&fixture.state, &fixture.fence, &fixture.peer)
+            .unwrap().failure;
+        assert_eq!(failure.is_none(), suppress, "{name}");
+    }
 }

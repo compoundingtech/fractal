@@ -48,9 +48,11 @@ class ResourceReadError extends Schema.TaggedError<ResourceReadError>()('Resourc
 export const gatewayResources = ({
   baseUrl,
   fetchImpl,
+  client: clientName,
 }: {
   readonly baseUrl: string
   readonly fetchImpl: typeof fetch
+  readonly client?: string
 }): AgentResourceSource => {
   const controls = new Map<string, { more: () => void; refresh: () => void }>()
   const cache = new Map<string, ResourceObservation>()
@@ -71,6 +73,7 @@ export const gatewayResources = ({
           // through fetch and response.json without sharing mutable cancellation across readers.
           const client = new FractalClient({
             baseUrl,
+            ...(clientName === undefined ? {} : { client: clientName }),
             fetchImpl: (input, init) => fetchImpl(input, { ...init, signal }),
           })
           let cursor = startCursor
