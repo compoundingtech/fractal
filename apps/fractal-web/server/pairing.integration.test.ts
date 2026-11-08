@@ -28,6 +28,13 @@ const fixture = async () => {
   const received: { path: string; auth: string | undefined; body: Record<string, unknown>; cookie: string | undefined }[] = []
   let status = 'pending'
   let grantStatus = 200
+  let malformedEnvelope = false
+  const envelope = (value: unknown) => JSON.stringify(malformedEnvelope ? value : {
+    api_version: 'st3.client.v0', request_id: 'request/test',
+    snapshot: { id: 'snapshot/test', created_at: '2026-11-08T00:00:00Z', host_id: 'host/test',
+      projection_version: 'client-projection.v0', store_index: 1 },
+    value,
+  })
   const daemon = createServer((req, res) => { void (async () => {
     const chunks: Buffer[] = []
     for await (const chunk of req) chunks.push(Buffer.from(chunk))
@@ -36,10 +43,10 @@ const fixture = async () => {
     if (req.url === '/v1/client/capabilities') {
       expect(req.method).toBe('GET')
       res.statusCode = grantStatus
-      res.end(grantStatus === 200 ? '{"capabilities":[]}' : '')
+      res.end(grantStatus === 200 ? envelope({ capabilities: [] }) : '')
       return
     }
-    res.end(JSON.stringify(req.url?.endsWith('/redeem') ? status === 'approved' ? { bearer: device, scopes: ['control.messages'], expiresAt: 123 } : { status }
+    res.end(envelope(req.url?.endsWith('/redeem') ? status === 'approved' ? { bearer: device, scopes: ['control.messages'], expiresAt: 123 } : { status }
       : req.url?.endsWith('/revoke-current') ? {} : { requestId: 'request-one', displayCode: '123456', expiresAt: 123 }))
   })().catch(() => res.destroy()) })
   const socketPath = join(root, 'daemon.sock')
@@ -60,7 +67,7 @@ const fixture = async () => {
     method: action === 'status' ? 'GET' : 'POST', headers: { ...headers, ...(cookie === undefined ? {} : { cookie }), ...overrides },
     ...(action === 'start' ? { body: JSON.stringify({ deviceLabel: 'Personal browser' }) } : {}),
   })
-  return { call, received, setStatus: (value: string) => { status = value }, setGrantStatus: (value: number) => { grantStatus = value } }
+  return { call, received, setStatus: (value: string) => { status = value }, setGrantStatus: (value: number) => { grantStatus = value }, rejectEnvelope: () => { malformedEnvelope = true } }
 }
 
 it('keeps request secrets and grants only in secure cookies and revokes before forgetting', async () => {
@@ -126,4 +133,13 @@ it.each([401, 403])('clears a revoked or expired device cookie when daemon authe
   expect(await response.json()).toEqual({ status: 'unpaired' })
   expect(response.headers.getSetCookie()).toEqual([`fractal_device=${flags}0`])
   expect(setup.received[0]?.auth).toBe(`Bearer ${device}`)
+})
+
+
+it('does not set a browser cookie from a response missing the daemon client envelope', async () => {
+  const setup = await fixture()
+  setup.rejectEnvelope()
+  const response = await setup.call('start')
+  expect(response.status).toBe(502)
+  expect(response.headers.getSetCookie()).toEqual([])
 })
