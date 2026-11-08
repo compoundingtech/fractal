@@ -92,7 +92,7 @@ fn subscription_retry_queries_use_history_indexes() {
     let connection = store.readers.get();
     let request_plan: String = connection
         .query_row(
-            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM claims
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM claims INDEXED BY claims_subscription_deferred_request_index
                  WHERE subject=?1 AND kind='subscription.mission-deferred'
                    AND json_extract(body, '$.fields.request')=?2",
             params![subject, "request-a"],

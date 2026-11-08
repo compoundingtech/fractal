@@ -113,6 +113,14 @@ const ADMISSION_QUERY: &str =
 #[cfg(feature = "test-support")]
 pub const fn admission_query_for_test() -> &'static str { ADMISSION_QUERY }
 
+
+fn admission_now_ms() -> u128 {
+    #[cfg(test)]
+    if let Some(now) = tests::ADMISSION_NOW.get() {
+        return now;
+    }
+    client_now_ms()
+}
 fn candidate_grants(state: &AppState, principal: &str, expiry_cut: Option<u64>) -> Result<Vec<(ClaimRecord, Profile)>, ApiError> {
     let owner = owning_person(state)?;
     let ids = {
@@ -212,7 +220,7 @@ fn profile_conflict_at(state: &AppState, granted: &ClaimRecord, now: u64) -> Res
 
 fn admit_profile(state: &AppState, source: &Value) -> Result<(), ApiError> {
     let profile = Profile::stored(source)?;
-    for (grant, other) in candidate_grants(state, principal(source)?, Some(client_now_ms() as u64))? {
+    for (grant, other) in candidate_grants(state, principal(source)?, Some(admission_now_ms() as u64))? {
         if profile != other {
             return Err(conflict_error(json!({"grants":[
                 {"grant_id":source["grant_id"],"origin":state.store.origin(),
@@ -486,6 +494,7 @@ mod tests {
     // the real mutation/session boundary. Production issuable() stays closed.
     thread_local! {
         pub(super) static SERVICE_PROFILE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        pub(super) static ADMISSION_NOW: std::cell::Cell<Option<u128>> = const { std::cell::Cell::new(None) };
     }
 
     fn concurrent_grants(profiles: [&str; 2]) -> (usize, usize) {
@@ -520,6 +529,125 @@ mod tests {
                 .filter(|grant| session(&state, grant, "http").is_ok()).count()
         }).join().unwrap();
         (admitted, usable)
+    }
+
+    // Independent Rust-only candidate scan: C's authenticated transition and
+    // typed-conflict semantics, without the production SQL active prefilter.
+    fn rust_only_admission(state: &AppState, source: &Value) -> Result<(), ApiError> {
+        let profile = Profile::stored(source)?;
+        let principal = principal(source)?;
+        owning_person(state)?;
+        let ids = {
+            let connection = state.store.readers.get();
+            let mut query = connection.prepare(
+                "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2"
+            ).map_err(ApiError::internal)?;
+            query.query_map(rusqlite::params![GRANTED, principal], |row| row.get::<_, String>(0))
+                .map_err(ApiError::internal)?.collect::<Result<Vec<_>, _>>().map_err(ApiError::internal)?
+        };
+        for id in ids {
+            let grant = state.store.claim_by_id(&id).map_err(ApiError::internal)?
+                .ok_or_else(|| forbidden("external grant is absent"))?;
+            if grant.origin != state.store.origin() || grant.actor.as_deref() != Some(owning_person(state)?)
+                || revoked(state, &grant)? {
+                continue;
+            }
+            let policy = effective(state, &grant)?;
+            let active = fields(&policy)?;
+            if active["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) > admission_now_ms() {
+                Profile::stored(fields(&grant)?)?.compatible(Profile::stored(active)?)?;
+                if profile != Profile::stored(active)? {
+                    return Err(conflict_error(Value::Null));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn prefiltered_admission_matches_rust_only_reference() {
+        struct Clock;
+        impl Drop for Clock {
+            fn drop(&mut self) { ADMISSION_NOW.set(None); }
+        }
+        ADMISSION_NOW.set(Some(100));
+        let _clock = Clock;
+        let cases = [
+            ("live", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
+            ("expired", json!({"expires_at_unix_ms":99}), vec![], 0, false, false),
+            ("equal-boundary", json!({"expires_at_unix_ms":100}), vec![], 0, false, false),
+            ("null-expiry", json!({"expires_at_unix_ms":null}), vec![], 0, false, false),
+            ("missing-expiry", json!({}), vec![], 0, false, false),
+            ("replicated-revoke", json!({"expires_at_unix_ms":101}), vec![], 1, true, true),
+            ("revoke-of-revoke", json!({"expires_at_unix_ms":101}), vec![], 2, false, false),
+            ("several-policies-live", json!({"expires_at_unix_ms":99}), vec![102, 98, 101], 0, false, true),
+            ("several-policies-expired", json!({"expires_at_unix_ms":101}), vec![99, 102, 100], 0, false, false),
+            ("unrelated-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, false),
+            ("legacy-default-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
+            ("null-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
+            ("mcp-principal", json!({"expires_at_unix_ms":101}), vec![], 0, false, true),
+        ];
+        for (name, mut source, policies, revokes, replicated, denied) in cases {
+            let root = tempfile::tempdir().unwrap();
+            let mut state = crate::api::tests_shared::state(root.path());
+            state.owning_person = Some("person/owner".into());
+            source["profile"] = json!("service");
+            if name == "null-principal" {
+                source["principal"] = Value::Null;
+            } else if name != "legacy-default-principal" {
+                source["principal"] = json!(if matches!(name, "unrelated-principal" | "mcp-principal") { MCP_PRINCIPAL } else { PRINCIPAL });
+            }
+            let id = "0123456789abcdef01234567";
+            let subject = subject(id).unwrap();
+            source["grant_id"] = json!(id);
+            source["issuer"] = json!("person/owner");
+            source["session_actor"] = json!(format!("{}/session/{id}", if name == "mcp-principal" || name == "unrelated-principal" { MCP_PRINCIPAL } else { PRINCIPAL }));
+            source["minimal_read_mode"] = json!("approval-once");
+            source["disclosure_consent"] = json!(true);
+            source["credential_hash"] = json!("a".repeat(64));
+            source["scopes"] = json!([]);
+            let append_fixture = |store: &Store, kind: &str, value: Value, previous: Option<&ClaimRecord>| {
+                store.append_claim(&ClaimInput {
+                    subject:subject.clone(), kind:kind.into(), actor:Some("person/owner".into()),
+                    fields:serde_json::from_value(value).unwrap(),
+                    evidence:previous.map(|claim| vec![claim.id.clone()]).unwrap_or_default(),
+                    expected_subject:None, idempotency_key:None,
+                }).unwrap()
+            };
+            let mut previous = append_fixture(&state.store, GRANTED, source.clone(), None);
+            for expiry in policies {
+                let mut policy = source.clone();
+                policy["expires_at_unix_ms"] = json!(expiry);
+                previous = append_fixture(&state.store, POLICY, policy, Some(&previous));
+            }
+            if replicated {
+                let peer = Store::open_memory("peer").unwrap();
+                let revoke = append_fixture(&peer, REVOKED, source.clone(), None);
+                state.store.import_replication("peer", &peer.export_replication(0).unwrap()).unwrap();
+                let imported = latest(&state, &subject, REVOKED).unwrap().unwrap();
+                assert_eq!(imported.id, revoke.id);
+                assert_eq!(imported.origin, "peer");
+            } else {
+                for _ in 0..revokes {
+                    // The second revoke cites the first revoke, not the grant:
+                    // neither reader may interpret that as restoring authority.
+                    previous = append_fixture(&state.store, REVOKED, source.clone(), Some(&previous));
+                }
+            }
+            for owner in [Some("person/owner"), None] {
+                state.owning_person = owner.map(str::to_owned);
+                for profile in ["assistant", "service"] {
+                    let principal = if name == "mcp-principal" { MCP_PRINCIPAL } else { PRINCIPAL };
+                    let candidate = json!({"profile":profile,"principal":principal});
+                    let old = rust_only_admission(&state, &candidate).map_err(|error| error.code);
+                    let new = admit_profile(&state, &candidate).map_err(|error| error.code);
+                    assert_eq!(new, old, "{name}: owner={owner:?}, profile={profile}");
+                    if owner.is_some() {
+                        assert_eq!(new.is_err(), denied && profile == "assistant", "{name}: expected decision");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
