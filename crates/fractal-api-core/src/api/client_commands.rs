@@ -336,7 +336,7 @@ mod tests {
             assistant_receipts: Default::default(), private_notes: Default::default(),
         };
         let now = client_now_ms();
-        let claim = state.store.append_claim(&ClaimInput {
+        let claim = state.store.append_client_operation_claim(&ClaimInput {
             subject: "custom/client/retention-test".into(), kind: "custom.client.pairing-completed".into(), actor: Some("person/ada".into()),
             fields: serde_json::from_value(json!({"session_actor":"client/retention-phone","person_id":"person/ada",
                 "device_id":"device/test","scopes":["read.projections"],"expires_at_unix_ms":(now + 600_000) as u64})).unwrap(),

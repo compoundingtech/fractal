@@ -794,7 +794,8 @@ pub fn authenticate(
         }
         let pairing_completion = request.method() == axum::http::Method::POST
             && request.uri().path().starts_with("/v1/client/pairings/")
-            && request.uri().path().ends_with("/complete");
+            && (request.uri().path().ends_with("/complete")
+                || request.uri().path() == "/v1/client/pairings/renewals/pending");
         return pairing_completion
             .then(ClientSession::pairing)
             .ok_or_else(|| forbidden("the Fabric-loopback client credential is required"));
@@ -815,13 +816,15 @@ pub fn authenticate(
         .store
         .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
         .map_err(ApiError::internal)?;
-    let paired = pairings.claims.iter().find(|claim| {
-        claim
-            .body
-            .pointer("/fields/credential_hash")
-            .and_then(Value::as_str)
-            == Some(digest.as_str())
-    });
+    let mut paired = None;
+    for claim in &pairings.claims {
+        if claim.body.pointer("/fields/credential_hash").and_then(Value::as_str) == Some(digest.as_str())
+            && state.store.pairing_completion_is_trusted(claim, client_now_ms()).map_err(ApiError::internal)?
+        {
+            paired = Some(claim);
+            break;
+        }
+    }
     let Some(paired) = paired else {
         return Err(credential_rejected("the client credential is unknown or expired"));
     };
@@ -867,14 +870,22 @@ pub fn paired_client_session(
     transport: &'static str,
     custom_forms: bool,
 ) -> Result<ClientSession, ApiError> {
+    paired_client_session_at(state, paired, transport, custom_forms, client_now_ms())
+}
+
+pub fn paired_client_session_at(
+    state: &AppState,
+    paired: &ClaimRecord,
+    transport: &'static str,
+    custom_forms: bool,
+    now_unix_ms: u128,
+) -> Result<ClientSession, ApiError> {
+    let expires_at = state.store.pairing_completion_deadline(paired, now_unix_ms).map_err(ApiError::internal)?
+        .ok_or_else(|| credential_rejected("the client credential requires a new pairing"))?;
     // Revoked wins: any revocation of the grant ends it, whatever order a member admitted the
     // pairing and the revocation in. Completing refuses a used grant, so nothing re-grants it.
-    let revoked = !state.store.claims_for_subject_kind_at(
-        &paired.subject, "custom.client.pairing-revoked", None, true, 1,
-    ).map_err(ApiError::internal)?.claims.is_empty();
-    let expires_at = paired.body.pointer("/fields/expires_at_unix_ms")
-        .and_then(Value::as_u64).map(u128::from).unwrap_or_default();
-    if revoked || expires_at <= client_now_ms() {
+    let revoked = state.store.pairing_completion_is_revoked(paired).map_err(ApiError::internal)?;
+    if revoked || expires_at <= now_unix_ms {
         return Err(credential_rejected("the client credential was revoked or expired"));
     }
     let actor = paired.body.pointer("/fields/session_actor").and_then(Value::as_str)
