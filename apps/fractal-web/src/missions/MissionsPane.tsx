@@ -9,6 +9,7 @@ import { ago } from '../../../../clients/typescript/fractal-views/time.ts'
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { useMissionsDecode, useNow } from '../data/react.tsx'
 import { DecodeNotice } from '../web/LiveRoster.tsx'
+import { MissionDetailView } from './MissionDetailView.tsx'
 import { MissionFeedNotice, missionsTruncatedText } from './MissionFeedNotice.tsx'
 import { hiddenByDefault, missionEta, missionReaderTitle, type MissionPresentation, type PresentedStep, type StepWord } from './presentation.ts'
 import { missionWord } from './missionWords.ts'
@@ -21,8 +22,10 @@ import { startOfDay, useMissionRows } from './useMissionRows.ts'
 const STEP_GLYPH: Record<StepWord, string> = { needs_you: '◆', done: '✓', working: '⠋', ready: '◇', waiting: '◐', cancelled: '⊘', failed: '✕', pending: '○' }
 const STEP_NAME: Record<StepWord, string> = { needs_you: 'needs you', done: 'done', working: 'working', ready: 'ready', waiting: 'waiting', cancelled: 'cancelled', failed: 'failed', pending: 'pending' }
 
-export const MissionsPane = ({ onOpenAgent, focusedMission, onFocusMission }: {
+export const MissionsPane = ({ onOpenAgent, onOpen, focusedMission, onFocusMission }: {
   readonly onOpenAgent?: (ref: string) => void
+  /** Opens any ref (alerts, linked work, the declaration); the focused mission shows as its full detail with it. */
+  readonly onOpen?: (ref: string) => void
   /** The URL's mission: opened and scrolled to. Without a host this screen keeps its own open row. */
   readonly focusedMission?: string
   readonly onFocusMission?: (ref: string | undefined) => void
@@ -42,6 +45,12 @@ export const MissionsPane = ({ onOpenAgent, focusedMission, onFocusMission }: {
   React.useEffect(() => {
     if (open !== undefined) [...list.current?.querySelectorAll<HTMLElement>('[data-mission-id]') ?? []].find((row) => row.dataset.missionId === open)?.scrollIntoView?.({ block: 'nearest' })
   }, [open, rows.length])
+  // A focused mission, with a host that can open what it links to, reads as the full mission detail.
+  if (onFocusMission !== undefined && focusedMission !== undefined && onOpen !== undefined) {
+    return <section aria-label="Mission" data-testid="missions-pane" {...stylex.props(styles.pane)}>
+      <MissionDetailView missionRef={focusedMission} visible onOpen={ref => ref.startsWith('agent/') && onOpenAgent !== undefined ? onOpenAgent(ref) : onOpen(ref)} />
+    </section>
+  }
   return (
     <section aria-label="Missions" data-testid="missions-pane" {...stylex.props(styles.pane)}>
       <header {...stylex.props(styles.header)}>

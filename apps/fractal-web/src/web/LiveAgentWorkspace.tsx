@@ -937,7 +937,7 @@ export function WorkspaceBody({ current, rosterRefs, view, hidden = false, focus
       )}
       {view._tag === 'Missions' ? (
         <React.Suspense fallback={<div {...stylex.props(styles.paneNotice)}><SystemNotice kind="loading" title="Loading missions" /></div>}>
-          <MissionsPane {...(onOpenAgent === undefined ? {} : { onOpenAgent })} {...(view.mission === undefined ? {} : { focusedMission: view.mission })} {...(onFocusMission === undefined ? {} : { onFocusMission })} />
+          <MissionsPane {...(onOpenAgent === undefined ? {} : { onOpenAgent })} {...(alertControls?.onOpenRef === undefined ? {} : { onOpen: alertControls.onOpenRef })} {...(view.mission === undefined ? {} : { focusedMission: view.mission })} {...(onFocusMission === undefined ? {} : { onFocusMission })} />
         </React.Suspense>
       ) : null}
       {view._tag === 'Alert' && alertControls !== undefined ? (
