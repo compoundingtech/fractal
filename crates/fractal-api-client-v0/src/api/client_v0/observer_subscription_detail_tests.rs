@@ -275,12 +275,11 @@ async fn detail_router_preserves_ids_kinds_stops_and_actor_scope() {
         let credential = format!("detail-reader-{index}");
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: format!("custom/client/detail-reader-{index}"),
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/ada".into()),
                 fields: BTreeMap::from([
-                    ("pairing_operation_version".into(), json!(1)),
                     (
                         "credential_hash".into(),
                         json!(credential_digest(&credential)),

@@ -47,16 +47,12 @@ mod tests {
         )
     }
 
-    fn claim(state: &AppState, subject: &str, kind: &str, mut fields: Value) {
-        if kind == "custom.client.pairing-completed" {
-            fields["pairing_operation_version"] = json!(1);
-        }
-        state
-            .store
-            .append_claim(&ClaimInput {
+    fn claim(state: &AppState, subject: &str, kind: &str, fields: Value) {
+        let input = ClaimInput {
                 subject: subject.into(),
                 kind: kind.into(),
-                actor: fields.get("person_id").and_then(Value::as_str).map(str::to_owned),
+                actor: fields.get("person_id").and_then(Value::as_str)
+                    .or((kind == "custom.client.pairing-revoked").then_some("person/alex")).map(str::to_owned),
                 fields: fields
                     .as_object()
                     .unwrap()
@@ -66,8 +62,12 @@ mod tests {
                 evidence: Vec::new(),
                 expected_subject: None,
                 idempotency_key: None,
-            })
-            .unwrap();
+            };
+        if kind.starts_with("custom.client.pairing") {
+            state.store.append_client_operation_claim(&input)
+        } else {
+            state.store.append_claim(&input)
+        }.unwrap();
     }
 
     fn pairing(state: &AppState, subject: &str, credential: &str, scopes: Value) {
@@ -230,6 +230,20 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn held_stream_stops_at_the_effective_pairing_deadline() {
+        let (_root, state, _) = fixture();
+        pairing(&state, "custom/client/deadline-phone", "deadline-phone", json!(["terminal.read"]));
+        let mut session = authenticated(&state, "deadline-phone");
+        session.grant_expires_at = Some(client_now_ms() + 2_000);
+        let lease = acquire(&state, &session);
+        assert!(lease.binding.absolute_deadline_unix_ms <= session.grant_expires_at.unwrap());
+        assert!(lease.check().is_ok());
+        tokio::time::advance(Duration::from_secs(3)).await;
+        assert!(lease.check().is_err());
+        assert!(lease.selected_use(1).is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn foreground_renewal_never_extends_absolute_and_fresh_rotation_is_independent() {
         let (_root, state, session) = fixture();
         let old = acquire(&state, &session);
@@ -376,7 +390,7 @@ mod tests {
         let mut binding = local.binding.clone();
         binding.actor = "client/original".into();
         binding.grant_subject = Some("custom/client/original".into());
-        let grant = json!({"fields":{"pairing_operation_version":1,"session_actor":"client/original","person_id":"person/alex","scopes":["terminal.read"],"expires_at_unix_ms":client_now_ms()+600_000}});
+        let grant = json!({"fields":{"session_actor":"client/original","person_id":"person/alex","scopes":["terminal.read"],"expires_at_unix_ms":client_now_ms()+600_000}});
         binding.grant_digest = Some(credential_digest(&serde_json::to_string(&grant).unwrap()));
         let forwarded = Lease::register(
             &state,

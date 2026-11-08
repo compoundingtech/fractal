@@ -656,12 +656,11 @@ mod tests {
         let credential = "observation-credential";
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: grant.into(),
                 kind: "custom.client.pairing-completed".into(),
                 actor: Some("person/test".into()),
                 fields: BTreeMap::from([
-                    ("pairing_operation_version".into(), json!(1)),
                     (
                         "credential_hash".into(),
                         json!(hex::encode(Sha256::digest(credential.as_bytes()))),
@@ -773,7 +772,7 @@ mod tests {
         );
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: grant.into(),
                 kind: "custom.client.pairing-revoked".into(),
                 actor: Some("person/test".into()),

@@ -880,16 +880,11 @@ pub fn paired_client_session_at(
     custom_forms: bool,
     now_unix_ms: u128,
 ) -> Result<ClientSession, ApiError> {
-    if !state.store.pairing_completion_is_trusted(paired, now_unix_ms).map_err(ApiError::internal)? {
-        return Err(credential_rejected("the client credential requires a new pairing"));
-    }
+    let expires_at = state.store.pairing_completion_deadline(paired, now_unix_ms).map_err(ApiError::internal)?
+        .ok_or_else(|| credential_rejected("the client credential requires a new pairing"))?;
     // Revoked wins: any revocation of the grant ends it, whatever order a member admitted the
     // pairing and the revocation in. Completing refuses a used grant, so nothing re-grants it.
-    let revoked = !state.store.claims_for_subject_kind_at(
-        &paired.subject, "custom.client.pairing-revoked", None, true, 1,
-    ).map_err(ApiError::internal)?.claims.is_empty();
-    let expires_at = paired.body.pointer("/fields/expires_at_unix_ms")
-        .and_then(Value::as_u64).map(u128::from).unwrap_or_default();
+    let revoked = state.store.pairing_completion_is_revoked(paired).map_err(ApiError::internal)?;
     if revoked || expires_at <= now_unix_ms {
         return Err(credential_rejected("the client credential was revoked or expired"));
     }
