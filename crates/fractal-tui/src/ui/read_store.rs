@@ -8,10 +8,10 @@
 //! own reads move a position here at once and are then sent as `read-position.advance`, at most
 //! one in flight and one every [`COALESCE`] per conversation, retried after a growing wait.
 //!
-//! `read.json` beside the drafts is only an offline cache: the merged positions and the advances
-//! st has not confirmed, so a restart shows what was read before st answers and sends what it
-//! never got. A larger position from st always wins over it. Against an st without read
-//! positions (an older daemon) the positions stay on this device, as the file alone.
+//! `read-<scope>.json` beside the drafts is only an offline cache: the merged positions and
+//! advances st has not confirmed, scoped to the same gateway/device grant and person as the
+//! display snapshot. A larger position from st always wins. Against an st without read positions
+//! (an older daemon) the positions stay on this device, as the file alone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -50,10 +50,11 @@ struct File {
     unsent: BTreeMap<String, i64>,
 }
 
-/// `read.json` beside the drafts: the cache, for the same reason (a device that only pairs keeps no
-/// st state).
-pub fn path() -> Option<PathBuf> {
-    super::drafts_store::path().map(|drafts| drafts.with_file_name("read.json"))
+/// An offline cache beside the drafts, keyed by the display snapshot's endpoint-and-person scope.
+/// Never import the old unscoped `read.json`: its unsent advances have no trustworthy owner.
+pub fn path(snapshot: Option<&Path>) -> Option<PathBuf> {
+    let scope = snapshot?.file_stem()?.to_str()?;
+    super::drafts_store::path().map(|drafts| drafts.with_file_name(format!("read-{scope}.json")))
 }
 
 /// The time, in ms since the epoch, of an RFC 3339 timestamp st sent.
@@ -359,6 +360,34 @@ mod tests {
         assert_eq!(positions.list_due(now), Some(true), "the first list asks the capability");
         positions.listed(Ok(Some(Vec::new())), now);
         positions
+    }
+
+    #[test]
+    fn cache_paths_separate_people_and_gateways_without_importing_unscoped_advances() {
+        let dir = tempfile::tempdir().unwrap();
+        let scoped = |gateway: &str, person: &str| {
+            let snapshot = crate::cache::path(Path::new(gateway), person).unwrap();
+            let scoped = path(Some(&snapshot)).unwrap();
+            dir.path().join(scoped.file_name().unwrap())
+        };
+        let ada = scoped("/gateway/one", "person/ada");
+        let bob = scoped("/gateway/one", "person/bob");
+        let other = scoped("/gateway/two", "person/ada");
+        assert_ne!(ada, bob);
+        assert_ne!(ada, other);
+        assert_eq!(path(None), None);
+        let mut unscoped = ReadPositions::load(Some(dir.path().join("read.json")));
+        unscoped.advance("agent/legacy", 20_000);
+        let now = Instant::now();
+        let mut first = present(Some(ada.clone()), now);
+        assert!(first.due(now, true).is_empty(), "an unowned advance is never imported");
+        first.advance("agent/a", 10_000);
+        let mut same = present(Some(ada), now);
+        assert_eq!(same.due(now, true), [("agent/a".to_owned(), 10_000)]);
+        for other_scope in [bob, other] {
+            let mut isolated = present(Some(other_scope), now);
+            assert!(isolated.due(now, true).is_empty(), "another scope cannot replay this person's advances");
+        }
     }
 
     #[test]

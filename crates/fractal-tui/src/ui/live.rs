@@ -463,7 +463,7 @@ enum Fetched {
     ReadPositions { generation: u64, outcome: Result<Option<Vec<(String, i64)>>, String> },
     /// st answered the advance of a read position to `at_ms`: the position it keeps now, if it
     /// said, or why it failed.
-    ReadPositionAdvanced { conversation: String, at_ms: i64, outcome: Result<Option<i64>, String> },
+    ReadPositionAdvanced { generation: u64, conversation: String, at_ms: i64, outcome: Result<Option<i64>, String> },
 }
 
 /// Send one glass write to st; its answer comes back as `Fetched::GlassSaved`.
@@ -566,7 +566,7 @@ pub fn run(context: Context) -> Result<()> {
     ui.drafts_path = super::drafts_store::path();
     let (_run, earlier) = super::lastrun::begin(&crate::version::short(crate::version::now()));
     ui.load_drafts();
-    ui.reads = super::read_store::ReadPositions::load(super::read_store::path());
+    ui.reads = super::read_store::ReadPositions::load(super::read_store::path(cache_path.as_deref()));
     ui.refresh_tab_statuses();
     ui.quality = super::slo::Draw::new(process_started);
     if earlier.is_some() {
@@ -1261,7 +1261,8 @@ pub fn run(context: Context) -> Result<()> {
                         changed = true;
                     }
                 }
-                Fetched::ReadPositionAdvanced { conversation, at_ms, outcome } => {
+                Fetched::ReadPositionAdvanced { generation, conversation, at_ms, outcome } => {
+                    if generation != resources_generation { continue; }
                     if ui.reads.sent(&conversation, at_ms, outcome, Instant::now()) {
                         ui.refresh_tab_statuses();
                         changed = true;
@@ -1531,9 +1532,10 @@ pub fn run(context: Context) -> Result<()> {
             // again after a growing wait (`read_store`), never flashed.
             if let Effect::AdvanceReadPosition { conversation, at_ms } = effect {
                 let client = client.clone(); let tx = fetched_tx.clone(); let person = person.clone();
+                let generation = resources_generation;
                 runtime.spawn(async move {
                     let outcome = advance_read_position(&client, &person, &conversation, at_ms).await.map_err(|error| plain(&error));
-                    let _ = tx.send(Fetched::ReadPositionAdvanced { conversation, at_ms, outcome });
+                    let _ = tx.send(Fetched::ReadPositionAdvanced { generation, conversation, at_ms, outcome });
                 });
                 continue;
             }

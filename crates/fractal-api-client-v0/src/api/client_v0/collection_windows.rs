@@ -1100,6 +1100,7 @@ mod tests {
             for kind in fractal_schema::registry().claims.keys() {
                 let telemetry = matches!(kind.as_str(),
                     "daemon.diagnostic" | "transport.observed" | "workspace.observed")
+                    || kind == fractal_schema::read_positions::KIND
                     || (collection == "missions" && matches!(kind.as_str(),
                         "harness.observed" | "harness.diagnostic" | "harness.timeline" | "harness.usage"
                             | "harness.todo.observed" | "harness.session-file"))
