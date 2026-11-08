@@ -31,7 +31,7 @@ export function documentLinks(text: string): DocumentLink[] {
     const before = start > 0 ? text[start - 1] : '';
     if (before && (NAME_BYTE.test(before) || before === '@')) continue;
     let end = start + 4;
-    while (end < text.length && NAME_BYTE.test(text[end])) end += 1;
+    while (end < text.length && NAME_BYTE.test(text.charAt(end))) end += 1;
     while (end > start + 4 && (text[end - 1] === '.' || text[end - 1] === '/')) end -= 1;
     let referenceEnd = end;
     if (text[end] === '@') {

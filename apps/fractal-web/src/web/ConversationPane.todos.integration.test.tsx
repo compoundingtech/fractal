@@ -34,13 +34,13 @@ it('keeps Todos out of the pane and preserves the composer during conversation l
   document.body.append(container)
   const root = createRoot(container)
   try {
-    await act(async () => root.render(<ConversationPane agentRef="agent/example" agentName="Example" onOpenTool={() => {}} />))
+    await act(async () => root.render(<ConversationPane agentRef="agent/example" agentName="Example" />))
     const composer = container.querySelector('textarea')
     expect(container.querySelector('[aria-label="To-dos"]')).toBeNull()
     expect(composer).not.toBeNull()
     expect(container.querySelector('[aria-label="Loading conversation"]')).not.toBeNull()
     state.tag = 'Unavailable'
-    await act(async () => root.render(<ConversationPane agentRef="agent/example" agentName="Example" onOpenTool={() => {}} />))
+    await act(async () => root.render(<ConversationPane agentRef="agent/example" agentName="Example" />))
     expect(container.querySelector('[aria-label="To-dos"]')).toBeNull()
     expect(container.querySelector('textarea')).toBe(composer)
     expect(container.querySelector('[data-testid="transcript-unavailable"]')).not.toBeNull()

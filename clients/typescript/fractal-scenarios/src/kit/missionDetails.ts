@@ -7,6 +7,15 @@ import type { DetailsState, Slice } from './slice.ts'
 
 const finished = (state: string): boolean => ['completed', 'failed', 'cancelled'].includes(state)
 
+/** A work row as its run's step; a field the row leaves out stays out of the step. */
+const missionStep = ({ stepRun, item }: { readonly stepRun: string; readonly item: Work }): MissionStep => ({
+  id: stepRun, path: item.path, ...(item.title === undefined ? {} : { title: item.title }), state: item.state,
+  attempt: item.attempt, since: item.updated_at,
+  ...(item.claimant === undefined ? {} : { claimant: item.claimant, assignee: item.claimant }),
+  ...(item.blocked_reason === undefined ? {} : { blocked_reason: item.blocked_reason }),
+  ...(item.blockers === undefined ? {} : { blockers: item.blockers }), goals: item.goals, constraints: item.constraints,
+})
+
 /** Project the authored work inventory, rather than maintaining a second set of step states. */
 const withRunDetails = (ctx: FactoryContext, mission: Mission, work: readonly Work[]): Mission => {
   const definition = ctx.cast.missions.find((value) => value.id === mission.id)
@@ -15,19 +24,15 @@ const withRunDetails = (ctx: FactoryContext, mission: Mission, work: readonly Wo
     const steps = work.filter((item) => item.mission_id === mission.id && item.mission_run_id === id).map((item): MissionStep => {
       const step = definition.steps.find((value) => value.work === item.id)
       if (!step) throw new Error(`Missing cast step: ${item.id}`)
-      return {
-        id: step.stepRun, path: item.path, title: item.title, state: item.state,
-        attempt: item.attempt, since: item.updated_at, claimant: item.claimant,
-        assignee: item.claimant, blocked_reason: item.blocked_reason,
-        blockers: item.blockers, goals: item.goals, constraints: item.constraints,
-      }
+      return missionStep({ stepRun: step.stepRun, item })
     })
     const mustAct = finished(mission.state) ? 'nobody'
       : steps.some((step) => step.state === 'waiting-person') ? 'you'
         : steps.some((step) => ['ready', 'claimed', 'verifying'].includes(step.state) && step.claimant !== null) ? 'agent'
           : steps.some((step) => step.state === 'blocked') ? 'blocked' : 'system'
+    const generation = mission.run_generations[id]
     return {
-      id, generation_id: mission.run_generations[id],
+      id, ...(generation === undefined ? {} : { generation_id: generation }),
       requester: ctx.cast.people[0]?.id ?? ctx.cast.agents[0]!.id,
       status: mission.state, phase: finished(mission.state) ? 'terminal' : 'normal',
       progress: { done: steps.filter((step) => step.state === 'completed').length, total: steps.length },

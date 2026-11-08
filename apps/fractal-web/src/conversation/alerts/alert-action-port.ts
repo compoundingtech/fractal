@@ -21,7 +21,8 @@ export type AlertAction =
   | {
       readonly type: 'work.done'
       readonly summary: string
-      readonly answer?: { readonly id?: string; readonly text?: string }
+      /** The one answer schema: the answers chosen, each with an optional note, and the person's words. */
+      readonly answer?: { readonly choices: Array<{ readonly id: string; readonly note?: string }>; readonly words?: string }
     }
   | {
       readonly type: 'review.approve' | 'review.reject' | 'review.request-changes'

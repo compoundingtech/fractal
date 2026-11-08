@@ -1,8 +1,8 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { ActionSheetIOS, Alert, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
+import { ActionSheetIOS, Alert, AppState, FlatList, Image, Keyboard, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View, type ViewToken } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Clipboard from 'expo-clipboard';
-import { useFocusEffect } from '@react-navigation/native';
+import { useFocusEffect, useIsFocused } from '@react-navigation/native';
 import { useHeaderHeight } from '@react-navigation/elements';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { FractalClient, TimelineEntry } from '../../../clients/typescript/fractal-client';
@@ -11,7 +11,8 @@ import { contentImageUri, contentJsonValue, fetchedConversationEntries, loadConv
 import { checkoutLabel } from '../launcher';
 import { agentGlyph, agentModel, agentName, agentReported, agentState, agentWord, harnessColor, harnessName, loginGuidance } from '../agentsView';
 import { Banners } from '../chrome';
-import { quality } from '../qualityNative';
+import { quality, readPositions } from '../qualityNative';
+import { seenTail } from '../readPosition';
 import rules from '../../../fixtures/clients/conversation-style.json';
 import { tokenColor, type ConversationRules } from '../conversationStyle';
 import { conversationEntries, freshnessLine, staleLine, entryMatches, entryText, folds, headerLine, shownToolLines, subagentSession, unreadableTranscript, type ConversationEntry, type MailImage, simplify, type SimpleRow, sessionPerson, applyConversation, applyOlderPage, isUnresolved, olderFailed, olderLoading, olderNote, type Conversation } from '@fractal/views';
@@ -68,6 +69,16 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const [timeline, setTimeline] = useState<Conversation<TimelineEntry>>(() => conversationCache.current.get(target) ?? empty);
   const timelineNow = useRef(timeline);
   timelineNow.current = timeline;
+  // Open and in front: what this conversation holds is seen, as far as the newest prose known of it.
+  const focused = useIsFocused();
+  const [active, setActive] = useState(AppState.currentState === 'active');
+  useEffect(() => { const listening = AppState.addEventListener('change', state => setActive(state === 'active')); return () => listening.remove(); }, []);
+  const lastProseAt = agent?.last_prose_at;
+  useEffect(() => {
+    if (!focused || !active) return;
+    const tail = seenTail(lastProseAt, timeline.entries);
+    if (tail !== undefined) readPositions.advance(target, tail);
+  }, [focused, active, target, lastProseAt, timeline.entries]);
   // Earlier pages load only when the person asks by scrolling (or tapping the line above the
   // oldest entry), never on their own when a short conversation fits the screen.
   const dragged = useRef(false);

@@ -185,7 +185,7 @@ it('opens a sidebar row in a split to the right on Cmd or Ctrl-click', async () 
   expect(window.location.pathname).toBe('/w/agent/b')
 })
 
-it('keeps one top bar unsplit, and once split gives every pane its own controls but only the first the sidebar\'s', async () => {
+it('keeps one top bar unsplit, and once split gives every pane its own controls while app-wide notices stay in the global area', async () => {
   await mount()
   expect(host.querySelectorAll('[data-testid="thread-header"]')).toHaveLength(1)
   await act(async () => row('agent/b').click())
@@ -193,8 +193,10 @@ it('keeps one top bar unsplit, and once split gives every pane its own controls 
   const bars = [...host.querySelectorAll<HTMLElement>('[data-testid="thread-header"]')]
   expect(bars).toHaveLength(2)
   for (const bar of bars) expect(bar.querySelector('button[aria-label="Toggle right panel"]')).not.toBeNull()
-  expect(host.querySelectorAll('[data-testid="global-bands"]')).toHaveLength(1)
-  expect(bars[0]!.querySelector('[data-testid="global-bands"]') ?? bars[0]!.parentElement!.querySelector('[data-testid="global-bands"]')).not.toBeNull()
+  // The connection and Usage live in the sidebar's footer, never in whichever pane is top-left.
+  const sidebar = host.querySelector<HTMLElement>('aside[aria-label="Agents"]')!
+  expect(sidebar.querySelector(':scope > footer [data-usage-section]')).not.toBeNull()
+  for (const pane of host.querySelectorAll('[data-pane]')) expect(pane.querySelector('[data-usage-section], [data-connection-line], [data-testid="alert-flash"]')).toBeNull()
 })
 
 const pointer = async (target: EventTarget, type: string, init: { clientX?: number; clientY?: number } = {}) => {
@@ -243,4 +245,136 @@ it('drops a tab into another pane\'s strip at the slot under the pointer, and th
   await pointer(window, 'pointermove', { clientX: 10, clientY: 20 })
   await pointer(window, 'pointerup', { clientX: 10, clientY: 20 })
   expect(stripTitles()).toEqual([['Agent B', 'Agent A']])
+})
+
+it('switches spaces from the sidebar\'s switcher, in place of the wordmark: new, rename, Alt+G, and close behind a confirm', async () => {
+  await mount()
+  const switcher = () => host.querySelector<HTMLButtonElement>('[data-testid="space-switcher"]')!
+  expect(host.querySelector('[data-sidebar-header]')?.textContent).not.toContain('Fractal')
+  expect(switcher().textContent).toBe('Main')
+  const choose = async (label: string) => {
+    await act(async () => switcher().click())
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(node => node.textContent === label)!
+    await act(async () => item.click())
+  }
+  const name = async (value: string) => {
+    const field = document.querySelector<HTMLInputElement>('input[placeholder="Space name"]')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, value)
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => field.form!.requestSubmit())
+  }
+  await choose('New space…')
+  await name('Review')
+  expect(switcher().textContent).toBe('Review')
+  expect(stripTitles()).toEqual([[]])
+  await choose('Rename…')
+  await name('Reviews')
+  expect(switcher().textContent).toBe('Reviews')
+  await key('KeyG')
+  expect(switcher().textContent).toBe('Main')
+  expect(stripTitles()).toEqual([['Agent A']])
+  await key('KeyG')
+  await choose('Close space…')
+  expect(switcher().textContent).toBe('Reviews')
+  const keep = [...document.querySelectorAll<HTMLButtonElement>('button')].find(node => node.textContent === 'Close space')!
+  await act(async () => keep.click())
+  expect(switcher().textContent).toBe('Main')
+  await act(async () => switcher().click())
+  expect([...document.querySelectorAll('[role="menuitem"]')].map(node => node.textContent)).toContain('Close space…')
+})
+
+it('marks a zoomed split, and its badge unzooms', async () => {
+  await mount()
+  await act(async () => row('agent/b').click())
+  await splitTab('Agent B', 'Split right')
+  await key('KeyO')
+  expect(panes()).toHaveLength(1)
+  const badge = host.querySelector<HTMLButtonElement>('[data-testid="zoom-badge"]')!
+  expect(badge.getAttribute('aria-label')).toBe('Unzoom split')
+  await act(async () => badge.click())
+  expect(panes()).toHaveLength(2)
+  expect(host.querySelector('[data-testid="zoom-badge"]')).toBeNull()
+})
+
+it('collapses to the focused pane on a phone, and the pane switcher reaches the others', async () => {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
+  vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('max-width'), media: query, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {} }))
+  await mount()
+  expect(host.querySelector('[data-testid="pane-switcher"]'), 'one pane needs no switcher').toBeNull()
+  await arrive('/w/agent/b')
+  await splitRight()
+  expect(panes()).toHaveLength(1)
+  const switcher = () => host.querySelector<HTMLButtonElement>('[data-testid="pane-switcher"]')!
+  expect(switcher().getAttribute('aria-label')).toBe('Pane 2 of 2')
+  expect(host.querySelector('[data-pane][data-focused] [data-testid="workspace-empty"]')).not.toBeNull()
+  await act(async () => switcher().click())
+  const items = [...document.querySelectorAll<HTMLElement>('[role="menuitemradio"], [role="menuitem"]')]
+  expect(items.map(item => item.textContent)).toEqual(['1Agent B +1', '2Empty'])
+  await act(async () => items[0]!.click())
+  expect(switcher().getAttribute('aria-label')).toBe('Pane 1 of 2')
+  expect(panes()).toHaveLength(1)
+  expect(window.location.pathname).toBe('/w/agent/b')
+  expect(surface('agent:agent/b')!.getAttribute('aria-hidden')).toBe('false')
+})
+
+it('keeps one glass per space: the switcher writes new, renamed and closed spaces, and switching writes nothing', async () => {
+  const glasses = new Map<string, Glass>()
+  const writes: string[] = []
+  let revision = 0
+  const gateway: GlassGateway = {
+    discover: async () => ({ value: { capabilities: [{ id: 'glasses', version: 2, state: 'granted' }] } }) as never,
+    collectionStream: async options => ({
+      subscribeGlasses: (id: string) => queueMicrotask(() => options.onFrame({ kind: 'snapshot', id, collection: 'glasses', items: [...glasses.values()], order: [...glasses.keys()], has_more: false, snapshot: {} } as never)),
+      close: () => {},
+    }) as unknown as CollectionStream,
+    putGlass: async (id, request) => {
+      revision += 1
+      writes.push(`put ${request.body.name}`)
+      const glass = { id: `glass/person/avery/${id}`, kind: 'glass', revision: `r${revision}`, updated_at: '2026-11-08T00:00:00Z', deleted: false, body: request.body, base_revision: request.base_revision, replaced_revision: null } as Glass
+      glasses.set(glass.id, glass)
+      return { value: glass } as never
+    },
+    deleteGlass: async id => {
+      revision += 1
+      const key = `glass/person/avery/${id}`
+      writes.push(`delete ${glasses.get(key)?.body?.name}`)
+      glasses.delete(key)
+      return { value: { id: key, kind: 'glass', revision: `r${revision}`, updated_at: '2026-11-08T00:00:00Z', deleted: true, body: null } } as never
+    },
+  }
+  await mount(gateway)
+  const names = () => [...glasses.values()].map(glass => glass.body?.name).toSorted()
+  await vi.waitFor(() => expect(names()).toEqual(['Main']))
+  const switcher = () => host.querySelector<HTMLButtonElement>('[data-testid="space-switcher"]')!
+  const choose = async (label: string) => {
+    await act(async () => switcher().click())
+    await act(async () => [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(node => node.textContent === label)!.click())
+  }
+  const name = async (value: string) => {
+    const field = document.querySelector<HTMLInputElement>('input[placeholder="Space name"]')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, value)
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => field.form!.requestSubmit())
+  }
+  await choose('New space…')
+  await name('Review')
+  await vi.waitFor(() => expect(names()).toEqual(['Main', 'Review']))
+  await choose('Rename…')
+  await name('Reviews')
+  await vi.waitFor(() => expect(names()).toEqual(['Main', 'Reviews']))
+  const before = writes.length
+  await key('KeyG')
+  expect(switcher().textContent).toBe('Main')
+  await key('KeyG')
+  expect(switcher().textContent).toBe('Reviews')
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 400)) })
+  expect(writes.slice(before), 'switching is this client\'s alone').toEqual([])
+  await choose('Close space…')
+  await act(async () => [...document.querySelectorAll<HTMLButtonElement>('button')].find(node => node.textContent === 'Close space')!.click())
+  await vi.waitFor(() => expect(names()).toEqual(['Main']))
+  expect(writes.at(-1)).toBe('delete Reviews')
 })

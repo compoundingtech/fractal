@@ -3444,14 +3444,36 @@ pub struct PersonStepResponse {
     pub idempotency_key: String,
 }
 
-/// A person's answer as submitted: a named answer `id`, text, or both (`person_request`).
+/// A person's answer as submitted, one schema for every question (`docs/st3/person-answers.md`):
+/// the answers they chose, each with an optional note, and their own words beside them. Notes and
+/// words are independent; each is recorded or refused, never folded into the other.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct AnswerInput {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<ChoiceInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<String>,
+    pub words: Option<String>,
+}
+
+/// One chosen answer, by its id, with the person's note on it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ChoiceInput {
+    pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
+    pub note: Option<String>,
+}
+
+impl AnswerInput {
+    /// One chosen answer and nothing else.
+    pub fn choose(id: impl Into<String>) -> Self {
+        Self { choices: vec![ChoiceInput { id: id.into(), note: None }], words: None }
+    }
+    /// The person's words alone.
+    pub fn words(words: impl Into<String>) -> Self {
+        Self { choices: Vec::new(), words: Some(words.into()) }
+    }
 }
 
 /// A response to a person ask, including answers submitted by an authorized assistant.
@@ -3478,7 +3500,8 @@ pub struct PersonAnswerView {
     /// The answering principal, including `assistant/chatgpt` for assistant responses.
     pub respondent: String,
     pub answered_at_unix_ms: u128,
-    /// The typed answer: `type`, `outcome`, and `id`, `label` and `text` when present. An ask
+    /// The typed answer in the one answer schema: `type`, `outcome`, `choices` (each `id`, `label`
+    /// and an optional `note`) and optional `words`; stored legacy records read the same. An ask
     /// that timed out carries its default answer as the person's choice of it would read, or no
     /// answer when it named none; `resolved_by` says the deadline gave it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

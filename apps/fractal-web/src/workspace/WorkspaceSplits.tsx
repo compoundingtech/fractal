@@ -103,6 +103,9 @@ export const surfacePlacement = (pane: string): React.CSSProperties => {
   return { left: `var(${vars.x}, 0px)`, top: `var(${vars.y}, 0px)`, width: `var(${vars.width}, 100%)`, height: `var(${vars.height}, 100%)` }
 }
 
+/** A value for a double-quoted attribute selector; `CSS.escape` is not everywhere this runs. */
+export const attributeValue = (value: string): string => value.replace(/["\\]/g, '\\$&')
+
 export const PaneSlotsContext = React.createContext<PaneSlots | undefined>(undefined)
 
 /**

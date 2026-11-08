@@ -46,9 +46,11 @@ describe('unread on sidebar rows', () => {
     expect(unreadLabel('some')).toBe('•')
   })
 
-  it('takes the newest prose from the gateway, else the last activity of a seat that is not working', () => {
+  it('takes the newest prose only from the gateway, as the TUI and the phone do', () => {
     expect(latestProseAt({ ...agent, lastProseAt: { _tag: 'Known', value: 300 } })).toBe(300)
-    expect(latestProseAt(agent)).toBe(500)
+    // Last activity moves on tool calls and prompts: it is not prose, so an older gateway that
+    // leaves `last_prose_at` out marks nothing beyond what a loaded window counted.
+    expect(latestProseAt(agent)).toBeUndefined()
     expect(latestProseAt({ ...agent, activity: 'working' })).toBeUndefined()
   })
 })

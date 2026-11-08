@@ -1,7 +1,6 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { RegistryContext } from '@effect/atom-react'
-import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { colorVars as c } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { ViewportStore, ViewportStoreContext } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceScrollViewport.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
@@ -13,7 +12,7 @@ import { showsTerminal, type Tab, type TabView } from './model.ts'
 import { parsePane, subjectAgent } from './subject.ts'
 import type { Tier } from './resources.ts'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
-import { surfacePlacement } from './WorkspaceSplits.tsx'
+import { attributeValue, surfacePlacement } from './WorkspaceSplits.tsx'
 
 export interface WorkspaceBodyProps {
   readonly tabs: readonly Tab[]
@@ -30,7 +29,6 @@ export interface WorkspaceBodyProps {
   readonly tiers: ReadonlyMap<string, Tier>
   readonly views: Readonly<Record<string, TabView>>
   readonly names: ReadonlyMap<string, string>
-  readonly onOpenTool: (call: WorkLogCall) => void
   readonly onOpen: (ref: string) => void
   readonly onReplace: (id: string, ref: string) => void
   readonly onClose: (id: string) => void
@@ -88,7 +86,7 @@ const useScrollMemory = ({ enabled, shown, scrollTop, save }: {
 }
 
 /** One tab's retained surface. Its props are stable so a roster tick or another tab's switch never re-renders it. */
-const TabSurface = React.memo(function TabSurface({ tab, pane, headerSlot, shown, covered, name, view, onOpenTool, onOpen, onReplace, onClose, onBackToAlerts, onView, ux }: {
+const TabSurface = React.memo(function TabSurface({ tab, pane, headerSlot, shown, covered, name, view, onOpen, onReplace, onClose, onBackToAlerts, onView, ux }: {
   readonly tab: Tab
   readonly pane: string
   readonly headerSlot: HTMLElement | null
@@ -96,7 +94,6 @@ const TabSurface = React.memo(function TabSurface({ tab, pane, headerSlot, shown
   readonly covered: boolean
   readonly name: string | undefined
   readonly view: TabView | undefined
-  readonly onOpenTool: (call: WorkLogCall) => void
   readonly onOpen: (ref: string) => void
   readonly onReplace: (id: string, ref: string) => void
   readonly onClose: (id: string) => void
@@ -118,7 +115,7 @@ const TabSurface = React.memo(function TabSurface({ tab, pane, headerSlot, shown
     if (hasDraft !== (view?.dirty ?? false)) onView(tab.id, { dirty: hasDraft })
   }, [shown, tab.id, onView, memory.host, view?.dirty])
   const Surface = surface.Surface
-  const body = <Surface subject={subject} name={name} visible={shown} terminal={showsTerminal(tab, view)} onOpenTool={onOpenTool} onOpen={onOpen} onReplace={replace} onClose={close} onBackToAlerts={onBackToAlerts} ux={ux} />
+  const body = <Surface subject={subject} name={name} visible={shown} terminal={showsTerminal(tab, view)} onOpen={onOpen} onReplace={replace} onClose={close} onBackToAlerts={onBackToAlerts} ux={ux} />
   return <div
     ref={memory.host}
     aria-hidden={!shown}
@@ -144,7 +141,7 @@ const sameSet = (left: ReadonlySet<string>, right: ReadonlySet<string>) => left.
  * content slot. A hidden surface is revealed, not re-rendered, on a switch; the outgoing one stays
  * covered through the switch frame, since locking it costs O(its rows).
  */
-export function WorkspaceBody({ tabs, active, shown, paneOf, headerSlots, onFocusPane, tiers, views, names, onOpenTool, onOpen, onReplace, onClose, onBackToAlerts, onView, focusShownFace, ux }: WorkspaceBodyProps) {
+export function WorkspaceBody({ tabs, active, shown, paneOf, headerSlots, onFocusPane, tiers, views, names, onOpen, onReplace, onClose, onBackToAlerts, onView, focusShownFace, ux }: WorkspaceBodyProps) {
   // Work-log folds outlive the surface and reload; reading positions stay with this surface.
   const registry = React.useContext(RegistryContext)
   const [viewportStore] = React.useState(() => new ViewportStore({ folds: persistedFolds(registry) }))
@@ -192,7 +189,7 @@ export function WorkspaceBody({ tabs, active, shown, paneOf, headerSlots, onFocu
     if (!focusShownFace.current) return
     focusShownFace.current = false
     if (narrow) return
-    const surface = active === null ? null : area.current?.querySelector<HTMLElement>(`[data-tab-surface-id="${CSS.escape(active)}"]`)
+    const surface = active === null ? null : area.current?.querySelector<HTMLElement>(`[data-tab-surface-id="${attributeValue(active)}"]`)
     surface?.querySelector<HTMLElement>(terminalFace ? '[data-testid="terminal-pane"][data-terminal-shown="true"]' : '[data-wf-shown-pane] textarea:not(:disabled)')?.focus({ preventScroll: true })
   }, [terminalFace, focusShownFace, narrow, active])
   // The surfaces sit outside their panes, so a press or focus in one focuses its pane here.
@@ -221,7 +218,6 @@ export function WorkspaceBody({ tabs, active, shown, paneOf, headerSlots, onFocu
           covered={switched.covered.has(tab.id)}
           name={agent === undefined ? undefined : names.get(agent)}
           view={views[tab.id]}
-          onOpenTool={onOpenTool}
           onOpen={onOpen}
           onReplace={onReplace}
           onClose={onClose}

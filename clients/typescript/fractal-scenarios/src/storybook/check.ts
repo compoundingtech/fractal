@@ -63,8 +63,11 @@ export interface ScenarioStoryCheckOptions<TArgs extends Args = Args> {
 }
 
 export class ScenarioStoryCheckError extends Error {
-  constructor(readonly result: ScenarioStoryCheckResult) {
+  readonly result: ScenarioStoryCheckResult
+
+  constructor(result: ScenarioStoryCheckResult) {
     super(result.failures.map(({ check, message }) => `check ${check}: ${message}`).join('\n'))
+    this.result = result
     this.name = 'ScenarioStoryCheckError'
   }
 }

@@ -40,7 +40,7 @@ const notFacts: ReadonlySet<string> = new Set(['Reviews', 'Declared bindings', '
 
 export interface AgentDetailsPanelProps {
   readonly agentRef: string
-  /** A number sizes a standalone panel; `dock` fills DockedSplit, and `fill` flows in the narrow sheet. */
+  /** A number sizes a standalone panel; `dock` fills a pane's side panel, and `fill` flows in the phone's bottom sheet. */
   readonly width: number | 'fill' | 'dock'
   /** The host shell applies the light/dark tokens; the inspector carries no theme control of its own. */
   readonly scheme: 'dark' | 'light'

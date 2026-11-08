@@ -270,7 +270,7 @@ const mountPane = (agentRef: string) => {
   flushSync(() => {
     root!.render(
       <DataSourceProvider source={live!.source} registry={live!.registry}>
-        <ConversationPane key={agentRef} agentRef={agentRef} agentName="Route" onOpenTool={() => {}} />
+        <ConversationPane key={agentRef} agentRef={agentRef} agentName="Route" />
       </DataSourceProvider>,
     )
   })
@@ -365,8 +365,8 @@ describe('ConversationPane conversation demand', () => {
     expect(paneText()).not.toContain('Older history unavailable')
   })
 
-  it('renders the live workspace transcript and opens and closes its tool detail in the pane side panel', async () => {
-    // A measured pane: the side panel only shows once the pane has a width.
+  it('renders the live workspace transcript and expands its tool detail inline, never in a side panel', async () => {
+    // A measured pane: wide enough for its side panel, which still never takes the tool's detail.
     vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) { return this.hasAttribute('data-pane') ? new DOMRect(0, 0, 1024, 800) : new DOMRect() })
     window.history.replaceState(null, '', '/w/agent/route')
     open()
@@ -391,16 +391,13 @@ describe('ConversationPane conversation demand', () => {
     const raw = [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Show raw input/output')!
     expect(raw).toBeDefined()
     flushSync(() => raw.click())
-    const button = container.querySelector('button[aria-label="Open Reading information tool detail"]') as HTMLButtonElement
-    expect(button).not.toBeNull()
-    flushSync(() => button.click())
-    await until(() => container.querySelector('aside[aria-label="Tool detail"]') !== null)
-    const panel = container.querySelector('aside[aria-label="Tool detail"]')!
-    expect(panel.textContent).toContain('export const rows = []')
-    // Tool detail opens in the side panel of the pane it came from, as a contextual tab.
-    expect(panel.closest('[data-pane-aside]')?.closest('[data-pane]')).not.toBeNull()
-    flushSync(() => (panel.querySelector('button[aria-label="Close tool detail"]') as HTMLButtonElement).click())
+    // The whole output reads in place, inside the work log; there is nothing to open elsewhere.
+    const log = workspace.querySelector('[data-testid="work-log"]')!
+    expect(log.textContent).toContain('export const rows = []')
+    expect(container.querySelector('button[aria-label="Open Reading information tool detail"]')).toBeNull()
+    expect(container.querySelector('[data-testid="tool-preview-actions"]')).toBeNull()
     expect(container.querySelector('aside[aria-label="Tool detail"]')).toBeNull()
+    expect(container.querySelector('[role="tablist"][aria-label="Side panel views"]')).toBeNull()
     expect(workspace.querySelector('[data-testid="agent-message"]')).not.toBeNull()
     window.history.replaceState(null, '', '/')
   })
@@ -849,7 +846,7 @@ describe('ConversationPane composer/send binding', () => {
     // Remove the port so the same pane cannot issue a send. The positive criterion must reject it.
     const { attachments: _attachments, ...withoutSend } = live!.source
     flushSync(() => root!.render(<DataSourceProvider source={withoutSend} registry={live!.registry}>
-      <ConversationPane agentRef={scratchSeat} agentName="Scratch" onOpenTool={vi.fn()} />
+      <ConversationPane agentRef={scratchSeat} agentName="Scratch" />
     </DataSourceProvider>))
     await submitDraft()
     expect(() => expect(send).toHaveBeenCalledTimes(1)).toThrow()

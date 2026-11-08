@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -60,7 +60,8 @@ export const prepareChangelogBuild = async ({ privateBuild, deployment, registri
     deployment: selected,
     entryIds: entries.map(({ id }) => id),
     privateEntries,
-    privateDirectory: hasPrivate ? dirname(registries.private).replaceAll('\\', '/') : undefined,
+    // Bundler module ids are real paths; compare against the real directory, not a symlinked spelling of it.
+    privateDirectory: hasPrivate ? realpathSync(dirname(registries.private)).replaceAll('\\', '/') : undefined,
     compile: (build) => compileChangelog({ build, sources, audience, inventory }),
   }
 }

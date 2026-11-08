@@ -25,12 +25,15 @@ import { useMarkRead, useUnreadMarks } from './readPosition.ts'
 import { useWorkspaceResources, useWorkspaceRoute, useWorkspaceState, useWorkspaceStore, type WorkspaceNavigation } from '../workspace/useWorkspace.ts'
 import { useWorkspaceKeys } from '../workspace/useWorkspaceKeys.ts'
 import { WorkspaceBody } from '../workspace/WorkspaceBody.tsx'
-import { WorkspaceEmpty, WorkspaceStrip } from '../workspace/WorkspaceStrip.tsx'
-import { PaneSlot, PaneSlots, WorkspaceSplits, leadPane } from '../workspace/WorkspaceSplits.tsx'
+import { WorkspaceEmpty, WorkspaceStrip, openable } from '../workspace/WorkspaceStrip.tsx'
+import { ConversationOverflowMenu, type OverflowSection } from './AgentActions.tsx'
+import { PaneSlot, PaneSlots, WorkspaceSplits, attributeValue, leadPane } from '../workspace/WorkspaceSplits.tsx'
+import { SpaceSwitcher, nextSpace } from '../workspace/SpaceSwitcher.tsx'
+import { PaneSwitcher } from '../workspace/PaneSwitcher.tsx'
 import type { HostActions, HostCommand } from '../palette/mod.ts'
 import { shortcutsPausedSelector } from './shortcuts.ts'
 import { narrowLayoutQuery } from './narrowLayout.ts'
-import { AlertFlashBand } from './AlertFlashBand.tsx'
+
 import { useVisibleAttention } from '../conversation/alerts/useAlertAnswers.ts'
 import { LiveAlertNames } from '../conversation/alerts/LiveAlertNames.tsx'
 import { liveLegacyTheme } from '../ui-compat/live-theme.stylex.ts'
@@ -52,14 +55,13 @@ import type { PresentationWorld } from '../workspace/presentation.ts'
 import { LiveAlertCard } from './LiveAlertCard.tsx'
 import { SidebarMissionChildRow, missionChildAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarMissionLine.tsx'
 import { SidebarQueryContext, sidebarRowAccessibleName } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/rowPresentation.tsx'
-import { SystemNotice, ConnectionStatus } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
+import { SystemNotice } from '../../../../packages/fractal-ui/src/assistant-ui/composition/SystemState.tsx'
 import { ThreadActions, ThreadBreadcrumb, PhoneTerminalToggle } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Shell.tsx'
 import { NarrowSheet } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { darkTheme as assistantDarkTheme, liveComposerDarkTheme, liveAccentTheme } from '../../../../packages/fractal-ui/src/assistant-ui/embrace-theme.ts'
 import { lightTheme as compositionLightTheme } from '../../../../packages/fractal-ui/src/assistant-ui/composition-theme.ts'
 import type { SidebarActions } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/model.ts'
 import { PinsSection } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/PinsSection.tsx'
-import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import { terminalSubjectForAgent } from '../data/projections.ts'
 import { sidebarPins } from '../data/sidebarPins.ts'
 import { useFleet, useAgent, useSubjectList, useConnection, useNow, useNowSnapshot, useDataSource, useRosterDecode, useAskingAgents, useMissions } from '../data/react.tsx'
@@ -70,8 +72,6 @@ import { setTheme } from '../ui-compat/foundations.ts'
 import { WorkbenchContextProvider, ResourcePanelProvider, MonitorDetailProvider, type OpenRequest } from '../shell/context.tsx'
 import type { ResourcePanelState } from '../shell/state.ts'
 import { afterNextPaint, type UxTelemetry } from '../telemetry/ux.ts'
-import { formatDuration } from '@fractal/ui/human-time/format'
-import { useGatewaySync } from '../data/react.tsx'
 import { NarrowLayoutContext } from '../../../../packages/fractal-ui/src/assistant-ui/composition/NarrowLayout.tsx'
 import { PhoneAgentDrawer, type PhoneAgentDrawerHandle } from './PhoneAgentDrawer.tsx'
 import { AgentFolders } from '../shell/AgentFolders.tsx'
@@ -88,12 +88,13 @@ import { FolderAttentionSignal } from './AttentionControls.tsx'
 import { liveShowRows, liveSidebarTree } from './liveSidebarTree.ts'
 import { RosterLoading, RosterStaleNotice, RosterUnavailable, SidebarEmptyState } from './SidebarEmptyState.tsx'
 import { useAgentsLastObservedAt } from './lastObserved.tsx'
-import { ResponsiveAgentSidebar, sidebarMinimumWidth, useSidebarShortcut, useSidebarNavigation } from './ResponsiveAgentSidebar.tsx'
-import { SidebarTabs } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarTabs.tsx'
-import { LiveUsageSection } from '../monitor/UsageSection.tsx'
+import { ResponsiveAgentSidebar, sidebarMinimumWidth, sidebarRailWidth, useSidebarShortcut, useSidebarNavigation } from './ResponsiveAgentSidebar.tsx'
+import { SidebarTabs, sidebarTabName, type SidebarTab } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarTabs.tsx'
+import { LiveUsageRailControl, LiveUsageSection } from '../monitor/UsageSection.tsx'
 import { SettingsControl } from './SettingsDialog.tsx'
 import type { SettingsBuild } from './settingsModel.ts'
-import { syncLine } from '../../../../packages/fractal-ui/src/assistant-ui/sync-presentation/sync-line.ts'
+import { AlertToast, ToastRegion } from './globalArea/AlertToast.tsx'
+import { ConnectionFooterLine, LayoutSyncNote, PaneConnectionBand, PhoneDrawerOpener, SidebarRail, layoutSyncWords } from './globalArea/GlobalArea.tsx'
 import { DecodeNotice, shownRosterRefs } from './LiveRoster.tsx'
 import { schemePreference, useResolvedScheme } from './themePreference.ts'
 
@@ -314,13 +315,6 @@ const useGlassBoot = (glasses: GlassGateway | undefined): { readonly boot: Boot 
   return state
 }
 
-/** Said in the strip when the person's glasses could not be reached: the layout is this page's alone. */
-const LayoutSyncNote = ({ retry }: { readonly retry: () => void }) => <span {...stylex.props(styles.syncNote)}>
-  <span role="status">Layout not syncing</span>
-  <span aria-hidden="true">·</span>
-  <Aria.Button onPress={retry} {...stylex.props(styles.syncRetry)}>Retry</Aria.Button>
-</span>
-
 /**
  * React Aria overlays (menus, popovers, tooltips, modals) portal into a host inside the themed
  * root instead of document.body, where only the legacy document palette and fonts apply. The
@@ -469,11 +463,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // The panel is one app-wide setting on desktop, so it stays as it is across tabs and windows. A phone's sheet closes on a switch instead.
   const [sheetOpen, setSheetOpen] = React.useState(false)
   const [phoneSheet, setPhoneSheet] = React.useState<{ readonly open: boolean; readonly id: string }>({ open: false, id: '' })
-  // A tool's detail opens in the side panel of the pane it was opened from, as a contextual tab.
-  const [openedTool, setOpenedTool] = React.useState<{ readonly pane: string; readonly tab: string | null; readonly call: WorkLogCall } | undefined>(undefined)
-  const focusRef = React.useRef<{ pane: string; tab: string | null }>({ pane: '', tab: null })
-  focusRef.current = { pane: space.local.focus, tab: findPane(space.layout, space.local.focus)?.active ?? null }
-  // A tool detail belongs to its agent and a phone's sheet to what was showing, however the tab changed: Back counts.
+  // A phone's sheet belongs to what was showing, however the tab changed: Back counts.
   const shownTab = activeRow?.id
   React.useLayoutEffect(() => setSheetOpen(false), [shownTab])
   /** Every workspace change from a person; transcript timing starts here. */
@@ -499,7 +489,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const onTabView = React.useCallback((id: string, view: TabView) => store.dispatch({ _tag: 'SetView', tab: id, view }), [store])
   const onReplaceTab = React.useCallback((id: string, ref: string) => go({ _tag: 'Replace', tab: id, ref: paneKey(subjectOfRef(ref)) }), [go])
   const onCloseTab = React.useCallback((id: string) => go({ _tag: 'Close', tab: id }), [go])
-  const onOpenTool = React.useCallback((call: WorkLogCall) => { setOpenedTool({ ...focusRef.current, call }) }, [])
+
   const pins = useAtomValue(terminalSource.pins ?? sidebarPins())
   const pinned = React.useMemo(() => new Set(pins.state.members.map(item => item.member)), [pins.state.members])
   const pinnedItems = React.useMemo(() => {
@@ -629,6 +619,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     faviconState: selectedFaviconState({ agent, needsYou: agent !== undefined && needsYou.has(agent.ref), offline }),
   })
   const itemById = React.useMemo(() => new Map(tabItems.map(item => [item.id, item])), [tabItems])
+  const titleOfTab = React.useCallback((id: string) => itemById.get(id)?.title, [itemById])
   const refById = React.useMemo(() => new Map(allTabs.map(tab => [tab.id, tab.ref])), [allTabs])
   const previousNames = React.useRef<ReadonlyMap<string, string>>(new Map())
   const names = React.useMemo(() => {
@@ -640,6 +631,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   }, [agents])
   const maxSidebar = Math.max(sidebarMinimumWidth, Math.min(440, viewport - 640))
   const width = Math.min(maxSidebar, Math.max(sidebarMinimumWidth, dragWidth ?? Math.round(ratio * viewport)))
+
   const focusShownFace = React.useRef(false)
   // An attach that finds no terminal disables the control with its reason and turns the tab back to the conversation.
   const onMissingTerminal = (agentRef: string, tab: string, reason: string) => {
@@ -648,25 +640,45 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   }
   // A pane's side panel belongs to its shown subject's kind. On a phone it rises as a sheet over the focused pane.
   const focusedAside = activeSubject === undefined ? undefined : workspaceKinds.kindOf(activeSubject).view.Aside
-  const narrowDetailsOpen = narrow && ((sheetOpen && focusedAside !== undefined) || (current !== '' && openedTool !== undefined))
-  const closeDetails = () => { setSheetOpen(false); setOpenedTool(undefined) }
-  const openDetailsUri = (uri: string) => {
-    const ref = uri.startsWith('agent:') ? `agent/${uri.slice('agent:'.length)}` : uri
-    open({ ref })
-  }
-  const toolDetail = (call: WorkLogCall, width: number | undefined) => <aside aria-label="Tool detail" style={width === undefined ? undefined : { width }} {...stylex.props(styles.changesPanel, width === undefined && styles.sheetPanel)}>
-    <header {...stylex.props(styles.toolDetailHeader)}>
-      <strong {...stylex.props(styles.toolDetailTitle)}>{call.title}{call.argsSummary === undefined ? '' : ` ${call.argsSummary}`}</strong>
-      <Aria.Button aria-label="Close tool detail" onPress={() => setOpenedTool(undefined)} {...stylex.props(styles.iconButton)}>×</Aria.Button>
-    </header>
-    <pre {...stylex.props(styles.toolDetailOutput)}>{call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
-  </aside>
+  const narrowDetailsOpen = narrow && sheetOpen && focusedAside !== undefined
+  // The palette loads on first open: neither its code nor its reads belong to the shell's first paint.
+  const [paletteOpen, setPaletteOpen] = React.useState(false)
+  const [paletteLoaded, setPaletteLoaded] = React.useState(false)
+  const openPalette = React.useCallback(() => { setPaletteLoaded(true); setPaletteOpen(true) }, [])
   const [settingsOpen, setSettingsOpen] = React.useState(false)
+  // The sidebar is the app's global area. Its header row: its toggle, the space switcher in place of the wordmark, the palette and Settings.
+  const sidebarHeaderTitle = <SpaceSwitcher />
   const sidebarHeaderActions = <>
+    <ChromeControl icon="search" label="Command palette" tooltip="Command palette (⌘/Ctrl+K)" popup="dialog" expanded={paletteOpen} onPress={openPalette} />
     <SettingsControl scheme={preference} onSchemeChange={setPreference} build={build} isOpen={settingsOpen} onOpenChange={setSettingsOpen} />
   </>
+  // Under the header, beside the switcher it is about; the footer holds the connection and Usage.
+  const sidebarNotice = boot.retry === undefined ? undefined : <LayoutSyncNote retry={boot.retry} />
+  const openUsage = () => openRef('monitor/quota')
+  const sidebarFooter = <>
+    <ConnectionFooterLine />
+    <LiveUsageSection onOpenUsage={openUsage} />
+  </>
+  const alertMarkers = alertTabMarkers(attention)
+  const sidebarTabs: readonly SidebarTab[] = [{ id: 'agents', label: 'Agents', icon: 'person', count: agents.length, questionCount: agents.filter(agent => agent.ask._tag === 'Known' && agent.ask.value === 'question').length, needsYouCount: needsYou.size }, { id: 'alerts', label: 'Alerts', icon: 'bell', ...alertMarkers }, { id: 'missions', label: 'Missions', icon: 'checklist', ...missionMarkers }]
+  const sidebarSelected = sidebarTab === 'alerts' || sidebarTab === 'missions' ? sidebarTab : 'agents'
+  // Collapsed, the same global controls stand in one 48px column; a tab opens the sidebar on itself.
+  const sidebarRail = <SidebarRail tabs={sidebarTabs} selectedId={sidebarSelected} onExpand={() => setCollapsed(false)}
+    onShowTab={id => {
+      setSidebarTab(id === 'alerts' || id === 'missions' ? id : 'agents')
+      setCollapsed(false)
+      window.requestAnimationFrame(() => document.querySelector<HTMLElement>('aside[aria-label="Agents"] [role="tab"][aria-selected="true"]')?.focus())
+    }}
+    top={<>
+      <SpaceSwitcher rail {...(boot.retry === undefined ? {} : { note: layoutSyncWords })} />
+      <ChromeControl icon="search" label="Command palette" tooltip="Command palette (⌘/Ctrl+K)" tooltipPlacement="right" popup="dialog" expanded={paletteOpen} onPress={openPalette} />
+    </>}
+    bottom={<>
+      <LiveUsageRailControl onOpenUsage={openUsage} />
+      <SettingsControl scheme={preference} onSchemeChange={setPreference} build={build} isOpen={settingsOpen} onOpenChange={setSettingsOpen} tooltipPlacement="right" />
+    </>} />
   // The Agents toolbar and tree provide tab stops even while loading or empty; Alerts may have none, so its panel takes focus itself.
-  const sidebarBody = <SidebarTabs panelHasTabbableContent={sidebarTab === 'agents' || sidebarTab === 'fleet'} selectedId={sidebarTab === 'alerts' || sidebarTab === 'missions' ? sidebarTab : 'agents'} onSelectionChange={id => setSidebarTab(id === 'alerts' || id === 'missions' ? id : 'agents')} tabs={[{ id: 'agents', label: 'Agents', icon: 'person', count: agents.length, questionCount: agents.filter(agent => agent.ask._tag === 'Known' && agent.ask.value === 'question').length, needsYouCount: needsYou.size }, { id: 'alerts', label: 'Alerts', icon: 'bell', ...alertTabMarkers(attention) }, { id: 'missions', label: 'Missions', icon: 'checklist', ...missionMarkers }]}>
+  const sidebarBody = <SidebarTabs panelHasTabbableContent={sidebarTab === 'agents' || sidebarTab === 'fleet'} selectedId={sidebarSelected} onSelectionChange={id => setSidebarTab(id === 'alerts' || id === 'missions' ? id : 'agents')} tabs={sidebarTabs}>
     {sidebarTab === 'missions' ? <SidebarMissionsList {...(activeSubject?._tag === 'Mission' ? { current: activeSubject.ref } : {})} onOpen={ref => openRef(ref ?? 'missions')} /> : sidebarTab === 'alerts' ? <AlertsTabCodeBoundary {...(activeSubject?._tag === 'Alert' ? { selected: activeSubject.id } : {})} onSelect={openAlert} onOpen={ref => openRef(ref)} /> : <>
     <LiveSidebarToolbar filters={filters} update={updateFilters} hosts={hosts} showRows={showRows} onEnterResults={() => rosterRef.current?.querySelector<HTMLElement>('[role="row"]')?.focus()} />
     {credentialNotice(fleet) ? <RosterUnavailable reason="unauthorized" onRetry={undefined} /> : fleet._tag === 'Unavailable' ? <RosterUnavailable reason={fleet.reason} onRetry={fleet.reason === 'failed' && fleet.retryable !== false ? folderSource.retryAgents : undefined} />
@@ -695,7 +707,6 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     </nav>
     {fleet._tag === 'Observed' ? <DecodeNotice noun="agent" decode={rosterDecode} shown={shownRosterRefs(fleet)} /> : null}
     </>}
-    <LiveUsageSection onOpenUsage={() => openRef('monitor/quota')} />
   </SidebarTabs>
   // The shared primitives dispatch through routing, so pane focus, resizes and keys reach the URL as a person's own commands do.
   const splitStore = React.useMemo(() => ({ dispatch: go, getState: store.getState, subscribe: store.subscribe, flush: store.flush }), [go, store])
@@ -709,10 +720,6 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // A phone shows the focused pane alone, so only its tab is on screen.
   const shownTabs = narrow ? new Set(activeRow === undefined ? [] : [activeRow.id]) : visibleTabIds(workspace)
   const lead = leadPane(workspace, narrow)
-  // The palette loads on first open: neither its code nor its reads belong to the shell's first paint.
-  const [paletteOpen, setPaletteOpen] = React.useState(false)
-  const [paletteLoaded, setPaletteLoaded] = React.useState(false)
-  const openPalette = React.useCallback(() => { setPaletteLoaded(true); setPaletteOpen(true) }, [])
   const openSettings = React.useCallback(() => setSettingsOpen(true), [])
   const sidebarModes = React.useMemo((): readonly HostCommand[] => sidebarModeRows.map(mode => ({
     id: `sidebar-${mode.id}`, section: 'sidebar', label: `Sidebar: ${mode.label}`, search: `sidebar ${mode.label} show`, icon: mode.icon, run: () => showSidebarTab(mode.id),
@@ -720,20 +727,21 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const paletteActions = React.useMemo((): HostActions => ({ openSettings, toggleSidebar, sidebar: sidebarModes }), [openSettings, toggleSidebar, sidebarModes])
   // Alt+arrows past the layout's left edge reach the sidebar, as in the TUI; Alt+Right from it comes back.
   const focusPaneContent = (pane: string) => window.requestAnimationFrame(() => {
-    const frame = document.querySelector<HTMLElement>(`[data-pane="${CSS.escape(pane)}"]`)
+    const frame = document.querySelector<HTMLElement>(`[data-pane="${attributeValue(pane)}"]`)
     const shownId = findPane(currentSpace(store.getState()).layout, pane)?.active ?? undefined
-    const surface = shownId === undefined ? null : document.querySelector<HTMLElement>(`[data-tab-surface-id="${CSS.escape(shownId)}"]`)
+    const surface = shownId === undefined ? null : document.querySelector<HTMLElement>(`[data-tab-surface-id="${attributeValue(shownId)}"]`)
     const target = surface?.querySelector<HTMLElement>('[data-wf-shown-pane] textarea:not(:disabled)') ?? frame?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]') ?? frame?.querySelector<HTMLElement>('button')
     target?.focus({ preventScroll: true })
   })
+  // A collapsed sidebar is its rail: Alt+Left lands on the rail's current tab and leaves it collapsed.
   const focusSidebar = () => {
     if (narrow) agentsDrawer.current?.open()
-    else setCollapsed(false)
     window.requestAnimationFrame(() => {
       const sidebar = document.querySelector<HTMLElement>('aside[aria-label="Agents"]')
       const target = sidebar?.querySelector<HTMLElement>('nav[aria-label="Agent roster"] [role="row"][aria-selected="true"]')
         ?? sidebar?.querySelector<HTMLElement>('nav[aria-label="Agent roster"] [role="row"]')
         ?? sidebar?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+        ?? sidebar?.querySelectorAll<HTMLElement>('[data-rail-tabs] button')[sidebarTabs.findIndex(tab => tab.id === sidebarSelected)]
       target?.focus()
     })
   }
@@ -760,7 +768,12 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
       // A new tab starts from the palette, which opens here or in a tab.
       newTab: openPalette,
       // Spaces arrive with their own slice.
-      switchSpace: () => false,
+      // The next space, until the palette's Spaces section takes Alt+G as the TUI's Ctrl+G does.
+      switchSpace: () => {
+        const command = nextSpace(store.getState())
+        if (command === undefined) return false
+        go(command)
+      },
     }
   }, [go, store, openPalette])
   const renderDragChip = React.useCallback((entity: EntityDescriptor) => <DragChip entity={entity} scheme={scheme} />, [scheme])
@@ -780,8 +793,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     const terminalShown = shownTab !== undefined && paneAgent !== '' && showsTerminal(shownTab, space.local.views[shownTab.id])
     const shownSubject = shownTab === undefined ? undefined : parsePane(shownTab.ref)
     const kindAside = shownSubject === undefined ? undefined : workspaceKinds.kindOf(shownSubject).view.Aside
-    // It stays with the tab it was opened from: another tab in the pane shows the pane's own panel.
-    const tool = openedTool?.pane === pane.id && openedTool.tab === pane.active ? openedTool.call : undefined
+
     // The control stays enabled while the terminal is shown: it is the way back, even from a deep link to a terminal this agent lacks.
     const disabledReason = terminalShown ? undefined : terminal.disabledReason
     const toggleTerminal = () => {
@@ -789,39 +801,46 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
       focusShownFace.current = true
       store.dispatch({ _tag: 'SetView', tab: shownTab.id, view: { terminal: !terminalShown } })
     }
-    const nativeActions = paneAgent === '' ? undefined : <ConversationHeaderActions key={paneAgent} agentRef={paneAgent} onViewDeclaration={() => openRef(`declaration/${paneAgent}`)} />
+    // A phone folds "Open a tab" and the pane's other tabs into its one More actions, so every bar target stays 44px.
+    const phoneSections: readonly OverflowSection[] | undefined = narrow ? [
+      { title: 'Open a tab', items: openable.map(item => ({ id: item.id, label: item.label, onAction: () => openRef(item.ref) })) },
+      ...(pane.tabs.length > 1 ? [{ title: 'Open tabs', items: pane.tabs.map(tab => ({ id: tab.id, label: titleOfTab(tab.id) ?? tab.ref, current: tab.id === pane.active, onAction: () => go({ _tag: 'Activate', tab: tab.id }) })) }] : []),
+    ] : undefined
+    const nativeActions = paneAgent === '' ? undefined : <ConversationHeaderActions key={paneAgent} agentRef={paneAgent} onViewDeclaration={() => openRef(`declaration/${paneAgent}`)} sections={phoneSections} />
     const watch = terminalShown && shownTab !== undefined ? <TerminalAttachWatch key={paneAgent} agentRef={paneAgent} onMissing={reason => onMissingTerminal(paneAgent, shownTab.id, reason)} /> : null
-    const syncNote = isLead && boot.retry !== undefined ? <LayoutSyncNote retry={boot.retry} /> : null
+    // A zoomed split says so, and the badge is the way back.
+    const zoomBadge = space.local.zoomed === pane.id ? <Aria.Button aria-label="Unzoom split" onPress={() => go({ _tag: 'ToggleZoom' })} data-testid="zoom-badge" {...stylex.props(styles.zoomBadge)}>Zoomed <kbd {...stylex.props(styles.zoomKey)}>{navigator.platform.includes('Mac') ? '⌥O' : 'Alt+O'}</kbd></Aria.Button> : null
     return <Pane key={pane.id} pane={pane} className={stylex.props(styles.pane).className}>
       {/* Each pane is self-contained: its strip ends with its shown tab's own controls. */}
       <WorkspaceStrip bar items={pane.tabs.flatMap(tab => itemById.get(tab.id) ?? [])} refs={refById} active={pane.active} group={pane.id} focused={focused} narrow={narrow} dispatch={go} open={openRef}
         leading={isLead ? <>
           {narrow
-            ? <ChromeControl ref={sidebarOpener} icon="panel-left" label="Expand sidebar" tooltip="Show agents" edge="lead" popup="dialog" expanded={phoneSheet.open} {...(phoneSheet.open ? { controls: phoneSheet.id } : {})} onPress={() => agentsDrawer.current?.open()} />
-            : collapsed ? <ChromeControl ref={sidebarOpener} icon="panel-left" label="Expand sidebar" tooltip="Expand sidebar (⌘/Ctrl+B)" edge="lead" onPress={toggleSidebar} /> : null}
+            ? <>
+              <PhoneDrawerOpener ref={sidebarOpener} expanded={phoneSheet.open} controls={phoneSheet.open ? phoneSheet.id : undefined} alerts={alertMarkers.questionCount + alertMarkers.needsYouCount > 0 ? sidebarTabName({ id: 'alerts', label: 'Alerts', ...alertMarkers }) : undefined} onPress={() => agentsDrawer.current?.open()} />
+              {/* A phone shows the focused pane alone; the others are a tap away. */}
+              <PaneSwitcher titleOf={titleOfTab} onFocusPane={focusPane} />
+            </>
+            : null}
           <ThreadBreadcrumb {...(agent?.host === undefined ? {} : { folder: agent.host })} title={agent?.name ?? activeLabel ?? 'Select an agent'} label={workspaceLabel === 'Agent workspace' ? 'Breadcrumb' : `${workspaceLabel} breadcrumb`} />
         </> : undefined}
         trailing={narrow
           ? <>
-            {syncNote}{watch}
+            {zoomBadge}{watch}
             {(terminal.ref !== undefined || terminal.disabledReason !== undefined || terminalShown) ? <PhoneTerminalToggle pressed={terminalShown} onPress={toggleTerminal} {...(disabledReason === undefined ? {} : { disabledReason })} /> : undefined}
-            <div data-testid="native-action-slot" ref={slots.header(pane.id)} {...stylex.props(styles.barSlot)}>{nativeActions}</div>
-            <ChromeControl icon="search" label="Search" edge="trail" popup="dialog" expanded={paletteOpen} onPress={openPalette} />
-            {focused && kindAside !== undefined ? <ChromeControl icon="panel" label="Agent details" edge="trail" popup="dialog" expanded={narrowDetailsOpen} active={narrowDetailsOpen} onPress={() => { if (narrowDetailsOpen) closeDetails(); else setSheetOpen(true) }} /> : null}
+            <div data-testid="native-action-slot" ref={slots.header(pane.id)} {...stylex.props(styles.barSlot)}>{nativeActions ?? (phoneSections === undefined ? null : <ConversationOverflowMenu sections={phoneSections} />)}</div>
+            {/* Only the bar's last control overhangs its gutter. */}
+            <ChromeControl icon="search" label="Search" {...(focused && kindAside !== undefined ? {} : { edge: 'trail' as const })} popup="dialog" expanded={paletteOpen} onPress={openPalette} />
+            {focused && kindAside !== undefined ? <ChromeControl icon="panel" label="Agent details" edge="trail" popup="dialog" expanded={narrowDetailsOpen} active={narrowDetailsOpen} onPress={() => setSheetOpen(!narrowDetailsOpen)} /> : null}
           </>
-          : <>{syncNote}{watch}<PaneThreadActions nativeActions={nativeActions} actionPortalRef={slots.header(pane.id)} terminalAvailable={terminal.ref !== undefined || terminalShown} {...(disabledReason === undefined ? {} : { terminalDisabledReason: disabledReason })} terminalOpen={terminalShown} onToggleTerminal={toggleTerminal} /></>}>
-        {isLead ? <GlobalBands onOpenAlert={openAlert} /> : null}
+          : <>{zoomBadge}{watch}<PaneThreadActions nativeActions={nativeActions} actionPortalRef={slots.header(pane.id)} terminalAvailable={terminal.ref !== undefined || terminalShown} {...(disabledReason === undefined ? {} : { terminalDisabledReason: disabledReason })} terminalOpen={terminalShown} onToggleTerminal={toggleTerminal} /></>}>
+        {/* The global area owns the connection; the focused pane hears it too once it is gone. */}
+        {focused ? <PaneConnectionBand /> : null}
         <PaneBody className={stylex.props(styles.paneBody).className}>
           <PaneSlot pane={pane.id}>{pane.tabs.length === 0 ? <WorkspaceEmpty open={openRef} /> : null}</PaneSlot>
-          {narrow || ((kindAside === undefined || shownSubject === undefined) && tool === undefined) ? null : <>
-            <AsideOpener token={tool} />
-            <PaneAside side="end" threshold={() => kindAside === undefined ? Number.POSITIVE_INFINITY : kindAside.threshold({ terminal: terminalShown })} defaultSize={360} minSize={280} aria-label="Side panel" className={stylex.props(styles.paneAside).className} resizerClassName={stylex.props(styles.paneAsideResizer).className}>
-              {({ setOpen }) => {
-                const panel = kindAside === undefined || shownSubject === undefined ? undefined : <kindAside.Panel subject={shownSubject} width="dock" scheme={scheme} onOpen={openRef} onClose={() => setOpen(false)} />
-                return tool === undefined ? panel : <AsideWithTool tool={tool} detail={toolDetail(tool, undefined)} panel={panel} onCloseTool={() => setOpenedTool(undefined)} />
-              }}
-            </PaneAside>
-          </>}
+          {narrow || kindAside === undefined || shownSubject === undefined ? null
+            : <PaneAside side="end" threshold={() => kindAside.threshold({ terminal: terminalShown })} defaultSize={360} minSize={280} aria-label="Side panel" className={stylex.props(styles.paneAside).className} resizerClassName={stylex.props(styles.paneAsideResizer).className}>
+              {({ setOpen }) => <kindAside.Panel subject={shownSubject} width="dock" scheme={scheme} onOpen={openRef} onClose={() => setOpen(false)} />}
+            </PaneAside>}
         </PaneBody>
       </WorkspaceStrip>
     </Pane>
@@ -834,25 +853,26 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
             <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} style={phoneViewportStyle} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
               {shortcutHelp}
-              {narrow ? null : <ResponsiveAgentSidebar headerActions={sidebarHeaderActions} viewport={viewport} width={width} maxWidth={maxSidebar} collapsed={collapsed} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setDragWidth} onWidthCommit={value => { setRatio(value / viewport); setDragWidth(undefined) }} onWidthReset={() => setRatio(256 / viewport)}>{sidebarBody}</ResponsiveAgentSidebar>}
+              {narrow ? null : <ResponsiveAgentSidebar headerActions={sidebarHeaderActions} headerTitle={sidebarHeaderTitle} notice={sidebarNotice} footer={sidebarFooter} rail={sidebarRail} viewport={viewport} width={width} maxWidth={maxSidebar} collapsed={collapsed} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setDragWidth} onWidthCommit={value => { setRatio(value / viewport); setDragWidth(undefined) }} onWidthReset={() => setRatio(256 / viewport)}>{sidebarBody}</ResponsiveAgentSidebar>}
               <section aria-label={workspaceLabel} onPointerOverCapture={prefetchTerminalIntent} onFocusCapture={prefetchTerminalIntent} {...stylex.props(styles.workspace)}>
-                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} headerActions={sidebarHeaderActions} onSheetChange={setPhoneSheet}>{sidebarBody}</PhoneAgentDrawer> : null}
+                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} headerActions={sidebarHeaderActions} headerTitle={sidebarHeaderTitle} notice={sidebarNotice} footer={sidebarFooter} onSheetChange={setPhoneSheet}>{sidebarBody}</PhoneAgentDrawer> : null}
                 {/* One strip and one portal host at every width: the breakpoint never remounts a surface. The strip is the window's one top bar, so the conversation's controls live at its end. */}
                 <WorkspaceSplits slots={slots} collapsed={narrow} onHost={setPaneHost} renderPane={renderPane} />
                 <SplitKeys handlers={splitHandlers} ignore={ignoreSplitKey} />
                 {paletteLoaded ? <React.Suspense fallback={null}><LivePalette isOpen={paletteOpen} onOpenChange={setPaletteOpen} state={workspace} dispatch={go} actions={paletteActions} /></React.Suspense> : null}
+                {/* Toasts rise from the bottom-left, beside the sidebar and over the panes. */}
+                <ToastRegion><AlertToast onOpen={openAlert} /></ToastRegion>
               </section>
-              {narrow ? <NarrowSheet label="Agent details" side="bottom" isOpen={narrowDetailsOpen} onOpenChange={(isOpen) => { if (!isOpen) closeDetails() }} width={400}>
-                {openedTool !== undefined && current !== '' ? toolDetail(openedTool.call, undefined)
-                  : focusedAside === undefined || activeSubject === undefined ? null
-                    : <focusedAside.Panel subject={activeSubject} width="fill" scheme={scheme} onOpen={ref => { closeDetails(); openRef(ref) }} onClose={closeDetails} />}
+              {narrow ? <NarrowSheet label="Agent details" side="bottom" isOpen={narrowDetailsOpen} onOpenChange={setSheetOpen} width={400}>
+                {focusedAside === undefined || activeSubject === undefined ? null
+                  : <focusedAside.Panel subject={activeSubject} width="fill" scheme={scheme} onOpen={ref => { setSheetOpen(false); openRef(ref) }} onClose={() => setSheetOpen(false)} />}
               </NarrowSheet> : null}
               <div ref={overlayHost} {...stylex.props(styles.overlayHost)} />
             </div>
         </MonitorDetailProvider>
       </ResourcePanelProvider>
     </WorkbenchContextProvider>
-    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody tabs={allTabs} active={activeRow?.id ?? null} shown={shownTabs} paneOf={paneOfTab} headerSlots={headerSlots} onFocusPane={focusPane} tiers={tiers} views={space.local.views} names={names} onOpenTool={onOpenTool} onOpen={openRef} onReplace={onReplaceTab} onClose={onCloseTab} onBackToAlerts={backToAlerts} onView={onTabView} focusShownFace={focusShownFace} {...(ux === undefined ? {} : { ux })} /></RegisteredPortal>}
+    {paneHost === null ? null : <RegisteredPortal container={paneHost}><WorkspaceBody tabs={allTabs} active={activeRow?.id ?? null} shown={shownTabs} paneOf={paneOfTab} headerSlots={headerSlots} onFocusPane={focusPane} tiers={tiers} views={space.local.views} names={names} onOpen={openRef} onReplace={onReplaceTab} onClose={onCloseTab} onBackToAlerts={backToAlerts} onView={onTabView} focusShownFace={focusShownFace} {...(ux === undefined ? {} : { ux })} /></RegisteredPortal>}
   </NarrowLayoutContext.Provider></OpenProvider></EntityCardSource></WorkspaceProvider>)
 }
 
@@ -895,32 +915,6 @@ const ignoreSplitKey = (event: KeyboardEvent) => {
   return event.altKey && !event.metaKey && !event.ctrlKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight') && isTyping(event.target)
 }
 
-/** A tool's detail opens its pane's side panel, whatever the pane's width. */
-const AsideOpener = ({ token }: { readonly token: unknown }) => {
-  const aside = usePaneAside()
-  const opened = React.useRef<unknown>(undefined)
-  React.useEffect(() => {
-    if (token === undefined || aside === undefined || opened.current === token) return
-    opened.current = token
-    aside.setOpen(true)
-  }, [token, aside])
-  return null
-}
-
-/** The side panel with a tool's detail as a contextual tab beside the kind's own panel; it shows first and closes back. */
-const AsideWithTool = ({ tool, detail, panel, onCloseTool }: { readonly tool: WorkLogCall; readonly detail: React.ReactNode; readonly panel: React.ReactNode; readonly onCloseTool: () => void }) => {
-  const [shown, setShown] = React.useState<'tool' | 'panel'>('tool')
-  React.useEffect(() => setShown('tool'), [tool])
-  if (panel === undefined) return detail
-  return <Aria.Tabs selectedKey={shown} onSelectionChange={key => setShown(key === 'panel' ? 'panel' : 'tool')} {...stylex.props(styles.asideTabs)}>
-    <Aria.TabList aria-label="Side panel views" {...stylex.props(styles.asideTabList)}>
-      <Aria.Tab id="panel" {...stylex.props(styles.asideTab)}>Details</Aria.Tab>
-      <Aria.Tab id="tool" {...stylex.props(styles.asideTab)}>Tool detail</Aria.Tab>
-    </Aria.TabList>
-    <Aria.TabPanel id="panel" {...stylex.props(styles.asideTabPanel)}>{panel}</Aria.TabPanel>
-    <Aria.TabPanel id="tool" {...stylex.props(styles.asideTabPanel)}>{detail}</Aria.TabPanel>
-  </Aria.Tabs>
-}
 
 /** The pane's own actions, with the toggle for its own side panel when its shown subject has one. */
 const PaneThreadActions = (props: Omit<React.ComponentProps<typeof ThreadActions>, 'panelOpen' | 'onTogglePanel'>) => {
@@ -946,37 +940,6 @@ const TerminalAttachWatch = ({ agentRef, onMissing }: { readonly agentRef: strin
   return null
 }
 
-/** App-wide notices, kept together so they move as one: the connection and the alert flash. */
-const GlobalBands = ({ onOpenAlert }: { readonly onOpenAlert: (id: string) => void }) => <div data-testid="global-bands" {...stylex.props(styles.bands)}>
-  <GatewayConnectionStatus />
-  <AlertFlashBand onOpen={onOpenAlert} />
-</div>
-
-const assumedOnline = Atom.make({ _tag: 'Online' } as const)
-/** Decoded gateway sync, never the socket's raw lifecycle tag, as the one connection band under the thread header. */
-const GatewayConnectionStatus = () => {
-  const source = useDataSource()
-  const network = useAtomValue(source.network ?? assumedOnline)
-  const observation = useGatewaySync()
-  const now = useNow()
-  if (observation === undefined) return null
-  const line = syncLine({
-    ...observation, label: 'connection', now,
-    socket: observation.status._tag !== 'Failed',
-  })
-  const status = observation.status
-  const reconnecting = status._tag === 'Stale' && status.reason._tag === 'Reconnecting'
-  // The band's title already says "Reconnecting"; its detail is the next try, after syncLine's grace delay.
-  const text = line === undefined ? undefined
-    : status._tag === 'Stale' && status.reason._tag === 'Reconnecting'
-      ? `Next try in ${formatDuration(Math.ceil(Math.max(0, status.reason.nextAt - now) / 1000) * 1000)} · attempt ${status.reason.attempt}`
-      : line.text
-  return <ConnectionStatus
-    state={network._tag === 'Offline' ? 'offline' : reconnecting ? 'reconnecting' : status._tag === 'Stale' ? 'stale' : status._tag === 'Failed' ? 'failed' : 'live'}
-    {...(text === undefined ? {} : { text })}
-    {...((reconnecting || network._tag === 'Offline') && source.reconnect !== undefined ? { onReconnect: source.reconnect } : {})}
-  />
-}
 
 /** The shared toolbar with the live sidebar's search surface, which must stand apart from the sidebar in both schemes. */
 export function LiveSidebarToolbar(props: Omit<SidebarToolbarProps, 'searchStyle'>) {
@@ -995,7 +958,6 @@ const styles = stylex.create({
   // Out of flow, above the panes. Viewport-wide but zero-height: no hit area of
   // its own, yet shrink-to-fit popovers get the viewport as available width.
   overlayHost: { position: 'fixed', top: 0, left: 0, width: '100%', height: 0, zIndex: 20 },
-  iconButton: { width: 28, height: 28, display: 'inline-flex', justifyContent: 'center', alignItems: 'center', backgroundColor: 'transparent', color: c.fgMuted, borderWidth: 0, borderRadius: 6, cursor: 'pointer' },
   // Message fill plus a hairline: raised equals the sidebar surface in light mode.
   searchField: { backgroundColor: c.message, borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.border },
   // AgentFolders' Tree owns scrolling; the roster only assigns the remaining flex space.
@@ -1009,25 +971,15 @@ const styles = stylex.create({
   skeletonHost: { gridRow: '2', width: '44%' },
   workspace: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0 },
   barSlot: { display: 'flex', alignItems: 'center', minWidth: 0 },
-  bands: { display: 'contents' },
+  zoomBadge: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, alignSelf: 'center', marginInline: s.xs, paddingBlock: 2, paddingInline: s.sm, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, borderRadius: 999, backgroundColor: { default: 'transparent', ':hover': c.rowHover }, color: c.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusOffset },
+  zoomKey: { fontFamily: t.fontSans, fontSize: t.metaSize, color: c.fgMuted },
   dragChip: { display: 'inline-flex', alignItems: 'center', gap: s.xs, maxWidth: 240, paddingBlock: 4, paddingInline: s.sm, borderRadius: 6, backgroundColor: c.raised, color: c.fg, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, boxShadow: '0 4px 16px rgba(0, 0, 0, 0.24)', fontFamily: t.fontSans, fontSize: t.metaSize, whiteSpace: 'nowrap' },
   dragChipIcon: { display: 'inline-flex', flexShrink: 0 },
   dragChipTitle: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' },
   pane: { backgroundColor: c.canvas },
   paneBody: { display: 'flex', flex: '1 1 0', minWidth: 0, minHeight: 0 },
-  asideTabs: { display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 },
-  asideTabList: { display: 'flex', gap: s.xs, flexShrink: 0, paddingInline: s.sm, paddingBlock: s.xs, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: c.border },
-  asideTab: { paddingInline: s.sm, height: g.controlSm, display: 'inline-flex', alignItems: 'center', borderRadius: 6, color: c.fgMuted, fontSize: t.metaSize, cursor: 'pointer', outline: 'none', ':is([data-selected])': { backgroundColor: c.rowActive, color: c.fg }, ':is([data-focus-visible])': { boxShadow: `inset 0 0 0 ${g.focusRing} ${c.primary}` } },
-  asideTabPanel: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, outline: 'none' },
   // The pane's side panel: its own surface beside the content, divided by the resizer's line.
   paneAside: { backgroundColor: c.canvas, color: c.fg, borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: c.border },
-  paneAsideResizer: { flex: '0 0 6px', marginInlineStart: '-3px', cursor: 'col-resize', zIndex: 1, outline: 'none', ':focus-visible': { boxShadow: `inset 0 0 0 ${g.focusRing} ${c.primary}` } },
-  syncNote: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, paddingInline: s.sm, color: c.fgMuted, fontSize: t.metaSize, whiteSpace: 'nowrap' },
-  syncRetry: { appearance: 'none', border: 0, padding: 0, background: 'none', color: c.fg, font: 'inherit', textDecoration: 'underline', cursor: 'pointer', outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusOffset, borderRadius: 2 },
+  paneAsideResizer: { flex: '0 0 6px', marginInlineStart: '-3px', cursor: 'col-resize', zIndex: 1, outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusInset },
   body: { position: 'relative', display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0, overflow: 'hidden' },
-  changesPanel: { display: 'flex', flexDirection: 'column', flexShrink: 0, minWidth: 0, minHeight: 0, overflowY: 'auto', borderLeftWidth: 1, borderLeftStyle: 'solid', borderLeftColor: c.border },
-  sheetPanel: { flexGrow: 1, borderLeftWidth: 0 },
-  toolDetailHeader: { height: 40, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: s.md, paddingInline: s.lg, flexShrink: 0, borderBottomWidth: 1, borderBottomStyle: 'solid', borderBottomColor: c.border },
-  toolDetailTitle: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: t.metaSize },
-  toolDetailOutput: { margin: 0, padding: s.lg, minHeight: 0, overflowY: 'auto', fontFamily: t.fontMono, fontSize: t.denseSize, lineHeight: 1.5, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere', color: c.fgMuted },
 })

@@ -1620,10 +1620,10 @@ pub fn person_attention_item(
         .cloned();
     let (label, response): (&str, &[&str]) = match request.as_ref().and_then(|r| r["type"].as_str())
     {
-        Some("decision" | "choice") => ("done", &["--answer", "ANSWER_ID"]),
+        Some("decision" | "choice") => ("done", &["--choice", "ANSWER_ID"]),
         // An update clears when the person opens it or presses read.
-        Some("update") => ("read", &["--answer", "read"]),
-        Some(_) => ("done", &["--text", "FEEDBACK"]),
+        Some("update") => ("read", &["--choice", "read"]),
+        Some(_) => ("done", &["--words", "FEEDBACK"]),
         None => ("done", &["--summary", "RESPONSE"]),
     };
     // An ask resolves by itself at its deadline, with its default answer if it names one. Only

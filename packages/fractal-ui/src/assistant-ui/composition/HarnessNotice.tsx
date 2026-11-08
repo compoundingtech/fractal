@@ -36,14 +36,12 @@ const pillText = (notice: HarnessNoticeData, kind: string): string => {
  */
 export function HarnessNotice({ item, weight = 'card', showTime = true }: { readonly item: EventItem & { readonly notice: HarnessNoticeData }; readonly weight?: HarnessWeight; /** False inside a transcript episode, whose head carries the one timestamp. */ readonly showTime?: boolean }) {
   const notice = item.notice
-  const compacted = notice._tag === 'Compaction'
   const time = item.at === undefined ? NaN : Date.parse(item.at)
   const [expanded, setExpanded] = React.useState(false)
   const shown = presentation[notice._tag]
   const tone = harnessOutcomeTone(notice)
   const failed = tone === 'failed'
   const noun = shown.noun
-  const payload = /^[\s]*[\[{]/.test(notice.payload) ? `\`\`\`json\n${notice.payload}\n\`\`\`` : notice.payload
   const row = weight === 'row'
   return <Disclosure isExpanded={expanded} onExpandedChange={setExpanded} data-testid="harness-notice" data-harness-kind={item.kind} data-harness-weight={weight} data-item-id={item.id} {...stylex.props(styles.base, row ? styles.row : styles.card)}>
     <div {...stylex.props(styles.header)}><span {...stylex.props(styles.headerIcon)}><Icon name={(tone === undefined ? undefined : toneIcon[tone]) ?? shown.icon} size={headerIconSize} /></span><span data-testid="harness-title" {...stylex.props(styles.label)}>{item.title}</span><span data-testid="harness-kind" {...stylex.props(styles.pill, failed && styles.pillFailed)}>{pillText(notice, shown.kind)}</span>{showTime && Number.isFinite(time) && <time dateTime={item.at} {...stylex.props(styles.time)}>{new Date(time).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time>}</div>
@@ -51,14 +49,23 @@ export function HarnessNotice({ item, weight = 'card', showTime = true }: { read
     <Button slot="trigger" data-testid="harness-trigger" {...stylex.props(styles.trigger, row && styles.rowIndent)}><Icon name={expanded ? 'chevron-down' : 'chevron-right'} size={headerIconSize} />{expanded ? `Hide ${noun}` : `Read ${noun}`}</Button>
     {/* The frame lives inside the panel: a collapsed hidden=until-found panel still keeps its own box in Chromium. */}
     <DisclosurePanel data-testid="harness-panel"><div data-testid="harness-panel-frame" {...stylex.props(styles.payload, row ? styles.rowPayload : styles.cardPayload)}>
-      <div data-testid={compacted ? 'compaction-summary' : 'harness-payload'}><Markdown text={markdownBlock(payload)} /></div>
-      {notice._tag === 'SubagentResult' && <dl {...stylex.props(styles.facts)}><dt>Agent</dt><dd>{notice.agent}</dd>{notice.lines !== undefined && <><dt>Output</dt><dd>{notice.lines} lines · {notice.size}</dd></>}{notice.fullOutput !== undefined && <><dt>Full output</dt><dd>{notice.fullOutput}</dd></>}{notice.abortReason !== undefined && <><dt>Stop reason</dt><dd>{notice.abortReason}</dd></>}{notice.error !== undefined && <><dt>Error</dt><dd>{notice.error}</dd></>}{notice.mergeSummary !== undefined && <><dt>Merge</dt><dd><InlineMarkdown text={markdownInline(notice.mergeSummary)} /></dd></>}{notice.followUp !== undefined && <><dt>Follow-up</dt><dd><InlineMarkdown text={markdownInline(notice.followUp)} /></dd></>}</dl>}
-      {notice._tag === 'Irc' && (notice.to !== undefined || notice.replyTo !== undefined) && <dl {...stylex.props(styles.facts)}>{notice.to !== undefined && <><dt>To</dt><dd>{notice.to}</dd></>}{notice.replyTo !== undefined && <><dt>Reply to</dt><dd>{notice.replyTo}</dd></>}</dl>}
-      {notice._tag === 'Interjection' && <dl {...stylex.props(styles.facts)}><dt>From</dt><dd>{notice.from}</dd>{notice.to !== undefined && <><dt>To</dt><dd>{notice.to}</dd></>}</dl>}
-      {notice._tag === 'SkillInvocation' && <dl {...stylex.props(styles.facts)}><dt>Skill</dt><dd>{notice.skill}</dd><dt>Requested by</dt><dd>{notice.by}</dd></dl>}
-      {notice._tag === 'Delivery' && <dl {...stylex.props(styles.facts)}><dt>From</dt><dd>{notice.from}</dd><dt>To</dt><dd>{notice.to}</dd>{notice.subject !== undefined && <><dt>Subject</dt><dd><InlineMarkdown text={markdownInline(notice.subject)} /></dd></>}</dl>}
+      <HarnessNoticeDetail notice={notice} />
     </div></DisclosurePanel>
   </Disclosure>
+}
+
+/** A notice's full payload and its typed facts; shared by the notice's own panel and a message row's. */
+export function HarnessNoticeDetail({ notice }: { readonly notice: HarnessNoticeData }) {
+  const compacted = notice._tag === 'Compaction'
+  const payload = /^[\s]*[\[{]/.test(notice.payload) ? `\`\`\`json\n${notice.payload}\n\`\`\`` : notice.payload
+  return <>
+    <div data-testid={compacted ? 'compaction-summary' : 'harness-payload'}><Markdown text={markdownBlock(payload)} /></div>
+    {notice._tag === 'SubagentResult' && <dl {...stylex.props(styles.facts)}><dt>Agent</dt><dd>{notice.agent}</dd>{notice.lines !== undefined && <><dt>Output</dt><dd>{notice.lines} lines · {notice.size}</dd></>}{notice.fullOutput !== undefined && <><dt>Full output</dt><dd>{notice.fullOutput}</dd></>}{notice.abortReason !== undefined && <><dt>Stop reason</dt><dd>{notice.abortReason}</dd></>}{notice.error !== undefined && <><dt>Error</dt><dd>{notice.error}</dd></>}{notice.mergeSummary !== undefined && <><dt>Merge</dt><dd><InlineMarkdown text={markdownInline(notice.mergeSummary)} /></dd></>}{notice.followUp !== undefined && <><dt>Follow-up</dt><dd><InlineMarkdown text={markdownInline(notice.followUp)} /></dd></>}</dl>}
+    {notice._tag === 'Irc' && (notice.to !== undefined || notice.replyTo !== undefined) && <dl {...stylex.props(styles.facts)}>{notice.to !== undefined && <><dt>To</dt><dd>{notice.to}</dd></>}{notice.replyTo !== undefined && <><dt>Reply to</dt><dd>{notice.replyTo}</dd></>}</dl>}
+    {notice._tag === 'Interjection' && <dl {...stylex.props(styles.facts)}><dt>From</dt><dd>{notice.from}</dd>{notice.to !== undefined && <><dt>To</dt><dd>{notice.to}</dd></>}</dl>}
+    {notice._tag === 'SkillInvocation' && <dl {...stylex.props(styles.facts)}><dt>Skill</dt><dd>{notice.skill}</dd><dt>Requested by</dt><dd>{notice.by}</dd></dl>}
+    {notice._tag === 'Delivery' && <dl {...stylex.props(styles.facts)}><dt>From</dt><dd>{notice.from}</dd><dt>To</dt><dd>{notice.to}</dd>{notice.subject !== undefined && <><dt>Subject</dt><dd><InlineMarkdown text={markdownInline(notice.subject)} /></dd></>}</dl>}
+  </>
 }
 
 const headerIconSize = 14

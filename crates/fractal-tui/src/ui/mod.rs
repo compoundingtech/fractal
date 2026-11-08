@@ -46,6 +46,7 @@ pub(crate) mod slo;
 pub mod pane;
 pub mod playback;
 mod drafts_store;
+mod read_store;
 mod prefs;
 mod recent;
 mod resource_sidebar;
@@ -505,6 +506,9 @@ pub struct Ui {
     snoozed: HashSet<String>,
     /// Where this device keeps unsent drafts: none in tests and the demo, which touch nothing.
     pub(crate) drafts_path: Option<std::path::PathBuf>,
+    /// Where the person last read each conversation on this device; nothing is written without a
+    /// file (tests and the demo).
+    pub(crate) reads: read_store::ReadPositions,
     /// The drafts as last read from or written to that file.
     drafts_saved: HashMap<String, String>,
     /// When they were last written, and until when to leave a failing write alone.
@@ -699,6 +703,35 @@ impl Ui {
         self.frame.borrow().read_messages.clone()
     }
 
+    /// Call only after the terminal successfully presented this frame: each conversation pane it
+    /// showed is read up to its agent's newest prose (st's `last_prose_at`). A conversation never
+    /// read here starts there too, so nothing from before the first look counts as new.
+    pub(crate) fn read_presented_conversations(&mut self) {
+        if self.help || self.popover.is_some() || self.glasses.palette_open() {
+            return;
+        }
+        let shown: Vec<(String, i64)> = {
+            let frame = self.frame.borrow();
+            frame
+                .panes
+                .iter()
+                .filter(|pane| pane.rect.width > 0 && pane.rect.height > 0)
+                .filter_map(|pane| pane.key.strip_prefix("chat:"))
+                .filter_map(|id| {
+                    let agent = self.world.agents.items().iter().find(|agent| agent.id == id)?;
+                    Some((agent.id.clone(), agent.last_prose_ms?))
+                })
+                .collect()
+        };
+        let mut moved = false;
+        for (id, at) in shown {
+            moved |= self.reads.advance(&id, at);
+        }
+        if moved {
+            self.refresh_tab_statuses();
+        }
+    }
+
     /// Release the pixels of every image more than a screen away from what the last frame
     /// showed, in every pane; an image in a tab not drawn is released too.
     pub(crate) fn release_far_images(&mut self) {
@@ -840,6 +873,7 @@ impl Ui {
             revoke: None,
             snoozed: HashSet::new(),
             drafts_path: None,
+            reads: read_store::ReadPositions::default(),
             drafts_saved: HashMap::new(),
             drafts_wrote: Instant::now(),
             drafts_backoff: None,
@@ -3752,7 +3786,7 @@ impl Ui {
         // Tab badges are a compact form: the activity before the title, then what waits on you.
         marks.lines(text::wrap(
             &[text::run(
-                "on a tab: ● working, ○ idle, × stopped, ! fault, ~ starting; after the title, ? a question or ◆ you, with how many alerts",
+                "on a tab: ● working, ○ idle, × stopped, ! fault, ~ starting; after the title, ? a question or ◆ you, with how many alerts; • after the title, it said something since you last read it",
                 theme::soft(),
             )],
             column,
@@ -8057,6 +8091,7 @@ mod tests {
                 },
             ],
             custom: true,
+            words: None,
             attachments: Vec::new(),
             ..Default::default()
         };
@@ -8139,6 +8174,7 @@ mod tests {
                 recommendation: None,
                 answers,
                 custom: false,
+                words: None,
                 attachments: Vec::new(),
             };
             let item = Attention {
@@ -8275,6 +8311,7 @@ mod tests {
                 },
             ],
             custom: true,
+            words: None,
             attachments: Vec::new(),
         };
         let item = Attention {
@@ -8361,6 +8398,7 @@ mod tests {
             subjects: Vec::new(),
             answers: vec![option("a", "Refresh"), option("b", "Shorten"), option("c", "Leave it")],
             custom: false,
+            words: None,
             attachments: Vec::new(),
         };
         let item = Attention {
@@ -8455,6 +8493,7 @@ mod tests {
                 },
             ],
             custom: false,
+            words: None,
             attachments: Vec::new(),
         };
         let item = Attention {

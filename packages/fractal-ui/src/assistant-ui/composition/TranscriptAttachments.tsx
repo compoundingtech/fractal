@@ -45,10 +45,13 @@ const formatSize = (bytes: number | undefined) => {
   return `${sizeFormatter.format(value)} ${units[unit]}`
 }
 
+/** More than this many attachments collapse to the first three and a +N more button. */
+const attachmentsShownWhole = 4
 /**
  * A sent or received message's attachments (user prompts, assistant answers and incoming mail bodies alike). The kit
- * never fetches one. Each is a quiet file card named `Image: <name>, <type>`
- * showing its kind and byte size (`Size unavailable` when the message carries none). With a host's
+ * never fetches one. Each is a quiet file card named `Image: <name>, <type>` showing one kind icon, the name and the
+ * byte size (`Size unavailable` when the message carries none). More than four collapse to the first three and a
+ * **+N more** button that shows the rest. With a host's
  * `attachmentImages`, an image card offers **Show image**, which asks the host to read it for `messageId` (the
  * attachment's own carrier message when it has one); the card then reads **Loading image**, **Not authorized**
  * (no retry) or **Couldn't load image** with **Retry**. An `Unavailable` image stays a plain card with no action.
@@ -63,9 +66,12 @@ const formatSize = (bytes: number | undefined) => {
  * place. Once a person asks, a status outside the card announces each change through the loaded image.
  */
 export function TranscriptAttachments({ attachments, messageId }: { readonly attachments: readonly Attachment[]; readonly messageId: string }) {
+  const [all, setAll] = React.useState(false)
   if (attachments.length === 0) return null
+  const shown = all || attachments.length <= attachmentsShownWhole ? attachments : attachments.slice(0, 3)
   return <div data-testid="transcript-attachments" {...stylex.props(styles.list)}>
-    {attachments.map((attachment, index) => <TranscriptAttachment key={`${attachment.id}:${index}`} attachment={attachment} messageId={attachment.messageId ?? messageId} />)}
+    {shown.map((attachment, index) => <TranscriptAttachment key={`${attachment.id}:${index}`} attachment={attachment} messageId={attachment.messageId ?? messageId} />)}
+    {shown.length < attachments.length && <Button data-testid="transcript-attachments-more" aria-label={`Show ${attachments.length - shown.length} more attachments`} onPress={() => setAll(true)} {...stylex.props(styles.card, styles.more)}>+{attachments.length - shown.length} more</Button>}
   </div>
 }
 
@@ -116,7 +122,7 @@ function TranscriptAttachment({ attachment, messageId }: { readonly attachment: 
         <span {...stylex.props(styles.cardIdentity)}>
           <Icon name={image ? 'image' : 'attach'} />
           <span {...stylex.props(styles.cardName)}>{name}</span>
-          <span {...stylex.props(styles.cardDetail)}>{`· ${image && type !== attachment.mediaType ? `${type} image` : type} · ${formatSize(attachment.size)}`}</span>
+          <span {...stylex.props(styles.cardDetail)}>{formatSize(attachment.size)}</span>
         </span>
         {readable && <span {...stylex.props(styles.cardStatus)}>
           {(state._tag === 'Unauthorized' || state._tag === 'Failed') && <span {...stylex.props(state._tag === 'Failed' && styles.statusFailed)}>{state._tag === 'Unauthorized' ? 'Not authorized' : "Couldn't load image"}</span>}
@@ -151,8 +157,9 @@ const styles = stylex.create({
   // Phones: the read status and its action wrap below the name instead of squeezing it.
   cardNarrow: { flexWrap: 'wrap', paddingBlock: s.xs },
   cardIdentity: { display: 'inline-flex', alignItems: 'center', gap: s.sm, minWidth: 0 },
-  cardName: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fg, fontSize: t.metaSize },
-  cardDetail: { flexShrink: 0, fontVariantNumeric: 'tabular-nums' },
+  cardName: { minWidth: 0, maxWidth: '28ch', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fg, fontSize: t.metaSize },
+  cardDetail: { flexShrink: 0, color: ink.fgMuted, fontVariantNumeric: 'tabular-nums' },
+  more: { color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { color: ink.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },
   cardStatus: { display: 'inline-flex', alignItems: 'center', gap: s.sm, flexShrink: 0, whiteSpace: 'nowrap' },
   statusFailed: { color: status.dangerFg },
   action: { display: 'inline-flex', alignItems: 'center', minHeight: g.controlSm, paddingBlock: 0, paddingInline: s.xs, borderWidth: 0, borderRadius: r.control, backgroundColor: surface.transparent, color: status.runningFg, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', ':hover': { backgroundColor: surface.rowHover }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusOffset } },

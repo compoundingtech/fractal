@@ -31,24 +31,25 @@ export interface ReplayHandle extends Replay {
   readonly flush: () => Promise<void>
 }
 
-type Filters = { status?: string; actor?: string; person?: string; subject?: string; owner?: string; state?: string; owner_run?: string; launch_id?: string }
+/** Filters parsed from a client command; a filter the command leaves out is undefined. */
+type Filters = { [Key in 'status' | 'actor' | 'person' | 'subject' | 'owner' | 'state' | 'owner_run' | 'launch_id']?: string | undefined }
 type Subscription = {
   id: string
   collection: CollectionName | 'conversation' | 'terminal' | 'terminals'
   limit: number
   filters: Filters
-  conversation?: string
+  conversation?: string | undefined
   /** Canonical agent binding survives a replacement session while keeping the original selector. */
   threadAgent?: string
   threadState?: 'pending' | 'present'
-  terminal?: string
-  incarnation?: string
-  capability?: string
+  terminal?: string | undefined
+  incarnation?: string | undefined
+  capability?: string | undefined
   ready: boolean
   recorded?: boolean
   window?: { items: WireResource[]; has_more: boolean }
 }
-type Connection = { socket: CollectionSocket; open: boolean; closed: boolean; subscriptions: Map<string, Subscription>; legacy: boolean; recorded_socket_id?: string }
+type Connection = { socket: CollectionSocket; open: boolean; closed: boolean; subscriptions: Map<string, Subscription>; legacy: boolean; recorded_socket_id?: string | undefined }
 const collectionKind = (collection: string): SliceKind | undefined => {
   switch (collection) {
     case 'agents': case 'runtimes': case 'machines': case 'arrangements': case 'sessions': case 'devices': return 'roster'

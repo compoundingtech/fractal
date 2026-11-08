@@ -1,16 +1,27 @@
+// Generated file - DO NOT EDIT
+// Source: tsconfig.json.genie.ts
 {
   "compilerOptions": {
-    "strict": true,
-    "noEmit": true,
+    "target": "ES2024",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
     "allowImportingTsExtensions": true,
-    "target": "ES2022",
-    "module": "esnext",
-    "moduleResolution": "bundler",
-    "lib": [
-      "es2022",
-      "dom"
-    ],
-    "types": [],
+    "rewriteRelativeImportExtensions": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "allowJs": false,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
     "plugins": [
       {
         "name": "@effect/language-service",
@@ -26,12 +37,10 @@
           "preferSchemaOverJson": "warning"
         }
       }
-    ]
+    ],
+    "noEmit": true,
+    "types": []
   },
-  "include": [
-    "*.ts"
-  ],
-  "exclude": [
-    "*.genie.ts"
-  ]
+  "include": ["*.ts"],
+  "exclude": ["*.genie.ts"]
 }

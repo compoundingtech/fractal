@@ -46,13 +46,21 @@ export const agentActions = (agent: { readonly state?: string; readonly activity
   ]
 }
 
+/** A group the host adds after the agent's own actions, e.g. a phone's "Open a tab" and open tabs. */
+export interface OverflowSection {
+  readonly title: string
+  readonly items: readonly { readonly id: string; readonly label: string; readonly current?: boolean; readonly onAction: () => void }[]
+}
+
 /**
- * The header's one overflow menu: what can be done to the agent now, then View KDL. The agent is optional because a
- * conversation can outlive its roster row, and its declaration is still worth reading.
+ * The header's one overflow menu: what can be done to the agent now, then View KDL, then any host sections. The agent
+ * is optional because a conversation can outlive its roster row, and its declaration is still worth reading; without
+ * `onViewDeclaration` (a pane that shows no agent) the menu holds only the host's sections.
  */
-export const ConversationOverflowMenu = ({ agent, onViewDeclaration }: {
+export const ConversationOverflowMenu = ({ agent, onViewDeclaration, sections = [] }: {
   readonly agent?: Pick<Agent, 'ref' | 'name' | 'state' | 'activity'> | undefined
-  readonly onViewDeclaration: () => void
+  readonly onViewDeclaration?: (() => void) | undefined
+  readonly sections?: readonly OverflowSection[]
 }): React.ReactNode => {
   const port = useDataSource().agentControls
   const rows = agent === undefined ? [] : agentActions(agent)
@@ -87,7 +95,7 @@ export const ConversationOverflowMenu = ({ agent, onViewDeclaration }: {
           <Aria.Menu
             aria-label="More actions"
             onAction={(key) => {
-              if (key === 'declaration') { onViewDeclaration(); return }
+              if (key === 'declaration') { onViewDeclaration?.(); return }
               const row = rows.find((each) => each.key === key)
               if (row === undefined) return
               if (row.confirm) setConfirming(row)
@@ -100,9 +108,15 @@ export const ConversationOverflowMenu = ({ agent, onViewDeclaration }: {
                 <span {...stylex.props(styles.label)}>{row.label}</span>
               </Aria.MenuItem>
             ))}
-            <Aria.MenuItem id="declaration" textValue="View KDL" {...stylex.props(styles.menuItem, rows.length > 0 && styles.menuItemApart)}>
+            {onViewDeclaration === undefined ? null : <Aria.MenuItem id="declaration" textValue="View KDL" {...stylex.props(styles.menuItem, rows.length > 0 && styles.menuItemApart)}>
               <span {...stylex.props(styles.label)}>View KDL</span>
-            </Aria.MenuItem>
+            </Aria.MenuItem>}
+            {sections.map((section, index) => <Aria.MenuSection key={section.title} aria-label={section.title} {...stylex.props((index > 0 || rows.length > 0 || onViewDeclaration !== undefined) && styles.sectionApart)}>
+              <Aria.Header {...stylex.props(styles.sectionTitle)}>{section.title}</Aria.Header>
+              {section.items.map(item => <Aria.MenuItem key={item.id} id={`${section.title}/${item.id}`} textValue={item.label} onAction={item.onAction} {...(item.current ? { 'aria-current': 'page' as const } : {})} {...stylex.props(styles.menuItem)}>
+                <span {...stylex.props(styles.label, item.current === true && styles.current)}>{item.label}</span>
+              </Aria.MenuItem>)}
+            </Aria.MenuSection>)}
           </Aria.Menu>
         </Aria.Popover>
       </Aria.MenuTrigger>
@@ -136,6 +150,9 @@ const styles = stylex.create({
   menu: { padding: s.xs, outline: 'none', maxWidth: 360 },
   menuItem: { display: 'flex', flexDirection: 'column', gap: 2, padding: s.md, outline: 'none', borderRadius: 4, cursor: 'pointer', ':focus': { backgroundColor: c.rowHover }, ':is([data-focus-visible])': { outlineWidth: geometryVars.focusRing, outlineStyle: 'solid', outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusInset } },
   menuItemApart: { marginTop: s.xs, borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: c.border, borderRadius: 0 },
+  sectionApart: { marginTop: s.xs, paddingTop: s.xs, borderTopWidth: 1, borderTopStyle: 'solid', borderTopColor: c.border },
+  sectionTitle: { paddingInline: s.md, paddingBlock: s.xs, color: c.fgMuted, fontSize: t.denseSize },
+  current: { fontWeight: 600 },
   label: { color: c.fg },
   what: { margin: 0, color: c.fgMuted, fontSize: t.denseSize },
   overlay: { position: 'fixed', inset: 0, zIndex: 100, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(0, 0, 0, 0.4)' },

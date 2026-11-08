@@ -60,8 +60,9 @@ const styles = stylex.create({
   // The visible strip of thread beside the sheet (40px) tells you the sheet is on top of it.
   sheet: { height: '100%', maxWidth: 'calc(100% - 40px)', display: 'flex', backgroundColor: surface.canvas, color: text.fg, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
   sheetEnd: { borderInlineStartWidth: g.hairline, borderInlineStartStyle: 'solid', borderInlineStartColor: border.borderStrong },
-  // The thread stays visible above it (64px), saying the sheet belongs to what it shows.
-  sheetBottom: { width: '100%', maxWidth: '100%', height: 'auto', maxHeight: 'calc(100% - 64px)', minHeight: '50%', borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.borderStrong, borderStartStartRadius: r.lg, borderStartEndRadius: r.lg },
+  // The thread stays visible above it (64px), saying the sheet belongs to what it shows. The height is definite: a
+  // panel fills it as it fills a pane's side, so a long view scrolls inside the sheet instead of spilling past it.
+  sheetBottom: { width: '100%', maxWidth: '100%', height: 'calc(100% - 64px)', borderTopWidth: g.hairline, borderTopStyle: 'solid', borderTopColor: border.borderStrong, borderStartStartRadius: r.lg, borderStartEndRadius: r.lg },
   sheetStart: { backgroundColor: surface.sidebar, borderInlineEndWidth: g.hairline, borderInlineEndStyle: 'solid', borderInlineEndColor: border.borderStrong },
   // Top and bottom insets clear the status bar and home indicator; the sheet's own edge clears a landscape notch.
   dialog: { flexGrow: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', outline: 'none', paddingBlockStart: 'env(safe-area-inset-top, 0px)', paddingBlockEnd: 'env(safe-area-inset-bottom, 0px)' },

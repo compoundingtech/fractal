@@ -90,7 +90,7 @@ export function signedMessageFields(others: Omit<SignedFields, 'content' | 'body
 }
 
 /** The signed field names for these fields: the long form when they carry a body hash. */
-export function signedFieldNames(fields: SignedFields): readonly string[] {
+export function signedFieldNames(fields: SignedFields): readonly (keyof SignedFields)[] {
   return fields.body_sha256 === undefined ? SIGNED_FIELDS : SIGNED_LONG_FIELDS;
 }
 
@@ -116,7 +116,11 @@ export function signedBytes(message: Unsigned): string {
     message.subject,
     'message.sent',
     message.signer,
-    ...signedFieldNames(message.fields).map(field => `${field}=${canonical((message.fields as Record<string, string | number | null | string[]>)[field])}`),
+    ...signedFieldNames(message.fields).map(field => {
+      const value = message.fields[field];
+      if (value === undefined) throw new Error(`a signed message needs its ${field} field`);
+      return `${field}=${canonical(value)}`;
+    }),
     message.signer,
     '',
     message.key,
@@ -145,11 +149,11 @@ export function base64url(bytes: Uint8Array): string {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
   let out = '';
   for (let index = 0; index < bytes.length; index += 3) {
-    const chunk = (bytes[index] << 16) | ((bytes[index + 1] ?? 0) << 8) | (bytes[index + 2] ?? 0);
+    const chunk = ((bytes[index] ?? 0) << 16) | ((bytes[index + 1] ?? 0) << 8) | (bytes[index + 2] ?? 0);
     const left = bytes.length - index;
-    out += alphabet[(chunk >> 18) & 63] + alphabet[(chunk >> 12) & 63];
-    if (left > 1) out += alphabet[(chunk >> 6) & 63];
-    if (left > 2) out += alphabet[chunk & 63];
+    out += alphabet.charAt((chunk >> 18) & 63) + alphabet.charAt((chunk >> 12) & 63);
+    if (left > 1) out += alphabet.charAt((chunk >> 6) & 63);
+    if (left > 2) out += alphabet.charAt(chunk & 63);
   }
   return out;
 }

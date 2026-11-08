@@ -93,6 +93,25 @@ it('opens or focuses one tab per subject from the sidebar, and the URL follows',
   expect(window.location.pathname).toBe('/w/agent/a')
 })
 
+it('keeps the pane slot while every selected tab controls its current, labelled panel', async () => {
+  await mount()
+  const slot = host.querySelector('[data-pane-slot-content]')!
+  expect(slot).not.toBeNull()
+  const assertPanel = () => {
+    const tab = strip().find(tab => tab.getAttribute('aria-selected') === 'true')!
+    const panel = document.getElementById(tab.getAttribute('aria-controls')!)
+    expect(panel?.getAttribute('role')).toBe('tabpanel')
+    expect(panel?.getAttribute('aria-labelledby')).toBe(tab.id)
+    expect(panel?.contains(slot)).toBe(true)
+    expect(host.querySelector('[data-pane-slot-content]')).toBe(slot)
+  }
+  assertPanel()
+  await act(async () => row('agent/b').click())
+  assertPanel()
+  await act(async () => row('agent/a').click())
+  assertPanel()
+})
+
 it('reopens a closed tab when history arrives back at its subject', async () => {
   await mount()
   await act(async () => row('agent/b').click())
@@ -151,6 +170,10 @@ it('says when the layout is not syncing, and a retry that reaches the glasses st
   root = createRoot(host)
   await act(async () => root!.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace glasses={flaky} /></DataSourceProvider>))
   await vi.waitFor(() => expect(host.textContent).toContain('Layout not syncing'))
+  // It describes the person's glasses and spaces, so it sits under the sidebar's header beside the space switcher, never in a pane.
+  const note = host.querySelector<HTMLElement>('[data-layout-sync]')!
+  expect(note.closest('aside[aria-label="Agents"]')).not.toBeNull()
+  expect(note.closest('[data-pane]')).toBeNull()
   expect(titles()).toEqual([])
   reachable = true
   await act(async () => [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Retry')!.click())

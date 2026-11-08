@@ -6,6 +6,7 @@ import { useDragState, useDropTarget, useOptionalWorkspaceContext } from '@fract
 import { colorVars as c } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import type { SidebarMoveTarget, SidebarNode } from '../folders/sidebarContract.ts'
 import { paneKey, subjectOfRef } from '../workspace/subject.ts'
+import { attributeValue } from '../workspace/WorkspaceSplits.tsx'
 
 /** Where a row would land, in the shape React Aria's drop targets used. */
 export interface FolderDropPlace {
@@ -144,7 +145,7 @@ const ActiveFolderDropIndicator = ({ root }: { readonly root: React.RefObject<HT
   }, [pointer, root])
   if (over === undefined || typeof document === 'undefined') return null
   const host = root.current
-  const row = over.type === 'item' && host !== null ? host.querySelector(`[data-sidebar-tree-key="${CSS.escape(String(over.key))}"]`) : null
+  const row = over.type === 'item' && host !== null ? host.querySelector(`[data-sidebar-tree-key="${attributeValue(String(over.key))}"]`) : null
   const box = (row ?? host?.querySelector('[role="treegrid"]'))?.getBoundingClientRect()
   if (box === undefined) return null
   const position = over.type === 'root' ? 'on' : over.dropPosition ?? 'on'

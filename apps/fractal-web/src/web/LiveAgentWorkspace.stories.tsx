@@ -1,6 +1,6 @@
 import type { ComponentProps } from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, waitFor } from 'storybook/test'
+import { expect, userEvent, waitFor } from 'storybook/test'
 import { AppStorySpecimen, type AppStoryArgs } from '../fixtures/AppStoryHarness.tsx'
 import { assertProductionAppState } from '../fixtures/appStoryAssertions.ts'
 import { appStoryAgent, appStoryStates } from '../fixtures/appStoryStates.ts'
@@ -48,6 +48,7 @@ export const scenarioExemptions: readonly string[] = [
   'Populated:contract-fixture',
   'ScriptedRepair:contract-fixture',
   'SidebarDragToPane:contract-fixture',
+  'Spaces:contract-fixture',
   'Splits:contract-fixture',
   'SplitsDragAndDrop:contract-fixture',
   'TabSwitchGeometry:contract-fixture',
@@ -67,10 +68,14 @@ export const Offline: Story = { args: { state: 'offline' } }
 export const Unavailable: Story = { args: { state: 'unavailable' } }
 export const ScriptedRepair: Story = { args: { state: 'scripted-repair' } }
 
-/** Every tab's box and the strip's height, rounded to a tenth of a pixel. */
+/**
+ * Every tab's box and the strip's height, rounded to a tenth of a pixel. A tab's x is measured within the list's
+ * scrolled content: a phone's list scrolls the selected tab into view, which moves no box.
+ */
 const stripGeometry = (canvas: HTMLElement) => {
   const strip = canvas.querySelector<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"]')!
-  const box = (element: Element) => { const rect = element.getBoundingClientRect(); return [rect.x, rect.y, rect.width, rect.height].map(value => Math.round(value * 10) / 10) }
+  const origin = strip.getBoundingClientRect().x - strip.scrollLeft
+  const box = (element: Element) => { const rect = element.getBoundingClientRect(); return [rect.x - origin, rect.y, rect.width, rect.height].map(value => Math.round(value * 10) / 10) }
   return { strip: box(strip)[3], tabs: [...strip.querySelectorAll('[role="tab"]')].map(box) }
 }
 
@@ -79,13 +84,14 @@ export const TabSwitchGeometry: Story = {
   args: { state: 'populated' },
   play: async ({ canvasElement, args }) => {
     await waitFor(() => assertProductionAppState(canvasElement, args.state, true), { timeout: 60000 })
-    // Two more agents' tabs, opened as a link would.
-    for (const agent of fixtureProjections.agents.filter(row => row.id !== appStoryAgent(args.state)).slice(0, 2)) {
+    const tabs = () => [...canvasElement.querySelectorAll<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"] [role="tab"]')]
+    // Two more agents' tabs, opened as a link would. Each navigation lands before the next, as two clicks would:
+    // two locations in one task reach the workspace as only the last.
+    for (const [index, agent] of fixtureProjections.agents.filter(row => row.id !== appStoryAgent(args.state)).slice(0, 2).entries()) {
       window.history.pushState(null, '', `/w/${agent.id}`)
       window.dispatchEvent(new PopStateEvent('popstate'))
+      await waitFor(() => expect(tabs()).toHaveLength(index + 2))
     }
-    const tabs = () => [...canvasElement.querySelectorAll<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"] [role="tab"]')]
-    await waitFor(() => expect(tabs()).toHaveLength(3))
     await document.fonts.ready
     const before = stripGeometry(canvasElement)
     for (const index of [0, 1, 2, 0]) {
@@ -135,6 +141,8 @@ export const TranscriptEndClearsComposer: Story = {
 export const TranscriptEndClearsComposerLight: Story = { ...TranscriptEndClearsComposer, args: { state: 'populated', scheme: 'light' } }
 
 const mac = () => /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
+/** A phone width shows the focused pane alone. */
+const collapsed = (canvas: HTMLElement) => canvas.querySelector('[data-workspace][data-collapsed]') !== null
 const press = (init: KeyboardEventInit, target: EventTarget = document.body) =>
   target.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }))
 
@@ -158,6 +166,30 @@ export const Splits: Story = {
     const surface = () => canvasElement.querySelector(`[data-tab-surface="agent:${other.id}"]`)
     await waitFor(() => expect(surface()).not.toBeNull())
     const node = surface()
+    if (collapsed(canvasElement)) {
+      // A phone keeps splits but shows the focused pane alone: Mod+D focuses a new empty pane, Alt+W closes it.
+      press({ key: 'd', code: 'KeyD', metaKey: mac(), ctrlKey: !mac() })
+      await waitFor(() => expect(strips()).toHaveLength(2))
+      expect(shownPanes()).toHaveLength(1)
+      await waitFor(() => expect(canvasElement.querySelector('[data-pane][data-focused] [data-testid="workspace-empty"]')).not.toBeNull())
+      // The pane switcher in the top bar reaches the other pane and back.
+      const switcher = () => canvasElement.querySelector<HTMLButtonElement>('[data-testid="pane-switcher"]')!
+      await waitFor(() => expect(switcher().getAttribute('aria-label')).toBe('Pane 2 of 2'))
+      const choose = async (place: number) => {
+        switcher().click()
+        await waitFor(() => expect(document.querySelectorAll('[role="menuitemradio"]').length).toBe(2))
+        document.querySelectorAll<HTMLElement>('[role="menuitemradio"]')[place - 1]!.click()
+        await waitFor(() => expect(switcher().getAttribute('aria-label')).toBe(`Pane ${place} of 2`))
+      }
+      await choose(1)
+      expect(surface()?.getAttribute('aria-hidden')).toBe('false')
+      await choose(2)
+      press({ key: 'w', code: 'KeyW', altKey: true })
+      await waitFor(() => expect(strips()).toHaveLength(1))
+      expect(surface()).toBe(node)
+      canvasElement.dataset.proof = 'passed'
+      return
+    }
     moved.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true }))
     await waitFor(() => expect([...document.querySelectorAll('[role="menuitem"]')].some(item => item.textContent === 'Split right')).toBe(true))
     ;[...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(item => item.textContent === 'Split right')!.click()
@@ -222,6 +254,13 @@ export const SplitsDragAndDrop: Story = {
     drop()
     await waitFor(() => expect(strips()).toHaveLength(2))
     expect(surface()).toBe(node)
+    if (collapsed(canvasElement)) {
+      // A phone shows the new pane alone, the dragged tab in it; nothing to drag back onto.
+      expect([...canvasElement.querySelectorAll('[data-pane]')].filter(pane => pane.closest('[hidden]') === null)).toHaveLength(1)
+      await waitFor(() => expect(surface()?.getAttribute('aria-hidden')).toBe('false'))
+      canvasElement.dataset.proof = 'passed'
+      return
+    }
     const home = strips()[0]!.querySelector('[role="tab"]')!.getBoundingClientRect()
     const back = drag(tabs()[1]!, { x: home.right - 4, y: home.top + home.height / 2 })
     back()
@@ -244,6 +283,11 @@ export const SidebarDragToPane: Story = {
     const strips = () => [...canvasElement.querySelectorAll<HTMLElement>('[role="tablist"][aria-label="Workspace tabs"]')]
     const tabs = () => strips().flatMap(strip => [...strip.querySelectorAll<HTMLElement>('[role="tab"]')])
     await waitFor(() => expect(tabs()).toHaveLength(1))
+    // A phone's roster is a touch drawer over the one pane: a press there scrolls, and filing uses the Move button.
+    if (collapsed(canvasElement)) {
+      canvasElement.dataset.proof = 'passed'
+      return
+    }
     const other = fixtureProjections.agents.find(row => row.id !== appStoryAgent(args.state))!
     const row = () => canvasElement.querySelector<HTMLElement>(`[data-sidebar-tree-key="${other.id}"]`)
     await waitFor(() => expect(row()).not.toBeNull())
@@ -259,6 +303,41 @@ export const SidebarDragToPane: Story = {
     drop()
     await waitFor(() => expect(strips()).toHaveLength(2))
     expect(tabs()).toHaveLength(2)
+    canvasElement.dataset.proof = 'passed'
+  },
+}
+
+/**
+ * Spaces from the sidebar's header row, where the switcher stands in place of the wordmark: a new space
+ * named in place opens empty, Alt+G goes to the next space and back, and closing one asks first.
+ */
+export const Spaces: Story = {
+  args: { state: 'populated' },
+  play: async ({ canvasElement, args }) => {
+    await waitFor(() => assertProductionAppState(canvasElement, args.state, true), { timeout: 60000 })
+    if (collapsed(canvasElement)) {
+      // The phone's switcher lives in the drawer, opened from the top bar.
+      canvasElement.querySelector<HTMLElement>('button[aria-label="Expand sidebar"]')!.click()
+    }
+    const switcher = () => document.querySelector<HTMLButtonElement>('[data-testid="space-switcher"]')
+    await waitFor(() => expect(switcher()?.textContent).toBe('Main'))
+    const choose = async (label: string) => {
+      switcher()!.click()
+      await waitFor(() => expect([...document.querySelectorAll('[role="menuitem"]')].some(item => item.textContent === label)).toBe(true))
+      ;[...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(item => item.textContent === label)!.click()
+    }
+    await choose('New space…')
+    const field = await waitFor(() => { const input = document.querySelector<HTMLInputElement>('input[placeholder="Space name"]'); expect(input).not.toBeNull(); return input! })
+    await userEvent.type(field, 'Review{Enter}')
+    await waitFor(() => expect(switcher()?.textContent).toBe('Review'))
+    press({ key: 'g', code: 'KeyG', altKey: true })
+    await waitFor(() => expect(switcher()?.textContent).toBe('Main'))
+    press({ key: 'g', code: 'KeyG', altKey: true })
+    await waitFor(() => expect(switcher()?.textContent).toBe('Review'))
+    await choose('Close space…')
+    const confirm = await waitFor(() => { const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(node => node.textContent === 'Close space'); expect(button).toBeDefined(); return button! })
+    confirm.click()
+    await waitFor(() => expect(switcher()?.textContent).toBe('Main'))
     canvasElement.dataset.proof = 'passed'
   },
 }

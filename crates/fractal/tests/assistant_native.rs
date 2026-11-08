@@ -171,7 +171,7 @@ impl Harness {
         let item = self.state.store.attention_items(Some(OWNER)).unwrap().into_iter().find(|item| item.subject == target).unwrap();
         ActionRequest::work_done(format!("action/{key}"), format!("native-test-{key}"), self.fence().await,
             PersonStepParameters { target_id: target.into(), summary: "Native test answer".into(), episode: item.episode,
-                answer: Some(PersonAnswerInput { id: Some(answer.into()), ..Default::default() }), ..Default::default() }).unwrap()
+                answer: Some(PersonAnswerInput { choices: vec![fractal_client::PersonChoiceInput { id: answer.into(), note: None }], ..Default::default() }), ..Default::default() }).unwrap()
     }
 
     async fn message(&self, to: &str, key: &str) -> ActionRequest {
@@ -402,7 +402,7 @@ async fn direct_answer_executes_without_approval_with_provenance_and_rejects_sta
     assert!(result["value"].get("approval_id").is_none(), "{result}");
     let durable = h.state.store.step_run(&ask).unwrap().unwrap();
     assert_eq!(durable.person_answers.len(), 1);
-    assert_eq!(durable.person_answers[0].answer.as_ref().unwrap()["id"], "yes");
+    assert_eq!(durable.person_answers[0].answer.as_ref().unwrap()["choices"][0]["id"], "yes");
     assert_eq!(durable.person_answers[0].respondent, "assistant/chatgpt");
     assert_eq!(durable.person_answers[0].assistant_owner.as_deref(), Some(OWNER));
     assert_eq!(durable.person_answers[0].assistant_session_actor.as_deref(), Some(paired.session_actor.as_str()));

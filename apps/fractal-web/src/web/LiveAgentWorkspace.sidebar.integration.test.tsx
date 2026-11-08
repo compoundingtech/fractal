@@ -462,29 +462,30 @@ describe.each([1280, 1440, 2980])('sidebar footer at %ipx', width => {
     expect(roster().textContent).toContain(agent.name)
     expect(roster().textContent).toContain(other.name)
   })
-  it('keeps the connection out of the sidebar and shows a band only once the connection is lost', async () => {
+  it('keeps the connection quiet while live and says it in the sidebar footer once lost, with no pane band while it recovers', async () => {
     registry.set(agents, observed({ value: [agent] }))
     await mount(width)
     expect(roster().querySelectorAll('[data-testid="taste-agent-row"]')).toHaveLength(1)
     expect(roster().textContent).toContain(agent.name)
     expect(band()).toBeNull()
-    expect(sidebar().querySelector('footer [role="status"]')).toBeNull()
+    expect(sidebar().querySelector('footer [data-connection-line]')).toBeNull()
     await act(async () => registry.set(gatewaySync, { status: { _tag: 'Connecting', attempt: 1, since: 0 }, observedAt: 0 }))
-    expect(band()).toBeNull()
+    expect(sidebar().querySelector('footer [data-connection-line]')).toBeNull()
     await act(async () => registry.set(gatewaySync, { status: { _tag: 'Stale', reason: { _tag: 'Reconnecting', attempt: 2, nextAt: 7000, issue: 'socket closed' } }, observedAt: 0 }))
-    expect(band()?.getAttribute('data-connection-state')).toBe('reconnecting')
-    expect(sidebar().contains(band())).toBe(false)
+    expect(sidebar().querySelector('footer [data-connection-line]')?.getAttribute('data-connection-line')).toBe('reconnecting')
+    expect(band()).toBeNull()
     expect(host.textContent).not.toContain(gateway)
   })
 
-  it('shows the offline band outside the sidebar when the network goes offline despite a live observation', async () => {
+  it('says an offline network in the sidebar footer and in a band in the focused pane, despite a live observation', async () => {
     const network = Atom.make({ _tag: 'Offline' } as const)
     source = { ...source, network }
     registry.set(agents, observed({ value: [agent] }))
     await mount(width)
     expect(band()?.getAttribute('data-connection-state')).toBe('offline')
     expect(sidebar().contains(band())).toBe(false)
-    expect(sidebar().querySelector('footer [role="status"]')).toBeNull()
+    expect(band()!.closest('[data-pane]')).not.toBeNull()
+    expect(sidebar().querySelector('footer [data-connection-line]')?.getAttribute('data-connection-line')).toBe('offline')
   })
 
   it('removes the waiting notice and skeleton as soon as roster rows are published', async () => {
@@ -634,9 +635,11 @@ describe('responsive agent navigation', () => {
     if (width < 900) await act(async () => within(host).getByRole('button', { name: 'Expand sidebar' }).click())
     const header = sidebar().querySelector<HTMLElement>('[data-sidebar-header]')!
     expect(header).not.toBeNull()
-    // Collapse leads, then the wordmark, then the alerts: no separate drawer title or trailing close.
+    // Collapse leads, then the space switcher in place of the wordmark, then the palette and Settings: no separate drawer title or trailing close.
     expect(header.querySelector('button')!.getAttribute('aria-label')).toBe(collapse)
-    expect(header.querySelector('strong')!.textContent).toBe('Fractal')
+    expect(header.querySelector('[data-testid="space-switcher"]')!.textContent).toBe('Main')
+    expect(header.textContent).not.toContain('Fractal')
+    expect([...header.querySelectorAll('button')].map(button => button.getAttribute('aria-label'))).toEqual([collapse, 'Space: Main', 'Command palette', 'Settings'])
     expect(sidebar().querySelectorAll(':scope > header').length).toBe(1)
   })
 })

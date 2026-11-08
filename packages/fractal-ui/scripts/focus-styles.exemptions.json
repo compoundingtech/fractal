@@ -54,5 +54,12 @@
     "detail": "boxShadow: step.state === 'pending' || step.state === 'ready' ? `inset 0 0 0 1px ${C.strong}` : undefined",
     "owner": "mission-explore",
     "reason": "Hollow step cell in an exploration variant: a status glyph's edge, not focus, selection or attention on a control."
+  },
+  {
+    "path": "packages/fractal-ui/src/assistant-ui/composition/MessageCard.tsx",
+    "rule": "ring-shadow",
+    "detail": "boxShadow: `0 0 0 2px ${surface.messageCard}`",
+    "owner": "messaging-v5",
+    "reason": "Card-coloured cutout around the avatar's presence dot; a status glyph's edge, not focus, selection or attention."
   }
 ]

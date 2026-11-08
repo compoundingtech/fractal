@@ -1,5 +1,4 @@
 import * as React from 'react'
-import type { WorkLogCall } from '@fractal/ui/assistant-ui'
 import type { UxTelemetry } from '../telemetry/ux.ts'
 import { makeKindRegistry, type KindPolicy } from './registry.ts'
 import type { KindDescriptor, PresentationWorld } from './presentation.ts'
@@ -22,7 +21,6 @@ export interface SurfaceProps {
   readonly visible: boolean
   /** This tab shows its terminal face. */
   readonly terminal: boolean
-  readonly onOpenTool: (call: WorkLogCall) => void
   readonly onOpen: (ref: string) => void
   /** This tab gives way to another subject, in place. */
   readonly onReplace: (ref: string) => void

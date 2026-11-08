@@ -35,7 +35,7 @@ const source = fixtureSource({ world: { ...fixtureProjections, conversations: { 
 const EpisodeTranscript = ({ scheme }: { readonly scheme: 'dark' | 'light' }) => {
   const [registry] = React.useState(() => AtomRegistry.make())
   return <main data-scheme={scheme} {...stylex.props(styles.root, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
-    <DataSourceProvider source={source} registry={registry}><ConversationPane agentRef={agentRef} agentName="Quay" onOpenTool={() => undefined} /></DataSourceProvider>
+    <DataSourceProvider source={source} registry={registry}><ConversationPane agentRef={agentRef} agentName="Quay" /></DataSourceProvider>
   </main>
 }
 const meta = { excludeStories: ['scenarioExemptions'],
@@ -63,22 +63,28 @@ const assertEpisodes: NonNullable<Story['play']> = async ({ canvasElement }) => 
   await expect(people[1]).toHaveTextContent('Also bump the lockfile.')
   await expect(within(people[1]!).getByTestId('user-redelivered')).toHaveTextContent('Delivered to the agent 2 times')
   // A wake's whole body is behind Read message, as Markdown.
-  const wake = canvas.getAllByTestId('harness-notice')[0]!
+  const wake = canvas.getAllByTestId('message-row')[0]!
   await userEvent.click(within(wake).getByRole('button', { name: 'Read message' }))
   await expect(within(wake).getByTestId('harness-payload')).toHaveTextContent('Wake: automatic attempt 1 (ready)')
-  // One object per message: sender to recipient, subject, then body; unresolved refs read as their last segment.
-  const mails = canvas.getAllByTestId('mail-message')
+  // One card per message: sender, subject, then body; unresolved refs read as their last segment. Mail to this
+  // conversation's own agent names no recipient.
+  const mails = canvas.getAllByTestId('message-card')
   await expect(mails).toHaveLength(2)
-  await expect(within(mails[0]!).getByTestId('mail-header')).toHaveTextContent('harbor → quay · Key audit')
+  await expect(within(mails[0]!).getByTestId('message-head')).toHaveTextContent('harbor · Key audit')
+  await expect(within(mails[0]!).queryByTestId('message-recipient')).toBeNull()
   await expect(within(mails[0]!).getByTitle('agent/example/harbor')).toBeInTheDocument()
-  await expect(mails[0]).toHaveAttribute('data-mail-look', 'between_others')
+  await expect(mails[0]).toHaveAttribute('data-message-look', 'between_others')
   // A long body collapses behind Read message.
   await expect(within(mails[1]!).getByRole('button', { name: 'Read message' })).toHaveAttribute('aria-expanded', 'false')
   // Trigger, work, outcome: one timestamp per episode, and a day line where the day changes.
   const turns = canvas.getAllByTestId('transcript-turn')
   await expect(turns).toHaveLength(5)
-  for (const turn of turns) await expect(within(turn).getAllByTestId('turn-time')).toHaveLength(1)
-  await expect(canvas.queryAllByTestId('message-time')).toHaveLength(0)
+  // A message head shows its own time only when the minute differs from the episode's; otherwise it waits for hover.
+  for (const turn of turns) {
+    await expect(within(turn).getAllByTestId('turn-time')).toHaveLength(1)
+    const episode = within(turn).getByTestId('turn-time').textContent
+    for (const time of within(turn).queryAllByTestId('message-time')) if (time.textContent === episode) await expect(time).toHaveAttribute('data-time-visible', 'false')
+  }
   await expect(canvas.getAllByTestId('transcript-day')).toHaveLength(1)
 }
 export const Dark: Story = { play: assertEpisodes }

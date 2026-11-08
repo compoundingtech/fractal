@@ -63,6 +63,7 @@ vi.mock('../data/react.tsx', () => ({
   useRosterDecode: () => ({ undecodable: [], decodeStale: false }),
   useAskingAgents: () => askingAgents,
   useAttention: () => ({ _tag: 'Waiting' }),
+  useMissions: () => ({ _tag: 'Waiting' }),
   useSubjectList: () => [],
   useConnection: () => ({ _tag: 'Live' }),
   useNow: () => 0,
@@ -75,7 +76,7 @@ vi.mock('../data/react.tsx', () => ({
 let workspace: typeof WorkspaceModule
 let body: typeof BodyModule
 /** The body hosting one agent's tab, on the face asked for. */
-const bodyFor = (agent: string, terminal = false, others: readonly string[] = []) => <body.WorkspaceBody tabs={[agent, ...others].map(id => ({ id, ref: `agent:${id}` }))} active={agent} shown={new Set([agent])} paneOf={new Map([agent, ...others].map(id => [id, 'pane']))} headerSlots={new Map()} onFocusPane={() => {}} tiers={new Map([[agent, 'active' as const], ...others.map(id => [id, 'mounted' as const] as const)])} views={terminal ? { [agent]: { terminal: true } } : {}} names={new Map([agent, ...others].map(id => [id, id]))} onOpenTool={() => {}} onOpen={() => {}} onReplace={() => {}} onClose={() => {}} onBackToAlerts={() => {}} onView={() => {}} focusShownFace={{ current: false }} />
+const bodyFor = (agent: string, terminal = false, others: readonly string[] = []) => <body.WorkspaceBody tabs={[agent, ...others].map(id => ({ id, ref: `agent:${id}` }))} active={agent} shown={new Set([agent])} paneOf={new Map([agent, ...others].map(id => [id, 'pane']))} headerSlots={new Map()} onFocusPane={() => {}} tiers={new Map([[agent, 'active' as const], ...others.map(id => [id, 'mounted' as const] as const)])} views={terminal ? { [agent]: { terminal: true } } : {}} names={new Map([agent, ...others].map(id => [id, id]))} onOpen={() => {}} onReplace={() => {}} onClose={() => {}} onBackToAlerts={() => {}} onView={() => {}} focusShownFace={{ current: false }} />
 let root: Root
 let container: HTMLDivElement
 let resolveImport: () => void
@@ -249,31 +250,31 @@ describe('Alerts tab import boundary', () => {
 })
 
 
-describe('gateway connection banner', () => {
+describe('gateway connection line', () => {
   it('shows nothing while live and keeps connection wording out of the sidebar', async () => {
     await renderShell()
-    expect(container.querySelector('[data-connection-state]')).toBeNull()
+    expect(container.querySelector('[data-connection-state], [data-connection-line]')).toBeNull()
     const sidebar = container.querySelector('[aria-label="Agents"]')
     expect(sidebar?.textContent).not.toContain('Connected')
     expect(sidebar?.textContent).not.toContain('alpha.example')
   })
 
-  it('places one band under the thread header with the countdown and one reconnect action', async () => {
+  it('places one line in the sidebar footer with the countdown and one reconnect action, and no pane band while it recovers', async () => {
     gatewayObservation = {
       status: { _tag: 'Stale', reason: { _tag: 'Reconnecting', attempt: 2, nextAt: 3000, issue: 'Private diagnostic' } },
       observedAt: -2000,
     }
     await renderShell()
-    const bands = container.querySelectorAll('[data-connection-state]')
-    expect(bands).toHaveLength(1)
-    const band = bands[0]
-    expect(band?.getAttribute('data-connection-state')).toBe('reconnecting')
-    expect(band?.closest('section[aria-label="Agent workspace"]')).not.toBeNull()
-    expect(band?.textContent).toContain('Next try in 3s · attempt 2')
-    expect(band?.textContent).not.toContain('Reconnecting in')
-    expect(band?.textContent).not.toContain('Private diagnostic')
-    expect(container.querySelector('[aria-label="Agents"] [data-connection-state]')).toBeNull()
-    const buttons = band?.querySelectorAll('button') ?? []
+    const lines = container.querySelectorAll('[data-connection-line]')
+    expect(lines).toHaveLength(1)
+    const line = lines[0]
+    expect(line?.getAttribute('data-connection-line')).toBe('reconnecting')
+    expect(line?.closest('[aria-label="Agents"] footer')).not.toBeNull()
+    expect(line?.textContent).toContain('Next try in 3s · attempt 2')
+    expect(line?.textContent).not.toContain('Reconnecting in')
+    expect(line?.textContent).not.toContain('Private diagnostic')
+    expect(container.querySelector('[data-connection-state]')).toBeNull()
+    const buttons = line?.querySelectorAll('button') ?? []
     expect(buttons).toHaveLength(1)
     await act(async () => (buttons[0] as HTMLButtonElement | undefined)?.click())
     expect(reconnect).toHaveBeenCalledTimes(1)

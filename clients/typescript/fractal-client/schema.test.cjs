@@ -1209,7 +1209,7 @@ test('an ask resolved at its deadline decodes, and what the decoder from before 
     };
     const withDefault = {
         ...record, summary: 'Timed out without an answer; the default applied: Keep it open (keep-open)',
-        answer: { type: 'decision', outcome: 'decline', id: 'keep-open', label: 'Keep it open' },
+        answer: { type: 'decision', outcome: 'decline', choices: [{ id: 'keep-open', label: 'Keep it open' }] },
     };
     const withoutAnswer = { ...record, summary: 'Timed out without an answer' };
     for (const wire of [withDefault, withoutAnswer]) {

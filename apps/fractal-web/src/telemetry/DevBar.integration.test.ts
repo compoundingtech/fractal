@@ -179,6 +179,28 @@ it('mirrors the unseen indicator on the overflow control when the changelog segm
   expect(overflow?.querySelector('[data-devbar-unseen]')).not.toBeNull()
 }, 30_000)
 
+it('is one Tab stop: a toolbar whose arrows move between its controls', async () => {
+  const { act, host } = await mount()
+  const row = host.querySelector<HTMLElement>('[role="toolbar"][aria-label="Developer bar"]')
+  if (row === null) throw new Error('the developer bar row is not a toolbar')
+  const tabStops = () => [...row.querySelectorAll<HTMLElement>('button, a[href], input, [tabindex]')]
+    .filter((element) => element.closest('[inert], [popover], [hidden]') === null && element.getAttribute('tabindex') !== '-1')
+  expect(tabStops()).toHaveLength(1)
+  const first = tabStops()[0]!
+  await act(async () => first.focus())
+  await act(async () => { first.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true })) })
+  expect(document.activeElement).not.toBe(first)
+  expect(tabStops()).toEqual([document.activeElement])
+}, 30_000)
+
+it('reserves no empty strip slot, so the segments follow the panel controls', async () => {
+  const { host } = await mount()
+  const row = host.querySelector<HTMLElement>('[aria-label="Developer bar"]')!
+  // Only the panel controls and the segment group: no strip slot between them.
+  expect(row.children).toHaveLength(2)
+  expect(row.lastElementChild?.querySelector('[data-devbar-segment="changelog"]')).not.toBeNull()
+}, 30_000)
+
 it('publishes the measured bar height to the workspace, follows resizes, and clears it when hidden or unmounted', async () => {
   const observers: { readonly notify: () => void; readonly observed: Set<Element>; disconnected: boolean }[] = []
   vi.stubGlobal('ResizeObserver', class {
@@ -192,7 +214,7 @@ it('publishes the measured bar height to the workspace, follows resizes, and cle
     disconnect() { this.entry.disconnected = true }
   })
   let rowHeight = 44
-  const isRow = (element: Element) => element.matches('[role="group"][aria-label="Developer bar"]')
+  const isRow = (element: Element) => element.matches('[role="toolbar"][aria-label="Developer bar"]')
   vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
     return DOMRect.fromRect({ width: 48, height: isRow(this) ? rowHeight : 500 })
   })

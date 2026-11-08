@@ -63,7 +63,7 @@ it('contains a rejected highlighter import to sticky plain code across transcrip
       items: [{ _tag: 'Text', id: 'answer', role: 'assistant', text: `Readable **answer**.\n\n\`\`\`typescript\n${code}\n\`\`\``, attachments: [], streaming: false, at: '2026-11-02T00:00:00.000Z' }],
       hasOlder: false, observation: { empty: false },
     } }
-    await act(async () => root.render(<ConversationPane agentRef="agent/example" agentName="Example" onOpenTool={() => {}} />))
+    await act(async () => root.render(<ConversationPane agentRef="agent/example" agentName="Example" />))
   }
   try {
     await show('const answer = 42')

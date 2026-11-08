@@ -86,8 +86,9 @@ test('a sent image is a named file card until the host loads it, and never an em
   const cards = render()
   assert.match(cards, /role="group" aria-label="Image: layout.png, PNG"/)
   assert.match(cards, /role="group" aria-label="Image: Unnamed image, WebP"/)
-  assert.match(cards, /· PNG image · Size unavailable/)
-  assert.match(cards, /· WebP image · 2 KB/)
+  // One kind icon, the name and the size: the type word lives in the accessible name only.
+  assert.match(cards, /layout\.png<\/span><span[^>]*>Size unavailable<\/span>/)
+  assert.match(cards, /Unnamed image<\/span><span[^>]*>2 KB<\/span>/)
   assert.doesNotMatch(cards, /<img|Show image/)
   // Markdown's resolver never reaches attachments.
   assert.doesNotMatch(render({ resolveImage: () => ({ _tag: 'Load', src: 'data:image/png;base64,AA==' }) }), /<img/)
@@ -391,4 +392,54 @@ test('highlighted commands preserve exact text and token-edge whitespace as text
       else Object.defineProperty(globalThis, name, descriptor)
     }
   }
+})
+
+// v5 messaging: one head per same-sender run, recipient only when it is not this transcript's agent, time only when it changes.
+const mail = (id, from, to, minute, text) => ({ _tag: 'Message', id, messageId: `message/${id}`, author: from, to, text, at: `2026-01-15T12:${String(minute).padStart(2, '0')}:00Z` })
+const who = ref => ({ label: ref.split('/').at(-1), ref, kind: ref.startsWith('person/') ? 'person' : 'agent' })
+const mailTurn = items => ({ id: 'turn/mail', items, work: { calls: [], durationMs: undefined, running: false, failed: false, interrupted: false },
+  participants: Object.fromEntries(items.map(item => [item.id, { from: who(item.author), to: who(item.to), involvesPerson: [item.author, item.to].some(ref => ref.startsWith('person/')) }])) })
+const renderMail = (items, props = {}) => renderToStaticMarkup(React.createElement(EmbraceRuntimeProvider, {
+  options: { messages: items, isRunning: false, onNew: async () => {} },
+}, React.createElement(Transcript, { turns: [mailTurn(items)], title: 'Mail', sync: { _tag: 'Live', since: now }, now, observedAt: now, self: { ref: 'agent/harbor-sdk', label: 'harbor-sdk' }, ...props })))
+const cardOf = (html, id) => new RegExp(`<[^>]*data-testid="message-card"[^>]*data-item-id="${id.replace('/', '\\/')}"[^>]*>`).exec(html)?.[0] ?? assert.fail(`no card for ${id}`)
+const headOf = (html, id) => {
+  const start = html.indexOf(`data-item-id="${id}"`)
+  const next = html.indexOf('data-testid="message-card"', start + 1)
+  return html.slice(start, next === -1 ? undefined : next)
+}
+
+test('consecutive messages from one sender to one recipient stack under the first head', () => {
+  const html = renderMail([mail('m/1', 'agent/keysmith', 'agent/harbor-sdk', 0, 'One.'), mail('m/2', 'agent/keysmith', 'agent/harbor-sdk', 1, 'Two.'), mail('m/3', 'agent/reviewer', 'agent/harbor-sdk', 2, 'Three.')])
+  assert.equal(html.match(/data-testid="message-head"/g)?.length, 2)
+  assert.match(cardOf(html, 'm/2'), /data-stacked="true"/)
+  assert.doesNotMatch(cardOf(html, 'm/1'), /data-stacked/)
+  assert.doesNotMatch(headOf(html, 'm/2'), /data-testid="message-head"/)
+  // A new sender starts a new head.
+  assert.match(headOf(html, 'm/3'), /data-testid="message-head"/)
+})
+
+test('a head names its recipient only when it is not the transcript\'s own agent; a different recipient breaks the stack', () => {
+  const html = renderMail([mail('m/1', 'agent/keysmith', 'agent/harbor-sdk', 0, 'To us.'), mail('m/2', 'agent/keysmith', 'person/rowan', 0, 'To Rowan.')])
+  assert.doesNotMatch(headOf(html, 'm/1'), /data-testid="message-recipient"/)
+  assert.match(headOf(html, 'm/2'), /data-testid="message-recipient"[^>]*><span aria-label="to"> → <\/span>rowan</)
+  assert.equal(html.match(/data-testid="message-head"/g)?.length, 2)
+})
+
+test('more than four attachments show three and +N more; four show whole', () => {
+  const files = count => Array.from({ length: count }, (_, index) => ({ id: `blob/${index}`, mediaType: 'text/plain', name: `file-${index}.log`, size: 2048 }))
+  const six = renderMail([{ ...mail('m/1', 'agent/keysmith', 'agent/harbor-sdk', 0, 'Logs.'), attachments: files(6) }])
+  assert.equal(six.match(/data-testid="transcript-attachment"/g)?.length, 3)
+  assert.match(six, /data-testid="transcript-attachments-more"[^>]*>\+3 more</)
+  const four = renderMail([{ ...mail('m/1', 'agent/keysmith', 'agent/harbor-sdk', 0, 'Logs.'), attachments: files(4) }])
+  assert.equal(four.match(/data-testid="transcript-attachment"/g)?.length, 4)
+  assert.doesNotMatch(four, /transcript-attachments-more/)
+})
+
+test('a head shows its time only when the minute changes; the rest keep it for hover', () => {
+  const html = renderMail([mail('m/1', 'agent/keysmith', 'agent/harbor-sdk', 0, 'A.'), mail('m/2', 'agent/reviewer', 'agent/harbor-sdk', 0, 'B.'), mail('m/3', 'agent/keysmith', 'agent/harbor-sdk', 4, 'C.')])
+  const visible = id => /data-testid="message-time"[^>]*data-time-visible="(true|false)"/.exec(headOf(html, id))?.[1]
+  assert.equal(visible('m/1'), 'false') // the episode head already carries 12:00
+  assert.equal(visible('m/2'), 'false')
+  assert.equal(visible('m/3'), 'true')
 })

@@ -44,8 +44,9 @@ describe('unknown-fields catalog world', () => {
   it('rejects every planted missing declaration rather than permitting arbitrary tolerant contamination', () => {
     const world = build()
     for (const slice of [world.slices.roster, world.slices.conversation]) {
-      for (const declaration of slice.unknown ?? []) {
-        const planted = { ...slice, unknown: slice.unknown?.filter((path) => path !== declaration) }
+      const declarations = slice.unknown ?? []
+      for (const declaration of declarations) {
+        const planted = { ...slice, unknown: declarations.filter((path) => path !== declaration) }
         expect(decodeSlice(world.id, planted), `missing ${declaration.pointer}`).not.toEqual([])
       }
     }

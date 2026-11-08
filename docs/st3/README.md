@@ -19,6 +19,8 @@ Use these documents for implementation details:
   runs the fleet may do, as itself, until principals and grants land.
 - [Principals and grants](principals-and-grants.md) defines the #867 acceptance matrix, delegated authority,
   read-only service identity, explicit deferrals and release gates.
+- [Person answers](person-answers.md) defines the one answer schema: chosen answers with optional notes, and
+  the person's words beside them, for every question a person answers.
 - [Person delegation](person-delegation.md): record a person's prior answer or instruction as
   the agent, with the person's allowed list, exact episode, and quoted evidence.
 - [External assistants](external-assistants.md): separate assistant principals, owner-issued expiring grants, and proof-bearing read boundaries.

@@ -10,7 +10,8 @@ import type { Command } from './model.ts'
 
 const PlusIcon = () => <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M6 2v8M2 6h8" /></svg>
 
-const openable = [
+/** Surfaces a strip can open as a tab: its "Open a tab" menu, a phone's More actions and the empty pane offer them. */
+export const openable = [
   { id: 'inbox', ref: 'inbox', label: 'Inbox' },
   { id: 'missions', ref: 'missions', label: 'Missions' },
   { id: 'usage', ref: 'monitor/quota', label: 'Usage' },
@@ -83,12 +84,14 @@ export const WorkspaceStrip = ({ items, refs, active, group, focused = true, nar
       dragType="application/x-fractal-workspace-tab"
       stablePanel
       touch={narrow}
+      surfacesMenu={!narrow}
       hostDrag={hostDrag}
       onActivate={id => dispatch({ _tag: 'Activate', tab: id })}
       onClose={id => dispatch({ _tag: 'Close', tab: id })}
       onMove={({ source, toIndex }) => dispatch({ _tag: 'Move', tab: source.tabId, to: { _tag: 'Strip', pane: group, index: toIndex } })}
       actions={<>
-        <MenuTrigger>
+        {/* A phone folds "Open a tab" and the open-tab list into the bar's More actions, keeping its targets 44px. */}
+        {narrow ? null : <MenuTrigger>
           <IconButton label="Open a tab" icon={<PlusIcon />} />
           <MenuPopover>
             <Menu aria-label="Open a tab" onAction={key => {
@@ -98,7 +101,7 @@ export const WorkspaceStrip = ({ items, refs, active, group, focused = true, nar
               {openable.map(item => <MenuItem key={item.id} id={item.id}>{item.label}</MenuItem>)}
             </Menu>
           </MenuPopover>
-        </MenuTrigger>
+        </MenuTrigger>}
         {bar ? null : trailing}
       </>}
     >

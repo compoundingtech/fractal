@@ -41,7 +41,7 @@ const NativeTranscript = ({ scheme }: { readonly scheme: 'dark' | 'light' }) => 
   const [registry] = React.useState(() => AtomRegistry.make())
   React.useEffect(() => { showSystemEvents.current = value => registry.set(systemEventsPreference, value) }, [registry])
   return <main data-scheme={scheme} {...stylex.props(styles.root, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
-    <DataSourceProvider source={source} registry={registry}><ConversationPane agentRef={agentRef} agentName="Native transcript review" onOpenTool={() => undefined} /></DataSourceProvider>
+    <DataSourceProvider source={source} registry={registry}><ConversationPane agentRef={agentRef} agentName="Native transcript review" /></DataSourceProvider>
   </main>
 }
 const meta = { excludeStories: ['scenarioExemptions'],
