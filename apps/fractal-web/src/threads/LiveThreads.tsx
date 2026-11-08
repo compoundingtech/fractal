@@ -136,6 +136,8 @@ function LiveThread({ source, thread, embedded = true, initiallyExpanded = false
   const detail = useAtomValue(expanded ? source.detail(thread.id) : idleDetail)
   const observation = detail._tag === 'Observed' ? detail.value : undefined
   const summary = observation?.summary ?? thread
+  const markRead = summary.unread === true && actions.has('thread.read') ? source.markRead : undefined
+  const viewport = useThreadViewport(expanded && markRead !== undefined)
   return <ThreadPanel thread={summary} embedded={embedded} initiallyExpanded={initiallyExpanded} onExpansionChange={setExpanded}
     {...(summary.message_count === undefined ? {} : { messageCount: summary.message_count })}
     unread={summary.unread === true}
@@ -146,16 +148,113 @@ function LiveThread({ source, thread, embedded = true, initiallyExpanded = false
     {...(observation === undefined || !actions.has(summary.state === 'open' ? 'thread.close' : 'thread.reopen') ? {} : {
       onChangeState: (state: ThreadSummary['state']) => source.changeState(observation, state),
     })}
+    {...(observation === undefined || markRead === undefined ? {} : {
+      canMarkRead: viewport.canMark,
+      onMarkRead: () => {
+        const seen = viewport.capture()
+        const anchor = seen.at(-1)
+        return anchor === undefined
+          ? Promise.resolve('Scroll to a visible reply before marking it read.')
+          : markRead(observation, anchor, seen)
+      },
+    })}
   >
-    <ThreadConversation source={source} thread={summary} editable={actions.has('thread.reply') && observation !== undefined} focusComposer={focusComposer} />
+    <ThreadConversation source={source} thread={summary} editable={actions.has('thread.reply') && observation !== undefined} focusComposer={focusComposer} timelineRef={viewport.timeline} />
   </ThreadPanel>
 }
 
-function ThreadConversation({ source, thread, editable, focusComposer }: {
+function useThreadViewport(enabled: boolean) {
+  const timeline = React.useRef<HTMLDivElement>(null)
+  const [canMark, setCanMark] = React.useState(false)
+  const capture = React.useRef<() => string[]>(() => [])
+  React.useLayoutEffect(() => {
+    setCanMark(false)
+    const container = timeline.current
+    if (!enabled || container === null || typeof IntersectionObserver === 'undefined') return
+    const tracked = new Set<Element>()
+    const visible = new Set<Element>()
+    let active = true
+    const track = (entries: readonly IntersectionObserverEntry[]) => {
+      if (!active) return
+      for (const entry of entries) {
+        if (tracked.has(entry.target) && entry.isIntersecting && entry.intersectionRatio >= 0.001) visible.add(entry.target)
+        else visible.delete(entry.target)
+      }
+      setCanMark(visible.size > 0)
+    }
+    // Viewport-rooted observation also clips against the pane’s ancestor scroll containers.
+    const observer = new IntersectionObserver(track, { threshold: 0.001 })
+    const rows = () => [...container.querySelectorAll('[data-thread-message]')]
+    const syncRows = () => {
+      const current = new Set(rows())
+      for (const row of tracked) {
+        if (current.has(row)) continue
+        observer.unobserve(row)
+        visible.delete(row)
+        tracked.delete(row)
+      }
+      for (const row of current) {
+        if (tracked.has(row)) continue
+        tracked.add(row)
+        observer.observe(row)
+      }
+      setCanMark(visible.size > 0)
+    }
+    const changes = new MutationObserver(syncRows)
+    changes.observe(container, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-thread-message'] })
+    syncRows()
+    capture.current = () => {
+      track(observer.takeRecords())
+      // The sticky control can overlap a row that still intersects the viewport.
+      // Recheck current scroll clipping at the moment the person presses it.
+      const bounds = threadViewportBounds(container)
+      // Timeline DOM order is chronological, including earlier history pages.
+      const seen = rows().flatMap(row => {
+        if (!visible.has(row)) return []
+        const id = row.getAttribute('data-thread-message')
+        const rect = row.getBoundingClientRect()
+        return id !== null && rect.top < bounds.bottom && rect.bottom > bounds.top
+          && rect.left < bounds.right && rect.right > bounds.left ? [id] : []
+      })
+      return [...new Set(seen)].slice(-50)
+    }
+    return () => {
+      active = false
+      changes.disconnect()
+      observer.disconnect()
+      capture.current = () => []
+    }
+  }, [enabled])
+  return { timeline, canMark, capture: () => capture.current() }
+}
+
+function threadViewportBounds(container: HTMLElement) {
+  const bounds = { top: 0, bottom: window.innerHeight, left: 0, right: window.innerWidth }
+  const clips = (overflow: string) => overflow !== '' && overflow !== 'visible'
+  for (let element = container.parentElement; element !== null; element = element.parentElement) {
+    const style = getComputedStyle(element)
+    if (!clips(style.overflowX) && !clips(style.overflowY)) continue
+    const rect = element.getBoundingClientRect()
+    if (clips(style.overflowX)) {
+      bounds.left = Math.max(bounds.left, rect.left + element.clientLeft)
+      bounds.right = Math.min(bounds.right, rect.left + element.clientLeft + element.clientWidth)
+    }
+    if (clips(style.overflowY)) {
+      bounds.top = Math.max(bounds.top, rect.top + element.clientTop)
+      bounds.bottom = Math.min(bounds.bottom, rect.top + element.clientTop + element.clientHeight)
+    }
+  }
+  const heading = container.closest('[data-thread-panel]')?.querySelector('[data-thread-read-heading]')
+  if (heading) bounds.top = Math.max(bounds.top, heading.getBoundingClientRect().bottom)
+  return bounds
+}
+
+function ThreadConversation({ source, thread, editable, focusComposer, timelineRef }: {
   readonly source: ThreadSource
   readonly thread: ThreadSummary
   readonly editable: boolean
   readonly focusComposer: boolean
+  readonly timelineRef: React.Ref<HTMLDivElement>
 }) {
   const [, setDraft] = useAtom(source.draft(thread.id))
   const input = React.useRef<HTMLTextAreaElement>(null)
@@ -174,7 +273,7 @@ function ThreadConversation({ source, thread, editable, focusComposer }: {
     input.current?.focus()
   } : undefined
   return <>
-    <ThreadTimeline source={source} threadId={thread.id} agentId={thread.agent_id} agentName={agentName} onQuote={quote} />
+    <div ref={timelineRef}><ThreadTimeline source={source} threadId={thread.id} agentId={thread.agent_id} agentName={agentName} onQuote={quote} /></div>
     {thread.state === 'closed' ? <p {...stylex.props(styles.note)}>Reopen this thread to send a message.</p> : !editable ? null
       : <ThreadEditor source={source} destination={thread.id} label={thread.title} inputRef={attachInput}
         send={(content, quoteId) => source.reply({ target_id: thread.id, content, ...(quoteId === undefined ? {} : { thread_quote_id: quoteId }) })} />}
@@ -211,7 +310,7 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
         const quoted = quotedId === undefined ? undefined : feed.value.items.find(
           (candidate): candidate is ThreadMessageEvent => candidate.kind === 'message' && candidate.id === quotedId,
         )
-        return <li key={event.id} {...stylex.props(stylex.defaultMarker(), styles.event)}>
+        return <li key={event.id} data-thread-message={event.kind === 'message' && event.actor_id === agentId && feed.freshness === 'live' ? event.id : undefined} {...stylex.props(stylex.defaultMarker(), styles.event)}>
           <div {...stylex.props(styles.eventHeader)}>
             <strong>{sender}</strong>
             {iso === undefined ? null : <time dateTime={iso}>{ago(iso, now)} ago</time>}

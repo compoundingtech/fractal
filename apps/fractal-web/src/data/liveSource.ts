@@ -798,7 +798,7 @@ export const liveSource = ({
   })
   const missions = missionsRetained.atom
   const attentionRetained = retain<readonly Attention[], Extract<FollowSpec, { _tag: 'Window' }>>({
-    resolve: () => Effect.succeed({ _tag: 'Window', collection: 'attention', limit: 100 }),
+    resolve: () => Effect.succeed({ _tag: 'Window', collection: 'attention', limit: 100, attentionThreadHints: true }),
     prepareObservation: attentionEvidence.prepareObservation,
     onCommit: attentionEvidence.onCommit,
     observedFreshness: attentionEvidence.observedFreshness,
@@ -1253,6 +1253,12 @@ export const liveSource = ({
         summaries: ({ cursor: _cursor, limit, ...context }) => receive => {
           const fiber = runtime.runFork(Effect.flatMap(Fractal, fractal => fractal.followThreadSummaries({
             _tag: 'ThreadSummary', context, limit: limit ?? 40,
+          }).pipe(Stream.runForEach(event => Effect.sync(() => receive(event))))))
+          return () => { runtime.runFork(Fiber.interrupt(fiber)) }
+        },
+        detail: thread => receive => {
+          const fiber = runtime.runFork(Effect.flatMap(Fractal, fractal => fractal.followThreadSummaries({
+            _tag: 'ThreadSummary', thread, limit: 1,
           }).pipe(Stream.runForEach(event => Effect.sync(() => receive(event))))))
           return () => { runtime.runFork(Fiber.interrupt(fiber)) }
         },

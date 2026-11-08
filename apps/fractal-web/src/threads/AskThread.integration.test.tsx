@@ -21,7 +21,7 @@ it('opens an active Inbox ask’s first composer inline with the ordinary Send c
     id: 'attention/review', kind: 'attention', revision: 'claim/episode', episode: 'claim/episode',
     person_id: 'person/operator', source_id: 'step-run/review', requester_id: 'agent/example/atlas',
     attention_kind: 'agent-request', title: 'Review PR #42', detail: 'Can we merge?', priority: 'high',
-    state: 'open', alert: true, actions: ['work.done'],
+    state: 'open', alert: true, actions: ['work.done'], thread_unread: true,
     request: {
       version: 1, type: 'decision', question: 'Can we merge?', why_person: 'You own the release.',
       answers: [
@@ -58,6 +58,8 @@ it('opens an active Inbox ask’s first composer inline with the ordinary Send c
     await act(async () => root.render(<DataSourceProvider source={source} registry={registry}><AlertsTab onOpen={open} /></DataSourceProvider>))
     const row = host.querySelector<HTMLButtonElement>('[data-alert-id="attention/review"] button[aria-expanded]')
     expect(row).not.toBeNull()
+    expect(row?.getAttribute('aria-label')).toContain('unread thread replies')
+    expect(host.querySelectorAll('[data-alert-id]')).toHaveLength(1)
     await act(async () => row?.click())
     await vi.waitFor(() => expect(requests.some(url =>
       url.searchParams.get('origin_ask') === 'step-run/review' && url.searchParams.get('origin_ask_episode') === 'claim/episode')).toBe(true))

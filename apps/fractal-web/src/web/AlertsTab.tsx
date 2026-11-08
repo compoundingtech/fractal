@@ -189,7 +189,7 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
           ref={trigger}
           aria-expanded={expanded}
           aria-controls={expanded ? panelId : undefined}
-          aria-label={`${row.title}, ${row.age}${row.line2 === '' ? '' : `, ${row.line2}`}, ${GLYPH_WORDS[row.glyph]}`}
+          aria-label={`${row.title}, ${row.age}${row.line2 === '' ? '' : `, ${row.line2}`}, ${GLYPH_WORDS[row.glyph]}${row.item.thread_unread === true ? ', unread thread replies' : ''}`}
           onPress={() => onExpand(!expanded)}
           onKeyDown={(event) => {
             if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) setMenu(true)
@@ -200,6 +200,7 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
           <span {...stylex.props(styles.line)}>
             <span aria-hidden="true" data-alert-row-glyph={row.glyph} {...stylex.props(styles.glyph, row.glyph === '?' && styles.question, row.glyph === '!' && styles.fault)} />
             <span {...stylex.props(styles.title)}>{row.title}</span>{' '}
+            {row.item.thread_unread === true ? <span aria-hidden="true" title="Unread thread replies" {...stylex.props(styles.threadUnread)}>●</span> : null}
             <span {...stylex.props(styles.metric)}>{row.age}</span>
           </span>
           {row.line2 === '' ? null : <>{' '}<span {...stylex.props(styles.meta)}>{row.line2}</span></>}
@@ -242,6 +243,7 @@ const styles = stylex.create({
   question: { color: c.primary },
   fault: { color: c.danger },
   title: { flexGrow: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  threadUnread: { flexShrink: 0, color: c.primary },
   metric: { flexShrink: 0, color: c.fgMuted, fontSize: t.metaSize, fontVariantNumeric: 'tabular-nums' },
   meta: { paddingInlineStart: `calc(${g.iconSm} + ${s.sm})`, color: c.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   more: { flexShrink: 0, width: 24, borderWidth: 0, borderRadius: 4, backgroundColor: 'transparent', color: c.fgMuted, cursor: 'pointer', ':hover': { color: c.fg }, ...focus },

@@ -155,3 +155,45 @@ it('offers metadata edits but omits the unsigned composer on paired web transpor
     registry.dispose()
   }
 })
+
+it('observes exact summary receipt updates without a write grant or a follow-up HTTP read', async () => {
+  const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+    if (String(input).endsWith('/capabilities')) return Response.json({
+      ...base,
+      value: { ...base.value, transport: 'local-web', capabilities: [
+        ...base.value.capabilities,
+        { id: 'threads-v1', version: 1, state: 'granted' },
+        { id: 'thread-summary-feed', version: 1, state: 'granted' },
+      ] },
+    })
+    return Response.json({ ...base, value: { ...summary, unread: true } })
+  })
+  const client = new FractalClient({ baseUrl: 'http://example.test', fetchImpl })
+  const registry = AtomRegistry.make()
+  const unsubscribe = vi.fn()
+  const detail = vi.fn<NonNullable<Parameters<typeof gatewayThreads>[2]>['detail']>()
+  let observe: Parameters<ReturnType<typeof detail>>[0] | undefined
+  detail.mockImplementation(() => receive => {
+    observe = receive
+    return unsubscribe
+  })
+  const source = gatewayThreads(client, registry, { detail, summaries: () => undefined, timeline: () => () => () => {} })
+  const view = source.detail(id)
+  const stop = registry.mount(view)
+  try {
+    await vi.waitFor(() => expect(registry.get(view)).toMatchObject({ _tag: 'Observed', value: { summary: { unread: true } } }))
+    const before = registry.get(view)
+    if (before._tag !== 'Observed') throw new Error('expected exact thread summary')
+    expect(detail).toHaveBeenCalledWith(id)
+    expect(registry.get(source.access).actions.has('thread.read')).toBe(false)
+    observe?.({ _tag: 'Observed', value: { items: [{ ...before.value.summary, unread: false }], hasMore: false, snapshotId: 'snapshot/socket' } })
+    expect(registry.get(view)).toMatchObject({
+      _tag: 'Observed', value: { summary: { unread: false }, snapshotId: 'snapshot/socket' },
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  } finally {
+    stop()
+    registry.dispose()
+    expect(unsubscribe).toHaveBeenCalledOnce()
+  }
+})

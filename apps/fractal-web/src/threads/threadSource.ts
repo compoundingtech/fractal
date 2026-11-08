@@ -19,7 +19,7 @@ export type ThreadSendResult =
   | { readonly _tag: 'Sent'; readonly threadId: string }
   | { readonly _tag: 'Refused'; readonly detail: string }
 
-type ThreadAccess = { readonly read: boolean; readonly actions: ReadonlySet<string>; readonly actor?: string }
+type ThreadAccess = { readonly read: boolean; readonly exactSummary?: boolean; readonly actions: ReadonlySet<string>; readonly actor?: string }
 
 export interface ThreadSource {
   readonly access: Atom.Atom<ThreadAccess>
@@ -32,11 +32,13 @@ export interface ThreadSource {
   readonly reply: (parameters: Omit<ThreadReplyParameters, 'signature'>) => Promise<ThreadSendResult>
   readonly rename: (thread: ThreadObservation, title: string, titleRevision: string) => Promise<string | undefined>
   readonly changeState: (thread: ThreadObservation, state: ThreadSummary['state']) => Promise<string | undefined>
+  readonly markRead?: (thread: ThreadObservation, through: string, seen: readonly string[]) => Promise<string | undefined>
 }
 
 type Watch<Row> = (receive: (event: FollowEvent<ThreadWindow<Row>>) => void) => () => void
 interface ThreadWatches {
   readonly summaries: (query: ThreadListQuery) => Watch<ThreadSummary> | undefined
+  readonly detail: (id: string) => Watch<ThreadSummary>
   readonly timeline: (id: string) => Watch<ThreadTimelineEvent>
 }
 
@@ -59,7 +61,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           capability.state === 'granted' && capability.id.startsWith('thread.')
           && (caps.transport === 'local-web' || (capability.id !== 'thread.start' && capability.id !== 'thread.reply'))
         ).map(capability => capability.id) : [])
-        get.setSelf({ read, actions, actor: caps.session_actor })
+        get.setSelf({ read, exactSummary: read && hasConversationCapability(caps, 'thread-summary-feed'), actions, actor: caps.session_actor })
       }
     }).catch(() => { if (!abort.signal.aborted) get.setSelf(noAccess) })
     return noAccess
@@ -130,14 +132,33 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       else publish({ items: event.value.items, next_cursor: Option.none() })
     })
   }
-  const readDetail = Atom.family((threadId: string) => reader(async signal => {
-    const { value, snapshot } = await client.threadGet(threadId, { signal })
-    const summary = Native.decodeUnknownSync(Native.ThreadSummary)(value)
-    if (summary.id !== threadId) throw new TypeError('Mismatched thread observation')
-    signal.throwIfAborted()
-    rememberTitles([summary])
-    return { summary, snapshotId: snapshot.id }
-  }, { dependsOn: metadata(threadId) }))
+  const readDetail = Atom.family((threadId: string) => {
+    const follow = (publish: (value: ThreadObservation) => void, reload: () => void, stale: () => void) => {
+      if (registry.get(access).exactSummary !== true || watches === undefined) return () => {}
+      return watches.detail(threadId)(event => {
+        if (event._tag !== 'Observed') {
+          if (event._tag === 'Failed' && event.error._tag === 'Rejected') reload()
+          else stale()
+          return
+        }
+        const [summary] = event.value.items
+        if (summary?.id !== threadId || event.value.items.length !== 1 || event.value.hasMore) {
+          reload()
+          return
+        }
+        rememberTitles([summary])
+        publish({ summary, snapshotId: event.value.snapshotId })
+      })
+    }
+    return reader(async signal => {
+      const { value, snapshot } = await client.threadGet(threadId, { signal })
+      const summary = Native.decodeUnknownSync(Native.ThreadSummary)(value)
+      if (summary.id !== threadId) throw new TypeError('Mismatched thread observation')
+      signal.throwIfAborted()
+      rememberTitles([summary])
+      return { summary, snapshotId: snapshot.id }
+    }, { dependsOn: metadata(threadId), follow })
+  })
   const readList = Atom.family((key: string) => {
     const query = JSON.parse(key) as ThreadListQuery
     const follow = followPage(query.cursor === undefined ? watches?.summaries(query) : undefined, window => rememberTitles(window.items))
@@ -153,6 +174,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
   const readTimeline = Atom.family((key: string) => {
     const [threadId, cursor] = key.split('\n') as [string, string | undefined]
     const follow = followPage(cursor === undefined ? watches?.timeline(threadId) : undefined, window => {
+      if (registry.get(access).exactSummary === true && watches !== undefined) return
       const latestMetadata = window.items.find(event => event.kind !== 'message')?.id
       const atom = metadata(threadId)
       if (registry.get(atom) !== latestMetadata) registry.set(atom, latestMetadata)
@@ -260,6 +282,36 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     changeState: (thread, state) => lifecycle(thread, state === 'closed' ? 'thread.close' : 'thread.reopen', request => state === 'closed'
       ? client.threadClose(request)
       : client.threadReopen(request)),
+    markRead: async (thread, through, seen) => {
+      const grant = registry.get(access)
+      if (!grant.actions.has('thread.read') || seen.length === 0 || !seen.includes(through)) {
+        return 'This connection cannot mark these replies read.'
+      }
+      try {
+        const { snapshot, value } = await client.capabilities()
+        if (value.session_actor !== grant.actor) return 'The connected account changed. Open the thread again.'
+        if (!value.capabilities.some(capability => capability.id === 'thread.read' && capability.state === 'granted')) {
+          return 'This connection cannot mark these replies read.'
+        }
+        const key = crypto.randomUUID()
+        const id = `action/${key}`
+        const { value: receipt } = await client.threadRead({
+          id, idempotency_key: key, fence: { snapshot_id: snapshot.id, subject_revisions: {} },
+          parameters: { target_id: thread.summary.id, through_message_id: through, seen_message_ids: [...seen] },
+        })
+        if (receipt.kind !== 'action-result' || receipt.status !== 'completed' || receipt.action_id !== id
+          || receipt.affected_ids.some(message => !seen.includes(message))) {
+          return 'Fractal could not confirm that these replies were marked read.'
+        }
+        return undefined
+      } catch (cause) {
+        return cause instanceof ClientError
+          ? cause.response.message
+          : 'Fractal could not confirm that these replies were marked read.'
+      } finally {
+        invalidate()
+      }
+    },
   }
 }
 

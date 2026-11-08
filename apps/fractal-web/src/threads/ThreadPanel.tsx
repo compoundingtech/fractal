@@ -23,13 +23,15 @@ export interface ThreadPanelProps {
   readonly onOpenInTab?: () => void
   readonly onRename?: (title: string, titleRevision: string) => Promise<string | undefined>
   readonly onChangeState?: (state: ThreadPanelSummary['state']) => Promise<string | undefined>
+  readonly onMarkRead?: () => Promise<string | undefined>
+  readonly canMarkRead?: boolean
   /** Mount the timeline demand and composer only while this presentation is expanded. */
   readonly children: React.ReactNode
 }
 
 /** The same conversation surface works inline in any context or as a standalone pane. */
 export function ThreadPanel({
-  thread, messageCount, unread = false, embedded = true, initiallyExpanded = false, onExpansionChange, onHideDraft, onOpenInTab, onRename, onChangeState, children,
+  thread, messageCount, unread = false, embedded = true, initiallyExpanded = false, onExpansionChange, onHideDraft, onOpenInTab, onRename, onChangeState, onMarkRead, canMarkRead = false, children,
 }: ThreadPanelProps): React.ReactNode {
   const [expanded, setExpanded] = React.useState(initiallyExpanded)
   const contentId = React.useId()
@@ -56,13 +58,21 @@ export function ThreadPanel({
     {messageCount !== undefined && thread.state === 'closed' ? ' · ' : null}
     {thread.state === 'closed' ? 'Closed' : onHideDraft === undefined ? null : 'Draft'}
   </span>
-  return <section aria-label={thread.title} {...stylex.props(styles.panel)}>
-    {embedded ? <Button aria-expanded={open} aria-controls={open ? contentId : undefined} onPress={() => { setExpanded(!open); onExpansionChange?.(!open) }} {...stylex.props(styles.header)}>
+  const feedback = error === undefined ? null : <p role="alert">{error}</p>
+  const heading = embedded ? <Button aria-expanded={open} aria-controls={open ? contentId : undefined} onPress={() => { setExpanded(!open); onExpansionChange?.(!open) }} {...stylex.props(styles.header)}>
       <span aria-hidden="true">{open ? '▾' : '▸'}</span>
       <span {...stylex.props(styles.title)}>{thread.title}</span>
       {metadata}
       {unread ? <span aria-label="Unread" {...stylex.props(styles.unread)}>●</span> : null}
-    </Button> : <h2 {...stylex.props(styles.header)}>{thread.title}{metadata}</h2>}
+    </Button> : <h2 {...stylex.props(styles.header)}>{thread.title}{metadata}</h2>
+  return <section data-thread-panel="" aria-label={thread.title} {...stylex.props(styles.panel)}>
+    {open && onMarkRead !== undefined ? <div data-thread-read-heading="" {...stylex.props(styles.readHeader)}>
+      <div {...stylex.props(styles.readHeadingRow)}>
+        {heading}
+        <Button isDisabled={pending || !canMarkRead} onPress={() => { void run(onMarkRead) }} {...stylex.props(styles.readButton)}>Mark visible replies read</Button>
+      </div>
+      {feedback}
+    </div> : heading}
     {open ? <div id={contentId} {...stylex.props(styles.body)}>
       {children}
       <div {...stylex.props(styles.actions)}>
@@ -82,7 +92,7 @@ export function ThreadPanel({
         <Button type="submit" isDisabled={pending || rename.title.trim() === '' || rename.title.trim() === thread.title}>Save</Button>
         <Button isDisabled={pending} onPress={() => setRename(undefined)}>Cancel</Button>
       </form>}
-      {error === undefined ? null : <p role="alert">{error}</p>}
+      {onMarkRead === undefined ? feedback : null}
     </div> : null}
   </section>
 }
@@ -90,6 +100,9 @@ export function ThreadPanel({
 const styles = stylex.create({
   panel: { minWidth: 0, borderColor: c.border, borderWidth: 1, borderStyle: 'solid', borderRadius: 6 },
   header: { display: 'flex', alignItems: 'baseline', gap: s.sm, width: '100%', minWidth: 0, textAlign: 'start', borderWidth: 0, backgroundColor: 'transparent', color: c.fg, padding: s.sm, margin: 0, fontSize: t.metaSize },
+  readHeader: { position: 'sticky', top: 0, zIndex: 1, backgroundColor: c.canvas },
+  readHeadingRow: { display: 'flex', alignItems: 'center', paddingInlineEnd: s.sm },
+  readButton: { flexShrink: 0, whiteSpace: 'nowrap' },
   title: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   metadata: { flexShrink: 0, color: c.fgMuted },
   unread: { flexShrink: 0, color: c.primary },
