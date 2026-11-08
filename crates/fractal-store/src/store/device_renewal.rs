@@ -1,5 +1,5 @@
 use super::*;
-use crate::pairing::{append_operation_receipt_tx, operation_is_trusted};
+use crate::pairing::{append_operation_receipt_tx, completion_is_revoked, operation_is_trusted};
 
 impl Store {
     /// Commit an approved renewal and its replacement in one writer transaction.
@@ -34,11 +34,19 @@ impl Store {
         let old_key = historical["device_public_key"].as_str().context("source key missing")?;
         let device = historical["device_id"].as_str().context("source device missing")?;
         let candidate = replacement.fields.get("device_public_key").and_then(Value::as_str).context("candidate key missing")?;
-        let withdrawn: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM claims WHERE (kind='custom.client.pairing-revoked' AND (subject=?1 OR json_extract(body,'$.fields.device_id')=?2)) OR (kind='principal.key-revoked' AND subject=?3 AND json_extract(body,'$.fields.key') IN (?4,?5)))",
-            params![source.subject, device, person, old_key, candidate], |row| row.get(0),
+        let raw_withdrawal: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.client.pairing-revoked' AND (subject=?1 OR json_extract(body,'$.fields.device_id')=?2))",
+            params![source.subject, device], |row| row.get(0),
         )?;
-        anyhow::ensure!(!withdrawn, "a renewal key or source was withdrawn");
+        if raw_withdrawal && !completion_is_revoked(&tx,&source.subject,&source.id,&source.origin)? {
+            return Err(anyhow::Error::new(FractalError::new("forbidden",
+                "the historical grant has an unreceipted withdrawal; renewal was refused. Surface this record to the operator")));
+        }
+        let key_withdrawal: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='principal.key-revoked' AND subject=?1 AND json_extract(body,'$.fields.key') IN (?2,?3))",
+            params![person, old_key, candidate], |row| row.get(0),
+        )?;
+        anyhow::ensure!(!raw_withdrawal && !key_withdrawal, FractalError::new("forbidden", "a renewal key or source was withdrawn"));
         anyhow::ensure!(consumed.kind == "custom.client.pairing-renewal-consumed"
             && consumed.subject == stage.subject && consumed.actor.as_deref() == Some(person)
             && replacement.kind == "custom.client.pairing-completed" && replacement.actor.as_deref() == Some(person)

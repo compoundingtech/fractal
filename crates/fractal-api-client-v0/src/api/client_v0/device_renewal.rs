@@ -90,7 +90,12 @@ fn not_revoked(state: &AppState, source: &ClaimRecord) -> Result<(), ApiError> {
         "SELECT EXISTS(SELECT 1 FROM claims WHERE kind='custom.client.pairing-revoked' AND (subject=?1 OR json_extract(body,'$.fields.device_id')=?2))",
         rusqlite::params![source.subject, device], |row| row.get(0),
     ).map_err(ApiError::internal)?;
-    if withdrawn { return Err(forbidden("the source device was withdrawn")); }
+    if withdrawn {
+        if !state.store.pairing_completion_is_revoked(source).map_err(ApiError::internal)? {
+            return Err(forbidden("the historical grant has an unreceipted withdrawal; renewal was refused. Surface this record to the operator"));
+        }
+        return Err(forbidden("the source device was withdrawn"));
+    }
     let person = text(source, "person_id")?;
     let key = text(source, "device_public_key")?;
     let revoked: bool = state.store.readers.get().query_row(

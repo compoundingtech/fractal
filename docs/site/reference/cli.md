@@ -91,6 +91,8 @@ the foreground. Review the displayed member, person, requester, and scopes there
 needed.
 A managed agent must use its own literal identity; a person operator can stage as
 themselves. The historical grant determines the phone key and person being renewed.
+If staging reports an unreceipted historical withdrawal, surface that record to
+the operator; the command does not replace or disregard it.
 
 ## Identity and automation
 
