@@ -5230,6 +5230,7 @@ fn cli_main() -> ExitCode {
         cli_output::stdout().is_terminal(),
         crate::agent_environment_present(),
     ) {
+        fractal_client::set_client_name(fractal_tui::client_name());
         let subject = match crate::setup::prepare_plain_ui() {
             Ok(subject) => subject,
             Err(error) => {
@@ -5314,8 +5315,13 @@ fn cli_main() -> ExitCode {
     if let Command::Demo { command } = cli.command {
         return run_demo(command);
     }
-    // Set the CLI identity only after the TUI path has chosen its stui client identity.
-    fractal_client::set_client_name(format!("st {}", fractal_drivers::version::machine_version()));
+    // Set the CLI identity only after the TUI path has chosen its fractal-tui client identity.
+    let client_product = match &cli.command {
+        Command::Driver(_) => "fractal-driver",
+        Command::ReplicationWorker(_) => "fractal-replication-worker",
+        _ => "fractal",
+    };
+    fractal_client::set_client_name(format!("{client_product} {}", fractal_drivers::version::machine_version()));
     if let Command::Up(args) = &cli.command {
         record_daemon_commands(args);
     }
@@ -7544,13 +7550,15 @@ async fn run_up(args: UpArgs) -> Result<()> {
         config.observations.clone(),
     )));
     tokio::spawn(fractal_daemon::task_cpu::account("account_limits.catch_up", catch_up_account_limits(store.clone(), notify.clone())));
+    fractal_daemon::readiness_slo::configure(config.readiness_slo.as_ref(), &config.state_dir, store.origin())?;
     {
         let store = store.clone();
         tokio::spawn(fractal_daemon::task_cpu::account("slo.history", fractal_daemon::slo_history::run(
             fractal_daemon::slo_history::dir(&config.state_dir),
             move || {
-                let rows = fractal_daemon::api::slo_rows(&store)?;
+                let mut rows = fractal_daemon::api::slo_rows(&store)?;
                 fractal_daemon::objective_faults::check_and_report(&store, &rows);
+                rows.extend(fractal_daemon::readiness_slo::sample(&store));
                 Ok(rows)
             },
         )));

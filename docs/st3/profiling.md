@@ -425,6 +425,50 @@ that shows the row `met` ends it with `operational.recovered`. A `no-data` row, 
 before the observer has read any runs, neither opens nor ends one. The other objectives open no
 fault.
 
+### Operator-selected API readiness
+
+An optional daemon policy accepts one independent, rolling API readiness
+objective. The configuration selects the single executor and reviewer;
+the producer does not choose either. For example:
+
+    [readiness_slo]
+    executor = "example-evaluator"
+    member = "example-member"
+    reviewer = "agent/example/observability"
+    evidence_file = "/run/fractal-slo-evidence/readiness.json"
+
+The evidence file must live directly under /run/fractal-slo-evidence.
+The file and its ancestors must be controlled by root, with no group or
+world write access and no symlinks. A trusted publisher atomically replaces the
+file with a bounded JSON document containing version (1), objective
+(fractal-api-readiness), member, start_ms, end_ms, observed_at_ms,
+expected (10,080), known, and good. The window ends on a UTC minute
+boundary. The known and good counts refer to distinct minute slots in that
+seven-day window. Probe selection is outside Fractal. The cut must be no
+more than three minutes old and may not be in the future. Republish the
+same document if retrying an already closed cut.
+
+Fractal computes the lower and upper readiness bounds from these counts. It
+routes one native fault to the named declared agent on a proven miss and
+resolves it only on a proven met reading. A stopped or retired reviewer
+receives no new fault, and an existing episode retains its reviewer without
+falling back to the fleet fault handler. A measured breach remains visible
+and the invalid binding appears in Usage and daemon logs. An unreachable but
+still-declared reviewer remains the owner. Missing, stale, invalid or
+indeterminate readings neither open nor resolve a fault. The local
+readiness-slo-cut.json checkpoint records a pending cut before routing and
+marks it committed after the idempotent transition. A restart replays an
+admitted pending cut before reading the next publication. Keep this checkpoint
+across restart and rollback while using
+the same source identity. The fault reports weekly objective compliance.
+Short outage detection and the publisher's transport remain separate.
+Before enabling both for the same member, the deployment must correlate the
+early warning and weekly miss into one owner-facing case, with a new notice
+only when the case is promoted. Upgrade all fault readers before enabling
+the policy, since older readers do not recognize this no-fallback condition.
+This objective does not implement that
+delivery policy or its off-host availability fallback.
+
 `fractal slo chart ID --over 24h` draws what is left of one row across a period (`90m`, `24h`, up to
 `7d`). The history is a local observation log, not the graph: once a minute the daemon appends the
 remaining percent of every row to `<state>/slo-history/YYYY-MM-DD.jsonl` (UTC day) and deletes a
