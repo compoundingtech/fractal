@@ -145,6 +145,7 @@ export const OlderDaemon: Story = {
 
 const styles = stylex.create({
   canvas: { minHeight: '100vh', boxSizing: 'border-box', padding: '24px', backgroundColor: surface.canvas, color: ink.fg },
-  frame: { width: '22rem', maxWidth: '100%', backgroundColor: surface.raised, borderRadius: '8px' },
+  // The kit card frame's surface and gutter; the card itself is the kit's 340px.
+  frame: { width: 'max-content', maxWidth: '100%', padding: '12px', backgroundColor: surface.raised, borderRadius: '8px' },
   prose: { maxWidth: '40rem' },
 })
