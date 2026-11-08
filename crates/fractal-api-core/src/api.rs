@@ -1989,6 +1989,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "not-found"
         | "forbidden"
         | "pairing-origin-required"
+        | "pairing-restart-required"
         | "attention-migrated"
         | "unsupported-capability"
         | "peer-too-old"
