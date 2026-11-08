@@ -6,6 +6,8 @@ export interface ProcessedWindow<A> {
   readonly items: readonly A[]
   readonly rawItems: readonly Resource[]
   readonly hasMore: boolean
+  /** The collection's size before the byte and count bounds, when the server states it (missions). */
+  readonly total?: number
   readonly snapshot: Snapshot
   readonly undecodable: readonly Undecodable[]
   readonly decodeStale: boolean
@@ -153,7 +155,8 @@ export const makeWindowIngest = <A>({
       previous.items.every((item, i) => item === currentItems[i])
         ? previous.items
         : currentItems
-    previous = { items: retainedItems, rawItems, hasMore: frame.has_more, snapshot: frame.snapshot, undecodable, decodeStale }
+    const total = (frame as { readonly total?: unknown }).total
+    previous = { items: retainedItems, rawItems, hasMore: frame.has_more, ...(typeof total === 'number' ? { total } : {}), snapshot: frame.snapshot, undecodable, decodeStale }
     publish(previous)
   }
 

@@ -203,6 +203,8 @@ export interface RosterDecode {
   readonly decodeStale: boolean
   /** The latest window said more rows exist than it carried. */
   readonly hasMore?: boolean
+  /** The collection's size before the server's bounds, when the server states it. */
+  readonly total?: number
 }
 
 /** A roster whose latest frame decoded completely. */

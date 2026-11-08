@@ -47,7 +47,7 @@ const ACTIVE = new Set(['claimed', 'working', 'running', 'verifying'])
 const FINISHED = new Set(['completed', 'failed', 'cancelled'])
 
 /** The steps of the open runs, or of the latest run when none is open. */
-const missionSteps = (mission: Row): readonly Step[] => {
+export const missionSteps = (mission: Row): readonly Step[] => {
   const runs = mission.run_details ?? []
   const open = runs.filter((run) => !FINISHED.has(run.status))
   const shown = open.length > 0 ? open : runs.slice(-1)
@@ -94,7 +94,8 @@ export const presentMission = ({
 }): MissionPresentation => {
   const row = mission as Row
   const work = missionSteps(row)
-  const label = (id: string) => agents.find((agent) => agent.id === id)?.name ?? id.replace(/^agent\//, '')
+  // Without a roster name, the seat's own slug (`agent/<host>/<slug>`), never the host path.
+  const label = (id: string) => agents.find((agent) => agent.id === id)?.name ?? id.split('/').pop() ?? id
   const gates = attention.filter((item) => item.state === 'open' && item.attention_kind === 'human-gate')
   const gated = new Set(gates.map((item) => item.source_id as string))
   const decision = gates.some((item) => item.mission_id === mission.id)

@@ -16,5 +16,6 @@ export const MissionFeedNotice = ({ missions, total, shown }: { readonly mission
       : shown === 0 ? <SystemNotice kind="empty" title={total === 0 ? 'No missions' : 'Nothing running today'} />
         : null
 
-/** The server bounds this feed by bytes and offers no continuation on a live subscription, so the total is unknown. */
-export const missionsTruncatedText = (count: number): string => `First ${count} missions. More exist that this view cannot load yet.`
+/** The server bounds this feed by bytes; with a stated total the reader learns how many remain, without one only that more exist. */
+export const missionsTruncatedText = (count: number, total?: number): string =>
+  total !== undefined && total > count ? `Showing ${count} of ${total} missions.` : `First ${count} missions. More exist that this view cannot load yet.`

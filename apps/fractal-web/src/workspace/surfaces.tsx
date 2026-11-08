@@ -74,6 +74,7 @@ class TerminalCodeBoundary extends React.Component<{ readonly terminalRef: `term
 
 const AlertDetailsPane = React.lazy(() => import('../web/AlertDetailsPane.tsx').then(module => ({ default: module.AlertDetailsPane })))
 const MissionsPane = React.lazy(() => import('../missions/MissionsPane.tsx').then(module => ({ default: module.MissionsPane })))
+const MissionDetailView = React.lazy(() => import('../missions/MissionDetailView.tsx').then(module => ({ default: module.MissionDetailView })))
 const DocumentPane = React.lazy(() => import('../documents/DocumentPane.tsx').then(module => ({ default: module.DocumentPane })))
 const DeclarationPane = React.lazy(() => import('../web/DeclarationDialog.tsx').then(module => ({ default: module.DeclarationPane })))
 const makeUsagePane = () => React.lazy(() => import('../monitor/UsagePane.tsx'))
@@ -126,8 +127,11 @@ export const AlertSurface = ({ subject, onOpen, onReplace, onClose, onBackToAler
   {subject._tag === 'Alert' ? <AlertDetailsPane id={subject.id} onOpenAlert={id => onReplace(`alert/${id}`)} onOpenRef={onOpen} onClose={onClose} onBack={onBackToAlerts} {...(ux === undefined ? {} : { ux })} /> : <Fragment />}
 </React.Suspense>
 
-export const MissionsSurface = ({ subject, onOpen }: SurfaceProps) => <React.Suspense fallback={<Loading title="Loading missions" />}>
-  <MissionsPane onOpenAgent={onOpen} {...(subject._tag === 'Mission' ? { focusedMission: subject.ref } : {})} onFocusMission={ref => onOpen(ref ?? 'missions')} />
+/** The Missions screen, or one mission as its own tab: header, banner, plan, agents, activity, linked work and actions. */
+export const MissionsSurface = ({ subject, visible, onOpen }: SurfaceProps) => <React.Suspense fallback={<Loading title="Loading missions" />}>
+  {subject._tag === 'Mission'
+    ? <MissionDetailView missionRef={subject.ref} visible={visible} onOpen={ref => onOpen(ref)} />
+    : <MissionsPane onOpenAgent={onOpen} onFocusMission={ref => onOpen(ref ?? 'missions')} />}
 </React.Suspense>
 
 export const UsageSurface = () => <UsageCodeBoundary />

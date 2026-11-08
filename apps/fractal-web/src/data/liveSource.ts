@@ -738,7 +738,7 @@ export const liveSource = ({
       onCommit: (value: readonly TRow[]) => {
         const next = evidence.get(value) ?? decodedRoster
         const current = registry.get(atom)
-        if (current.decodeStale === next.decodeStale && current.hasMore === next.hasMore && sameUndecodable(current.undecodable, next.undecodable)) return
+        if (current.decodeStale === next.decodeStale && current.hasMore === next.hasMore && current.total === next.total && sameUndecodable(current.undecodable, next.undecodable)) return
         registry.set(atom, next.undecodable.length === 0 && !next.decodeStale && next.hasMore !== true ? decodedRoster : next)
       },
       observedFreshness: (value: readonly TRow[]): 'stale' | 'live' =>
@@ -784,9 +784,9 @@ export const liveSource = ({
       fractal.followWindow(spec).pipe(
         Stream.map((event) => {
           if (event._tag !== 'Observed') return event
-          const { items, undecodable, decodeStale, hasMore } = event.value
+          const { items, undecodable, decodeStale, hasMore, total } = event.value
           const value = items.filter((row): row is Mission => row.kind === 'mission')
-          missionsEvidence.record(value, { undecodable, decodeStale, hasMore })
+          missionsEvidence.record(value, { undecodable, decodeStale, hasMore, ...(total === undefined ? {} : { total }) })
           return { _tag: 'Observed' as const, value }
         }),
       ),
