@@ -63,24 +63,25 @@ async fn browser_pairing_wrong_login_disabled_and_rate_limit() {
 #[tokio::test]
 async fn browser_pairing_pending_deny_and_exact_single_use_grant_revocation() {
     let (_root,state,owner) = fixture().await;
+    let publisher = paired_device(&state,&["read.projections"],"read-only-publisher").await;
     let key = "a".repeat(64);
-    let denied = start(&state,&owner,&key).await;
-    assert_eq!(poll(&state,&owner,&denied,&key).await.unwrap().0["status"],"pending");
+    let denied = start(&state,&publisher,&key).await;
+    assert_eq!(poll(&state,&publisher,&denied,&key).await.unwrap().0["status"],"pending");
     let id = denied["requestId"].as_str().unwrap();
     assert!(pairing_complete(State(state.clone()),Extension(owner.clone()),AxumPath(id.into()),Json(PairingComplete {
         api_version: CLIENT_API_VERSION.into(), code: key.clone(), device_public_key: format!("browser:{id}"),
         key_storage: None, fabric_node_id: None,
     })).await.is_err(), "ordinary completion must not bypass owner approval");
     answer(&state,&owner,&denied,"deny").unwrap();
-    assert_eq!(poll(&state,&owner,&denied,&key).await.unwrap().0["status"],"denied");
+    assert_eq!(poll(&state,&publisher,&denied,&key).await.unwrap().0["status"],"denied");
     assert!(answer(&state,&owner,&denied,"approve").is_err());
-    let approved = start(&state,&owner,&key).await;
-    assert!(poll(&state,&owner,&approved,"incorrect").await.is_err());
+    let approved = start(&state,&publisher,&key).await;
+    assert!(poll(&state,&publisher,&approved,"incorrect").await.is_err());
     answer(&state,&owner,&approved,"approve").unwrap();
-    let paired = poll(&state,&owner,&approved,&key).await.unwrap().0;
+    let paired = poll(&state,&publisher,&approved,&key).await.unwrap().0;
     assert_eq!(paired["scopes"],json!(SCOPES));
     assert!(paired["bearer"].as_str().is_some_and(|s|s.len()==43));
-    assert!(poll(&state,&owner,&approved,&key).await.is_err());
+    assert!(poll(&state,&publisher,&approved,&key).await.is_err());
     let request = begun(&state,&approved);
     let completion = state.store.claims_for_subject_kind_at(&request.subject,"custom.client.pairing-completed",None,true,1).unwrap().claims.remove(0);
     let browser = paired_client_session(&state,&completion,"fabric-loopback",false).unwrap();
@@ -139,6 +140,12 @@ async fn browser_pairing_expiry_refuses_redeem_even_after_approval() {
     let mut request = begun(&state,&started);
     request.body["fields"]["expires_at_unix_ms"] = json!(1);
     assert_eq!(approval(&state,&request).unwrap(),"expired");
+    state.store.append_claim(&ClaimInput {
+        subject:request.subject,kind:request.kind,actor:request.actor,
+        fields:serde_json::from_value(request.body["fields"].clone()).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    assert_eq!(poll(&state,&owner,&started,&"a".repeat(64)).await.unwrap().0["status"],"expired");
 }
 
 #[tokio::test]
@@ -177,4 +184,30 @@ async fn browser_pairing_completion_boundary_requires_paired_device_for_every_ta
     assert_eq!(poll(&state,&owner,&started,&"a".repeat(64)).await.unwrap().0["status"],"pending");
     answer(&state,&owner,&started,"approve").unwrap();
     assert!(poll(&state,&owner,&started,&"a".repeat(64)).await.unwrap().0["bearer"].is_string());
+}
+
+#[tokio::test]
+async fn browser_pairing_requires_operation_provenance_for_request_and_approver() {
+    let (_root,state,owner) = fixture().await;
+    let key = "a".repeat(64);
+    let started = start(&state,&owner,&key).await;
+    let mut request = begun(&state,&started);
+    request.body["fields"].as_object_mut().unwrap().remove(fractal_store::PAIRING_OPERATION_VERSION);
+    assert!(approval(&state,&request).is_err());
+    state.store.append_claim(&ClaimInput {
+        subject:request.subject,kind:request.kind,actor:request.actor,
+        fields:serde_json::from_value(request.body["fields"].clone()).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    assert!(poll(&state,&owner,&started,&key).await.is_err());
+    let another = start(&state,&owner,&key).await;
+    let grant = owner.pairing_grant.as_deref().unwrap();
+    let mut paired = state.store.claims_for_subject_kind_at(grant,"custom.client.pairing-completed",None,true,1).unwrap().claims.remove(0);
+    paired.body["fields"].as_object_mut().unwrap().remove(fractal_store::PAIRING_OPERATION_VERSION);
+    state.store.append_claim(&ClaimInput {
+        subject:paired.subject,kind:paired.kind,actor:paired.actor,
+        fields:serde_json::from_value(paired.body["fields"].clone()).unwrap(),
+        evidence:vec![],expected_subject:None,idempotency_key:None,
+    }).unwrap();
+    assert!(answer(&state,&owner,&another,"approve").is_err());
 }

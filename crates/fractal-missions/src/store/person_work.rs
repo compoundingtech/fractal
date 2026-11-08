@@ -570,7 +570,8 @@ impl PersonWorkStore for Store {
                 let fields = &paired.body["fields"];
                 let revoked: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='custom.client.pairing-revoked')", [grant], |row| row.get(0)).map_err(internal)?;
                 let allows = |name: &str| fields[name].as_array().is_some_and(|scopes| scopes.iter().any(|scope| scope == "control.pairing"));
-                if revoked || fields["person_id"] != input.actor || fields["session_actor"] != session_actor
+                if !fractal_store::trusted_pairing_fields(paired.actor.as_deref(), fields)
+                    || revoked || fields["person_id"] != input.actor || fields["session_actor"] != session_actor
                     || fields["expires_at_unix_ms"].as_u64().is_none_or(|expiry| u128::from(expiry) <= now_ms())
                     || !allows("scopes") || !allows("delegated_scopes")
                     || ask.as_ref().is_none_or(|ask| ask.body["fields"]["deadline_unix_ms"].as_u64().is_none_or(|expiry| u128::from(expiry) <= now_ms()))

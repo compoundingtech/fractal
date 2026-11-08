@@ -25,7 +25,8 @@ fn request(state: &AppState, id: &str) -> Result<ClaimRecord, ApiError> {
     }
     state.store.claims_for_subject_kind_at(&format!("custom/client/pairing-{id}"), "custom.client.pairing-begun", None, true, 1)
         .map_err(ApiError::internal)?.claims.into_iter()
-        .find(|c| c.body["fields"]["browser_request"] == true && c.origin == state.store.origin())
+        .find(|c| c.body["fields"]["browser_request"] == true && c.origin == state.store.origin()
+            && fractal_store::trusted_pairing_fields(c.actor.as_deref(), &c.body["fields"]))
         .ok_or_else(|| ApiError::not_found("browser request does not exist"))
 }
 fn owner(state: &AppState, session: &ClientSession) -> Result<(), ApiError> {
@@ -78,6 +79,7 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
     state.store.append_claim(&ClaimInput {
         subject: format!("custom/client/pairing-{id}"), kind: "custom.client.pairing-begun".into(), actor: Some(session.authority_actor.clone()),
         fields: BTreeMap::from([
+            (fractal_store::PAIRING_OPERATION_VERSION.into(), json!(1)),
             ("pairing_id".into(), json!(format!("pairing/{id}"))), ("person_id".into(), json!(session.authority_actor)),
             ("device_name".into(), json!(body.device_label)), ("tailnet_login".into(), json!(body.tailnet_login)),
             ("code_hash".into(), json!(body.request_key_digest)), ("scopes".into(), json!(SCOPES)),
@@ -90,6 +92,9 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
 }
 
 pub fn approval(state: &AppState, begun: &ClaimRecord) -> Result<&'static str, ApiError> {
+    if !fractal_store::trusted_pairing_fields(begun.actor.as_deref(), &begun.body["fields"]) {
+        return Err(forbidden("browser request requires a pairing operation record"));
+    }
     let expires = begun.body["fields"]["expires_at_unix_ms"].as_u64().unwrap_or(0);
     if u128::from(expires) <= client_now_ms() { return Ok("expired"); }
     let ask = field(begun, "browser_ask").ok_or_else(|| forbidden("browser request has no approval ask"))?;
@@ -132,10 +137,12 @@ pub async fn revoke_current(State(state): State<AppState>, Extension(session): E
     owner(&state, &session)?;
     let grant = session.pairing_grant.as_deref().ok_or_else(|| forbidden("a paired browser device is required"))?;
     let paired = state.store.claims_for_subject_kind_at(grant, "custom.client.pairing-completed", None, true, 1).map_err(ApiError::internal)?.claims.into_iter()
-        .next().filter(|c| field(c, "session_actor") == Some(session.actor.as_str()))
+        .next().filter(|c| field(c, "session_actor") == Some(session.actor.as_str())
+            && fractal_store::trusted_pairing_fields(c.actor.as_deref(), &c.body["fields"]))
         .ok_or_else(|| forbidden("a paired browser device is required"))?;
     let begun = state.store.claims_for_subject_kind_at(&paired.subject, "custom.client.pairing-begun", None, true, 1).map_err(ApiError::internal)?;
-    if paired.origin != state.store.origin() || !begun.claims.first().is_some_and(|c| c.body["fields"]["browser_request"] == true) {
+    if paired.origin != state.store.origin() || !begun.claims.first().is_some_and(|c| c.body["fields"]["browser_request"] == true
+        && fractal_store::trusted_pairing_fields(c.actor.as_deref(), &c.body["fields"])) {
         return Err(forbidden("only this browser's issuer can revoke it"));
     }
     state.store.append_claim(&ClaimInput { subject: paired.subject.clone(), kind: "custom.client.pairing-revoked".into(), actor: Some(session.authority_actor),
