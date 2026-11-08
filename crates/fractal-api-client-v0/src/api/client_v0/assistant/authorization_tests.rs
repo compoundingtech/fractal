@@ -471,19 +471,34 @@ fn content_source(fixture: &mut Fixture, text: &str) -> (String,String,String) {
 async fn conversation_routes_share_existing_scope_and_discovered_handle_reads_native_content() {
     let mut fixture = fixture(SCOPES, true).await;
     let text = format!("boundedneedle {}", "word ".repeat(1900));
-    content_source(&mut fixture, &text);
+    let (session, _, _) = content_source(&mut fixture, &text);
+    fixture.state.store.configure_thread_write_rollout([]);
+    let private_thread = "thread/generic-conversation-private";
+    let private_message = "message/generic-conversation-private";
+    let private_marker = "boundedneedle private-topic-f94dd";
+    use crate::store::thread_metadata::{self, Edit};
+    thread_metadata::apply(
+        &fixture.state.store, OWNER, private_thread, "create-generic-conversation-private",
+        Edit::Create { agent: "agent/reads-codex", title: "Private topic" },
+    ).unwrap();
+    thread_fixture_message(&fixture.state, private_message, private_thread,
+        OWNER, "agent/reads-codex", None, private_marker);
     let mut handle = None;
     for (route, query) in [
         ("conversations", "?max_response_bytes=16384"),
         ("conversation-detail", "?agent_id=agent%2Freads-codex&max_response_bytes=16384"),
-        ("conversation-timeline", "?agent_id=agent%2Freads-codex&limit=1&max_response_bytes=16384"),
-        ("conversation-search", "?text=boundedneedle&agent_id=agent%2Freads-codex&limit=1&max_response_bytes=16384"),
+        ("conversation-timeline", "?agent_id=agent%2Freads-codex&limit=10&max_response_bytes=16384"),
+        ("conversation-search", "?text=boundedneedle&agent_id=agent%2Freads-codex&limit=10&max_response_bytes=16384"),
     ] {
         let payload = fixture.payload(route, query);
         let header = fixture.header(&payload, &fixture.attestor);
         let (status, value, bytes) = fixture.request(&format!("/v1/client/assistant/{route}{query}"), Some(&header)).await;
         assert_eq!(status, StatusCode::OK, "{route}: {value}");
         assert!(bytes <= MAX_RESPONSE_BYTES);
+        let encoded = value.to_string();
+        assert!(!encoded.contains("private-topic-f94dd"), "{route}: {value}");
+        assert!(!encoded.contains(private_thread), "{route}: {value}");
+        assert!(!encoded.contains(private_message), "{route}: {value}");
         if route == "conversations" {
             handle = value["value"]["items"].as_array().unwrap().iter()
                 .find_map(|item| item["read"].as_object().cloned());
@@ -500,6 +515,25 @@ async fn conversation_routes_share_existing_scope_and_discovered_handle_reads_na
     assert_eq!(status, StatusCode::OK, "{value}");
     assert!(bytes <= MAX_RESPONSE_BYTES);
     assert!(text.starts_with(value["value"]["text"].as_str().unwrap()));
+
+    // Build an authentic same-process generic handle to test the exact read boundary
+    // independently of whether current discovery could mint such a handle.
+    let claims = fixture.state.store.claims_for(private_message, Some("message.sent")).unwrap();
+    let claim = claims.first().expect("the admitted private message has a claim");
+    let reference = fractal_api_core::api::client_v0::conversation_blocks::message_reference(&session, &claim.id);
+    let binding = credential_digest(&serde_json::to_string(&(&fixture.grant, fixture.revision)).unwrap());
+    let reference = super::super::reads::conversation_reads::bind_reference(&reference, &binding).unwrap();
+    let query = format!(
+        "?agent_id=agent%2Freads-codex&session_id={}&reference={}&revision=1&start=0&end=32&max_response_bytes=16384",
+        urlencoding::encode(&session), urlencoding::encode(&reference),
+    );
+    let payload = fixture.payload("conversation-content", &query);
+    let header = fixture.header(&payload, &fixture.attestor);
+    let (status, value, _) = fixture.request(&format!("/v1/client/assistant/conversation-content{query}"), Some(&header)).await;
+    assert_eq!(status, StatusCode::GONE, "{value}");
+    assert_eq!(value["code"], "conversation-content-invalidated", "{value}");
+    assert!(value.get("value").is_none());
+    assert!(!value.to_string().contains("private-topic-f94dd"));
 
     let denied = self::fixture(&SCOPES[..4], true).await;
     for route in ["conversations", "conversation-detail", "conversation-timeline", "conversation-search"] {
