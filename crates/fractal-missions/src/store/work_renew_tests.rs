@@ -983,9 +983,51 @@ fn independent_work_capacity_uses_literal_ownership_for_admission() {
 }
 
 #[test]
+fn bare_work_actors_claim_renew_release_and_complete_with_main_normalization() {
+    for bare_actor in ["node.worker", "worker"] {
+        for (action, expected_status) in [("release", "ready"), ("complete", "verifying")] {
+            let step = ready_step_with_mail(0);
+            let main_actor = smallclaims::store::normalize_actor(bare_actor, "agent");
+            step.store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h755979e290e9 owner=fractal_missions::store::work_renew_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?2 WHERE subject=?1",
+                params![step.subject, main_actor],
+            ).unwrap();
+            let mut mutation = request("bare-claim", None);
+            mutation.actor = Some(bare_actor.into());
+            let claimed = step.store.work_action(&step.subject, "claim", &mutation).unwrap();
+            assert_eq!(claimed.status, "claimed");
+            assert_eq!(claimed.claimant.as_deref(), Some(main_actor.as_str()));
+            assert_eq!(claimed.claim_incarnation, mutation.incarnation);
+            let claims = step.store.claims_for(&step.subject, Some("work.claimed")).unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].actor.as_deref(), Some(main_actor.as_str()));
+            assert_eq!(claims[0].body["fields"]["claimant"], json!(main_actor));
+
+            mutation.idempotency_key = "bare-renew".into();
+            let renewed = step.store.work_action(&step.subject, "renew", &mutation).unwrap();
+            assert_eq!(renewed.status, "claimed");
+            assert_eq!(renewed.claimant.as_deref(), Some(main_actor.as_str()));
+            assert_eq!(renewed.claim_incarnation, mutation.incarnation);
+            assert!(renewed.claim_expires_at_unix_ms.unwrap() > now_ms());
+
+            mutation.idempotency_key = format!("bare-{action}");
+            let finished = step.store.work_action(&step.subject, action, &mutation).unwrap();
+            assert_eq!(finished.status, expected_status);
+            assert!(finished.claimant.is_none());
+            assert!(finished.claim_incarnation.is_none());
+            assert!(finished.claim_expires_at_unix_ms.is_none());
+            assert_eq!(finished.worker_reported, action == "complete");
+            let persisted = step.store.step_run(&step.subject).unwrap().unwrap();
+            assert_eq!(persisted.status, expected_status);
+            assert!(persisted.claimant.is_none());
+        }
+    }
+}
+
+#[test]
 fn work_claim_rejects_malformed_actor_without_claiming_work() {
     let step = ready_step_with_mail(0);
-    for (index, actor) in ["", "worker", "agent/", "/worker", "node/worker name"].iter().enumerate() {
+    for (index, actor) in ["", "agent/", "/worker", "node/worker name"].iter().enumerate() {
         let mut claim_request = request(&format!("malformed-actor-claim-{index}"), None);
         claim_request.actor = Some((*actor).into());
         let error = step.store.work_action(&step.subject, "claim", &claim_request).unwrap_err();

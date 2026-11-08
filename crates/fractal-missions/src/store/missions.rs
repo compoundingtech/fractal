@@ -5923,7 +5923,6 @@ impl MissionsStore for Store {
         let actor = request.actor.as_deref().ok_or_else(|| {
             FractalError::new("missing-work-actor", "a work action needs an actor")
         })?;
-        validate_work_write_actor(actor)?;
         let requested_incarnation = request
             .incarnation
             .as_deref()

@@ -9568,7 +9568,7 @@ fn a_revision_keeps_the_claim_on_a_carried_step() {
 }
 
 #[test]
-fn carried_claim_successor_matches_legacy_and_canonical_holders() {
+fn carried_claim_successor_requires_literal_ownership() {
     for actor in ["node/worker", "agent/node/worker"] {
         for holder in ["node/worker", "agent/node/worker"] {
             let store = Store::open_memory("node").unwrap();
@@ -9614,7 +9614,7 @@ fn carried_claim_successor_matches_legacy_and_canonical_holders() {
             ).unwrap();
             if main_actor != holder {
                 let error = store.work_action(old, "renew", &renew).unwrap_err();
-                assert_eq!(error.code, "work-already-claimed");
+                assert_eq!(error.code, "stale-run-generation");
                 assert_eq!(
                     store.step_run(carried).unwrap().unwrap().claimant.as_deref(),
                     Some(holder),
