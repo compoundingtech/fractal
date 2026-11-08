@@ -10,6 +10,7 @@ mod alerts;
 mod answers;
 mod attach;
 mod clickable;
+mod composer;
 mod content;
 mod context;
 #[cfg(test)]
@@ -57,6 +58,8 @@ pub mod requests;
 pub mod screens;
 pub mod text;
 pub mod theme;
+pub mod thread;
+mod threads_live;
 mod objectives;
 mod triage;
 mod usage;
@@ -86,6 +89,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
+    widgets::Widget,
 };
 use screens::{Drafts, Item, ListState, Listing};
 use fractal_conversation_ui::pane::order;
@@ -418,6 +422,7 @@ pub struct Ui {
     resource_sidebar: resource_sidebar::Sidebar,
     /// Documents read so far, the list, and the documents missions name.
     documents: documents::Documents,
+    threads: threads_live::Threads,
     system: bool,
     frame: RefCell<FrameInfo>,
     hover: hover::Hover,
@@ -795,6 +800,7 @@ impl Ui {
             help: false,
             resource_sidebar,
             documents: documents::Documents::default(),
+            threads: threads_live::Threads::default(),
             system: false,
             frame: RefCell::new(FrameInfo::default()),
             hover: hover::Hover::default(),
@@ -1523,6 +1529,8 @@ impl Ui {
             return;
         }
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let pane = self.main_pane();
+        if !self.palette_open() && self.threads.paste(&pane, &text, &self.cursor, &mut self.conversation_state.drafts) { return; }
         let first = text.lines().next().unwrap_or("").to_owned();
         if let Some(find) = self.find.as_mut() {
             edit::insert(&mut find.query, &self.cursor, "find", &first);
@@ -1727,7 +1735,11 @@ impl Ui {
 
     fn listing_for(&self, tab: usize, width: usize) -> Listing {
         match tab {
-            0 => screens::home_list(&self.world, &self.snoozed, &self.closed),
+            0 => {
+                let mut list = screens::home_list(&self.world, &self.snoozed, &self.closed);
+                self.threads.recently_closed(&mut list);
+                list
+            },
             1 if self.tree => screens::agents_tree(&self.world, self.spinner(), width),
             1 => screens::agents_list(&self.world, self.spinner(), width),
             2 if self.tree => screens::missions_tree(&self.world, self.spinner(), self.system),
@@ -2478,13 +2490,17 @@ impl Ui {
     /// scrolls as one document keeps its scroll under the pane's own key.
     fn draw_pane(&self, buf: &mut Buffer, area: Rect, pane: &Pane) {
         let width = area.width.saturating_sub(1) as usize;
-        let doc = match pane {
+        let mut doc = match pane {
             Pane::List(tab) => return self.draw_list(buf, area, *tab),
             Pane::Agent(id) => return self.draw_agent(buf, area, id.as_deref()),
             Pane::Terminal(agent) => return self.draw_terminal(buf, area, agent),
+            Pane::Home(Some(id)) if id.starts_with("thread/") => Doc::new(),
             Pane::Home(id) => {
                 let drafts = self.drafts_for(id.as_deref().unwrap_or_default(), width);
-                let mut doc = screens::home_detail(&self.world, id.as_deref(), width, &drafts);
+                let mut doc = screens::home_detail_with_threads(
+                    &self.world, id.as_deref(), width, &drafts,
+                    id.as_deref().is_some_and(|id| self.threads.can_start(id)),
+                );
                 self.content.expand_requests(&mut doc, width);
                 doc
             }
@@ -2536,8 +2552,10 @@ impl Ui {
             Pane::Usage(id) => usage::detail(&self.world, id.as_deref(), self.usage_hours, width),
             Pane::Document(reference) => self.documents.page(reference, None, width, documents::now_ms()),
             Pane::Documents(prefix) => self.documents.list(prefix.as_deref(), width, documents::now_ms()),
+            Pane::Thread(_) => Doc::new(),
         };
-        self.pane(buf, &pane.key(), area, doc, false);
+        doc.append(self.threads.mount(pane, width, &self.cursor, &self.world, &self.conversation_state.drafts), 0);
+        self.pane(buf, &pane.key(), area, doc, matches!(pane, Pane::Thread(_)));
     }
 
     /// A document in a split of a glass, with the way back along what that split followed.
@@ -2653,7 +2671,7 @@ impl Ui {
         }
         // While finding, the find bar takes the message box's place.
         let find = self.find.as_ref().filter(|find| find.agent == agent.id);
-        let doc = match self.world.conversations.get(&agent.id) {
+        let mut doc = match self.world.conversations.get(&agent.id) {
             None | Some(Load::Loading) => {
                 let mut doc = Doc::new();
                 // A first page st keeps refusing says why while Fractal TUI tries again, rather than
@@ -2741,6 +2759,9 @@ impl Ui {
                 doc
             }
         };
+        if find.is_none() {
+            doc.append(self.threads.mount(&Pane::Agent(Some(agent.id.clone())), width, &self.cursor, &self.world, &self.conversation_state.drafts), 0);
+        }
         let key = format!("chat:{}", agent.id);
         if let Some(entry) = self.content.scroll_to.borrow_mut().remove(&agent.id)
             && let Some((_, line)) = doc.entries.iter().find(|(id, _)| *id == entry)
@@ -2870,17 +2891,8 @@ impl Ui {
         let bottom = area.y + area.height;
         if composer_height > 0 && body.y + body.height + band_height < bottom {
             let y = body.y + body.height + band_height;
-            buf.set_stringn(
-                area.x,
-                y,
-                "─".repeat(area.width as usize),
-                area.width as usize,
-                theme::fg(if self.editing && self.composing(&agent.id) {
-                    theme::ACCENT
-                } else {
-                    theme::SURFACE0
-                }),
-            );
+            composer::divider(area.width as usize, self.editing && self.composing(&agent.id))
+                .render(Rect::new(area.x, y, area.width, 1), buf);
             // A working agent can be stopped from here, as with Ctrl+C.
             if self.live
                 && agent.state == AgentState::Working
@@ -3648,50 +3660,18 @@ impl Ui {
         if let Some(state) = self.voice_for(&agent.id) {
             return self.voice_lines(state, width);
         }
-        if draft.is_empty() && !editing {
-            let hint = if self.composing(&agent.id) {
-                format!("Message {} · type or click", agent.name)
-            } else {
-                format!("Message {} · click", agent.name)
-            };
-            return vec![Line::from(vec![
-                Span::styled("› ", theme::dim()),
-                Span::styled(hint, theme::dim()),
-            ])];
-        }
-        let style = if editing {
-            theme::text()
+        let hint = if self.composing(&agent.id) {
+            format!("Message {} · type or click", agent.name)
         } else {
-            theme::soft()
+            format!("Message {} · click", agent.name)
         };
-        let mut lines = Vec::new();
-        let at = editing.then(|| self.cursor.at(&agent.id, draft));
-        for (index, runs) in edit::lines(draft, at, style).into_iter().enumerate() {
-            let first = if index == 0 {
-                text::run(
-                    "› ",
-                    if editing {
-                        theme::strong(theme::ACCENT)
-                    } else {
-                        theme::dim()
-                    },
-                )
-            } else {
-                text::run("  ", theme::dim())
-            };
-            lines.extend(text::wrap(
-                &runs,
-                width.saturating_sub(1),
-                &[first],
-                &[text::run("  ", theme::dim())],
-                None,
-            ));
-        }
-        let keep = 8;
-        if lines.len() > keep {
-            lines.drain(..lines.len() - keep);
-        }
-        lines
+        composer::text(
+            width,
+            editing,
+            draft,
+            editing.then(|| self.cursor.at(&agent.id, draft)),
+            hint,
+        )
     }
 
     fn draw_help(&self, buf: &mut Buffer, area: Rect) {
@@ -4145,6 +4125,7 @@ impl Ui {
         }
         if event == Event::FocusLost {
             self.hover.clear();
+            self.threads.hover(None);
             self.hover.pressed.set(false);
             self.dragging = false;
             self.middle_tab = None;
@@ -4291,6 +4272,16 @@ impl Ui {
     pub fn key(&mut self, key: KeyEvent) {
         if self.observe_recent_key(key) {
             return;
+        }
+        if self.threads.available() && key.kind != KeyEventKind::Release && !self.palette_open() && !self.help
+            && !self.terminal_focused() && !self.leader && self.popover.is_none() && self.context.is_none()
+        {
+            let pane = self.main_pane();
+            if let Some(tap) = self.threads.shortcut(&pane, key) {
+                self.click(Hit::Thread(pane.key(), tap));
+                return;
+            }
+            if self.threads.key(&pane, key, &self.cursor, &mut self.conversation_state.drafts) { return; }
         }
         let ctrl_t = key.code == KeyCode::Char('t') && key.modifiers == KeyModifiers::CONTROL;
         if self.terminal_hold.is_some() {
@@ -6414,6 +6405,16 @@ impl Ui {
             // the browser opens too.
             Hit::Link(url) if documents::openable(&url).is_some() => self.open_document(&url),
             Hit::Document(tap) => self.document_tap(tap),
+            Hit::Thread(host, tap) => {
+                if let Some(id) = self.threads.tap(&host, tap, &mut self.conversation_state.drafts) {
+                    let pane = Pane::Thread(id.clone());
+                    let key = pane.key();
+                    self.open_in_glass(pane, glass::Open::Tab);
+                    if self.threads.summary(&id).is_some_and(|row| row.state == fractal_client::ThreadState::Open) {
+                        self.threads.tap(&key, thread::Tap::Compose(id), &mut self.conversation_state.drafts);
+                    }
+                }
+            }
             Hit::Link(url) => {
                 copy(&url);
                 let opened = open_in_browser(&url);

@@ -13,6 +13,7 @@ pub enum Pane {
     Home(Option<String>),
     /// An agent's conversation and details.
     Agent(Option<String>),
+    Thread(String),
     /// An agent's attached terminal.
     Terminal(String),
     Mission(Option<String>),
@@ -43,6 +44,7 @@ impl Pane {
             Pane::List(tab) => format!("list:{}", LISTS.get(*tab).unwrap_or(&LISTS[0])),
             Pane::Home(subject) => with("home", subject),
             Pane::Agent(subject) => with("agent", subject),
+            Pane::Thread(id) => format!("thread:{id}"),
             Pane::Terminal(agent) => format!("terminal:{agent}"),
             Pane::Mission(subject) => with("mission", subject),
             Pane::Declaration(subject) => with("declaration", subject),
@@ -68,6 +70,7 @@ impl Pane {
             ),
             "home" => Pane::Home(subject),
             "agent" => Pane::Agent(subject),
+            "thread" => Pane::Thread(subject?),
             "terminal" => Pane::Terminal(subject?),
             "mission" => Pane::Mission(subject),
             "declaration" => Pane::Declaration(subject),
