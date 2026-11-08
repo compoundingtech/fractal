@@ -42,7 +42,8 @@ it('shows a failed transcript tool as its summary and one-line reason; the path 
   await act(async () => root.render(<ToolDetailPreview call={{ id: 'failed-call', kind: 'read', title: 'Reading rows', summary: 'Read rows.ts', status: 'error', startedAt: '2026-01-15T12:00:00Z', detail: dump }} />))
   const trigger = container.querySelector('button')!
   expect(trigger.getAttribute('aria-expanded')).toBe('false')
-  expect(container.querySelector('p')?.textContent).toBe('Read rows.ts · error')
+  // The row above already names the call and its failure; the summary line adds only what the row does not say.
+  expect(container.querySelector('p')?.textContent).toBe('Read rows.ts')
   expect(container.querySelector('[data-testid="tool-error-reason"]')?.textContent).toBe("Error: ENOENT: no such file or directory, open '…/rows.ts'")
   expect(container.textContent).not.toContain('fixture-workspace')
   expect(container.querySelector('pre')).toBeNull()

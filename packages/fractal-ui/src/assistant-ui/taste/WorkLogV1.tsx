@@ -55,10 +55,12 @@ export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail
   useRevealOpen(reveal => reveal.entryId !== undefined && (turn.calls.some(call => call.id === reveal.entryId) || summaryMemberIds?.includes(reveal.entryId) === true), expanded, setChoice)
   const failedCall = turn.calls.find(call => call.status === 'error')
   const failed = turn.failed || failedCall !== undefined
-  // Worked always carries a number: how long, else how many tools.
-  const workCount = turn.calls.length === 0 ? 'for <1s' : `· ${turn.calls.length} ${turn.calls.length === 1 ? 'tool' : 'tools'}`
-  const workLabel = turn.running ? 'Working' : settled ? `Worked ${durationLabel ? `for ${durationLabel}` : workCount}` : failed ? 'Run failed' : turn.interrupted ? 'Run interrupted' : 'Work · completion unverified'
-  const summary = [workLabel, settled && turn.commands ? `${turn.commands} ${turn.commands === 1 ? 'command' : 'commands'}` : undefined, settled && turn.changedFiles ? `${turn.changedFiles} ${turn.changedFiles === 1 ? 'file changed' : 'files changed'}` : undefined].filter(value => value !== undefined).join(' · ')
+  // A finished turn reads as one line, "Worked 6s · 5 tools", and always carries a number.
+  const toolCount = turn.calls.length === 0 ? undefined : `${turn.calls.length} ${turn.calls.length === 1 ? 'tool' : 'tools'}`
+  const workLabel = turn.running ? 'Working' : settled ? `Worked${durationLabel ? ` ${durationLabel}` : toolCount === undefined ? ' <1s' : ''}` : failed ? 'Run failed' : turn.interrupted ? 'Run interrupted' : 'Work · completion unverified'
+  const summary = [workLabel, settled ? toolCount : undefined, settled && turn.changedFiles ? `${turn.changedFiles} ${turn.changedFiles === 1 ? 'file changed' : 'files changed'}` : undefined].filter(value => value !== undefined).join(' · ')
+  // Folding a finished turn never hides a failure: its failed rows stay under the summary.
+  const shownCalls = !interactiveCalls || expanded ? turn.calls : turn.calls.filter(call => call.status === 'error')
   const started = turn.running ? NaN : Date.parse(turn.startedAt ?? '')
   const failedCommand = failedCall?.kind === 'run' ? failedCall.argsSummary ?? failedCall.title : undefined
   const detail = [failedCommand, failedCall?.detail, turn.failureNote].filter((value, index, values) => value !== undefined && values.indexOf(value) === index).join('\n') || undefined
@@ -67,7 +69,7 @@ export function WorkLogV1({ turn, listStyle, renderCallDetail, previewCallDetail
   return <CallDetailRenderer.Provider value={renderCallDetail}><CallPresentation.Provider value={{ preview: previewCallDetail, interactive: interactiveCalls }}><section role="group" aria-label={ariaLabel} data-testid="work-log">
     {turn.running && !hideLiveRow && <div data-testid="live-work" role="status" aria-label="Response in progress" {...stylex.props(styles.live)}><span aria-hidden="true" {...stylex.props(styles.slot)}><LiveRing /></span><span>Working</span></div>}
     {interactiveCalls ? <Button aria-expanded={expanded} onPress={toggle} {...summaryAnchor} {...stylex.props(styles.summary, failed && styles.failureInk)}><span aria-hidden="true" {...stylex.props(styles.slot)}><span {...stylex.props(styles.chevron, expanded && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span></span>{summaryContent}</Button> : <div {...summaryAnchor} {...stylex.props(styles.summary, styles.staticCall, failed && styles.failureInk)}><span aria-hidden="true" {...stylex.props(styles.slot)} />{summaryContent}</div>}
-    {(!interactiveCalls || expanded) && <div data-testid="work-log-children" {...stylex.props(styles.children)}><div {...stylex.props(styles.list, listStyle)}>{turn.calls.map(call => <TimelineCall key={call.id} call={call} />)}{expandedBody}</div></div>}
+    {(!interactiveCalls || expanded || shownCalls.length > 0) && <div data-testid="work-log-children" {...stylex.props(styles.children)}><div {...stylex.props(styles.list, listStyle)}>{shownCalls.map(call => <TimelineCall key={call.id} call={call} />)}{(!interactiveCalls || expanded) && expandedBody}</div></div>}
     {failed && <ErrorOverlay id={`work-failure-${turn.calls[0]?.id ?? 'turn'}`} title={failedCommand === undefined ? 'Run failed.' : 'Command did not complete'} detail={errorReason(failedCall?.detail ?? turn.failureNote ?? '')} rawDetail={detail} command={failedCall === undefined ? failedCommandSource(turn.failureNote ?? '') : readableCommand(failedCall)} onRetry={onRetry} onOpenOutput={failedCall === undefined || onOpenOutput === undefined ? undefined : () => onOpenOutput(failedCall)} />}
     {turn.interrupted && <div {...stylex.props(styles.promoted)}><Icon name="stop" size={14} /><span>Run interrupted.</span></div>}
   </section></CallPresentation.Provider></CallDetailRenderer.Provider>
@@ -90,11 +92,19 @@ function TimelineCall({ call }: { call: WorkLogCall }) {
   const row = <><span aria-hidden="true" data-row-disclosure={expandable && interactive ? displayed ? 'open' : 'closed' : undefined} {...stylex.props(styles.slot, styles.disclosure)}>{expandable && interactive && <span {...stylex.props(styles.chevron, displayed && styles.chevronOpen)}><Icon name="chevron-right" size={12} /></span>}</span><span aria-hidden="true" {...stylex.props(styles.slot)}>{call.status === 'running' ? <LiveRing /> : <Icon name={call.status === 'error' ? 'alert' : call.status === 'interrupted' ? 'stop-circle' : kindIcons[call.kind]} size={14} />}</span><span data-call-title title={label} {...stylex.props(styles.callLabel)}>{call.kind === 'run' ? <code {...stylex.props(styles.mono)}><HighlightedSource code={label} language="bash" /></code> : <>{call.title}{call.argsSummary === undefined ? null : <>{' '}<code {...stylex.props(styles.mono)}>{call.argsSummary}</code></>}</>}</span><span data-call-meta {...stylex.props(styles.meta)}><span data-call-word {...stylex.props(styles.callWord, word !== undefined && duration !== undefined && styles.callWordSpaced)}>{word}</span><span data-call-duration {...stylex.props(styles.duration)}>{duration}</span></span></>
   return <div data-scroll-anchor-id={call.id} data-tool-status={call.status}>{expandable && interactive ? <TooltipTrigger delay={150}><Button aria-expanded={displayed} onPress={() => setOpen(value => !value)} {...stylex.props(stylex.defaultMarker(), styles.call, open && styles.expanded, call.status === 'error' && styles.failureInk)}>{row}</Button><Tooltip {...stylex.props(styles.hover)}><div>{label}</div><div>{result}</div></Tooltip></TooltipTrigger> : <div {...stylex.props(styles.call, styles.staticCall, call.status === 'error' && styles.failureInk)}>{row}</div>}{displayed && <div data-call-detail {...stylex.props(styles.callDetail)}>{renderDetail === undefined ? <DefaultCallDetail call={call} /> : renderDetail(call)}</div>}</div>
 }
+/** The detail's first line, without repeating the row: the row already names the call and shows every status but success. */
+export function callDetailLine(call: WorkLogCall): string | undefined {
+  return [call.summary !== undefined && call.summary !== call.title ? call.summary : undefined, call.status === 'success' ? 'success' : undefined].filter(part => part !== undefined).join(' · ') || undefined
+}
+function CallDetailLine({ call }: { readonly call: WorkLogCall }) {
+  const line = callDetailLine(call)
+  return line === undefined ? null : <p>{line}</p>
+}
 function DefaultCallDetail({ call }: { readonly call: WorkLogCall }) {
   const [rawOpen, setRawOpen] = React.useState(false)
   useRevealOpen(reveal => reveal.entryId === call.id && reveal.deep, rawOpen, setRawOpen)
   return <>
-    <p>{call.summary ?? call.title} · {call.status}</p>
+    <CallDetailLine call={call} />
     {call.status === 'error' && call.detail !== undefined && <p>{errorReason(call.detail)}</p>}
     <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}>
       <Button slot="trigger" {...stylex.props(styles.call, styles.rawTrigger)}>Show raw input/output</Button>

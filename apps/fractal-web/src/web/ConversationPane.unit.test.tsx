@@ -138,7 +138,7 @@ describe('ConversationPane kit composition', () => {
     expect(html).not.toContain('[reasoning]')
     expect(html).not.toContain('Compare the observed selection first.')
     expect(html).toContain('data-testid="work-log"')
-    expect(html).toContain('Worked for 7s')
+    expect(html).toContain('Worked 7s')
   })
 
   it('omits known internal event kinds and repeats no truncation wording', () => {

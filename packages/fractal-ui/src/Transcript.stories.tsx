@@ -290,7 +290,7 @@ export const AdjacentReasoning: Story = {
 export const AdjacentReasoningLight: Story = { ...AdjacentReasoning, args: { scheme: 'light' } }
 export const Settled: Story = { tags: ['critical'], play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  const fold = await canvas.findByRole('button', { name: /Worked for 24s/ })
+  const fold = await canvas.findByRole('button', { name: /Worked 24s/ })
   await expect(fold).toHaveAttribute('aria-expanded', 'false')
   await expect(canvasElement.querySelector('[data-testid="tool-detail-preview"]')).toBeNull()
   // One timestamp per episode: the turn head carries it, the answer header does not.
@@ -315,9 +315,13 @@ export const TurnFooter: Story = {
 export const TurnFooterLight: Story = { ...TurnFooter, args: { scheme: 'light' } }
 export const Expanded: Story = { tags: ['critical'], args: { state: 'expanded' }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  const fold = await canvas.findByRole('button', { name: /Worked for 24s/ })
+  const fold = await canvas.findByRole('button', { name: /Worked 24s/ })
   await userEvent.click(fold)
   await expect(fold).toHaveAttribute('aria-expanded', 'true')
+  // A finished turn's rows open on click.
+  await expect(canvas.queryAllByTestId('tool-detail-preview')).toHaveLength(0)
+  // Open the two rows with output; the silent success stays collapsed, checked below.
+  for (const row of [...canvasElement.querySelectorAll<HTMLElement>('[data-testid="work-log"] [data-tool-status]:not([data-tool-status="error"]) > button')].slice(0, -1)) await userEvent.click(row)
   await expect(canvas.queryByTestId('tool-preview-remaining')).toBeNull()
   const previews = canvas.getAllByTestId('tool-detail-preview')
   await expect(previews).toHaveLength(2)
@@ -355,7 +359,7 @@ const treeData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }, turn
 /** The open work log as a tree: toggles lead expandable rows, the type glyph follows, and plain rows keep the empty slot so every label shares one edge. A running Wait spins the same ring as Working; a finished Wait keeps its clock. */
 export const WorkLogTree: Story = { render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><section aria-label="Settled tree" {...stylex.props(styles.frame)}><RuntimeTranscript data={treeData} onOpenTool={() => {}} onRetry={() => {}} /></section><section aria-label="Running wait" {...stylex.props(styles.frame)}><RuntimeTranscript data={treeLiveData} onOpenTool={() => {}} onRetry={() => {}} /></section></main>, play: async ({ canvasElement }) => {
   const canvas = within(within(canvasElement).getByRole('region', { name: 'Settled tree' }))
-  const fold = await canvas.findByRole('button', { name: /Worked for 20s/ })
+  const fold = await canvas.findByRole('button', { name: /Worked 20s/ })
   await userEvent.click(fold)
   const children = canvas.getByTestId('work-log-children')
   const left = (element: Element) => element.getBoundingClientRect().left
@@ -465,7 +469,7 @@ const commandRowData: TranscriptStoryData = { sync: { _tag: 'Live', since: now }
 /** A long command keeps its row to one line: ellipsis in place, full text in the title. */
 export const LongCommandRow: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><RuntimeTranscript data={commandRowData} onOpenTool={() => {}} onRetry={() => {}} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  await userEvent.click(await canvas.findByRole('button', { name: /Worked for 4s/ }))
+  await userEvent.click(await canvas.findByRole('button', { name: /Worked 4s/ }))
   const rows = [...canvasElement.querySelectorAll<HTMLElement>('[data-tool-status] > button')]
   await expect(rows).toHaveLength(2)
   for (const row of rows) await expectNoOutputWithControl(row)
@@ -519,7 +523,8 @@ export const RawInputOnExpand: Story = { tags: ['critical'], render: args => <ma
   // Control: the overlay probe does see promoted output, so its raw-input absence is meaningful.
   await expect(notice).toHaveTextContent('assertion did not match')
   await expect(notice.textContent).not.toContain(rawMarker)
-  await expect(canvas.getAllByTestId('tool-detail-preview')).toHaveLength(1)
+  // A finished turn's rows open on click.
+  await expect(canvas.queryAllByTestId('tool-detail-preview')).toHaveLength(0)
   await expect(canvas.queryAllByTestId('tool-raw-input')).toHaveLength(0)
   await expect(canvasElement.textContent).not.toContain(rawMarker)
   for (const row of canvasElement.querySelectorAll<HTMLElement>('[data-tool-status] > button')) await expectNoOutputWithControl(row)
@@ -536,7 +541,9 @@ export const RawInputOnExpand: Story = { tags: ['critical'], render: args => <ma
   await userEvent.click(canvas.getByRole('button', { name: /^run pnpm test rows/ }))
   await expect(canvas.getAllByTestId('tool-raw-input')).toHaveLength(1)
   const runPreview = canvas.getAllByTestId('tool-detail-preview')[1]!
-  await expect(runPreview).toHaveTextContent('error')
+  // The status shows once: a failure is the row's own word, not repeated in the detail.
+  await expect(canvas.getByRole('button', { name: /^run pnpm test rows/ })).toHaveTextContent('Failed')
+  await expect(runPreview).not.toHaveTextContent('error')
   await userEvent.click(within(runPreview).getByRole('button', { name: 'Show raw input/output' }))
   await waitFor(() => expect(canvas.getAllByTestId('tool-raw-input')).toHaveLength(2))
   await expect(canvas.getAllByTestId('tool-raw-input')[1]).toHaveTextContent(`${rawMarker}:raw/run`)
@@ -551,7 +558,7 @@ const rawDefaultTurn = workLogTurnFromItems([{ _tag: 'ToolCall', id: 'raw-defaul
 /** The kit's default detail renderer applies the same rule; a string input stays verbatim. */
 export const RawInputDefaultDetail: Story = { tags: ['critical'], render: args => <main {...stylex.props(styles.root, ...baselineTheme, args.scheme === 'light' && lightTheme)}><WorkLogV1 turn={rawDefaultTurn} /></main>, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  await userEvent.click(canvas.getByRole('button', { name: 'Worked · 1 tool · 1 command' }))
+  await userEvent.click(canvas.getByRole('button', { name: 'Worked · 1 tool' }))
   await expect(canvas.queryByTestId('tool-raw-input')).toBeNull()
   await expect(canvasElement.textContent).not.toContain(rawMarker)
   await expectNoOutputWithControl(canvas.getByRole('button', { name: /^run/ }))
@@ -592,7 +599,8 @@ export const RawInputWithoutOutput: Story = { tags: ['critical'], render: args =
     await expect(row).toHaveAttribute('aria-expanded', 'true')
     const preview = row.parentElement!.querySelector<HTMLElement>('[data-testid="tool-detail-preview"]')!
     await expect(within(preview).queryByTestId('tool-raw-input')).toBeNull()
-    await expect(preview).toHaveTextContent(index === 0 ? 'success' : index === 1 ? 'error' : 'running')
+    // The status shows once: success in the detail, the others as the row's own word.
+    await expect(index === 0 ? preview : row).toHaveTextContent(index === 0 ? 'success' : index === 1 ? 'Failed' : 'Running')
     await userEvent.click(within(preview).getByRole('button', { name: 'Show raw input/output' }))
     await expect(within(preview).getByTestId('tool-raw-input')).toHaveTextContent(`"note": "${rawMarker}:${id}"`)
     // Exact input and any readable command, never an empty-output block.
@@ -797,7 +805,7 @@ const loadEarlier = fn()
 export const HasOlderWithLoad: Story = { tags: ['critical'], args: { history: { _tag: 'HasOlder', onLoadEarlier: loadEarlier } }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
   loadEarlier.mockClear()
-  await canvas.findByRole('button', { name: /Worked for 24s/ })
+  await canvas.findByRole('button', { name: /Worked 24s/ })
   await expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
   await userEvent.click(canvas.getByRole('button', { name: 'Load earlier messages' }))
   await expect(loadEarlier).toHaveBeenCalledTimes(1)
@@ -805,7 +813,7 @@ export const HasOlderWithLoad: Story = { tags: ['critical'], args: { history: { 
 export const HasOlderWithLoadLight: Story = { ...HasOlderWithLoad, args: { ...HasOlderWithLoad.args, scheme: 'light' } }
 export const HasOlderWithoutLoad: Story = { tags: ['critical'], args: { history: { _tag: 'HasOlder' } }, play: async ({ canvasElement }) => {
   const canvas = within(canvasElement)
-  await canvas.findByRole('button', { name: /Worked for 24s/ })
+  await canvas.findByRole('button', { name: /Worked 24s/ })
   await expect(canvas.getByTestId('history-boundary')).toHaveTextContent('Earlier messages not loaded')
   await expect(canvas.queryByRole('button', { name: 'Load earlier messages' })).toBeNull()
 } }
@@ -1049,7 +1057,7 @@ export const SendIdentity: Story = { tags: ['critical'], render: args => <SendId
   const selector = '[data-testid="user-message"][data-item-id="identity/prompt"]'
   await expect(await canvas.findByTestId('user-message')).toHaveAttribute('data-send-state', 'pending')
   const pending = canvasElement.querySelector(selector)
-  const fold = await canvas.findByRole('button', { name: /Worked for 24s/ })
+  const fold = await canvas.findByRole('button', { name: /Worked 24s/ })
   await userEvent.click(fold)
   await expect(fold).toHaveAttribute('aria-expanded', 'true')
   const removed: Node[] = []
@@ -1066,7 +1074,7 @@ export const SendIdentity: Story = { tags: ['critical'], render: args => <SendId
     recordRemovals(observer.takeRecords())
     await expect(removed).toHaveLength(0)
     await expect(canvasElement.querySelector(selector)).toBe(pending)
-    await expect(canvas.getByRole('button', { name: /Worked for 24s/ })).toHaveAttribute('aria-expanded', 'true')
+    await expect(canvas.getByRole('button', { name: /Worked 24s/ })).toHaveAttribute('aria-expanded', 'true')
     await expect(canvasElement.querySelectorAll(selector)).toHaveLength(1)
     await expect(canvasElement.querySelectorAll('[data-testid="user-message"]')).toHaveLength(1)
   } finally { observer.disconnect() }
@@ -1329,8 +1337,9 @@ export const SemanticItems: Story = { tags: ['critical'], render: args => <main 
   await expect(mountedSourceIds(canvas.getByTestId('transcript-turn'))).toEqual(['semantic/prompt', ...semanticItems.slice(-6).map(item => item.id)])
   await userEvent.click(canvas.getByRole('button', { name: 'Show all messages' }))
   await waitFor(() => expect(history).toHaveAttribute('data-state', 'complete'))
-  await userEvent.click(await canvas.findByRole('button', { name: /Worked for 24s/ }))
+  await userEvent.click(await canvas.findByRole('button', { name: /Worked 24s/ }))
   await userEvent.click(canvas.getByRole('button', { name: 'Thinking' }))
+  for (const row of canvasElement.querySelectorAll<HTMLElement>('[data-testid="work-log"] [data-tool-status] > button')) await userEvent.click(row)
   await expect(canvas.getByTestId('tool-detail-preview')).toBeVisible()
   await userEvent.click(canvas.getByRole('button', { name: 'Show raw input/output' }))
   await expect(canvas.getByTestId('tool-detail-preview')).toHaveTextContent('export const semantic = true')
