@@ -21,16 +21,18 @@ export interface SettingsControlProps {
   /** Open from elsewhere, such as the palette; the trigger owns it when absent. */
   readonly isOpen?: boolean | undefined
   readonly onOpenChange?: ((isOpen: boolean) => void) | undefined
+  /** `right` on the collapsed sidebar's rail. */
+  readonly tooltipPlacement?: 'bottom' | 'right'
 }
 
 /**
- * The sidebar header's gear and the modal it opens. The trigger owns open state and focus return, and the portal stays
+ * The sidebar header's gear (or the rail's) and the modal it opens. The trigger owns open state and focus return, and the portal stays
  * inside the themed workspace, or inside the phone drawer's focus scope, so the sheet keeps the colour scheme and contains focus.
  * Contents and their reads exist only while open.
  */
-export const SettingsControl = ({ scheme, onSchemeChange, build, isOpen, onOpenChange }: SettingsControlProps) =>
+export const SettingsControl = ({ scheme, onSchemeChange, build, isOpen, onOpenChange, tooltipPlacement = 'bottom' }: SettingsControlProps) =>
   <Aria.DialogTrigger {...(isOpen === undefined ? {} : { isOpen })} {...(onOpenChange === undefined ? {} : { onOpenChange })}>
-    <ChromeControl icon="gear" label="Settings" popup="dialog" edge="trail" />
+    <ChromeControl icon="gear" label="Settings" popup="dialog" edge="trail" tooltipPlacement={tooltipPlacement} />
     <ThemePortal>
       <Aria.ModalOverlay isDismissable {...stylex.props(styles.overlay)}>
         <Aria.Modal {...stylex.props(styles.modal)}>

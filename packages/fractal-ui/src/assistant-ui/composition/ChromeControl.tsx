@@ -36,7 +36,12 @@ export interface ChromeControlProps {
   readonly onPrefetch?: () => void
   /** A header-edge control: in a narrow host its 44px touch target overhangs the gutter so the glyph stays where the 28px control put it. */
   readonly edge?: 'lead' | 'trail'
-  readonly tooltipPlacement?: 'top' | 'bottom'
+  /** `right` for a vertical rail, whose controls have their room beside them. */
+  readonly tooltipPlacement?: 'top' | 'bottom' | 'right'
+  /** A decorative mark at the glyph's top trailing corner, e.g. a count or a status dot; say what it means in `label` or `description`. */
+  readonly badge?: React.ReactNode
+  /** State the control carries beyond its name, e.g. "Reconnecting" on the control that opens the connection. */
+  readonly description?: string
 }
 
 /**
@@ -44,7 +49,7 @@ export interface ChromeControlProps {
  * Inside a React Aria trigger (MenuTrigger, DialogTrigger) it is the trigger's button.
  * Tooltips follow hover or user keyboard navigation, never autofocus or programmatic focus restoration.
  */
-export function ChromeControl({ icon, label, pressed, active = false, disabledReason, isDisabled = false, onPress, popup, expanded, controls, tooltip, ref, onPrefetch, edge, tooltipPlacement = 'bottom' }: ChromeControlProps) {
+export function ChromeControl({ icon, label, pressed, active = false, disabledReason, isDisabled = false, onPress, popup, expanded, controls, tooltip, ref, onPrefetch, edge, tooltipPlacement = 'bottom', badge, description }: ChromeControlProps) {
   const reasonId = React.useId()
   const { focusProps, isFocusVisible } = useFocusRing()
   // Inside a narrow (phone) host every chrome control is a 44px touch target; a narrow desktop pane keeps desktop density.
@@ -79,22 +84,27 @@ export function ChromeControl({ icon, label, pressed, active = false, disabledRe
       <span id={reasonId} hidden>{disabledReason}</span>
     </>
   }
-  return <Tooltip label={tooltip ?? label} placement={tooltipPlacement} navigationFocusOnly>
-    <Button
-      {...(ref === undefined ? {} : { ref })}
-      aria-label={label}
-      {...(pressed === undefined ? {} : { 'aria-pressed': pressed })}
-      {...(popup === undefined ? {} : { 'aria-haspopup': popup })}
-      {...(expanded === undefined ? {} : { 'aria-expanded': expanded })}
-      {...(controls === undefined ? {} : { 'aria-controls': controls })}
-      {...(onPrefetch === undefined ? {} : { onHoverStart: onPrefetch, onFocus: onPrefetch, onPressStart: onPrefetch })}
-      isDisabled={isDisabled}
-      {...(onPress === undefined ? {} : { onPress })}
-      {...stylex.props(styles.control, (pressed === true || active) && styles.pressed, ...touch)}
-    >
-      <Icon name={icon} />
-    </Button>
-  </Tooltip>
+  return <>
+    <Tooltip label={tooltip ?? label} placement={tooltipPlacement} navigationFocusOnly>
+      <Button
+        {...(ref === undefined ? {} : { ref })}
+        aria-label={label}
+        {...(description === undefined ? {} : { 'aria-describedby': reasonId })}
+        {...(pressed === undefined ? {} : { 'aria-pressed': pressed })}
+        {...(popup === undefined ? {} : { 'aria-haspopup': popup })}
+        {...(expanded === undefined ? {} : { 'aria-expanded': expanded })}
+        {...(controls === undefined ? {} : { 'aria-controls': controls })}
+        {...(onPrefetch === undefined ? {} : { onHoverStart: onPrefetch, onFocus: onPrefetch, onPressStart: onPrefetch })}
+        isDisabled={isDisabled}
+        {...(onPress === undefined ? {} : { onPress })}
+        {...stylex.props(styles.control, (pressed === true || active) && styles.pressed, ...touch)}
+      >
+        <Icon name={icon} />
+        {badge === undefined ? null : <span aria-hidden="true" data-chrome-badge="" {...stylex.props(styles.badge)}>{badge}</span>}
+      </Button>
+    </Tooltip>
+    {description === undefined ? null : <span id={reasonId} hidden>{description}</span>}
+  </>
 }
 
 /** Keys a React Aria trigger acts on; a control with a reason swallows them. */
@@ -105,7 +115,7 @@ const styles = stylex.create({
   touchLead: { marginInlineStart: `calc((${g.controlMd} - ${g.touchTarget}) / 2)` },
   touchTrail: { marginInlineEnd: `calc((${g.controlMd} - ${g.touchTarget}) / 2)` },
   control: {
-    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxSizing: 'border-box',
+    display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, boxSizing: 'border-box', position: 'relative',
     width: g.controlMd, height: g.controlMd, padding: 0,
     borderWidth: 0, borderRadius: r.control, backgroundColor: 'transparent', color: ink.fgMuted,
     outlineStyle: 'none',
@@ -118,4 +128,6 @@ const styles = stylex.create({
   pressed: { backgroundColor: surface.rowActive, color: ink.fg, ':hover': { backgroundColor: surface.rowActive, color: ink.fg } },
   // The aria-disabled twin of `:disabled`: dimmed and inert to hover, but it keeps the focus ring.
   disabled: { opacity: 0.64, cursor: 'default', ':hover': { backgroundColor: 'transparent', color: ink.fgMuted } },
+  // Centred on the glyph's top trailing corner, so a dot and a two-digit count sit in the same place.
+  badge: { position: 'absolute', insetBlockStart: 0, insetInlineStart: '50%', display: 'inline-flex', transform: 'translate(25%, -15%)', pointerEvents: 'none' },
 })

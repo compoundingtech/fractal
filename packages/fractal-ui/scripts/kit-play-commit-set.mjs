@@ -43,6 +43,8 @@ export const APP_CASE_OVERRIDES = new Map([
   // The Usage pane's served tone inks and row/chart layout run in both schemes at both widths on every commit.
   ['fractal-app-usagepane--all-states', FULL],
   ['fractal-app-usagepane--populated', FULL],
+  // The global area (sidebar header, footer, rail, toasts and the phone drawer) at the desktop and phone widths it was designed at, in both schemes.
+  ...['docked', 'rail', 'connection-lost', 'rail-connection-lost', 'offline', 'layout-not-syncing', 'alert-toast'].map(story => [`fractal-app-globalarea--${story}`, [['dark', 1280], ['light', 1280], ['dark', 440], ['light', 440]]]),
 ])
 // The production build includes both inventories; every named story remains required.
 export const FULL_CASE_OVERRIDES = new Map([...KIT_CASE_OVERRIDES, ...APP_CASE_OVERRIDES])

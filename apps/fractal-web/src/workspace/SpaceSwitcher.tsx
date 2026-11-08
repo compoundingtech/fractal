@@ -5,6 +5,7 @@ import { currentSpace, type Command, type WorkspaceState } from '@fractal/ui/wor
 import { useDispatch, useWorkspace } from '@fractal/ui/workspace/react'
 import { colorVars as c, geometryVars as g, interactionVars as interaction, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { Icon } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Icons.tsx'
+import { Tooltip } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
 import { namingCommand, type NamingIntent } from '../palette/dispatch.ts'
 
 /** The space after the current one, wrapping: what Alt+G switches to. */
@@ -16,6 +17,9 @@ export const nextSpace = (state: WorkspaceState): Command | undefined => {
 
 const whole = (state: WorkspaceState) => state
 
+/** The name's first character, whole even when it is an emoji or other surrogate pair. */
+const initialOf = (name: string): string => (Array.from(name.trim())[0] ?? '·').toLocaleUpperCase()
+
 const namingTitle: Record<NamingIntent, string> = { create: 'New space', rename: 'Rename space', duplicate: 'Duplicate space' }
 
 type Mode = { readonly _tag: 'Menu' } | { readonly _tag: 'Naming'; readonly intent: NamingIntent } | { readonly _tag: 'Closing' } | { readonly _tag: 'Idle' }
@@ -24,13 +28,15 @@ type Mode = { readonly _tag: 'Menu' } | { readonly _tag: 'Naming'; readonly inte
  * The spaces switcher at the top of the sidebar, in place of the wordmark: the current space's name,
  * and a menu of the person's spaces (their glasses) with new, rename, duplicate and close. Naming
  * happens in a small field; closing asks first, since it removes the space from every client.
+ * On the collapsed rail it is the space's initial, named in full by its tooltip; `note` marks it and says why.
  */
-export const SpaceSwitcher = () => {
+export const SpaceSwitcher = ({ rail = false, note }: { readonly rail?: boolean; readonly note?: string } = {}) => {
   const dispatch = useDispatch()
   const state = useWorkspace(whole)
   const { spaces, current } = state
   const name = spaces.find(space => space.id === current)?.name ?? 'Space'
   const trigger = React.useRef<HTMLButtonElement>(null)
+  const noteId = React.useId()
   const [mode, setMode] = React.useState<Mode>({ _tag: 'Idle' })
   const [draft, setDraft] = React.useState('')
   const begin = (intent: NamingIntent) => {
@@ -42,13 +48,16 @@ export const SpaceSwitcher = () => {
     dispatch(namingCommand(state, mode.intent, draft.trim()))
     setMode({ _tag: 'Idle' })
   }
+  const button = <Aria.Button ref={trigger} aria-label={`Space: ${name}`} {...(note === undefined ? {} : { 'aria-describedby': noteId })} data-testid="space-switcher" {...stylex.props(rail ? styles.railTrigger : styles.trigger)}>
+    {rail
+      ? <span aria-hidden="true">{initialOf(name)}</span>
+      : <><span {...stylex.props(styles.name)}>{name}</span><Icon name="chevron-down" size={12} /></>}
+    {note === undefined ? null : <span aria-hidden="true" data-space-note="" {...stylex.props(styles.noteDot)} />}
+  </Aria.Button>
   return <>
     <Aria.MenuTrigger isOpen={mode._tag === 'Menu'} onOpenChange={open => setMode(open ? { _tag: 'Menu' } : current => current._tag === 'Menu' ? { _tag: 'Idle' } : current)}>
-      <Aria.Button ref={trigger} aria-label={`Space: ${name}`} data-testid="space-switcher" {...stylex.props(styles.trigger)}>
-        <span {...stylex.props(styles.name)}>{name}</span>
-        <Icon name="chevron-down" size={12} />
-      </Aria.Button>
-      <Aria.Popover placement="bottom start" {...stylex.props(styles.popover)}>
+      {rail ? <Tooltip label={note === undefined ? `Space: ${name}` : `Space: ${name} · ${note}`} placement="right" navigationFocusOnly>{button}</Tooltip> : button}
+      <Aria.Popover placement={rail ? 'right top' : 'bottom start'} {...stylex.props(styles.popover)}>
         <Aria.Menu aria-label="Spaces" autoFocus="first" onAction={key => {
           const id = String(key)
           if (id === 'new') begin('create')
@@ -73,7 +82,7 @@ export const SpaceSwitcher = () => {
         </Aria.Menu>
       </Aria.Popover>
     </Aria.MenuTrigger>
-    <Aria.Popover triggerRef={trigger} isOpen={mode._tag === 'Naming' || mode._tag === 'Closing'} onOpenChange={open => { if (!open) setMode({ _tag: 'Idle' }) }} placement="bottom start" {...stylex.props(styles.popover)}>
+    <Aria.Popover triggerRef={trigger} isOpen={mode._tag === 'Naming' || mode._tag === 'Closing'} onOpenChange={open => { if (!open) setMode({ _tag: 'Idle' }) }} placement={rail ? 'right top' : 'bottom start'} {...stylex.props(styles.popover)}>
       {mode._tag === 'Naming' ? <Aria.Dialog aria-label={namingTitle[mode.intent]} data-shortcuts-paused="" {...stylex.props(styles.dialog)}>
         <form onSubmit={event => { event.preventDefault(); submit() }} {...stylex.props(styles.form)}>
           <Aria.TextField aria-label={namingTitle[mode.intent]} value={draft} onChange={setDraft} autoFocus {...stylex.props(styles.field)}>
@@ -89,6 +98,7 @@ export const SpaceSwitcher = () => {
         </div>
       </Aria.Dialog> : null}
     </Aria.Popover>
+    {note === undefined ? null : <span id={noteId} hidden>{note}</span>}
   </>
 }
 
@@ -99,6 +109,14 @@ const styles = stylex.create({
     color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, fontWeight: 500, cursor: 'pointer',
     outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusOffset,
   },
+  // A 28px square holding the initial, the rail's other controls' size; its fill marks it as the current space.
+  railTrigger: {
+    position: 'relative', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, width: g.controlMd, height: g.controlMd, padding: 0,
+    borderWidth: g.hairline, borderStyle: 'solid', borderColor: c.borderStrong, borderRadius: 6, backgroundColor: { default: c.rowActive, ':hover': c.rowHover },
+    color: c.fg, fontFamily: t.fontSans, fontSize: t.uiSize, fontWeight: 600, cursor: 'pointer',
+    outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusOffset,
+  },
+  noteDot: { position: 'absolute', insetBlockStart: -3, insetInlineEnd: -3, width: 6, height: 6, borderRadius: '50%', backgroundColor: c.attention },
   name: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   popover: { backgroundColor: c.raised, color: c.fg, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, borderRadius: 8, fontFamily: t.fontSans, fontSize: t.uiSize },
   menu: { padding: s.xs, outline: 'none', minWidth: 200, maxWidth: 320 },

@@ -12,6 +12,8 @@ import { colorVars as c, typeVars as t, spaceVars as s, geometryVars as g } from
 
 export const sidebarMinimumWidth = 240
 export const sidebarDrawerBreakpoint = 900
+/** The collapsed dock: wide enough for a 28px control and its badge, never `null`, so global state stays on screen. */
+export const sidebarRailWidth = 48
 
 const subscribeTouchPointer = (onChange: () => void) => {
   const media = window.matchMedia(touchPointerQuery)
@@ -40,27 +42,55 @@ export type ResponsiveAgentSidebarProps = {
   readonly headerActions?: React.ReactNode
   /** In place of the wordmark: the space switcher. */
   readonly headerTitle?: React.ReactNode
+  /** Directly under the header, about what the header holds: "Layout not syncing". */
+  readonly notice?: React.ReactNode
+  /** Pinned under the body: the connection and Usage. */
+  readonly footer?: React.ReactNode
+  /** What the collapsed dock shows under its expand control; without it a collapsed dock renders nothing. */
+  readonly rail?: React.ReactNode
   readonly children: React.ReactNode
 }
 
 // Dialog filters aria-modal from its props; its DOM renderer preserves the modal declaration.
 const renderModalDialog = (props: React.ComponentPropsWithRef<'section'>) => <section {...props} aria-modal="true" />
 
-/** The dock consumes layout space; the modal drawer never resizes the thread. */
-export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, drawerOpen, drawerId, onDrawerOpenChange, onToggleCollapsed, onWidthChange, onWidthCommit, onWidthReset, headerActions, headerTitle, children }: ResponsiveAgentSidebarProps) => {
+/**
+ * The dock consumes layout space; the modal drawer never resizes the thread. Collapsed, the dock becomes a 48px rail.
+ * Whichever of the collapse and expand controls goes takes focus with it to the other, so a keyboard never lands on the page.
+ */
+export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, drawerOpen, drawerId, onDrawerOpenChange, onToggleCollapsed, onWidthChange, onWidthCommit, onWidthReset, headerActions, headerTitle, notice, footer, rail, children }: ResponsiveAgentSidebarProps) => {
   const portalContainer = React.useRef<HTMLDivElement>(null)
   const narrow = viewport < sidebarDrawerBreakpoint
   const coarse = useCoarsePointer()
+  const collapseControl = React.useRef<HTMLButtonElement | null>(null)
+  const expandControl = React.useRef<HTMLButtonElement>(null)
   const focusDrawerClose = React.useCallback((button: HTMLButtonElement | null) => {
+    collapseControl.current = button
     if (narrow) button?.focus()
   }, [narrow])
+  const shownCollapsed = React.useRef(collapsed)
+  React.useLayoutEffect(() => {
+    if (shownCollapsed.current === collapsed) return
+    shownCollapsed.current = collapsed
+    const active = document.activeElement
+    if (active !== null && active !== document.body && active.isConnected) return
+    ;(collapsed ? expandControl : collapseControl).current?.focus()
+  }, [collapsed])
+  if (!narrow && collapsed) return rail === undefined ? null : <NarrowLayoutContext.Provider value={false}>
+    <aside aria-label="Agents" data-sidebar-presentation="rail" style={{ width: sidebarRailWidth }} {...stylex.props(styles.rail)}>
+      <ChromeControl ref={expandControl} icon="panel-left" label="Expand sidebar" tooltip="Expand sidebar (⌘/Ctrl+B)" tooltipPlacement="right" onPress={onToggleCollapsed} />
+      {rail}
+    </aside>
+  </NarrowLayoutContext.Provider>
   const sidebar = <NarrowLayoutContext.Provider value={coarse}>
     <aside aria-label="Agents" data-sidebar-presentation={narrow ? 'drawer' : 'dock'} data-sidebar-density={coarse ? 'touch' : 'dock'} style={{ width: Math.max(sidebarMinimumWidth, width) }} {...stylex.props(styles.sidebar)}>
       <SidebarHeader ref={focusDrawerClose} label={narrow ? 'Close agents' : 'Collapse agents'} onCollapse={() => narrow ? onDrawerOpenChange(false) : onToggleCollapsed()} actions={headerActions} title={headerTitle} />
+      {notice}
       {children}
+      {footer === undefined ? null : <SidebarFooter>{footer}</SidebarFooter>}
     </aside>
   </NarrowLayoutContext.Provider>
-  if (!narrow) return collapsed ? null : <>{sidebar}<ResizableSplit id="live-agent-sidebar" value={width} min={sidebarMinimumWidth} max={maxWidth} collapsed={false} label="Agent sidebar width" onChange={onWidthChange} onCommit={onWidthCommit} onToggle={onToggleCollapsed} onReset={onWidthReset} /></>
+  if (!narrow) return <>{sidebar}<ResizableSplit id="live-agent-sidebar" value={width} min={sidebarMinimumWidth} max={maxWidth} collapsed={false} label="Agent sidebar width" onChange={onWidthChange} onCommit={onWidthCommit} onToggle={onToggleCollapsed} onReset={onWidthReset} /></>
   return <div ref={portalContainer} {...stylex.props(styles.portal)}>
     <Aria.ModalOverlay isOpen={drawerOpen} onOpenChange={onDrawerOpenChange} isDismissable UNSTABLE_portalContainer={portalContainer.current ?? undefined} {...stylex.props(styles.overlay)}>
       <Aria.Modal {...stylex.props(styles.modal)}>
@@ -69,6 +99,9 @@ export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, d
     </Aria.ModalOverlay>
   </div>
 }
+
+/** The sidebar's pinned bottom, shared by the dock and the phone drawer. */
+export const SidebarFooter = ({ children }: { readonly children: React.ReactNode }) => <footer {...stylex.props(styles.footer)}>{children}</footer>
 
 /** The dock's header, reused by the phone drawer: collapse at the leading edge, the wordmark (or the host's title), then trailing actions. */
 export const SidebarHeader = ({ ref, label, onCollapse, actions, title }: {
@@ -140,6 +173,9 @@ export const useSidebarNavigation = (showTab: (tab: 'agents' | 'alerts' | 'missi
 
 const styles = stylex.create({
   sidebar: { display: 'flex', flexDirection: 'column', flexShrink: 0, minWidth: sidebarMinimumWidth, minHeight: 0, height: '100%', overflow: 'hidden', backgroundColor: c.sidebar, color: c.fg },
+  // One column of 28px controls: the expand control first, as the header's collapse control was, and the rest under it.
+  rail: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: s.xs, flexShrink: 0, boxSizing: 'border-box', height: '100%', minHeight: 0, paddingBlock: s.sm, overflowX: 'hidden', overflowY: 'auto', borderInlineEndWidth: g.hairline, borderInlineEndStyle: 'solid', borderInlineEndColor: c.border, backgroundColor: c.sidebar, color: c.fg },
+  footer: { display: 'flex', flexDirection: 'column', flexShrink: 0, minHeight: 0 },
   // A minimum, not a fixed height: a touch layout's 44px collapse target stays inside the band.
   brand: { minHeight: g.band, boxSizing: 'border-box', paddingInline: s.md, display: 'flex', alignItems: 'center', gap: s.md, flexShrink: 0 },
   wordmark: { fontWeight: 500 },

@@ -155,6 +155,10 @@ it('says when the layout is not syncing, and a retry that reaches the glasses st
   root = createRoot(host)
   await act(async () => root!.render(<DataSourceProvider source={source} registry={registry}><LiveAgentWorkspace glasses={flaky} /></DataSourceProvider>))
   await vi.waitFor(() => expect(host.textContent).toContain('Layout not syncing'))
+  // It describes the person's glasses and spaces, so it sits under the sidebar's header beside the space switcher, never in a pane.
+  const note = host.querySelector<HTMLElement>('[data-layout-sync]')!
+  expect(note.closest('aside[aria-label="Agents"]')).not.toBeNull()
+  expect(note.closest('[data-pane]')).toBeNull()
   expect(titles()).toEqual([])
   reachable = true
   await act(async () => [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Retry')!.click())

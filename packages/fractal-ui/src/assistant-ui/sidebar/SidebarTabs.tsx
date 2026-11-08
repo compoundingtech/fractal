@@ -104,6 +104,13 @@ export function CountPill({ count, needsYou = false }: { readonly count: number;
   return <span aria-hidden="true" data-sidebar-tab-marker={needsYou ? 'needs-you' : 'count'} data-sidebar-tab-count={count > 99 ? '99+' : count} {...stylex.props(styles.pill, needsYou ? styles.attention : styles.neutral)} />
 }
 
+/** A tab's strongest marker alone, counts kept, for a rail that shows the tab as its icon; null when the tab has none. Painted, so the host's name carries the words (`sidebarTabName`). */
+export function SidebarTabBadge({ tab }: { readonly tab: SidebarTab }) {
+  const marker = markerOf(tab)
+  if (marker === null) return null
+  return <span data-sidebar-tab-marker={marker.kind} data-sidebar-tab-count={marker.count > 0 ? (marker.count > 99 ? '99+' : marker.count) : undefined} {...stylex.props(styles.pill, styles.badge, marker.icon !== undefined && styles.iconOnly, marker.kind === 'question' || marker.kind === 'needs-you' ? styles.attention : marker.kind === 'status' ? (tab.status?.glyph === '!' ? styles.fault : styles.neutral) : styles.neutral)}>{marker.icon === undefined ? null : <Icon name={marker.icon} size={12} />}</span>
+}
+
 /**
  * Controlled sidebar tabs (React Aria): ←/→ move between tabs, Home/End to the ends. Every tab spans the full row, with side
  * padding and a gap between tabs at every width, and labels never truncate: the row steps down through `sidebarTabFits`.
@@ -187,6 +194,8 @@ const styles = stylex.create({
   // A compact badge: never stretched by the row, a true circle around one digit, growing sideways for more. The line box is the
   // inner height, so a digit sits optically centred. An absent count attribute paints as empty.
   pill: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', alignSelf: 'center', flexShrink: 0, marginInlineStart: s.xs2, boxSizing: 'border-box', height: g.icon, minWidth: g.icon, paddingInline: s.xs2, borderWidth: g.hairline, borderStyle: 'solid', borderRadius: r.full, fontSize: t.denseSize, lineHeight: `calc(${g.icon} - 2 * ${g.hairline})`, fontWeight: t.weightMedium, fontVariantNumeric: 'tabular-nums', '::after': { content: 'attr(data-sidebar-tab-count)' } },
+  // On a rail icon's corner rather than after a label: no lead-in space.
+  badge: { marginInlineStart: 0 },
   // Counts dropped: the filled pill stays as a dot; status keeps its icon at badge size.
   dot: { height: s.md, minWidth: s.md, paddingInline: 0 },
   iconOnly: { paddingInline: 0 },
