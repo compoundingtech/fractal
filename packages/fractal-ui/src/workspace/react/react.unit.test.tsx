@@ -320,4 +320,15 @@ describe('keys', () => {
     key(document.body, { key: 'k', code: 'KeyK', metaKey: mac, ctrlKey: !mac })
     expect(onPalette).toHaveBeenCalledOnce()
   })
+
+  it('closes an empty pane with Alt+W', () => {
+    const store = memoryStore(['doc:a'])
+    render(<App store={store} />)
+    const mac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)
+    key(document.body, { key: 'd', code: 'KeyD', metaKey: mac, ctrlKey: !mac })
+    expect(panesOf(currentSpace(store.getState()).layout)).toHaveLength(2)
+    key(document.body, { key: '∑', code: 'KeyW', altKey: true })
+    expect(panesOf(currentSpace(store.getState()).layout)).toHaveLength(1)
+    expect(tabsOf(currentSpace(store.getState()).layout).map(tab => tab.ref)).toEqual(['doc:a'])
+  })
 })
