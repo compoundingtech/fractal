@@ -91,8 +91,29 @@ it('clears the divider and the count on a send', async () => {
 it('shows a dot for a closed conversation whose roster reports newer prose', async () => {
   await render({ items: [answer('a1', 20)], visible: true })
   await render(undefined)
-  agents[0] = { ...agent, lastProseAt: { _tag: 'Known', value: 90 } } as Agent
+  agents[0] = { ...agent, lastProseAt: { _tag: 'Known', value: 90_000 } } as Agent
   await render(undefined)
   expect(marks.get('agent/scout')).toBe('some')
   agents[0] = agent
+})
+
+it('treats a roster time a little after the newest item read as the same words, not as new', async () => {
+  await render({ items: [answer('a1', 20_000)], visible: true })
+  await act(async () => latest.onSeen?.(['a1']))
+  await render(undefined)
+  // The daemon stamps prose when it accepts it, a few ms after the item's own time.
+  agents[0] = { ...agent, lastProseAt: { _tag: 'Known', value: 20_050 } } as Agent
+  await render(undefined)
+  expect(marks.get('agent/scout')).toBeUndefined()
+  agents[0] = agent
+})
+
+it('does not count a send from before the pane mounted as reading what came since', async () => {
+  await render({ items: [answer('a1', 20)], visible: true, sendKey: 'send-1' })
+  await render({ items: [answer('a1', 20), answer('a2', 30)], visible: false, sendKey: 'send-1' })
+  await render(undefined)
+  await render({ items: [answer('a1', 20), answer('a2', 30)], visible: true, sendKey: 'send-1' })
+  expect(latest.unreadFrom).toBe('a2')
+  // Not read until it is seen.
+  expect(marks.get('agent/scout')).toBe(1)
 })

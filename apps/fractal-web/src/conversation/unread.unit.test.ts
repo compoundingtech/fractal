@@ -47,12 +47,20 @@ describe('the mark on a tab or row', () => {
   })
 
   it('is a dot, not a stale count, when the roster knows newer prose than this window saw', () => {
-    expect(unreadMark({ seenAtMs: 20, observed: [20, 40], latestProseAt: 90 })).toBe('some')
-    expect(unreadMark({ seenAtMs: 20, latestProseAt: 90 })).toBe('some')
+    expect(unreadMark({ seenAtMs: 20, observed: [20, 40], latestProseAt: 90_000 })).toBe('some')
+    expect(unreadMark({ seenAtMs: 20, latestProseAt: 90_000 })).toBe('some')
   })
 
   it('is nothing once seen, or before the person ever looked', () => {
     expect(unreadMark({ seenAtMs: 90, observed: [40], latestProseAt: 90 })).toBeUndefined()
     expect(unreadMark({ seenAtMs: undefined, latestProseAt: 90 })).toBeUndefined()
+  })
+})
+
+describe('clock skew between items and the roster', () => {
+  it('reads roster prose within a moment of what was seen as already seen', () => {
+    expect(unreadMark({ seenAtMs: 20_000, observed: [20_000], latestProseAt: 20_050 })).toBeUndefined()
+    expect(unreadMark({ seenAtMs: 20_000, latestProseAt: 20_050 })).toBeUndefined()
+    expect(unreadMark({ seenAtMs: 20_000, latestProseAt: 30_000 })).toBe('some')
   })
 })

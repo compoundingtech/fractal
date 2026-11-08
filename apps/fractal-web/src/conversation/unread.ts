@@ -62,6 +62,12 @@ export type UnreadMark = number | 'some'
  * A conversation's mark without its transcript: `observed` are the times of the new items this
  * window last saw (exact while nothing newer is known), `latestProseAt` the roster's newest prose.
  */
+/**
+ * Item times come from the harness entry; the roster stamps the same words when the daemon accepts
+ * them, a moment later. Roster prose this close after what the person saw is those same words.
+ */
+export const rosterSkewMs = 2_000
+
 export const unreadMark = ({ seenAtMs, observed, latestProseAt }: {
   readonly seenAtMs: number | undefined
   readonly observed?: readonly number[]
@@ -69,9 +75,9 @@ export const unreadMark = ({ seenAtMs, observed, latestProseAt }: {
 }): UnreadMark | undefined => {
   if (seenAtMs === undefined) return undefined
   const observedLatest = observed === undefined || observed.length === 0 ? undefined : Math.max(...observed)
-  const behind = latestProseAt !== undefined && (observedLatest === undefined || latestProseAt > observedLatest)
+  const behind = latestProseAt !== undefined && (observedLatest === undefined || latestProseAt > observedLatest + rosterSkewMs)
   // Newer prose than this window saw makes any count a lower bound: say only that something is new.
-  if (behind && latestProseAt! > seenAtMs) return 'some'
+  if (behind && latestProseAt! > seenAtMs + rosterSkewMs) return 'some'
   const count = observed?.filter(at => at > seenAtMs).length ?? 0
   return count > 0 ? count : undefined
 }

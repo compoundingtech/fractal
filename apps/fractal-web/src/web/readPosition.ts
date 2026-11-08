@@ -70,12 +70,16 @@ export const useReadPosition = ({ conversation, items, visible, enabled, sendKey
       if (latest !== undefined) store.advance(conversation, latest)
     }
   }, [enabled, store, items, gateway, conversation, registry, shown])
+  // Only a send made while this pane is mounted moves the position here; a send kept from
+  // before it mounted is old news, and reading moves the position through onSeen.
+  const lastSend = React.useRef(sendKey)
   React.useEffect(() => {
+    if (lastSend.current === sendKey) return
+    lastSend.current = sendKey
     if (shown && sendKey !== undefined && items !== undefined) {
       const latest = latestAtMs(items)
       if (latest !== undefined) store!.advance(conversation, latest)
     }
-    // Only a new send moves the position here; reading moves it through onSeen.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sendKey])
   const byId = React.useMemo(() => new Map((items ?? []).map(item => [item.id, item] as const)), [items])
