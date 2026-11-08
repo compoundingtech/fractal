@@ -194,6 +194,19 @@ describe('syncing spaces with an external store', () => {
     expect(fake.published[0]).toMatchObject({ base: 'r1', body: { layout: { tabs: [{ ref: 'doc:a' }, { ref: 'doc:b' }] } } })
   }).pipe(Effect.provide(memoryPersistence())))
 
+  itEffect('still writes a change made while its last write was coming back', () => Effect.gen(function* () {
+    const fake = yield* fakeSync()
+    const store = yield* makeWorkspaceStore({ config: counter('a'), schema, initial, sync: [fake.sync] })
+    store.dispatch({ _tag: 'Open', ref: 'doc:a' })
+    yield* settle
+    store.dispatch({ _tag: 'Open', ref: 'doc:b' })
+    // The first write's echo lands before the second is sent.
+    yield* Queue.offer(fake.incoming, { _tag: 'Body', space: 'space', body: fake.published[0]!.body, revision: 'r1' })
+    yield* settle
+    expect(fake.published).toHaveLength(2)
+    expect(refs(store.getState())).toEqual(['doc:a', 'doc:b'])
+  }).pipe(Effect.provide(memoryPersistence())))
+
   itEffect('does not write its stored spaces again on load', () => Effect.gen(function* () {
     const first = yield* fakeSync()
     const store = yield* makeWorkspaceStore({ config: counter('a'), schema, initial, sync: [first.sync] })

@@ -10,7 +10,7 @@ import { alertTabMarkers } from './alertsTab.ts'
 import { missionTabMarkersAtom } from './missionsTab.ts'
 import { focusedPane } from '@fractal/ui/workspace'
 import { activeTab, currentSpace, showsTerminal, tabsOf, workspaceConfig, type Command, type TabView, type WorkspaceState as WorkspaceStateValue } from '../workspace/model.ts'
-import { bootGlasses, type GlassGateway } from '../workspace/glassSync.ts'
+import { bootGlassesOnce, type GlassGateway } from '../workspace/glassSync.ts'
 import type { SpaceSync } from '@fractal/ui/workspace/store'
 import { OpenProvider, openCommand, type Open } from '../workspace/openable.ts'
 import { paneKey, parsePane, subjectAgent, subjectOfRef, subjectRef } from '../workspace/subject.ts'
@@ -276,13 +276,11 @@ const useGlassBoot = (glasses: GlassGateway | undefined): Boot | undefined => {
   React.useEffect(() => {
     if (glasses === undefined) return
     let live = true
-    let close: (() => void) | undefined
-    void bootGlasses({ gateway: glasses, config: workspaceConfig() }).then(result => {
-      if (result._tag === 'Synced') close = result.close
-      if (!live) return close?.()
-      setBoot(result._tag === 'Synced' ? { initial: result.initial, sync: [result.sync] } : memoryBoot)
+    // One boot per gateway for the page's life; its follow stays open with it.
+    void bootGlassesOnce({ gateway: glasses, config: workspaceConfig() }).then(result => {
+      if (live) setBoot(result._tag === 'Synced' ? { initial: result.initial, sync: [result.sync] } : memoryBoot)
     })
-    return () => { live = false; close?.() }
+    return () => { live = false }
   }, [glasses])
   return boot
 }

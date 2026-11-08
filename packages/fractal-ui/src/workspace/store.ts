@@ -210,9 +210,8 @@ export const makeWorkspaceStore = Effect.fn('makeWorkspaceStore')(function* <V>(
       return row === undefined ? undefined : { body: spaceBody(row, { sizes: sync.syncsSizes }), revision: row.revision }
     }
     const apply = (event: SpaceEvent) => {
-      // What arrives wins over what this client had not written yet: last writer wins.
-      track.dirty.delete(event.space)
       if (event._tag === 'Removed') {
+        track.dirty.delete(event.space)
         track.known.delete(event.space)
         track.sent.delete(event.space)
         track.received.delete(event.space)
@@ -228,6 +227,8 @@ export const makeWorkspaceStore = Effect.fn('makeWorkspaceStore')(function* <V>(
         dispatch({ _tag: 'SetRevision', space: event.space, revision: event.revision })
         return
       }
+      // Another writer's body wins over what this client had not written yet: last writer wins.
+      track.dirty.delete(event.space)
       dispatch({ _tag: 'Receive', space: event.space, body: event.body, revision: event.revision, sizes: sync.syncsSizes })
     }
     const publishSpace = (space: string): Effect.Effect<void> => Effect.suspend(() => {

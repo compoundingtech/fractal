@@ -198,15 +198,20 @@ const settleWrite = <A>(write: () => Promise<A>, what: string) => Effect.tryProm
     })),
 )
 
-export const glassSync = ({ gateway, follow, ratios, key }: {
+/**
+ * `written` holds the revisions this page wrote. st sends each write back as it stored it (binary, ratios
+ * clamped), which is not the body the store sent; so a glass at one of these revisions is this page's own
+ * and is skipped, never adopted as another writer's.
+ */
+export const glassSync = ({ gateway, follow, ratios, written = new Set<string>() }: {
   readonly gateway: GlassGateway
   readonly follow: Pick<GlassFollow, 'listen'>
   readonly ratios: boolean
-  readonly key?: (key: string) => string
+  readonly written?: Set<string>
 }): SpaceSync => ({
   syncsSizes: ratios,
   incoming: Stream.callback<SpaceEvent>(queue => Effect.acquireRelease(
-    Effect.sync(() => follow.listen(glass => { Queue.offerUnsafe(queue, eventOfGlass(glass)) })),
+    Effect.sync(() => follow.listen(glass => { if (!written.has(glass.revision)) Queue.offerUnsafe(queue, eventOfGlass(glass)) })),
     stop => Effect.sync(stop),
   )),
   publish: (space, body, meta) => Effect.suspend(() => {
@@ -216,12 +221,30 @@ export const glassSync = ({ gateway, follow, ratios, key }: {
       console.warn(`[workspace] not writing the glass: ${problem}`)
       return Effect.succeed(undefined)
     }
-    return settleWrite(() => gateway.putGlass(space, { base_revision: meta.base ?? null, body: glass }, key?.(meta.key) ?? meta.key), 'the layout').pipe(
-      Effect.map(envelope => envelope === undefined ? undefined : { revision: envelope.value.revision }),
+    return settleWrite(() => gateway.putGlass(space, { base_revision: meta.base ?? null, body: glass }, meta.key), 'the layout').pipe(
+      Effect.map(envelope => {
+        if (envelope === undefined) return undefined
+        written.add(envelope.value.revision)
+        return { revision: envelope.value.revision }
+      }),
     )
   }),
   remove: (space, meta) => settleWrite(() => gateway.deleteGlass(space, { base_revision: meta.base ?? null }, `remove-${space}-${meta.base ?? 'none'}`), 'closing the glass').pipe(Effect.asVoid),
 })
+
+const boots = new WeakMap<GlassGateway, Promise<GlassBoot>>()
+
+/**
+ * Boots once per gateway for the page's life: a remount (StrictMode's, in development) shares the boot,
+ * so a person without glasses never gets two `Main` glasses.
+ */
+export const bootGlassesOnce = (options: Parameters<typeof bootGlasses>[0]): Promise<GlassBoot> => {
+  const known = boots.get(options.gateway)
+  if (known !== undefined) return known
+  const boot = bootGlasses(options)
+  boots.set(options.gateway, boot)
+  return boot
+}
 
 /**
  * Discovers the grant and waits for the person's first glasses snapshot. With no glasses yet, makes one
@@ -253,7 +276,8 @@ export const bootGlasses = async ({ gateway, config, socket, timeoutMs = 5_000 }
   }
   const ratios = version >= 2
   const live = glasses.filter(glass => !glass.deleted && glass.body !== null)
-  const sync = glassSync({ gateway, follow, ratios })
+  const written = new Set<string>()
+  const sync = glassSync({ gateway, follow, ratios, written })
   if (live.length === 0) {
     // The person's first glass. Made here, so the first write is a create.
     const initial = emptyWorkspace(config)
@@ -261,6 +285,7 @@ export const bootGlasses = async ({ gateway, config, socket, timeoutMs = 5_000 }
     const body = Workspace.spaceBody(space, { sizes: ratios })
     const made = await gateway.putGlass(space.id, { base_revision: null, body: toGlassBody(body, { ratios }) }, `create-${space.id}`).catch(() => undefined)
     const revision = made?.value.revision
+    if (revision !== undefined) written.add(revision)
     return { _tag: 'Synced', initial: revision === undefined ? initial : Workspace.transition(initial, { _tag: 'SetRevision', space: space.id, revision }, config), sync, close: follow.close }
   }
   const [head] = live

@@ -109,7 +109,8 @@ it('reopens a closed tab when history arrives back at its subject', async () => 
 const glassStore = () => {
   const glasses = new Map<string, Glass>()
   let revision = 0
-  const gateway: GlassGateway = {
+  // A fresh gateway per page load, over the same glasses.
+  const gateway = (): GlassGateway => ({
     discover: async () => ({ value: { capabilities: [{ id: 'glasses', version: 2, state: 'granted' }] } }) as never,
     collectionStream: async options => ({
       subscribeGlasses: (id: string) => queueMicrotask(() => options.onFrame({ kind: 'snapshot', id, collection: 'glasses', items: [...glasses.values()], order: [...glasses.keys()], has_more: false, snapshot: {} } as never)),
@@ -122,19 +123,19 @@ const glassStore = () => {
       return { value: glass } as never
     },
     deleteGlass: async () => { throw new Error('not expected') },
-  }
+  })
   return { gateway, glasses }
 }
 
 it('starts from the person\'s glasses after a reload; faces and the shared panel are this page\'s', async () => {
   const st = glassStore()
-  await mount(st.gateway)
+  await mount(st.gateway())
   await act(async () => row('agent/b').click())
   await vi.waitFor(() => expect([...st.glasses.values()].map(glass => JSON.stringify(glass.body))).toEqual([expect.stringContaining('agent:agent/b')]))
   await act(async () => button('Toggle right panel').click())
   await unmount()
   window.history.replaceState(null, '', '/')
-  await mount(st.gateway)
+  await mount(st.gateway())
   expect(titles()).toEqual(['Agent A', 'Agent B'])
   expect(button('Toggle right panel').getAttribute('aria-pressed')).toBe('true')
 })

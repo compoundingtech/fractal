@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import * as Workspace from '@fractal/ui/workspace'
 import type { CollectionFrame, CollectionStream, Glass, GlassBody, GlassLayout } from '@fractal/client'
 import { ClientError } from '@fractal/client'
@@ -18,7 +18,7 @@ const counter = () => {
 }
 
 /** A gateway over one fake socket: `emit` sends a frame for the workspace's subscription. */
-const fakeGateway = ({ granted = true, version = 2, glasses = [] as readonly Glass[], silent = false } = {}) => {
+const fakeGateway = ({ granted = true, version = 2, glasses = [] as readonly Glass[], silent = false, echoMs = 5 } = {}) => {
   const puts: { id: string; base: string | null; body: GlassBody; key: string }[] = []
   const deletes: string[] = []
   let onFrame: ((frame: CollectionFrame) => void) | undefined
@@ -39,14 +39,19 @@ const fakeGateway = ({ granted = true, version = 2, glasses = [] as readonly Gla
     putGlass: async (id, request, key) => {
       puts.push({ id, base: request.base_revision, body: request.body, key })
       revision += 1
-      return { value: glass(0, request.body, `r${revision}`) } as never
+      // st stores the body as written and sends it back on the subscription, as every client sees it.
+      const stored = { ...glass(0, request.body, `r${revision}`), id: `glass/person/ada/${id}` } as Glass
+      setTimeout(() => emit([stored]), echoMs)
+      return { value: stored } as never
     },
     deleteGlass: async id => {
       deletes.push(id)
       return { value: glass(0, null) } as never
     },
   }
-  const emit = (upserts: readonly Glass[]) => onFrame?.({ kind: 'changes', id: subscription, collection: 'glasses', upserts, removes: [], order: [], has_more: false, snapshot: {} } as never)
+  function emit(upserts: readonly Glass[]) {
+    onFrame?.({ kind: 'changes', id: subscription, collection: 'glasses', upserts, removes: [], order: [], has_more: false, snapshot: {} } as never)
+  }
   return { gateway, puts, deletes, emit }
 }
 
@@ -118,13 +123,48 @@ describe('booting from the person\'s glasses', () => {
 })
 
 describe('the workspace on the person\'s glasses', () => {
-  const synced = async (glasses: readonly Glass[]) => {
-    const fake = fakeGateway({ glasses })
+  const synced = async (glasses: readonly Glass[], { debounceMs = 5, echoMs = 5, open }: { debounceMs?: number; echoMs?: number; open?: string } = {}) => {
+    const fake = fakeGateway({ glasses, echoMs })
     const boot = await bootGlasses({ gateway: fake.gateway, config: workspaceConfig(counter()) })
     if (boot._tag !== 'Synced') throw new Error(boot._tag)
-    const store = createWorkspaceStore({ initial: boot.initial, sync: [boot.sync], debounceMs: 5, newId: counter() })
+    const store = createWorkspaceStore({ initial: boot.initial, sync: [boot.sync], debounceMs, newId: counter() })
+    // As `useWorkspaceStore` opens the URL's subject.
+    if (open !== undefined) store.dispatch({ _tag: 'Open', ref: open })
     return { fake, store, close: () => { store.dispose(); boot.close() } }
   }
+  const shape = (state: ReturnType<ReturnType<typeof createWorkspaceStore>['getState']>) => JSON.stringify(Workspace.toWire(currentSpace(state).layout, { sizes: true }))
+
+  it('keeps the tab a first visit opens, and writes it into the new Main glass', async () => {
+    const { fake, store, close } = await synced([], { open: 'agent:agent/a' })
+    await settle()
+    expect(tabsOf(store.getState()).map(tab => tab.ref)).toEqual(['agent:agent/a'])
+    expect(fake.puts.map(put => put.body.layout)).toEqual([tabs(), tabs('agent:agent/a')])
+    close()
+  })
+
+  it('still writes a change made while its last write was coming back', async () => {
+    const { fake, store, close } = await synced([glass(1, { name: 'Main', layout: tabs('list:home') })], { debounceMs: 30, echoMs: 5 })
+    store.dispatch({ _tag: 'Open', ref: 'usage:' })
+    await vi.waitFor(() => expect(fake.puts).toHaveLength(1))
+    store.dispatch({ _tag: 'Open', ref: 'agent:agent/a' })
+    await settle()
+    expect(fake.puts).toHaveLength(2)
+    expect(tabsOf(store.getState()).map(tab => tab.ref)).toEqual(['list:home', 'usage:', 'agent:agent/a'])
+    close()
+  })
+
+  it('does not take its own write back as another writer\'s, though st keeps it binary and clamped', async () => {
+    const { fake, store, close } = await synced([glass(1, { name: 'Main', layout: tabs('a:1') })])
+    store.dispatch({ _tag: 'Split', side: 'right', ref: 'a:2' })
+    store.dispatch({ _tag: 'Split', side: 'right', ref: 'a:3' })
+    const split = currentSpace(store.getState()).layout as Extract<Workspace.Layout, { axis: string }>
+    store.dispatch({ _tag: 'Resize', split: split.id, sizes: split.children.length === 3 ? [0.02, 0.49, 0.49] : [0.02, 0.98] })
+    const before = shape(store.getState())
+    await settle()
+    expect(fake.puts.length).toBeGreaterThan(0)
+    expect(shape(store.getState())).toBe(before)
+    close()
+  })
 
   it('adopts what another writer sends and never writes it back, even where it normalised it', async () => {
     const { fake, store, close } = await synced([glass(1, { name: 'Main', layout: tabs('list:home') })])
