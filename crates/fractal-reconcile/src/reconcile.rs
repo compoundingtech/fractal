@@ -50134,12 +50134,6 @@ mission "queued" state="ready" {
   goal "Give the durable seat one step in each run."
   step "work" { assigned-to "agent/node.worker" }
 }
-mission "mixed" state="ready" {
-  concurrent-runs
-  goal "Keep literal and historical assignments in one run."
-  step "work" { assigned-to "agent/node.worker" }
-  step "legacy" { assigned-to "agent/node.worker" }
-}
 mission "gated" state="ready" {
   concurrent-runs
   goal "Hold the durable seat's step until another seat finishes."
@@ -50338,29 +50332,46 @@ mission "fresh" state="ready" {
     #[test]
     fn wake_order_ignores_alias_join_times_and_agrees_with_claim_admission() {
         const SEAT: &str = "agent/node/worker";
-        let root = tempfile::tempdir().unwrap();
-        let database = root.path().join("literal-wake-order.sqlite");
-        let seat = SeatQueueFixture::with_store_for_agent(
-            Arc::new(Store::open(&database, "node").unwrap()), SEAT,
-        );
-        let a = seat.start("mixed", "literal-wake-a");
-        let b = seat.start("queued", "literal-wake-b");
-        let a_work = SeatQueueFixture::step(&a, "work");
-        let a_legacy = SeatQueueFixture::step(&a, "legacy");
-        let b_work = SeatQueueFixture::step(&b, "work");
-        let connection = rusqlite::Connection::open(&database).unwrap();
-        crate::store::configure_projection_writer(&connection).unwrap();
-        for (subject, assignee, joined) in [
-            (a_work.as_str(), SEAT, 20),
-            (a_legacy.as_str(), "node/worker", 1),
-            (b_work.as_str(), SEAT, 10),
-        ] {
-            connection.execute(
-                /* sqlite-large-value: allow-for-now lv-h05a4bea897ac owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET assignee=?1, created_at_unix_ms=?2 WHERE subject=?3",
-                rusqlite::params![assignee, joined, subject],
-            ).unwrap();
+        struct Clock;
+        impl Drop for Clock {
+            fn drop(&mut self) {
+                smallclaims::store::set_thread_clock(None);
+            }
         }
-        drop(connection);
+        smallclaims::store::set_thread_clock(Some(1));
+        let _clock = Clock;
+        let store = Arc::new(Store::open_memory("node").unwrap());
+        store.set_write_clock_at(1).unwrap();
+        let seat = SeatQueueFixture::with_store_for_agent(store, SEAT);
+        let canonical_source = SEAT_QUEUE_SOURCE
+            .replace("agent \"worker\"", "agent \"node/worker\"")
+            .replace("agent/node.worker", SEAT);
+        let legacy_source = canonical_source.replace(SEAT, "node/worker");
+        apply_source(&seat.store, &legacy_source, "literal-wake-legacy-definition");
+        let a = seat.start("queued", "literal-wake-a");
+        let legacy = a.steps.iter().find(|step| step.step == "work").unwrap();
+        assert_eq!(legacy.assigned_to.as_deref(), Some("node/worker"));
+        assert_eq!(legacy.created_at_unix_ms, 1);
+        smallclaims::store::set_thread_clock(Some(10));
+        seat.store.set_write_clock_at(10).unwrap();
+        apply_source(&seat.store, &canonical_source, "literal-wake-canonical-definition");
+        let b = seat.start("queued", "literal-wake-b");
+        let b_work = SeatQueueFixture::step(&b, "work");
+        smallclaims::store::set_thread_clock(Some(20));
+        seat.store.set_write_clock_at(20).unwrap();
+        // A new generation joins the literal seat at 20, while its old
+        // generation keeps the alias join at 1 for presentation.
+        let revised_source = canonical_source.replace("step \"work\"", "step \"literal\"");
+        apply_source(&seat.store, &revised_source, "literal-wake-revision");
+        let revision = seat.store.mission_spec("queued", None).unwrap().unwrap();
+        let a = seat.store.adopt_mission_revision(
+            &a.id, &revision, "person/requester", "join the literal seat",
+            "literal-wake-adopt",
+        ).unwrap();
+        seat.reconciler.reconcile_once().unwrap();
+        let a_work = SeatQueueFixture::step(&a, "literal");
+        assert_eq!(a.steps.iter().find(|step| step.subject == a_work).unwrap().created_at_unix_ms, 20);
+        assert_eq!(b.steps.iter().find(|step| step.subject == b_work).unwrap().created_at_unix_ms, 10);
         assert_eq!(seat.order(), SeatQueueFixture::runs(&[&a, &b]),
             "presentation still merges the earlier alias join");
         let expected = SeatQueueFixture::runs(&[&b, &a]);
