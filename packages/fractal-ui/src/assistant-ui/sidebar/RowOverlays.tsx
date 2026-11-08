@@ -5,7 +5,7 @@ import { Dialog, Popover, Text } from 'react-aria-components'
 import { Menu, MenuItem, Popover as MenuPopover } from '../composition/Controls'
 import { Icon } from '../composition/Icons'
 import { borderVars as border, elevationVars as elevation, geometryVars as g, radiusVars as r, spaceVars as s, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
-import { rowAttention, rowStatusLabel, type SidebarAgentRow as Row } from './model'
+import { rowAttention, rowHasUnread, rowStatusLabel, type SidebarAgentRow as Row } from './model'
 import type { AgentRowActionsProps } from './DeferredRowActions.tsx'
 import { sidebarRowTitle, sidebarSubagentObservationText, usageText, tokenCount, spendCount, openRow } from './rowPresentation.tsx'
 import { SidebarStatus } from './SidebarStatus'
@@ -125,7 +125,7 @@ export function AgentRowMenu({ row, actions, onOpen, onMarkRead, onDetailsPress 
       {actions?.resource !== undefined && row.mission !== undefined && <MenuItem id="mission" onAction={() => actions.resource?.(row.mission!, ownerId)} style={menuItemStyle}>Open mission</MenuItem>}
       {actions?.resource !== undefined && row.worktree !== undefined && <MenuItem id="worktree" onAction={() => actions.resource?.(row.worktree!, ownerId)} style={menuItemStyle}>Open worktree</MenuItem>}
       {actions?.resource !== undefined && row.pullRequest !== undefined && <MenuItem id="pr" onAction={() => actions.resource?.(row.pullRequest!.ref, ownerId)} style={menuItemStyle}>Open pull request</MenuItem>}
-      {(row.unread ?? 0) > 0 && onMarkRead !== undefined && <MenuItem id="read" onAction={() => onMarkRead(row.ref)} style={menuItemStyle}>Mark read</MenuItem>}
+      {rowHasUnread(row) && onMarkRead !== undefined && <MenuItem id="read" onAction={() => onMarkRead(row.ref)} style={menuItemStyle}>Mark read</MenuItem>}
     </Menu></MenuPopover>
 }
 const styles = stylex.create({

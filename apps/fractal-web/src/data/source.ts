@@ -182,6 +182,8 @@ export interface Agent {
   readonly ask: Known<string>
   /** Last observed activity, not the boundary of the current status. */
   readonly lastActivityAt: Known<number>
+  /** The newest prose from the agent's side, when the gateway reports it: what "new since you last looked" compares with. */
+  readonly lastProseAt?: Known<number>
   /** Exact observed state boundary when supplied (currently suspension), not last activity. */
   readonly statusSince?: number
   readonly subagents?: readonly AgentSubagent[]
