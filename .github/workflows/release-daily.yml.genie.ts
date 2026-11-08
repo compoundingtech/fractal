@@ -25,7 +25,7 @@ export default githubWorkflow(auditCaches({
           type: 'string',
         },
         run: {
-          description: 'Successful main tag-release run ID; default is the newest',
+          description: 'Successful main tag-release run ID. Provide the exact source SHA to reuse a dispatched candidate.',
           required: false,
           type: 'string',
         },
@@ -56,7 +56,7 @@ export default githubWorkflow(auditCaches({
   jobs: {
     build: {
       name: 'build-exact-release-candidate',
-      if: "github.event_name == 'workflow_dispatch' && inputs.mode == 'candidate' && inputs.sha != '' && github.ref == 'refs/heads/main'",
+      if: "github.event_name == 'workflow_dispatch' && inputs.mode == 'candidate' && inputs.sha != '' && inputs.run == '' && github.ref == 'refs/heads/main'",
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 180,
       concurrency: {
@@ -82,7 +82,7 @@ export default githubWorkflow(auditCaches({
     release: {
       name: 'daily-release-candidate',
       needs: 'build',
-      if: "${{ !cancelled() && (needs.build.result == 'success' || needs.build.result == 'skipped') && inputs.mode != 'publish' && github.ref == 'refs/heads/main' }}",
+      if: "${{ always() && !cancelled() && (needs.build.result == 'success' || needs.build.result == 'skipped') && inputs.mode != 'publish' && github.ref == 'refs/heads/main' }}",
       'runs-on': 'ubuntu-latest',
       'timeout-minutes': 20,
       concurrency: {
