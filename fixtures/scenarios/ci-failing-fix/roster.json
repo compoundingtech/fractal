@@ -58,6 +58,7 @@
         "reachability": "local",
         "revision": "ag5",
         "runtime_ids": [
+          "runtime/example-atlas-builder-shell",
           "runtime/example-atlas-builder"
         ],
         "since": "2030-01-01T11:50:00.000Z",
@@ -205,6 +206,7 @@
           "reachability": "local",
           "revision": "ag18",
           "runtime_ids": [
+            "runtime/example-atlas-builder-shell",
             "runtime/example-atlas-builder"
           ],
           "since": "2030-01-01T12:00:10.000Z",
@@ -290,6 +292,7 @@
           "reachability": "local",
           "revision": "ag16",
           "runtime_ids": [
+            "runtime/example-atlas-builder-shell",
             "runtime/example-atlas-builder"
           ],
           "since": "2030-01-01T12:00:18.000Z",
@@ -351,6 +354,7 @@
           "reachability": "local",
           "revision": "ag25",
           "runtime_ids": [
+            "runtime/example-atlas-builder-shell",
             "runtime/example-atlas-builder"
           ],
           "since": "2030-01-01T12:00:30.000Z",
