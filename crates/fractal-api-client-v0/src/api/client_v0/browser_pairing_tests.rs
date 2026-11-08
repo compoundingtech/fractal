@@ -101,11 +101,18 @@ async fn browser_pairing_pending_deny_and_exact_single_use_grant_revocation() {
     assert!(require_scope(&browser,"control.pairing").is_err());
     let next_request = start(&state,&owner,&key).await;
     assert!(answer(&state,&browser,&next_request,"approve").is_err());
+    let intent = crate::graph::parse_intent(
+        r#"version 2
+agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
+"#,
+        state.store.origin(),
+    ).unwrap();
+    state.store.apply_internal(&intent, "declare-browser-send-recipient").unwrap();
     let snapshot = new_client_snapshot(&state);
     let send: ActionRequest = serde_json::from_value(json!({
         "api_version":CLIENT_API_VERSION,"id":"action/browser-send","type":"message.send","idempotency_key":"browser-send-proof",
         "fence":{"snapshot_id":snapshot.id,"subject_revisions":{}},
-        "parameters":{"to":"person/operator","content":"Browser pairing proof"}
+        "parameters":{"to":"agent/garden/reviewer","content":"Browser pairing proof"}
     })).unwrap();
     let sent = action(State(state.clone()),Extension(snapshot),Extension(browser.clone()),Json(send)).await.unwrap().0;
     assert!(!sent["affected_ids"].as_array().unwrap().is_empty());
