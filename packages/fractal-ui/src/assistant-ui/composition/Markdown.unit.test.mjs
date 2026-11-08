@@ -21,6 +21,11 @@ const server = await createServer({
 after(() => server.close())
 const { completeStreamingTail, Markdown, InlineMarkdown } = await server.ssrLoadModule('/src/assistant-ui/composition/Markdown.tsx')
 const { splitMarkdownBlocks } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-source.ts')
+// MARKDOWN_PARSER=pulldown runs the whole suite on the WebAssembly parser: the policy, the block cuts and every
+// regression must hold for both parsers.
+const pulldown = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-pulldown.ts')
+const usePulldown = process.env.MARKDOWN_PARSER === 'pulldown'
+if (usePulldown) await pulldown.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
 const { markdownBlock, markdownInline } = await server.ssrLoadModule('/src/assistant-ui/composition/markdown-text.ts')
 test('generated Pierre IDs and aliases match the installed package', async () => {
   assert.equal(await readFile(output, 'utf8'), await generatedLanguages())
@@ -55,7 +60,7 @@ test('the CPU-time budget still catches a scan that restarts at every bracket', 
   assert.ok(milliseconds >= 50, `a quadratic scan of 50k brackets took only ${milliseconds}ms of CPU`)
 })
 
-const parsed = source => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: [remarkGfm], skipHtml: false }, source)).replace(/<link rel="preload"[^>]*>/g, '').replace(/\n/g, '')
+const parsed = source => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: usePulldown ? [pulldown.remarkPulldown] : [remarkGfm], skipHtml: false }, source)).replace(/<link rel="preload"[^>]*>/g, '').replace(/\n/g, '')
 const prompt = (text, props = {}) => renderToStaticMarkup(h(Markdown, { text: markdownBlock(text), hardBreaks: true, ...props }))
 const block = text => renderToStaticMarkup(h(Markdown, { text: markdownBlock(text) }))
 
@@ -66,6 +71,12 @@ const FRAGMENTS = [
   '| a | b |\n|---|---|\n| 1 | 2 |', '<!-- comment\n\nstill comment -->', '<details>\n<summary>More</summary>\n\nHidden *body*.\n\n</details>', '<pre>\nraw\n\nstill raw\n</pre>', '<div>html</div>',
   'Text with [ref][r] link.', '[r]: https://example.test/r', 'Note[^1].', '[^1]: A footnote.', '* star\n\n+ plus', '![image](https://example.test/i.png)', 'Trailing spaces   \n  indented', '   ```\n   three\n\nunindented\n   ```',
 ]
+
+test('a parser module that cannot load leaves Markdown on the JavaScript parser', async () => {
+  // Node's fetch cannot read the module's file URL, so the load fails here the way a blocked or missing asset would.
+  assert.equal(await pulldown.loadPulldown(), false)
+  assert.match(block('**still renders**'), /<strong[^>]*>still renders<\/strong>/)
+})
 
 test('parsing the blocks one by one equals parsing the document', () => {
   let seed = 1234
@@ -289,3 +300,20 @@ test('policy final pass: fake fences, nested images, raw pre blocks and commente
   assert.match(block('<pre>\nordinary code\n</pre>'), /ordinary code/)
   assert.doesNotMatch(block('<svg>\n<!-- </svg> -->\n\nLEAK\n\n</svg>'), /LEAK/)
 })
+
+test('the WebAssembly parser builds the tree remark builds for everyday Markdown', async () => {
+  await pulldown.installPulldown(await readFile(new URL('./markdown-pulldown.generated.wasm', import.meta.url)))
+  const html = plugins => source => renderToStaticMarkup(h(ReactMarkdown, { remarkPlugins: plugins }, source)).replace(/<link rel="preload"[^>]*>/g, '').replace(/\n/g, '')
+  const remark = html([remarkGfm])
+  const wasm = html([pulldown.remarkPulldown])
+  // Accepted differences: pulldown's footnote markup, and bare-URL edge cases GFM resolves differently.
+  for (const source of FRAGMENTS.filter(fragment => !fragment.includes('[^1]')).concat(['- [x] done\n- [ ] open', 'See https://example.test/a_b and www.example.test.', '1. one\n2. two\n\n   nested para', '| a | b |\n|:-|-:|\n| 1 | 2 |'])) {
+    assert.equal(wasm(source), remark(source), source)
+  }
+})
+
+test('the suite runs on the parser it names', { skip: !usePulldown }, () => {
+  assert.equal(pulldown.pulldownReady(), true)
+  assert.match(block('**x**'), /<strong/)
+})
+
