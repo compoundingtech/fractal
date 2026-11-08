@@ -275,6 +275,8 @@ KIT_PATTERNS = (
     "apps/fractal-web/src/workbench-kit/icons.tsx",
     "apps/fractal-web/src/workbench-kit/keys.tsx",
     "fixtures/clients/words.json",
+    # The kit Markdown suite checks every client-shared Markdown case and the HTML policy in it.
+    "fixtures/clients/markdown-cases.json",
     "apps/fractal-web/src/web/index.html",
     "clients/typescript/fractal-scenarios/**",
     "clients/typescript/fractal-client/**",
