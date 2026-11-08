@@ -2,7 +2,7 @@ import { LiveRing } from './composition/LiveRing'
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
-import { surfaceVars, textVars, borderVars, radiusVars, spaceVars, typeVars, geometryNumbers, motionNumbers, geometryVars, interactionVars } from './composition-tokens.stylex'
+import { surfaceVars, textVars, borderVars, radiusVars, spaceVars, typeVars, geometryNumbers, motionNumbers, geometryVars, interactionVars, elevationVars } from './composition-tokens.stylex'
 
 const rowSelector = '[data-item-id], [data-embrace-entry-id]'
 /** History anchors also resolve to leaf rows inside a turn: tool calls, thoughts and work summaries. */
@@ -216,6 +216,7 @@ class ViewportController {
     this.anchor = undefined
     if (this.frame !== undefined) cancelAnimationFrame(this.frame)
     this.frame = undefined
+    this.dock()
   }
 
   constructor(saved?: ViewportState) {
@@ -238,11 +239,12 @@ class ViewportController {
     this.dock()
   }
 
-  /** Shows the jump for unread rows or a run the reader has scrolled away from, and never reflows the lane under an active press. */
+  /** Shows the jump whenever the reader is away from the end, counting rows that arrived, and holds it still under an active press. */
   private dock() {
     if (!this.unread) this.newCount = 0
     if (this.jumpCount !== null) this.jumpCount.textContent = this.newCount > 0 ? ` · ${this.newCount} new` : ''
-    if (this.jumpButton !== null && this.pressed.size === 0) this.jumpButton.hidden = !(this.unread || (this.running && !this.following))
+    // Any reader away from the end gets the way back; the count says whether anything arrived meanwhile.
+    if (this.jumpButton !== null && this.pressed.size === 0) this.jumpButton.hidden = this.following
   }
 
   /** Host fact: a run is producing output below the reader. */
@@ -298,6 +300,7 @@ class ViewportController {
     this.unread = saved !== undefined && !saved.following && saved.unread
     this.newCount = this.unread ? saved?.newCount ?? 0 : 0
     this.snapshotAnchor = saved?.following === false ? saved.anchor : undefined
+    this.following = saved === undefined || saved.following
     this.dock()
     if (saved !== undefined && !saved.following) {
       this.following = false
@@ -629,7 +632,7 @@ export interface EmbraceScrollViewportProps extends Omit<React.HTMLAttributes<HT
   readonly stateKey?: string
   /** Host command: a changed, defined key resumes following and clears unread; an unchanged key never scrolls. */
   readonly scrollToBottomKey?: string
-  /** A run is in progress: a reader scrolled away from the end gets "Working · Jump to latest" instead of waiting for new rows. */
+  /** A run is in progress: a reader scrolled away from the end reads "Working · Jump to latest". */
   readonly running?: boolean
   /** Mount the tail first, then fill one extra viewport and prepend on upward navigation. */
   readonly initialTailCount?: number
@@ -730,8 +733,9 @@ export const EmbraceScrollViewport = React.memo(function EmbraceScrollViewport({
 })
 
 const styles = stylex.create({
-  frame: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, minWidth: 0 },
-  // A visible jump control gets its own dock, never covering a reader's current line.
+  frame: { position: 'relative', display: 'flex', flexDirection: 'column', flex: '1 1 0', minHeight: 0, minWidth: 0 },
+  // The jump control floats just above whatever the host docks over the lane's end (`--transcript-end-inset`). Showing or
+  // hiding it never reflows the lane, so the reader's line never moves and the lane is never clipped short by its band.
   jumpWorking: { display: 'inline-flex', alignItems: 'center', gap: spaceVars.sm },
-  jump: { outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: geometryVars.focusRing, outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusOffset, flexShrink: 0, marginInline: 'auto', marginBlock: spaceVars.md, paddingBlock: spaceVars.xs, paddingInline: spaceVars.md, borderRadius: radiusVars.full, borderWidth: spaceVars.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, backgroundColor: surfaceVars.raised, color: textVars.fg, fontSize: typeVars.metaSize, cursor: 'pointer' },
+  jump: { outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: geometryVars.focusRing, outlineColor: interactionVars.focusRing, outlineOffset: geometryVars.focusOffset, position: 'absolute', zIndex: 1, left: '50%', transform: 'translateX(-50%)', bottom: `calc(${spaceVars.md} + var(--transcript-end-inset, 0px))`, whiteSpace: 'nowrap', boxShadow: elevationVars.popover, paddingBlock: spaceVars.xs, paddingInline: spaceVars.md, borderRadius: radiusVars.full, borderWidth: spaceVars.hairline, borderStyle: 'solid', borderColor: borderVars.borderStrong, backgroundColor: surfaceVars.raised, color: textVars.fg, fontSize: typeVars.metaSize, cursor: 'pointer' },
 })

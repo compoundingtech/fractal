@@ -13,7 +13,7 @@ import { createConversationTranscript, frozenTranscript, openableImageUrl, trans
 import { composerSendBinding, imageUploadAdapter, type SendRefusal } from './composerSend.ts'
 import { nativeTurnFooter } from './NativeTurnFooter.tsx'
 import { transcriptImagesFor } from './transcriptImages.ts'
-import { spaceVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
+import { spaceVars, surfaceVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LastSeen, ThreadUnavailable } from './ConversationStates.tsx'
 import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
 import { DOCUMENT_REF } from '../documents/document-port.ts'
@@ -34,6 +34,11 @@ const selectRosterNames = (feed: Feed<Fleet>): ReadonlyMap<string, string> =>
   new Map(feed._tag === 'Observed' ? feed.value.agents.map(agent => [agent.ref, agent.name] as const) : [])
 const sameRosterNames = (left: ReadonlyMap<string, string>, right: ReadonlyMap<string, string>): boolean =>
   left.size === right.size && [...left].every(([ref, name]) => right.get(ref) === name)
+
+/** Transcript lane contract: the height of whatever floats over the lane's end. */
+const transcriptEndInset = '--transcript-end-inset'
+/** The fade between the transcript and the bottom dock: text passes under it, never under an opaque band. */
+const bottomDockFade = spaceVars.section
 
 export const ConversationPane = (props: React.ComponentProps<typeof ConversationThreadPane>) => {
   const feed = useConversation(props.agentRef)
@@ -174,6 +179,18 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   React.useSyncExternalStore(images.subscribe, images.snapshot, images.snapshot)
   React.useLayoutEffect(images.acquire, [images])
   const composer = React.useRef<HTMLDivElement>(null)
+  const stage = React.useRef<HTMLDivElement>(null)
+  const bottomDock = React.useRef<HTMLDivElement>(null)
+  // The transcript runs under the bottom dock; its end inset is the dock's height, so the last line lands above it.
+  React.useLayoutEffect(() => {
+    const host = stage.current, dock = bottomDock.current
+    if (host === null || dock === null) return
+    const inset = () => host.style.setProperty(transcriptEndInset, `${dock.offsetHeight}px`)
+    inset()
+    const observer = new ResizeObserver(inset)
+    observer.observe(dock)
+    return () => { observer.disconnect(); host.style.removeProperty(transcriptEndInset) }
+  }, [])
   const tail = React.useRef<HTMLElement | null>(null)
   const tailRef = React.useCallback((node: HTMLElement | null) => {
     const changed = node !== null && node !== tail.current
@@ -241,7 +258,8 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     ...(feed._tag === 'Observed' && feed.value.lastSendId !== undefined ? { sendKey: feed.value.lastSendId } : {}),
   })
   return <EmbraceRuntimeProvider key={agentRef} options={{ ...binding.runtime, isRunning: running, ...(onCancel === undefined ? {} : { onCancel }) }}>
-    {/* Bound the 100%-height kit frame to the space left above the composer. */}
+    {/* The history fills the pane; the bottom dock floats over its end behind a short fade, never as an opaque band. */}
+    <div ref={stage} data-testid="conversation-stage" style={{ position: 'relative', flex: '1 1 0', minHeight: 0, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
     <div data-testid="conversation-history-host" onClickCapture={followDocumentLinks} style={{ flex: '1 1 0', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
     {state._tag === 'Unavailable' ? <ThreadUnavailable classification={state.classification} reason={state.availability._tag === 'Unavailable' ? state.availability.reason : ''} detail={state.availability._tag === 'Unavailable' ? state.availability.detail : undefined} onRetry={retryUnavailable} /> : <ConversationTranscript
       agentRef={agentRef}
@@ -270,6 +288,9 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       {...(state._tag === 'Observed' && state.emptyState !== undefined ? { emptyState: state.emptyState } : {})}
     />}
     </div>
+    <div ref={bottomDock} data-testid="conversation-bottom-dock" style={{ position: 'absolute', insetInline: 0, bottom: 0, display: 'flex', flexDirection: 'column', pointerEvents: 'none', ...(readOnly && frozen === undefined ? {} : { paddingTop: bottomDockFade, backgroundImage: `linear-gradient(to bottom, transparent, ${surfaceVars.canvas} ${bottomDockFade})` }) }}>
+    {/* Only the fade lets the pointer through to the transcript; the dock's own controls take it. */}
+    <div style={{ display: 'flex', flexDirection: 'column', pointerEvents: 'auto' }}>
     {frozen === undefined ? null : <LastSeen agentRef={agentRef} lastSeen={frozen.lastSeen} />}
     {!readOnly && <LiveAgentAlerts agentRef={agentRef} ux={ux} {...(onOpenDocument === undefined ? {} : { onOpenDocument })} />}
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
@@ -277,10 +298,13 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
       if (!(event.target instanceof HTMLTextAreaElement)) return
       markStart('keystroke_paint')
       measureEnd('keystroke_paint')
-    }} style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: `calc(${geometryVars.controlLg} + ${geometryVars.controlMd} + 3 * ${spaceVars.md} + 2 * ${geometryVars.hairline} + ${spaceVars.lg})`, paddingBottom: spaceVars.lg }}>
+    }} style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', paddingBottom: spaceVars.lg }}>
       {draftPort === undefined ? null : <ComposerDraftSync port={draftPort} />}
       <EmbraceComposer variant="C1" readingColumn conversationLabel={agentName} disabledReason={state._tag === 'Unavailable' && state.classification === 'not-found' ? 'Conversation not found' : binding.disabledReason} {...(binding.imageAttachments === undefined ? {} : { imageAttachments: binding.imageAttachments })} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
     </div>}
+    </div>
+    </div>
+    </div>
   </EmbraceRuntimeProvider>
 })
 

@@ -847,6 +847,16 @@ describe('following the live end', () => {
     expect(distance()).toBe(0)
   })
 
+  it('offers the way back whenever the reader is away from the end, counting only rows that arrived', async () => {
+    await render(<Growing />)
+    expect(jump().hidden).toBe(true)
+    await scrollUp(120)
+    expect(jump().hidden).toBe(false)
+    expect(jump().textContent).toBe('Jump to latest')
+    await appendRow()
+    expect(jump().textContent).toBe('Jump to latest · 1 new')
+  })
+
   it('stops following on a small upward wheel even within the end band', async () => {
     await render(<Growing />)
     await act(async () => {

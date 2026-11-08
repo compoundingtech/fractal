@@ -647,7 +647,8 @@ const styles = stylex.create({
   title: { flex: '1 1 0', minWidth: 0, fontWeight: t.weightMedium, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   lane: { outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: g.focusRing, outlineColor: interaction.focusRing, outlineOffset: g.focusInset, flex: '1 1 0', minHeight: 0, minWidth: 0, overflowY: 'auto', overflowX: 'hidden', overflowAnchor: 'none' },
   // The shared reading column keeps rows and a reading-column composer on the same bounds.
-  content: { paddingBlock: s.lg }, timeline: { display: 'flex', flexDirection: 'column', gap: s.xl, minWidth: 0 }, turn: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
+  // A host may float a dock over the lane's end (`--transcript-end-inset`); the last line then ends above it.
+  content: { paddingTop: s.lg, paddingBottom: `calc(${s.lg} + var(--transcript-end-inset, 0px))` }, timeline: { display: 'flex', flexDirection: 'column', gap: s.xl, minWidth: 0 }, turn: { display: 'flex', flexDirection: 'column', gap: s.md, minWidth: 0 },
   workList: { maxHeight: 'none', overflowY: 'visible', overscrollBehavior: 'auto' },
   user: { display: 'flex', flexDirection: 'column', minWidth: 0, color: ink.fg, fontSize: t.bodySize, lineHeight: t.bodyLeading, borderLeftWidth: g.focusRing, borderLeftStyle: 'solid', borderLeftColor: accent.primary, paddingLeft: s.lg, paddingBlock: s.xs }, userText: { minWidth: 0, overflowWrap: 'anywhere' },
   userClamp: { maxHeight: `calc(${g.userClamp} - ${s.xs} * 2 - ${g.controlSm})`, overflow: 'hidden' },

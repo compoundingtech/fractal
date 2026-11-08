@@ -48,6 +48,8 @@ export const scenarioExemptions: readonly string[] = [
   'Populated:contract-fixture',
   'ScriptedRepair:contract-fixture',
   'TabSwitchGeometry:contract-fixture',
+  'TranscriptEndClearsComposer:contract-fixture',
+  'TranscriptEndClearsComposerLight:contract-fixture',
   'Unavailable:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
@@ -91,3 +93,40 @@ export const TabSwitchGeometry: Story = {
     canvasElement.dataset.proof = 'passed'
   },
 }
+
+/** The last visible text line in the lane, as one rendered line box. */
+function lastLine(lane: HTMLElement): DOMRect | undefined {
+  const walker = document.createTreeWalker(lane, NodeFilter.SHOW_TEXT, { acceptNode: node => node.textContent?.trim() && node.parentElement?.getClientRects().length ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP })
+  let last: Node | undefined
+  for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) last = node
+  if (last === undefined) return undefined
+  const range = document.createRange()
+  range.selectNodeContents(last)
+  return [...range.getClientRects()].at(-1)
+}
+
+/**
+ * The transcript runs under the composer behind a short fade, never under an opaque band. At the end the last line is
+ * fully readable: above the bottom dock (its fade included) and topmost where it is drawn.
+ */
+export const TranscriptEndClearsComposer: Story = {
+  args: { state: 'populated' },
+  play: async ({ canvasElement, args }) => {
+    await waitFor(() => assertProductionAppState(canvasElement, args.state, true), { timeout: 60000 })
+    await document.fonts.ready
+    const lane = canvasElement.querySelector<HTMLElement>('[data-testid="transcript-scroll"]')!
+    const dock = canvasElement.querySelector<HTMLElement>('[data-testid="conversation-bottom-dock"]')!
+    const composer = canvasElement.querySelector<HTMLElement>('[data-testid="conversation-composer-dock"]')!
+    // The lane reaches under the dock: no band of dead space between the transcript and the composer.
+    await expect(Math.abs(lane.getBoundingClientRect().bottom - composer.getBoundingClientRect().bottom), 'the lane stops short of the composer').toBeLessThanOrEqual(1)
+    await waitFor(() => expect(lane.scrollHeight - lane.clientHeight - lane.scrollTop).toBeLessThanOrEqual(1))
+    const line = lastLine(lane)!
+    await expect(line, 'no transcript text').toBeDefined()
+    await expect(line.bottom, 'the last line ends under the dock or its fade').toBeLessThanOrEqual(dock.getBoundingClientRect().top + 1)
+    await expect(line.bottom).toBeLessThanOrEqual(composer.getBoundingClientRect().top)
+    const hit = document.elementFromPoint(line.left + Math.min(line.width / 2, 8), line.top + line.height / 2)
+    await expect(hit !== null && lane.contains(hit), 'something covers the last line').toBe(true)
+    canvasElement.dataset.proof = 'passed'
+  },
+}
+export const TranscriptEndClearsComposerLight: Story = { ...TranscriptEndClearsComposer, args: { state: 'populated', scheme: 'light' } }
