@@ -21,7 +21,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import { mergeProps, mergeRefs, useDrop, type DropItem } from 'react-aria'
-import { Tab, TabList, TabPanel, Tabs, type Key } from 'react-aria-components'
+import { Tab, TabList, TabListStateContext, TabPanel, Tabs, TabsContext, type Key } from 'react-aria-components'
 import { HoverCardSurface, useHoverCardIntent } from '../../../../packages/fractal-ui/src/assistant-ui/entity/HoverCard.tsx'
 import { ThemePortal } from '../../../../packages/fractal-ui/src/assistant-ui/taste/ThemePortal.tsx'
 import { interactionVars as interaction, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
@@ -692,7 +692,8 @@ export const EditorTabs = ({
 
 /**
  * RAC's useId retains the first panel id, so its semantic shell must remount on selection. The portal target does
- * not: moving that same node into the new shell preserves PaneSlot and every surface portalled into it.
+ * not: moving that same node into the new shell preserves PaneSlot and every surface portalled into it. Reset the
+ * tab contexts as RAC's TabPanel does, so nested Details/Resources tabs never inherit the workspace selection.
  */
 const StableTabPanel = ({ activeId, children }: { readonly activeId: string | null; readonly children: ReactNode }) => {
   const [content] = useState(() => {
@@ -705,7 +706,12 @@ const StableTabPanel = ({ activeId, children }: { readonly activeId: string | nu
   }, [content])
   return <>
     <TabPanel key={activeId ?? ''} id={activeId ?? ''} shouldForceMount ref={attach} {...stylex.props(styles.panel)} />
-    {createPortal(children, content)}
+    {createPortal(
+      <TabsContext.Provider value={null}>
+        <TabListStateContext.Provider value={null}>{children}</TabListStateContext.Provider>
+      </TabsContext.Provider>,
+      content,
+    )}
   </>
 }
 
