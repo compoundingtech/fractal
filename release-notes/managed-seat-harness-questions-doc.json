@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Document that managed seats ask through work asks and that the launch wrapper, not Fractal, removes harness question tools",
+  "replay": {"status": "none", "detail": "Documentation only; replay and projections are unchanged."},
+  "schema": {"status": "none", "detail": "No persisted schema changes."},
+  "rules": {"status": "none", "detail": "No runtime, admission or coordination rule changes."},
+  "compatibility": {"status": "none", "detail": "No client, protocol or harness behavior changes."},
+  "downtime": {"status": "none", "detail": "No service interruption is required."},
+  "manual": {"status": "none", "detail": "No upgrade action is required."},
+  "recovery": {"status": "none", "detail": "No recovery or rollback steps are required."}
+}
