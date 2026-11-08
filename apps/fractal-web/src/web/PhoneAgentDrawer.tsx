@@ -14,12 +14,14 @@ export interface PhoneAgentDrawerHandle { open: () => void; close: () => void; t
  * primary pointer is coarse. Closing returns focus to `triggerRef`, the header control that opens it, with a focus
  * ring only when the drawer was dismissed from the keyboard.
  */
-export function PhoneAgentDrawer({ ref, triggerRef, headerActions, children, header, onSheetChange }: {
+export function PhoneAgentDrawer({ ref, triggerRef, headerActions, headerTitle, children, header, onSheetChange }: {
   readonly ref: React.Ref<PhoneAgentDrawerHandle>
   /** The control that opens the drawer; it gets focus back on every close. */
   readonly triggerRef: React.RefObject<HTMLElement | null>
   /** The dock header's trailing actions, the alerts. */
   readonly headerActions?: React.ReactNode
+  /** In place of the wordmark: the space switcher. */
+  readonly headerTitle?: React.ReactNode
   readonly children: React.ReactNode
   /** Drawn before the drawer; a host whose trigger lives elsewhere (the workspace's top bar) leaves it out and follows `onSheetChange`. */
   readonly header?: (open: () => void, sheet: { readonly open: boolean; readonly id: string }) => React.ReactNode
@@ -56,7 +58,7 @@ export function PhoneAgentDrawer({ ref, triggerRef, headerActions, children, hea
           <NarrowLayoutContext.Provider value={coarse}>
             <aside aria-label="Agents" data-sidebar-presentation="drawer" data-sidebar-density={coarse ? 'touch' : 'dock'} {...stylex.props(styles.sidebar)}>
               <UNSAFE_PortalProvider getContainer={getContainer}>
-                <SidebarHeader ref={closeButton} label="Close agents" onCollapse={close} actions={headerActions} />
+                <SidebarHeader ref={closeButton} label="Close agents" onCollapse={close} actions={headerActions} title={headerTitle} />
                 {children}
                 <div ref={portalHost} />
               </UNSAFE_PortalProvider>

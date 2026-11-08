@@ -635,9 +635,11 @@ describe('responsive agent navigation', () => {
     if (width < 900) await act(async () => within(host).getByRole('button', { name: 'Expand sidebar' }).click())
     const header = sidebar().querySelector<HTMLElement>('[data-sidebar-header]')!
     expect(header).not.toBeNull()
-    // Collapse leads, then the wordmark, then the alerts: no separate drawer title or trailing close.
+    // Collapse leads, then the space switcher in place of the wordmark, then the palette and Settings: no separate drawer title or trailing close.
     expect(header.querySelector('button')!.getAttribute('aria-label')).toBe(collapse)
-    expect(header.querySelector('strong')!.textContent).toBe('Fractal')
+    expect(header.querySelector('[data-testid="space-switcher"]')!.textContent).toBe('Main')
+    expect(header.textContent).not.toContain('Fractal')
+    expect([...header.querySelectorAll('button')].map(button => button.getAttribute('aria-label'))).toEqual([collapse, 'Space: Main', 'Command palette', 'Settings'])
     expect(sidebar().querySelectorAll(':scope > header').length).toBe(1)
   })
 })

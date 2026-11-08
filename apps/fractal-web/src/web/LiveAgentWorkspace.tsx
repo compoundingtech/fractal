@@ -26,7 +26,8 @@ import { useWorkspaceResources, useWorkspaceRoute, useWorkspaceState, useWorkspa
 import { useWorkspaceKeys } from '../workspace/useWorkspaceKeys.ts'
 import { WorkspaceBody } from '../workspace/WorkspaceBody.tsx'
 import { WorkspaceEmpty, WorkspaceStrip } from '../workspace/WorkspaceStrip.tsx'
-import { PaneSlot, PaneSlots, WorkspaceSplits, leadPane } from '../workspace/WorkspaceSplits.tsx'
+import { PaneSlot, PaneSlots, WorkspaceSplits, attributeValue, leadPane } from '../workspace/WorkspaceSplits.tsx'
+import { SpaceSwitcher, nextSpace } from '../workspace/SpaceSwitcher.tsx'
 import type { HostActions, HostCommand } from '../palette/mod.ts'
 import { shortcutsPausedSelector } from './shortcuts.ts'
 import { narrowLayoutQuery } from './narrowLayout.ts'
@@ -669,8 +670,15 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     </header>
     <pre {...stylex.props(styles.toolDetailOutput)}>{call.detail ?? (call.status === 'running' ? 'No output received yet.' : 'No output recorded.')}</pre>
   </aside>
+  // The palette loads on first open: neither its code nor its reads belong to the shell's first paint.
+  const [paletteOpen, setPaletteOpen] = React.useState(false)
+  const [paletteLoaded, setPaletteLoaded] = React.useState(false)
+  const openPalette = React.useCallback(() => { setPaletteLoaded(true); setPaletteOpen(true) }, [])
   const [settingsOpen, setSettingsOpen] = React.useState(false)
+  // The sidebar's header row: its toggle, the space switcher in place of the wordmark, the palette and Settings.
+  const sidebarHeaderTitle = <SpaceSwitcher />
   const sidebarHeaderActions = <>
+    <ChromeControl icon="search" label="Command palette" tooltip="Command palette (⌘/Ctrl+K)" popup="dialog" expanded={paletteOpen} onPress={openPalette} />
     <SettingsControl scheme={preference} onSchemeChange={setPreference} build={build} isOpen={settingsOpen} onOpenChange={setSettingsOpen} />
   </>
   // The Agents toolbar and tree provide tab stops even while loading or empty; Alerts may have none, so its panel takes focus itself.
@@ -717,10 +725,6 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   // A phone shows the focused pane alone, so only its tab is on screen.
   const shownTabs = narrow ? new Set(activeRow === undefined ? [] : [activeRow.id]) : visibleTabIds(workspace)
   const lead = leadPane(workspace, narrow)
-  // The palette loads on first open: neither its code nor its reads belong to the shell's first paint.
-  const [paletteOpen, setPaletteOpen] = React.useState(false)
-  const [paletteLoaded, setPaletteLoaded] = React.useState(false)
-  const openPalette = React.useCallback(() => { setPaletteLoaded(true); setPaletteOpen(true) }, [])
   const openSettings = React.useCallback(() => setSettingsOpen(true), [])
   const sidebarModes = React.useMemo((): readonly HostCommand[] => sidebarModeRows.map(mode => ({
     id: `sidebar-${mode.id}`, section: 'sidebar', label: `Sidebar: ${mode.label}`, search: `sidebar ${mode.label} show`, icon: mode.icon, run: () => showSidebarTab(mode.id),
@@ -728,9 +732,9 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const paletteActions = React.useMemo((): HostActions => ({ openSettings, toggleSidebar, sidebar: sidebarModes }), [openSettings, toggleSidebar, sidebarModes])
   // Alt+arrows past the layout's left edge reach the sidebar, as in the TUI; Alt+Right from it comes back.
   const focusPaneContent = (pane: string) => window.requestAnimationFrame(() => {
-    const frame = document.querySelector<HTMLElement>(`[data-pane="${CSS.escape(pane)}"]`)
+    const frame = document.querySelector<HTMLElement>(`[data-pane="${attributeValue(pane)}"]`)
     const shownId = findPane(currentSpace(store.getState()).layout, pane)?.active ?? undefined
-    const surface = shownId === undefined ? null : document.querySelector<HTMLElement>(`[data-tab-surface-id="${CSS.escape(shownId)}"]`)
+    const surface = shownId === undefined ? null : document.querySelector<HTMLElement>(`[data-tab-surface-id="${attributeValue(shownId)}"]`)
     const target = surface?.querySelector<HTMLElement>('[data-wf-shown-pane] textarea:not(:disabled)') ?? frame?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]') ?? frame?.querySelector<HTMLElement>('button')
     target?.focus({ preventScroll: true })
   })
@@ -768,7 +772,12 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
       // A new tab starts from the palette, which opens here or in a tab.
       newTab: openPalette,
       // Spaces arrive with their own slice.
-      switchSpace: () => false,
+      // The next space, until the palette's Spaces section takes Alt+G as the TUI's Ctrl+G does.
+      switchSpace: () => {
+        const command = nextSpace(store.getState())
+        if (command === undefined) return false
+        go(command)
+      },
     }
   }, [go, store, openPalette])
   const renderDragChip = React.useCallback((entity: EntityDescriptor) => <DragChip entity={entity} scheme={scheme} />, [scheme])
@@ -795,7 +804,11 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
     }
     const nativeActions = paneAgent === '' ? undefined : <ConversationHeaderActions key={paneAgent} agentRef={paneAgent} onViewDeclaration={() => openRef(`declaration/${paneAgent}`)} />
     const watch = terminalShown && shownTab !== undefined ? <TerminalAttachWatch key={paneAgent} agentRef={paneAgent} onMissing={reason => onMissingTerminal(paneAgent, shownTab.id, reason)} /> : null
-    const syncNote = isLead && boot.retry !== undefined ? <LayoutSyncNote retry={boot.retry} /> : null
+    // A zoomed split says so, and the badge is the way back.
+    const syncNote = <>
+      {space.local.zoomed === pane.id ? <Aria.Button aria-label="Unzoom split" onPress={() => go({ _tag: 'ToggleZoom' })} data-testid="zoom-badge" {...stylex.props(styles.zoomBadge)}>Zoomed <kbd {...stylex.props(styles.zoomKey)}>{navigator.platform.includes('Mac') ? '⌥O' : 'Alt+O'}</kbd></Aria.Button> : null}
+      {isLead && boot.retry !== undefined ? <LayoutSyncNote retry={boot.retry} /> : null}
+    </>
     return <Pane key={pane.id} pane={pane} className={stylex.props(styles.pane).className}>
       {/* Each pane is self-contained: its strip ends with its shown tab's own controls. */}
       <WorkspaceStrip bar items={pane.tabs.flatMap(tab => itemById.get(tab.id) ?? [])} refs={refById} active={pane.active} group={pane.id} focused={focused} narrow={narrow} dispatch={go} open={openRef}
@@ -827,14 +840,14 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
         <MonitorDetailProvider value={{ size: 380, onSizeChange: (value) => setPanelFraction(value / viewport) }}>
             <div ref={shellCommit} data-testid="live-agent-workspace" data-scheme={scheme} style={phoneViewportStyle} {...stylex.props(styles.app, styles.legacyBridge, liveLegacyTheme, scheme === 'dark' && assistantDarkTheme, scheme === 'dark' && liveComposerDarkTheme, liveAccentTheme, scheme === 'light' && compositionLightTheme)}>
               {shortcutHelp}
-              {narrow ? null : <ResponsiveAgentSidebar headerActions={sidebarHeaderActions} viewport={viewport} width={width} maxWidth={maxSidebar} collapsed={collapsed} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setDragWidth} onWidthCommit={value => { setRatio(value / viewport); setDragWidth(undefined) }} onWidthReset={() => setRatio(256 / viewport)}>{sidebarBody}</ResponsiveAgentSidebar>}
+              {narrow ? null : <ResponsiveAgentSidebar headerActions={sidebarHeaderActions} headerTitle={sidebarHeaderTitle} viewport={viewport} width={width} maxWidth={maxSidebar} collapsed={collapsed} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => setCollapsed(value => !value)} onWidthChange={setDragWidth} onWidthCommit={value => { setRatio(value / viewport); setDragWidth(undefined) }} onWidthReset={() => setRatio(256 / viewport)}>{sidebarBody}</ResponsiveAgentSidebar>}
               <DockedSplit persistKey={persistGeometry ? 'live.rightPanel' : undefined} label={dockLabel} defaultSize={440} minMainSize={geometryNumbers.panelMin} onCollapse={() => setPanel({ open: false })} dock={dockedInspector !== undefined ? (
                 <React.Suspense fallback={<aside aria-label="Agent inspector" {...stylex.props(styles.changesPanel, styles.sheetPanel)}><SystemNotice kind="loading" title="Loading agent details" /></aside>}>
                   <AgentDetailsPanel key={dockedInspector} agentRef={dockedInspector} width="dock" scheme={scheme} view={panel.tab} onViewChange={view => setPanel({ tab: view })} onClose={() => setPanel({ open: false })} onOpen={openDetailsUri} {...(ux === undefined ? {} : { ux })} />
                 </React.Suspense>
               ) : undefined}>
               <section aria-label={workspaceLabel} onPointerOverCapture={prefetchTerminalIntent} onFocusCapture={prefetchTerminalIntent} {...stylex.props(styles.workspace)}>
-                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} headerActions={sidebarHeaderActions} onSheetChange={setPhoneSheet}>{sidebarBody}</PhoneAgentDrawer> : null}
+                {narrow ? <PhoneAgentDrawer ref={agentsDrawer} triggerRef={sidebarOpener} headerActions={sidebarHeaderActions} headerTitle={sidebarHeaderTitle} onSheetChange={setPhoneSheet}>{sidebarBody}</PhoneAgentDrawer> : null}
                 {/* One strip and one portal host at every width: the breakpoint never remounts a surface. The strip is the window's one top bar, so the conversation's controls live at its end. */}
                 <WorkspaceSplits slots={slots} collapsed={narrow} onHost={setPaneHost} renderPane={renderPane} />
                 <SplitKeys handlers={splitHandlers} ignore={ignoreSplitKey} />
@@ -984,6 +997,8 @@ const styles = stylex.create({
   workspace: { display: 'flex', flexDirection: 'column', flexGrow: 1, minWidth: 0, minHeight: 0 },
   barSlot: { display: 'flex', alignItems: 'center', minWidth: 0 },
   bands: { display: 'contents' },
+  zoomBadge: { display: 'inline-flex', alignItems: 'center', gap: s.xs, flexShrink: 0, alignSelf: 'center', marginInline: s.xs, paddingBlock: 2, paddingInline: s.sm, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, borderRadius: 999, backgroundColor: { default: 'transparent', ':hover': c.rowHover }, color: c.fgMuted, fontFamily: t.fontSans, fontSize: t.metaSize, cursor: 'pointer', outlineStyle: { default: 'none', ':focus-visible': 'solid' }, outlineWidth: '2px', outlineColor: interaction.focusRing, outlineOffset: '1px' },
+  zoomKey: { fontFamily: t.fontSans, fontSize: t.metaSize, color: c.fgMuted },
   dragChip: { display: 'inline-flex', alignItems: 'center', gap: s.xs, maxWidth: 240, paddingBlock: 4, paddingInline: s.sm, borderRadius: 6, backgroundColor: c.raised, color: c.fg, borderWidth: 1, borderStyle: 'solid', borderColor: c.border, boxShadow: '0 4px 16px rgba(0, 0, 0, 0.24)', fontFamily: t.fontSans, fontSize: t.metaSize, whiteSpace: 'nowrap' },
   dragChipIcon: { display: 'inline-flex', flexShrink: 0 },
   dragChipTitle: { minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' },

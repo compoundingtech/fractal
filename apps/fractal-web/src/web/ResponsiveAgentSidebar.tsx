@@ -38,6 +38,8 @@ export type ResponsiveAgentSidebarProps = {
   readonly onWidthCommit: (width: number) => void
   readonly onWidthReset: () => void
   readonly headerActions?: React.ReactNode
+  /** In place of the wordmark: the space switcher. */
+  readonly headerTitle?: React.ReactNode
   readonly children: React.ReactNode
 }
 
@@ -45,7 +47,7 @@ export type ResponsiveAgentSidebarProps = {
 const renderModalDialog = (props: React.ComponentPropsWithRef<'section'>) => <section {...props} aria-modal="true" />
 
 /** The dock consumes layout space; the modal drawer never resizes the thread. */
-export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, drawerOpen, drawerId, onDrawerOpenChange, onToggleCollapsed, onWidthChange, onWidthCommit, onWidthReset, headerActions, children }: ResponsiveAgentSidebarProps) => {
+export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, drawerOpen, drawerId, onDrawerOpenChange, onToggleCollapsed, onWidthChange, onWidthCommit, onWidthReset, headerActions, headerTitle, children }: ResponsiveAgentSidebarProps) => {
   const portalContainer = React.useRef<HTMLDivElement>(null)
   const narrow = viewport < sidebarDrawerBreakpoint
   const coarse = useCoarsePointer()
@@ -54,7 +56,7 @@ export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, d
   }, [narrow])
   const sidebar = <NarrowLayoutContext.Provider value={coarse}>
     <aside aria-label="Agents" data-sidebar-presentation={narrow ? 'drawer' : 'dock'} data-sidebar-density={coarse ? 'touch' : 'dock'} style={{ width: Math.max(sidebarMinimumWidth, width) }} {...stylex.props(styles.sidebar)}>
-      <SidebarHeader ref={focusDrawerClose} label={narrow ? 'Close agents' : 'Collapse agents'} onCollapse={() => narrow ? onDrawerOpenChange(false) : onToggleCollapsed()} actions={headerActions} />
+      <SidebarHeader ref={focusDrawerClose} label={narrow ? 'Close agents' : 'Collapse agents'} onCollapse={() => narrow ? onDrawerOpenChange(false) : onToggleCollapsed()} actions={headerActions} title={headerTitle} />
       {children}
     </aside>
   </NarrowLayoutContext.Provider>
@@ -68,15 +70,16 @@ export const ResponsiveAgentSidebar = ({ viewport, width, maxWidth, collapsed, d
   </div>
 }
 
-/** The dock's header, reused by the phone drawer: collapse at the leading edge, the wordmark, then trailing actions. */
-export const SidebarHeader = ({ ref, label, onCollapse, actions }: {
+/** The dock's header, reused by the phone drawer: collapse at the leading edge, the wordmark (or the host's title), then trailing actions. */
+export const SidebarHeader = ({ ref, label, onCollapse, actions, title }: {
   readonly ref?: React.Ref<HTMLButtonElement>
   readonly label: string
   readonly onCollapse: () => void
   readonly actions?: React.ReactNode
+  readonly title?: React.ReactNode
 }) => <header data-sidebar-header="" {...stylex.props(styles.brand)}>
   <ChromeControl {...(ref === undefined ? {} : { ref })} icon="panel-left" label={label} edge="lead" onPress={onCollapse} />
-  <strong {...stylex.props(styles.wordmark)}>Fractal</strong>
+  {title ?? <strong {...stylex.props(styles.wordmark)}>Fractal</strong>}
   {actions === undefined ? null : <span {...stylex.props(styles.actions)}>{actions}</span>}
 </header>
 

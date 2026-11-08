@@ -246,3 +246,54 @@ it('drops a tab into another pane\'s strip at the slot under the pointer, and th
   await pointer(window, 'pointerup', { clientX: 10, clientY: 20 })
   expect(stripTitles()).toEqual([['Agent B', 'Agent A']])
 })
+
+it('switches spaces from the sidebar\'s switcher, in place of the wordmark: new, rename, Alt+G, and close behind a confirm', async () => {
+  await mount()
+  const switcher = () => host.querySelector<HTMLButtonElement>('[data-testid="space-switcher"]')!
+  expect(host.querySelector('[data-sidebar-header]')?.textContent).not.toContain('Fractal')
+  expect(switcher().textContent).toBe('Main')
+  const choose = async (label: string) => {
+    await act(async () => switcher().click())
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(node => node.textContent === label)!
+    await act(async () => item.click())
+  }
+  const name = async (value: string) => {
+    const field = document.querySelector<HTMLInputElement>('input[placeholder="Space name"]')!
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!.call(field, value)
+      field.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    await act(async () => field.form!.requestSubmit())
+  }
+  await choose('New space…')
+  await name('Review')
+  expect(switcher().textContent).toBe('Review')
+  expect(stripTitles()).toEqual([[]])
+  await choose('Rename…')
+  await name('Reviews')
+  expect(switcher().textContent).toBe('Reviews')
+  await key('KeyG')
+  expect(switcher().textContent).toBe('Main')
+  expect(stripTitles()).toEqual([['Agent A']])
+  await key('KeyG')
+  await choose('Close space…')
+  expect(switcher().textContent).toBe('Reviews')
+  const keep = [...document.querySelectorAll<HTMLButtonElement>('button')].find(node => node.textContent === 'Close space')!
+  await act(async () => keep.click())
+  expect(switcher().textContent).toBe('Main')
+  await act(async () => switcher().click())
+  expect([...document.querySelectorAll('[role="menuitem"]')].map(node => node.textContent)).toContain('Close space…')
+})
+
+it('marks a zoomed split, and its badge unzooms', async () => {
+  await mount()
+  await act(async () => row('agent/b').click())
+  await splitTab('Agent B', 'Split right')
+  await key('KeyO')
+  expect(panes()).toHaveLength(1)
+  const badge = host.querySelector<HTMLButtonElement>('[data-testid="zoom-badge"]')!
+  expect(badge.getAttribute('aria-label')).toBe('Unzoom split')
+  await act(async () => badge.click())
+  expect(panes()).toHaveLength(2)
+  expect(host.querySelector('[data-testid="zoom-badge"]')).toBeNull()
+})

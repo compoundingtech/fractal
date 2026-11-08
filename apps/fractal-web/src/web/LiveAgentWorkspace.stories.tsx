@@ -1,6 +1,6 @@
 import type { ComponentProps } from 'react'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, waitFor } from 'storybook/test'
+import { expect, userEvent, waitFor } from 'storybook/test'
 import { AppStorySpecimen, type AppStoryArgs } from '../fixtures/AppStoryHarness.tsx'
 import { assertProductionAppState } from '../fixtures/appStoryAssertions.ts'
 import { appStoryAgent, appStoryStates } from '../fixtures/appStoryStates.ts'
@@ -48,6 +48,7 @@ export const scenarioExemptions: readonly string[] = [
   'Populated:contract-fixture',
   'ScriptedRepair:contract-fixture',
   'SidebarDragToPane:contract-fixture',
+  'Spaces:contract-fixture',
   'Splits:contract-fixture',
   'SplitsDragAndDrop:contract-fixture',
   'TabSwitchGeometry:contract-fixture',
@@ -285,6 +286,41 @@ export const SidebarDragToPane: Story = {
     drop()
     await waitFor(() => expect(strips()).toHaveLength(2))
     expect(tabs()).toHaveLength(2)
+    canvasElement.dataset.proof = 'passed'
+  },
+}
+
+/**
+ * Spaces from the sidebar's header row, where the switcher stands in place of the wordmark: a new space
+ * named in place opens empty, Alt+G goes to the next space and back, and closing one asks first.
+ */
+export const Spaces: Story = {
+  args: { state: 'populated' },
+  play: async ({ canvasElement, args }) => {
+    await waitFor(() => assertProductionAppState(canvasElement, args.state, true), { timeout: 60000 })
+    if (collapsed(canvasElement)) {
+      // The phone's switcher lives in the drawer, opened from the top bar.
+      canvasElement.querySelector<HTMLElement>('button[aria-label="Expand sidebar"]')!.click()
+    }
+    const switcher = () => document.querySelector<HTMLButtonElement>('[data-testid="space-switcher"]')
+    await waitFor(() => expect(switcher()?.textContent).toBe('Main'))
+    const choose = async (label: string) => {
+      switcher()!.click()
+      await waitFor(() => expect([...document.querySelectorAll('[role="menuitem"]')].some(item => item.textContent === label)).toBe(true))
+      ;[...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(item => item.textContent === label)!.click()
+    }
+    await choose('New space…')
+    const field = await waitFor(() => { const input = document.querySelector<HTMLInputElement>('input[placeholder="Space name"]'); expect(input).not.toBeNull(); return input! })
+    await userEvent.type(field, 'Review{Enter}')
+    await waitFor(() => expect(switcher()?.textContent).toBe('Review'))
+    press({ key: 'g', code: 'KeyG', altKey: true })
+    await waitFor(() => expect(switcher()?.textContent).toBe('Main'))
+    press({ key: 'g', code: 'KeyG', altKey: true })
+    await waitFor(() => expect(switcher()?.textContent).toBe('Review'))
+    await choose('Close space…')
+    const confirm = await waitFor(() => { const button = [...document.querySelectorAll<HTMLButtonElement>('button')].find(node => node.textContent === 'Close space'); expect(button).toBeDefined(); return button! })
+    confirm.click()
+    await waitFor(() => expect(switcher()?.textContent).toBe('Main'))
     canvasElement.dataset.proof = 'passed'
   },
 }
