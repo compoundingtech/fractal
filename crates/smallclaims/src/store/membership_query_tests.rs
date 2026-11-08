@@ -5,6 +5,7 @@ use std::cell::Cell;
 
 thread_local! {
     static STATEMENTS: Cell<usize> = const { Cell::new(0) };
+    pub(super) static SIGNATURE_VERIFICATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 fn fixture() -> Connection {
@@ -481,12 +482,17 @@ fn authenticated_member_writer_accepts_valid_records_in_a_degraded_envelope() {
     ).unwrap();
     cache_member_window(&store, key.public(), 0);
     assert!(store.claim_has_authenticated_member_writer(&claim).unwrap());
+    assert_eq!(
+        store.claim_ids_with_authenticated_member_writers(std::slice::from_ref(&claim)).unwrap(),
+        BTreeSet::from([claim.clone()]),
+    );
     store.connection.write().execute(
         /* sqlite-large-value: allow-for-now lv-h9e7e7a841384 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
         "UPDATE replica_envelope_signatures SET signature='invalid'", [],
     ).unwrap();
     cache_member_window(&store, key.public(), 0);
     assert!(!store.claim_has_authenticated_member_writer(&claim).unwrap());
+    assert!(store.claim_ids_with_authenticated_member_writers(&[claim]).unwrap().is_empty());
 }
 
 #[test]
@@ -525,6 +531,10 @@ fn authenticated_member_writer_requires_origin_valid_record_admitted_envelope_an
         store.connection.write().execute_batch(/* sqlite-large-value: allow-for-now lv-h622f4fdd0f6d owner=smallclaims::store::membership_query_tests TODO=trace-statement-and-value-representation */ sql).unwrap();
         cache_member_window(&store, key.public(), 0);
         assert!(!store.claim_has_authenticated_member_writer(&claim).unwrap(), "{sql}");
+        assert!(
+            store.claim_ids_with_authenticated_member_writers(&[claim]).unwrap().is_empty(),
+            "{sql}",
+        );
     }
 }
 
@@ -553,5 +563,92 @@ fn authenticated_member_writer_rejects_wrong_fleet_and_shard_signature_domains()
         drop(connection);
         cache_member_window(&store, key.public(), 0);
         assert!(!store.claim_has_authenticated_member_writer(&claim).unwrap());
+        assert!(store.claim_ids_with_authenticated_member_writers(&[claim]).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn batch_authenticated_member_writers_match_scalar_keyed_and_legacy_windows() {
+    let (store, claim, key) = authenticated_member_fixture();
+    let requested = vec![claim.clone(), "missing".into(), claim.clone()];
+    let assert_parity = |expected: bool| {
+        let batch = store.claim_ids_with_authenticated_member_writers(&requested).unwrap();
+        assert_eq!(
+            batch,
+            if expected { BTreeSet::from([claim.clone()]) } else { BTreeSet::new() },
+        );
+        for id in &requested {
+            assert_eq!(batch.contains(id), store.claim_has_authenticated_member_writer(id).unwrap());
+        }
+    };
+    assert_parity(true);
+    // The same signed envelope is legacy before its incarnation's floor.
+    cache_member_window(&store, key.public(), u64::MAX);
+    assert_parity(false);
+    let generation = fleet_generation(&store.readers.get()).unwrap();
+    *store.membership_cache.lock().unwrap() = Some((generation, Membership::default()));
+    assert_parity(false);
+    let other = crate::fleet::MemberKey::generate().unwrap().0;
+    cache_member_window(&store, other.public(), 0);
+    assert_parity(false);
+    cache_member_window(&store, key.public(), 0);
+    assert_parity(true);
+    assert!(store.claim_ids_with_authenticated_member_writers(&[]).unwrap().is_empty());
+}
+
+#[test]
+fn batch_authenticated_member_writers_verify_shared_envelope_signatures_once() {
+    let (store, claim, key) = authenticated_member_fixture();
+    let sibling = store.append_claim(&ClaimInput {
+        subject: "note/provenance-sibling".into(),
+        kind: "example.note".into(),
+        actor: None,
+        fields: BTreeMap::new(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    // Invent a second admitted record in the same envelope: only the signed envelope
+    // identity matters to this query, not the record's retained payload.
+    {
+        let connection = store.connection.write();
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-hb5e52f377f02 owner=smallclaims::store::membership_query_tests TODO=prepare-body-and-predecessor-values */
+            "UPDATE claims SET origin='birch' WHERE id=?1", [&sibling.id],
+        ).unwrap();
+        connection.execute(
+            /* sqlite-large-value: allow-for-now lv-he6cdb35f9041 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+            "INSERT INTO replica_records(
+                record_ref, writer, sequence, envelope_hash, position, raw, state,
+                claim_id, updated_at_unix_ms
+             ) SELECT record_ref || '-sibling', writer, sequence, envelope_hash,
+                      position + 1, raw, state, ?1, updated_at_unix_ms
+               FROM replica_records WHERE claim_id=?2",
+            params![sibling.id, claim],
+        ).unwrap();
+    }
+    let requested = vec![claim.clone(), sibling.id.clone(), claim.clone(), sibling.id.clone()];
+    for valid in [true, false] {
+        if !valid {
+            store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-h85da58ff0363 owner=smallclaims::store::membership_query_tests TODO=chunk-or-reference-exact-wire-values */
+                "UPDATE replica_envelope_signatures SET signature='invalid'", [],
+            ).unwrap();
+        }
+        cache_member_window(&store, key.public(), 0);
+        SIGNATURE_VERIFICATIONS.with(|count| count.set(0));
+        let batch = store.claim_ids_with_authenticated_member_writers(&requested).unwrap();
+        SIGNATURE_VERIFICATIONS.with(|count| assert_eq!(count.get(), 1));
+        assert_eq!(
+            batch,
+            if valid {
+                BTreeSet::from([claim.clone(), sibling.id.clone()])
+            } else {
+                BTreeSet::new()
+            },
+        );
+        for id in &requested {
+            assert_eq!(batch.contains(id), store.claim_has_authenticated_member_writer(id).unwrap());
+        }
     }
 }

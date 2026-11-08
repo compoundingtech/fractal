@@ -1,29 +1,67 @@
 //! Opt-in, real HTTP/Unix daemon measurement (not a router oneshot or mocked daemon).
-//! Run this same test source on both revisions, sequentially on the same host, from each
-//! worktree root (cargo runs tests from crates/fractal, so pass absolute paths):
+//! Run this same source sequentially on each revision, from that worktree root.
+//! Bind the build to its source revision and select the executable from Cargo JSON,
+//! NEVER by searching a shared target directory for `integration-*` (stale head/base
+//! binaries can coexist). `baseline` is a scenario label, NOT executable identity.
 //! ```sh
-//! # fixed head: full q39 scenario plus read counts
-//! ST3_PROFILE_DIR="$PWD/tmp/867-admission/fixed-profile" ST3_PROFILE_SLOW_MS=0 ST_ADMISSION_VARIANT=indexed ST_ADMISSION_FOREIGN_ACTIVE=3 ST_ADMISSION_REPORT="$PWD/tmp/867-admission/fixed.json" CARGO_TARGET_DIR="$PWD/tmp/867-admission/target" cargo test --release -p fractal --test integration daemon_cost::assistant_admission::authenticated_get_during_pairing -- --exact --nocapture --test-threads=1
-//! # origin/main: read counts only, without overlays its admission does not ignore
-//! ST3_PROFILE_DIR="$PWD/tmp/867-admission/main-profile" ST3_PROFILE_SLOW_MS=0 ST_ADMISSION_VARIANT=baseline ST_ADMISSION_READ_COUNTS_ONLY=1 ST_ADMISSION_WRONG_ORIGIN_OVERLAYS=0 ST_ADMISSION_REPORT="$PWD/tmp/867-admission/main.json" CARGO_TARGET_DIR="$PWD/tmp/867-admission/target" cargo test --release -p fractal --test integration daemon_cost::assistant_admission::authenticated_get_during_pairing -- --exact --nocapture --test-threads=1
+//! export ST_ADMISSION_SOURCE_ROOT="$PWD"
+//! export ST_ADMISSION_EXPECT_REVISION="$(git rev-parse HEAD)"
+//! export ST_ADMISSION_BUILD_REVISION="$ST_ADMISSION_EXPECT_REVISION"
+//! export ST_ADMISSION_BUILD_PROVENANCE="git worktree; harness backport only; cargo command below"
+//! export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/tmp/867-admission/target}"
+//! mkdir -p "$PWD/tmp/867-admission"
+//! cargo test --release -p fractal --test integration --no-run --message-format=json > "$PWD/tmp/867-admission/build.jsonl"
+//! export ST_ADMISSION_BINARY="$(jq -rs '[.[] | select(.reason == "compiler-artifact" and .target.name == "integration" and .profile.test and .executable != null) | .executable] | unique | if length == 1 then .[0] else error("expected one integration test executable") end' "$PWD/tmp/867-admission/build.jsonl")"
+//! # Like-for-like counts: run N=2 AND N=5 at BOTH revisions; fresh profiles.
+//! # Set variant=baseline on base, indexed on head. Do not reuse an old binary.
+//! for n in 2 5; do
+//!   ST3_PROFILE_DIR="$PWD/tmp/867-admission/$ST_ADMISSION_EXPECT_REVISION-n$n-profile" ST3_PROFILE_SLOW_MS=0 ST_ADMISSION_VARIANT=indexed ST_ADMISSION_LOCAL_ACTIVE="$n" ST_ADMISSION_READ_COUNTS_ONLY=1 ST_ADMISSION_WRONG_ORIGIN_OVERLAYS=0 ST_ADMISSION_FOREIGN_ACTIVE=0 ST_ADMISSION_REPORT="$PWD/tmp/867-admission/$ST_ADMISSION_EXPECT_REVISION-n$n.json" "$ST_ADMISSION_BINARY" daemon_cost::assistant_admission::authenticated_get_during_pairing --exact --nocapture --test-threads=1
+//! done
+//! # Head only, full extended q39: 2 local + 3 authenticated foreign grants,
+//! # 10000 expired grants/principal, 3 renewals each, 1000 overlays/active grant,
+//! # 200 concurrent GET/completion pairs/mode; do NOT set READ_COUNTS_ONLY.
+//! ST3_PROFILE_DIR="$PWD/tmp/867-admission/$ST_ADMISSION_EXPECT_REVISION-q39-profile" ST3_PROFILE_SLOW_MS=0 ST_ADMISSION_VARIANT=indexed ST_ADMISSION_LOCAL_ACTIVE=2 ST_ADMISSION_HISTORY=10000 ST_ADMISSION_SAMPLES=200 ST_ADMISSION_FOREIGN_ACTIVE=3 ST_ADMISSION_WRONG_ORIGIN_OVERLAYS=1000 ST_ADMISSION_REPORT="$PWD/tmp/867-admission/$ST_ADMISSION_EXPECT_REVISION-q39.json" "$ST_ADMISSION_BINARY" daemon_cost::assistant_admission::authenticated_get_during_pairing --exact --nocapture --test-threads=1
 //! ```
-//! For a like-for-like count, also run the fixed head with the origin/main command's
-//! ST_ADMISSION_READ_COUNTS_ONLY=1 ST_ADMISSION_WRONG_ORIGIN_OVERLAYS=0 settings
-//! (VARIANT=indexed there). Each revision has its own worktree, hence its own tmp/.
-//! Backport to origin/main (d477c67ad1), which lacks this file and three head APIs:
-//! 1. copy this file to crates/fractal/tests/daemon_cost/assistant_admission.rs and add
-//!    `mod assistant_admission;` to crates/fractal/tests/daemon_cost.rs;
-//! 2. replace the body of `mod revision_api` at the end of this file with the
-//!    origin/main body documented in its comment. Nothing else changes.
-//! On origin/main, only ST_ADMISSION_READ_COUNTS_ONLY=1, ST_ADMISSION_FOREIGN_ACTIVE=0 and
-//! ST_ADMISSION_WRONG_ORIGIN_OVERLAYS=0 are valid: it has no provenance check and does
-//! not ignore wrong-origin overlays, and its credential-hash admission has no index probe.
+//! Backport to base d477c67ad1: copy this file, add `mod assistant_admission;` to
+//! crates/fractal/tests/daemon_cost.rs, and replace ONLY `revision_api`'s body
+//! with the documented base body below. Build there using the commands above;
+//! change VARIANT to baseline in the counts loop. Base supports local N=2/5,
+//! but requires READ_COUNTS_ONLY=1, FOREIGN_ACTIVE=0, WRONG_ORIGIN_OVERLAYS=0.
+//! It has no provenance API and does not ignore foreign overlays or expose an indexed probe.
+//! For a git archive (no .git), set ST_ADMISSION_SOURCE_REVISION to the archived
+//! full commit ID and ST_ADMISSION_SOURCE_PROVENANCE to the exact archive command
+//! and source/build evidence location; retain the build env above and set EXPECT
+//! to that ID explicitly instead of git rev-parse. These are declared provenance,
+//! not a claim that a reused binary was built from that archive. The executable's
+//! embedded revision MUST match EXPECT; its canonical path and SHA256 are reported.
+//! A worktree report records actual `git rev-parse HEAD`; archives record null for
+//! that observation and separately record the explicit source revision/evidence.
+//! Counts are observations, not expectations: rerun true base N=2 to establish or
+//! explain the previously cited 4/12/16 (auth/caller-bound/approval-once) counts.
+//! Old base 8/8/9 with identical head SQL is not evidence of base behavior without
+//! executable identity. Compare direct auth separately from GET: receipt/proof work
+//! and the number of live grants differ. Never relabel an existing report as base.
+//! Prior run: `git archive d477c67ad1` into a base directory, harness-only
+//! backport, then `cargo test --release -p fractal --test integration ...` in a
+//! shared target directory previously used by head. The retained report
+//! /var/tmp/867c-evidence/fix/base-counts-1.json lacked executable identity.
+//! This fixture serves routers IN PROCESS: daemon_bench's standalone binary
+//! discovery cannot explain its direct-auth measurement. A reused integration
+//! executable/dependency artifact is a hypothesis, not an established cause.
+//! Source inspection of d477c67ad1 authenticate/session implies four acquisitions
+//! (digest lookup, claim_by_id, POLICY, REVOKED), independent of N. GET 12/16 must
+//! be remeasured with the same route, proof, receipt flush and profiling scope;
+//! they are not asserted as expected counts by this fixture. Retain reports and
+//! build JSON to distinguish executable reuse from instrumentation/scope differences.
 //! ST_ADMISSION_HISTORY (default 10000) is expired grants PER principal; ST_ADMISSION_SAMPLES
 //! (default 200) is measured GET/completion pairs PER read mode. Setup and proof creation are
 //! outside timing. Each pair starts behind a barrier, with no sleeps, polling, retries or timers.
 //! ST_ADMISSION_FOREIGN_ACTIVE optionally adds verified same-profile active foreign grants
 //! (default 0; use 3 for the provenance-check scenario). ST_ADMISSION_REPORT optionally
 //! saves the complete JSON report. Hardware is observed from uname/lscpu, not inferred.
+//! ST_ADMISSION_LOCAL_ACTIVE (default 2, minimum 2) creates that many local active
+//! grants, including the two measured modes; total N is local + FOREIGN_ACTIVE.
+//! Extra local grants use caller-bound-allow and remain active throughout sampling.
 //! Each expired grant has three still-expired POLICY renewals. Each active session has
 //! ST_ADMISSION_WRONG_ORIGIN_OVERLAYS (default 1000; 0 allowed) authenticated wrong-origin
 //! overlays, alternating POLICY and REVOKED; every measured read must still succeed.
@@ -69,6 +107,58 @@ fn number(name: &str, default: usize) -> usize {
 
 fn count(name: &str, default: usize) -> usize {
     std::env::var(name).map_or(default, |s| s.parse().expect("nonnegative integer setting"))
+}
+
+/// Bind source checkout/archive, build declaration and the actual running executable.
+/// Embedded env values are Cargo-tracked inputs, not runtime overrides of old artifacts.
+fn execution_identity() -> Value {
+    let required = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("set {name}; see harness instructions"));
+    let expected = required("ST_ADMISSION_EXPECT_REVISION");
+    assert_eq!(expected.len(), 40, "use a full commit ID");
+    assert!(expected.bytes().all(|byte| byte.is_ascii_hexdigit()), "use a full commit ID");
+    let built_revision = option_env!("ST_ADMISSION_BUILD_REVISION")
+        .expect("build with ST_ADMISSION_BUILD_REVISION; do not reuse an unidentified executable");
+    let build_provenance = option_env!("ST_ADMISSION_BUILD_PROVENANCE")
+        .expect("build with ST_ADMISSION_BUILD_PROVENANCE");
+    assert!(!build_provenance.trim().is_empty(), "build provenance must not be empty");
+    assert_eq!(built_revision, expected, "the executable was built for a different source revision");
+    let binary = std::env::current_exe().unwrap().canonicalize().unwrap();
+    assert_eq!(binary, PathBuf::from(required("ST_ADMISSION_BINARY")).canonicalize().unwrap(),
+        "execute the explicitly selected Cargo artifact");
+    let source_root = PathBuf::from(required("ST_ADMISSION_SOURCE_ROOT")).canonicalize().unwrap();
+    let (git_head, source_revision, source_provenance) = if source_root.join(".git").exists() {
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git").arg("-C").arg(&source_root).args(args).output().unwrap();
+            assert!(output.status.success(), "git identity command failed");
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        assert_eq!(PathBuf::from(git(&["rev-parse", "--show-toplevel"])).canonicalize().unwrap(), source_root);
+        let head = git(&["rev-parse", "HEAD"]);
+        assert_eq!(head, expected, "source checkout and executable revision differ");
+        let status = git(&["status", "--porcelain", "--untracked-files=no"]);
+        (Some(head.clone()), head, format!("git worktree; tracked changes:\n{status}"))
+    } else {
+        let revision = required("ST_ADMISSION_SOURCE_REVISION");
+        let provenance = required("ST_ADMISSION_SOURCE_PROVENANCE");
+        assert_eq!(revision, expected, "archive source and executable revision differ");
+        assert!(!provenance.trim().is_empty(), "archive evidence must not be empty");
+        (None, revision, provenance)
+    };
+    use std::io::Read as _;
+    let mut executable = std::fs::File::open(&binary).unwrap();
+    let mut hash = ring::digest::Context::new(&ring::digest::SHA256);
+    let mut buffer = [0_u8; 65_536];
+    loop {
+        let bytes = executable.read(&mut buffer).unwrap();
+        if bytes == 0 { break; }
+        hash.update(&buffer[..bytes]);
+    }
+    let sha256 = hex::encode(hash.finish().as_ref());
+    json!({"git_rev_parse_head":git_head,"source_revision":source_revision,
+        "source_root":source_root,"source_provenance":source_provenance,
+        "binary_path":binary,"binary_sha256":sha256,"build_revision":built_revision,
+        "build_provenance":build_provenance,
+        "identity_limit":"build/archive provenance is explicitly supplied; SHA256 identifies executed bytes, not independent source attestation"})
 }
 
 fn value(response: Value) -> Value {
@@ -228,6 +318,8 @@ fn foreign_same_profile(store: &Store, anchor: Arc<smallclaims::fleet::MemberKey
 async fn authenticated_get_during_pairing() {
     let Ok(variant) = std::env::var("ST_ADMISSION_VARIANT") else { return };
     assert!(matches!(variant.as_str(), "baseline" | "indexed"));
+    let identity = execution_identity();
+    assert_eq!(variant, revision_api::VARIANT, "scenario variant must match the compiled revision API");
     let counts_only = std::env::var_os("ST_ADMISSION_READ_COUNTS_ONLY").is_some();
     assert!(counts_only || fractal_daemon::test_support::optimized_build(), "use --release");
     assert_eq!(std::env::var("ST3_PROFILE_SLOW_MS").as_deref(), Ok("0"),
@@ -241,6 +333,12 @@ async fn authenticated_get_during_pairing() {
     let samples = if counts_only { 0 } else { number("ST_ADMISSION_SAMPLES", 200) };
     let foreign_active = count("ST_ADMISSION_FOREIGN_ACTIVE", 0);
     let overlays = count("ST_ADMISSION_WRONG_ORIGIN_OVERLAYS", 1000);
+    let local_active = number("ST_ADMISSION_LOCAL_ACTIVE", 2);
+    assert!(local_active >= 2, "the fixture measures two distinct read modes");
+    if variant == "baseline" {
+        assert!(counts_only && foreign_active == 0 && overlays == 0,
+            "base requires READ_COUNTS_ONLY=1, FOREIGN_ACTIVE=0, WRONG_ORIGIN_OVERLAYS=0");
+    }
     let root = tempfile::tempdir().unwrap();
     let database = root.path().join("admission.sqlite");
     let store = Arc::new(Store::open(&database, NODE).unwrap());
@@ -298,12 +396,16 @@ async fn authenticated_get_during_pairing() {
         }
         sessions.push((mode, paired));
     }
+    let mut extra_sessions = Vec::new();
+    for _ in 2..local_active {
+        extra_sessions.push(complete(&http, &base, &begin(&owner, "caller-bound-allow").await).await);
+    }
     // Synthetic expired grants retain valid production field shapes, native Store envelopes,
     // origin/actor and per-subject indexes. They are never service-profile fixtures and never
     // authorize a request. Grant history is deliberately nonempty for BOTH principals.
     let template_subject = format!("custom/client/assistant-v1-{}", sessions[0].1["grant"]["id"].as_str().unwrap().trim_start_matches("assistant-grant/"));
     let template = store.claims_for_subject_kind_at(&template_subject, GRANTED, None, true, 1).unwrap().claims.pop().unwrap();
-    let active = sessions.iter().map(|(_, paired)| {
+    let active = sessions.iter().map(|(_, paired)| paired).chain(extra_sessions.iter()).map(|paired| {
         let subject = format!("custom/client/assistant-v1-{}", paired["grant"]["id"].as_str().unwrap().trim_start_matches("assistant-grant/"));
         let grant = store.claims_for_subject_kind_at(&subject, GRANTED, None, true, 1).unwrap().claims.pop().unwrap();
         (subject, grant.body["fields"].clone())
@@ -472,6 +574,7 @@ async fn authenticated_get_during_pairing() {
     let final_connection = rusqlite::Connection::open(&database).unwrap();
     let final_rows: u64 = final_connection.query_row("SELECT count(*) FROM claims", [], |r| r.get(0)).unwrap();
     let report = json!({"variant":variant,"read_counts_only":counts_only,"revision_api":revision_api::REVISION,
+        "execution_identity":identity,"local_active_grants":local_active,"active_grants_n":local_active + foreign_active,
         "hardware_uname":hardware("uname", &["-a"]),
         "hardware_lscpu":hardware("lscpu", &["-J"]),"hardware_hostname":hardware("hostname", &[]),
         "host_description":"Observed local benchmark host; no prescribed hardware identity",
@@ -500,14 +603,17 @@ async fn authenticated_get_during_pairing() {
 
 /// Synthetic large-store index build, independent of the HTTP latency fixture:
 /// ```sh
-/// ST_ADMISSION_INDEX_BUILD=1 cargo test --release -p fractal --test integration daemon_cost::assistant_admission::synthetic_large_store_index_build -- --exact --nocapture --test-threads=1
+/// ST_ADMISSION_INDEX_BUILD=1 "$ST_ADMISSION_BINARY" daemon_cost::assistant_admission::synthetic_large_store_index_build --exact --nocapture --test-threads=1
 /// ```
 /// ST_ADMISSION_INDEX_ROWS defaults to 1,000,000 total claims. ST_ADMISSION_INDEX_REPORT
 /// optionally saves JSON. Run on the indexed branch. This measures the exact startup index
 /// CREATE DDL, not full Store::open, cold-disk startup, admission, or signature verification.
+/// Use the same identity-bound build/export commands above (including SOURCE_ROOT,
+/// EXPECT_REVISION and BINARY). Every index report carries the same execution identity.
 #[test]
 fn synthetic_large_store_index_build() {
     if std::env::var_os("ST_ADMISSION_INDEX_BUILD").is_none() { return; }
+    let identity = execution_identity();
     assert!(fractal_daemon::test_support::optimized_build(), "use --release");
     let rows = number("ST_ADMISSION_INDEX_ROWS", 1_000_000);
     let root = tempfile::tempdir().unwrap();
@@ -583,6 +689,7 @@ fn synthetic_large_store_index_build() {
     };
     let report = json!({
         "measurement":"synthetic startup index CREATE DDL only; not full startup",
+        "execution_identity":identity,
         "claims_rows":actual_rows,"synthetic_copied_rows":rows - 1,
         "fixture_authority":"one native template; SQL copies are not signature-authoritative",
         "index_name":INDEX,"index_create_sql":CREATE_INDEX,"index_build_ms":elapsed_ms,
@@ -606,6 +713,7 @@ fn synthetic_large_store_index_build() {
 /// ```ignore
 /// use super::*;
 /// pub const REVISION: &str = "origin/main";
+/// pub const VARIANT: &str = "baseline";
 /// // origin/main admission is a credential-hash lookup with no candidate query.
 /// pub const ADMISSION_QUERY: &str = A_QUERY;
 /// pub fn verified_writer(_: &Store, _: &str) -> bool {
@@ -616,6 +724,7 @@ fn synthetic_large_store_index_build() {
 mod revision_api {
     use super::*;
     pub const REVISION: &str = "fixed-head";
+    pub const VARIANT: &str = "indexed";
     pub const ADMISSION_QUERY: &str = api::client_v0::external_grants::admission_query_for_test();
     pub fn verified_writer(store: &Store, id: &str) -> bool {
         store.claim_has_authenticated_member_writer(id).unwrap()

@@ -123,37 +123,67 @@ fn admission_now_ms() -> u128 {
     client_now_ms()
 }
 fn candidate_grants(state: &AppState, principal: &str, expiry_cut: Option<u64>) -> Result<Vec<(ClaimRecord, Profile)>, ApiError> {
-    candidate_grants_except(state, principal, expiry_cut, None)
+    candidate_grants_except(state, principal, expiry_cut, None, None)
 }
 
-fn candidate_grants_except(state: &AppState, principal: &str, expiry_cut: Option<u64>, excluded: Option<&str>) -> Result<Vec<(ClaimRecord, Profile)>, ApiError> {
+fn candidate_grants_except(state: &AppState, principal: &str, expiry_cut: Option<u64>,
+    excluded: Option<&str>, ignored_profile: Option<Profile>) -> Result<Vec<(ClaimRecord, Profile)>, ApiError> {
     let owner = owning_person(state)?;
-    let ids = {
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(||
+        crate::store::assistant_write::validated_candidates_query(ADMISSION_QUERY));
+    let ignored_profile = ignored_profile.map(|profile| match profile {
+        Profile::Assistant => "assistant", Profile::Service => "service",
+    });
+    let rows = {
         let connection = state.store.readers.get();
-        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h99f1a302c7b1 owner=fractal_api_core::api::client_v0::external_grants TODO=trace-statement-and-value-representation */ ADMISSION_QUERY).map_err(ApiError::internal)?;
-        query.query_map(rusqlite::params![GRANTED, principal, REVOKED, POLICY, expiry_cut, state.store.origin()], |row| row.get::<_, String>(0))
-            .map_err(ApiError::internal)?.collect::<Result<Vec<_>, _>>().map_err(ApiError::internal)?
+        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-hc1c46de6a890 owner=fractal_api_core::api::client_v0::external_grants TODO=trace-statement-and-value-representation */ &QUERY).map_err(ApiError::internal)?;
+        query.query_map(rusqlite::params![GRANTED, principal, REVOKED, POLICY, expiry_cut,
+            state.store.origin(), owner, ignored_profile, excluded], |row| {
+                Ok((row.get::<_, String>(10)?, row.get::<_, String>(11)?,
+                    smallclaims::store::claim_from_row(row)?))
+            }).map_err(ApiError::internal)?.collect::<Result<Vec<_>, _>>().map_err(ApiError::internal)?
     };
+    // Verify foreign grants and transitions together: one sealed membership
+    // snapshot, and each envelope signature at most once for this fold.
+    let foreign_ids: Vec<String> = rows.iter()
+        .filter(|(_, _, claim)| claim.origin != state.store.origin())
+        .map(|(_, _, claim)| claim.id.clone()).collect();
+    let authenticated = if foreign_ids.is_empty() {
+        std::collections::BTreeSet::new()
+    } else {
+        state.store.claim_ids_with_authenticated_member_writers(&foreign_ids).map_err(ApiError::internal)?
+    };
+    let mut candidates = std::collections::BTreeMap::<String,
+        (Option<ClaimRecord>, Option<ClaimRecord>, Option<ClaimRecord>)>::new();
+    for (id, role, claim) in rows {
+        let entry = candidates.entry(id).or_default();
+        match role.as_str() {
+            "grant" => entry.0 = Some(claim),
+            "policy" => entry.1 = Some(claim),
+            "revoked" => entry.2 = Some(claim),
+            _ => unreachable!("candidate query has fixed roles"),
+        }
+    }
     let mut active = Vec::new();
-    for id in ids {
-        if excluded == Some(id.as_str()) { continue; }
-        let grant = state.store.claim_by_id(&id).map_err(ApiError::internal)?
-            .ok_or_else(|| forbidden("external grant is absent"))?;
-        if grant.actor.as_deref() != Some(owner)
-            || (expiry_cut.is_some() && revoked(state, &grant)?) {
-            continue;
-        }
-        let policy = effective(state, &grant)?;
+    for (_, (grant, mut policy, mut revocation)) in candidates {
+        let grant = grant.ok_or_else(|| ApiError::internal("candidate grant is absent"))?;
+        if grant.actor.as_deref() != Some(owner) { continue; }
         let foreign = grant.origin != state.store.origin();
-        // Custom fields are open at replication admission. Actor/origin strings
-        // alone therefore confer no authority to suspend another credential.
-        // Only well-formed owner grants carried by a signed, admitted issuer
-        // count; policies must have the same provenance and immutable identity.
-        if !valid_foreign_grant(state, &grant, &policy)?
-            || (foreign && !state.store.claim_has_authenticated_member_writer(&grant.id).map_err(ApiError::internal)?) {
-            continue;
+        if foreign {
+            if !authenticated.contains(&grant.id) { continue; }
+            // A Legacy-window or invalid signature must not hide an older
+            // authenticated renewal/revocation from the same issuer.
+            if let Some(candidate) = policy.as_ref().filter(|row| !authenticated.contains(&row.id)) {
+                policy = transition_before(state, &grant, POLICY, Some(candidate.store_index))?;
+            }
+            if let Some(candidate) = revocation.as_ref().filter(|row| !authenticated.contains(&row.id)) {
+                revocation = transition_before(state, &grant, REVOKED, Some(candidate.store_index))?;
+            }
         }
-        let source = fields(&policy)?;
+        if expiry_cut.is_some() && revocation.is_some() { continue; }
+        let policy = policy.as_ref().unwrap_or(&grant);
+        if !valid_foreign_grant(state, &grant, policy)? { continue; }
+        let source = fields(policy)?;
         if expiry_cut.is_none_or(|now| unexpired(source, now)) {
             let profile = Profile::stored(fields(&grant)?)?;
             profile.compatible(Profile::stored(source)?)?;
@@ -345,19 +375,26 @@ pub fn audit<T>(state: &AppState, operation: &str, actor: &str, transport: &str,
     Ok(())
 }
 
-// SQL seeks directly to the latest authoritative transition. Overlay histories
-// never reach Rust or increase the number of store reads per authentication.
+// Seek past unauthenticated issuer rows, not just structurally malformed rows.
+// Wrong-origin/actor histories never enter the seek's indexed prefix.
 fn transition(state: &AppState, granted: &ClaimRecord, kind: &str) -> Result<Option<ClaimRecord>, ApiError> {
-    let candidate = crate::store::assistant_write::validated_transition(
-        &state.store.readers.get(), granted, owning_person(state)?, state.store.origin(), kind,
-    ).map_err(ApiError::internal)?;
-    if let Some(candidate) = &candidate {
-        if granted.origin != state.store.origin()
-            && !state.store.claim_has_authenticated_member_writer(&candidate.id).map_err(ApiError::internal)? {
-            return Ok(None);
+    transition_before(state, granted, kind, None)
+}
+
+fn transition_before(state: &AppState, granted: &ClaimRecord, kind: &str, mut before: Option<u64>)
+    -> Result<Option<ClaimRecord>, ApiError> {
+    let connection = state.store.readers.get();
+    loop {
+        let candidate = crate::store::assistant_write::validated_transition_before(
+            &connection, granted, owning_person(state)?, state.store.origin(), kind, before,
+        ).map_err(ApiError::internal)?;
+        let Some(candidate) = candidate else { return Ok(None); };
+        if granted.origin == state.store.origin()
+            || state.store.claim_has_authenticated_member_writer(&candidate.id).map_err(ApiError::internal)? {
+            return Ok(Some(candidate));
         }
+        before = Some(candidate.store_index);
     }
-    Ok(candidate)
 }
 
 pub fn revoked(state: &AppState, granted: &ClaimRecord) -> Result<bool, ApiError> {
@@ -428,7 +465,7 @@ pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
         && (granted.origin == state.store.origin()
             || state.store.claim_has_authenticated_member_writer(&granted.id).map_err(ApiError::internal)?) {
         let profile = Profile::stored(fields(granted)?)?;
-        if candidate_grants_except(state, principal(fields(granted)?)?, Some(now), Some(&granted.id))?
+        if candidate_grants_except(state, principal(fields(granted)?)?, Some(now), Some(&granted.id), Some(profile))?
             .iter().any(|(_, other)| *other != profile) {
             return Err(conflict_error());
         }
@@ -532,9 +569,41 @@ mod tests {
         (admitted, usable)
     }
 
+    // Deliberately walk subject history rather than reuse the production SQL
+    // transition selector, effective-policy fold, or revocation helper.
+    pub(super) fn reference_transition(state: &AppState, grant: &ClaimRecord, kind: &str)
+        -> Result<Option<ClaimRecord>, ApiError> {
+        let original = fields(grant)?;
+        let mut history = state.store.claims_for(&grant.subject, Some(kind)).map_err(ApiError::internal)?;
+        history.sort_by_key(|claim| std::cmp::Reverse(claim.store_index));
+        for claim in history {
+            let Ok(source) = fields(&claim) else { continue };
+            if claim.origin != grant.origin || claim.actor.as_deref() != Some(owning_person(state)?)
+                || source["issuer"] != owning_person(state)?
+                || source["grant_id"] != original["grant_id"]
+                || source["issuer"] != original["issuer"]
+                || principal(source).ok() != principal(original).ok()
+                || principal(source).is_err()
+                || Profile::stored(source).ok() != Profile::stored(original).ok()
+                || Profile::stored(source).is_err() {
+                continue;
+            }
+            if kind == POLICY && (!valid_foreign_grant(state, grant, &claim)?
+                || source["expires_at_unix_ms"].as_u64().is_none()) {
+                continue;
+            }
+            if grant.origin != state.store.origin()
+                && !state.store.claim_has_authenticated_member_writer(&claim.id).map_err(ApiError::internal)? {
+                continue;
+            }
+            return Ok(Some(claim));
+        }
+        Ok(None)
+    }
+
     // Independent Rust-only candidate scan: C's authenticated transition and
     // typed-conflict semantics, without the production SQL active prefilter.
-    fn rust_only_admission(state: &AppState, source: &Value) -> Result<(), ApiError> {
+    pub(super) fn rust_only_admission(state: &AppState, source: &Value) -> Result<(), ApiError> {
         let profile = Profile::stored(source)?;
         let principal = principal(source)?;
         owning_person(state)?;
@@ -549,11 +618,13 @@ mod tests {
         for id in ids {
             let grant = state.store.claim_by_id(&id).map_err(ApiError::internal)?
                 .ok_or_else(|| forbidden("external grant is absent"))?;
-            if grant.origin != state.store.origin() || grant.actor.as_deref() != Some(owning_person(state)?)
-                || revoked(state, &grant)? {
+            if grant.actor.as_deref() != Some(owning_person(state)?)
+                || (grant.origin != state.store.origin()
+                    && !state.store.claim_has_authenticated_member_writer(&grant.id).map_err(ApiError::internal)?)
+                || reference_transition(state, &grant, REVOKED)?.is_some() {
                 continue;
             }
-            let policy = effective(state, &grant)?;
+            let policy = reference_transition(state, &grant, POLICY)?.unwrap_or_else(|| grant.clone());
             if !valid_foreign_grant(state, &grant, &policy)? { continue; }
             let active = fields(&policy)?;
             if active["expires_at_unix_ms"].as_u64().map(u128::from).unwrap_or(0) > admission_now_ms() {

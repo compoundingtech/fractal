@@ -2951,15 +2951,35 @@ impl Store {
     /// degraded envelope. Legacy and unkeyed writers do not authenticate provenance. Reads only sealed
     /// membership; this query never seals local batches or scans the replication log.
     pub fn claim_has_authenticated_member_writer(&self, claim_id: &str) -> Result<bool> {
+        Ok(self.authenticated_member_writer_claim_ids(&serde_json::to_string(&[claim_id])?)?
+            .contains(claim_id))
+    }
+
+    /// The requested claims with fully authenticated keyed-member envelope provenance.
+    /// Uses the same membership windows, record states, origin check and fleet/shard signature
+    /// domain as [`Self::claim_has_authenticated_member_writer`]. All claims share one read
+    /// snapshot and one sealed-membership lookup; identical envelope signatures are verified
+    /// at most once, including signatures shared by several claims or repeated input IDs.
+    pub fn claim_ids_with_authenticated_member_writers(
+        &self,
+        claim_ids: &[String],
+    ) -> Result<BTreeSet<String>> {
+        if claim_ids.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        self.authenticated_member_writer_claim_ids(&serde_json::to_string(claim_ids)?)
+    }
+
+    fn authenticated_member_writer_claim_ids(&self, claim_ids: &str) -> Result<BTreeSet<String>> {
         self.read_snapshot(|_| {
             let membership = self.fleet_membership_sealed()?;
             let connection = self.readers.get();
             let Some(fleet_id) = self.signing_fleet_id(&connection)? else {
-                return Ok(false);
+                return Ok(BTreeSet::new());
             };
             let shard = fleet_meta(&connection, "shard_id")?;
             let mut statement = connection.prepare_cached(
-                "SELECT records.writer, records.sequence, records.envelope_hash,
+                "SELECT records.claim_id, records.writer, records.sequence, records.envelope_hash,
                         signatures.member_key, signatures.signature
                  FROM replica_records AS records
                  JOIN claims ON claims.id=records.claim_id AND claims.origin=records.writer
@@ -2967,30 +2987,50 @@ impl Store {
                    USING (writer, sequence, envelope_hash)
                  JOIN replica_envelope_signatures AS signatures
                    USING (writer, sequence, envelope_hash)
-                 WHERE records.claim_id=?1 AND records.state='valid'
+                 WHERE records.claim_id IN (SELECT value FROM json_each(?1))
+                   AND records.state='valid'
                    AND envelopes.receipt_state IN ('validated', 'degraded')",
             )?;
-            let rows = statement.query_map([claim_id], |row| {
+            let rows = statement.query_map([claim_ids], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, u64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
+                    (
+                        row.get::<_, String>(1)?,
+                        row.get::<_, u64>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ),
                 ))
             })?;
+            let mut authenticated = BTreeSet::new();
+            let mut verified = BTreeMap::new();
             for row in rows {
-                let (writer, sequence, hash, key, signature) = row?;
-                if matches!(
-                    membership.window(&writer, sequence),
-                    crate::fleet::Window::Keyed(keys) if keys.contains(&key)
-                ) && VerifiedEnvelopeSignature::verify(
-                    shard.as_deref(), &fleet_id, &writer, sequence, &hash, &key, &signature,
-                ).is_some() {
-                    return Ok(true);
+                let (claim_id, signature_identity) = row?;
+                if authenticated.contains(&claim_id) {
+                    continue;
+                }
+                let valid = *verified.entry(signature_identity).or_insert_with_key(|identity| {
+                    let (writer, sequence, hash, key, signature) = identity;
+                    if !matches!(
+                        membership.window(writer, *sequence),
+                        crate::fleet::Window::Keyed(keys) if keys.contains(key)
+                    ) {
+                        return false;
+                    }
+                    #[cfg(test)]
+                    membership_query_tests::SIGNATURE_VERIFICATIONS.with(|count| {
+                        count.set(count.get() + 1);
+                    });
+                    VerifiedEnvelopeSignature::verify(
+                        shard.as_deref(), &fleet_id, writer, *sequence, hash, key, signature,
+                    ).is_some()
+                });
+                if valid {
+                    authenticated.insert(claim_id);
                 }
             }
-            Ok(false)
+            Ok(authenticated)
         })
     }
 

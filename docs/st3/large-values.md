@@ -502,19 +502,34 @@ proof. The producer maintainer retains `chunk-or-reference-variable-columns`
 responsibility while preserving effective-principal matching and claim authority.
 
 `fractal_store::store::assistant_write` owns the read-only sink
-`lv-h0fa302b0797b`. The shared validated transition query binds a grant subject,
-claim kind, origin, owner actor, grant claim ID and local origin, and returns at
-most one claim row. It writes nothing; bodies stay inline, so the exception
-establishes neither encoded-size nor execution-cost bounds.
+`lv-h1cad9af7ef23`, replacing `lv-h0fa302b0797b`. The shared validated transition
+query binds a grant subject, claim kind, origin, owner actor, grant claim ID,
+local origin and optional store-index seek boundary, and returns at most one
+claim row. The boundary allows callers to continue past a structurally valid but
+cryptographically unauthenticated foreign transition. It writes nothing; bodies
+stay inline, so the exception establishes neither encoded-size nor execution-cost bounds.
 
 `fractal_api_core::api::client_v0::external_grants` owns the conservative
-read-only sink `lv-h99f1a302c7b1`. Its prepared admission query binds fixed claim
-kinds, an assistant principal and an optional expiry cutoff, then returns claim
-IDs after revocation and latest-policy filtering. It adds no writer or body copy;
-principal, subject and claim-ID TEXT keys remain variable-size. The producer
-maintainer retains `trace-statement-and-value-representation` responsibility for
-these bindings and returned identifiers; fewer candidates and indexed seeks do
-not establish encoded-size or execution-cost bounds.
+read-only sink `lv-hc1c46de6a890`, replacing `lv-h99f1a302c7b1`. Its dynamically
+composed candidate query binds fixed claim kinds, an assistant principal, an
+optional expiry cutoff, local origin, owner actor, and optional ignored profile
+and excluded claim ID. It returns candidate grant/transition claim rows for one
+batch full-provenance check before latest-policy and revocation filtering.
+It adds no writer or persistent body copy; principal, subject, claim-ID TEXT keys
+and returned inline bodies remain variable-size. The producer maintainer retains
+`trace-statement-and-value-representation` responsibility for these bindings and
+returned values; fewer candidates and indexed seeks do not establish encoded-size
+or execution-cost bounds.
+
+The `smallclaims::store::membership_query_tests` maintainer owns test-only sites
+`lv-hb5e52f377f02`, `lv-he6cdb35f9041` and `lv-h85da58ff0363`. These change a
+fixture claim's origin, copy an admitted record's inline raw bytes and identity
+into a sibling record, and replace a fixture signature with fixed invalid text.
+They exercise batch/scalar parity and shared-signature verification deduplication
+in an in-memory store; they add no production writer. The maintainer retains the
+listed body/predecessor and exact-wire representation TODOs for these fixture
+copies; this exception is not a byte-size or execution-cost proof.
+
 ## Incremental observed credit heads
 
 `fractal_store::store::usage_credits` owns `lv-he501efb4d29a`,

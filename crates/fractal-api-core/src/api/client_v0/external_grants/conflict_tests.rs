@@ -44,8 +44,13 @@ fn replicate(from: &AppState, to: &AppState) {
 }
 
 fn admitted_pair(root: &std::path::Path) -> (AppState, AppState) {
+    admitted_pair_with_floor(root, 0)
+}
+
+fn admitted_pair_with_floor(root: &std::path::Path, floor: u64) -> (AppState, AppState) {
     let a = member(root, "alder");
     let b = member(root, "birch");
+    b.store.set_writer_floor(floor).unwrap();
     let anchor = Arc::new(MemberKey::generate().unwrap().0);
     let peer = Arc::new(MemberKey::generate().unwrap().0);
     for (state, key) in [(&a, &anchor), (&b, &peer)] {
@@ -54,7 +59,8 @@ fn admitted_pair(root: &std::path::Path) -> (AppState, AppState) {
     }
     a.store.admit_fleet_anchor(FLEET, anchor.public(), "listening").unwrap();
     raw_claim(&a, "host/birch", "fleet.member-admitted", OWNER, json!({
-        "fleet_id":FLEET,"member_key":peer.public(),"via":"invite","mode":"listening"
+        "fleet_id":FLEET,"member_key":peer.public(),"via":"invite","mode":"listening",
+        "writer_floor":floor
     }));
     replicate(&a, &b);
     assert!(matches!(b.store.fleet_membership().unwrap().state("birch"),
@@ -363,6 +369,72 @@ fn malformed_same_origin_expired_policy_keeps_the_last_valid_live_policy() {
 }
 
 #[test]
+fn unauthenticated_legacy_transitions_preserve_authenticated_lifecycle_history() {
+    let root = tempfile::tempdir().unwrap();
+    for (scenario, kind) in [("renewal", POLICY), ("renewal", REVOKED),
+        ("narrowing", POLICY), ("revocation", REVOKED)] {
+        let (a, b) = admitted_pair_with_floor(root.path(), 10);
+        let local = issue(&a, ASSISTANT_ID, "assistant").unwrap();
+        let mut expired = grant_fields(SERVICE_ID, "service");
+        expired["expires_at_unix_ms"] = json!(if scenario == "renewal" { 1_u64 } else { u64::MAX });
+        let foreign = raw_claim(&b, &subject(SERVICE_ID).unwrap(), GRANTED, OWNER, expired);
+        let mut live = fields(&foreign).unwrap().clone();
+        live["expires_at_unix_ms"] = json!(if scenario == "narrowing" { 1_u64 } else { u64::MAX });
+        let live = raw_claim(&b, &foreign.subject, POLICY, OWNER, live);
+        let authentic_revoke = (scenario == "revocation").then(||
+            raw_claim(&b, &foreign.subject, REVOKED, OWNER, fields(&foreign).unwrap().clone()));
+        replicate(&b, &a);
+        assert!(a.store.claim_has_authenticated_member_writer(&foreign.id).unwrap());
+        assert!(a.store.claim_has_authenticated_member_writer(&live.id).unwrap());
+        if let Some(revoke) = &authentic_revoke {
+            assert!(a.store.claim_has_authenticated_member_writer(&revoke.id).unwrap());
+        }
+
+        // A different incarnation of the same writer sends a signed envelope
+        // below the admission floor. It is visible Legacy data, not authority,
+        // even though origin, owner actor and immutable grant identity match.
+        let legacy = member(root.path(), "birch");
+        legacy.store.set_member_key(Some(Arc::new(MemberKey::generate().unwrap().0))).unwrap();
+        let mut source = fields(&foreign).unwrap().clone();
+        source["expires_at_unix_ms"] = json!(if scenario == "narrowing" { u64::MAX } else { 1_u64 });
+        let overlay = raw_claim(&legacy, &foreign.subject, kind, OWNER, source);
+        replicate(&legacy, &a);
+        let overlay = a.store.claim_by_id(&overlay.id).unwrap().unwrap();
+        let retained = a.store.claim_by_id(&live.id).unwrap().unwrap();
+        assert!(overlay.store_index > retained.store_index);
+        assert_eq!(overlay.origin, foreign.origin);
+        assert_eq!(overlay.actor, foreign.actor);
+        let connection = a.store.readers.get();
+        let (signatures, sequence): (u64, u64) = connection.query_row(
+            "SELECT count(*),max(sequence) FROM replica_records JOIN replica_envelope_signatures
+             USING(writer,sequence,envelope_hash) WHERE claim_id=?1",
+            [&overlay.id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert!(signatures > 0, "this regression must pass the signature-row prefilter");
+        drop(connection);
+        assert!(matches!(a.store.fleet_membership().unwrap().window("birch", sequence),
+            smallclaims::fleet::Window::Legacy));
+        assert!(!a.store.claim_has_authenticated_member_writer(&overlay.id).unwrap());
+        assert_eq!(tests::reference_transition(&a, &foreign, POLICY).unwrap().unwrap().id, live.id);
+        assert_eq!(tests::reference_transition(&a, &foreign, REVOKED).unwrap().map(|claim| claim.id),
+            authentic_revoke.as_ref().map(|claim| claim.id.clone()));
+        assert_eq!(effective(&a, &foreign).unwrap().id, live.id);
+        assert_eq!(revoked(&a, &foreign).unwrap(), scenario == "revocation");
+        let candidate = json!({"profile":"assistant","principal":PRINCIPAL});
+        let reference = tests::rust_only_admission(&a, &candidate).map_err(|error| error.code);
+        let production = admit_profile(&a, &candidate).map_err(|error| error.code);
+        assert_eq!(production, reference, "{scenario}/{kind}: independent provenance-aware oracle");
+        assert_eq!(production.is_err(), scenario == "renewal");
+        if scenario == "renewal" {
+            assert_witness(&profile_conflict(&a, &local).unwrap().unwrap());
+            assert_conflict(&authenticate_id(&a, ASSISTANT_ID).expect_err("the old renewal remains active"));
+        } else {
+            assert!(profile_conflict(&a, &local).unwrap().is_none());
+            assert!(authenticate_id(&a, ASSISTANT_ID).unwrap().is_some());
+        }
+    }
+}
+
+#[test]
 fn signed_revocation_arriving_before_its_grant_converges_without_conflict() {
     let root = tempfile::tempdir().unwrap();
     let (a, b) = admitted_pair(root.path());
@@ -458,6 +530,10 @@ fn p1_policy_candidates_keep_read_acquisitions_bounded_with_expired_history() {
         let after = acquisitions("p1-policy-candidates-after");
         assert!(before > 0, "the measured scan must acquire real read connections");
         assert_eq!(after, before, "expired policy history and wrong-origin renewals must be pruned before per-grant reads");
+        let two = acquisitions("p1-authentication-n2");
+        let six = acquisitions("p1-authentication-n6");
+        assert!(two > 0, "authentication must acquire real read connections");
+        assert_eq!(six, two, "authenticated foreign candidates must use constant-N batched reads");
         return;
     }
     smallclaims::profile::init_from_env();
@@ -490,4 +566,24 @@ fn p1_policy_candidates_keep_read_acquisitions_bounded_with_expired_history() {
     }
     replicate(&b, &a);
     measure("p1-policy-candidates-after");
+
+    let (a, b) = admitted_pair(root.path());
+    issue(&a, ASSISTANT_ID, "assistant").unwrap();
+    for (count, label) in [(1, "p1-authentication-n2"), (5, "p1-authentication-n6")] {
+        let start = if count == 1 { 0 } else { 1 };
+        for index in start..count {
+            let id = format!("{:024x}", index + 2000);
+            let source = grant_fields(&id, "service");
+            let grant = raw_claim(&b, &subject(&id).unwrap(), GRANTED, OWNER, source.clone());
+            raw_claim(&b, &grant.subject, POLICY, OWNER, source);
+        }
+        replicate(&b, &a);
+        let operation = smallclaims::profile::Op::start(label, None).unwrap();
+        {
+            let _entered = operation.enter();
+            assert_conflict(&authenticate_id(&a, ASSISTANT_ID)
+                .expect_err("all measured opposite-profile grants remain active"));
+        }
+        operation.finish();
+    }
 }

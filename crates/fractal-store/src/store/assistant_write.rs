@@ -24,15 +24,30 @@ pub fn principal(fields: &Value) -> Option<&str> {
     }
 }
 
-/// Select the last authoritative transition, not the last arbitrary claim overlay.
-/// Foreign results still require cryptographic member-writer verification by the
-/// caller; the SQL provenance predicate excludes legacy and unsigned records.
+/// Select the last structurally valid transition. Foreign results require full
+/// cryptographic member-writer verification by the caller, including its keyed
+/// membership window; a signature row alone does not authenticate provenance.
 pub fn validated_transition(
     connection: &Connection, granted: &ClaimRecord, owner: &str, local_origin: &str, kind: &str,
 ) -> Result<Option<ClaimRecord>, FractalError> {
+    validated_transition_before(connection, granted, owner, local_origin, kind, None)
+}
+
+/// Continue an indexed seek past a structurally valid but unauthenticated row.
+pub fn validated_transition_before(
+    connection: &Connection, granted: &ClaimRecord, owner: &str, local_origin: &str,
+    kind: &str, before: Option<u64>,
+) -> Result<Option<ClaimRecord>, FractalError> {
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        validated_transition_query().replace(
+            "ORDER BY claims.store_index DESC LIMIT 1",
+            "AND (?7 IS NULL OR claims.store_index<?7) ORDER BY claims.store_index DESC LIMIT 1",
+        )
+    });
     connection.query_row(
-        /* sqlite-large-value: allow-for-now lv-h0fa302b0797b owner=fractal_store::store::assistant_write TODO=trace-statement-and-value-representation */ validated_transition_query(),
-        params![granted.subject, kind, granted.origin, owner, granted.id, local_origin],
+        /* sqlite-large-value: allow-for-now lv-h1cad9af7ef23 owner=fractal_store::store::assistant_write TODO=trace-statement-and-value-representation */
+        &QUERY,
+        params![granted.subject, kind, granted.origin, owner, granted.id, local_origin, before],
         claim_from_row,
     ).optional().map_err(internal)
 }
@@ -105,6 +120,38 @@ pub fn validated_transition_query() -> &'static str {
               AND records.state='valid' AND envelopes.receipt_state IN ('validated','degraded')))
         ORDER BY claims.store_index DESC LIMIT 1"));
     QUERY.as_str()
+}
+
+/// Hydrate candidates and their latest structurally valid transitions in one
+/// statement. `selection` returns grant IDs using parameters 1 through 6;
+/// parameter 7 is the owner, 8 an optional profile to ignore, 9 an excluded ID.
+/// The correlated subqueries use the same validation as the mutation writer.
+pub fn validated_candidates_query(selection: &str) -> String {
+    let seek = |kind: &str| {
+        validated_transition_query()
+            .replace(&format!("SELECT {CLAIM_COLUMNS}"), "SELECT claims.id")
+            .replace("?5", "granted.id")
+            .replace("?1", "granted.subject")
+            .replace("?2", &format!("'{kind}'"))
+            .replace("?3", "granted.origin")
+            .replace("?4", "?7")
+    };
+    let policy = seek("custom.client.assistant.v1.policy");
+    let revoked = seek("custom.client.assistant.v1.revoked");
+    format!(
+        "WITH selected AS ({selection}), grants AS (
+            SELECT claims.* FROM selected JOIN claims ON claims.id=selected.id
+            WHERE (?9 IS NULL OR claims.id<>?9)
+              AND (?8 IS NULL OR COALESCE(json_extract(claims.body,'$.fields.profile'),'assistant') IS NOT ?8)
+         )
+         SELECT {CLAIM_COLUMNS}, claims.id, 'grant' FROM grants AS claims
+         UNION ALL
+         SELECT {CLAIM_COLUMNS}, granted.id, 'policy' FROM grants AS granted
+             JOIN claims ON claims.id=({policy})
+         UNION ALL
+         SELECT {CLAIM_COLUMNS}, granted.id, 'revoked' FROM grants AS granted
+             JOIN claims ON claims.id=({revoked})"
+    )
 }
 
 pub fn authorize_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<String, FractalError> {
