@@ -122,6 +122,7 @@ class Api:
             try:
                 data = json.dumps(body).encode() if body is not None else b""
                 writer.write((f"{method} {path} HTTP/1.0\r\nHost: localhost\r\n"
+                              "X-St3-Client: fractal-delivery-probe\r\n"
                               f"Content-Type: application/json\r\nContent-Length: {len(data)}\r\n\r\n").encode() + data)
                 await writer.drain()
                 response = await reader.read()
