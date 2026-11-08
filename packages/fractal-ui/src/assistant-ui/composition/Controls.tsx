@@ -80,12 +80,12 @@ export function Tooltip({ label, shortcut, placement = 'bottom', delay = 350, is
   const lastScroll = React.useRef(Number.NEGATIVE_INFINITY)
   const reopenRequest = React.useRef(0)
   const focusFromNavigation = React.useRef(false)
-  const pointerLeaving = React.useRef(false)
   const setScope = React.useCallback((element: HTMLSpanElement | null) => {
     scope.current = element
     if (element !== null && navigationFocusOnly) trackFocusNavigation(element.ownerDocument)
   }, [navigationFocusOnly])
   const [localOpen, setLocalOpen] = React.useState(false)
+  const [keyboardFocus, setKeyboardFocus] = React.useState(false)
   const isOpen = controlledOpen ?? localOpen
   const [settling, setSettling] = React.useState(false)
   const setOpen = (open: boolean) => { setLocalOpen(open); onOpenChange?.(open) }
@@ -138,20 +138,19 @@ export function Tooltip({ label, shortcut, placement = 'bottom', delay = 350, is
   const changeOpen = (open: boolean) => {
     if (open && navigationFocusOnly && !focusFromNavigation.current) return
     if (open && scope.current?.closest(hiddenByModal) != null) return
-    // RAC clears focus intent on hover end. Veto that close through its controlled API, not by reopening
-    // afterwards; key presses, blur, other tooltips and modal dismissal must still be allowed to close.
-    if (!open && pointerLeaving.current && keyboardFocused()) return
     setOpen(open)
     if (open) return
     const closedAt = performance.now()
     const request = ++reopenRequest.current
     window.setTimeout(() => { if (request === reopenRequest.current && Math.abs(closedAt - lastScroll.current) < scrollSettleMs && keyboardFocused()) setSettling(true) })
   }
-  // Pointer-out capture precedes the child's hover-end handler; pointer-leave clears the reason afterwards.
-  return <ThemePortal><span ref={setScope} onPointerEnter={() => { focusFromNavigation.current = true }} onPointerOutCapture={event => { pointerLeaving.current = !(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) }} onPointerLeave={() => { pointerLeaving.current = false; if (isOpen && !keyboardFocused()) setOpen(false) }} onFocusCapture={event => {
+  // Focus-only mode makes RAC ignore hover end before hideTooltip can schedule removal from its global
+  // registry. A controlled close veto would leave the visible tooltip outside global replacement after 500ms.
+  return <ThemePortal><span ref={setScope} onPointerEnter={() => { focusFromNavigation.current = true }} onPointerDownCapture={() => setKeyboardFocus(false)} onPointerLeave={() => { if (isOpen && !keyboardFocused()) setOpen(false) }} onFocusCapture={event => {
     const navigation = focusNavigationByDocument.get(event.currentTarget.ownerDocument)
     focusFromNavigation.current = navigation?.target === event.target && navigation.userMoved
-  }} onKeyDownCapture={event => { if (event.key === 'Escape') { reopenRequest.current++; lastScroll.current = Number.NEGATIVE_INFINITY; setSettling(false); setOpen(false) } }} {...stylex.props(styles.tooltipScope)}><TooltipTrigger delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={changeOpen}>{children}<TooltipSurface placement={placement} style={style}><span>{label}</span>{shortcut && <>{' '}<kbd {...stylex.props(styles.shortcut, styles.tooltipShortcut)}>{shortcut}</kbd></>}</TooltipSurface></TooltipTrigger></span></ThemePortal>
+    setKeyboardFocus(keyboardFocused())
+  }} onBlurCapture={() => setKeyboardFocus(false)} onKeyDownCapture={event => { if (event.key === 'Escape') { reopenRequest.current++; lastScroll.current = Number.NEGATIVE_INFINITY; setSettling(false); setOpen(false) } }} {...stylex.props(styles.tooltipScope)}><TooltipTrigger trigger={keyboardFocus ? 'focus' : undefined} delay={delay} closeDelay={0} isOpen={isOpen} onOpenChange={changeOpen}>{children}<TooltipSurface placement={placement} style={style}><span>{label}</span>{shortcut && <>{' '}<kbd {...stylex.props(styles.shortcut, styles.tooltipShortcut)}>{shortcut}</kbd></>}</TooltipSurface></TooltipTrigger></span></ThemePortal>
 }
 export type TooltipSurfaceProps = Omit<AriaTooltipProps, 'className' | 'style'> & { style?: stylex.StyleXStyles }
 /** Use inside an existing TooltipTrigger and ThemePortal when its trigger is not a kit Button. */

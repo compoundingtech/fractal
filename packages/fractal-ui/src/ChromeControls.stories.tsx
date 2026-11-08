@@ -1,7 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { Dialog, DialogTrigger, Menu, MenuItem, MenuTrigger, Modal, Popover } from 'react-aria-components'
+import { Button as AriaButton, Dialog, DialogTrigger, Menu, MenuItem, MenuTrigger, Modal, Popover, Tooltip as AriaTooltip, TooltipTrigger } from 'react-aria-components'
 import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import { ChromeControl } from './assistant-ui/composition/ChromeControl'
 import { ThreadHeader } from './assistant-ui/composition/Shell'
@@ -17,7 +17,7 @@ import { tooltipFor } from './story-play'
  * Resources is a dialog trigger and Conversation menu a menu trigger, as in the app; each is disabled when
  * given a reason. Below 640px the sidebar strip stacks above the header. `phone` hosts it in a narrow (touch) layout.
  */
-function ChromeControlsStory({ scheme = 'dark', phone = false, resourcesDisabledReason, conversationDisabledReason, onResources }: { scheme?: Scheme; phone?: boolean; resourcesDisabledReason?: string; conversationDisabledReason?: string; onResources?: () => void }) {
+function ChromeControlsStory({ scheme = 'dark', phone = false, rawTooltip = false, resourcesDisabledReason, conversationDisabledReason, onResources }: { scheme?: Scheme; phone?: boolean; rawTooltip?: boolean; resourcesDisabledReason?: string; conversationDisabledReason?: string; onResources?: () => void }) {
   const [collapsed, setCollapsed] = React.useState(false)
   const [panelOpen, setPanelOpen] = React.useState(true)
   const [drawerOpen, setDrawerOpen] = React.useState(false)
@@ -36,6 +36,7 @@ function ChromeControlsStory({ scheme = 'dark', phone = false, resourcesDisabled
         <ChromeControl icon="swap" label="Toggle color scheme" tooltipPlacement="top" />
         <ChromeControl icon="checklist" label="Missions" tooltipPlacement="top" />
         <ChromeControl icon="gauge" label="Usage" tooltipPlacement="top" />
+        {rawTooltip && <TooltipTrigger delay={0} closeDelay={0}><AriaButton>Raw RAC tooltip trigger</AriaButton><AriaTooltip>Raw RAC tooltip</AriaTooltip></TooltipTrigger>}
       </footer>
     </aside>
     <section aria-label="Agent workspace" {...stylex.props(styles.workspace)}>
@@ -239,7 +240,7 @@ export const ProgrammaticFocusQuiet: Story = { tags: ['critical'], play: async (
  * Keyboard navigation closing a hovered control's tooltip must not bring it back as an unpositioned surface at the
  * top-left corner once the pointer leaves, and a control a modal covers opens no tooltip however the pointer moves.
  */
-export const TooltipReleasedWithPointer: Story = { tags: ['critical'], play: async ({ canvasElement }) => {
+export const TooltipReleasedWithPointer: Story = { args: { rawTooltip: true }, tags: ['critical'], play: async ({ canvasElement }) => {
   const sidebar = within(within(canvasElement).getByRole('complementary', { name: 'Agents' }))
   const sort = sidebar.getByRole('button', { name: 'Sort agents · Manual' })
   const needsMe = sidebar.getByRole('button', { name: 'Needs me only' })
@@ -299,6 +300,13 @@ export const TooltipReleasedWithPointer: Story = { tags: ['critical'], play: asy
     await expect(tooltips()).toContain('Filter agents · 1 active')
     await new Promise<void>(resolve => requestAnimationFrame(() => resolve()))
   }
+  // After RAC's 500ms cooldown, a non-kit tooltip must still replace the keyboard-retained one.
+  // This fixture emits no fractal-kit-tooltip-open event: only RAC's own registry can close the old tooltip.
+  const raw = within(canvasElement).getByRole('button', { name: 'Raw RAC tooltip trigger' })
+  await userEvent.hover(canvasElement)
+  await userEvent.hover(raw)
+  await namedTooltip('Raw RAC replaces keyboard-retained filter after cooldown', raw, 'Raw RAC tooltip')
+  await waitFor(() => expect(tooltips()).toEqual(['Raw RAC tooltip']))
   await userEvent.keyboard('{Escape}')
   await waitFor(() => expect(tooltips()).toEqual([]))
 
