@@ -31,7 +31,7 @@ describe('trace scale: what the wall clock shows', () => {
     expect(tickEvery(30 / HOUR)).toBe(3 * HOUR)
     expect(tickEvery(600 / HOUR)).toBe(15 * MIN)
     const ticks = ticksIn(syncStart + 10 * MIN, syncStart + 4 * HOUR, HOUR)
-    expect(ticks.every(t => t % HOUR === 0)).toBe(true)
+    expect(ticks.every(t => new Date(t).getMinutes() === 0 && new Date(t).getSeconds() === 0)).toBe(true)
     expect(ticks[0]).toBeGreaterThanOrEqual(syncStart + 10 * MIN)
   })
 })
