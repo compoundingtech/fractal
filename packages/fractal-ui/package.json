@@ -19,7 +19,11 @@
     "./assistant-ui/sync-status": "./src/assistant-ui/sync-presentation/sync-line.ts",
     "./human-time": "./src/time/HumanTime.tsx",
     "./human-time/format": "./src/time/human-time.ts",
-    "./human-time/clock": "./src/time/clock.tsx"
+    "./human-time/clock": "./src/time/clock.tsx",
+    "./workspace": "./src/workspace/mod.ts",
+    "./workspace/store": "./src/workspace/store.ts",
+    "./workspace/react": "./src/workspace/react/mod.ts",
+    "./workspace/palette": "./src/workspace/palette/mod.ts"
   },
   "scripts": {
     "generate:pierre-languages": "node scripts/pierre-languages.mjs",
@@ -41,7 +45,8 @@
     "check:details": "node scripts/details-run-gates.mjs",
     "check:sidebar-fitting": "node scripts/check-sidebar-fitting.mjs",
     "check:transcript-skeleton-imports": "node scripts/check-transcript-skeleton-imports.mjs",
-    "test:declaration": "node --test --test-force-exit src/assistant-ui/declaration/declaration-tint.unit.test.mjs"
+    "test:declaration": "node --test --test-force-exit src/assistant-ui/declaration/declaration-tint.unit.test.mjs",
+    "test:workspace": "vitest run --config vitest.workspace.config.ts"
   },
   "dependencies": {
     "@assistant-ui/react": "0.15.25",
