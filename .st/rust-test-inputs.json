@@ -354,6 +354,7 @@
     "docs/st3/client-v0/fixtures/notice-conformance.json",
     "evals/fractal",
     "examples/fractal/custom-review.json",
+    "examples/fractal/decision-tree-v2.json",
     "examples/fractal/decision-tree.json",
     "examples/fractal/human-feedback.kdl",
     "scripts/ci-test-paths.rs",
