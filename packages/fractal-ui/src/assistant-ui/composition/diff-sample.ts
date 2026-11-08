@@ -1,4 +1,4 @@
-/** Shared story and test fixture: one TypeScript file with context, removals and additions. */
+/** Shared story sample: one TypeScript file with context, removals and additions. */
 export const samplePatch = [
   'diff --git a/src/rows.ts b/src/rows.ts',
   'index 1111111..2222222 100644',

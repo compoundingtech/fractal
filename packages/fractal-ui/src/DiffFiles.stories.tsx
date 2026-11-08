@@ -5,7 +5,7 @@ import { expect, userEvent, waitFor, within } from 'storybook/test'
 import { surfaceVars as surface, textVars as text, typeVars as type } from './assistant-ui/composition-tokens.stylex'
 import { lightTheme } from './assistant-ui/composition-theme'
 import { DiffFiles, type DiffFilesEntry } from './assistant-ui/composition/DiffFiles'
-import { samplePatch } from './assistant-ui/composition/diff-fixtures'
+import { samplePatch } from './assistant-ui/composition/diff-sample'
 
 const body = (lines: number, prefix: string) => Array.from({ length: lines }, (_, index) => ` ${prefix} context ${index + 1}`)
 const pullRequestFiles: readonly DiffFilesEntry[] = [
