@@ -513,8 +513,9 @@ mod tests {
         let path = root.path().join("credits.db");
         let store = Store::open(&path, "alder").unwrap();
         store.set_usage_limits_writers(vec![PRODUCER.into(), OTHER.into()]).unwrap();
+        let now = timestamp("2026-11-08T10:00:01Z").unwrap();
         let append = |actor: &str, at: &str, state: &str| {
-            let mut reading = credit("one", state, NOW - DAY_MS);
+            let mut reading = credit("one", state, now - DAY_MS);
             reading["measured_at"] = json!(at);
             store.append_claim(&crate::model::ClaimInput {
                 subject: actor.into(), kind: "usage.limits.observed".into(), actor: Some(actor.into()),
@@ -526,7 +527,6 @@ mod tests {
         };
         let older_at = "2026-11-08T10:00:00.000100Z";
         let newer_at = "2026-11-08T10:00:00.000900Z";
-        let now = timestamp("2026-11-08T10:00:01Z").unwrap();
         let newer = append(PRODUCER, newer_at, "forfeited");
         append(PRODUCER, older_at, "unknown");
         let other = append(OTHER, "2026-11-08T10:00:00.000950Z", "forfeited");

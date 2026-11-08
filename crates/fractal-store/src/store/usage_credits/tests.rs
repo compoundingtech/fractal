@@ -180,6 +180,8 @@ fn credit_read_work_is_bounded_by_heads_not_retained_history() {
         for _ in 0..count {
             append(&store, WRITER, vec![credit("same", "2026-11-07T10:00:00Z")]);
         }
+        // Compare warmed readers: the first connection read also initializes its SQL tracing.
+        assert_eq!(store.usage_credit_readings().unwrap().len(), 1);
         let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
         assert_eq!(store.usage_credit_readings().unwrap().len(), 1);
         scope.finish()
