@@ -300,7 +300,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         client.post(format!("{address}/v1/client/actions")).bearer_auth(bearer)
             .json(&json!({
                 "api_version": CLIENT_API_VERSION, "id": format!("action/{key}"),
-                "type": kind, "idempotency_key": key,
+                "type": kind, "idempotency_key": format!("fixture-thread:{key}"),
                 "fence": { "snapshot_id": new_client_snapshot(&state).id },
                 "parameters": parameters,
             }))
@@ -394,7 +394,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     assert!(thread_access::browser_message_authority(&replica, &browser).is_none());
 
     let already_sent = prepare_inline_thread_message(&state, ThreadMessageDraft {
-        key: "browser-reply", thread, from: person, to: agent, title: None,
+        key: "fixture-thread:browser-reply", thread, from: person, to: agent, title: None,
         quote: Some(first), origin: None, content: "Also check the restart path.",
     }, None).unwrap();
     client.post(format!("{address}/v1/client/pairing/browser-requests/revoke-current"))
