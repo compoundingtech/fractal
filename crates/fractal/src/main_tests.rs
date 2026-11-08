@@ -6883,7 +6883,7 @@ async fn device_renewal_staging_posts_sealed_terms_and_returns_only_receipt() {
     tokio::time::timeout(Duration::from_secs(5), async {
         while !socket.exists() { tokio::task::yield_now().await; }
     }).await.unwrap();
-    let receipt = stage_device_renewal(&Endpoint::Unix(socket), "person/alex", DeviceRenewalStageRequest {
+    let receipt = stage_device_renewal(&Endpoint::Unix(socket), "agent/deployer", DeviceRenewalStageRequest {
         api_version: CLIENT_V0_API_VERSION,
         device_id: "device/phone".into(),
         migration_epoch: "phone-renewal".into(),
@@ -6891,7 +6891,7 @@ async fn device_renewal_staging_posts_sealed_terms_and_returns_only_receipt() {
         expires_in_hours: 72,
     }).await.unwrap();
     let (headers, body) = received.await.unwrap();
-    assert_eq!(headers["x-st3-person"], "person/alex");
+    assert_eq!(headers["x-st3-person"], "agent/deployer");
     assert_eq!(body, json!({
         "api_version": CLIENT_V0_API_VERSION,
         "device_id": "device/phone",
@@ -6906,6 +6906,18 @@ async fn device_renewal_staging_posts_sealed_terms_and_returns_only_receipt() {
         "allow_digest": "audited-digest",
     }));
     server.abort();
+}
+
+#[test]
+fn device_renewal_staging_requires_the_callers_literal_agent_actor() {
+    let command = |actor: &str| Cli::try_parse_from([
+        "fractal","devices","renew-stage","--as",actor,"device/phone",
+        "--migration-epoch","phone-renewal","--allow","audited-digest",
+    ]).unwrap().command;
+    assert!(guard_mutating_cli_actor(&command("agent/deployer"),Some("agent/deployer"),None).is_ok());
+    for actor in ["person/alex","agent/other"] {
+        assert!(guard_mutating_cli_actor(&command(actor),Some("agent/deployer"),None).is_err());
+    }
 }
 
 #[test]

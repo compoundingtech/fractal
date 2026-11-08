@@ -27,7 +27,7 @@ async fn poll(state: &AppState, key: &MemberKey) -> Result<Json<Value>, ApiError
     pending(State(state.clone()),Json(serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"device_public_key":key.public(),"timestamp_unix_ms":timestamp,"signature":key.sign(bytes.as_bytes())})).unwrap())).await
 }
 fn approval(offer: &Value, old: &MemberKey, candidate: &MemberKey) -> Complete {
-    let bytes = format!("fractal-device-renewal-v1\n{}",json!([offer["renewal_id"],offer["migration_epoch"],offer["issuer_member"],offer["person_id"],offer["scopes"],offer["old_public_key"],offer["nonce"],offer["expires_at_unix_ms"],candidate.public()]));
+    let bytes = format!("fractal-device-renewal-v1\n{}",json!([offer["renewal_id"],offer["migration_epoch"],offer["issuer_member"],offer["person_id"],offer["requested_by"],offer["scopes"],offer["old_public_key"],offer["nonce"],offer["expires_at_unix_ms"],candidate.public()]));
     serde_json::from_value(json!({"api_version":CLIENT_API_VERSION,"renewal_id":offer["renewal_id"],"device_public_key":old.public(),"candidate_public_key":candidate.public(),"key_storage":"secure-enclave","nonce":offer["nonce"],"expires_at_unix_ms":offer["expires_at_unix_ms"],"old_signature":old.sign(bytes.as_bytes()),"candidate_signature":candidate.sign(bytes.as_bytes())})).unwrap()
 }
 
@@ -116,7 +116,7 @@ async fn renewal_signatures_cover_every_offer_field_and_candidate() {
     let bytes=approval_bytes(&stage,nonce,expiry,candidate.public()).unwrap();
     let signature=old.sign(&bytes);
     assert!(smallclaims::principal::verify_key_signature(old.public(),&bytes,&signature));
-    for name in ["renewal_id","migration_epoch","issuer_member","person_id","scopes","old_public_key"] {
+    for name in ["renewal_id","migration_epoch","issuer_member","person_id","requested_by","scopes","old_public_key"] {
         let mut changed=stage.clone();
         changed.body["fields"][name]=if name=="scopes" { json!(["control.messages"]) } else { json!("changed") };
         assert!(!smallclaims::principal::verify_key_signature(old.public(),&approval_bytes(&changed,nonce,expiry,candidate.public()).unwrap(),&signature),"{name}");
@@ -163,4 +163,18 @@ async fn renewal_gateway_routes_accept_key_proofs_without_reviving_old_bearer() 
         .uri("/v1/client/pairings/renewals/stage").header("Content-Type","application/json")
         .body(Body::from("{}")).unwrap()).await.unwrap();
     assert!(!response.status().is_success());
+}
+
+#[tokio::test]
+async fn renewal_agent_staging_retains_requester_without_changing_person_or_key() {
+    let (_root,state,old,source)=fixture();
+    let receipt=stage(State(state.clone()),Extension(ClientSession::local(Some("agent/deployer")).unwrap()),Json(staging(&source))).await.unwrap().0;
+    let offered=poll(&state,&old).await.unwrap().0;
+    let offer=&offered["renewals"][0];
+    assert_eq!(offer["renewal_id"],receipt["renewal_id"]);
+    assert_eq!(offer["requested_by"],"agent/deployer");
+    assert_eq!(offer["person_id"],PERSON);
+    assert_eq!(offer["old_public_key"],old.public());
+    let candidate=MemberKey::generate().unwrap().0;
+    assert!(complete(State(state),Extension(ClientSession::pairing()),Json(approval(offer,&old,&candidate))).await.is_ok());
 }

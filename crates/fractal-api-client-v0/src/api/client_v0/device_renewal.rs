@@ -77,10 +77,10 @@ fn record(state: &AppState, subject: &str, kind: &str) -> Result<Option<ClaimRec
         _ => Ok(None),
     }
 }
-fn append(state: &AppState, subject: String, kind: &str, person: &str, mut fields: BTreeMap<String, Value>, expected: Option<String>, evidence: Vec<String>) -> Result<ClaimRecord, ApiError> {
+fn append(state: &AppState, subject: String, kind: &str, actor: &str, person: &str, mut fields: BTreeMap<String, Value>, expected: Option<String>, evidence: Vec<String>) -> Result<ClaimRecord, ApiError> {
     fields.insert("person_id".into(), json!(person));
     state.store.append_client_operation_claim(&ClaimInput {
-        subject, kind: kind.into(), actor: Some(person.into()), fields, evidence,
+        subject, kind: kind.into(), actor: Some(actor.into()), fields, evidence,
         expected_subject: expected.map(Some), idempotency_key: None,
     }).map_err(ApiError::bad)
 }
@@ -131,8 +131,10 @@ fn version(value: &str) -> Result<(), ApiError> {
 
 pub async fn stage(State(state): State<AppState>, Extension(session): Extension<ClientSession>, Json(request): Json<Stage>) -> Result<Json<Value>, ApiError> {
     version(&request.api_version)?;
-    if session.transport != "unix" || !session.authority_actor.starts_with("person/") {
-        return Err(forbidden("device renewal staging requires the local person API"));
+    let requester = &session.authority_actor;
+    if session.transport != "unix" || !(requester.starts_with("agent/")
+        || requester.starts_with("person/") && requester.matches('/').count() == 1) {
+        return Err(forbidden("device renewal staging requires a local person or agent"));
     }
     if request.migration_epoch.is_empty() || request.migration_epoch.len() > 120
         || !(1..=168).contains(&request.expires_in_hours)
@@ -141,7 +143,11 @@ pub async fn stage(State(state): State<AppState>, Extension(session): Extension<
     let source = matching_claims(&state, "custom.client.pairing-completed", "device_id", &request.device_id)?.into_iter().find(|claim| {
         serde_json::to_string(&claim.body).ok().is_some_and(|body| credential_digest(&body) == request.allow_digest)
     }).ok_or_else(|| forbidden("no device grant matches the explicitly allowed digest"))?;
-    if text(&source, "person_id")? != session.authority_actor { return Err(forbidden("the source device belongs to another person")); }
+    let person = text(&source, "person_id")?;
+    if !person.starts_with("person/") || person.matches('/').count() != 1
+        || requester.starts_with("person/") && person != requester {
+        return Err(forbidden("the source device has a different or invalid person"));
+    }
     not_revoked(&state, &source)?;
     let old_key = text(&source, "device_public_key")?;
     if device_signing_key(old_key).is_none() { return Err(validation("renewal requires a device signing key")); }
@@ -153,9 +159,10 @@ pub async fn stage(State(state): State<AppState>, Extension(session): Extension<
     let id = fresh_id()?;
     let renewal_id = format!("renewal/{id}");
     let expires = client_now_ms() + u128::from(request.expires_in_hours) * DAY_MS / 24;
-    append(&state, format!("custom/client/pairing-renewal-{id}"), STAGED, &session.authority_actor,
+    append(&state, format!("custom/client/pairing-renewal-{id}"), STAGED, requester, person,
         BTreeMap::from([
             ("renewal_id".into(), json!(renewal_id)), ("migration_epoch".into(), json!(request.migration_epoch)),
+            ("requested_by".into(), json!(requester)),
             ("issuer_member".into(), json!(state.node)), ("source_grant_id".into(), json!(source.id)),
             ("allow_digest".into(), json!(request.allow_digest)), ("old_public_key".into(), json!(old_key)),
             ("scopes".into(), json!(scopes)), ("expires_at_unix_ms".into(), json!(expires)),
@@ -165,7 +172,7 @@ pub async fn stage(State(state): State<AppState>, Extension(session): Extension<
 }
 
 fn offer_tuple(stage: &ClaimRecord, nonce: &str, expires: u64) -> Result<Value, ApiError> {
-    Ok(json!([text(stage,"renewal_id")?, text(stage,"migration_epoch")?, text(stage,"issuer_member")?, text(stage,"person_id")?, field(stage,"scopes"), text(stage,"old_public_key")?, nonce, expires]))
+    Ok(json!([text(stage,"renewal_id")?, text(stage,"migration_epoch")?, text(stage,"issuer_member")?, text(stage,"person_id")?, text(stage,"requested_by")?, field(stage,"scopes"), text(stage,"old_public_key")?, nonce, expires]))
 }
 fn approval_bytes(stage: &ClaimRecord, nonce: &str, expires: u64, candidate: &str) -> Result<Vec<u8>, ApiError> {
     let mut tuple = offer_tuple(stage, nonce, expires)?;
@@ -195,9 +202,9 @@ pub async fn pending(State(state): State<AppState>, Json(request): Json<Pending>
         let tuple = offer_tuple(&stage, &nonce, expires)?;
         let issuer_signature = state.store.sign_device_renewal_offer(person, &tuple).map_err(ApiError::internal)?;
         let root = pairing_root_proof(&state, person)?.ok_or_else(|| forbidden("the member cannot prove the renewal root"))?;
-        append(&state, format!("custom/client/pairing-renewal-challenge-{nonce}"), CHALLENGE, person,
+        append(&state, format!("custom/client/pairing-renewal-challenge-{nonce}"), CHALLENGE, person, person,
             BTreeMap::from([("renewal_id".into(), field(&stage,"renewal_id").clone()),("nonce".into(),json!(nonce)),("expires_at_unix_ms".into(),json!(expires))]), None, vec![stage.id.clone()])?;
-        renewals.push(json!({"renewal_id":text(&stage,"renewal_id")?,"migration_epoch":text(&stage,"migration_epoch")?,"issuer_member":text(&stage,"issuer_member")?,"person_id":person,"scopes":field(&stage,"scopes"),"old_public_key":request.device_public_key,"nonce":nonce,"expires_at_unix_ms":expires,"person_root_key_proof":root,"issuer_signature":issuer_signature}));
+        renewals.push(json!({"renewal_id":text(&stage,"renewal_id")?,"migration_epoch":text(&stage,"migration_epoch")?,"issuer_member":text(&stage,"issuer_member")?,"person_id":person,"requested_by":text(&stage,"requested_by")?,"scopes":field(&stage,"scopes"),"old_public_key":request.device_public_key,"nonce":nonce,"expires_at_unix_ms":expires,"person_root_key_proof":root,"issuer_signature":issuer_signature}));
     }
     Ok(Json(json!({"kind":"device-renewals","renewals":renewals})))
 }

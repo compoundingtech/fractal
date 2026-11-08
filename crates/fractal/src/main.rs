@@ -2299,9 +2299,9 @@ enum AssistantGrantCommand {
 
 #[derive(Args)]
 struct DevicesArgs {
-    /// Concrete human authority carried over the trusted local Unix boundary.
+    /// Local caller attribution; ordinary device administration requires a person.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Person)))]
-    #[arg(long = "as", value_parser = parse_person_subject, global = true)]
+    #[arg(long = "as", value_parser = parse_actor_subject, global = true)]
     person: Option<String>,
     /// Include expired and revoked device history.
     #[arg(long)]
@@ -6395,6 +6395,9 @@ fn guard_mutating_cli_actor(
         Command::Devices(args) => match args.command.as_ref() {
             Some(DevicesCommand::Pair { assistant: Some(_), .. })
             | Some(DevicesCommand::Grant { .. }) => Some(args.person.as_deref().unwrap_or("requester")),
+            Some(DevicesCommand::RenewStage { .. }) => Some(args.person.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("renewal staging needs explicit --as {own}")
+            })?),
             _ => None,
         },
         _ => None,
@@ -9466,14 +9469,14 @@ struct DeviceRenewalStageReceipt {
 
 async fn stage_device_renewal(
     endpoint: &Endpoint,
-    person: &str,
+    actor: &str,
     request: DeviceRenewalStageRequest,
 ) -> Result<DeviceRenewalStageReceipt> {
     anyhow::ensure!(
         matches!(endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)),
         "device renewal staging requires the trusted local Unix socket"
     );
-    let client = execution_client(endpoint, person.to_owned())?;
+    let client = execution_client(endpoint, actor.to_owned())?;
     client
         .post("/v1/client/pairings/renewals/stage", &request)
         .await
@@ -9493,7 +9496,6 @@ async fn run_devices(
         command,
     } = args;
     let configured_person = config.person.as_deref();
-    let person = configured_human(person.as_deref(), configured_person, "devices")?;
     // Refuse nonlocal staging before constructing a product client or issuing any request.
     if let Some(DevicesCommand::RenewStage {
         device_id,
@@ -9501,9 +9503,10 @@ async fn run_devices(
         allow_digest,
         expires_in_hours,
     }) = command {
+        let actor = configured_actor(person.as_deref(), configured_person, "devices renew-stage")?;
         let receipt = stage_device_renewal(
             &endpoint,
-            &person,
+            &actor,
             DeviceRenewalStageRequest {
                 api_version: CLIENT_V0_API_VERSION,
                 device_id,
@@ -9521,6 +9524,7 @@ async fn run_devices(
         }
         return Ok(());
     }
+    let person = configured_human(person.as_deref(), configured_person, "devices")?;
     let client = generated_client(&endpoint, Some(&person))?;
     match command.unwrap_or(DevicesCommand::Ls) {
         DevicesCommand::Complete { .. } => unreachable!("handled before loading local config"),

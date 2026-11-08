@@ -70,8 +70,7 @@ The daemon serves installed web assets on loopback port 7410 by default. `fracta
 Stage an audited historical device grant on the member's trusted local Unix socket:
 
 ```sh
-fractal devices renew-stage device/DEVICE_ID \
-  --as person/NAME \
+fractal devices renew-stage --as agent/NAME device/DEVICE_ID \
   --migration-epoch EPOCH \
   --allow SHA256
 ```
@@ -87,9 +86,11 @@ The approval window defaults to 72 hours. Set `--expires-in-hours HOURS` to choo
 over HTTP or Fabric endpoints. It prints only the renewal ID and expiry; `--json`
 returns the stage receipt, including its audited digest, without a credential.
 The saved phone profile discovers its renewal when the app starts or returns to
-the foreground. Review the displayed member, person, and scopes there, then tap
+the foreground. Review the displayed member, person, requester, and scopes there, then tap
 **Approve** to finish with native user presence. No pairing code or QR scan is
 needed.
+A managed agent must use its own literal identity; a person operator can stage as
+themselves. The historical grant determines the phone key and person being renewed.
 
 ## Identity and automation
 
