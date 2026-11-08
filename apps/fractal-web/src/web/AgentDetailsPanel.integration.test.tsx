@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { within } from 'storybook/test'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
-import { observed } from '../data/source.ts'
+import { credentialExpiredMessage, observed, unavailable } from '../data/source.ts'
 import type { Feed } from '../data/source.ts'
 import { gatewayNativeDetails } from '../data/nativeDetailsSource.ts'
 import { gatewaySubjectReads } from '../data/subjectReadPort.ts'
@@ -256,6 +256,16 @@ describe('OMP subagent activity on the production inspector', () => {
     const trigger = within(scope).getByRole('button', { name })
     return { trigger, panel: document.getElementById(trigger.getAttribute('aria-controls')!)! }
   }
+  it('uses the shared recovery copy for rejected supplement credentials', async () => {
+    await act(async () => root.render(<DataSourceProvider source={ompDetailsSource()} registry={registry}>
+      <AgentDetailsPanel agentRef={ompAgentRef} width={320} scheme="dark" onClose={onClose} onOpen={() => undefined} detailsSupplement={() => unavailable({ reason: 'unauthorized', detail: 'private diagnostic' })} />
+    </DataSourceProvider>))
+    const line = host.querySelector<HTMLElement>('[data-details-supplement]')!
+    expect(within(line).getByRole('status').textContent).toBe(credentialExpiredMessage)
+    expect(line.querySelector('button')).toBeNull()
+    expect(line.textContent).not.toContain('private diagnostic')
+  })
+
   it('announces loading in plain words, with no technical paragraph', async () => {
     await mount('loading')
     const line = host.querySelector<HTMLElement>('[data-details-supplement]')!

@@ -1,4 +1,5 @@
 use super::*;
+use thread_access::{bound_agent, edit_authority, read_person};
 use crate::store::thread_metadata::{self, Summary, SummaryPage, ThreadContext, TimelinePage};
 
 type ReadResult<T> = Result<(Extension<ClientSnapshot>, Json<T>), ApiError>;
@@ -112,7 +113,7 @@ fn store_error(error: FractalError) -> ApiError {
     match error.code {
         "thread-unavailable" => ApiError::not_found("the thread is unavailable"),
         "stale-thread-cursor" | "stale-thread-title" | "stale-subject" | "thread-closed"
-        | "thread-state-unchanged" => stale(&error.message),
+        | "thread-state-unchanged" | "thread-ask-already-linked" => stale(&error.message),
         "thread-authority-expired" | "device-key-not-enrolled" => forbidden(&error.message),
         "thread-rollout-unavailable" => ApiError {
             status: StatusCode::CONFLICT,
@@ -120,7 +121,7 @@ fn store_error(error: FractalError) -> ApiError {
             message: error.message,
             details: Box::default(),
         },
-        "invalid-thread-cursor" | "invalid-thread-message" | "invalid-thread-start"
+        "invalid-thread-cursor" | "invalid-thread-message" | "invalid-thread-start" | "invalid-thread-read"
         | "invalid-thread-decision" | "invalid-thread-title" => validation(&error.message),
         _ => ApiError::bad(error),
     }
@@ -159,19 +160,6 @@ async fn with_person<T: Send + 'static>(
     .await?
 }
 
-fn read_person(session: &ClientSession) -> Result<&str, ApiError> {
-    require_scope(session, "read.projections")?;
-    let person = &session.authority_actor;
-    if session.local_peer
-        || session.assistant_write.is_some()
-        || !person.starts_with("person/")
-        || person.matches('/').count() != 1
-    {
-        return Err(forbidden("thread reads require a concrete person"));
-    }
-    Ok(person)
-}
-
 fn validate_subject(subject: &str) -> Result<(), ApiError> {
     let Some(id) = subject.strip_prefix("thread/") else {
         return Err(ApiError::not_found("the thread is unavailable"));
@@ -190,6 +178,7 @@ fn validate_subject(subject: &str) -> Result<(), ApiError> {
 #[derive(Clone)]
 pub(super) enum StreamSelection {
     Context(ThreadCollectionContext),
+    Summary(String),
     Thread(String),
 }
 
@@ -215,12 +204,17 @@ pub(super) fn stream_selection(
         ));
     }
     let selection = if request.collection == "threads" {
-        let context = request
-            .thread_context
-            .as_ref()
-            .ok_or_else(|| validation("thread discovery requires exactly one valid context"))?;
-        resolve_context(context)?;
-        StreamSelection::Context(context.clone())
+        match (request.subject.as_deref(), request.thread_context.as_ref()) {
+            (Some(subject), None) => {
+                validate_subject(subject)?;
+                StreamSelection::Summary(subject.into())
+            }
+            (None, Some(context)) => {
+                resolve_context(context)?;
+                StreamSelection::Context(context.clone())
+            }
+            _ => return Err(validation("threads require exactly one subject or context")),
+        }
     } else {
         let subject = request
             .subject
@@ -252,6 +246,10 @@ pub(super) fn stream_rows(
             )
             .map_err(store_error)?;
             stream_page(page.items, page.next_cursor.is_some())
+        }
+        StreamSelection::Summary(subject) => {
+            let summary = thread_metadata::summary(store, person, subject).map_err(store_error)?;
+            stream_page(vec![summary], false)
         }
         StreamSelection::Thread(subject) => {
             let page = thread_metadata::mixed_timeline(store, person, subject, None, limit)
@@ -366,38 +364,43 @@ fn run_lifecycle(
     })))
 }
 
-fn edit_authority(
-    current: &ClientSession,
-) -> Result<thread_metadata::PersonAuthority<'_>, ApiError> {
-    use thread_metadata::PersonAuthority;
-    let person = &current.authority_actor;
-    if current.local_peer
-        || current.assistant_write.is_some()
-        || !person.starts_with("person/")
-        || person.matches('/').count() != 1
-    {
-        return Err(forbidden("thread edits require a concrete person"));
-    }
-    Ok(
-        match (
-            current.transport,
-            current.pairing_grant.as_deref(),
-            current.pairing_completion.as_deref(),
-        ) {
-            ("unix", None, None) => PersonAuthority::TrustedLocal,
-            ("local-web", None, None) => PersonAuthority::LocalWeb {
-                expires_at: current
-                    .grant_expires_at
-                    .ok_or_else(|| forbidden("the web credential is unavailable"))?,
-            },
-            (_, Some(grant), Some(completion)) => PersonAuthority::Paired {
-                grant,
-                completion,
-                actor: &current.actor,
-            },
-            _ => return Err(forbidden("the thread credential is unavailable")),
-        },
-    )
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReadParameters {
+    target_id: String,
+    through_message_id: Option<String>,
+    seen_message_ids: Vec<String>,
+}
+
+pub(super) async fn read_action(
+    state: AppState,
+    session: ClientSession,
+    request: ActionRequest,
+) -> Result<Json<Value>, ApiError> {
+    validate_action_admission(&session, &request)?;
+    blocking_store(move || Ok((|| {
+        let current = current_session(&state, &session)?;
+        let person = read_person(&current)?;
+        require_scope(&current, "control.messages")?;
+        let authority = edit_authority(&current)?;
+        validate_snapshot_fence(&state, &request.fence)?;
+        let operation_id = format!("operation/{}", action_request_digest(&request)?);
+        let parameters: ReadParameters = serde_json::from_value(request.parameters)
+            .map_err(|error| validation(error.to_string()))?;
+        validate_subject(&parameters.target_id)?;
+        let (acknowledged, appended) = thread_metadata::mark_read(
+            &state.store, authority, person, &parameters.target_id,
+            parameters.through_message_id.as_deref(), &parameters.seen_message_ids,
+        ).map_err(store_error)?;
+        if appended {
+            crate::api::signal_visible_change(&state);
+        }
+        Ok(Json(json!({
+            "kind": "action-result", "action_id": request.id, "operation_id": operation_id,
+            "status": "completed", "affected_ids": acknowledged,
+            "snapshot_id": new_client_snapshot(&state).id,
+        })))
+    })())).await?
 }
 
 #[derive(Deserialize)]
@@ -442,10 +445,7 @@ fn run_message(
     require_scope(&current, "control.messages")?;
     let person = &current.authority_actor;
     let authority = if request.action_type == "thread.reply"
-        && current.transport == "unix"
-        && current.assistant_write.is_none()
-        && let Some(bound) = current.bound_agent.as_deref()
-        && person.starts_with("agent/")
+        && let Some(bound) = bound_agent(&current)
     {
         thread_metadata::PersonAuthority::BoundAgent { actor: bound }
     } else {
@@ -560,14 +560,7 @@ pub(super) async fn link_ask_action(
         Ok((|| {
             let current = current_session(&state, &session)?;
             require_scope(&current, "control.work")?;
-            let bound = current
-                .bound_agent
-                .as_deref()
-                .filter(|_| {
-                    current.transport == "unix"
-                        && current.assistant_write.is_none()
-                        && current.authority_actor.starts_with("agent/")
-                })
+            let bound = bound_agent(&current)
                 .ok_or_else(|| forbidden("only the bound requesting agent can attach an ask"))?;
             validate_snapshot_fence(&state, &request.fence)?;
             if !request.fence.subject_revisions.is_empty() {
@@ -617,6 +610,197 @@ mod tests {
     use super::*;
     use axum::body::{Body, to_bytes};
     use tower::ServiceExt;
+
+    fn grant(caps: &Value, id: &str) -> String {
+        caps["value"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == id)
+            .unwrap()["state"]
+            .as_str()
+            .unwrap()
+            .into()
+    }
+
+    async fn get_capabilities(state: &AppState, header: &str, value: &str) -> (StatusCode, Value) {
+        let response = crate::api::router(state.clone())
+            .oneshot(Request::builder()
+                .uri("/v1/client/capabilities")
+                .header(header, value)
+                .body(Body::empty())
+                .unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn thread_capabilities_require_the_same_fleet_writer_gate() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "thread-capabilities");
+        let person = "person/operator";
+        let (status, before) = get_capabilities(&state, LOCAL_PERSON_HEADER, person).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(grant(&before, "threads-v1"), "unavailable");
+        assert_eq!(grant(&before, "thread.start"), "unavailable");
+
+        state.store.configure_thread_write_rollout([]);
+        let (status, ready) = get_capabilities(&state, LOCAL_PERSON_HEADER, person).await;
+        assert_eq!(status, StatusCode::OK);
+        for id in ["threads-v1", "thread-summary-feed", "thread.start", "thread.reply", "thread.rename", "thread.close", "thread.reopen"] {
+            assert_eq!(grant(&ready, id), "granted", "{id}");
+        }
+        assert_eq!(grant(&ready, "thread.link-ask"), "ungranted");
+
+        let other_root = tempfile::tempdir().unwrap();
+        let waiting = super::super::tests::test_state_named(other_root.path(), "thread-waiting");
+        let old = Store::open_memory("old-reader").unwrap();
+        old.append_claim(&ClaimInput {
+            subject: "daemon/old-reader".into(),
+            kind: "daemon.started".into(),
+            actor: None,
+            fields: BTreeMap::from([("status".into(), json!("running"))]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        waiting.store.import_replication("old-reader", &old.export_replication(0).unwrap()).unwrap();
+        waiting.store.configure_thread_write_rollout(["old-reader".into()]);
+        let (_, unavailable) = get_capabilities(&waiting, LOCAL_PERSON_HEADER, person).await;
+        assert_eq!(grant(&unavailable, "threads-v1"), "unavailable");
+        assert_eq!(grant(&unavailable, "thread.reply"), "unavailable");
+    }
+
+    #[tokio::test]
+    async fn thread_capabilities_honor_read_only_and_revoked_pairings() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "thread-capability-pair");
+        state.store.configure_thread_write_rollout([]);
+        let grant_id = "custom/client/pairing-thread-readonly";
+        let credential = "fixture-thread-read-only";
+        state.store.append_claim(&ClaimInput {
+            subject: grant_id.into(),
+            kind: "custom.client.pairing-completed".into(),
+            actor: None,
+            fields: BTreeMap::from([
+                ("person_id".into(), json!("person/operator")),
+                ("session_actor".into(), json!("client/paired/thread-reader")),
+                ("credential_hash".into(), json!(credential_digest(credential))),
+                ("expires_at_unix_ms".into(), json!(client_now_ms() as u64 + 60_000)),
+                ("scopes".into(), json!(["read.projections"])),
+            ]),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        let bearer = format!("Bearer {credential}");
+        let (status, read) = get_capabilities(&state, AUTHORIZATION.as_str(), &bearer).await;
+        assert_eq!(status, StatusCode::OK, "{read}");
+        assert_eq!(grant(&read, "threads-v1"), "granted");
+        assert_eq!(grant(&read, "thread-summary-feed"), "granted");
+        for id in ["thread.read", "thread.start", "thread.reply", "thread.rename", "thread.close", "thread.reopen", "thread.link-ask"] {
+            assert_eq!(grant(&read, id), "ungranted", "{id}");
+        }
+
+        let blocked = crate::api::router(state.clone()).oneshot(
+            Request::builder().method("POST").uri("/v1/client/actions")
+                .header(AUTHORIZATION, &bearer).header("Content-Type", "application/json")
+                .body(Body::from(json!({
+                    "api_version": CLIENT_API_VERSION, "id": "action/thread-read-denied",
+                    "type": "thread.read", "idempotency_key": "thread-read-denied-key",
+                    "fence": {"snapshot_id": new_client_snapshot(&state).id},
+                    "parameters": {"target_id": "thread/unknown", "through_message_id": null, "seen_message_ids": []},
+                }).to_string())).unwrap(),
+        ).await.unwrap();
+        assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
+
+        state.store.append_claim(&ClaimInput {
+            subject: grant_id.into(),
+            kind: "custom.client.pairing-revoked".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }).unwrap();
+        let (status, revoked) = get_capabilities(&state, AUTHORIZATION.as_str(), &bearer).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{revoked}");
+    }
+
+    #[tokio::test]
+    async fn paired_thread_read_updates_the_same_owner_on_another_device() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "thread-read-devices");
+        state.store.configure_thread_write_rollout([]);
+        let person = "person/operator";
+        let agent = "agent/example";
+        let thread = "thread/read-devices";
+        let message = "message/read-device-reply";
+        thread_metadata::apply(&state.store, person, thread, "create-read-devices", thread_metadata::Edit::Create {
+            agent, title: "Review",
+        }).unwrap();
+        crate::store::thread_delivery::append_reply(&state.store, &ClaimInput {
+            subject: message.into(), kind: "message.sent".into(), actor: Some(agent.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(agent)), ("to".into(), json!(person)),
+                ("content".into(), json!("Reply")), ("status".into(), json!("sent")),
+                ("thread_id".into(), json!(thread)),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: Some("send-device-reply".into()),
+        }, thread_metadata::PersonAuthority::TrustedLocal, None).unwrap();
+        let pair = |name: &str, scopes: &[&str]| {
+            state.store.append_claim(&ClaimInput {
+                subject: format!("custom/client/pairing-{name}"), kind: "custom.client.pairing-completed".into(),
+                actor: None,
+                fields: BTreeMap::from([
+                    ("person_id".into(), json!(person)),
+                    ("session_actor".into(), json!(format!("client/paired/{name}"))),
+                    ("credential_hash".into(), json!(credential_digest(name))),
+                    ("expires_at_unix_ms".into(), json!(client_now_ms() as u64 + 60_000)),
+                    ("scopes".into(), json!(scopes)),
+                ]),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+            format!("Bearer {name}")
+        };
+        let writer = pair("thread-read-writer", &["read.projections", "control.messages"]);
+        let observer = pair("thread-read-observer", &["read.projections"]);
+        let app = crate::api::router(state.clone());
+        let summary = |bearer: &str| {
+            let app = app.clone();
+            let request = Request::builder().uri("/v1/client/threads/read-devices")
+                .header(AUTHORIZATION, bearer).body(Body::empty()).unwrap();
+            async move {
+                let response = app.oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                serde_json::from_slice::<Value>(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap()
+            }
+        };
+        assert_eq!(summary(&observer).await["value"]["unread"], true);
+        let action = json!({
+            "api_version": CLIENT_API_VERSION, "id": "action/read-devices", "type": "thread.read",
+            "idempotency_key": "read-devices-operation",
+            "fence": {"snapshot_id": new_client_snapshot(&state).id},
+            "parameters": {"target_id": thread, "through_message_id": message, "seen_message_ids": [message]},
+        });
+        for _ in 0..2 {
+            let response = app.clone().oneshot(
+                Request::builder().method("POST").uri("/v1/client/actions")
+                    .header(AUTHORIZATION, &writer).header("Content-Type", "application/json")
+                    .body(Body::from(action.to_string())).unwrap(),
+            ).await.unwrap();
+            let status = response.status();
+            let result: Value = serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await.unwrap()).unwrap();
+            assert_eq!(status, StatusCode::OK, "{result}");
+            assert_eq!(result["value"]["affected_ids"], json!([message]));
+            assert!(result["value"]["operation_id"].is_string());
+        }
+        assert_eq!(summary(&observer).await["value"]["unread"], false);
+        assert_eq!(state.store.claims_for(message, Some("message.read")).unwrap().len(), 1);
+    }
 
     #[tokio::test]
     async fn exact_summary_enforces_owner_and_rejects_a_bound_agent_person_header() {
@@ -864,6 +1048,67 @@ mod tests {
         assert_eq!(body["value"]["items"][0]["id"], "thread/fixture");
         assert!(body["value"]["next_cursor"].is_null());
     }
+    #[tokio::test]
+    async fn real_inbox_ask_starts_and_retries_through_typed_action() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "thread-http-start");
+        state.store.configure_thread_write_rollout([]);
+        let person = "person/operator";
+        let agent = "agent/garden/reviewer";
+        let thread = "thread/http-start";
+        let intent = crate::graph::parse_intent(
+            r#"version 2
+agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
+"#,
+            state.store.origin(),
+        ).unwrap();
+        state.store.apply_internal(&intent, "declare-start-agent").unwrap();
+        let app = crate::api::router(state.clone());
+        let post = |actor: &'static str, bound: Option<&'static str>, action: &'static str, parameters: Value| {
+            let app = app.clone();
+            let snapshot = new_client_snapshot(&state).id;
+            async move {
+                let request = json!({
+                    "api_version": CLIENT_API_VERSION, "id": format!("action/{action}"),
+                    "type": action, "idempotency_key": format!("thread-fixture-{action}"),
+                    "fence": {"snapshot_id": snapshot}, "parameters": parameters,
+                });
+                let mut request = Request::builder().method("POST").uri("/v1/client/actions")
+                    .header(LOCAL_PERSON_HEADER, actor).header("Content-Type", "application/json")
+                    .body(Body::from(request.to_string())).unwrap();
+                if let Some(bound) = bound {
+                    request.extensions_mut().insert(crate::api::BoundAgent(bound.into()));
+                }
+                let response = app.oneshot(request).await.unwrap();
+                let status = response.status();
+                let body = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(status, StatusCode::OK, "{value}");
+                value["value"].clone()
+            }
+        };
+        let asked = post(agent, Some(agent), "work.ask", json!({
+            "person_id": person, "title": "Review CI", "reason": "Can we proceed?",
+        })).await;
+        let ask = asked["affected_ids"][0].as_str().unwrap();
+        let episode = state.store.newest_claim_for_subject_kind(ask, "work.person-asked")
+            .unwrap().unwrap();
+        let parameters = json!({
+            "target_id": thread, "agent_id": agent, "origin_ask": ask,
+            "origin_ask_episode": episode.id, "title": "Review CI", "content": "Check worker tests.",
+        });
+        let start = post(person, None, "thread.start", parameters.clone()).await;
+        let retry = post(person, None, "thread.start", parameters).await;
+        assert_eq!(retry["operation_id"], start["operation_id"]);
+        let message = start["affected_ids"][1].as_str().unwrap();
+        let sent = state.store.claims_for(message, Some("message.sent")).unwrap();
+        assert_eq!(sent.len(), 1);
+        let created = state.store.newest_claim_for_subject_kind(thread, "thread.created").unwrap().unwrap();
+        assert_eq!(sent[0].batch_id, created.batch_id);
+        assert_eq!(sent[0].body["fields"]["thread_id"], thread);
+        assert_eq!(state.store.latest_claim_id(ask).unwrap().as_deref(), Some(episode.id.as_str()));
+    }
+
     #[tokio::test]
     async fn recently_closed_context_is_owner_scoped_and_ignores_reopened_threads() {
         use thread_metadata::Edit;

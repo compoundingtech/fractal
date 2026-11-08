@@ -13,6 +13,174 @@ use axum::body::to_bytes;
 use axum::http::Request;
 use std::path::PathBuf;
 
+#[cfg(target_os = "linux")]
+#[test]
+fn incomplete_linux_environment_is_unavailable() {
+    for (case, environment, expected) in [
+        ("empty environ", b"".as_slice(), HarnessAncestry::Unavailable),
+        ("truncated environ", b"PATH=/bin".as_slice(), HarnessAncestry::Unavailable),
+        ("complete environment without markers", b"PATH=/bin\0".as_slice(), HarnessAncestry::Person),
+        ("complete environment with marker", b"ST_AGENT=agent/fixture/worker\0".as_slice(),
+            HarnessAncestry::Bound("agent/fixture/worker".into())),
+    ] {
+        assert_eq!(HarnessAncestry::of_linux_environment(environment), expected, "{case}");
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn empty_process_environment_is_unavailable() {
+    let mut child = std::process::Command::new("sleep").arg("10").env_clear().spawn().unwrap();
+    let pid = child.id();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let identity = local_harness_identity(pid);
+    let ancestry = harness_ancestor(pid, Some(&peer));
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_eq!(identity, Some(HarnessAncestry::Unavailable), "empty environ local identity");
+    assert_eq!(ancestry, HarnessAncestry::Unavailable, "empty environ ancestry walk");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn person_uid_boundary_stops_before_unreadable_foreign_ancestors() {
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let (_, birth) = local_harness_process(pid).unwrap().generation.unwrap();
+        for (ancestor, expected) in [
+            (Some(HarnessProcess { uid: 0, generation: None }), HarnessAncestry::Person),
+            (Some(HarnessProcess { uid: 1000, generation: None }), HarnessAncestry::Unavailable),
+            (None, HarnessAncestry::Unavailable),
+        ] {
+            let result = walk_harness_ancestry(pid, Some(&peer), |candidate| {
+                if candidate == pid {
+                    Some(HarnessProcess { uid: 1000, generation: Some((pid + 1, birth)) })
+                } else {
+                    ancestor
+                }
+            }, |candidate| {
+                assert_eq!(candidate, pid, "foreign or unreadable ancestors need no environment read");
+                Some(HarnessAncestry::Person)
+            });
+            assert_eq!(result, expected);
+        }
+    });
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn captured_connector_case(captured: bool, changed_at: Option<usize>) -> HarnessAncestry {
+    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        let process = local_harness_process(pid).unwrap();
+        let mut inspection = 0;
+        walk_harness_ancestry(pid, captured.then_some(&peer), |_| {
+            let mut current = process;
+            if changed_at == Some(inspection) {
+                current.generation.as_mut().unwrap().1 =
+                    current.generation.unwrap().1.wrapping_add(1);
+            }
+            inspection += 1;
+            Some(current)
+        }, |_| Some(HarnessAncestry::Bound("agent/fixture/worker".into())))
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_connector_generation_mismatch_is_unavailable() {
+    for inspection in [0, 1, 2] {
+        assert_eq!(captured_connector_case(true, Some(inspection)), HarnessAncestry::Unavailable);
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_failed_connector_capture_is_unavailable() {
+    assert_eq!(captured_connector_case(false, None), HarnessAncestry::Unavailable);
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn ancestry_matching_connector_capture_binds() {
+    assert_eq!(captured_connector_case(true, None),
+        HarnessAncestry::Bound("agent/fixture/worker".into()));
+}
+
+// A real serving-boundary probe for manual person-CLI integration checks.
+#[tokio::test]
+async fn person_cli_probe_server() {
+    let Ok(socket) = std::env::var("FRACTAL_PERSON_CLI_PROBE_SOCKET") else { return; };
+    let socket = PathBuf::from(socket);
+    let state = state(socket.parent().unwrap());
+    let app = Router::new().fallback(|| async { Json(json!({"person_admitted": true})) });
+    serve_unix_with_ancestor_ready(&socket, None, app, Some(state.store), harness_ancestor,
+        || println!("PERSON_CLI_PROBE_READY")).await.unwrap();
+}
+
+#[tokio::test]
+async fn legacy_mail_poll_delivers_thread_content_only_to_the_bound_recipient() {
+    let root = tempfile::tempdir().unwrap();
+    let state = super::tests_shared::state(root.path());
+    let agent = "agent/eval.worker";
+    let person = "person/operator";
+    let thread = "thread/polling-driver";
+    state.store.configure_thread_write_rollout([]);
+    crate::store::mailbox_tests::ready(&state.store, "thread-poll");
+    crate::store::thread_metadata::apply(
+        &state.store, person, thread, "create-poll-thread",
+        crate::store::thread_metadata::Edit::Create { agent, title: "Review" },
+    ).unwrap();
+    crate::store::thread_delivery::append_reply(
+        &state.store,
+        &ClaimInput {
+            subject: "message/thread-poll".into(), kind: "message.sent".into(), actor: Some(person.into()),
+            fields: serde_json::from_value(json!({
+                "from": person, "to": agent, "content": "Check CI.", "status": "sent",
+                "thread_id": thread,
+            })).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: Some("thread-poll-message".into()),
+        },
+        crate::store::thread_metadata::PersonAuthority::TrustedLocal, None,
+    ).unwrap();
+    let app = router(state);
+    let route = "/v1/messages/page?to=agent%2Feval.worker";
+    for (bound, native, visible, with_context) in [
+        (None, Some(agent), false, false),
+        (Some("agent/other"), Some(agent), false, false),
+        (Some(agent), None, true, false),
+        (Some(agent), Some("agent/other"), true, false),
+        (Some(agent), Some(agent), true, true),
+    ] {
+        let mut app = app.clone();
+        if let Some(bound) = bound {
+            app = app.layer(Extension(BoundAgent(bound.into())));
+        }
+        if let Some(native) = native {
+            app = app.layer(Extension(NativeDeliveryPeer {
+                agent: native.into(), transport: "app-server", pid: 20, archives_inbox: true,
+            }));
+        }
+        let (status, body) = get_request(app.clone(), route).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let message = body["items"].as_array().unwrap().iter()
+            .find(|message| message["subject"] == "message/thread-poll");
+        assert_eq!(message.is_some(), visible, "{body}");
+        if let Some(message) = message {
+            assert_eq!(message["content"], "Check CI.");
+            assert_eq!(message.get("delivery_thread").and_then(Value::as_str),
+                with_context.then_some(thread), "{body}");
+        }
+        let (status, unpaged) = get_request(app, "/v1/messages?to=agent%2Feval.worker").await;
+        assert_eq!(status, StatusCode::OK, "{unpaged}");
+        let message = unpaged.as_array().unwrap().iter()
+            .find(|message| message["subject"] == "message/thread-poll");
+        assert_eq!(message.is_some(), visible, "{unpaged}");
+        if let Some(message) = message {
+            assert!(message.get("delivery_thread").is_none(), "{unpaged}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let root = tempfile::tempdir().unwrap();
@@ -22,7 +190,7 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let reserved = reserve_unix_socket(&socket, None).await.unwrap();
     let (ready, waiting) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
-        reserved, router(state), Some(store.clone()), |_| Some("agent/example".into()),
+        reserved, router(state), Some(store.clone()), |_, _| HarnessAncestry::Bound("agent/example".into()),
         move || { let _ = ready.send(()); },
     ));
     waiting.await.unwrap();
@@ -42,6 +210,129 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
         assert_eq!(store.index().unwrap(), before);
     }
     server.abort();
+}
+
+#[tokio::test]
+async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
+    use http_body_util::BodyExt as _;
+    for ancestry in [HarnessAncestry::Unavailable, HarnessAncestry::Person] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let socket = root.path().join("bound.sock");
+        let reserved = reserve_unix_socket(&socket, None).await.unwrap();
+        let (ready, waiting) = tokio::sync::oneshot::channel();
+        let lookup: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry = if ancestry == HarnessAncestry::Unavailable {
+            |_, _| HarnessAncestry::Unavailable
+        } else {
+            |_, _| HarnessAncestry::Person
+        };
+        let app = Router::new().fallback(|| async { Json(json!({"ok": true})) });
+        let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
+            reserved, app, Some(state.store), lookup,
+            move || { let _ = ready.send(()); },
+        ));
+        waiting.await.unwrap();
+        let stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await.unwrap();
+        tokio::spawn(connection);
+        for (method, path, person, body, sensitive) in [
+            ("GET", "/v1/health", false, "{}", false),
+            ("POST", "/v1/example", false, "{}", false),
+            ("GET", "/v1/backup", false, "{}", true),
+            ("GET", "/v1/agents/rename-id/proof/export", false, "{}", true),
+            ("GET", "/v1/missions/rename-id/proof/export", false, "{}", true),
+            ("GET", "/v1/internal/example", false, "{}", true),
+            ("GET", "/v1/client/session", true, "{}", true),
+            ("POST", "/v1/example", false, r#"{"actor":"person/operator"}"#, true),
+            ("POST", "/v1/example", false, r#"{"requester":"agent/other"}"#, true),
+        ] {
+            let mut request = Request::builder().method(method).uri(path).header("host", "local");
+            if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
+            let response = sender.send_request(request.body(Body::from(body)).unwrap()).await.unwrap();
+            let refused = sensitive && ancestry == HarnessAncestry::Unavailable;
+            assert_eq!(response.status(), if refused { StatusCode::UNPROCESSABLE_ENTITY } else { StatusCode::OK }, "{ancestry:?} {path} {body}");
+            response.into_body().collect().await.unwrap();
+        }
+        server.abort();
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn with_process_fixture<T>(command: &mut std::process::Command, inspect: impl FnOnce(u32) -> T) -> T {
+    use std::io::{BufRead as _, Write as _};
+    let mut child = command
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let mut pid = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap()).read_line(&mut pid).unwrap();
+    let pid: u32 = pid.trim().parse().unwrap();
+    let result = inspect(pid);
+    // The child announces readiness after exec, then stays alive until inspection ends.
+    child.stdin.take().unwrap().write_all(b"done\n").unwrap();
+    child.wait().unwrap();
+    result
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn inspect_ancestry_fixture(command: &mut std::process::Command) -> HarnessAncestry {
+    with_process_fixture(command, |pid| {
+        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+        harness_ancestor(pid, Some(&peer))
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn assert_masked_identity_refused(method: &str, path: &str, person: bool, body: Value) {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (primary, legacy) in [
+        (Some(""), None),
+        (None, Some("")),
+        (Some(""), Some("agent/fixture/worker")),
+        (Some("agent/fixture/worker"), Some("")),
+        (Some("person/example"), None),
+        (Some("agent/"), None),
+        (Some("agent/fixture/worker"), Some("agent/fixture/other")),
+    ] {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "echo $$; read answer"]).env_remove("ST_AGENT").env_remove("FRACTAL_AGENT");
+        if let Some(value) = primary { command.env("ST_AGENT", value); }
+        if let Some(value) = legacy { command.env("FRACTAL_AGENT", value); }
+        let ancestry = inspect_ancestry_fixture(&mut command);
+        assert_eq!(ancestry, HarnessAncestry::Unavailable, "{path}: {primary:?} {legacy:?}");
+        let mut request = Request::builder().method(method).uri(path);
+        if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
+        let mut request = request.body(Body::from(body.to_string())).unwrap();
+        request.extensions_mut().insert(ancestry);
+        let error = guard_bound_request(request, None, &state.store).await.unwrap_err();
+        assert_eq!(error.code, "foreign-agent-actor", "{path}: {primary:?} {legacy:?}");
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_backup_export() {
+    assert_masked_identity_refused("GET", "/v1/backup", false, json!({})).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_person_session() {
+    assert_masked_identity_refused("GET", "/v1/client/session", true, json!({})).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn masked_identity_refuses_foreign_actor() {
+    assert_masked_identity_refused("POST", "/v1/fleet/transports", false, json!({"actor": "agent/other"})).await;
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn a_harness_descendant_without_agent_environment_is_bound() {
+    let ancestry = inspect_ancestry_fixture(std::process::Command::new("sh")
+        .args(["-c", "env -u ST_AGENT -u FRACTAL_AGENT sh -c 'echo $$; read answer'; :"])
+        .env_remove("FRACTAL_AGENT").env("ST_AGENT", "agent/fixture/parent"));
+    assert_eq!(ancestry, HarnessAncestry::Bound("agent/fixture/parent".into()));
 }
 
 #[tokio::test]
@@ -285,6 +576,23 @@ agent "eval/named" { name "Quartz"; workspace "/tmp"; harness "claude" {} }
     let (status, missing) = get_request(app, "/v1/desired/agent/eval/absent").await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{missing}");
 }
+#[tokio::test]
+async fn status_preserves_claim_provenance_even_with_an_unknown_omit_claims_query() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    state.store.apply_internal(
+        &parse_intent("version 2\nagent \"eval/named\" { workspace \"/tmp\"; harness \"claude\" {} }\n", "node").unwrap(),
+        "status-summary-fixture",
+    ).unwrap();
+    let app = router(state);
+    let (code, full) = get_request(app.clone(), "/v1/status?subject=agent/eval/named").await;
+    assert_eq!(code, StatusCode::OK, "{full}");
+    let (code, legacy_query) = get_request(app, "/v1/status?subject=agent/eval/named&omit_claims=true").await;
+    assert_eq!(code, StatusCode::OK, "{legacy_query}");
+    assert!(!full["subjects"][0]["claims"].as_array().unwrap().is_empty());
+    assert_eq!(legacy_query["subjects"][0]["claims"], full["subjects"][0]["claims"]);
+}
+
 
 #[tokio::test]
 async fn delivery_hold_api_enforces_authority_and_keeps_presence_separate() {
@@ -793,28 +1101,16 @@ fn descriptor_exhaustion_bounds_accept_retries_and_log_reports() {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn a_unix_peer_is_bound_to_its_harness_environment() {
     // A test run from an agent seat inherits that seat's FRACTAL_AGENT, which would conflict
     // with this fixture's identity and bind nothing.
-    let mut child = std::process::Command::new("sleep")
-        .arg("10")
+    let bound = inspect_ancestry_fixture(std::process::Command::new("sh")
+        .args(["-c", "echo $$; read answer"])
         .env_remove("FRACTAL_AGENT")
-        .env("ST_AGENT", "agent/fixture/worker")
-        .spawn()
-        .unwrap();
-    let mut bound = None;
-    for _ in 0..50 {
-        bound = harness_ancestor(child.id());
-        if bound.is_some() {
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    assert_eq!(bound.as_deref(), Some("agent/fixture/worker"));
-    child.kill().unwrap();
-    child.wait().unwrap();
+        .env("ST_AGENT", "agent/fixture/worker"));
+    assert_eq!(bound.agent(), Some("agent/fixture/worker"));
 }
 
 #[tokio::test]
@@ -1926,6 +2222,23 @@ async fn channel_history_queries_do_not_renew_delivery() {
     }
 }
 
+#[test]
+fn doctor_reports_work_wake_copy_progress_and_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for complete in [false, true] {
+        state.store.connection.write().execute(
+            /* sqlite-large-value: allow-for-now lv-he79e179dc71c owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE local_work_wake_backfill SET cursor=12, ceiling=34, complete=?1 WHERE singleton=1",
+            [complete],
+        ).unwrap();
+        let check = work_wake_index_check(&state);
+        assert_eq!(check.status, "pass");
+        assert!(check.message.contains(&format!("cursor=12 ceiling=34 done={complete}")));
+        assert_eq!(check.message.contains("indexed tags only"), complete);
+        assert_eq!(check.message.contains("unindexed historical tail"), !complete);
+    }
+}
+
 /// Doctor says whether this member records its seats' lifecycle as marks, and when it does not,
 /// what holds them off: here a configured peer whose start has not reached it.
 #[test]
@@ -2851,9 +3164,9 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
     use http_body_util::{BodyExt as _, Empty};
     use hyper::client::conn::http1::SendRequest;
 
-    fn slow_ancestor(_pid: u32) -> Option<String> {
+    fn slow_ancestor(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
         std::thread::sleep(Duration::from_millis(500));
-        None
+        HarnessAncestry::Person
     }
 
     async fn health(sender: &mut SendRequest<Empty<axum::body::Bytes>>) {
@@ -2910,8 +3223,8 @@ async fn slow_peer_identity_lookup_does_not_stop_existing_api_connections() {
 async fn direct_router_bound_unix_accepts_renamed_actor_and_header_but_refuses_foreign_identity() {
     use http_body_util::{BodyExt as _, Full};
 
-    fn ancestor(_pid: u32) -> Option<String> {
-        Some("agent/example-bound-original/worker".into())
+    fn ancestor(_pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
+        HarnessAncestry::Bound("agent/example-bound-original/worker".into())
     }
 
     let root = tempfile::tempdir().unwrap();
@@ -13485,6 +13798,180 @@ async fn a_summary_status_read_answers_a_seats_incarnation_without_its_claims() 
 }
 
 #[tokio::test]
+async fn notice_managed_owner_reads_ignore_a_repair_rebuilt_cache_after_snapshot_pin() {
+    for exact in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let owner = state(root.path());
+        let store = owner.store.clone();
+        let subject = "agent/example-owner/worker";
+        for incarnation in ["before", "after"] {
+            roster_fixture_append(&store, subject, "runtime.observed", json!({
+                "status":"running", "runtime_id":subject, "host":owner.node,
+                "incarnation_id":incarnation,
+            }));
+        }
+        let through = store.index().unwrap();
+        let repaired = store.status_summary_at(subject, Some(through)).unwrap()
+            .subjects.remove(0).actual_claim.unwrap();
+        assert_eq!(store.conversation_owners_at(through).unwrap()[subject].incarnation.as_deref(), Some("after"));
+        let repair_store = store.clone();
+        MANAGED_OWNER_AFTER_PIN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                std::thread::spawn(move || {
+                    // Repair changes retained-prefix meaning without advancing its claim cut.
+                    repair_store.connection.write().execute(
+                        /* sqlite-large-value: allow-for-now lv-h7dc166900806 owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)",
+                        [&repaired],
+                    ).unwrap();
+                    smallclaims::Runtime::forget_views(repair_store.fractal.as_ref());
+                    let rebuilt = repair_store.conversation_owners_at(through).unwrap();
+                    assert_eq!(rebuilt[subject].incarnation.as_deref(), Some("before"));
+                }).join().unwrap();
+            }));
+        });
+        let session = managed_session_id(subject, "after");
+        let found = if exact {
+            managed_session_owner_for_subject_at(&store, through, &session, subject)
+        } else {
+            managed_session_owner_at(&store, through, &session)
+        }.unwrap().expect("the pinned prefix still contains the unrepaired incarnation");
+        assert!(MANAGED_OWNER_AFTER_PIN.with(|hook| hook.borrow().is_none()));
+        assert_eq!(found.1.as_deref(), Some("after"));
+        assert!(managed_session_owner_at(&store, through, &session).unwrap().is_none());
+        assert!(managed_session_owner_for_subject_at(&store, through, &session, subject).unwrap().is_none());
+    }
+}
+
+#[test]
+fn managed_owner_collision_keeps_the_first_visible_subject_and_exact_path_equivalence() {
+    for hide_first in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let first = "agent/collision/a";
+        let second = "agent/collision/a:b";
+        for (subject, incarnation) in [(first, "b:c"), (second, "c")] {
+            roster_fixture_append(&state.store, subject, "runtime.observed", json!({
+                "status":"running", "runtime_id":subject, "host":state.node,
+                "incarnation_id":incarnation,
+            }));
+        }
+        let id = managed_session_id(first, "b:c");
+        assert_eq!(id, managed_session_id(second, "c"));
+        if hide_first {
+            // A retained reserved fact hides the subject without changing its routing ID.
+            state.store.connection.write().execute(
+                /* sqlite-large-value: allow-for-now lv-hc075bae4b26b owner=fractal_api_core::api::tests TODO=prepare-body-and-predecessor-values */ "INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
+                 SELECT 'collision-notice',batch_id,subject,'attention.notice',origin,
+                        '{\"fields\":{}}','[]',accepted_at_unix_ms
+                 FROM claims WHERE subject=?1 LIMIT 1", [first],
+            ).unwrap();
+        }
+        state.store.read_snapshot(|cut| {
+            assert_eq!(state.store.generic_status_subject_visible_at(first, cut)?, !hide_first);
+            let generic = managed_session_owner_at(&state.store, cut, &id)?;
+            assert_eq!(generic.as_ref().unwrap().0, if hide_first { second } else { first });
+            for hint in [first, second, "agent/missing"] {
+                assert_eq!(
+                    managed_session_owner_for_timeline_at(&state.store, cut, &id, hint)?,
+                    generic,
+                    "hide_first={hide_first}, hint={hint}",
+                );
+            }
+            Ok(())
+        }).unwrap();
+    }
+}
+
+#[test]
+fn managed_owner_map_is_built_once_for_many_timeline_pages_in_one_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let subjects: Vec<_> = (0..4).map(|i| format!("agent/owner-memo/worker-{i}")).collect();
+    for subject in &subjects {
+        roster_fixture_append(&state.store, subject, "runtime.observed", json!({
+            "status":"running", "runtime_id":subject, "host":state.node,
+            "incarnation_id":"current",
+        }));
+    }
+    let session = client_v0::ClientSession::for_tests_scoped(
+        "person/alex", "person/alex", &["read.projections"],
+    );
+    MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(0));
+    state.store.read_snapshot(|_| {
+        let snapshot = new_client_snapshot(&state);
+        for subject in &subjects {
+            let id = managed_session_id(subject, "current");
+            assert_eq!(managed_session_owner_for_timeline_at(
+                &state.store, snapshot.store_index, &id, subject,
+            )?.unwrap().0, *subject);
+        }
+        assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 0);
+        // First pages perform authorization too: repeating them must not fold the fleet.
+        for _ in 0..5 {
+            for subject in &subjects {
+                let id = managed_session_id(subject, "current");
+                let Json(page) = client_v0::timeline_value(
+                    &state, &snapshot, &session, &id,
+                    &ClientListQuery { limit: Some(1), ..Default::default() },
+                ).unwrap();
+                assert!(page["items"].is_array(), "{page}");
+                assert_eq!(managed_session_owner_at(&state.store, snapshot.store_index, &id)?.unwrap().0, *subject);
+                assert_eq!(managed_session_owner_for_timeline_at(
+                    &state.store, snapshot.store_index, &id, subject,
+                )?, managed_session_owner_at(&state.store, snapshot.store_index, &id)?);
+            }
+        }
+        assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 1);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn managed_owner_memo_expires_before_a_same_cut_repair_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let store = &state.store;
+    let subject = "agent/owner-memo/repair";
+    for incarnation in ["before", "after"] {
+        roster_fixture_append(store, subject, "runtime.observed", json!({
+            "status":"running", "runtime_id":subject, "host":state.node,
+            "incarnation_id":incarnation,
+        }));
+    }
+    let through = store.index().unwrap();
+    let repaired = store.status_summary_at(subject, Some(through)).unwrap()
+        .subjects.remove(0).actual_claim.unwrap();
+    let after = managed_session_id(subject, "after");
+    let before = managed_session_id(subject, "before");
+    MANAGED_OWNER_MAP_BUILDS.with(|count| count.set(0));
+    store.read_snapshot(|_| {
+        assert!(managed_session_owner_at(store, through, &after)?.is_some());
+        assert!(managed_session_owner_at(store, through, &before)?.is_none());
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &after, subject)?,
+            managed_session_owner_at(store, through, &after)?);
+        Ok(())
+    }).unwrap();
+    assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 1);
+    store.connection.write().execute(
+        /* sqlite-large-value: allow-for-now lv-he543d968a9fa owner=fractal_api_core::api::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_digest_repaired_claims(id) VALUES (?1)", [&repaired],
+    ).unwrap();
+    smallclaims::Runtime::forget_views(store.fractal.as_ref());
+    assert_eq!(store.index().unwrap(), through);
+    store.read_snapshot(|_| {
+        assert!(managed_session_owner_at(store, through, &after)?.is_none());
+        // The inventory's old session must be re-resolved after repair on this new pin.
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &after, subject)?,
+            managed_session_owner_at(store, through, &after)?);
+        assert_eq!(managed_session_owner_for_timeline_at(store, through, &before, subject)?,
+            managed_session_owner_at(store, through, &before)?);
+        assert_eq!(managed_session_owner_at(store, through, &before)?.unwrap().1.as_deref(), Some("before"));
+        Ok(())
+    }).unwrap();
+    assert_eq!(MANAGED_OWNER_MAP_BUILDS.with(std::cell::Cell::get), 2);
+}
+
+
+#[tokio::test]
 async fn renamed_subject_show_reads_actual_and_claims_through_both_names_and_replication() {
     let root = tempfile::tempdir().unwrap();
     let owner = state(root.path());
@@ -14556,4 +15043,115 @@ async fn a_restart_that_ignores_a_lanes_fit_needs_a_reason_and_records_who_asked
         "subject": "agent/example/operations", "actor": "person/avery", "idempotency_key": "plain"
     })).await;
     assert!(plain["body"]["fields"].get("ignore_fit").is_none(), "{plain}");
+}
+
+#[test]
+fn population_repository_observations_require_current_host_and_workspace() {
+    let store = Store::open_memory("node").unwrap();
+    let source = "version 2\nagent \"example/workspace\" { workspace \"/tmp\"; command \"true\" }\n";
+    store.apply_internal(&parse_intent(source, "node").unwrap(), "workspace-overlay").unwrap();
+    let subject = "agent/example/workspace";
+    for (host, workspace, repository, expected) in [
+        ("node", "/tmp", Some("example/current"), Some(json!("example/current"))),
+        ("remote", "/tmp", Some("example/wrong-host"), None),
+        ("node", "/previous", Some("example/wrong-workspace"), None),
+        ("node", "/tmp", None, Some(Value::Null)),
+    ] {
+        let mut fields = BTreeMap::from([
+            ("host".into(), json!(host)),
+            ("workspace".into(), json!(workspace)),
+        ]);
+        if let Some(repository) = repository {
+            fields.insert("repository".into(), json!(repository));
+        }
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: "workspace.observed".into(), actor: None,
+            fields, evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap();
+        let mut rows = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+        assert!(rows.iter().all(|card| card.get("observed_repository").is_none()));
+        overlay_population_repositories(&store, &mut rows).unwrap();
+        let card = rows.iter().find(|card| card["id"] == subject).unwrap();
+        assert_eq!(card.get("observed_repository"), expected.as_ref(), "{host} {workspace}");
+    }
+    // Reusing a presented card must erase evidence that no longer matches its location.
+    let mut rows = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+    rows[0]["workspace"] = json!("/moved");
+    overlay_population_repositories(&store, &mut rows).unwrap();
+    assert!(rows[0].get("observed_repository").is_none());
+}
+
+#[test]
+fn ordinary_agent_list_workspace_reads_do_not_add_statements_per_card() {
+    for (count, enabled) in [(1, false), (32, false), (1, true), (32, true)] {
+        let store = Store::open_memory("node").unwrap();
+        store.extension::<crate::config::AgentPopulationEnabled>().0.set(enabled).unwrap();
+        let mut source = String::from("version 2\n");
+        for i in 0..count {
+            source.push_str(&format!(
+                "agent \"example/seat-{i}\" {{ workspace \"/tmp\"; command \"true\" }}\n"
+            ));
+        }
+        store.apply_internal(&parse_intent(&source, "node").unwrap(), "workspace-query-growth").unwrap();
+        for i in 0..count {
+            store.append_claim(&ClaimInput {
+                subject: format!("agent/example/seat-{i}"), kind: "workspace.observed".into(), actor: None,
+                fields: BTreeMap::from([
+                    ("host".into(), json!("node")),
+                    ("workspace".into(), json!("/tmp")),
+                    ("repository".into(), json!("example/current")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let index = store.index().unwrap();
+        let rows = client_agent_resources(&store, false, "warm", index).unwrap();
+        assert_eq!(rows.len(), count);
+        let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
+        let rows = client_agent_resources(&store, false, "again", index).unwrap();
+        let work = scope.finish();
+        assert_eq!(rows.len(), count);
+        assert!(rows.iter().all(|card| ["runtime_state", "_runtime_state", "observed_repository"]
+            .iter().all(|field| card.get(*field).is_none())),
+            "population-only evidence leaked into ordinary agent resources");
+        // The identical fixture at pinned base b0bbc6dc uses six statements
+        // for both cardinalities: population evidence must add no request reads.
+        assert_eq!(work.statements, 6, "ordinary roster query count changed for {count} seats: {work:?}");
+    }
+}
+
+#[test]
+fn population_repository_normalizes_production_shaped_checkout_paths() {
+    let store = Store::open_memory("node").unwrap();
+    let mut rows = vec![json!({
+        "id":"agent/example.workspace", "workspace":"/work/tree", "host_id":"host/node",
+        "checkout":{"repository":"/srv/checkouts/github.com/Example/Repo/refs/heads/main"}
+    })];
+    overlay_population_repositories(&store, &mut rows).unwrap();
+    assert_eq!(rows[0]["checkout"]["repository"], "example/repo");
+    for (raw, expected) in [
+        ("/srv/checkouts/github.com/example/repo", Some("example/repo")),
+        ("/srv/checkouts/github.com/example/repo/refs/heads/feature/topic", Some("example/repo")),
+        ("example/repo", Some("example/repo")),
+        ("/srv/work/repo", None),
+        ("/srv/github.com/example/repo/../other", None),
+        ("/srv/github.com/example/repo/arbitrary", None),
+        ("example/repo/extra", None),
+        ("https://github.com/example/repo", None),
+    ] {
+        assert_eq!(canonical_population_repository(raw).as_deref(), expected, "{raw}");
+    }
+    let source = "version 2\nagent \"example/workspace\" { workspace \"/tmp\"; command \"true\" }\n";
+    store.apply_internal(&parse_intent(source, "node").unwrap(), "population-repository-path").unwrap();
+    store.append_claim(&ClaimInput {
+        subject:"agent/example/workspace".into(), kind:"workspace.observed".into(), actor:None,
+        fields:BTreeMap::from([
+            ("host".into(), json!("node")), ("workspace".into(), json!("/tmp")),
+            ("repository".into(), json!("/srv/checkouts/github.com/example/repo/refs/heads/main")),
+        ]),
+        evidence:Vec::new(), expected_subject:None, idempotency_key:None,
+    }).unwrap();
+    let mut cards = client_agent_resources(&store, false, "now", store.index().unwrap()).unwrap();
+    overlay_population_repositories(&store, &mut cards).unwrap();
+    assert_eq!(cards[0]["observed_repository"], "example/repo");
 }

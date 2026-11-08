@@ -1941,7 +1941,14 @@ fn report_read_back(read_back: ReadBack, diagnostics: &mut Option<&mut Diagnosti
     }
 }
 
-fn stable_message_id(recipient: &str, session_id: &str, filename: &str) -> String {
+/// Identify a graph or legacy mailbox delivery in the provider’s durable transcript.
+pub fn is_stable_message_id(id: &str) -> bool {
+    id.strip_prefix("msg").is_some_and(|tail| {
+        tail.len() == 26 && tail.bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
+}
+
+pub fn stable_message_id(recipient: &str, session_id: &str, filename: &str) -> String {
     let mut hash = Sha256::new();
     hash.update(b"st2.opencode-client-message.v1");
     for value in [

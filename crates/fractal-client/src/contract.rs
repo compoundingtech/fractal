@@ -51,6 +51,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "terminal.input",
     "terminal.resize",
     "thread.close",
+    "thread.read",
     "thread.rename",
     "thread.reopen",
     "thread.reply",

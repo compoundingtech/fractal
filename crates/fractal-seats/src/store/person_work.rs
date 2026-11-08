@@ -231,14 +231,23 @@ pub mod tests {
             crate::store::thread_metadata::Edit::Close { revision: &created.id },
         ).unwrap();
         let agent = original.actor.as_deref().unwrap();
-        // Seed the admitted shape to exercise the read boundary while the
-        // signed thread reply writer is developed separately.
-        store.connection.batched(|tx| crate::store::append_receipt_claim_tx(
-            tx, store.origin(), "message/thread-reply", "message.sent", Some(agent),
-            &json!({"fields":{"from":agent,"to":person,"content":"Worker tests pass.",
-                "status":"sent","thread_id":"thread/worker","thread_quote_id":message.subject}}),
-            &[], None, "seed-thread-reply",
-        )).unwrap().unwrap();
+        crate::store::thread_delivery::append_reply(
+            &store,
+            &ClaimInput {
+                subject: "message/thread-reply".into(),
+                kind: "message.sent".into(),
+                actor: Some(agent.into()),
+                fields: serde_json::from_value(json!({
+                    "from": agent, "to": person, "content": "Worker tests pass.",
+                    "status": "sent", "thread_id": "thread/worker", "thread_quote_id": message.subject,
+                })).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("bound-thread-reply".into()),
+            },
+            crate::store::thread_metadata::PersonAuthority::BoundAgent { actor: agent },
+            None,
+        ).unwrap();
         store.connection.batched(|tx| crate::store::append_receipt_claim_tx(
             tx, store.origin(), "message/ordinary-reply", "message.sent", Some(agent),
             &json!({"fields":{"from":agent,"to":person,"content":"Outside the thread.",
@@ -256,13 +265,25 @@ pub mod tests {
         let tail = mixed_timeline(&store, person, "thread/worker", lifecycle.next_cursor.as_deref(), 1).unwrap();
         assert!(matches!(&tail.items[0], TimelineItem::Message(item) if item.id == message.subject));
         assert!(tail.next_cursor.is_none());
-        store.connection.batched(|tx| crate::store::append_receipt_claim_tx(
-            tx, store.origin(), "message/thread-foreign-quote", "message.sent", Some(agent),
-            &json!({"fields":{"from":agent,"to":person,"content":"Unverified quote.",
-                "status":"sent","thread_id":"thread/worker","thread_quote_id":"message/ordinary-reply"}}),
-            &[], None, "seed-foreign-quote",
-        )).unwrap().unwrap();
-        assert!(mixed_timeline(&store, person, "thread/worker", None, 1).is_err());
+        let foreign_quote = crate::store::thread_delivery::append_reply(
+            &store,
+            &ClaimInput {
+                subject: "message/thread-foreign-quote".into(),
+                kind: "message.sent".into(),
+                actor: Some(agent.into()),
+                fields: serde_json::from_value(json!({
+                    "from": agent, "to": person, "content": "Unverified quote.", "status": "sent",
+                    "thread_id": "thread/worker", "thread_quote_id": "message/ordinary-reply",
+                })).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: Some("foreign-thread-quote".into()),
+            },
+            crate::store::thread_metadata::PersonAuthority::BoundAgent { actor: agent },
+            None,
+        );
+        assert_eq!(foreign_quote.unwrap_err().code, "invalid-thread-message");
+        assert!(store.claims_for("message/thread-foreign-quote", None).unwrap().is_empty());
         let (retry, appended) = start_from_ask(&store, start("thread/worker", "start-thread", person)).unwrap();
         assert!(!appended);
         assert_eq!(retry.id, created.id);
@@ -341,6 +362,10 @@ pub mod tests {
                 ("thread_id".into(), json!(thread)),
                 ("thread_origin_ask".into(), json!(ask.subject)),
                 ("thread_origin_episode".into(), json!(original.id)),
+                (
+                    fractal_schema::threads::MESSAGE_READER_VERSION_FIELD.into(),
+                    json!(fractal_schema::threads::MESSAGE_READER_VERSION),
+                ),
             ]),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         };
@@ -374,6 +399,10 @@ pub mod tests {
                 ("content".into(), json!("The worker checks are ready.")),
                 ("status".into(), json!("sent")),
                 ("thread_id".into(), json!(thread)),
+                (
+                    fractal_schema::threads::MESSAGE_READER_VERSION_FIELD.into(),
+                    json!(fractal_schema::threads::MESSAGE_READER_VERSION),
+                ),
             ]);
             if let Some(quote) = quote {
                 fields.insert("thread_quote_id".into(), json!(quote));
@@ -469,6 +498,9 @@ pub mod tests {
         let (retry, appended) = attach_ask(&store, agent, link()).unwrap();
         assert!(!appended);
         assert_eq!(retry.id, attached.id);
+        assert_eq!(attach_ask(&store, agent, AttachAsk {
+            key: "attach-ask-second-key", ..link()
+        }).unwrap_err().code, "thread-ask-already-linked");
         assert_eq!(store.latest_claim_id(thread).unwrap().as_deref(), Some(closed.id.as_str()));
         assert!(current(&store.readers.get(), &original, now_ms()).unwrap());
         assert!(current(&store.readers.get(), &fresh, now_ms()).unwrap());

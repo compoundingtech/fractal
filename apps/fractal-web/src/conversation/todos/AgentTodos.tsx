@@ -9,6 +9,7 @@ import { NarrowLayoutContext } from '../../../../../packages/fractal-ui/src/assi
 import { HumanTime } from '@fractal/ui/human-time'
 
 import { useDataSource } from '../../data/react.tsx'
+import { credentialExpiredMessage } from '../../data/source.ts'
 import { agentTodosAtom, type TodoState } from './model.ts'
 
 const occurrenceKey = ({ counts, parts }: { counts: Map<string, number>; parts: readonly string[] }): string => {
@@ -116,12 +117,12 @@ export const AgentTodos = ({
 }): React.ReactNode => {
   const narrow = React.useContext(NarrowLayoutContext)
   if (state._tag !== 'Observed') {
-    if (!detail && placement !== 'resources') return null
+    if (!detail && placement !== 'resources' && state._tag !== 'Unauthorized') return null
     return (
       <p role="status" {...stylex.props(placement === 'resources' ? styles.resources : styles.detail)}>
         {state._tag === 'Waiting'
           ? 'Loading to-dos…'
-          : state._tag === 'Unavailable'
+          : state._tag === 'Unauthorized' ? credentialExpiredMessage : state._tag === 'Unavailable'
             ? "To-dos aren't available right now."
             : 'This session has not shared a to-do list.'}
       </p>

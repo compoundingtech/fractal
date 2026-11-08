@@ -594,6 +594,7 @@
       "idempotency-conflict",
       "legacy-action-receipt-untrusted",
       "issuer-required",
+      "pairing-origin-required",
       "suspend-authored-session-selection",
       "stale-fence",
       "cursor-gap",
@@ -892,7 +893,7 @@
         "kind": { "const": "capabilities" },
         "machine_version": { "type": "string", "description": "Compile-time build identity of the responding daemon; absent on older servers." },
         "session_actor": { "$ref": "#/$defs/Id" },
-        "transport": { "enum": ["unix", "fabric-loopback"] },
+        "transport": { "enum": ["unix", "fabric-loopback", "local-web"] },
         "capabilities": { "type": "array", "items": { "$ref": "#/$defs/Capability" } },
         "limits": {
           "type": "object",
@@ -1010,6 +1011,7 @@
             "source_id": { "$ref": "#/$defs/Id" },
             "person_id": { "$ref": "#/$defs/Id" },
             "alert": { "type": "boolean", "description": "Whether this item is an alert: it blocks or waits on its person (an ask, a human gate, a launch or revision approval, an agent or custom request, a harness prompt or login, or a broken gate the person published). An update is not one. Absent on daemons that predate alerts." },
+            "thread_unread": { "type": "boolean", "description": "True when the authenticated person has an unread incoming reply in a thread for this exact ask episode. Absent otherwise." },
             "conversation_id": { "$ref": "#/$defs/Id", "description": "The agent whose conversation this item belongs to: the agent that asked, whose work a gate reviews, that planned the launch or proposed the revision, or the seat itself. Absent when no agent is behind it." },
             "conversation_ids": { "type": "array", "items": { "$ref": "#/$defs/Id" }, "description": "Every agent conversation this item shows in, starting with conversation_id. A harness login alert names every seat that shares the login, since one sign-in answers them all." },
             "requester_id": { "$ref": "#/$defs/Id" },
@@ -3346,6 +3348,15 @@
         "private_notes": { "$ref": "#/$defs/PrivateNotesFence" }
       }
     },
+    "ThreadReadParameters": {
+      "type": "object", "additionalProperties": false,
+      "required": ["target_id", "through_message_id", "seen_message_ids"],
+      "properties": {
+        "target_id": {"type":"string","pattern":"^thread/[A-Za-z0-9_-]{1,128}$"},
+        "through_message_id": {"type":["string","null"],"pattern":"^message/.+","maxLength":512},
+        "seen_message_ids": {"type":"array","maxItems":50,"uniqueItems":true,"items":{"type":"string","pattern":"^message/.+","maxLength":512}}
+      }
+    },
     "ActionCommon": {
       "type": "object",
       "additionalProperties": false,
@@ -3372,6 +3383,7 @@
             "review.request-changes",
             "message.send",
             "message.read",
+            "thread.read",
             "message.close",
             "launch.create",
             "launch.revise",
@@ -3541,7 +3553,7 @@
         "ask": {"$ref": "#/$defs/Id"},
         "status": {"enum": ["completed", "cancelled"]},
         "summary": {"type": "string"},
-        "respondent": {"$ref": "#/$defs/RespondentRef", "description": "The actual answering principal, including assistant/chatgpt for an assistant response; never replaced by its grant owner. daemon/runtime when the ask's deadline, or its requester ending, resolved it."},
+        "respondent": {"$ref": "#/$defs/RespondentRef", "description": "The actual answering principal, including assistant/chatgpt or assistant/mcp for an assistant response; never replaced by its grant owner. daemon/runtime when the ask's deadline, or its requester ending, resolved it."},
         "acted_for": {"$ref": "#/$defs/Id", "description": "The person whose prior instruction the agent respondent recorded."},
         "sender_class": {"type": "string", "description": "External assistant attribution when the response was submitted through an assistant grant."},
         "assistant_grant_id": {"$ref": "#/$defs/Id", "description": "The assistant grant that authorized the response."},
@@ -3600,6 +3612,7 @@
             }
           }
         },
+        { "properties": { "type": { "const": "thread.read" }, "parameters": { "$ref": "#/$defs/ThreadReadParameters" } } },
         { "properties": { "type": { "enum": ["message.read", "message.close"] }, "parameters": { "$ref": "#/$defs/TargetParameters" } } },
         {
           "properties": {
@@ -3827,7 +3840,7 @@
         "metadata_revision": { "$ref": "#/$defs/Revision" }
       }
     },
-    "AssistantPrincipal": { "enum": ["assistant/chatgpt"] },
+    "AssistantPrincipal": { "enum": ["assistant/chatgpt", "assistant/mcp"] },
     "AssistantSenderClass": { "enum": ["external-assistant"] },
     "AssistantScope": { "enum": [
       "read.assistant.summary",
@@ -3850,7 +3863,7 @@
         "id": { "$ref": "#/$defs/Id" },
         "principal": { "$ref": "#/$defs/AssistantPrincipal" },
         "sender_class": { "$ref": "#/$defs/AssistantSenderClass" },
-        "session_actor": { "type": "string", "pattern": "^assistant/chatgpt/session/.+$" },
+        "session_actor": { "type": "string", "pattern": "^assistant/(?:chatgpt|mcp)/session/.+$" },
         "device_id": { "$ref": "#/$defs/Id" },
         "key_id": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of the canonical device public-key string; never a credential digest." },
         "issuer": { "$ref": "#/$defs/PersonId", "description": "Daemon-configured owning person, sealed by the authoritative grant-issuer member at trusted-local begin." },
@@ -4000,7 +4013,7 @@
       "required": ["issuer", "identity", "assistant_id", "grant_id", "policy_revision", "key_id", "approval_id", "execution_id", "projection", "parameters", "max_response_bytes", "request_digest", "expires_at_unix_ms", "nonce"],
       "properties": {
         "issuer": { "$ref": "#/$defs/PersonId" },
-        "identity": { "const": "chatgpt" },
+        "identity": { "enum": ["chatgpt", "mcp"] },
         "assistant_id": { "$ref": "#/$defs/AssistantPrincipal" },
         "grant_id": { "$ref": "#/$defs/Id" },
         "policy_revision": { "type": "integer", "minimum": 1 },
@@ -4256,7 +4269,7 @@
         "principal": { "$ref": "#/$defs/AssistantPrincipal" },
         "sender_class": { "$ref": "#/$defs/AssistantSenderClass" },
         "device_id": { "$ref": "#/$defs/Id" },
-        "session_actor": { "type": "string", "pattern": "^assistant/chatgpt/session/.+$" },
+        "session_actor": { "type": "string", "pattern": "^assistant/(?:chatgpt|mcp)/session/.+$" },
         "credential": { "x-st-codec": "redacted", "type": "string", "minLength": 32 },
         "scopes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/AssistantScope" } },
         "expires_at": { "$ref": "#/$defs/Timestamp" },
@@ -4459,7 +4472,7 @@
         "retryable": { "type": "boolean" },
         "retry_after_ms": { "x-st-codec": "duration-ms", "type": "integer", "minimum": 0 },
         "applied": { "type": "string", "enum": ["none", "unknown"] },
-        "details": { "type": "object", "additionalProperties": {}, "properties": {"applied": {"type":"string","enum":["none","unknown"]}, "refusal": {"$ref":"#/$defs/MessageSendRefusal"}} }
+        "details": { "$comment": "HTTP 403 forbidden uses reason credential-rejected for unknown, expired or revoked paired-device credentials, not missing scopes. Older daemons may omit it; details remains open.", "type": "object", "additionalProperties": {}, "properties": {"applied": {"type":"string","enum":["none","unknown"]}, "refusal": {"$ref":"#/$defs/MessageSendRefusal"}} }
       }
     },
     "SubscribeTraceContext": {
@@ -4557,6 +4570,7 @@
         { "$ref": "#/$defs/AgentsPublicationSubscribe" },
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "subject"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "thread-timeline"}, "subject": {"type": "string", "pattern": "^thread/[A-Za-z0-9_-]{1,128}$"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "thread_context"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "threads"}, "thread_context": {"$ref": "#/$defs/ThreadCollectionContext"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
+        {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection", "subject"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "threads"}, "subject": {"type": "string", "pattern": "^thread/[A-Za-z0-9_-]{1,128}$"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "collection": {"const": "commands"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "actor": {"type": ["string", "null"]}, "status": {"type": ["string", "null"]}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}}},
         {"type": "object", "additionalProperties": false, "required": ["kind", "id", "collection"], "properties": {"kind": {"const": "subscribe"}, "id": {"type": "string", "minLength": 1, "maxLength": 128}, "trace": {"$ref": "#/$defs/SubscribeTraceContext"}, "collection": {"enum": ["clients", "usage", "machines", "devices", "sessions", "terminals"]}, "actor": {"type":"null"}, "status": {"type":"null"}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}, "person": {"type": ["string", "null"]}, "since_ms": {"type": "integer", "minimum": 0}, "until_ms": {"type": "integer", "minimum": 0}}},
         {
@@ -4568,6 +4582,7 @@
             "id": { "type": "string", "minLength": 1, "maxLength": 128 },
             "trace": { "$ref": "#/$defs/SubscribeTraceContext" },
             "collection": { "enum": ["missions", "attention", "work", "glasses", "summary"] },
+            "attention_thread_hints": { "type": "boolean", "description": "Opt into the owner thread hint on an attention subscription after collection.attention.thread-hints is granted." },
             "limit": { "type": "integer", "minimum": 1, "maximum": 200 },
             "person": { "type": ["string", "null"] },
             "actor": { "type": ["string", "null"] },

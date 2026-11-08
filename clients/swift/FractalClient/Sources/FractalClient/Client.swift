@@ -153,6 +153,12 @@ public actor FractalClient {
         return threadCollectionStream(["kind": .string("subscribe"), "id": .string(subscriptionID), "collection": .string("threads"), "thread_context": .object(context), "limit": .number(Double(limit))])
     }
 
+    /// Follow one thread's summary, including shared unread progress.
+    /// Requires the daemon's `thread-summary-feed` capability.
+    public func threadSummaryStream(threadID: String, subscriptionID: String = "thread-summary") -> AsyncThrowingStream<ThreadCollectionFrame<ThreadSummary>, Error> {
+        threadCollectionStream(["kind": .string("subscribe"), "id": .string(subscriptionID), "collection": .string("threads"), "subject": .string(threadID), "limit": .number(1)])
+    }
+
     /// Follow accepted messages and lifecycle rows of exactly one thread.
     public func threadTimelineStream(threadID: String, subscriptionID: String = "thread-timeline", limit: Int = 50) -> AsyncThrowingStream<ThreadCollectionFrame<ThreadTimelineEvent>, Error> {
         threadCollectionStream(["kind": .string("subscribe"), "id": .string(subscriptionID), "collection": .string("thread-timeline"), "subject": .string(threadID), "limit": .number(Double(limit))])
@@ -468,6 +474,7 @@ public actor FractalClient {
     public func terminalInput(id: String, idempotencyKey: String, fence: Fence, parameters: TerminalInputParameters) async throws -> Envelope<ActionResult> { try await submit(try .terminalInput(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func terminalResize(id: String, idempotencyKey: String, fence: Fence, parameters: TerminalResizeParameters) async throws -> Envelope<ActionResult> { try await submit(try .terminalResize(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func threadClose(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadClose(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
+    public func threadRead(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadReadParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadRead(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func threadRename(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadRenameParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadRename(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func threadReopen(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadTargetParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadReopen(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
     public func threadReply(id: String, idempotencyKey: String, fence: Fence, parameters: ThreadReplyParameters) async throws -> Envelope<ActionResult> { try await submit(try .threadReply(id: id, idempotencyKey: idempotencyKey, fence: fence, parameters: parameters)) }
