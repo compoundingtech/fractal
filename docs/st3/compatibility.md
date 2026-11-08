@@ -71,6 +71,20 @@ The active-member definition, authenticated freshness/absence evidence, durable
 activation record, and re-sync completion/write fence are unresolved protocol
 details in #4002. A local timeout alone is not authority to remove a member.
 
+### Declared admission publication
+
+Publishing `declared-priority`, `declared-lane`, or `declared-budgets` (including an
+empty budgets block) requires every active fleet incarnation to advertise
+`features.declared_admission=1` in its latest own-origin, authenticated
+`daemon.started` claim anchored to the admitted incarnation. The publication gate
+requires signed, current, unambiguous membership and fails closed on missing,
+false, conflicted, unsigned, or unanchored capability evidence and unfenced legacy
+writers. A refusal rejects the full publication before any declaration is written;
+an old member never receives a new-child publication through a refused write.
+Upgrade all active members or fence legacy peers before publishing the metadata.
+This per-feature gate does not establish the general adjacent-release guarantee
+described above. See [declared admission](priority.md#declared-admission).
+
 ### Checkpoints in a mixed fleet
 
 The current [checkpoint contract](checkpoints.md) requires exactly equal rules
