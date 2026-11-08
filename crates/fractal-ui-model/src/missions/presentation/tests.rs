@@ -210,6 +210,107 @@ fn a_failed_step_offers_a_retry_and_names_its_seat() {
 }
 
 #[test]
+fn legacy_assignees_and_claimants_resolve_the_canonical_roster_seat() {
+    let mut agents = Agents::default().with("agent/example/keeper", "stopped", None, &[]);
+    agents.seats.get_mut("agent/example/keeper").unwrap().label = "Roster keeper".into();
+    for holder in [
+        json!({"assignee": "example/keeper"}),
+        json!({"claimant": "example/keeper", "assignee": "agent/example/other"}),
+    ] {
+        let mission = mission("running", vec![step("fix", "failed", holder)]);
+        let shown = present(&mission, &[], &agents);
+        let owner = Actor::Agent {
+            agent: "agent/example/keeper".into(),
+            label: "Roster keeper".into(),
+        };
+        assert_eq!(shown.who, owner);
+        assert_eq!(shown.steps[0].owner, owner);
+        assert_eq!(
+            shown.stuck.unwrap().agent.unwrap(),
+            SeatRef {
+                id: "agent/example/keeper".into(),
+                label: "Roster keeper".into(),
+                state: "stopped".into(),
+            }
+        );
+        for action in shown
+            .actions
+            .iter()
+            .filter(|action| matches!(action.id, Offer::RestartAgent | Offer::Chat))
+        {
+            assert_eq!(action.target, "agent/example/keeper");
+        }
+    }
+}
+
+#[test]
+fn legacy_assignees_and_claimants_have_canonical_fallbacks() {
+    for holder in [
+        json!({"assignee": "example/keeper"}),
+        json!({"claimant": "example/keeper"}),
+    ] {
+        let mission = mission("running", vec![step("fix", "failed", holder)]);
+        let shown = present(&mission, &[], &Agents::default());
+        let owner = Actor::Agent {
+            agent: "agent/example/keeper".into(),
+            label: "example/keeper".into(),
+        };
+        assert_eq!(shown.who, owner);
+        assert_eq!(shown.steps[0].owner, owner);
+        assert_eq!(
+            shown.stuck.unwrap().agent.unwrap().id,
+            "agent/example/keeper"
+        );
+    }
+}
+
+#[test]
+fn legacy_queued_seats_emit_canonical_agent_ids() {
+    let mission = mission("running", vec![step("build", "ready", json!({}))]);
+    let agents = Agents::default().with(
+        "example/keeper",
+        "running",
+        Some(("mission/fleet/example/ship", "deploy")),
+        &["step-run/audit/build"],
+    );
+    let shown = present(&mission, &[], &agents);
+    let owner = Actor::Agent {
+        agent: "agent/example/keeper".into(),
+        label: "example/keeper".into(),
+    };
+    assert_eq!(shown.word, Word::Queued);
+    assert_eq!(shown.who, owner);
+    assert_eq!(shown.steps[0].owner, owner);
+    assert_eq!(shown.stuck.unwrap().agent.unwrap().id, "agent/example/keeper");
+    assert_eq!(shown.queued_behind.unwrap().agent, "agent/example/keeper");
+}
+
+#[test]
+fn invalid_or_non_agent_holders_never_emit_agent_actors() {
+    for id in ["", "keeper", "example/keep er", "agent/", "person/avery", "daemon/st"] {
+        for holder in [json!({"assignee": id}), json!({"claimant": id})] {
+            let mission = mission("running", vec![step("fix", "failed", holder)]);
+            let agents = Agents::default().with(id, "stopped", None, &[]);
+            let shown = present(&mission, &[], &agents);
+            assert_eq!(shown.who, Actor::Nobody, "{id}");
+            assert_eq!(shown.steps[0].owner, Actor::Nobody, "{id}");
+            assert_eq!(shown.stuck.unwrap().agent, None, "{id}");
+        }
+        let mission = mission("running", vec![step("build", "ready", json!({}))]);
+        let agents = Agents::default().with(
+            id,
+            "running",
+            Some(("mission/fleet/example/ship", "deploy")),
+            &["step-run/audit/build"],
+        );
+        let shown = present(&mission, &[], &agents);
+        assert_eq!(shown.who, Actor::Nobody, "{id}");
+        assert_eq!(shown.steps[0].owner, Actor::Nobody, "{id}");
+        assert_eq!(shown.queued_behind, None, "{id}");
+    }
+}
+
+#[test]
 fn working_names_who_holds_it_and_watching_is_st() {
     let working = mission(
         "running",
