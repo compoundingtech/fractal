@@ -1,6 +1,7 @@
 import CryptoKit
 import ExpoModulesCore
 import Foundation
+import LocalAuthentication
 import Security
 
 // The key this phone signs its messages with (docs/st3/device-signing.md). A P-256 key made in the
@@ -22,6 +23,34 @@ public class FractalDeviceKeyModule: Module {
       var info = try DeviceKey.create(handle: handle).described
       info["handle"] = handle
       return info
+    }
+
+    AsyncFunction("createRenewal") { () -> [String: String] in
+      guard SecureEnclave.isAvailable else {
+        throw Exception(name: "ProtectedKeyUnavailable", description: "Renewal requires this phone's Secure Enclave")
+      }
+      let handle = UUID().uuidString
+      var info = try DeviceKey.create(handle: handle).described
+      info["handle"] = handle
+      return info
+    }
+
+    // Approval authenticates the person once; ordinary message signatures remain prompt-free.
+    AsyncFunction("approveRenewal") { (text: String, handle: String) -> String in
+      guard text.hasPrefix("fractal-device-renewal-v1\n"), SecureEnclave.isAvailable else {
+        throw Exception(name: "InvalidRenewal", description: "Renewal approval is unavailable")
+      }
+      let context = LAContext()
+      context.touchIDAuthenticationAllowableReuseDuration = 0
+      defer { context.invalidate() }
+      let approved = try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: "Approve this phone's renewed Fractal access")
+      guard approved, let key = try DeviceKey.load(handle: handle) else {
+        throw Exception(name: "ApprovalRequired", description: "Renewal requires device authentication")
+      }
+      guard case .enclave = key else {
+        throw Exception(name: "ProtectedKeyUnavailable", description: "Renewal requires a Secure Enclave key")
+      }
+      return try key.sign(Data(text.utf8))
     }
 
     // The raw r||s ECDSA P-256 SHA-256 signature over the UTF-8 bytes of `text`, base64url.

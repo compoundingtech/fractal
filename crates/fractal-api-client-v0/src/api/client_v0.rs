@@ -37,6 +37,7 @@ pub use fractal_api_core::api::client_v0::{authenticate, bound_mission_cards, ca
 pub use fractal_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
 pub mod arrangements;
 pub mod assistant;
+pub mod device_renewal;
 pub mod pairing_verifier;
 pub mod collection_ivm;
 pub mod collection_windows;
@@ -195,6 +196,9 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/missions-rich", get(assistant::read_projection))
         .route("/v1/client/assistant/agents-rich", get(assistant::read_projection))
         .route("/v1/client/pairings", post(pairing_begin))
+        .route("/v1/client/pairings/renewals/stage", post(device_renewal::stage))
+        .route("/v1/client/pairings/renewals/pending", post(device_renewal::pending))
+        .route("/v1/client/pairings/renewals/complete", post(device_renewal::complete))
         .route("/v1/client/assistant/grants/{id}", get(assistant::inspect))
         .route("/v1/client/assistant/grants/{id}/revoke", post(assistant::revoke))
         .route("/v1/client/assistant/grants/{id}/read-trust", post(assistant::pin_read_trust))
