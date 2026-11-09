@@ -9,7 +9,7 @@ use declared_admission::{FleetFeature, validate_fleet};
 const EARLIER_LIMIT_BYTES: usize = 1_000;
 
 const AGENT_CHARTER: FleetFeature = FleetFeature {
-    key: "agent_charter",
+    keys: &["agent_charter"],
     code: "agent-charter-feature-barrier",
     carries: "an agent charter over 1,000 bytes",
 };

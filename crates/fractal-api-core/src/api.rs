@@ -4243,6 +4243,12 @@ pub fn client_declared_admission(desired: &Value) -> Option<crate::model::Declar
         memory_max: child(node, "memory-max").and_then(argument).and_then(Value::as_str).map(str::to_owned),
         disk_max: child(node, "disk-max").and_then(argument).and_then(Value::as_str).map(str::to_owned),
         token_budget: child(node, "token-budget").and_then(argument).and_then(Value::as_u64),
+        attention: node.get("children").and_then(Value::as_array).into_iter().flatten()
+            .filter(|child| child.get("name").and_then(Value::as_str) == Some("attention"))
+            .filter_map(|node| Some(crate::model::DeclaredAttentionBudget {
+                person: argument(node)?.as_str()?.to_owned(),
+                asks: node.get("properties")?.get("asks")?.as_u64()?,
+            })).collect(),
     });
     crate::model::DeclaredAdmission::from_declaration(priority.as_ref(), lane.as_ref(), budgets.as_ref())
 }
@@ -4314,6 +4320,33 @@ mod declared_admission_tests {
             {"name": "declared-lane", "arguments": ["build"]},
             {"name": "declared-budgets", "children": []}
         ]})).unwrap()).unwrap(), json!({"priority": "background", "lane": "build"}));
+    }
+
+    #[test]
+    fn attention_projection_preserves_authored_order_and_round_trips() {
+        let admission = client_declared_admission(&json!({"children": [
+            {"name": "declared-budgets", "children": [
+                {"name": "attention", "arguments": ["person/reviewer"], "properties": {"asks": 3}},
+                {"name": "attention", "arguments": ["person/owner"], "properties": {"asks": 1}}
+            ]}
+        ]})).unwrap();
+        let value = serde_json::to_value(&admission).unwrap();
+        assert_eq!(value, json!({"budgets": {"attention": [
+            {"person": "person/reviewer", "asks": 3},
+            {"person": "person/owner", "asks": 1}
+        ]}}));
+        assert_eq!(serde_json::from_value::<crate::model::DeclaredAdmission>(value.clone()).unwrap(), admission);
+        let wire: fractal_client::DeclaredAdmission = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(serde_json::to_value(wire).unwrap(), value);
+        let empty: fractal_client::DeclaredBudgets = serde_json::from_value(json!({})).unwrap();
+        assert!(empty.attention.is_empty());
+        assert_eq!(serde_json::to_value(empty).unwrap(), json!({}));
+        for invalid in [
+            json!({"attention": [{"person": "person/owner", "asks": 1, "extra": true}]}),
+            json!({"unknown": 1}),
+        ] {
+            assert!(serde_json::from_value::<fractal_client::DeclaredBudgets>(invalid).is_err());
+        }
     }
 }
 
@@ -8215,7 +8248,7 @@ async fn health(State(state): State<AppState>) -> Result<Json<Value>, ApiError> 
         "isolation": isolation_name(fractal_runtime::isolation_mode()),
         "store_index": state.store.index().map_err(ApiError::internal)?,
         "security": "trusted-network-no-tls-no-acls",
-        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"github_plugin":2},
+        "features": {"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"bounded_legacy_events":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"github_plugin":2},
     });
     // How far this member's messages stream has come. Absent when it holds no shard, so a
     // client that waits on both indexes knows there is only the graph to wait on.

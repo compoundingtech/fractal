@@ -3,8 +3,8 @@ use super::*;
 
 /// A publication every active fleet member advertises support for before any of it is written.
 pub(super) struct FleetFeature {
-    /// The `daemon.started` `features` key a supporting member sets to `1`.
-    pub key: &'static str,
+    /// The `daemon.started` `features` keys a supporting member sets to `1`.
+    pub keys: &'static [&'static str],
     /// The refusal code.
     pub code: &'static str,
     /// What the refused publication carries, as refusal messages name it.
@@ -18,18 +18,28 @@ impl FleetFeature {
 }
 
 const DECLARED_ADMISSION: FleetFeature = FleetFeature {
-    key: "declared_admission",
+    keys: &["declared_admission"],
     code: "declared-admission-feature-barrier",
     carries: "declared admission",
 };
 
-fn declares_fields(value: &Value) -> bool {
+/// Attention asks additionally need every member to read them.
+const DECLARED_ATTENTION: FleetFeature = FleetFeature {
+    keys: &["declared_admission", "declared_attention"],
+    ..DECLARED_ADMISSION
+};
+
+fn declares_fields(value: &Value, attention_only: bool) -> bool {
+    if attention_only {
+        return value.get("declared_budgets").and_then(|b| b.get("attention"))
+            .and_then(Value::as_array).is_some_and(|entries| !entries.is_empty());
+    }
     ["declared_priority", "declared_lane", "declared_budgets"]
         .iter()
         .any(|field| value.get(field).is_some_and(|value| !value.is_null()))
 }
 
-fn declares_children(value: &Value) -> bool {
+fn declares_children(value: &Value, attention_only: bool) -> bool {
     value
         .get("children")
         .and_then(Value::as_array)
@@ -39,6 +49,12 @@ fn declares_children(value: &Value) -> bool {
                     .get("name")
                     .and_then(Value::as_str)
                     .is_some_and(|name| {
+                        if attention_only {
+                            return name == "declared-budgets"
+                                && child.get("children").and_then(Value::as_array).is_some_and(|entries| {
+                                    entries.iter().any(|entry| entry.get("name").and_then(Value::as_str) == Some("attention"))
+                                });
+                        }
                         matches!(
                             name,
                             "declared-priority" | "declared-lane" | "declared-budgets"
@@ -48,12 +64,12 @@ fn declares_children(value: &Value) -> bool {
         })
 }
 
-fn declares_mission_json(mission: &Value) -> bool {
-    declares_fields(mission)
+fn declares_mission_json(mission: &Value, attention_only: bool) -> bool {
+    declares_fields(mission, attention_only)
         || mission
             .get("declarations_kdl")
             .and_then(Value::as_str)
-            .is_some_and(declares_kdl)
+            .is_some_and(|source| declares_kdl(source, attention_only))
         || mission
             .get("steps")
             .and_then(Value::as_object)
@@ -61,57 +77,62 @@ fn declares_mission_json(mission: &Value) -> bool {
                 steps.values().any(|step| {
                     step.get("declarations_kdl")
                         .and_then(Value::as_str)
-                        .is_some_and(declares_kdl)
+                        .is_some_and(|source| declares_kdl(source, attention_only))
                         || step
                             .get("nested_mission")
-                            .is_some_and(declares_mission_json)
+                            .is_some_and(|nested| declares_mission_json(nested, attention_only))
                         || step.get("loop_spec").is_some_and(|loop_spec| {
                             ["round", "on_keep", "on_discard"].iter().any(|field| {
-                                loop_spec.get(field).is_some_and(declares_mission_json)
+                                loop_spec.get(field).is_some_and(|nested| declares_mission_json(nested, attention_only))
                             })
                         })
                 })
             })
 }
 
-fn declares_kdl(source: &str) -> bool {
-    fn document_declares(document: &kdl::KdlDocument) -> bool {
+fn declares_kdl(source: &str, attention_only: bool) -> bool {
+    fn document_declares(document: &kdl::KdlDocument, attention_only: bool) -> bool {
         document.nodes().iter().any(|node| {
             node.children().as_ref().is_some_and(|children| {
                 (matches!(node.name().value(), "agent" | "mission")
                     && children.nodes().iter().any(|child| {
+                        if attention_only {
+                            return child.name().value() == "declared-budgets"
+                                && child.children().as_ref().is_some_and(|entries| {
+                                    entries.nodes().iter().any(|entry| entry.name().value() == "attention")
+                                });
+                        }
                         matches!(
                             child.name().value(),
                             "declared-priority" | "declared-lane" | "declared-budgets"
                         )
                     }))
-                    || document_declares(children)
+                    || document_declares(children, attention_only)
             })
         })
     }
     source
         .parse::<kdl::KdlDocument>()
-        .is_ok_and(|document| document_declares(&document))
+        .is_ok_and(|document| document_declares(&document, attention_only))
 }
 
-fn declares_mission(mission: &MissionSpec) -> bool {
-    mission.declared_priority.is_some()
-        || mission.declared_lane.is_some()
-        || mission.declared_budgets.is_some()
+fn declares_mission(mission: &MissionSpec, attention_only: bool) -> bool {
+    (!attention_only && (mission.declared_priority.is_some() || mission.declared_lane.is_some()))
+        || mission.declared_budgets.as_ref().is_some_and(|budgets| !attention_only || !budgets.attention.is_empty())
         || mission
             .declarations_kdl
             .as_deref()
-            .is_some_and(declares_kdl)
+            .is_some_and(|source| declares_kdl(source, attention_only))
         || mission.steps.values().any(|step| {
-            step.declarations_kdl.as_deref().is_some_and(declares_kdl)
-                || step.nested_mission.as_deref().is_some_and(declares_mission)
+            step.declarations_kdl.as_deref().is_some_and(|source| declares_kdl(source, attention_only))
+                || step.nested_mission.as_deref().is_some_and(|nested| declares_mission(nested, attention_only))
                 || step.loop_spec.as_ref().is_some_and(|loop_spec| {
-                    declares_mission(&loop_spec.round)
-                        || loop_spec.on_keep.as_deref().is_some_and(declares_mission)
+                    declares_mission(&loop_spec.round, attention_only)
+                        || loop_spec.on_keep.as_deref().is_some_and(|nested| declares_mission(nested, attention_only))
                         || loop_spec
                             .on_discard
                             .as_deref()
-                            .is_some_and(declares_mission)
+                            .is_some_and(|nested| declares_mission(nested, attention_only))
                 })
         })
 }
@@ -122,15 +143,16 @@ pub(super) fn validate_publication(
     intent: &NormalizedIntent,
 ) -> Result<(), FractalError> {
     let declared = intent.subjects.values().any(|desired| {
-        (desired.kind == "agent" && declares_children(&desired.desired))
+        (desired.kind == "agent" && declares_children(&desired.desired, false))
             || desired.member.as_ref().is_some_and(|member| {
                 member.declared_priority.is_some()
                     || member.declared_lane.is_some()
                     || member.declared_budgets.is_some()
             })
-    }) || intent.missions.values().any(declares_mission);
+    }) || intent.missions.values().any(|mission| declares_mission(mission, false));
     if declared {
-        validate_fleet(connection, origin, &DECLARED_ADMISSION)?;
+        let attention = intent.missions.values().any(|mission| declares_mission(mission, true));
+        validate_fleet(connection, origin, if attention { &DECLARED_ATTENTION } else { &DECLARED_ADMISSION })?;
     }
     Ok(())
 }
@@ -148,20 +170,20 @@ pub(super) fn validate_claim(
     // Mission capacity validation also reads `fields.body`. Inspect a conservative
     // superset of these locations, retaining the existing `body` envelope checks;
     // an empty decoy must never hide declarations in another persisted location.
-    let declared = fractal_missions_base::declared_admission::claim_payload_candidates(body)
+    let declares = |attention_only| fractal_missions_base::declared_admission::claim_payload_candidates(body)
     .any(|payload| match kind {
         "intent.desired" => {
-            declares_fields(payload)
-                || payload.get("member").is_some_and(declares_fields)
+            declares_fields(payload, attention_only)
+                || payload.get("member").is_some_and(|member| declares_fields(member, attention_only))
                 || (payload.get("kind").and_then(Value::as_str) == Some("agent")
-                    && (declares_children(payload)
-                        || payload.get("desired").is_some_and(declares_children)))
+                    && (declares_children(payload, attention_only)
+                        || payload.get("desired").is_some_and(|desired| declares_children(desired, attention_only))))
         }
-        "mission.published" => declares_mission_json(payload),
+        "mission.published" => declares_mission_json(payload, attention_only),
         _ => false,
     });
-    if declared {
-        validate_fleet(connection, origin, &DECLARED_ADMISSION)?;
+    if declares(false) {
+        validate_fleet(connection, origin, if declares(true) { &DECLARED_ATTENTION } else { &DECLARED_ADMISSION })?;
     }
     Ok(())
 }
@@ -214,8 +236,9 @@ pub(super) fn validate_fleet(
         }
         // Select the latest advertisement first; an unsigned or false replacement must not
         // fall back to an older positive advertisement, nor one from a previous incarnation.
-        let supported: Option<bool> = connection.query_row(/* sqlite-large-value: allow-for-now lv-hb6e3b300596c owner=fractal_store::store::declared_admission TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT json_extract(claims.body,?5)=1
+        let supported: Option<bool> = connection.query_row(/* sqlite-large-value: allow-for-now lv-h1975c08b9306 owner=fractal_store::store::declared_admission TODO=trace-statement-and-value-representation */ &canonical_sql(
+            "SELECT NOT EXISTS(SELECT 1 FROM json_each(?5) k
+                     WHERE json_extract(claims.body,'$.fields.features.'||k.value) IS NOT 1)
                  AND EXISTS(SELECT 1 FROM replica_envelopes e JOIN replica_envelope_signatures s
                      ON s.writer=e.writer AND s.sequence=e.sequence AND s.envelope_hash=e.envelope_hash
                      WHERE e.batch_id=batches.id AND s.member_key=?4)
@@ -223,12 +246,13 @@ pub(super) fn validate_fleet(
              WHERE claims.subject=?1 AND claims.kind='daemon.started' AND claims.origin=?2
                  AND batches.replica_sequence>=?3 ORDER BY CANONICAL_DESC(claims) LIMIT 1"),
             params![format!("daemon/{}", member.name), member.name, member.start, member.member_key,
-                format!("$.fields.features.{}", feature.key)], |row| row.get(0))
+                serde_json::to_string(feature.keys).map_err(internal)?], |row| row.get(0))
             .optional().map_err(internal)?.flatten();
         if supported != Some(true) {
+            let advertised = feature.keys.iter().map(|key| format!("features.{key}=1")).collect::<Vec<_>>();
             return Err(feature.refused(format!(
-                "host/{} has not advertised anchored features.{}=1 for its active incarnation; upgrade or fence it before publishing {}",
-                member.name, feature.key, feature.carries
+                "host/{} has not advertised anchored {} for its active incarnation; upgrade or fence it before publishing {}",
+                member.name, advertised.join(" and "), feature.carries
             )));
         }
     }
