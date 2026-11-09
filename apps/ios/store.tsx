@@ -4,7 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
-import { C6Recorder, type C6Send } from './c6Recorder';
+import { C6Recorder, type C6Context, type C6Send } from './c6Recorder';
 import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
 import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
@@ -54,6 +54,10 @@ export type Planner = 'codex' | 'claude' | 'pi' | 'omp' | 'opencode';
 export type MessageRequest = BoundMessage<Parameters<FractalClient['messageSend']>[0]>;
 /** What became of a message: sent, unconfirmed (with the exact request to send again), or failed as a person reads it. */
 export type Sent = { how: 'sent' } | { how: 'unconfirmed'; request: MessageRequest } | { how: 'failed'; error: string };
+type C6AppSample = {
+  identity: FractalClient | null; context: C6Context; feed: Feed | null; actor: string | undefined;
+  send: (to: string, content: string, sessionId?: string, tags?: string[], images?: Picked[], hooks?: C6Send) => Promise<Sent>;
+};
 
 const URL_KEY = 'st3.gateway.url', ORDER_KEY = 'st3.tabs.order.resources-v1', CREDENTIAL_KEY = 'st3.device.credential';
 // The enrolled signing key's public half, the person it signs as and its grant chain (the private
@@ -141,6 +145,7 @@ function useAppStore(proof?: FabricProfile) {
   const [loadErrors, setLoadErrors] = useState<Partial<Record<keyof Data, string>>>({});
   const foreground = useRef(new ForegroundGate(proof && !proof.ready ? 'background' : AppState.currentState));
   const [feed, setFeed] = useState<Feed | null>(null), [connectionIssue, setConnectionIssue] = useState('');
+  const feedClient = useRef<{ feed: Feed; client: FractalClient } | null>(null);
   const [cachedHostId, setCachedHostId] = useState('');
   const [caps, setCaps] = useState<Capabilities | null>(null), [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const capsClient = useRef<FractalClient | null>(null);
@@ -255,14 +260,7 @@ function useAppStore(proof?: FabricProfile) {
   const fabricPathRef = useRef<'direct' | 'relay' | 'unknown'>('unknown');
   fabricPathRef.current = selected.route.kind === 'fabric' ? fabricPath : 'unknown';
   const [, c6Changed] = useState(0);
-  const c6Ref = useRef<C6Recorder | null>(null);
-  if (!c6Ref.current) c6Ref.current = new C6Recorder({
-    now: () => performance.now(), id: () => Crypto.randomUUID(),
-    context: () => ({ route: routeRef.current.kind === 'tailnet' ? 'tailscale' : routeRef.current.kind, path: fabricPathRef.current }),
-    version: `${app.expo.version}/${process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD ?? 'development'}`,
-    changed: () => c6Changed(value => value + 1),
-  });
-  const c6 = c6Ref.current;
+  const c6Ref = useRef<C6Recorder<C6AppSample> | null>(null);
   const observationsRef = useRef<Observations | null>(null);
   if (!observationsRef.current) {
     observationsRef.current = new Observations(
@@ -278,6 +276,7 @@ function useAppStore(proof?: FabricProfile) {
     if (proof) return;
     const gate = foreground.current;
     const changed = (active: boolean) => {
+      if (!active) c6Ref.current?.cancel();
       observations.setForeground(active);
       const held = timers.current;
       if (active) {
@@ -613,6 +612,7 @@ function useAppStore(proof?: FabricProfile) {
     }, foreground.current, actionId, undefined, undefined, false, undefined, nativeCollectionSocket);
     // Paired: connecting from here on, even while the app waits to be active before it dials.
     setStatus(previous => previous === 'setup' ? 'connecting' : previous);
+    feedClient.current = { feed: opened, client };
     setFeed(opened);
     return () => { active = false; opened.close(); setFeed(held => held === opened ? null : held); };
   }, [client, credential, loadCapabilities, observations, carrier]);
@@ -1291,6 +1291,18 @@ function useAppStore(proof?: FabricProfile) {
   const gatewayMachineId = knownHostId ? `machine/${knownHostId.replace(/^host\//, '')}` : '';
   const gatewayHost = data.machines.find(m => m.id === gatewayMachineId)?.name ?? (knownHostId ? knownHostId.replace(/^host\//, '') : '');
   const canControlTerminal = caps?.capabilities.some(capability => capability.id === 'terminal.input' && capability.state === 'granted') ?? false;
+  // One render publishes the selected client, its send closure/feed, and its route label together.
+  const c6SampleRef = useRef<C6AppSample>({ identity: client, context: { route: 'none', path: 'unknown' }, feed, actor: caps?.session_actor, send: actions.send });
+  c6SampleRef.current = {
+    identity: client, feed: feedClient.current?.client === client && feedClient.current?.feed === feed ? feed : null, actor: caps?.session_actor, send: actions.send,
+    context: { route: selected.route.kind === 'tailnet' ? 'tailscale' : selected.route.kind, path: selected.route.kind === 'fabric' ? fabricPath : 'unknown' },
+  };
+  if (!c6Ref.current) c6Ref.current = new C6Recorder({
+    now: () => performance.now(), id: () => Crypto.randomUUID(), snapshot: () => c6SampleRef.current,
+    version: `${app.expo.version}/${process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD ?? 'development'}`,
+    changed: () => c6Changed(value => value + 1),
+  });
+  const c6 = c6Ref.current;
 
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,

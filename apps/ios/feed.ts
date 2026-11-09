@@ -82,6 +82,8 @@ export type ConversationHandlers = {
   onIssue: (issue: string, stopped?: boolean) => void;
   /** Typed, content-free refusal for local quality accounting. */
   onQualityError?: (code?: string) => void;
+  /** Another conversation took this feed's single subscription slot. */
+  onReplaced?: () => void;
 };
 
 type Client = Pick<FractalClient, 'collectionStream' | 'terminalScreen' | 'terminalAttach' | 'terminalDetach'>;
@@ -189,6 +191,7 @@ export class Feed {
 
   close(): void {
     if (this.closed) return;
+    this.conversation?.handlers.onReplaced?.();
     clearTimeout(this.missionsLeave);
     this.terminal?.close();
     this.inventory.close();
@@ -214,6 +217,7 @@ export class Feed {
 
   /** Follow the conversation of an agent or a session; a second call replaces the first. */
   followConversation(target: string, handlers: ConversationHandlers): Follow {
+    this.conversation?.handlers.onReplaced?.();
     clearTimeout(this.conversation?.timer);
     const began = Date.now();
     let timed = false;

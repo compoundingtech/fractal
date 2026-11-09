@@ -402,3 +402,19 @@ test('a collections socket that never opens is given up on and tried again', asy
   assert.equal(closed, true);
   feed.close();
 });
+
+test('replacing or closing a conversation subscription notifies its owner once', () => {
+  const { client } = fakeClient();
+  const { handlers } = watch();
+  const feed = new Feed(client, handlers, new ForegroundGate('background'), () => 'action/test');
+  let first = 0, second = 0;
+  const follow = feed.followConversation('agent/c6', { onEntries() {}, onIssue() {}, onReplaced: () => first++ });
+  feed.followConversation('agent/normal', { onEntries() {}, onIssue() {}, onReplaced: () => second++ });
+  assert.equal(first, 1);
+  follow.close();
+  assert.equal(second, 0, 'stale diagnostic cleanup does not close the normal conversation');
+  feed.close();
+  feed.close();
+  assert.equal(first, 1);
+  assert.equal(second, 1);
+});

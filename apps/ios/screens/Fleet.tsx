@@ -129,40 +129,42 @@ export function FleetScreen() {
 
 // Uses the same selected Feed and signed actions as Conversation, including its decoded mail view.
 function C6Section() {
-  const { c6, client, feed, actions, data, caps, status } = useStore();
+  const { c6, client, feed, data, status } = useStore();
   const [target, setTarget] = useState('');
   const [shareIssue, setShareIssue] = useState('');
   const agent = data.agents.find(item => item.id === target);
+  useFocusEffect(useCallback(() => () => c6.cancel(), [c6]));
   const run = async (operation: 'status' | 'send-echo') => {
     if (!client || c6.busy || (operation === 'send-echo' && (!agent || !feed))) return;
-    const names = new Map<string, string>();
-    if (caps?.session_actor) names.set(caps.session_actor, 'you');
-    const person = sessionPerson(caps?.session_actor);
-    if (person) names.set(person, 'you');
-    const follow = operation === 'send-echo' ? feed?.followConversation(target, {
-      onEntries: frame => {
-        for (const entry of conversationEntries(frame.items, names)) {
-          if (entry.body.kind === 'mail') c6.observe(entry.id, entry.body.text, entry.body.from === 'you');
-        }
-      },
-      onIssue: issue => { if (issue) setShareIssue('Conversation stream unavailable; missing echoes will time out.'); },
-    }) : undefined;
-    try {
-      await c6.run(operation, async (nonce, hooks) => {
-        if (operation === 'status') {
-          const reply = await client.capabilities({ signal: hooks.signal });
-          hooks.request(reply.request_id); hooks.ack();
-        } else if (agent) {
-          const sent = await actions.send(agent.id, `[C6:${nonce}] latency measurement`, agent.current_session_id ?? undefined, undefined, [], hooks);
-          if (sent.how !== 'sent') throw new Error('C6 send failed');
-        }
-      });
-    } finally { follow?.close(); }
+    await c6.run(operation, async (nonce, hooks, sample) => {
+      if (!sample.identity) throw new Error('C6 disconnected');
+      if (operation === 'status') {
+        const reply = await sample.identity.capabilities({ signal: hooks.signal });
+        hooks.request(reply.request_id); hooks.ack();
+      } else if (agent && sample.feed) {
+        const names = new Map<string, string>();
+        if (sample.actor) names.set(sample.actor, 'you');
+        const person = sessionPerson(sample.actor);
+        if (person) names.set(person, 'you');
+        const follow = sample.feed.followConversation(target, {
+          onEntries: frame => {
+            for (const entry of conversationEntries(frame.items, names)) {
+              if (entry.body.kind === 'mail') c6.observe(entry.id, entry.body.text, entry.body.from === 'you');
+            }
+          },
+          onIssue: issue => { if (issue) setShareIssue('Conversation stream unavailable; missing echoes will time out.'); },
+          onReplaced: () => c6.cancel(),
+        });
+        hooks.cleanup(() => follow.close());
+        const sent = await sample.send(agent.id, `[C6:${nonce}] latency measurement`, agent.current_session_id ?? undefined, undefined, [], hooks);
+        if (sent.how !== 'sent') throw new Error('C6 send failed');
+      } else throw new Error('C6 conversation unavailable');
+    });
   };
   return <>
     <SectionHeader title="C6 diagnostics" count={c6.rows.length} />
     <View style={{ paddingHorizontal: 12, gap: 4 }}>
-      <T dim>Opt-in: 10 sequential samples, 15s each; last 200 rows in memory on this phone. Sending posts real messages. Select the target conversation explicitly below.</T>
+      <T dim>Opt-in: 10 sequential samples, 15s each; last 200 rows in memory on this phone. Choose a disposable conversation: real messages wake the agent. Leaving Fleet or backgrounding cancels remaining sends.</T>
       {data.agents.map(item => <Button key={item.id} label={`${target === item.id ? 'selected: ' : ''}${item.id}`} disabled={c6.busy} onPress={() => setTarget(item.id)} />)}
       <T dim>Target: {target || 'none selected'}. ACK and stream echo are separate durations. Changed routes are invalid.</T>
       <Button label="10 status reads" disabled={c6.busy || status !== 'online'} onPress={() => void run('status')} />

@@ -1,12 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { C6Recorder, C6_LIMIT, nearestRank } from './c6Recorder.ts';
+import { ForegroundGate } from './foreground.ts';
 
 const fixture = (timeoutMs = 20) => {
   let time = 0, id = 0;
   const context = { route: 'tailscale', path: 'unknown' };
-  const recorder = new C6Recorder({ now: () => time, id: () => `nonce-${++id}`, context: () => context, version: '1.0/source-sha', changed: () => {}, timeoutMs });
-  return { recorder, context, advance: ms => { time += ms; } };
+  const sample = { identity: {}, context };
+  const recorder = new C6Recorder({ now: () => time, id: () => `nonce-${++id}`, snapshot: () => sample, version: '1.0/source-sha', changed: () => {}, timeoutMs });
+  return { recorder, context, sample, advance: ms => { time += ms; } };
 };
 
 test('freezes start context, invalidates a changed route, and does not refill failures', async () => {
@@ -95,4 +97,66 @@ test('nearest-rank percentiles are sorted and not interpolated', () => {
   assert.equal(nearestRank(input, 0.95), 10);
   assert.equal(nearestRank([], 0.95), null);
   assert.equal(input[0], 10);
+});
+
+test('each sample binds its transport and context, and client changes invalidate even an unchanged route', async () => {
+  const { recorder, sample } = fixture();
+  const original = sample.identity, replacement = {};
+  const used = [];
+  await recorder.run('status', async (_, hooks, captured) => {
+    used.push(captured.identity);
+    if (used.length === 1) sample.identity = replacement;
+    hooks.ack();
+  });
+  assert.equal(used[0], original);
+  assert(used.slice(1).every(client => client === replacement));
+  assert.equal(recorder.rows[0].status, 'invalid');
+  assert(recorder.rows.slice(1).every(row => row.status === 'ok' && row.start.route === 'tailscale'));
+  const switched = fixture();
+  let count = 0;
+  await switched.recorder.run('status', async (_, hooks, captured) => {
+    assert.equal(captured.identity, switched.sample.identity);
+    if (++count === 1) {
+      switched.sample.identity = {};
+      switched.sample.context = { route: 'fabric', path: 'direct' };
+    }
+    hooks.ack();
+  });
+  assert.equal(switched.recorder.rows[0].status, 'invalid');
+  assert.equal(switched.recorder.rows[0].start.route, 'tailscale');
+  assert(switched.recorder.rows.slice(1).every(row => row.status === 'ok' && row.start.route === 'fabric'));
+});
+
+for (const reason of ['blur', 'background', 'subscription-replaced']) {
+  test(`cancel on ${reason} aborts the active sample and retains cancelled rows without more sends`, async () => {
+    const { recorder } = fixture(1000);
+    let sends = 0, closed = 0, aborted = false;
+    await recorder.run('send-echo', async (_, hooks) => {
+      sends++;
+      hooks.cleanup(() => closed++);
+      hooks.signal.addEventListener('abort', () => { aborted = true; });
+      hooks.ack();
+      recorder.cancel();
+    });
+    assert.equal(sends, 1);
+    assert.equal(closed, 1);
+    assert.equal(aborted, true);
+    assert.equal(recorder.rows.length, 10);
+    assert(recorder.rows.every(row => row.status === 'cancelled' && row.errorCode === 'cancelled'));
+    assert(recorder.rows.slice(1).every(row => row.requestId === null && row.ackMs === null));
+  });
+}
+
+test('the app foreground gate cancels a running recorder on background', async () => {
+  const { recorder } = fixture(1000);
+  const gate = new ForegroundGate('active');
+  const unsubscribe = gate.subscribe(active => { if (!active) recorder.cancel(); });
+  let sends = 0;
+  await recorder.run('send-echo', async () => {
+    sends++;
+    gate.update('background');
+  });
+  unsubscribe();
+  assert.equal(sends, 1);
+  assert(recorder.rows.every(row => row.errorCode === 'cancelled'));
 });
