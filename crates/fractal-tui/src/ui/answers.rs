@@ -408,15 +408,16 @@ mod tests {
             let (_, request) = ui.structured_request().unwrap();
             ui.click(Hit::Answer(0));
             ui.click(Hit::Enter);
-            let Effect::Attention { answer, reason, .. } = ui.effects.pop().unwrap() else {
+            let Effect::Attention { answer, reason, option_notes, .. } = ui.effects.pop().unwrap() else {
                 panic!("expected answer effect");
             };
             let (summary, answer) =
-                crate::person_step_response(Some(&request), answer, reason).unwrap();
+                crate::person_step_response(Some(&request), answer, reason, option_notes).unwrap();
             assert_eq!(summary, "Yes");
             let answer = answer.unwrap();
             assert_eq!(answer.id.as_deref(), Some("yes"));
             assert_eq!(answer.text, None);
+            assert!(answer.option_notes.is_empty());
         }
     }
 
