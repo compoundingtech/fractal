@@ -4189,6 +4189,10 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("assistant_grant_id", string()),
             ("assistant_owner", reference()),
             ("assistant_session_actor", string()),
+            ("thread_id", reference_to(&["thread"])),
+            ("thread_quote_id", reference_to(&["message"])),
+            ("thread_origin_ask", reference_to(&["step-run"])),
+            ("thread_origin_episode", string()),
         ],
         "message.staged" => &[
             ("status", required_enum(&["staged"])),

@@ -5,10 +5,19 @@ use crate::PersonWorkStore;
 use crate::EvidenceStore;
 use super::*;
 
+pub(super) fn private_thread_claim(claim: &ClaimRecord) -> bool {
+    fractal_schema::threads::is_reserved_record(&claim.subject, &claim.kind)
+        || (claim.kind == "message.sent"
+            && fractal_schema::threads::MESSAGE_RELATION_FIELDS.iter().any(|field| {
+                claim.body.get(*field).is_some()
+                    || claim.body.get("fields").and_then(|fields| fields.get(*field)).is_some()
+            }))
+}
+
 pub(super) fn generic_claim_visible(claim: &ClaimRecord) -> bool {
     !fractal_schema::notice::is_reserved_subject(&claim.subject)
         && !fractal_schema::notice::is_reserved_kind(&claim.kind)
-        && !fractal_schema::threads::is_reserved_record(&claim.subject, &claim.kind)
+        && !private_thread_claim(claim)
 }
 
 /// Fill a serving page with visible claims, leaving raw replication/projector reads intact.
