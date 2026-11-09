@@ -11770,6 +11770,19 @@ fn settle_answered_message(
         if !needed {
             continue;
         }
+        if current.created_index >= crate::store::messages_shard::STREAM_INDEX_BASE {
+            // The parent lives in the stream even though its reply cites a graph claim.
+            // The shard writer validates the step and makes a concurrent/repeated step a no-op.
+            crate::store::messages_shard::record_lifecycle(
+                store,
+                &parent,
+                &format!("message.{lifecycle}"),
+                Some(from),
+                &BTreeMap::from([("status".into(), Value::String(lifecycle.into()))]),
+            )
+            .map_err(ApiError::bad)?;
+            continue;
+        }
         store
             .append_claim(&ClaimInput {
                 subject: parent.clone(),
