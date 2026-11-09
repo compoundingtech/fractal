@@ -200,7 +200,11 @@ person, and another person is refused. Agents without a session person must spec
 `person`; omission never reads all people.
 
 The CLI uses the same client operation:
-`fractal budgets attention MISSION [--person PERSON] [--at UNIX_MS] [--json]`.
+`fractal budgets attention MISSION [--as ACTOR] [--person PERSON] [--at UNIX_MS] [--json]`.
+For Unix calls, `--as` names the acting person or agent (default: `ST_AGENT`, including
+the existing `FRACTAL_AGENT` alias, then the configured person); `--person` selects
+the budget recipient and never establishes acting identity. A harness cannot name
+another agent as its actor. Fabric calls use their paired credential instead.
 
 The report distinguishes declared asks from undeclared, charged from inclusive usage,
 not-charged requests, and unattributed requests for the person. It identifies the canonical

@@ -15,8 +15,11 @@ fn authority(session: &ClientSession, requested: Option<&str>, now: u128) -> Res
     if session.grant_expires_at.is_some_and(|expiry| expiry <= now) {
         return Err(forbidden("the attention budget reader session expired"));
     }
-    // A raw Unix person header is not an embedded-web recipient session.
-    if session.transport == "unix" && session.authority_actor.starts_with("person/") {
+    // Authenticated pairing provenance is independent of the Unix transport.
+    // Only an unpaired Unix person header lacks recipient authentication.
+    if session.transport == "unix" && session.authority_actor.starts_with("person/")
+        && session.pairing_grant.is_none()
+    {
         return Err(forbidden("a Unix person header does not authenticate an attention recipient"));
     }
     if session.transport == "local-web"

@@ -101,10 +101,13 @@ async fn recipient_revalidation_and_report_never_return_text() {
 }
 
 #[tokio::test]
-async fn fabric_admits_only_scoped_projection_readers_not_raw_person_headers() {
+async fn unix_and_fabric_admit_scoped_pairings_not_raw_person_headers() {
     let root = tempfile::tempdir().unwrap();
     let state = fixture(root.path());
-    let app = super::super::super::fabric_router(state.clone());
+    let apps = [
+        ("fabric", super::super::super::fabric_router(state.clone())),
+        ("unix", super::super::super::router(state.clone())),
+    ];
     let uri = "/v1/client/attention-budget?mission=mission%2Fexample%2Fbudget&person=person%2Fexample&at=0";
     for (index, scopes) in [(0, json!([])), (1, json!(["read.projections"]))] {
         let subject = format!("custom/client/budget-{index}");
@@ -120,17 +123,21 @@ async fn fabric_admits_only_scoped_projection_readers_not_raw_person_headers() {
         }).unwrap();
         let request = || Request::builder().uri(uri).header(AUTHORIZATION, format!("Bearer {credential}"))
             .body(Body::empty()).unwrap();
-        let response = app.clone().oneshot(request()).await.unwrap();
-        assert_eq!(response.status(), if index == 1 { StatusCode::OK } else { StatusCode::FORBIDDEN });
-        if index == 1 {
-            let body = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
-            let envelope: Value = serde_json::from_slice(&body).unwrap();
-            assert_eq!(envelope["value"]["person"], "person/example");
-            assert_eq!(envelope["value"]["inclusive"], 0);
+        for (transport, app) in &apps {
+            let response = app.clone().oneshot(request()).await.unwrap();
+            assert_eq!(response.status(), if index == 1 { StatusCode::OK } else { StatusCode::FORBIDDEN }, "{transport}");
+            if index == 1 {
+                let body = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+                let envelope: Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(envelope["value"]["person"], "person/example");
+                assert_eq!(envelope["value"]["inclusive"], 0);
+            }
         }
     }
-    let raw = Request::builder().uri(uri).header(LOCAL_PERSON_HEADER, "person/example").body(Body::empty()).unwrap();
-    assert_eq!(app.oneshot(raw).await.unwrap().status(), StatusCode::FORBIDDEN);
+    for (transport, app) in apps {
+        let raw = Request::builder().uri(uri).header(LOCAL_PERSON_HEADER, "person/example").body(Body::empty()).unwrap();
+        assert_eq!(app.oneshot(raw).await.unwrap().status(), StatusCode::FORBIDDEN, "{transport}");
+    }
 }
 
 #[tokio::test]

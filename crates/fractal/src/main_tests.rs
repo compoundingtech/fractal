@@ -1096,7 +1096,7 @@ fn budgets_attention_requires_positional_mission_and_accepts_read_options() {
     ]).expect("positional mission parses without optional filters");
     assert!(!cli.json);
     let Command::Budgets {
-        command: BudgetsCommand::Attention { mission, person, at },
+        command: BudgetsCommand::Attention { mission, actor: _, person, at },
     } = cli.command else {
         panic!("expected budgets attention");
     };
@@ -1107,10 +1107,12 @@ fn budgets_attention_requires_positional_mission_and_accepts_read_options() {
     for arguments in [
         vec![
             "fractal", "budgets", "attention", "mission/example",
+            "--as", "agent/node.desk",
             "--person", "person/operator", "--at", "1794182400000", "--json",
         ],
         vec![
             "fractal", "--json", "budgets", "attention", "mission/example",
+            "--as", "agent/node.desk",
             "--person", "person/operator", "--at", "1794182400000",
         ],
     ] {
@@ -1118,14 +1120,75 @@ fn budgets_attention_requires_positional_mission_and_accepts_read_options() {
             .expect("attention budget filters and global JSON parse");
         assert!(cli.json);
         let Command::Budgets {
-            command: BudgetsCommand::Attention { mission, person, at },
+            command: BudgetsCommand::Attention { mission, actor, person, at },
         } = cli.command else {
             panic!("expected budgets attention");
         };
         assert_eq!(mission, "mission/example");
+        assert_eq!(actor.as_deref(), Some("agent/node.desk"));
         assert_eq!(person.as_deref(), Some("person/operator"));
         assert_eq!(at, Some(1_794_182_400_000_u128));
     }
+    for actor in ["person/operator", "agent/node.desk"] {
+        let cli = Cli::try_parse_from([
+            "fractal", "budgets", "attention", "mission/example", "--as", actor,
+        ]).expect("attention budget accepts a concrete acting person or agent");
+        let Command::Budgets {
+            command: BudgetsCommand::Attention { actor: parsed, person, .. },
+        } = cli.command else {
+            panic!("expected budgets attention");
+        };
+        assert_eq!(parsed.as_deref(), Some(actor));
+        assert_eq!(person, None, "acting identity is not the recipient filter");
+    }
+}
+
+#[tokio::test]
+async fn attention_budget_generated_unix_client_requires_an_acting_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = fractal_daemon::api::tests_shared::state(directory.path());
+    let source = r#"version 2
+agent "desk" { workspace "."; command "true"; restart always; }
+mission "example/budget" state="ready" {
+  goal "Gather decisions."
+  step "work" { assigned-to "agent/node.desk"; goal "Ask the recipient." }
+}
+"#;
+    let intent = fractal_daemon::graph::parse_intent(source, "node").unwrap();
+    let preview = state.store.mission(&intent, fractal_daemon::model::IntentInput {
+        kdl: source.into(), source_name: None,
+    }).unwrap();
+    state.store.apply_as(
+        &intent, &preview.subject_tokens, "budget-cli-fixture", Some("person/operator"),
+    ).unwrap();
+
+    let socket = directory.path().join("budget.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = fractal_daemon::api::router(state);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let endpoint = Endpoint::Unix(socket);
+    let actor = fractal_drivers::contracts::env("ST_AGENT")
+        .filter(|actor| actor.starts_with("agent/"))
+        .unwrap_or_else(|| "agent/node.desk".into());
+    let response = attention_budget_client(
+        &endpoint, Some(&actor), Some("person/operator"),
+    ).unwrap()
+        .attention_budget("mission/example/budget", Some("person/operator"), Some(0))
+        .await.unwrap();
+    assert_eq!(response.value.mission, "mission/example/budget");
+    assert_eq!(response.value.person, "person/operator");
+    assert_eq!(response.value.inclusive, 0);
+
+    let error = generated_client(&endpoint, None).unwrap()
+        .attention_budget("mission/example/budget", Some("person/operator"), Some(0))
+        .await.unwrap_err();
+    let GeneratedClientError::Api(ClientErrorCode::Forbidden, message, envelope) = error else {
+        panic!("expected the actorless client's revalidation error, got {error:?}");
+    };
+    assert_eq!(message, "the client session grant is absent");
+    assert_eq!(envelope.code, ClientErrorCode::Forbidden);
+    server.abort();
+    let _ = server.await;
 }
 
 #[test]
