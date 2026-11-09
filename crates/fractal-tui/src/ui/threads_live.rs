@@ -379,10 +379,6 @@ impl Threads {
         }
     }
 
-    pub(super) fn set_read_enabled(&mut self, enabled: bool) {
-        self.access.mark_read = self.available && enabled;
-    }
-
     pub(super) fn set_access(&mut self, access: ThreadAccess) {
         self.access = if self.available {
             access

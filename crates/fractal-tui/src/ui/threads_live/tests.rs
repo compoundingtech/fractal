@@ -617,7 +617,10 @@ fn mark_visible_read_fences_the_observed_incoming_messages() {
     .map(str::to_owned)
     .collect();
     assert!(!threads.mark_visible_read("home:ask", id.into(), &visible));
-    threads.set_read_enabled(true);
+    threads.set_access(ThreadAccess {
+        mark_read: true,
+        ..threads.access
+    });
     assert!(!threads.mark_visible_read("home:ask", id.into(), &HashSet::new()));
     assert!(threads.mark_visible_read("home:ask", id.into(), &visible));
     assert!(!threads.mark_visible_read("home:ask", id.into(), &visible));
@@ -860,7 +863,10 @@ fn a_confirmed_reply_does_not_consume_a_concurrent_unknown_close() {
 #[test]
 fn read_retry_keeps_the_original_shown_ids_even_after_the_view_moves() {
     let mut threads = observed_threads(ThreadState::Open);
-    threads.set_read_enabled(true);
+    threads.set_access(ThreadAccess {
+        mark_read: true,
+        ..threads.access
+    });
     let id = "thread/worker";
     let event = |id: &str| {
         serde_json::from_value::<ThreadTimelineEvent>(serde_json::json!({
