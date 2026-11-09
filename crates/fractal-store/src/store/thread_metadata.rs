@@ -806,7 +806,8 @@ pub fn unread_inbox_positions(
         {
             continue;
         }
-        let Some(agent) = fields["agent"].as_str() else { continue };
+        // Both direct origins and later ask links use the thread's frozen recipient.
+        let Some(agent) = creation.body["fields"]["agent"].as_str() else { continue };
         if message_window::message_unread(&conn, &person, agent, &thread, &creation)? {
             unread.insert(position);
         }
