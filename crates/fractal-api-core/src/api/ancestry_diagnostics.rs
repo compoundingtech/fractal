@@ -1,6 +1,11 @@
-use super::{AncestryUnavailableCause, LocalPeer};
+use super::{AncestryUnavailableCause, AncestryUnavailableReason, LocalPeer};
 use axum::{body::Body, http::{Method, Request, StatusCode}};
 use std::{collections::HashMap, sync::{Arc, LazyLock, Mutex}, time::{Duration, Instant}};
+
+const WINDOW: Duration = Duration::from_secs(60);
+const MAX_KEYS: usize = 1024;
+const MAX_LINES: u32 = 100;
+static LIMITER: LazyLock<Mutex<Limiter>> = LazyLock::new(|| Mutex::new(Limiter::default()));
 
 // Only the successful server-side worker verification inserts this private fact.
 #[derive(Clone)]
@@ -27,6 +32,31 @@ impl Decision {
     }
 }
 
+// PID and arbitrary error text belong to the record, never the aggregation key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct CauseKind {
+    reason: &'static str,
+    os_error: Option<i32>,
+    metadata: Option<&'static str>,
+}
+
+impl CauseKind {
+    fn of(cause: &AncestryUnavailableCause) -> Self {
+        Self {
+            reason: cause.reason_code(),
+            os_error: match cause.reason {
+                AncestryUnavailableReason::ProcessReadFailed { os_error, .. } => os_error,
+                _ => None,
+            },
+            metadata: match cause.reason {
+                AncestryUnavailableReason::ProcessMetadataInvalid(field) => Some(field),
+                _ => None,
+            },
+        }
+    }
+}
+
+#[derive(Clone)]
 pub(super) struct RequestDiagnostic {
     cause: Arc<AncestryUnavailableCause>,
     connector_pid: Option<u32>,
@@ -59,162 +89,249 @@ impl RequestDiagnostic {
     }
 
     pub(super) fn record(self, status: Option<StatusCode>, worker: bool) {
-        static LIMITER: LazyLock<Mutex<Limiter>> = LazyLock::new(|| Mutex::new(Limiter::default()));
         self.record_to(status, worker, Instant::now(), &LIMITER, &mut std::io::stderr());
     }
 
-    fn record_to(
-        &self,
-        status: Option<StatusCode>,
-        worker: bool,
-        now: Instant,
-        limiter: &Mutex<Limiter>,
-        output: &mut impl std::io::Write,
+    fn record_to(&self, status: Option<StatusCode>, worker: bool, now: Instant,
+        limiter: &Mutex<Limiter>, output: &mut impl std::io::Write,
     ) {
         let decision = Decision::of(status, worker, &self.method);
-        // Poisoning must not hide the first refusal or affect the authorization result.
-        let suppressed = limiter.lock().map_or(Some(0), |mut limiter|
-            limiter.observe((*self.cause).clone(), decision, now));
-        if let Some(suppressed) = suppressed {
-            let _ = writeln!(output, "{}", self.line(decision, suppressed));
+        // A poisoned diagnostic lock cannot change authorization or hide a refusal.
+        match limiter.lock() {
+            Ok(mut limiter) => limiter.emit(self, decision, now, output),
+            Err(_) => { let _ = writeln!(output, "{} dropped=0", self.line(decision, 0)); }
         }
     }
+}
+
+type Key = (CauseKind, Decision);
+struct Entry {
+    started: Instant,
+    suppressed: u64,
+    sample: RequestDiagnostic,
 }
 
 #[derive(Default)]
 struct Limiter {
-    windows: HashMap<(AncestryUnavailableCause, Decision), (Instant, u64)>,
+    windows: HashMap<Key, Entry>,
+    global_started: Option<Instant>,
+    lines: u32,
+    dropped: u64,
 }
 
 impl Limiter {
-    fn observe(&mut self, cause: AncestryUnavailableCause, decision: Decision, now: Instant) -> Option<u64> {
-        let key = (cause, decision);
-        if let Some((last, suppressed)) = self.windows.get_mut(&key) {
-            if now.duration_since(*last) < Duration::from_secs(60) {
-                *suppressed = suppressed.saturating_add(1);
-                return None;
-            }
-            let count = *suppressed;
-            *last = now;
-            *suppressed = 0;
-            return Some(count);
+    fn summary(key: &Key, entry: &Entry, output: &mut impl std::io::Write) {
+        if entry.suppressed != 0 {
+            let _ = writeln!(output, "{} event=suppression-summary dropped=0",
+                entry.sample.line(key.1, entry.suppressed));
         }
-        // Reclaim expired windows before admitting a new cause/decision pair.
-        // Look up the requested key first so its next report retains its count.
-        self.windows.retain(|_, (last, _)| now.duration_since(*last) < Duration::from_secs(60));
-        if self.windows.len() >= 1024 {
-            let oldest = self.windows.iter().min_by_key(|(_, (last, _))| *last)
-                .map(|(key, _)| key.clone());
-            if let Some(oldest) = oldest { self.windows.remove(&oldest); }
-        }
-        self.windows.insert(key, (now, 0));
-        Some(0)
     }
+
+    fn flush_dropped(&mut self, output: &mut impl std::io::Write) {
+        if self.dropped != 0 {
+            let _ = writeln!(output,
+                "st3: local caller ancestry unavailable level=warn event=global-cap-summary dropped={}", self.dropped);
+            self.dropped = 0;
+        }
+    }
+
+    fn emit(&mut self, record: &RequestDiagnostic, decision: Decision, now: Instant,
+        output: &mut impl std::io::Write,
+    ) {
+        let key = (CauseKind::of(&record.cause), decision);
+        // Flush every expired key on the next event, even if that event has a
+        // different cause. The current key carries its count on its next record.
+        self.windows.retain(|other, entry| {
+            if *other != key && now.duration_since(entry.started) >= WINDOW {
+                Self::summary(other, entry, output);
+                false
+            } else { true }
+        });
+        if self.global_started.is_none_or(|start| now.duration_since(start) >= WINDOW) {
+            self.flush_dropped(output);
+            self.global_started = Some(now);
+            self.lines = 0;
+        }
+        let suppressed = if let Some(entry) = self.windows.get_mut(&key) {
+            if now.duration_since(entry.started) < WINDOW {
+                entry.suppressed = entry.suppressed.saturating_add(1);
+                return;
+            }
+            let count = entry.suppressed;
+            entry.started = now;
+            entry.suppressed = 0;
+            entry.sample = record.clone();
+            count
+        } else {
+            if self.windows.len() >= MAX_KEYS {
+                let oldest = self.windows.iter().min_by_key(|(_, entry)| entry.started)
+                    .map(|(oldest, _)| *oldest);
+                if let Some(oldest) = oldest
+                    && let Some(entry) = self.windows.remove(&oldest) {
+                    Self::summary(&oldest, &entry, output);
+                }
+            }
+            self.windows.insert(key, Entry { started: now, suppressed: 0, sample: record.clone() });
+            0
+        };
+        // First refusals and count summaries are never hidden by the global cap.
+        // Only non-refusal event records are capped; their loss is counted.
+        if self.lines >= MAX_LINES && !matches!(decision, Decision::Refused(_)) {
+            if suppressed != 0 {
+                let _ = writeln!(output, "{} event=suppression-summary dropped=0", record.line(decision, suppressed));
+            }
+            self.dropped = self.dropped.saturating_add(1);
+            return;
+        }
+        let _ = writeln!(output, "{} dropped={}", record.line(decision, suppressed), self.dropped);
+        self.dropped = 0;
+        self.lines = self.lines.saturating_add(1);
+    }
+
+    fn flush(&mut self, output: &mut impl std::io::Write) {
+        for (key, entry) in self.windows.drain() { Self::summary(&key, &entry, output); }
+        self.flush_dropped(output);
+    }
+}
+
+pub(super) fn flush() {
+    if let Ok(mut limiter) = LIMITER.lock() { limiter.flush(&mut std::io::stderr()); }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::AncestryUnavailableReason;
 
-    fn cause(reason: AncestryUnavailableReason) -> AncestryUnavailableCause {
-        AncestryUnavailableCause { pid: Some(42), reason }
+    fn record(reason: AncestryUnavailableReason) -> RequestDiagnostic {
+        RequestDiagnostic { cause: Arc::new(AncestryUnavailableCause { pid: Some(42), reason }),
+            connector_pid: Some(7), connector_generation: Some(123),
+            method: Method::POST, route: "/v1/intent/apply".into() }
+    }
+
+    fn read_failure(pid: u32, errno: i32, text: &str) -> RequestDiagnostic {
+        let mut record = record(AncestryUnavailableReason::ProcessReadFailed {
+            operation: "proc-environ-read", os_error: Some(errno), error: text.into(),
+        });
+        Arc::make_mut(&mut record.cause).pid = Some(pid);
+        record
     }
 
     #[test]
-    fn repeated_cause_and_decision_report_suppressed_count_without_hiding_other_failures() {
-        let now = Instant::now();
-        let mut limiter = Limiter::default();
-        let first = cause(AncestryUnavailableReason::WitnessMissing);
-        let other = cause(AncestryUnavailableReason::AncestorGenerationChanged);
-        assert_eq!(limiter.observe(first.clone(), Decision::ReadOnly, now), Some(0));
-        assert_eq!(limiter.observe(first.clone(), Decision::ReadOnly, now), None);
-        assert_eq!(limiter.observe(first.clone(), Decision::ReadOnly, now), None);
-        assert_eq!(limiter.observe(other, Decision::ReadOnly, now), Some(0));
-        assert_eq!(limiter.observe(first.clone(), Decision::Refused(400), now), Some(0));
-        assert_eq!(limiter.observe(first, Decision::ReadOnly, now + Duration::from_secs(60)), Some(2));
-    }
-
-    #[test]
-    fn saturation_evicts_oldest_and_still_suppresses_new_keys() {
-        let now = Instant::now();
-        let mut limiter = Limiter::default();
-        for pid in 0..1024 {
-            let cause = AncestryUnavailableCause { pid: Some(pid), reason: AncestryUnavailableReason::WitnessMissing };
-            assert_eq!(limiter.observe(cause, Decision::Refused(400),
-                now + Duration::from_millis(u64::from(pid))), Some(0));
-        }
-        let newest = AncestryUnavailableCause { pid: Some(1024), reason: AncestryUnavailableReason::WitnessMissing };
-        let later = now + Duration::from_secs(2);
-        assert_eq!(limiter.observe(newest.clone(), Decision::Refused(400), later), Some(0));
-        assert_eq!(limiter.observe(newest.clone(), Decision::Refused(400), later), None);
-        assert_eq!(limiter.windows.len(), 1024);
-        assert!(!limiter.windows.contains_key(&(AncestryUnavailableCause {
-            pid: Some(0), reason: AncestryUnavailableReason::WitnessMissing,
-        }, Decision::Refused(400))));
-        assert!(limiter.windows.contains_key(&(newest, Decision::Refused(400))));
-    }
-
-    #[test]
-    fn inserting_new_key_reclaims_expired_windows() {
-        let now = Instant::now();
-        let mut limiter = Limiter::default();
-        for pid in 0..1024 {
-            let cause = AncestryUnavailableCause { pid: Some(pid), reason: AncestryUnavailableReason::WitnessMissing };
-            assert_eq!(limiter.observe(cause, Decision::ReadOnly, now), Some(0));
-        }
-        let next = cause(AncestryUnavailableReason::AncestorGenerationChanged);
-        let later = now + Duration::from_secs(60);
-        assert_eq!(limiter.observe(next.clone(), Decision::ReadOnly, later), Some(0));
-        assert_eq!(limiter.windows.len(), 1);
-        assert_eq!(limiter.observe(next, Decision::ReadOnly, later), None);
-    }
-
-    #[test]
-    fn real_emit_path_writes_one_line_for_identical_requests_then_reports_count() {
+    fn real_emit_path_suppresses_identical_requests_and_reports_count() {
         let now = Instant::now();
         let limiter = Mutex::new(Limiter::default());
-        let record = RequestDiagnostic {
-            cause: Arc::new(cause(AncestryUnavailableReason::WitnessMissing)),
-            connector_pid: Some(7), connector_generation: Some(123),
-            method: Method::POST, route: "/v1/intent/apply".into(),
-        };
+        let record = record(AncestryUnavailableReason::WitnessMissing);
         let mut output = Vec::new();
         for _ in 0..100 {
             record.record_to(Some(StatusCode::BAD_REQUEST), false, now, &limiter, &mut output);
         }
-        let first = String::from_utf8(output.clone()).unwrap();
-        assert_eq!(first.lines().count(), 1);
-        assert!(first.contains("level=warn"));
-        record.record_to(Some(StatusCode::BAD_REQUEST), false,
-            now + Duration::from_secs(60), &limiter, &mut output);
+        assert_eq!(String::from_utf8(output.clone()).unwrap().lines().count(), 1);
+        record.record_to(Some(StatusCode::BAD_REQUEST), false, now + WINDOW, &limiter, &mut output);
         let all = String::from_utf8(output).unwrap();
         assert_eq!(all.lines().count(), 2);
         assert!(all.lines().nth(1).unwrap().contains("suppressed=99"));
     }
 
     #[test]
-    fn record_correlates_connector_cause_route_and_decision() {
-        let record = RequestDiagnostic {
-            cause: Arc::new(cause(AncestryUnavailableReason::WitnessMissing)),
-            connector_pid: Some(7), connector_generation: Some(123),
-            method: Method::POST, route: "/v1/intent/apply".into(),
-        };
+    fn key_uses_cause_kind_not_pid_or_error_text_and_decisions_are_independent() {
+        let now = Instant::now();
+        let mut limiter = Limiter::default();
+        let mut output = Vec::new();
+        let first = read_failure(42, libc::EACCES, "first error text");
+        let same = read_failure(99, libc::EACCES, "different error text");
+        let other = read_failure(99, libc::ENOENT, "different cause kind");
+        limiter.emit(&first, Decision::ReadOnly, now, &mut output);
+        limiter.emit(&same, Decision::ReadOnly, now, &mut output);
+        limiter.emit(&other, Decision::ReadOnly, now, &mut output);
+        limiter.emit(&same, Decision::Refused(422), now, &mut output);
+        assert_eq!(String::from_utf8(output.clone()).unwrap().lines().count(), 3);
+        limiter.emit(&same, Decision::ReadOnly, now + WINDOW, &mut output);
+        assert!(String::from_utf8(output).unwrap().lines().last().unwrap().contains("suppressed=1"));
+    }
+
+    #[test]
+    fn saturation_evicts_oldest_and_suppresses_new_key() {
+        let now = Instant::now();
+        let mut limiter = Limiter::default();
+        let mut output = Vec::new();
+        for errno in 0..1024 {
+            limiter.emit(&read_failure(42, errno, "error"), Decision::ReadOnly,
+                now + Duration::from_millis(errno as u64), &mut output);
+        }
+        let newest = read_failure(42, 1024, "new key");
+        limiter.emit(&newest, Decision::Refused(422), now + Duration::from_secs(2), &mut output);
+        let length = output.len();
+        limiter.emit(&newest, Decision::Refused(422), now + Duration::from_secs(2), &mut output);
+        assert_eq!(output.len(), length);
+        assert_eq!(limiter.windows.len(), MAX_KEYS);
+        assert!(!limiter.windows.contains_key(&(CauseKind::of(&read_failure(42, 0, "error").cause), Decision::ReadOnly)));
+    }
+
+    #[test]
+    fn expiry_and_shutdown_flush_pending_counts() {
+        let now = Instant::now();
+        let mut limiter = Limiter::default();
+        let mut output = Vec::new();
+        let first = record(AncestryUnavailableReason::WitnessMissing);
+        let other = record(AncestryUnavailableReason::AncestorGenerationChanged);
+        for _ in 0..3 { limiter.emit(&first, Decision::ReadOnly, now, &mut output); }
+        limiter.emit(&other, Decision::ReadOnly, now + WINDOW, &mut output);
+        assert_eq!(limiter.windows.len(), 1);
+        let text = String::from_utf8(output.clone()).unwrap();
+        assert!(text.contains("suppressed=2 event=suppression-summary"));
+        limiter.emit(&other, Decision::ReadOnly, now + WINDOW, &mut output);
+        limiter.flush(&mut output);
+        assert!(limiter.windows.is_empty());
+        assert!(String::from_utf8(output).unwrap().contains("suppressed=1 event=suppression-summary"));
+    }
+
+    #[test]
+    fn global_cap_counts_drops_but_never_hides_first_refusal() {
+        let now = Instant::now();
+        let mut limiter = Limiter::default();
+        let mut output = Vec::new();
+        for errno in 0..105 {
+            limiter.emit(&read_failure(42, errno, "error"), Decision::ReadOnly, now, &mut output);
+        }
+        assert_eq!(String::from_utf8(output.clone()).unwrap().lines().count(), MAX_LINES as usize);
+        assert_eq!(limiter.dropped, 5);
+        limiter.emit(&record(AncestryUnavailableReason::WitnessMissing), Decision::Refused(422), now, &mut output);
+        let text = String::from_utf8(output).unwrap();
+        let last = text.lines().last().unwrap();
+        assert!(last.contains("level=warn"));
+        assert!(last.contains("dropped=5"));
+    }
+
+    #[test]
+    fn shutdown_flushes_global_dropped_count() {
+        let now = Instant::now();
+        let mut limiter = Limiter::default();
+        let mut output = Vec::new();
+        for errno in 0..105 {
+            limiter.emit(&read_failure(42, errno, "error"), Decision::ReadOnly, now, &mut output);
+        }
+        limiter.flush(&mut output);
+        assert!(String::from_utf8(output).unwrap().contains("event=global-cap-summary dropped=5"));
+    }
+
+    #[test]
+    fn record_correlates_connector_cause_route_worker_and_decision() {
+        let record = record(AncestryUnavailableReason::WitnessMissing);
         let line = record.line(Decision::VerifiedWorker, 9);
         for field in ["level=debug", "connector_pid=Some(7)", "connector_generation=Some(123)",
             "method=POST", "route=\"/v1/intent/apply\"", "decision=VerifiedWorker",
             "worker=Some((Some(7), Some(123)))", "pid=Some(42)", "reason=witness-missing", "suppressed=9"] {
             assert!(line.contains(field), "missing {field}: {line}");
         }
-        assert!(record.line(Decision::Refused(400), 0).contains("level=warn"));
+        assert!(record.line(Decision::Refused(422), 0).contains("level=warn"));
     }
 
     #[test]
     fn refusals_override_read_and_worker_downgrades() {
         for method in [Method::GET, Method::HEAD, Method::POST] {
             for worker in [false, true] {
-                let decision = Decision::of(Some(StatusCode::BAD_REQUEST), worker, &method);
-                assert_eq!(decision, Decision::Refused(400));
+                let decision = Decision::of(Some(StatusCode::UNPROCESSABLE_ENTITY), worker, &method);
+                assert_eq!(decision, Decision::Refused(422));
                 assert_eq!(decision.level(), "warn");
             }
         }
@@ -231,29 +348,26 @@ mod tests {
         let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
         let generation = peer.diagnostic_start_token();
         let mut request = Request::builder().method(Method::GET)
-            .uri("/v1/health?environment=must-not-log")
-            .header("x-connector-pid", "999")
+            .uri("/v1/health?environment=must-not-log").header("x-connector-pid", "999")
             .body(Body::empty()).unwrap();
-        request.extensions_mut().insert(Arc::new(cause(AncestryUnavailableReason::WitnessMissing)));
+        request.extensions_mut().insert(record(AncestryUnavailableReason::WitnessMissing).cause);
         request.extensions_mut().insert(LocalPeer { pid, peer_process: Some(peer), ancestor: None });
         let record = RequestDiagnostic::capture(&request).unwrap();
         assert_eq!(record.connector_pid, Some(pid));
         assert_eq!(record.connector_generation, generation);
         assert_eq!(record.cause.pid, Some(42));
-        let line = record.line(Decision::ReadOnly, 0);
-        assert!(!line.contains("must-not-log"));
-        assert_eq!(record.route, "/v1/health");
+        assert!(!record.line(Decision::ReadOnly, 0).contains("must-not-log"));
     }
 
     #[test]
     fn client_header_cannot_claim_verified_worker_fallback() {
         let mut request = Request::builder().method(Method::POST)
             .header("x-verified-worker-fallback", "true").body(Body::empty()).unwrap();
-        request.extensions_mut().insert(Arc::new(cause(AncestryUnavailableReason::WitnessMissing)));
+        request.extensions_mut().insert(record(AncestryUnavailableReason::WitnessMissing).cause);
         let record = RequestDiagnostic::capture(&request).unwrap();
         let worker = request.extensions().get::<VerifiedWorkerFallback>().is_some();
         assert!(!worker);
         assert_eq!(Decision::of(None, worker, &record.method), Decision::Admitted);
-        assert_eq!(Decision::of(Some(StatusCode::BAD_REQUEST), worker, &record.method).level(), "warn");
+        assert_eq!(Decision::of(Some(StatusCode::UNPROCESSABLE_ENTITY), worker, &record.method).level(), "warn");
     }
 }

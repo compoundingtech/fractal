@@ -7527,6 +7527,11 @@ impl HarnessAncestry {
 
 mod ancestry_diagnostics;
 
+/// Preserve pending diagnostic counts before the daemon exits.
+pub fn flush_ancestry_diagnostics() {
+    ancestry_diagnostics::flush();
+}
+
 /// Diagnostic data is deliberately limited to operation names, PIDs and OS errors.
 /// In particular, identity parsing must never attach environment values.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -7541,7 +7546,7 @@ enum AncestryUnavailableReason {
     WitnessCaptureFailed(String),
     WitnessMissing,
     LookupTaskFailed(String),
-    ProcessReadFailed { operation: &'static str, error: String },
+    ProcessReadFailed { operation: &'static str, os_error: Option<i32>, error: String },
     ProcessMetadataInvalid(&'static str),
     ProcessTerminal,
     EmptyEnvironment,
@@ -7657,7 +7662,9 @@ fn walk_harness_ancestry(
 #[cfg(target_os = "linux")]
 fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailableReason> {
     let read = |file, operation| fs::read_to_string(format!("/proc/{pid}/{file}"))
-        .map_err(|error| AncestryUnavailableReason::ProcessReadFailed { operation, error: error.to_string() });
+        .map_err(|error| AncestryUnavailableReason::ProcessReadFailed {
+            operation, os_error: error.raw_os_error(), error: error.to_string(),
+        });
     let invalid = AncestryUnavailableReason::ProcessMetadataInvalid;
     let status = read("status", "proc-status-read")?;
     let uid = status.lines().find_map(|line| line.strip_prefix("Uid:"))
@@ -7685,7 +7692,7 @@ fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailable
     match fractal_runtime::macos_process_identity(pid) {
         Ok((parent, birth, uid)) => Ok(HarnessProcess { uid, generation: Some((parent, birth)), generation_error: None }),
         Err(error) => {
-            let failure = |operation, error: String| AncestryUnavailableReason::ProcessReadFailed { operation, error };
+            let failure = |operation, error: String| AncestryUnavailableReason::ProcessReadFailed { operation, os_error: None, error };
             let uid = fractal_runtime::macos_process_owner(pid)
                 .map_err(|error| failure("process-owner-read", error.to_string()))?;
             Ok(HarnessProcess { uid, generation: None,
@@ -7698,7 +7705,7 @@ fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailable
 fn local_harness_identity(pid: u32) -> Result<HarnessAncestry, AncestryUnavailableReason> {
     let environment = fs::read(format!("/proc/{pid}/environ"))
         .map_err(|error| AncestryUnavailableReason::ProcessReadFailed {
-            operation: "proc-environ-read", error: error.to_string(),
+            operation: "proc-environ-read", os_error: error.raw_os_error(), error: error.to_string(),
         })?;
     if environment.is_empty() { return Err(AncestryUnavailableReason::EmptyEnvironment); }
     if !environment.ends_with(&[0]) { return Err(AncestryUnavailableReason::TruncatedEnvironment); }

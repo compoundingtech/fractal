@@ -122,13 +122,13 @@ fn ancestry_records_environment_read_failure() {
             },
             |candidate| if candidate == pid { Ok(HarnessAncestry::Person) } else {
                 Err(AncestryUnavailableReason::ProcessReadFailed {
-                    operation: "proc-environ-read", error: "Permission denied".into(),
+                    operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
                 })
             }),
             |cause| recorded.push((cause.pid, cause.reason.clone())));
         assert_eq!(result, HarnessAncestry::Unavailable);
         assert_eq!(recorded, vec![(Some(ancestor), AncestryUnavailableReason::ProcessReadFailed {
-            operation: "proc-environ-read", error: "Permission denied".into(),
+            operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
         })]);
     });
 }
@@ -211,7 +211,7 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
             -> Result<HarnessAncestry, AncestryUnavailableCause> = if ancestry == HarnessAncestry::Unavailable {
             |pid, _| Err(AncestryUnavailableCause { pid: Some(pid + 1),
                 reason: AncestryUnavailableReason::ProcessReadFailed {
-                    operation: "proc-environ-read", error: "Permission denied (os error 13)".into(),
+                    operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied (os error 13)".into(),
                 } })
         } else {
             |_, _| Ok(HarnessAncestry::Person)
@@ -275,7 +275,7 @@ async fn unreadable_same_uid_parent_admits_only_authenticated_worker_as_person()
             // Model a same-uid, non-dumpable service manager: metadata remains readable,
             // but its environment does not.
             Err(AncestryUnavailableReason::ProcessReadFailed {
-                operation: "proc-environ-read", error: "Permission denied".into(),
+                operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
             })
         }), |_| {});
     assert_eq!(ancestry, HarnessAncestry::Unavailable);
