@@ -25,6 +25,7 @@ export interface ThreadPanelProps {
   readonly onRename?: (title: string, titleRevision: string) => Promise<string | undefined>
   readonly onChangeState?: (state: ThreadPanelSummary['state']) => Promise<string | undefined>
   readonly pendingChange?: string
+  readonly retryPending?: boolean
   readonly onRetryChange?: () => Promise<string | undefined>
   readonly onMarkRead?: () => Promise<string | undefined>
   readonly canMarkRead?: boolean
@@ -34,7 +35,7 @@ export interface ThreadPanelProps {
 
 /** The same conversation surface works inline in any context or as a standalone pane. */
 export function ThreadPanel({
-  thread, messageCount, unread = false, embedded = true, initiallyExpanded = false, onExpansionChange, onHideDraft, onOpenInTab, onRename, onChangeState, pendingChange, onRetryChange, onMarkRead, canMarkRead = false, children,
+  thread, messageCount, unread = false, embedded = true, initiallyExpanded = false, onExpansionChange, onHideDraft, onOpenInTab, onRename, onChangeState, pendingChange, retryPending = false, onRetryChange, onMarkRead, canMarkRead = false, children,
 }: ThreadPanelProps): React.ReactNode {
   const [expanded, setExpanded] = React.useState(initiallyExpanded)
   const contentId = React.useId()
@@ -94,8 +95,8 @@ export function ThreadPanel({
         {embedded && onOpenInTab !== undefined ? <ActionButton onPress={onOpenInTab}>Open in tab</ActionButton> : null}
       </div>
       {pendingChange === undefined || onRetryChange === undefined ? null : <div role="status">
-        Fractal has not confirmed the previous {pendingChange}.
-        <ActionButton variant="outline" isDisabled={pending} onPress={() => { void run(onRetryChange, () => setRename(undefined)) }}>Retry {pendingChange}</ActionButton>
+        {retryPending ? 'Sending…' : `Fractal has not confirmed the previous ${pendingChange}.`}
+        <ActionButton variant="outline" isDisabled={pending || retryPending} onPress={() => { void run(onRetryChange, () => setRename(undefined)) }}>Retry {pendingChange}</ActionButton>
       </div>}
       {rename === undefined || onRename === undefined ? null : <form onSubmit={event => {
         event.preventDefault()

@@ -14,7 +14,7 @@ import { ThreadPanel } from './ThreadPanel.tsx'
 import { waiting, type Feed } from '../data/source.ts'
 import { ThreadEditor } from './ThreadEditor.tsx'
 import { Button as ActionButton } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
-import type { ThreadObservation, ThreadSource } from './threadSource.ts'
+import type { RetainedThreadStart, ThreadObservation, ThreadSource } from './threadSource.ts'
 
 type OpenThread = { readonly onOpenThread?: ((id: string) => void) | undefined }
 
@@ -57,14 +57,14 @@ function ThreadGroupContent({ source, query, label, onOpenThread }: OpenThread &
 function ThreadListPage({ source, query, onOpenThread, exclude }: OpenThread & {
   readonly source: ThreadSource
   readonly query: ThreadListQuery
-  readonly exclude?: string | undefined
+  readonly exclude?: readonly string[] | undefined
 }) {
   const list = useAtomValue(source.list(query))
   const [showNext, setShowNext] = React.useState(false)
   if (list._tag !== 'Observed') return <ReadStatus state={list._tag} />
   const next = Option.getOrUndefined(list.value.next_cursor)
   return <>
-    {list.value.items.filter(thread => thread.id !== exclude).map(thread => <LiveThread key={thread.id} source={source} thread={thread} onOpenThread={onOpenThread} />)}
+    {list.value.items.filter(thread => !exclude?.includes(thread.id)).map(thread => <LiveThread key={thread.id} source={source} thread={thread} onOpenThread={onOpenThread} />)}
     {next === undefined ? null : showNext
       ? <ThreadListPage source={source} query={{ ...query, cursor: next }} onOpenThread={onOpenThread} exclude={exclude} />
       : <ActionButton onPress={() => setShowNext(true)}>Load more threads</ActionButton>}
@@ -89,6 +89,8 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
   readonly canStart: boolean
 }) {
   const { read, actions, inboxOrigins, upgradeRequired } = useAtomValue(source.access)
+  const retained = useAtomValue(source.pendingStarts?.(originSource) ?? noPendingStarts)
+    .filter(start => start.parameters.origin.episode === episode)
   const [starting, setStarting] = React.useState(false)
   const [focused, setFocused] = React.useState<string>()
   const threadTitle = threadTitleFromAsk(title)
@@ -98,8 +100,9 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
   if (!read) return null
   return <div {...stylex.props(styles.groupBody)}>
     {focused === undefined ? null : <ThreadById source={source} threadId={focused} embedded focusComposer onOpenThread={onOpenThread} />}
-    <ThreadListPage source={source} query={{ origin_source: originSource, origin_episode: episode }} exclude={focused} onOpenThread={onOpenThread} />
-    {!actions.has('thread.start') || !canStart ? null : agent === undefined
+    <ThreadListPage source={source} query={{ origin_source: originSource, origin_episode: episode }} exclude={[...(focused === undefined ? [] : [focused]), ...retained.map(start => start.targetId)]} onOpenThread={onOpenThread} />
+    {retained.map(start => <PendingStartPanel key={start.draftKey} source={source} start={start} onSent={setFocused} />)}
+    {retained.length > 0 || !actions.has('thread.start') || !canStart ? null : agent === undefined
       ? <p {...stylex.props(styles.note)}>No responsible agent is configured for this Inbox item.</p>
       : !starting ? <ActionButton onPress={() => setStarting(true)}>Start thread</ActionButton>
       : <ThreadPanel thread={{ title: threadTitle, state: 'open' }} initiallyExpanded onHideDraft={() => setStarting(false)}>
@@ -108,6 +111,47 @@ function InboxThreadsContent({ source, agent, originSource, episode, title, canS
           onSent={id => { setFocused(id); setStarting(false) }} />
       </ThreadPanel>}
   </div>
+}
+
+/** Pending first sends survive the Inbox source that originally hosted their editor. */
+export function LivePendingInboxStarts({ items, onOpenThread }: OpenThread & { readonly items: readonly Attention[] }) {
+  const source = useDataSource().threads
+  return source === undefined ? null : <PendingInboxStarts source={source} items={items} onOpenThread={onOpenThread} />
+}
+
+function PendingInboxStarts({ source, items, onOpenThread }: OpenThread & { readonly source: ThreadSource; readonly items: readonly Attention[] }) {
+  const starts = useAtomValue(source.pendingStarts?.() ?? noPendingStarts).filter(start => !items.some(item =>
+    item.source_id === start.parameters.origin.source_id && item.episode === start.parameters.origin.episode))
+  const [focused, setFocused] = React.useState<string>()
+  if (starts.length === 0 && focused === undefined) return null
+  return <section aria-label="Thread recovery" {...stylex.props(styles.group)}>
+    <h3 {...stylex.props(styles.note)}>Thread recovery</h3>
+    <div {...stylex.props(styles.groupBody)}>
+      {focused === undefined ? null : <ThreadById source={source} threadId={focused} embedded focusComposer onOpenThread={onOpenThread} />}
+      {starts.map(start => <PendingStartPanel key={start.draftKey} source={source} start={start} onSent={setFocused} />)}
+    </div>
+  </section>
+}
+
+function PendingStartPanel({ source, start, onSent }: {
+  readonly source: ThreadSource
+  readonly start: RetainedThreadStart
+  readonly onSent: (id: string) => void
+}) {
+  const agent = useAgent(start.parameters.agent_id)
+  const name = agent._tag === 'Observed' ? agent.value?.name : undefined
+  const retry = source.retryStart
+  return <ThreadPanel thread={{ title: start.parameters.title, state: 'open' }} initiallyExpanded
+    pendingChange="thread start" retryPending={start.state === 'sending'}
+    {...(retry === undefined ? {} : { onRetryChange: async () => {
+      const result = await retry(start.draftKey)
+      if (result._tag === 'Refused') return result.detail
+      onSent(result.threadId)
+      return undefined
+    } })}>
+    <p {...stylex.props(styles.note)}>To {name ?? start.parameters.agent_id}</p>
+    <div {...stylex.props(styles.message)}>{start.parameters.content}</div>
+  </ThreadPanel>
 }
 
 export function LiveThreadPane({ threadId }: { readonly threadId: string }) {
@@ -132,6 +176,7 @@ function ThreadById({ source, threadId, embedded = false, focusComposer = false,
 
 const noPendingChange = Atom.make<string | undefined>(undefined)
 const idleDetail = Atom.make<Feed<ThreadObservation>>(waiting)
+const noPendingStarts = Atom.make<readonly RetainedThreadStart[]>([])
 
 function LiveThread({ source, thread, embedded = true, initiallyExpanded = false, focusComposer = false, onOpenThread }: OpenThread & {
   readonly source: ThreadSource

@@ -13,7 +13,7 @@ import type { AlertAction, AlertActionResult } from '../conversation/alerts/aler
 import type { PromptAnswerResult } from '../conversation/alerts/prompt-answer-port.ts'
 import { useAttention, useAttentionDecode, useDataSource, useNow } from '../data/react.tsx'
 import { credentialExpiredMessage, decodedRoster, type Feed, type RosterDecode } from '../data/source.ts'
-import { LiveInboxThreads, LiveRecentlyClosedThreads } from '../threads/LiveThreads.tsx'
+import { LiveInboxThreads, LivePendingInboxStarts, LiveRecentlyClosedThreads } from '../threads/LiveThreads.tsx'
 import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
 import { DecodeNotice } from './LiveRoster.tsx'
 
@@ -29,14 +29,17 @@ const GLYPH_WORDS: Record<AlertsTabRow['glyph'], string> = { '?': 'asks a questi
 /** The Alerts tab over the active source: its attention feed, clock, and answer ports when it serves them. */
 export const AlertsTab = ({ onOpen }: { readonly onOpen: (ref: string) => void }): React.ReactNode => {
   const { alertActions: actions, prompts } = useDataSource()
+  const feed = useAttention()
+  const now = useNow()
+  const currentItems = feed._tag === 'Observed' ? alertsTabRows(feed.value, now).map(row => row.item) : []
   return (
     <AlertsList
-      feed={useAttention()}
+      feed={feed}
       decode={useAttentionDecode()}
-      now={useNow()}
+      now={now}
       onOpen={onOpen}
       renderThreads={alert => <LiveInboxThreads alert={alert} onOpenThread={onOpen} />}
-      footer={<LiveRecentlyClosedThreads onOpenThread={onOpen} />}
+      footer={<><LivePendingInboxStarts items={currentItems} onOpenThread={onOpen} /><LiveRecentlyClosedThreads onOpenThread={onOpen} /></>}
       onAct={actions === undefined ? undefined : (alert, action) => actions.act({ alert, action })}
       onAnswer={prompts === undefined ? undefined : (alert, _answer, sent) => {
         const prompt = promptAnswers(alert)
