@@ -93,8 +93,10 @@ pub fn completion_is_admitted(
 pub fn latest_operation(
     connection: &Connection, subject: &str, kind: &str,
 ) -> Result<Option<ClaimRecord>> {
-    let mut statement = connection.prepare_cached(&smallclaims::store::latest_claim_of_kind_query()
-        .replace(" LIMIT 1", ""))?;
+    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| smallclaims::store::canonical_sql(
+        "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind=?2 ORDER BY CANONICAL_DESC(claims)",
+    ));
+    let mut statement = connection.prepare_cached(&QUERY)?;
     let mut rows = statement.query(params![subject, kind])?;
     while let Some(row) = rows.next()? {
         let claim = smallclaims::store::claim_from_row(row)?;
