@@ -32,15 +32,17 @@ impl MetadataSnapshot {
                 conflict: state.as_deref() == Some("conflict"),
             })
         }).map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
-        let known = claims.iter().map(|entry| entry.claim.id.as_str()).collect::<BTreeSet<_>>();
-        for parent in claims.iter().filter(|entry| entry.eligible)
-            .flat_map(|entry| entry.claim.predecessors.iter())
-        {
-            if !known.contains(parent.as_str())
-                && claim_by_id_tx(connection, parent).map_err(internal)?.is_none()
-            {
-                // Do not expose a partial causal snapshot whose fields could change when
-                // a predecessor arrives without changing the frontier claim itself.
+        let graph = claims.iter().map(|entry| (entry.claim.id.as_str(), &entry.claim)).collect::<BTreeMap<_, _>>();
+        let mut pending = claims.iter().filter(|entry| entry.eligible)
+            .flat_map(|entry| entry.claim.predecessors.iter().map(String::as_str)).collect::<Vec<_>>();
+        let mut visited = BTreeSet::new();
+        while let Some(parent) = pending.pop() {
+            if !visited.insert(parent) { continue; }
+            if let Some(claim) = graph.get(parent) {
+                // Ineligible intermediates still carry immutable causal links. Every edge
+                // walked by heads() must be complete before exposing a versioned snapshot.
+                pending.extend(claim.predecessors.iter().map(String::as_str));
+            } else if claim_by_id_tx(connection, parent).map_err(internal)?.is_none() {
                 return Err(unavailable());
             }
         }
@@ -80,18 +82,117 @@ impl MetadataSnapshot {
         Ok(ids)
     }
 
+    pub(super) fn commit_snapshot(&self) -> Result<ClaimSubjectSnapshot, FractalError> {
+        let predecessors = self.predecessors()?;
+        let revision = if predecessors.is_empty() { None } else {
+            let creation = self.selected("thread.created")?.map(|claim| claim.id);
+            let title = self.selected("thread.title-set")?.map(|claim| claim.id);
+            let state = self.selected("thread.state-set")?.map(|claim| claim.id);
+            // Bind the effective selections as well as the causal frontier. A repair can
+            // exclude an ancestor title while leaving the frontier unchanged.
+            Some(format!("thread-revision/{}", canonical_hash(&(
+                "fractal.thread-metadata-snapshot.v1", &predecessors, creation, title, state,
+            )).map_err(internal)?))
+        };
+        Ok(ClaimSubjectSnapshot { revision, predecessors })
+    }
+
     pub(super) fn revision(&self) -> Result<Option<String>, FractalError> {
-        let heads = self.predecessors()?;
-        Ok(match heads.as_slice() {
-            [] => None,
-            [head] => Some(head.clone()),
-            _ => Some(format!("thread-revision/{}", canonical_hash(&(
-                "fractal.thread-metadata-frontier.v1", heads,
-            )).map_err(internal)?)),
-        })
+        Ok(self.commit_snapshot()?.revision)
     }
 }
 
 fn conflict() -> FractalError {
     FractalError::new("idempotency-conflict", "the thread metadata operation has conflicting requests")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const PERSON: &str = "person/owner";
+    const THREAD: &str = "thread/snapshot";
+
+    fn fixture() -> Store {
+        let store = Store::open_memory("metadata-snapshot").unwrap();
+        apply(&store, PERSON, THREAD, "create", Edit::Create {
+            agent: "agent/reviewer", title: "Original",
+        }).unwrap();
+        store
+    }
+
+    fn rename(store: &Store) -> ClaimRecord {
+        let current = summary(store, PERSON, THREAD).unwrap();
+        apply(store, PERSON, THREAD, "rename", Edit::Rename {
+            title: "Updated", title_revision: &current.title_revision, revision: &current.revision,
+        }).unwrap().0
+    }
+
+    fn state(store: &Store, key: &str, closed: bool) -> ClaimRecord {
+        let current = summary(store, PERSON, THREAD).unwrap();
+        let edit = if closed { Edit::Close { revision: &current.revision } }
+            else { Edit::Reopen { revision: &current.revision } };
+        apply(store, PERSON, THREAD, key, edit).unwrap().0
+    }
+
+    #[test]
+    fn excluding_an_ancestor_title_changes_the_snapshot_and_fences_old_writers() {
+        let store = fixture();
+        let title = rename(&store);
+        let closed = state(&store, "close", true);
+        let before = summary(&store, PERSON, THREAD).unwrap();
+        let frontier = MetadataSnapshot::read(&store.readers.get(), THREAD).unwrap().predecessors().unwrap();
+        assert_eq!(frontier, [closed.id]);
+        // This is the same retained-source exclusion maintained by record repairs.
+        store.connection.batched(|tx| -> anyhow::Result<()> {
+            tx.execute("INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)", [&title.id])?;
+            Ok(())
+        }).unwrap().unwrap();
+        let after = summary(&store, PERSON, THREAD).unwrap();
+        assert_eq!(after.title, "Original");
+        assert_eq!(after.state, "closed");
+        assert_ne!(after.revision, before.revision);
+        assert_eq!(MetadataSnapshot::read(&store.readers.get(), THREAD).unwrap().predecessors().unwrap(), frontier);
+        assert_eq!(apply(&store, PERSON, THREAD, "stale-reopen", Edit::Reopen {
+            revision: &before.revision,
+        }).unwrap_err().code, "stale-subject");
+        assert!(summary(&store, "person/other", THREAD).is_err());
+        state(&store, "fresh-reopen", false);
+        assert_eq!(summary(&store, PERSON, THREAD).unwrap().state, "open");
+    }
+
+    #[test]
+    fn a_missing_parent_through_an_excluded_intermediate_never_exposes_a_partial_snapshot() {
+        let store = fixture();
+        let title = rename(&store);
+        let intermediate = state(&store, "close", true);
+        let current = state(&store, "reopen", false);
+        assert_eq!(current.predecessors, [intermediate.id.clone()]);
+        assert_eq!(intermediate.predecessors, [title.id.clone()]);
+        store.connection.batched(|tx| -> anyhow::Result<()> {
+            tx.execute("INSERT INTO projection_digest_repaired_claims(id) VALUES(?1)", [&intermediate.id])?;
+            Ok(())
+        }).unwrap().unwrap();
+        let complete = summary(&store, PERSON, THREAD).unwrap();
+        // Model retained/out-of-order graph state below normal admission: C -> X -> T,
+        // with X excluded and T not present yet. No live writer can manufacture this path.
+        store.connection.batched(|tx| -> anyhow::Result<()> {
+            tx.execute("DELETE FROM claims WHERE id=?1", [&title.id])?;
+            assert!(MetadataSnapshot::read(tx, THREAD).is_err());
+            Ok(())
+        }).unwrap().unwrap();
+        assert!(summary(&store, PERSON, THREAD).is_err());
+        assert!(summary(&store, "person/other", THREAD).is_err());
+        store.connection.batched(|tx| -> anyhow::Result<()> {
+            tx.execute("INSERT INTO claims(id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+                        VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                params![title.id, title.store_index, title.batch_id, title.subject, title.kind,
+                    title.origin, title.actor, serde_json::to_string(&title.body)?,
+                    serde_json::to_string(&title.predecessors)?, title.accepted_at_unix_ms.to_string()])?;
+            Ok(())
+        }).unwrap().unwrap();
+        let restored = summary(&store, PERSON, THREAD).unwrap();
+        assert_eq!(restored.title, "Updated");
+        assert_eq!(restored.state, "open");
+        assert_eq!(restored.revision, complete.revision);
+    }
 }

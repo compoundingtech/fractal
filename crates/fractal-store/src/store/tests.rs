@@ -13244,7 +13244,8 @@ fn typed_thread_edits_keep_timeline_provenance_and_check_receipt_authority() {
         &store, owner, thread, "create",
         Edit::Create { agent: "agent/example", title: "Review" },
     ).unwrap();
-    let close = || Edit::Close { revision: &created.id };
+    let created_revision = thread_metadata::summary(&store, owner, thread).unwrap().revision;
+    let close = || Edit::Close { revision: &created_revision };
     let (closed, _) = apply(&store, owner, thread, "close", close()).unwrap();
     assert_eq!(closed.actor.as_deref(), Some(owner));
     assert!(closed.accepted_at_unix_ms > 0);
@@ -13258,14 +13259,16 @@ fn typed_thread_edits_keep_timeline_provenance_and_check_receipt_authority() {
     assert_eq!(retry.id, closed.id);
     assert_eq!(retry.operation_id, closed.operation_id);
     assert_eq!(retry.accepted_at_unix_ms, closed.accepted_at_unix_ms);
+    let closed_revision = thread_metadata::summary(&store, owner, thread).unwrap().revision;
     let (reopened, _) = apply(
-        &store, owner, thread, "reopen", Edit::Reopen { revision: &closed.id },
+        &store, owner, thread, "reopen", Edit::Reopen { revision: &closed_revision },
     ).unwrap();
     assert_eq!(reopened.body["fields"]["state"], "open");
+    let reopened_revision = thread_metadata::summary(&store, owner, thread).unwrap().revision;
     let (renamed, _) = apply(
         &store, owner, thread, "rename",
         Edit::Rename {
-            title: "Worker review", title_revision: &created.id, revision: &reopened.id,
+            title: "Worker review", title_revision: &created.id, revision: &reopened_revision,
         },
     ).unwrap();
     assert_eq!(renamed.body["fields"]["title"], "Worker review");
@@ -13277,7 +13280,7 @@ fn typed_thread_edits_keep_timeline_provenance_and_check_receipt_authority() {
         apply(
             &store, owner, thread, "new-rename",
             Edit::Rename {
-                title: "Stale", title_revision: &created.id, revision: &renamed.id,
+                title: "Stale", title_revision: &created.id, revision: &thread_metadata::summary(&store, owner, thread).unwrap().revision,
             },
         ).unwrap_err().code,
         "stale-thread-title",
@@ -13299,7 +13302,8 @@ fn thread_lifecycle_projection_selects_the_same_receipt_across_members() {
     ).unwrap();
     right.import_replication("thread-left", &left.export_replication(0).unwrap()).unwrap();
     assert!(latest_lifecycle_event(&right, thread).unwrap().is_none());
-    let close = || Edit::Close { revision: &created.id };
+    let created_revision = thread_metadata::summary(&left, owner, thread).unwrap().revision;
+    let close = || Edit::Close { revision: &created_revision };
     let (left_close, _) = apply(&left, owner, thread, "close", close()).unwrap();
     let (right_close, _) = apply(&right, owner, thread, "close", close()).unwrap();
     assert_ne!(left_close.id, right_close.id);
@@ -13310,7 +13314,7 @@ fn thread_lifecycle_projection_selects_the_same_receipt_across_members() {
     assert_eq!(closed.change, Change::Closed);
     assert_eq!(latest_lifecycle_event(&left, thread).unwrap().as_ref(), Some(&closed));
     assert_eq!(latest_lifecycle_event(&right, thread).unwrap().as_ref(), Some(&closed));
-    let revision = left.latest_claim_id(thread).unwrap().unwrap();
+    let revision = thread_metadata::summary(&left, owner, thread).unwrap().revision;
     let (reopen, _) = apply(
         &left, owner, thread, "reopen", Edit::Reopen { revision: &revision },
     ).unwrap();
@@ -13333,9 +13337,10 @@ fn thread_mixed_timeline_preserves_the_selected_lifecycle_conflict() {
         Edit::Create { agent: "agent/example", title: "Review" },
     ).unwrap();
     right.import_replication(left.origin(), &left.export_replication(0).unwrap()).unwrap();
+    let created_revision = thread_metadata::summary(&left, owner, thread).unwrap().revision;
     for (store, title) in [(&left, "Left title"), (&right, "Right title")] {
         apply(store, owner, thread, "same-rename-key", Edit::Rename {
-            title, title_revision: &created.id, revision: &created.id,
+            title, title_revision: &created.id, revision: &created_revision,
         }).unwrap();
     }
     left.import_replication(right.origin(), &right.export_replication(0).unwrap()).unwrap();
@@ -13375,7 +13380,8 @@ fn thread_pairing_revocation_precedes_receipt_recovery() {
         expected_subject: None,
         idempotency_key: None,
     }).unwrap();
-    let close = || Edit::Close { revision: &created.id };
+    let created_revision = thread_metadata::summary(&store, person, thread).unwrap().revision;
+    let close = || Edit::Close { revision: &created_revision };
     let authority = || PersonAuthority::Paired { grant, completion: &paired.id, actor };
     let (_, appended) = apply_as(&store, person, thread, "close", close(), authority()).unwrap();
     assert!(appended);

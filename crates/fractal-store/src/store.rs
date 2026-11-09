@@ -22724,8 +22724,11 @@ pub(crate) fn refuse_untyped_thread_message(
 }
 
 pub type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), FractalError> + Sync + 'a;
-pub type ClaimRevision<'a> = dyn Fn(&Connection) -> Result<Option<String>, FractalError> + Sync + 'a;
-pub type ClaimPredecessors<'a> = dyn Fn(&Connection) -> Result<Vec<String>, FractalError> + Sync + 'a;
+pub struct ClaimSubjectSnapshot {
+    pub revision: Option<String>,
+    pub predecessors: Vec<String>,
+}
+pub type ClaimSubjectSnapshotReader<'a> = dyn Fn(&Connection) -> Result<ClaimSubjectSnapshot, FractalError> + Sync + 'a;
 
 #[derive(Default)]
 pub struct ClaimCommitContext<'a> {
@@ -22737,10 +22740,8 @@ pub struct ClaimCommitContext<'a> {
     pub admission: Option<&'a ClaimAdmission<'a>>,
     /// Current authority required for both a new append and replay of an existing receipt.
     pub authority: Option<&'a ClaimAdmission<'a>>,
-    /// A typed domain may fence a causal snapshot instead of the canonical timestamp tip.
-    pub subject_revision: Option<&'a ClaimRevision<'a>>,
-    /// Its accepted append retains every branch of that same admitted snapshot.
-    pub predecessors: Option<&'a ClaimPredecessors<'a>>,
+    /// A typed domain supplies its revision and all causal parents from one admitted snapshot.
+    pub subject_snapshot: Option<&'a ClaimSubjectSnapshotReader<'a>>,
     pub thread_delivery: bool,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
@@ -22973,9 +22974,11 @@ pub fn append_claim_with_commit_context(
                     ));
                 }
             }
+            let subject_snapshot = context.subject_snapshot
+                .map(|snapshot| snapshot(transaction)).transpose()?;
             if let Some(expected) = &input.expected_subject {
-                let actual = if let Some(revision) = context.subject_revision {
-                    revision(transaction)?
+                let actual = if let Some(snapshot) = &subject_snapshot {
+                    snapshot.revision.clone()
                 } else if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
                     transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_,String>(0)).optional().map_err(internal)?
                 } else {
@@ -23094,8 +23097,8 @@ pub fn append_claim_with_commit_context(
             {
                 return message_marks::record_tx(transaction, &graph.origin, &input.subject, &input.kind, &recipient);
             }
-            let mut predecessors = if let Some(predecessors) = context.predecessors {
-                predecessors(transaction)?
+            let mut predecessors = if let Some(snapshot) = subject_snapshot {
+                snapshot.predecessors
             } else {
                 let predecessor = if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
                     transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_, String>(0)).optional().map_err(internal)?

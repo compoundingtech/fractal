@@ -3000,8 +3000,9 @@ fn real_checkpoint_trim_preserves_thread_title_history_and_rename_receipt() {
         &store, person, subject, "thread/create",
         Edit::Create { agent: "agent/alder", title: "Original" },
     ).unwrap();
+    let created_revision = summary(&store, person, subject).unwrap().revision;
     let rename = || Edit::Rename {
-        title: "Current", title_revision: &created.id, revision: &created.id,
+        title: "Current", title_revision: &created.id, revision: &created_revision,
     };
     let (renamed, _) = apply(&store, person, subject, "thread/rename", rename()).unwrap();
     let cut = now_ms() + 1_000;

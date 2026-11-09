@@ -323,7 +323,7 @@ mod tests {
             thread,
             "close",
             Edit::Close {
-                revision: &created.id,
+                revision: &crate::store::thread_metadata::summary(&store, person, thread).unwrap().revision,
             },
         )
         .unwrap();

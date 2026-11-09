@@ -134,8 +134,9 @@ check the metadata revision visible at admission. A stale client refreshes and m
 accepted incoming reply remains append-only and does not change the title or lifecycle
 revision. Metadata successors override their causal ancestors even if the writer's clock is
 behind. Canonical claim order resolves only concurrent edits. The opaque metadata revision
-fences every known causal frontier branch; the next accepted edit retains all those branches
-as predecessors. A title's revision still identifies the exact effective title claim.
+fences every known causal frontier branch and the effective creation, title, and lifecycle
+claims. Excluding a previously effective claim by repair changes that version even when the
+frontier itself is unchanged. The next accepted edit retains all frontier branches as predecessors. A title's revision still identifies the exact effective title claim.
 Existing historical subject-based discussion remains readable through its existing
 path. There is no inferred migration from subjects to durable thread IDs.
 

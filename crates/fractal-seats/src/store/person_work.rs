@@ -229,7 +229,7 @@ pub mod tests {
         assert!(mixed_timeline(&store, "person/other", "thread/worker", None, 1).is_err());
         let (closed, _) = crate::store::thread_metadata::apply(
             &store, person, "thread/worker", "close-worker",
-            crate::store::thread_metadata::Edit::Close { revision: &created.id },
+            crate::store::thread_metadata::Edit::Close { revision: &crate::store::thread_metadata::summary(&store, person, "thread/worker").unwrap().revision },
         ).unwrap();
         let agent = original.actor.as_deref().unwrap();
         crate::store::thread_delivery::append_reply(
@@ -394,7 +394,7 @@ pub mod tests {
         let (closed, _) = apply(&store, person, &historical.id, "close-history", Edit::Close {
             revision: &historical.revision,
         }).unwrap();
-        apply(&store, person, &historical.id, "reopen-history", Edit::Reopen { revision: &closed.id }).unwrap();
+        apply(&store, person, &historical.id, "reopen-history", Edit::Reopen { revision: &crate::store::thread_metadata::summary(&store, person, &historical.id).unwrap().revision }).unwrap();
         assert_eq!(list_context(&store, person, context(), None, 20).unwrap().items.len(), 3);
     }
 
@@ -508,7 +508,7 @@ pub mod tests {
         ).unwrap();
         assert!(sent);
         let (closed, _) = apply(&store, person, thread, "close-signed-thread", Edit::Close {
-            revision: &created.id,
+            revision: &crate::store::thread_metadata::summary(&store, person, thread).unwrap().revision,
         }).unwrap();
         let incoming = reply("message/signed-thread-incoming", agent, person, Some(&quoted.subject));
         assert!(crate::store::thread_delivery::append_reply(
@@ -553,7 +553,7 @@ pub mod tests {
             key: "start-thread-link", first_message: &message,
         }).unwrap();
         let (closed, _) = apply(&store, person, thread, "close-linked-thread", Edit::Close {
-            revision: &created.id,
+            revision: &crate::store::thread_metadata::summary(&store, person, thread).unwrap().revision,
         }).unwrap();
         input.idempotency_key = "follow-up-request".into();
         let fresh_ask = store.ask_person(&input).unwrap();

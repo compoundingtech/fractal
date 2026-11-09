@@ -540,7 +540,7 @@ mod read_progress_tests {
         let anchor = message(&left, "message/shown-anchor");
         assert!(late.accepted_at_unix_ms < anchor.accepted_at_unix_ms);
         let (closed, _) = apply(&left, owner, thread, "close-read-test", Edit::Close {
-            revision: &created.id,
+            revision: &crate::store::thread_metadata::summary(&left, owner, thread).unwrap().revision,
         }).unwrap();
         let seen = vec![anchor.subject.clone()];
         assert_eq!(mark_read(&left, PersonAuthority::TrustedLocal, owner, thread, None, &[]).unwrap(), (vec![], false));

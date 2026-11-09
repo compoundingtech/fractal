@@ -271,11 +271,12 @@ fn apply_inner(
         owned_creation(connection, subject, person, revision.is_none()).map(|_| ())
     };
 
-    let admit = |connection: &Connection| {
+    let subject_snapshot = |connection: &Connection| {
+        let snapshot = MetadataSnapshot::read(connection, subject)?;
         if let Some(observed) = input.fields.get("title_revision").and_then(Value::as_str) {
-            let title = match latest_applied_claim(connection, subject, "thread.title-set")? {
+            let title = match snapshot.selected("thread.title-set")? {
                 Some(title) => title,
-                None => latest_applied_claim(connection, subject, "thread.created")?
+                None => snapshot.selected("thread.created")?
                     .ok_or_else(stale_title)?,
             };
             if title.id != observed {
@@ -283,9 +284,9 @@ fn apply_inner(
             }
         }
         if let Some(requested) = input.fields.get("state").and_then(Value::as_str) {
-            let current_revision = MetadataSnapshot::read(connection, subject)?.revision()?;
+            let current_revision = snapshot.revision()?;
             if current_revision.as_deref() == revision {
-                let lifecycle = latest_applied_claim(connection, subject, "thread.state-set")?;
+                let lifecycle = snapshot.selected("thread.state-set")?;
                 let current = lifecycle
                     .as_ref()
                     .and_then(|claim| claim.body["fields"]["state"].as_str())
@@ -298,11 +299,9 @@ fn apply_inner(
                 }
             }
         }
-        Ok(())
+        snapshot.commit_snapshot()
     };
 
-    let subject_revision = |connection: &Connection| MetadataSnapshot::read(connection, subject)?.revision();
-    let predecessors = |connection: &Connection| MetadataSnapshot::read(connection, subject)?.predecessors();
     store.graph.ensure_principal_key(person)?;
     append_claim_with_commit_context(
         &store.graph,
@@ -313,9 +312,7 @@ fn apply_inner(
         None,
         ClaimCommitContext {
             authority: Some(&authority),
-            admission: Some(&admit),
-            subject_revision: Some(&subject_revision),
-            predecessors: Some(&predecessors),
+            subject_snapshot: Some(&subject_snapshot),
             ..Default::default()
         },
     )
@@ -555,7 +552,8 @@ fn summary_conn(
     if selected_agent.is_some_and(|selected| selected != agent) {
         return Err(unavailable());
     }
-    let state = match latest_applied_claim(connection, subject, "thread.state-set")?
+    let snapshot = MetadataSnapshot::read(connection, subject)?;
+    let state = match snapshot.selected("thread.state-set")?
         .as_ref()
         .and_then(|claim| claim.body["fields"]["state"].as_str())
     {
@@ -568,9 +566,8 @@ fn summary_conn(
             ));
         }
     };
-    let title = latest_applied_claim(connection, subject, "thread.title-set")?
-        .unwrap_or_else(|| creation.clone());
-    let revision = MetadataSnapshot::read(connection, subject)?.revision()?.ok_or_else(unavailable)?;
+    let title = snapshot.selected("thread.title-set")?.unwrap_or_else(|| creation.clone());
+    let revision = snapshot.revision()?.ok_or_else(unavailable)?;
     let (message_count, unread) = message_window::message_summary(
         connection, person, agent, subject, &creation,
     )?;
