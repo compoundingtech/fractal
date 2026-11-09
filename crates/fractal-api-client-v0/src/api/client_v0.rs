@@ -9662,10 +9662,12 @@ async fn action_inner(
     let mut checked_fence = request.fence.clone();
     if matches!(request.action_type.as_str(), "arrangement.edit" | "arrangement.membership.edit") {
         // Layout revisions merge; fenced retirement and graph/launch identity revisions
-        // are checked in the writer transaction. Attention episodes and external filesystem
-        // sessions retain projected preflight checks (external state is outside SQLite).
+        // are checked in the writer transaction. Thread fences additionally require owner,
+        // read-scope and current-session authorization before reaching that atomic recheck.
+        // Attention and external filesystem sessions retain projected preflight checks.
         checked_fence.subject_revisions.retain(|subject, _| {
             subject.starts_with("attention/") || subject.starts_with("session/external-")
+                || fractal_schema::threads::is_reserved_subject(subject)
         });
     }
     let fence_result = validate_fence(&state, &checked_fence, &session);
