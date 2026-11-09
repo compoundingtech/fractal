@@ -1082,6 +1082,53 @@ fn a_leave_is_confirmed_by_a_matching_digest_or_a_refusal_as_left() {
 }
 
 #[test]
+fn budgets_attention_requires_positional_mission_and_accepts_read_options() {
+    let missing = Cli::try_parse_from(["fractal", "budgets", "attention"])
+        .err()
+        .expect("attention budget requires a mission");
+    assert_eq!(missing.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert!(Cli::try_parse_from([
+        "fractal", "budgets", "attention", "--mission", "mission/example",
+    ]).is_err());
+
+    let cli = Cli::try_parse_from([
+        "fractal", "budgets", "attention", "mission/example",
+    ]).expect("positional mission parses without optional filters");
+    assert!(!cli.json);
+    let Command::Budgets {
+        command: BudgetsCommand::Attention { mission, person, at },
+    } = cli.command else {
+        panic!("expected budgets attention");
+    };
+    assert_eq!(mission, "mission/example");
+    assert_eq!(person, None);
+    assert_eq!(at, None);
+
+    for arguments in [
+        vec![
+            "fractal", "budgets", "attention", "mission/example",
+            "--person", "person/operator", "--at", "1794182400000", "--json",
+        ],
+        vec![
+            "fractal", "--json", "budgets", "attention", "mission/example",
+            "--person", "person/operator", "--at", "1794182400000",
+        ],
+    ] {
+        let cli = Cli::try_parse_from(arguments)
+            .expect("attention budget filters and global JSON parse");
+        assert!(cli.json);
+        let Command::Budgets {
+            command: BudgetsCommand::Attention { mission, person, at },
+        } = cli.command else {
+            panic!("expected budgets attention");
+        };
+        assert_eq!(mission, "mission/example");
+        assert_eq!(person.as_deref(), Some("person/operator"));
+        assert_eq!(at, Some(1_794_182_400_000_u128));
+    }
+}
+
+#[test]
 fn missions_tree_fixture_renders_all_sections() {
     let fixture: Value =
         serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h5c4f751108a0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("../tests/fixtures/missions-tree.json"))

@@ -190,11 +190,17 @@ There is no database, replay or enforcement change.
 The client-v0 operation
 `GET /v1/client/attention-budget?mission=M[&person=P][&at=UNIX_MS]`
 reads the [attention window and declaration](#declared-admission) for one mission and person.
-Omitted person means the authenticated person. Only an embedded-web recipient session
-may read its own report. Agents and paired clients are refused even with `read.projections`,
-including over Fabric; a raw Unix person header does not authorize this read.
-There is no CLI transport for this operation. CLI and agent access would require a
-separate decision to widen read authority.
+Embedded-web recipient sessions may read their own report. Local agents and ordinary
+paired clients with `read.projections` may also read reports, including over
+Fabric. External assistant grants cannot read the report.
+Missing scope and expired sessions are refused; a raw Unix person header
+does not establish recipient authority. Existing `person_filter` restrictions
+limit person sessions to their own report: omitted person defaults to the session
+person, and another person is refused. Agents without a session person must specify
+`person`; omission never reads all people.
+
+The CLI uses the same client operation:
+`fractal budgets attention MISSION [--person PERSON] [--at UNIX_MS] [--json]`.
 
 The report distinguishes declared asks from undeclared, charged from inclusive usage,
 not-charged requests, and unattributed requests for the person. It identifies the canonical

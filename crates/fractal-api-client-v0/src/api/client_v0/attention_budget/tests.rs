@@ -32,7 +32,7 @@ fn query() -> AttentionBudgetQuery {
 }
 
 #[test]
-fn authority_is_only_the_embedded_web_recipient() {
+fn authority_allows_recipient_and_scoped_projection_readers() {
     let now = client_now_ms();
     let recipient = web();
     assert_eq!(authority(&recipient, None, now).unwrap(), "person/example");
@@ -46,15 +46,18 @@ fn authority_is_only_the_embedded_web_recipient() {
     let mut paired = ClientSession::for_tests_scoped("client/device", "person/example", &["read.projections"]);
     paired.transport = "fabric-loopback";
     paired.pairing_grant = Some("custom/client/example".into());
-    assert!(authority(&paired, Some("person/example"), now).is_err());
+    assert_eq!(authority(&paired, None, now).unwrap(), "person/example");
+    paired.grant_expires_at = Some(now);
+    assert!(authority(&paired, None, now).is_err());
+    paired.grant_expires_at = Some(now + 60_000);
     paired.scopes.clear();
     assert!(authority(&paired, None, now).is_err());
-    let agent = ClientSession::for_tests_scoped("agent/example", "agent/example", &["read.projections"]);
-    assert!(authority(&agent, Some("person/example"), now).is_err());
-    assert!(authority(&agent, None, now).is_err());
-    for actor in [None, Some("person/example")] {
-        assert!(authority(&ClientSession::local(actor).unwrap(), Some("person/example"), now).is_err());
-    }
+    let mut agent = ClientSession::for_tests_scoped("agent/example", "agent/example", &["read.projections"]);
+    assert_eq!(authority(&agent, Some("person/example"), now).unwrap(), "person/example");
+    assert_eq!(authority(&agent, None, now).unwrap_err().status, StatusCode::UNPROCESSABLE_ENTITY);
+    agent.scopes.clear();
+    assert_eq!(authority(&agent, Some("person/example"), now).unwrap_err().status, StatusCode::FORBIDDEN);
+    assert!(authority(&ClientSession::local(Some("person/example")).unwrap(), Some("person/example"), now).is_err());
 }
 
 #[tokio::test]
@@ -98,7 +101,7 @@ async fn recipient_revalidation_and_report_never_return_text() {
 }
 
 #[tokio::test]
-async fn fabric_refuses_paired_readers_and_raw_person_headers() {
+async fn fabric_admits_only_scoped_projection_readers_not_raw_person_headers() {
     let root = tempfile::tempdir().unwrap();
     let state = fixture(root.path());
     let app = super::super::super::fabric_router(state.clone());
@@ -118,7 +121,13 @@ async fn fabric_refuses_paired_readers_and_raw_person_headers() {
         let request = || Request::builder().uri(uri).header(AUTHORIZATION, format!("Bearer {credential}"))
             .body(Body::empty()).unwrap();
         let response = app.clone().oneshot(request()).await.unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.status(), if index == 1 { StatusCode::OK } else { StatusCode::FORBIDDEN });
+        if index == 1 {
+            let body = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+            let envelope: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(envelope["value"]["person"], "person/example");
+            assert_eq!(envelope["value"]["inclusive"], 0);
+        }
     }
     let raw = Request::builder().uri(uri).header(LOCAL_PERSON_HEADER, "person/example").body(Body::empty()).unwrap();
     assert_eq!(app.oneshot(raw).await.unwrap().status(), StatusCode::FORBIDDEN);

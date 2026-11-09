@@ -358,6 +358,11 @@ enum Command {
         #[command(subcommand)]
         command: AttentionCommand,
     },
+    /// Inspect mission budgets.
+    Budgets {
+        #[command(subcommand)]
+        command: BudgetsCommand,
+    },
     /// Assess fleet machines, health, and capacity.
     Machines(MachinesArgs),
     /// Inspect current agents or explicit agent history.
@@ -3966,6 +3971,22 @@ struct SubscriptionRequestArgs {
 }
 
 #[derive(Subcommand)]
+enum BudgetsCommand {
+    /// Read a mission's attention budget without charging it.
+    Attention {
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Mission)))]
+        mission: String,
+        /// Person whose attention budget to read; required for agent callers.
+        #[arg(long, value_parser = parse_person_subject)]
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Person)))]
+        person: Option<String>,
+        /// Evaluate the budget at this Unix timestamp in milliseconds.
+        #[arg(long, value_name = "UNIX_MS")]
+        at: Option<u128>,
+    },
+}
+
+#[derive(Subcommand)]
 enum AttentionCommand {
     /// List current alerts, then unread updates.
     Ls {
@@ -5986,6 +6007,14 @@ async fn run(cli: Cli) -> Result<()> {
                 cli.json,
             )
             .await
+        }
+        Command::Budgets {
+            command: BudgetsCommand::Attention { mission, person, at },
+        } => {
+            let response = generated_client(&endpoint, None)?
+                .attention_budget(&mission, person.as_deref(), at)
+                .await?;
+            print_client_value(&response, cli.json)
         }
         Command::Machines(args) => run_machines(&endpoint, args, cli.json).await,
         Command::Agents { command } => {
