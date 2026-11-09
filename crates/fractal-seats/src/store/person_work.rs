@@ -181,7 +181,7 @@ pub mod tests {
 
     #[test]
     fn starting_thread_from_real_ask_commits_one_first_message_and_leaves_ask_pending() {
-        use crate::store::thread_metadata::{StartFromAsk, TimelineItem, mixed_timeline, start_from_ask};
+        use crate::store::thread_metadata::{InboxOrigin, StartFromInbox, TimelineItem, mixed_timeline, start_from_inbox};
         use crate::store::thread_metadata::{ThreadContext, list_context};
 
         let (store, origin_run, input) = fixture();
@@ -203,18 +203,19 @@ pub mod tests {
             expected_subject: None,
             idempotency_key: None,
         };
-        let start = |thread, key, person| StartFromAsk {
-            thread, title: "Worker test", person, ask: &ask.subject,
-            episode: &original.id, key, first_message: &message,
+        let origin = InboxOrigin { source_id: ask.subject.clone(), episode: original.id.clone() };
+        let start = |thread, key, person| StartFromInbox {
+            thread, title: "Worker test", person, origin: &origin,
+            key, first_message: &message,
         };
-        let (created, appended) = start_from_ask(&store, start("thread/worker", "start-thread", person)).unwrap();
+        let (created, appended) = start_from_inbox(&store, start("thread/worker", "start-thread", person)).unwrap();
         assert!(appended);
-        assert_eq!(created.body["fields"]["origin_ask_episode"], original.id);
+        assert_eq!(created.body["fields"]["origin_episode"], original.id);
         assert_eq!(created.body["fields"]["first_message"], message.subject);
-        let origin = ThreadContext::Ask { id: &ask.subject, episode: &original.id };
+        let origin = ThreadContext::Inbox { source: &ask.subject, episode: &original.id };
         assert_eq!(list_context(&store, person, origin, None, 20).unwrap().items[0].id, "thread/worker");
-        assert!(list_context(&store, person, ThreadContext::Ask { id: &ask.subject, episode: "wrong" }, None, 20).unwrap().items.is_empty());
-        assert!(list_context(&store, "person/robin", ThreadContext::Ask { id: &ask.subject, episode: &original.id }, None, 20).unwrap().items.is_empty());
+        assert!(list_context(&store, person, ThreadContext::Inbox { source: &ask.subject, episode: "wrong" }, None, 20).unwrap().items.is_empty());
+        assert!(list_context(&store, "person/robin", ThreadContext::Inbox { source: &ask.subject, episode: &original.id }, None, 20).unwrap().items.is_empty());
         let mission = store.mission_run(&origin_run.run).unwrap().unwrap().mission;
         assert_eq!(created.body["fields"]["mission"], mission);
         assert_eq!(list_context(&store, person, ThreadContext::Mission(&mission), None, 20).unwrap().items[0].id, "thread/worker");
@@ -284,14 +285,14 @@ pub mod tests {
         );
         assert_eq!(foreign_quote.unwrap_err().code, "invalid-thread-message");
         assert!(store.claims_for("message/thread-foreign-quote", None).unwrap().is_empty());
-        let (retry, appended) = start_from_ask(&store, start("thread/worker", "start-thread", person)).unwrap();
+        let (retry, appended) = start_from_inbox(&store, start("thread/worker", "start-thread", person)).unwrap();
         assert!(!appended);
         assert_eq!(retry.id, created.id);
         let messages = store.claims_for(&message.subject, Some("message.sent")).unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].batch_id, created.batch_id);
         assert_eq!(
-            start_from_ask(&store, start("thread/rollback", "another-start", person)).unwrap_err().code,
+            start_from_inbox(&store, start("thread/rollback", "another-start", person)).unwrap_err().code,
             "stale-subject",
         );
         assert!(store.claims_for("thread/rollback", None).unwrap().is_empty());
@@ -304,7 +305,7 @@ pub mod tests {
         foreign_message.actor = Some("person/robin".into());
         foreign_message.fields.insert("from".into(), json!("person/robin"));
         assert_eq!(
-            start_from_ask(&store, StartFromAsk {
+            start_from_inbox(&store, StartFromInbox {
                 first_message: &foreign_message,
                 ..start("thread/foreign", "foreign-start", "person/robin")
             }).unwrap_err().code,
@@ -318,15 +319,15 @@ pub mod tests {
             idempotency_key: "answer-after-thread".into(), answer: None,
         }, false).unwrap();
         assert_eq!(
-            start_from_ask(&store, start("thread/after-answer", "start-after-answer", person)).unwrap_err().code,
+            start_from_inbox(&store, start("thread/after-answer", "start-after-answer", person)).unwrap_err().code,
             "thread-unavailable",
         );
-        assert!(!start_from_ask(&store, start("thread/worker", "start-thread", person)).unwrap().1);
+        assert!(!start_from_inbox(&store, start("thread/worker", "start-thread", person)).unwrap().1);
     }
 
     #[test]
     fn enrolled_device_starts_thread_with_signed_ask_origin_and_first_message() {
-        use crate::store::thread_metadata::{PersonAuthority, StartFromAsk, start_from_ask_as};
+        use crate::store::thread_metadata::{InboxOrigin, PersonAuthority, StartFromInbox, start_from_inbox_as};
         use smallclaims::principal::{ClaimSignature, FIELDS_FORMAT, fields_signing_bytes};
 
         let (store, _, input) = fixture();
@@ -360,7 +361,7 @@ pub mod tests {
                 ("status".into(), json!("sent")),
                 ("title".into(), json!("Worker tests")),
                 ("thread_id".into(), json!(thread)),
-                ("thread_origin_ask".into(), json!(ask.subject)),
+                ("thread_origin_source".into(), json!(ask.subject)),
                 ("thread_origin_episode".into(), json!(original.id)),
                 (
                     fractal_schema::threads::MESSAGE_READER_VERSION_FIELD.into(),
@@ -377,19 +378,20 @@ pub mod tests {
             &signature.signed_fields, &signature.signer, None, &signature.key,
             &signature.chain, &signature.nonce, signature.signed_at_unix_ms,
         ));
-        let start = || StartFromAsk {
-            thread, title: "Worker tests", person, ask: &ask.subject, episode: &original.id,
+        let origin = InboxOrigin { source_id: ask.subject.clone(), episode: original.id.clone() };
+        let start = || StartFromInbox {
+            thread, title: "Worker tests", person, origin: &origin,
             key: "start-signed-thread", first_message: &message,
         };
         let authority = || PersonAuthority::Paired { grant, completion: &pairing.id, actor };
-        let (created, appended) = start_from_ask_as(&store, start(), authority(), Some(&signature)).unwrap();
+        let (created, appended) = start_from_inbox_as(&store, start(), authority(), Some(&signature)).unwrap();
         assert!(appended);
         assert_eq!(created.body["fields"]["first_message"], message.subject);
         let delivered = store.claims_for(&message.subject, Some("message.sent")).unwrap();
         assert_eq!(delivered.len(), 1);
         assert_eq!(delivered[0].body["fields"]["thread_origin_episode"], original.id);
         assert_eq!(delivered[0].batch_id, created.batch_id);
-        assert_eq!(start_from_ask_as(&store, start(), authority(), Some(&signature)).unwrap().0.id, created.id);
+        assert_eq!(start_from_inbox_as(&store, start(), authority(), Some(&signature)).unwrap().0.id, created.id);
         use crate::store::thread_metadata::{Edit, TimelineItem, apply, mixed_timeline};
         let agent = original.actor.as_deref().unwrap();
         let reply = |subject: &str, from: &str, to: &str, quote: Option<&str>| {
@@ -454,7 +456,7 @@ pub mod tests {
     #[test]
     fn bound_requester_links_fresh_ask_to_closed_thread_without_answering_either() {
         use crate::store::thread_links::{AttachAsk, DecisionHistory, attach_ask};
-        use crate::store::thread_metadata::{Edit, StartFromAsk, apply, start_from_ask};
+        use crate::store::thread_metadata::{Edit, InboxOrigin, StartFromInbox, apply, start_from_inbox};
 
         let (store, _, mut input) = fixture();
         store.configure_thread_write_rollout([]);
@@ -472,8 +474,9 @@ pub mod tests {
             ]),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         };
-        let (created, _) = start_from_ask(&store, StartFromAsk {
-            thread, title: "Worker tests", person, ask: &first_ask.subject, episode: &original.id,
+        let origin = InboxOrigin { source_id: first_ask.subject.clone(), episode: original.id.clone() };
+        let (created, _) = start_from_inbox(&store, StartFromInbox {
+            thread, title: "Worker tests", person, origin: &origin,
             key: "start-thread-link", first_message: &message,
         }).unwrap();
         let (closed, _) = apply(&store, person, thread, "close-linked-thread", Edit::Close {

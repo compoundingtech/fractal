@@ -11398,7 +11398,6 @@ fn check_device_signature(
 /// A plain inline message prepared for a typed thread transaction. The action supplies
 /// the authenticated sender; caller-supplied fields cannot select an actor.
 pub enum ThreadMessageOrigin<'a> {
-    Ask(&'a str, &'a str),
     Inbox(&'a str, &'a str),
 }
 
@@ -11445,7 +11444,6 @@ pub fn prepare_inline_thread_message(
     if let Some(quote) = draft.quote { fields.insert("thread_quote_id".into(), json!(quote)); }
     if let Some(origin) = draft.origin {
         let (field, source, episode) = match origin {
-            ThreadMessageOrigin::Ask(source, episode) => ("thread_origin_ask", source, episode),
             ThreadMessageOrigin::Inbox(source, episode) => ("thread_origin_source", source, episode),
         };
         fields.insert(field.into(), json!(source));
