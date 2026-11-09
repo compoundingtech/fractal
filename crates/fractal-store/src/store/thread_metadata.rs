@@ -2,6 +2,10 @@
 
 use super::*;
 
+#[path = "thread_metadata_snapshot.rs"]
+mod metadata_snapshot;
+use metadata_snapshot::MetadataSnapshot;
+
 pub(super) fn install_indexes(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
          /* sqlite-large-value: allow-for-now lv-h60845d471cc3 owner=fractal_store::store::thread_metadata TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
@@ -279,14 +283,8 @@ fn apply_inner(
             }
         }
         if let Some(requested) = input.fields.get("state").and_then(Value::as_str) {
-            let current_revision: String = connection
-                .query_row(
-                     /* sqlite-large-value: allow-for-now lv-h7f574845282c owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &canonical_sql(smallclaims::store::LATEST_CLAIM_QUERY),
-                    [subject],
-                    |row| row.get(0),
-                )
-                .map_err(internal)?;
-            if Some(current_revision.as_str()) == revision {
+            let current_revision = MetadataSnapshot::read(connection, subject)?.revision()?;
+            if current_revision.as_deref() == revision {
                 let lifecycle = latest_applied_claim(connection, subject, "thread.state-set")?;
                 let current = lifecycle
                     .as_ref()
@@ -303,6 +301,8 @@ fn apply_inner(
         Ok(())
     };
 
+    let subject_revision = |connection: &Connection| MetadataSnapshot::read(connection, subject)?.revision();
+    let predecessors = |connection: &Connection| MetadataSnapshot::read(connection, subject)?.predecessors();
     store.graph.ensure_principal_key(person)?;
     append_claim_with_commit_context(
         &store.graph,
@@ -314,6 +314,8 @@ fn apply_inner(
         ClaimCommitContext {
             authority: Some(&authority),
             admission: Some(&admit),
+            subject_revision: Some(&subject_revision),
+            predecessors: Some(&predecessors),
             ..Default::default()
         },
     )
@@ -470,6 +472,9 @@ pub(super) fn latest_applied_claim(
     subject: &str,
     kind: &str,
 ) -> Result<Option<ClaimRecord>, FractalError> {
+    if matches!(kind, "thread.created" | "thread.title-set" | "thread.state-set") {
+        return MetadataSnapshot::read(connection, subject)?.selected(kind);
+    }
     let selected = connection
         .prepare_cached( /* sqlite-large-value: allow-for-now lv-h4162c9a4ad90 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
             "SELECT {CLAIM_COLUMNS}, operations.state
@@ -565,13 +570,7 @@ fn summary_conn(
     };
     let title = latest_applied_claim(connection, subject, "thread.title-set")?
         .unwrap_or_else(|| creation.clone());
-    let revision = connection
-        .query_row(
-             /* sqlite-large-value: allow-for-now lv-h9d96c131cb28 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &canonical_sql(smallclaims::store::LATEST_CLAIM_QUERY),
-            [subject],
-            |row| row.get(0),
-        )
-        .map_err(internal)?;
+    let revision = MetadataSnapshot::read(connection, subject)?.revision()?.ok_or_else(unavailable)?;
     let (message_count, unread) = message_window::message_summary(
         connection, person, agent, subject, &creation,
     )?;

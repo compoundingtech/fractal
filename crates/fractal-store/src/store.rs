@@ -22724,6 +22724,8 @@ pub(crate) fn refuse_untyped_thread_message(
 }
 
 pub type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), FractalError> + Sync + 'a;
+pub type ClaimRevision<'a> = dyn Fn(&Connection) -> Result<Option<String>, FractalError> + Sync + 'a;
+pub type ClaimPredecessors<'a> = dyn Fn(&Connection) -> Result<Vec<String>, FractalError> + Sync + 'a;
 
 #[derive(Default)]
 pub struct ClaimCommitContext<'a> {
@@ -22735,6 +22737,10 @@ pub struct ClaimCommitContext<'a> {
     pub admission: Option<&'a ClaimAdmission<'a>>,
     /// Current authority required for both a new append and replay of an existing receipt.
     pub authority: Option<&'a ClaimAdmission<'a>>,
+    /// A typed domain may fence a causal snapshot instead of the canonical timestamp tip.
+    pub subject_revision: Option<&'a ClaimRevision<'a>>,
+    /// Its accepted append retains every branch of that same admitted snapshot.
+    pub predecessors: Option<&'a ClaimPredecessors<'a>>,
     pub thread_delivery: bool,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
@@ -22968,7 +22974,9 @@ pub fn append_claim_with_commit_context(
                 }
             }
             if let Some(expected) = &input.expected_subject {
-                let actual = if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
+                let actual = if let Some(revision) = context.subject_revision {
+                    revision(transaction)?
+                } else if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
                     transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_,String>(0)).optional().map_err(internal)?
                 } else {
                     latest_claim_id_tx(transaction, &input.subject).map_err(internal)?
@@ -23086,12 +23094,16 @@ pub fn append_claim_with_commit_context(
             {
                 return message_marks::record_tx(transaction, &graph.origin, &input.subject, &input.kind, &recipient);
             }
-            let predecessor = if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
-                transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_, String>(0)).optional().map_err(internal)?
+            let mut predecessors = if let Some(predecessors) = context.predecessors {
+                predecessors(transaction)?
             } else {
-                latest_claim_id_tx(transaction, &input.subject).map_err(internal)?
+                let predecessor = if matches!(input.kind.as_str(), "arrangement.edited" | "ordered-membership.edited") {
+                    transaction.query_row("SELECT revision FROM arrangements WHERE subject=?1", [&input.subject], |row| row.get::<_, String>(0)).optional().map_err(internal)?
+                } else {
+                    latest_claim_id_tx(transaction, &input.subject).map_err(internal)?
+                };
+                predecessor.into_iter().collect::<Vec<_>>()
             };
-            let mut predecessors = predecessor.into_iter().collect::<Vec<_>>();
             // A placement handoff explicitly cites its local runtime and peer stop proof.
             // Keep same-subject evidence as causal links even when a newer declaration
             // displaced the runtime branch from the selected subject head.
