@@ -219,8 +219,15 @@ describe('AnswerAlert', () => {
     expect(renderToStaticMarkup(<AnswerAlert alert={item({})} now={now} />)).toContain('This device cannot answer alerts.')
     expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'harness-login', actions: [] })} onAct={async () => ({ _tag: 'Sent' })} now={now} />))
       .toContain('Sign in from the seat&#x27;s terminal.')
-    expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'fault', actions: [] })} onAct={async () => ({ _tag: 'Sent' })} now={now} />))
+    expect(renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'fault', actions: ['fault.respond'] })} onAct={async () => ({ _tag: 'Sent' })} now={now} />))
       .toContain('Answer this one in Fractal for now.')
+  })
+
+  it('does not ask for an answer to an informational report without actions', () => {
+    const html = renderToStaticMarkup(<AnswerAlert alert={item({ attention_kind: 'custom.garden.report', title: 'Worker report ready', detail: 'Checks are complete.', actions: [] })} now={now} />)
+    expect(html).toContain('Checks are complete.')
+    expect(html).not.toContain('Answer this one')
+    expect(html).not.toContain('This device cannot answer')
   })
 
   it('opens the first of several alerts and folds the rest under their titles', () => {

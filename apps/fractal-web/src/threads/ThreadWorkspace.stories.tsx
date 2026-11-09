@@ -8,7 +8,6 @@ import { userEvent, waitFor, within } from 'storybook/test'
 import { DataSourceProvider } from '../data/react.tsx'
 import { observed, unavailable } from '../data/source.ts'
 import { createAppStoryFixture } from '../fixtures/appStoryStates.ts'
-import { fixtureProjections } from '../fixtures/projections.ts'
 import { LiveAgentWorkspace, type WorkspaceNavigation } from '../web/LiveAgentWorkspace.tsx'
 import type { ThreadDraft, ThreadSource } from './threadSource.ts'
 
@@ -25,7 +24,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario) {
   const base = createAppStoryFixture('populated')
   const { agentRef } = base
   const registry = AtomRegistry.make()
-  const now = fixtureProjections.now
+  const now = Date.now()
   const originSource = scenario === 'custom-source' ? 'custom/garden/report/v1/origin' : askId
   const sourceTitle = scenario === 'custom-source' ? 'Worker report ready' : review
   const attention = (name: string, subject: string, claim: string, unread?: true) => Native.decodeUnknownSync(Native.Attention)({
@@ -124,7 +123,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario) {
   }
   const answered = Atom.make<ReadonlySet<string>>(new Set<string>())
   const source = {
-    ...base.source, threads,
+    ...base.source, threads, now: Atom.make(now),
     attention: Atom.make(get => observed({ value: [
       attention(sourceTitle, originSource, episode, get(summaries).find(row => row.id === existingId)?.unread ? true : undefined),
       attention('Confirm the release note', 'step-run/thread-story/release', 'claim/thread-story/release'),

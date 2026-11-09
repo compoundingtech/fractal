@@ -296,6 +296,11 @@ export const AnswerAlert = ({
   }
   const wordsId = React.useId()
   const takesWords = choices?.some((choice) => choice.words !== 'none') === true
+  const answerHint = alert.attention_kind === 'harness-login'
+    ? 'Sign in from the seat\'s terminal. One sign-in answers every seat that shares it.'
+    : alert.attention_kind === 'revision-approval'
+      ? 'Approve or cancel a revision with fractal work revision approve or cancel, as in the terminal app.'
+      : alert.actions.length > 0 ? 'Answer this one in Fractal for now.' : undefined
   const send = (choice: AlertChoice) => {
     if (onAct === undefined) return
     setConfirming(undefined)
@@ -324,13 +329,7 @@ export const AnswerAlert = ({
       </div>
       <Body alert={alert} />
       {choices === null ? (
-        <div {...stylex.props(styles.note)}>
-          {alert.attention_kind === 'harness-login'
-            ? 'Sign in from the seat\'s terminal. One sign-in answers every seat that shares it.'
-            : alert.attention_kind === 'revision-approval'
-              ? 'Approve or cancel a revision with fractal work revision approve or cancel, as in the terminal app.'
-              : 'Answer this one in Fractal for now.'}
-        </div>
+        answerHint === undefined ? null : <div {...stylex.props(styles.note)}>{answerHint}</div>
       ) : onAct === undefined ? (
         <div {...stylex.props(styles.note)}>This device cannot answer alerts. Answer it in Fractal.</div>
       ) : (
