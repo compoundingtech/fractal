@@ -4,7 +4,7 @@ import { Option } from 'effect'
 import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import * as React from 'react'
-import { userEvent, within } from 'storybook/test'
+import { userEvent, waitFor, within } from 'storybook/test'
 import { DataSourceProvider } from '../data/react.tsx'
 import { observed, unavailable } from '../data/source.ts'
 import { createAppStoryFixture } from '../fixtures/appStoryStates.ts'
@@ -174,6 +174,9 @@ type Story = StoryObj<typeof meta>
 export const AllStates: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
+    const navigation = await waitFor(() => canvas.queryByRole('tab', { name: /^Alerts\b/ })
+      ?? canvas.getByRole('button', { name: 'Expand sidebar' }), { timeout: 60_000 })
+    if (navigation.getAttribute('role') !== 'tab') await userEvent.click(navigation)
     await userEvent.click(await canvas.findByRole('tab', { name: /^Alerts\b/ }, { timeout: 60_000 }))
     await userEvent.click(await canvas.findByRole('button', { name: /^(Review PR #42|Worker report ready),/ }, { timeout: 60_000 }))
   },
