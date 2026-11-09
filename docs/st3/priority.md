@@ -97,6 +97,18 @@ at run admission and recorded on the run. A run is never repriced when prices ch
 Unknown pricing reports unknown usage, never zero. Usage reporting must show USD
 alongside cost-weighted tokens.
 
+**Attention window.** Attention has its own window type. A mission's attention usage
+for one person is the number of distinct native person-ask subjects
+(`work.person-asked`) that the mission sent to that person in the rolling 7 days
+that end at the read time. The window spans all recurring runs of the mission and
+does not reset per run. An answer does not reduce the count. Ask updates and migrated
+legacy asks do not count. Asks from delegated child runs count for the ancestor
+mission. Reason: a person spends attention over calendar time, and a per-run window
+would let a recurring mission (for example, an hourly one) ask many times a day
+without exceeding its limit. No attention declaration exists yet.
+`Store::attention_request_count` reports this measure from one replica's data; the
+result is not fleet-complete.
+
 **Agents.** New agent declarations accept only `memory-max` and `disk-max` in
 `declared-budgets`; `cpu-seconds` and `token-budget` refuse publication with
 `invalid-declared-admission` and the corresponding budget field. An agent has no
