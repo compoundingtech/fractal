@@ -19,18 +19,20 @@ const episode = 'claim/thread-story/review'
 const existingId = 'thread/worker-tests'
 const closedId = 'thread/rollout-notes'
 const actor = 'person/operator'
-type Scenario = 'existing' | 'empty' | 'closed' | 'multiple'
+type Scenario = 'existing' | 'empty' | 'closed' | 'multiple' | 'custom-source'
 
 function createThreadStory(readOnly: boolean, scenario: Scenario) {
   const base = createAppStoryFixture('populated')
   const { agentRef } = base
   const registry = AtomRegistry.make()
   const now = fixtureProjections.now
+  const originSource = scenario === 'custom-source' ? 'custom/garden/report/v1/origin' : askId
+  const sourceTitle = scenario === 'custom-source' ? 'Worker report ready' : review
   const attention = (name: string, subject: string, claim: string, unread?: true) => Native.decodeUnknownSync(Native.Attention)({
     id: `attention/${claim.split('/').at(-1)}`, kind: 'attention', revision: claim, episode: claim,
-    person_id: actor, source_id: subject, requester_id: agentRef, conversation_id: agentRef, attention_kind: 'agent-request',
-    title: name, detail: 'Can we proceed with this change?', priority: 'high', state: 'open', alert: true,
-    actions: ['work.done'], requested_at: new Date(now - 25 * 60_000).toISOString(), updated_at: new Date(now).toISOString(),
+    person_id: actor, source_id: subject, requester_id: agentRef, conversation_id: agentRef, attention_kind: scenario === 'custom-source' && subject === originSource ? 'custom.garden.report' : 'agent-request',
+    title: name, detail: scenario === 'custom-source' && subject === originSource ? 'The worker run finished. Discuss follow-up checks here.' : 'Can we proceed with this change?', priority: 'high', state: 'open', alert: true,
+    actions: scenario === 'custom-source' && subject === originSource ? [] : ['work.done'], requested_at: new Date(now - 25 * 60_000).toISOString(), updated_at: new Date(now).toISOString(),
     ...(unread === undefined ? {} : { thread_unread: unread }),
   })
   const summary = (id: string, title: string, state: 'open' | 'closed', count: number, unread: boolean) =>
@@ -41,7 +43,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario) {
     Native.decodeUnknownSync(Native.ThreadMessageEvent)({
       kind: 'message', id, actor_id: author, accepted_at_unix_ms: now + minutes * 60_000, content, thread_quote_id: quote ?? null,
     })
-  const summaries = Atom.make<readonly Native.ThreadSummary[]>(scenario === 'empty' ? [] : [
+  const summaries = Atom.make<readonly Native.ThreadSummary[]>(scenario === 'empty' || scenario === 'custom-source' ? [] : [
     summary(existingId, existing, 'open', 3, true), summary(closedId, 'Rollout notes', 'closed', 1, false),
     ...(scenario === 'multiple' ? [summary('thread/cancellation', 'Cancellation behavior', 'open', 1, false)] : []),
   ])
@@ -59,7 +61,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario) {
     ],
     'thread/cancellation': [message('message/cancellation', agentRef, -5, 'Cancellation keeps the original attempt fenced. Should we cover the retry case too?')],
   })
-  const origins = Atom.make<Readonly<Record<string, string>>>({ [existingId]: askId, [closedId]: askId, 'thread/cancellation': askId })
+  const origins = Atom.make<Readonly<Record<string, string>>>({ [existingId]: originSource, [closedId]: originSource, 'thread/cancellation': originSource })
   const drafts = Atom.family((_id: string) => Atom.keepAlive(Atom.make<ThreadDraft>({ content: '' })))
   const update = (id: string, edit: (row: Native.ThreadSummary) => Native.ThreadSummary) =>
     registry.set(summaries, registry.get(summaries).map(row => row.id === id ? edit(row) : row))
@@ -124,7 +126,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario) {
   const source = {
     ...base.source, threads,
     attention: Atom.make(get => observed({ value: [
-      attention(review, askId, episode, get(summaries).find(row => row.id === existingId)?.unread ? true : undefined),
+      attention(sourceTitle, originSource, episode, get(summaries).find(row => row.id === existingId)?.unread ? true : undefined),
       attention('Confirm the release note', 'step-run/thread-story/release', 'claim/thread-story/release'),
     ].filter(row => !get(answered).has(row.id)) })),
     ...(readOnly ? {} : { alertActions: {
@@ -161,19 +163,19 @@ const meta = {
   component: ThreadWorkspace,
   args: { placement: 'inbox', connection: 'local', scenario: 'existing' },
   argTypes: { placement: { control: 'inline-radio' }, connection: { control: 'inline-radio' }, scenario: { control: 'inline-radio' } },
-  parameters: { layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'Production workspace and thread pane with deterministic Inbox requests, exact quotes and local lifecycle actions. No daemon writes.' } },
+  parameters: { layout: 'fullscreen', scenario: { _tag: 'contract-fixture', reason: 'Production workspace and thread pane with deterministic Inbox sources, exact quotes and local lifecycle actions. No daemon writes.' } },
   render: args => <ThreadWorkspace key={`${args.placement}:${args.connection}:${args.scenario}`} {...args} />,
 } satisfies Meta<Args>
 export default meta
 
-export const scenarioExemptions = ['AllStates:contract-fixture', 'DedicatedTab:contract-fixture', 'ReadOnly:contract-fixture', 'EmptyStart:contract-fixture', 'ClosedThread:contract-fixture', 'MultipleThreads:contract-fixture'] as const
+export const scenarioExemptions = ['AllStates:contract-fixture', 'DedicatedTab:contract-fixture', 'ReadOnly:contract-fixture', 'EmptyStart:contract-fixture', 'ClosedThread:contract-fixture', 'MultipleThreads:contract-fixture', 'CustomInboxSource:contract-fixture'] as const
 type Story = StoryObj<typeof meta>
 
 export const AllStates: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement)
     await userEvent.click(await canvas.findByRole('tab', { name: /^Alerts\b/ }, { timeout: 60_000 }))
-    await userEvent.click(await canvas.findByRole('button', { name: /^Review PR #42,/ }))
+    await userEvent.click(await canvas.findByRole('button', { name: /^(Review PR #42|Worker report ready),/ }, { timeout: 60_000 }))
   },
 }
 export const DedicatedTab: Story = { args: { placement: 'tab' } }
@@ -182,3 +184,4 @@ export const ReadOnly: Story = { args: { placement: 'tab', connection: 'read-onl
 export const EmptyStart: Story = { args: { scenario: 'empty' }, play: AllStates.play }
 export const ClosedThread: Story = { args: { placement: 'tab', scenario: 'closed' } }
 export const MultipleThreads: Story = { args: { scenario: 'multiple' }, play: AllStates.play }
+export const CustomInboxSource: Story = { args: { scenario: 'custom-source' }, play: AllStates.play }
