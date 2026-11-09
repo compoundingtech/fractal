@@ -103,12 +103,16 @@ fn source_evidence(
         evidence.insert(claim.id);
     }
     if item.kind.starts_with("custom.") {
+        // Source payloads can contain unrelated variable data. Only their provenance object
+        // is needed to pin the exact admitted claims; retain the caller's transaction cut.
         let text: String = connection.query_row(
-            "SELECT body FROM custom_sources WHERE subject=?1", [&origin.source_id],
+            "SELECT CASE WHEN json_type(body,'$.provenance')='object'
+               THEN json_extract(body,'$.provenance') ELSE '{}' END
+             FROM custom_sources WHERE subject=?1", [&origin.source_id],
             |row| row.get(0),
         )?;
-        let body: Value = serde_json::from_str(&text)?;
-        for provenance in body["provenance"].as_object().into_iter().flat_map(|p| p.values()) {
+        let provenance: Value = serde_json::from_str(&text)?;
+        for provenance in provenance.as_object().into_iter().flat_map(|p| p.values()) {
             if let Some(id) = provenance["claim_id"].as_str() {
                 evidence.insert(id.into());
             }
@@ -124,10 +128,10 @@ fn source_evidence(
         }
     } else if matches!(item.kind.as_str(), "launch-approval" | "revision-approval") {
         let kind = if item.kind == "launch-approval" { "planning-session.previewed" } else { "revision-proposal.created" };
-        let id: Option<String> = connection.prepare_cached(&canonical_sql(
+        let id: Option<String> = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h9ee9e75a9561 owner=fractal_store::store::thread_inbox_source TODO=trace-statement-and-value-representation */ &canonical_sql(
             "SELECT id FROM claims WHERE subject=?1 AND kind=?2
              ORDER BY CANONICAL_DESC(claims) LIMIT 1",
-        ))?.query_row(params![origin.source_id, kind], |row| row.get(0)).optional()?;
+        ))?.query_row(/* sqlite-large-value: allow-for-now lv-h6c3a55133316 owner=fractal_store::store::thread_inbox_source TODO=trace-statement-and-value-representation */ params![origin.source_id, kind], |row| row.get(0)).optional()?;
         evidence.extend(id);
     }
     Ok(evidence.into_iter().collect())

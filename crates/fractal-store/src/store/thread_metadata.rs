@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) fn install_indexes(connection: &Connection) -> rusqlite::Result<()> {
     connection.execute_batch(
-         /* sqlite-large-value: allow-for-now lv-h5154252ff8aa owner=fractal_store::store::thread_metadata TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
+         /* sqlite-large-value: allow-for-now lv-h60845d471cc3 owner=fractal_store::store::thread_metadata TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
 ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.agent'), subject)
 WHERE kind='thread.created';
 CREATE INDEX IF NOT EXISTS claims_thread_message_accepted_index
@@ -735,7 +735,7 @@ pub fn unread_inbox_positions(
     }).collect::<Result<Vec<_>, FractalError>>()?;
     let keys = serde_json::to_string(&keys).map_err(internal)?;
     let mut query = conn.prepare_cached(
-         /* sqlite-large-value: allow-for-now lv-haed978c23ed6 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ "WITH inbox AS (
+         /* sqlite-large-value: allow-for-now lv-h10da3f869f76 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ "WITH inbox AS (
             SELECT CAST(key AS INTEGER) AS position, json_extract(value,'$[0]') AS ask,
                    json_extract(value,'$[1]') AS episode, json_extract(value,'$[2]') AS link
             FROM json_each(?1)

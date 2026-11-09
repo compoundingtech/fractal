@@ -2767,7 +2767,7 @@ stop "agent/alder.asker""#, "alder").unwrap();
         let ask = store.ask_person(&input).unwrap();
         store.configure_inbox_fallback_agent(Some("agent/example/pending-inbox")).unwrap();
         store.connection.batched(|tx| -> Result<()> {
-            tx.execute("INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms) VALUES('record/inbox-pending','example-peer',1,'inbox-pending',0,'{}','unknown','agent/example/pending-inbox','agent.renamed','1')", [])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h023477cfb471 owner=fractal_seats::store::person_work TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms) VALUES('record/inbox-pending','example-peer',1,'inbox-pending',0,'{}','unknown','agent/example/pending-inbox','agent.renamed','1')", [])?;
             Ok(())
         }).unwrap().unwrap();
         let items = store.attention_items(Some("person/avery")).unwrap();

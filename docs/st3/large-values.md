@@ -94,6 +94,41 @@ rationale in their place. It checks neither the linked review's existence nor
 its approval. Owner/TODO strings alone are not cost, correctness, or storage
 approval; do not replace a TODO with a permanent exemption.
 
+### Inbox discussion and generic thread-origin inventory review
+
+These entries retain transitional debt under their source-module maintainers.
+They establish neither a byte bound nor a permanent exemption. The discussion
+resolver and evidence reads retain the caller's supplied connection; configuration
+and its materialized-row invalidation remain one writer transaction. Existing
+history, signed envelopes and pairing records are unchanged.
+
+| Site | Actual producer, values and access | Remaining representation work |
+| --- | --- | --- |
+| `lv-h023477cfb471` | `fractal_seats::store::person_work`: test-only insertion of one fixed unresolved replica envelope (`raw = '{}'`) and known subject hints to exercise fallback refusal. | Keep the fixture tied to actual envelope columns; the fixture does not qualify arbitrary replication values as bounded. |
+| `lv-heb39719bc8fc` | `fractal_store::store::attention_ivm`: three fixed trigger definitions propagate replica subject hints into dirty-row dependencies. They copy identifiers, not raw envelope bytes; identifier bytes and invalidation fanout remain unproven. | Follow exact-wire identity dependencies into a bounded representation and keyed invalidation/reclamation; preserve insert, update and delete invalidation. |
+| `lv-h59b064d8f339` | `fractal_store::store::attention_ivm::tests`: one fixed replica fixture with the tested lifecycle state and fallback agent bound as parameters. | Maintain the real envelope dependency shape without treating the test's short values as production bounds. |
+| `lv-hcda7c845be22` | The same test module deletes that exact fixed fixture record to verify recovery invalidation. | Keep deletion coupled to the real replica lifecycle; no general deletion-cost exemption follows. |
+| `lv-h6a5073273ece` | The same test module renames the identity relation using constant table names to expose a genuine database error. This is an isolated failure fixture, not a production schema migration. | Keep the fixture isolated; its metadata operation does not prove bounds on stored identity values or cleanup work. |
+| `lv-h901f68d5f5cf` | `fractal_store::store::attention_snapshot`: the canonical operational-episode fold reads matching failure/recovery claims, including their bodies, dependencies, identifiers and timestamps. An episode filter supplies no bound on row count or historical body bytes. | Trace the fold into an incremental episode projection or references while preserving canonical failure/recovery selection and historical fields. |
+| `lv-h75808bdc9a86` | `fractal_store::store::inbox`: one daemon-local metadata key stores a schema-validated agent identifier. Subject-family validation is not an encoded-byte bound. | Preserve local configuration semantics while establishing a bounded identifier/reference representation. |
+| `lv-h79674b576f3f` | The same module deletes that single constant metadata key when configuration is cleared. | Retain exact-key cleanup and qualify its physical value/index costs with the metadata representation. |
+| `lv-h85f3f02d66ef` | The same transaction invalidates all existing materialized Inbox rows after policy changes, copying family/source identifiers into the dirty set. Row count and identifier bytes are not bounded by a client page size. | Qualify policy-change fanout and keyed reclamation without separating publication from its atomic invalidation. |
+| `lv-h9ee9e75a9561` | `fractal_store::store::thread_inbox_source`: a canonical prepared lookup selects the latest preview/proposal claim ID for an exact source and one of two fixed claim kinds. It selects no claim body; one row still does not prove identifier byte bounds. | Trace the dynamic canonical statement and returned identity into the durable evidence/reference representation. |
+| `lv-h6c3a55133316` | The same lookup's execution/bind sink supplies the source identifier and fixed claim kind, returning the claim ID above. | Preserve source/episode authority and the caller's transaction cut when qualifying bind and result identities. |
+| `lv-h60845d471cc3` | `fractal_store::store::thread_metadata`: index declarations now include generic origin/episode keys and the operational episode index. Person, agent, origin, episode, mission and subject keys remain variable; historical ask-field aliases remain indexed readers. Replaces `lv-h5154252ff8aa`. | Qualify every variable index key or replace it with a bounded reference; retain generic/historical lookup semantics and account for index installation. |
+| `lv-h10da3f869f76` | The same module binds serialized source/episode/link tuples to the unread-origin query. It returns positions and subject/link identities, not full claims. Its internal caller set has no universal page-size or encoded-byte bound. Replaces `lv-haed978c23ed6`. | Trace the batch parameter and result identities into bounded physical units without losing exact episode matching or old ask-linked history. |
+
+The evidence reader also avoids loading the complete custom-source body: it
+projects only the provenance object needed to pin admitted claim IDs. Missing,
+null, array and scalar provenance retain the previous empty-evidence behavior.
+Provenance entries and their identifiers still have no proven byte bound; this
+projection reduces copied data rather than qualifying it as bounded. A future
+representation change must preserve exact evidence and the admission transaction.
+
+The column/index catalog is derived by the owning lexical inventory functions
+after reviewing these declarations. The two superseded markers and records are
+removed; unchanged reviewed records, manual flows and `reviewed_base` remain.
+
 ### Client operation admission inventory (PR #5921)
 
 The `fractal_store::pairing` maintainer owns `lv-h37e16ce1bdcb`,

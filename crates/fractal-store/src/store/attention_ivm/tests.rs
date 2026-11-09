@@ -87,7 +87,7 @@ fn unavailable_inbox_fallback_keeps_cards_and_actions_visible_but_refuses_discus
             while !flush(tx, &views, now_ms(), 2)? {}
             // The identity reader's real lifecycle fence: unresolved replica evidence is
             // pending; rejected evidence is conflicting. Neither is a storage failure.
-            tx.execute("INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms) VALUES('record/inbox-pending','example-peer',1,'inbox-pending',0,'{}',?1,?2,'agent.renamed','1')",
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h59b064d8f339 owner=fractal_store::store::attention_ivm::tests TODO=chunk-or-reference-exact-wire-values */ "INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms) VALUES('record/inbox-pending','example-peer',1,'inbox-pending',0,'{}',?1,?2,'agent.renamed','1')",
                 params![state, fallback])?;
             Ok(())
         }).unwrap().unwrap();
@@ -107,14 +107,14 @@ fn unavailable_inbox_fallback_keeps_cards_and_actions_visible_but_refuses_discus
             assert_eq!(cached["operational"]["actionable"], true);
             assert!(cached["operational"]["reasons"].as_array().unwrap().contains(&json!("discussion-lifecycle-unavailable")));
             assert_eq!(cached["actions"], json!(["custom.reply"]));
-            tx.execute("DELETE FROM replica_records WHERE record_ref='record/inbox-pending'", [])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-hcda7c845be22 owner=fractal_store::store::attention_ivm::tests TODO=chunk-or-reference-exact-wire-values */ "DELETE FROM replica_records WHERE record_ref='record/inbox-pending'", [])?;
             assert!(!clean(tx, Some(CUSTOM_VIEW))?);
             while !flush(tx, &views, now_ms(), 2)? {}
             let rows = window(tx, &views, CUSTOM_VIEW, "person/example", u128::MAX, 10)?;
             let restored = rows.iter().find(|row| row["source_id"] == subject).unwrap();
             assert!(!restored["operational"]["reasons"].as_array().unwrap().contains(&json!("discussion-lifecycle-unavailable")));
             // A missing database relation remains an error; the lifecycle exception is narrow.
-            tx.execute("ALTER TABLE identity_names RENAME TO broken_identity_names", [])?;
+            tx.execute(/* sqlite-large-value: allow-for-now lv-h6a5073273ece owner=fractal_store::store::attention_ivm::tests TODO=bound-or-reference-values-and-reclamation */ "ALTER TABLE identity_names RENAME TO broken_identity_names", [])?;
             assert!(crate::store::inbox::responsible_agent_at(tx, item).is_err());
             Ok(())
         }).unwrap().unwrap();

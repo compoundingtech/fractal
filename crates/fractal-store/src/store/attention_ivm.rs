@@ -134,7 +134,7 @@ impl View for Family {
                 "DELETE" => "OLD.subject_hint",
                 _ => "OLD.subject_hint,NEW.subject_hint",
             };
-            connection.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS attention_open_inbox_lifecycle_{action} AFTER {action} ON replica_records BEGIN INSERT INTO local_attention_open_dirty SELECT family,source FROM local_attention_open_dependencies WHERE dependency IN ({hints}) ON CONFLICT DO NOTHING; END;"))?;
+            connection.execute_batch(&format!(/* sqlite-large-value: allow-for-now lv-heb39719bc8fc owner=fractal_store::store::attention_ivm TODO=chunk-or-reference-exact-wire-values */ "CREATE TRIGGER IF NOT EXISTS attention_open_inbox_lifecycle_{action} AFTER {action} ON replica_records BEGIN INSERT INTO local_attention_open_dirty SELECT family,source FROM local_attention_open_dependencies WHERE dependency IN ({hints}) ON CONFLICT DO NOTHING; END;"))?;
         }
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hcd371697cf7d owner=fractal_store::store::attention_ivm TODO=chunk-or-reference-exact-wire-values */ "CREATE TRIGGER IF NOT EXISTS attention_open_batch_update AFTER UPDATE OF origin,replica_sequence ON batches BEGIN
           INSERT INTO local_attention_open_dirty SELECT family,source FROM local_attention_open_dependencies

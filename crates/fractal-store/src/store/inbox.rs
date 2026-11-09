@@ -78,13 +78,13 @@ impl Store {
         let changed = self.connection.batched(|tx| -> Result<bool> {
             if configured_agent_at(tx)?.as_deref() == agent { return Ok(false) }
             match agent {
-                Some(agent) => { tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![FALLBACK_AGENT, agent])?; }
-                None => { tx.execute("DELETE FROM meta WHERE key=?1", [FALLBACK_AGENT])?; }
+                Some(agent) => { tx.execute(/* sqlite-large-value: allow-for-now lv-h75808bdc9a86 owner=fractal_store::store::inbox TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![FALLBACK_AGENT, agent])?; }
+                None => { tx.execute(/* sqlite-large-value: allow-for-now lv-h79674b576f3f owner=fractal_store::store::inbox TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [FALLBACK_AGENT])?; }
             }
             // Existing materialized rows must adopt changed policy before being served again.
             let installed: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='local_attention_open')", [], |row| row.get(0))?;
             if installed {
-                tx.execute("INSERT OR IGNORE INTO local_attention_open_dirty SELECT family,source FROM local_attention_open", [])?;
+                tx.execute(/* sqlite-large-value: allow-for-now lv-h85f3f02d66ef owner=fractal_store::store::inbox TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_attention_open_dirty SELECT family,source FROM local_attention_open", [])?;
             }
             Ok(true)
         }).map_err(anyhow::Error::msg)??;
