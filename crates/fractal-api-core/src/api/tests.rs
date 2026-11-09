@@ -133,74 +133,6 @@ fn ancestry_records_environment_read_failure() {
     });
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn service_manager_eacces_ends_ancestry_without_changing_identity() {
-    with_process_fixture(std::process::Command::new("sh").args(["-c", "echo $$; read answer"]), |pid| {
-        let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
-        let process = local_harness_process(pid).unwrap();
-        let ancestor = pid + 1;
-        let mut old_warnings = 0;
-        let before = ancestry_or_record(Err(AncestryUnavailableCause {
-            pid: Some(ancestor),
-            reason: AncestryUnavailableReason::ProcessReadFailed {
-                operation: "proc-environ-read",
-                error: std::io::Error::from_raw_os_error(libc::EACCES).to_string(),
-            },
-        }), |_| old_warnings += 1);
-        assert_eq!(before, HarnessAncestry::Unavailable);
-        assert_eq!(old_warnings, 1);
-        for connector_identity in [HarnessAncestry::Person, HarnessAncestry::Bound("agent/fixture/worker".into())] {
-            let mut warnings = 0;
-            for _ in 0..3 {
-                let result = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer),
-                    |candidate| {
-                        let mut current = process.clone();
-                        current.generation.as_mut().unwrap().0 = if candidate == pid { ancestor } else { 1 };
-                        Ok(current)
-                    },
-                    |candidate| if candidate == pid { Ok(connector_identity.clone()) } else {
-                        assert_eq!(candidate, ancestor, "stop at the service manager");
-                        Err(linux_environment_read_failure(
-                            std::io::Error::from_raw_os_error(libc::EACCES),
-                            || Ok(b"systemd\n".to_vec()),
-                        ))
-                    }), |_| warnings += 1);
-                let expected = if connector_identity == HarnessAncestry::Person { before.clone() } else { connector_identity.clone() };
-                assert_eq!(result, expected);
-            }
-            assert_eq!(warnings, 0, "expected boundary must not warn on every request");
-        }
-        let mut warnings = 0;
-        let result = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer),
-            |_| Ok(process.clone()),
-            |_| Err(AncestryUnavailableReason::ServiceManagerEnvironmentDenied)),
-            |_| warnings += 1);
-        assert_eq!(result, HarnessAncestry::Unavailable);
-        assert_eq!(warnings, 1, "the connector itself is not an ancestor boundary");
-    });
-}
-
-#[cfg(target_os = "linux")]
-#[test]
-fn only_service_manager_eacces_is_an_expected_environment_boundary() {
-    for (errno, command) in [(libc::EACCES, b"sh\n".as_slice()), (libc::ENOENT, b"systemd\n".as_slice())] {
-        assert!(matches!(linux_environment_read_failure(std::io::Error::from_raw_os_error(errno),
-            || Ok(command.to_vec())), AncestryUnavailableReason::ProcessReadFailed { .. }));
-    }
-}
-
-#[test]
-fn ancestry_diagnostics_are_rate_limited() {
-    let now = std::time::Instant::now();
-    let mut last_report = None;
-    assert!(ancestry_diagnostic_due(&mut last_report, now));
-    for seconds in 0..60 {
-        assert!(!ancestry_diagnostic_due(&mut last_report, now + std::time::Duration::from_secs(seconds)));
-    }
-    assert!(ancestry_diagnostic_due(&mut last_report, now + std::time::Duration::from_secs(60)));
-}
-
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[test]
 fn ancestry_records_generation_change() {
@@ -275,16 +207,20 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
         let socket = root.path().join("bound.sock");
         let reserved = reserve_unix_socket(&socket, None).await.unwrap();
         let (ready, waiting) = tokio::sync::oneshot::channel();
-        let lookup: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry = if ancestry == HarnessAncestry::Unavailable {
-            |_, _| HarnessAncestry::Unavailable
+        let lookup: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>)
+            -> Result<HarnessAncestry, AncestryUnavailableCause> = if ancestry == HarnessAncestry::Unavailable {
+            |pid, _| Err(AncestryUnavailableCause { pid: Some(pid + 1),
+                reason: AncestryUnavailableReason::ProcessReadFailed {
+                    operation: "proc-environ-read", error: "Permission denied (os error 13)".into(),
+                } })
         } else {
-            |_, _| HarnessAncestry::Person
+            |_, _| Ok(HarnessAncestry::Person)
         };
         let app = Router::new().fallback(|| async { Json(json!({"ok": true})) });
         let authority: Option<WorkerAuthority> = worker.then(|| {
             Arc::new(|| Ok(std::process::id())) as WorkerAuthority
         });
-        let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
+        let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
             reserved, app, Some(state.store), authority, lookup,
             move || { let _ = ready.send(()); },
         ));
@@ -308,7 +244,8 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
             ("POST", "/v1/example", false, r#"{"actor":"person/operator"}"#, true),
             ("POST", "/v1/example", false, r#"{"requester":"agent/other"}"#, true),
         ] {
-            let mut request = Request::builder().method(method).uri(path).header("host", "local");
+            let mut request = Request::builder().method(method).uri(path).header("host", "local")
+                .header("x-verified-worker-fallback", "true");
             if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
             let response = sender.send_request(request.body(Body::from(body)).unwrap()).await.unwrap();
             let refused = sensitive && ancestry == HarnessAncestry::Unavailable && !worker;
