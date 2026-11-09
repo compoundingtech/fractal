@@ -5922,7 +5922,7 @@ mod tests {
 
     #[test]
     fn an_agent_with_prose_newer_than_its_read_position_is_marked_until_its_conversation_shows() {
-        // Johannes, 2026-11-08: the same unread signal on the web, the TUI and the phone, from
+        // The same unread signal on the web, the TUI and the phone compares
         // st's `last_prose_at` against where the person last read the conversation.
         let mut ui = tab_badge_world();
         let mut next = ui.world.clone();
@@ -5955,12 +5955,74 @@ mod tests {
         }).collect();
         assert_eq!(marked, ["agent/b"], "its row in Agents is marked too");
         // Its conversation, presented, is read up to its newest prose.
+        let timelines = presented_read_timeline(&mut ui, 90_000);
         ui.show_tab(1);
         let _ = screen(&ui);
         assert!(ui.frame.borrow().panes.iter().any(|pane| pane.key == "chat:agent/b"), "the conversation shows");
-        ui.read_presented_conversations();
+        ui.read_presented_conversations(&timelines);
         assert!(!badge(&ui).unread);
         assert!(ui.world.unread.is_empty());
+    }
+
+    fn presented_read_timeline(
+        ui: &mut Ui,
+        at: i64,
+    ) -> BTreeMap<String, fractal_conversation_ui::Timeline> {
+        let items: Vec<fractal_client::TimelineEntry> = serde_json::from_value(serde_json::json!([{
+            "id": "prose", "sequence": 1, "revision": 1, "timestamp": read_store::timestamp(at).unwrap(),
+            "role": "assistant", "type": "content", "final": true,
+            "body": { "media_type": "text/plain", "text": "Presented prose" }
+        }])).unwrap();
+        ui.world.conversations.insert(
+            "agent/b".into(),
+            Load::Ready(adapt::conversation(&items, &BTreeMap::new())),
+        );
+        BTreeMap::from([("agent/b".into(), fractal_conversation_ui::Timeline {
+            items, ..Default::default()
+        })])
+    }
+
+    #[test]
+    fn roster_before_transcript_does_not_advance_presented_reads() {
+        let mut ui = tab_badge_world();
+        let mut timelines = presented_read_timeline(&mut ui, 60_000);
+        ui.reads.advance("agent/b", 60_000);
+        let mut next = ui.world.clone();
+        if let Load::Ready(agents) = &mut next.agents {
+            agents[1].last_prose_ms = Some(90_000);
+        }
+        ui.set_world(next);
+        ui.show_tab(1);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        assert!(ui.reads.unread("agent/b", Some(90_000)), "stale presented prose cannot consume the roster update");
+
+        ui.world.conversations.insert("agent/b".into(), Load::Loading);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        assert!(ui.reads.unread("agent/b", Some(90_000)), "loading is not presentation");
+
+        timelines = presented_read_timeline(&mut ui, 90_000);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        assert!(!ui.reads.unread("agent/b", Some(90_000)), "the new prose is read only after presentation");
+    }
+
+    #[test]
+    fn failed_conversation_load_does_not_advance_presented_reads() {
+        let mut ui = tab_badge_world();
+        let timelines = presented_read_timeline(&mut ui, 90_000);
+        ui.reads.advance("agent/b", 60_000);
+        let mut next = ui.world.clone();
+        if let Load::Ready(agents) = &mut next.agents {
+            agents[1].last_prose_ms = Some(90_000);
+        }
+        next.conversations.insert("agent/b".into(), Load::Failed("Transcript unavailable".into()));
+        ui.set_world(next);
+        ui.show_tab(1);
+        let _ = screen(&ui);
+        ui.read_presented_conversations(&timelines);
+        assert!(ui.reads.unread("agent/b", Some(90_000)));
     }
 
     #[test]

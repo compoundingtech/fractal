@@ -69,16 +69,11 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   const [timeline, setTimeline] = useState<Conversation<TimelineEntry>>(() => conversationCache.current.get(target) ?? empty);
   const timelineNow = useRef(timeline);
   timelineNow.current = timeline;
-  // Open and in front: what this conversation holds is seen, as far as the newest prose known of it.
+  // Only viewable prose establishes a read frontier, not the roster's newer timestamp.
   const focused = useIsFocused();
   const [active, setActive] = useState(AppState.currentState === 'active');
   useEffect(() => { const listening = AppState.addEventListener('change', state => setActive(state === 'active')); return () => listening.remove(); }, []);
-  const lastProseAt = agent?.last_prose_at;
-  useEffect(() => {
-    if (!focused || !active) return;
-    const tail = seenTail(lastProseAt, timeline.entries);
-    if (tail !== undefined) readPositions.advance(target, tail);
-  }, [focused, active, target, lastProseAt, timeline.entries]);
+  const [presented, setPresented] = useState<ReadonlySet<string>>(new Set());
   // Earlier pages load only when the person asks by scrolling (or tapping the line above the
   // oldest entry), never on their own when a short conversation fits the screen.
   const dragged = useRef(false);
@@ -202,6 +197,11 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
     return () => quality.endConversation(qualityOpen.current);
   }, [target, unresolved, attempt]));
   const visibleEntries = useRef((info: { viewableItems: ViewToken<Row>[] }) => {
+    setPresented(new Set(info.viewableItems.flatMap(item => {
+      if (!item.isViewable || item.item.kind !== 'entry') return [];
+      const { entry } = item.item;
+      return (entry.body.kind === 'assistant' && entry.body.text) || entry.body.kind === 'mail' ? [entry.id] : [];
+    })));
     for (const item of info.viewableItems) {
       const kind = item.item.kind;
       if (item.isViewable && (kind === 'entry' || kind === 'call' || kind === 'bundle')) { quality.conversationVisible(qualityOpen.current); break; }
@@ -238,6 +238,11 @@ function ConversationView({ route, navigation }: RootScreen<'Conversation'>) {
   }, [data.agents, caps?.session_actor]);
   // Half a conversation is worse than none: when Fractal could not read the transcript, say why.
   const unreadable = useMemo(() => unreadableTranscript(timeline.entries), [timeline.entries]);
+  useEffect(() => {
+    if (!focused || !active || unreadable) return;
+    const tail = seenTail(timeline.entries, presented);
+    if (tail !== undefined) readPositions.advance(target, tail);
+  }, [focused, active, target, unreadable, timeline.entries, presented]);
   useEffect(() => { if (unreadable) quality.conversationError(qualityOpen.current, 'transcript-not-bound'); }, [unreadable]);
   // An entry that did not change keeps its object, so its row is not drawn and measured again:
   // redrawing every row on each frame made the list jump.

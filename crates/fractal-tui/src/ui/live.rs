@@ -460,7 +460,7 @@ enum Fetched {
     },
     /// st's read positions for the person, on the connection `generation`: `None` from a daemon
     /// that keeps none (positions stay on this device), or why they could not be read.
-    ReadPositions { generation: u64, outcome: Result<Option<Vec<(String, i64)>>, String> },
+    ReadPositions { generation: u64, outcome: Result<Option<Vec<(String, i64)>>, fractal_client::ClientError> },
     /// st answered the advance of a read position to `at_ms`: the position it keeps now, if it
     /// said, or why it failed.
     ReadPositionAdvanced { generation: u64, conversation: String, at_ms: i64, outcome: Result<Option<i64>, String> },
@@ -756,6 +756,7 @@ pub fn run(context: Context) -> Result<()> {
                 // An invalidation: st's list is read again (`read_store`), not the frame's rows.
                 feed::Update::Window { window: Window::ReadPositions, .. } => {
                     ui.reads.stream_frame(Instant::now());
+                    changed |= extras.window_errors.remove(&window_label(Window::ReadPositions)).is_some();
                 }
                 feed::Update::Window { window: Window::Arrangements, items, .. } => {
                     ui.resource_sidebar.writable = true;
@@ -954,10 +955,6 @@ pub fn run(context: Context) -> Result<()> {
                     changed = true;
                 }
                 feed::Update::WindowStopped(window) => {
-                    // The socket had no room for the stream: st's list is polled instead.
-                    if window == Window::ReadPositions {
-                        ui.reads.stream_stopped(Instant::now());
-                    }
                     if let Window::Inventory(inventory) = window {
                         extras.window_errors.remove(&window_label(window));
                         extras.inventory_partial.retain(|name| name != inventory.collection());
@@ -970,11 +967,6 @@ pub fn run(context: Context) -> Result<()> {
                         extras.missions_followed = false;
                         changed = true;
                     }
-                }
-                // st refused the stream for now; the feed asks again and the list is polled
-                // meanwhile. Nothing is said: the positions shown are still good.
-                feed::Update::WindowFailed(Window::ReadPositions, _) => {
-                    ui.reads.stream_stopped(Instant::now());
                 }
                 feed::Update::WindowFailed(window, error) => {
                     if let Window::Inventory(Inventory::Clients) = window && model.clients.is_none() { model.clients = Some(Err(error.clone())); }
@@ -1256,8 +1248,16 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 Fetched::GlassSaved { id, key, outcome } => ui.glass_saved(&id, &key, outcome),
                 Fetched::ReadPositions { generation, outcome } => {
-                    if generation == resources_generation && ui.reads.listed(outcome, Instant::now()) {
-                        ui.refresh_tab_statuses();
+                    if generation == resources_generation {
+                        if let Err(error) = &outcome {
+                            extras.window_errors.insert("ReadPositionsList".into(), error.human());
+                            changed = true;
+                        } else {
+                            changed |= extras.window_errors.remove("ReadPositionsList").is_some();
+                        }
+                        if ui.reads.listed(outcome, Instant::now()) {
+                            ui.refresh_tab_statuses();
+                        }
                     }
                 }
                 Fetched::ReadPositionAdvanced { generation, conversation, at_ms, outcome } => {
@@ -2100,7 +2100,7 @@ pub fn run(context: Context) -> Result<()> {
         for at in landed_answers.drain(..) {
             super::slo::METRICS.observe("alert_landed_ms", at.elapsed());
         }
-        ui.read_presented_conversations();
+        ui.read_presented_conversations(&timelines);
         ui.queue_read_advances(Instant::now(), extras.live);
         if extras.live
             && let Some(check) = ui.reads.list_due(Instant::now())
@@ -2793,17 +2793,17 @@ async fn save_sidebar(client: &Client, write: &super::resource_sidebar::Write) -
 
 /// The person's read positions st keeps, every page, as ms since the epoch; `None` when the daemon
 /// keeps none (asked first when `check`) or the session is no person's.
-async fn read_positions(client: &Client, person: &str, check: bool) -> Result<Option<Vec<(String, i64)>>, String> {
+async fn read_positions(client: &Client, person: &str, check: bool) -> Result<Option<Vec<(String, i64)>>, fractal_client::ClientError> {
     if !person.starts_with("person/") {
         return Ok(None);
     }
-    if check && !client.capabilities().await.map_err(|error| error.human())?.value.grants(super::read_store::CAPABILITY, 1) {
+    if check && !client.capabilities().await?.value.grants(super::read_store::CAPABILITY, 1) {
         return Ok(None);
     }
     let mut positions = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
-        let page = client.read_positions_list(person, cursor.as_deref(), None).await.map_err(|error| error.human())?.value;
+        let page = client.read_positions_list(person, cursor.as_deref(), None).await?.value;
         positions.extend(page.items.into_iter().filter(|item| item.owner == person).filter_map(|item| {
             let at = super::read_store::at_ms(&item.at)?;
             Some((item.conversation, at))
@@ -3285,6 +3285,16 @@ async fn send_message(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_refused_read_position_stream_is_visible_without_an_inventory() {
+        let extras = Extras {
+            window_errors: BTreeMap::from([("ReadPositions".into(), "subscription refused".into())]),
+            ..Extras::default()
+        };
+        assert_eq!(adapt::world(&Model::default(), "person/reader", &extras).stale,
+            ["ReadPositions: subscription refused"]);
+    }
+
     #[test]
     fn a_polled_inventory_that_fails_briefly_says_nothing_and_one_that_keeps_failing_is_said() {
         let start = Instant::now();

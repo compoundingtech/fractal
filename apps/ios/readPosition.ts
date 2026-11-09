@@ -40,11 +40,13 @@ export function countsAsNew(entry: Pick<TimelineEntry, 'type' | 'role' | 'body'>
   return false;
 }
 
-/** Where an open conversation's position goes: the newest of the roster's prose and the loaded prose. */
-export function seenTail(lastProseAt: string | null | undefined, entries: readonly Pick<TimelineEntry, 'type' | 'role' | 'body' | 'timestamp'>[]): number | undefined {
-  let latest = ms(lastProseAt);
+/** The newest presented prose; roster timestamps never establish what the person saw. */
+export function seenTail(entries: readonly Pick<TimelineEntry, 'id' | 'type' | 'role' | 'body' | 'timestamp'>[], presented: ReadonlySet<string>): number | undefined {
+  let latest: number | undefined;
   for (const entry of entries) {
     if (!countsAsNew(entry)) continue;
+    const body = entry.body as { message_id?: string };
+    if (![...presented].some(id => id === entry.id || id.startsWith(`${entry.id}#`) || (entry.type === 'message' && id === body.message_id))) continue;
     const at = ms(entry.timestamp);
     if (at !== undefined && (latest === undefined || at > latest)) latest = at;
   }

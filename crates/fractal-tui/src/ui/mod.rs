@@ -93,7 +93,7 @@ use fractal_conversation_ui::pane::order;
 use fractal_conversation_ui::{PaneIntent, PaneState, Selection};
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     io::{self, Write},
     rc::Rc,
     time::{Duration, Instant},
@@ -709,11 +709,12 @@ impl Ui {
         self.frame.borrow().read_messages.clone()
     }
 
-    /// Call only after the terminal successfully presented this frame: each conversation pane it
-    /// showed is read up to its agent's newest prose (st's `last_prose_at`), here at once and in st
-    /// through `queue_read_advances`. A conversation with no position anywhere starts there too, so
-    /// nothing from before the first look counts as new.
-    pub(crate) fn read_presented_conversations(&mut self) {
+    /// Call only after terminal presentation succeeds. Advance through visible prose entries,
+    /// resolving their absolute timestamps from the transcript rather than the newer roster.
+    pub(crate) fn read_presented_conversations(
+        &mut self,
+        timelines: &BTreeMap<String, fractal_conversation_ui::Timeline>,
+    ) {
         if self.help || self.popover.is_some() || self.glasses.palette_open() {
             return;
         }
@@ -722,11 +723,37 @@ impl Ui {
             frame
                 .panes
                 .iter()
-                .filter(|pane| pane.rect.width > 0 && pane.rect.height > 0)
-                .filter_map(|pane| pane.key.strip_prefix("chat:"))
-                .filter_map(|id| {
-                    let agent = self.world.agents.items().iter().find(|agent| agent.id == id)?;
-                    Some((agent.id.clone(), agent.last_prose_ms?))
+                .filter_map(|pane| {
+                    let id = pane.key.strip_prefix("chat:")?;
+                    let entries = self.world.conversations.get(id)?.ready()?;
+                    let timeline = timelines.get(id)?;
+                    let at = pane.entries.iter().enumerate().filter_map(|(index, (entry_id, start))| {
+                        let end = pane.entries.get(index + 1).map_or(pane.total, |(_, line)| *line);
+                        if !pane.entry_visible(*start, end, &frame.covers) {
+                            return None;
+                        }
+                        let entry = entries.iter().find(|entry| entry.id == *entry_id)?;
+                        match &entry.body {
+                            Body::Assistant(text) if !text.is_empty() => {}
+                            Body::Mail { .. } => {}
+                            _ => return None,
+                        }
+                        let source = timeline.items.iter().find(|source| {
+                            entry_id == &source.id
+                                || entry_id.strip_prefix(&source.id).is_some_and(|suffix| suffix.starts_with('#'))
+                                || matches!(&source.body, fractal_client::TimelineBody::Message(message) if &message.message_id == entry_id)
+                        })?;
+                        match &source.body {
+                            fractal_client::TimelineBody::Content(_) if source.role == fractal_client::TimelineRole::Assistant => {}
+                            fractal_client::TimelineBody::Message(message)
+                                if source.role != fractal_client::TimelineRole::User
+                                    && !message.from.as_deref().is_some_and(|from| from.starts_with("person/"))
+                                    && !message.author.as_deref().is_some_and(|author| author.starts_with("person/")) => {}
+                            _ => return None,
+                        }
+                        read_store::at_ms(&source.timestamp)
+                    }).max()?;
+                    Some((id.to_owned(), at))
                 })
                 .collect()
         };

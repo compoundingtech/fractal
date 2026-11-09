@@ -35,13 +35,44 @@ test('only the other side\'s prose counts as new', () => {
   assert.equal(countsAsNew(entry('message', 'system', { message_id: 'm', author: 'person/ada' })), false);
 });
 
-test('the seen tail is the newest of the roster prose and the loaded prose', () => {
+test('the seen tail is the newest presented prose, not a later prompt', () => {
   const entries = [entry('content', 'assistant', {}, '2026-11-08T10:00:00Z'), entry('content', 'user', {}, '2026-11-08T11:00:00Z')];
-  assert.equal(seenTail(undefined, entries), at('2026-11-08T10:00:00Z'));
-  assert.equal(seenTail('2026-11-08T10:30:00Z', entries), at('2026-11-08T10:30:00Z'));
-  assert.equal(seenTail('2026-11-08T09:00:00Z', entries), at('2026-11-08T10:00:00Z'));
-  assert.equal(seenTail(null, []), undefined);
-  assert.equal(seenTail('not a time', []), undefined);
+  assert.equal(seenTail(entries, new Set(entries.map(entry => entry.id))), at('2026-11-08T10:00:00Z'));
+  assert.equal(seenTail(entries, new Set()), undefined);
+});
+
+test('a roster update before its transcript cannot advance the presented frontier', async () => {
+  const { storage } = memory();
+  const positions = new ReadPositions(storage);
+  await positions.load('https://gateway.example', 'person/example');
+  const old = entry('content', 'assistant', {}, '2026-11-08T10:00:00Z');
+  const newer = entry('content', 'assistant', {}, '2026-11-08T11:00:00Z');
+  const present = entries => {
+    const tail = seenTail(entries, new Set([old.id]));
+    if (tail !== undefined) positions.advance('agent/example', tail);
+  };
+  present([]);
+  assert.equal(positions.read('agent/example'), undefined, 'a roster timestamp alone establishes no frontier');
+  present([old]);
+  assert.equal(unreadMark(positions.read('agent/example'), newer.timestamp), UNREAD_DOT);
+  present([old, newer]);
+  assert.equal(positions.read('agent/example'), at(old.timestamp), 'loaded but not presented prose stays unread');
+  positions.advance('agent/example', seenTail([old, newer], new Set([newer.id])));
+  assert.equal(positions.read('agent/example'), at(newer.timestamp));
+});
+
+test('a failed conversation load with no presented prose cannot advance synced reads', async () => {
+  const { storage } = memory();
+  const positions = new ReadPositions(storage);
+  await positions.load('https://gateway.example', 'person/example');
+  const remote = daemon();
+  positions.connect('https://gateway.example', 'person/example', remote.port);
+  await flush();
+  const tail = seenTail([], new Set());
+  if (tail !== undefined) positions.advance('agent/example', tail);
+  await flush();
+  assert.equal(positions.read('agent/example'), undefined);
+  assert.equal(remote.sent.length, 0);
 });
 
 test('a mark needs a known position and roster prose beyond the skew', () => {

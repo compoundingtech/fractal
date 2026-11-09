@@ -3,10 +3,10 @@
 //! unread, and its tab and row say so.
 //!
 //! st keeps the positions, one per person and conversation, merged from every device by the
-//! larger time. This TUI lists them on connecting, again on each frame of their stream (or now
-//! and then while the socket has no room for the stream), and merges them in by the larger. Its
-//! own reads move a position here at once and are then sent as `read-position.advance`, at most
-//! one in flight and one every [`COALESCE`] per conversation, retried after a growing wait.
+//! larger time. This TUI lists them on connecting and on each invalidation from their dedicated
+//! stream, and merges them in by the larger. Its own reads move a position here at once and are
+//! then sent as `read-position.advance`, at most one in flight and one every [`COALESCE`] per
+//! conversation, retried after a growing wait.
 //!
 //! `read-<scope>.json` beside the drafts is only an offline cache: the merged positions and
 //! advances st has not confirmed, scoped to the same gateway/device grant and person as the
@@ -30,9 +30,6 @@ pub const COALESCE: Duration = Duration::from_secs(2);
 
 /// How long a failed send waits, doubling from [`COALESCE`] up to this.
 const RETRY_CAP: Duration = Duration::from_secs(60);
-
-/// How often st's positions are listed while their stream is not held (the socket is full).
-pub const POLL: Duration = Duration::from_secs(30);
 
 /// How long a failed list waits before it is asked again.
 const LIST_RETRY: Duration = Duration::from_secs(10);
@@ -95,8 +92,6 @@ struct Listing {
     reading: bool,
     again: bool,
     due: Option<Instant>,
-    /// The stream is held, so its frames say when to read; otherwise the list is polled.
-    followed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -168,7 +163,6 @@ impl ReadPositions {
 
     /// The stream of st's positions said something changed: read the list again.
     pub fn stream_frame(&mut self, now: Instant) {
-        self.listing.followed = true;
         if self.listing.reading {
             self.listing.again = true;
         } else {
@@ -176,14 +170,6 @@ impl ReadPositions {
         }
     }
 
-    /// The stream is no longer held (the socket had no room, or st refused it for now): the list is
-    /// read every [`POLL`] instead.
-    pub fn stream_stopped(&mut self, now: Instant) {
-        self.listing.followed = false;
-        if !self.listing.reading && self.server == Server::Present {
-            self.listing.due.get_or_insert(now + POLL);
-        }
-    }
 
     /// Whether st's list should be read now; then whether the daemon's capability must be asked
     /// first. Never against a daemon without read positions.
@@ -199,7 +185,7 @@ impl ReadPositions {
 
     /// st answered a list: its positions (`None` from a daemon without them), or why it could not.
     /// Whether any position moved.
-    pub fn listed(&mut self, outcome: Result<Option<Vec<(String, i64)>>, String>, now: Instant) -> bool {
+    pub fn listed(&mut self, outcome: Result<Option<Vec<(String, i64)>>, fractal_client::ClientError>, now: Instant) -> bool {
         self.listing.reading = false;
         match outcome {
             Ok(None) => {
@@ -212,13 +198,14 @@ impl ReadPositions {
                 if self.listing.again {
                     self.listing.again = false;
                     self.listing.due = Some(now);
-                } else if !self.listing.followed {
-                    self.listing.due = Some(now + POLL);
                 }
                 self.merge(positions)
             }
-            Err(_) => {
-                self.listing.due = Some(now + LIST_RETRY);
+            Err(error) => {
+                if matches!(error, fractal_client::ClientError::Transport(_) | fractal_client::ClientError::Unreachable(_)
+                    | fractal_client::ClientError::Api(fractal_client::ErrorCode::RemoteUnavailable, _, _)) {
+                    self.listing.due = Some(now + LIST_RETRY);
+                }
                 false
             }
         }
@@ -533,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn the_list_is_read_once_at_a_time_again_after_a_frame_and_polled_without_the_stream() {
+    fn the_list_is_read_once_at_a_time_only_after_invalidations_or_network_failure() {
         let now = Instant::now();
         let mut positions = ReadPositions::default();
         positions.connected(now);
@@ -541,14 +528,23 @@ mod tests {
         positions.stream_frame(now);
         assert_eq!(positions.list_due(now), None, "one read at a time");
         positions.listed(Ok(Some(Vec::new())), now);
-        assert_eq!(positions.list_due(now), Some(false), "a frame during the read reads again, without the capability");
+        assert_eq!(positions.list_due(now), Some(false), "a frame during the read reads again");
         positions.listed(Ok(Some(Vec::new())), now);
-        assert_eq!(positions.list_due(now + POLL * 2), None, "the stream says when");
-        positions.stream_stopped(now);
-        assert_eq!(positions.list_due(now + POLL - Duration::from_millis(1)), None);
-        assert_eq!(positions.list_due(now + POLL), Some(false), "polled without the stream");
-        positions.listed(Err("unreachable".into()), now + POLL);
-        assert_eq!(positions.list_due(now + POLL + LIST_RETRY), Some(false), "a failed read is tried again");
+        assert_eq!(positions.list_due(now + Duration::from_secs(3600)), None, "no periodic listing");
+        positions.stream_frame(now);
+        assert_eq!(positions.list_due(now), Some(false));
+        positions.listed(Err(fractal_client::ClientError::Transport("unreachable".into())), now);
+        assert_eq!(positions.list_due(now + LIST_RETRY), Some(false), "a failed network read is tried again");
+    }
+
+    #[test]
+    fn a_refused_list_does_not_start_a_retry_loop() {
+        let now = Instant::now();
+        let mut positions = present(None, now);
+        positions.stream_frame(now);
+        assert_eq!(positions.list_due(now), Some(false));
+        positions.listed(Err(fractal_client::ClientError::Protocol("invalid response".into())), now);
+        assert_eq!(positions.list_due(now + Duration::from_secs(3600)), None);
     }
 
     #[test]

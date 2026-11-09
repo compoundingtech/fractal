@@ -239,7 +239,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         .window_errors
         .iter()
         .filter(|(name, _)| loaded_windows.iter().any(|(window, loaded)| *loaded && window == &name.as_str())
-            || ["clients", "usage", "machines", "devices", "sessions", "terminals"].contains(&name.as_str()))
+            || ["clients", "usage", "machines", "devices", "sessions", "terminals", "ReadPositions", "ReadPositionsList"].contains(&name.as_str()))
         .map(|(name, why)| format!("{name}: {why}"))
         .chain(
             extras

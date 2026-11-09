@@ -62,6 +62,20 @@ current marks; only its claims are cut at that index.
 are local in the same way, and the seat's conversation timeline on its own node still shows them.
 Its control codes stay claims.
 
+Agent-card prose frontiers seek assistant `message`/`content` entries through
+`local_observations_timeline_prose_index` and `claims_timeline_prose_time_index`,
+keyed by subject and incarnation. Tool traffic and user prompts never enter these partial
+indexes, including when the incarnation has no assistant prose. Local entries keep arrival
+order and their graph-cut fence; replicated entries keep numeric acceptance-time order and
+their store-index fence. Sent mail continues to use its existing sender/time index.
+Schema initialization installs the two indexes with `CREATE INDEX IF NOT EXISTS`, including
+on existing storage-version-20 databases, without changing claims, replication rules or
+projection digests. The first open builds them from retained rows before the store serves;
+its duration on large stores is unmeasured. Reopens reuse them, and normal SQLite mutations
+maintain them through local trimming and graph replay. No manual replay or state reset is
+required. Older builds can ignore the additive indexes; replacing the binary does not remove
+them.
+
 A kind of `system-local` retention is local when the system records it without an actor and a
 claim when a person or agent writes it as its actor. The reconciler's own `runtime.action.*`
 records, its starts, stop requests, deadlines and kills, stay on the node that runs the runtime,

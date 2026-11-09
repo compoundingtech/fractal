@@ -287,3 +287,70 @@ fn last_prose_is_the_agents_own_words_only() {
     append_at(&store, 600, AGENT, "harness.timeline", timeline(4, "content", "assistant"));
     assert_eq!(prose(&store), Some(600));
 }
+
+#[test]
+fn last_prose_reads_do_not_scan_growing_non_prose_history() {
+    use smallclaims::sqlite::work::SqliteWorkScope;
+
+    let measure = |local, count, has_prose, tools_only| {
+        let store = activity_source(4, &[]);
+        let append = |entry, entry_type, role, incarnation| {
+            let mut fields = timeline(entry, entry_type, role);
+            fields["incarnation_id"] = json!(incarnation);
+            if local {
+                store.append_claim(&ClaimInput {
+                    subject: AGENT.into(),
+                    kind: "harness.timeline".into(),
+                    actor: Some(AGENT.into()),
+                    fields: serde_json::from_value(fields).unwrap(),
+                    evidence: Vec::new(),
+                    expected_subject: None,
+                    idempotency_key: None,
+                }).unwrap();
+            } else {
+                append_at(&store, entry as u128 + 1, AGENT, "harness.timeline", fields);
+            }
+        };
+        if has_prose {
+            append(0, "message", "assistant", INCARNATION);
+        }
+        let index = store.index().unwrap();
+        let expected = store.agent_last_prose_at(AGENT, Some(INCARNATION), index).unwrap();
+        assert_eq!(expected.is_some(), has_prose);
+        for entry in 1..=count {
+            let (entry_type, role, incarnation) = match entry % if tools_only { 2 } else { 4 } {
+                0 => ("tool_call", "assistant", INCARNATION),
+                1 => ("tool_result", "tool", INCARNATION),
+                2 => ("message", "user", INCARNATION),
+                _ => ("content", "assistant", "other-incarnation"),
+            };
+            append(entry, entry_type, role, incarnation);
+        }
+        let index = store.index().unwrap();
+        let scope = SqliteWorkScope::start();
+        // This is the per-card roster read, including both timeline seeks and sent mail.
+        assert_eq!(
+            store.agent_last_prose_at(AGENT, Some(INCARNATION), index).unwrap(),
+            expected
+        );
+        let work = scope.finish();
+        assert!(work.vm_steps > 0, "{work:?}");
+        assert_eq!(work.fullscan_steps, 0, "{work:?}");
+        assert_eq!(work.sorts, 0, "{work:?}");
+        work
+    };
+    for local in [false, true] {
+        for tools_only in [true, false] {
+            // An absent frontier is the worst case for a residual role/type filter.
+            for has_prose in [false, true] {
+                let small = measure(local, 128, has_prose, tools_only);
+                let large = measure(local, 4096, has_prose, tools_only);
+                assert_eq!(large.statements, small.statements);
+                assert!(
+                    large.vm_steps <= small.vm_steps + 100,
+                    "local={local}, has_prose={has_prose}, tools_only={tools_only}, small={small:?}, large={large:?}"
+                );
+            }
+        }
+    }
+}

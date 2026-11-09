@@ -161,9 +161,8 @@ impl Store {
 
     /// The newest of an agent's own words: assistant `message`/`content` timeline entries of
     /// `incarnation`, and mail the agent sent. What "new since you last looked" compares with;
-    /// tool calls, prompts and mail to the agent are activity, not prose. The timeline reads keep
-    /// the activity index's own entry-type predicate so the partial index still applies, and then
-    /// walk back from the newest entry past any tool entries.
+    /// tool calls, prompts and mail to the agent are activity, not prose. Both timeline seeks
+    /// use assistant-prose-only partial indexes, so non-prose history never enters the search.
     pub fn agent_last_prose_at(
         &self,
         agent: &str,
@@ -174,7 +173,7 @@ impl Store {
         let mut times = Vec::new();
         if let Some(incarnation) = incarnation {
             let local: Option<i64> = connection.prepare_cached(
-                "SELECT observed_at_unix_ms FROM local_observations
+                "SELECT observed_at_unix_ms FROM local_observations INDEXED BY local_observations_timeline_prose_index
                  WHERE subject=?1 AND kind='harness.timeline'
                    AND json_extract(body, '$.fields.incarnation_id')=?2
                    AND json_extract(body, '$.fields.entry_type') IN ('message','content')
@@ -184,10 +183,9 @@ impl Store {
             ).optional()?;
             times.extend(local.map(|time| time.max(0) as u128));
             let replicated: Option<String> = connection.prepare_cached(
-                "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_timeline_activity_time_index
+                "SELECT accepted_at_unix_ms FROM claims INDEXED BY claims_timeline_prose_time_index
                  WHERE subject=?1 AND kind='harness.timeline'
                    AND json_extract(body, '$.fields.incarnation_id')=?2
-                   AND json_extract(body, '$.fields.entry_type') IN ('message','content','tool_call','tool_result')
                    AND json_extract(body, '$.fields.entry_type') IN ('message','content')
                    AND json_extract(body, '$.fields.role')='assistant'
                    AND store_index<=?3

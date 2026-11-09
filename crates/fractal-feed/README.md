@@ -12,9 +12,11 @@ removals and remote register edits; it never creates or edits an arrangement.
 
 With the same person and the `read-positions` capability, it also follows that person's
 `read-positions` collection as `Window::ReadPositions`. Its frames are invalidations only: the UI
-reads `read-positions.list` again. The subscription takes the slot a sixth screen inventory
-would use. While six inventories are held it is given up (`WindowStopped(Window::ReadPositions)`),
-and the UI polls the list until an inventory leaves.
+reads `read-positions.list` again. A dedicated collection socket holds only this subscription,
+so all six screen inventories, three conversations and the terminal retain their existing slots.
+The socket exists only when read positions are supported and is scoped to the selected member's
+connection: member replacement or feed shutdown cancels it. Unreachable connections reconnect
+with the feed's backoff; a subscription refusal is reported and logged, never replaced by polling.
 
 ## Start a feed
 
