@@ -167,6 +167,25 @@ fn decisions(store: &Store, now: u64) -> Vec<String> {
 }
 
 #[test]
+fn malformed_base_cannot_mask_a_valid_credential_but_valid_policy_can_repair_it() {
+    let store = node("issuer", None);
+    let granted = append(&store, SUBJECT, GRANTED, fields());
+    let digest = fields()["credential_hash"].as_str().unwrap().to_owned();
+    let mut malformed = fields();
+    malformed["expires_at_unix_ms"] = Value::Null;
+    let pending = append(&store, SUBJECT, GRANTED, malformed);
+    assert!(!authority::contains(&store.readers.get(), &pending.id).unwrap());
+    assert_eq!(authority::by_credential(&store.readers.get(), &digest).unwrap().unwrap().id, granted.id);
+    assert_eq!(authority::latest(&store.readers.get(), SUBJECT, GRANTED).unwrap().unwrap().id, granted.id);
+    let mut renewal = fields();
+    renewal["expires_at_unix_ms"] = json!(20000);
+    append(&store, SUBJECT, POLICY, renewal);
+    assert!(authority::contains(&store.readers.get(), &pending.id).unwrap());
+    assert_eq!(authority::by_credential(&store.readers.get(), &digest).unwrap().unwrap().id, pending.id);
+    assert_reference_and_rebuild(&store);
+}
+
+#[test]
 fn late_envelope_signature_promotes_previously_admitted_grant() {
     let (source, key) = source();
     let target = node("reader", Some(key.public()));

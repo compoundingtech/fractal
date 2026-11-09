@@ -218,7 +218,11 @@ pub fn rebuild_subject(connection: &Connection, subject: &str) -> Result<()> {
 fn attach_claim(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
     let mut changed = false;
     if claim.kind == GRANTED {
-        changed |= insert_authority(connection,claim,claim)?;
+        // A malformed base stays pending until a valid issuer policy repairs it.
+        // Otherwise a newer malformed copy could mask a valid bearer lookup.
+        if structurally_valid(claim,claim) {
+            changed |= insert_authority(connection,claim,claim)?;
+        }
         // Only this base's issuer prefix can attach to it. In particular, an
         // authenticated wrong-actor history cannot enlarge later admission work.
         let mut statement = connection.prepare_cached(
@@ -228,17 +232,23 @@ fn attach_claim(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
         for record in records {
             let transition: ClaimRecord = serde_json::from_str(&record?)?;
             if transition_valid(claim,&transition) {
+                if transition.kind == POLICY {
+                    changed |= insert_authority(connection,claim,claim)?;
+                }
                 changed |= insert_authority(connection,&transition,claim)?;
             }
         }
     } else {
         let mut statement = connection.prepare_cached(
-            "SELECT record FROM assistant_grant_authority WHERE grant_subject=?1
-             AND kind=?2 AND origin=?3 AND actor=?4")?;
+            "SELECT record FROM assistant_grant_pending WHERE grant_subject=?1
+             AND authenticated=1 AND kind=?2 AND origin=?3 AND actor=?4")?;
         let records = statement.query_map(params![claim.subject,GRANTED,claim.origin,claim.actor], |row| row.get::<_,String>(0))?;
         for record in records {
             let grant: ClaimRecord = serde_json::from_str(&record?)?;
             if transition_valid(&grant,claim) {
+                if claim.kind == POLICY {
+                    changed |= insert_authority(connection,&grant,&grant)?;
+                }
                 changed |= insert_authority(connection,claim,&grant)?;
             }
         }
