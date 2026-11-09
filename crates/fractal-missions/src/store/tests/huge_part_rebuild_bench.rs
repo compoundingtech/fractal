@@ -265,9 +265,13 @@ fn measure(children: usize, steps_per_run: usize, extra_generations: usize, hist
                     worker.project_replication_backlog().unwrap();
                     settle_passes += 1;
                 }
-                eprintln!("huge_receive_settle passes={settle_passes}");
+                let pending_runs = runs.iter()
+                    .filter(|run| worker.run_projection_pending(&run.subject).unwrap())
+                    .count();
+                let deferred = worker.replication_projection_deferred();
+                eprintln!("huge_receive_settle passes={settle_passes} deferred={deferred} pending_runs={pending_runs}");
+                assert!(!deferred, "deferred projection still set after {settle_passes} settle passes; pending_runs={pending_runs}");
             });
-            assert!(!worker.replication_projection_deferred());
             for run in &runs {
                 assert!(!worker.run_projection_pending(&run.subject).unwrap());
             }
