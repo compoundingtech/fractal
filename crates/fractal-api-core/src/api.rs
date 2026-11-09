@@ -11284,6 +11284,8 @@ pub fn slo_rows(store: &crate::store::Store) -> anyhow::Result<Vec<Value>> {
         let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
         rows.insert(budgets, crate::objectives::divergence(open));
     }
+    let budgets = rows.iter().position(|row| row["kind"] == "budget").unwrap_or(rows.len());
+    drop(rows.splice(budgets..budgets, crate::declared_objectives::rows(store, now)?));
     Ok(rows)
 }
 
