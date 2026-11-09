@@ -10388,6 +10388,10 @@ fn login_attention_skips_healthy_seats_and_retains_legacy_and_runtime_fences() {
     );
     assert!(reads.contains("kind:harness.observed"));
     assert!(reads.contains("kind:harness.diagnostic"));
+    for seat in ["agent/node.native", "agent/node.legacy", "agent/node.screen"] {
+        assert!(reads.contains(seat), "login attention must track {seat}");
+        assert!(reads.contains(&format!("actor:{seat}")), "actor-only recovery must invalidate login attention for {seat}");
+    }
     for name in ["native", "legacy"] {
         append(
             name,

@@ -865,6 +865,10 @@ impl Store {
             if !person_work::declaration_live(connection, &desired.subject)? {
                 continue;
             }
+            // Login recovery also follows work claims authored by the seat, even when
+            // no new harness observation is published for its subject.
+            smallclaims::touched::note_read(|| desired.subject.clone());
+            smallclaims::touched::note_read(|| format!("actor:{}", desired.subject));
             let Some(harness) = current_harness_fold_at(connection, &desired.subject, None, true, true)? else {
                 continue;
             };
