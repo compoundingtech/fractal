@@ -1177,6 +1177,7 @@ pub struct AgentWorkspace {
 }
 /// Declared admission — declared, not enforced.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct DeclaredBudgets {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_seconds: Option<u64>,
@@ -1186,6 +1187,14 @@ pub struct DeclaredBudgets {
     pub disk_max: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attention: Vec<DeclaredAttentionBudget>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeclaredAttentionBudget {
+    pub person: String,
+    pub asks: u64,
 }
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct DeclaredAdmission {

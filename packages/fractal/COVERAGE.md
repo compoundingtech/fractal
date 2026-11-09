@@ -127,7 +127,7 @@ mission({
       gates: [
         gate.human({
           name: 'Approve the bounded cutover',
-          reviewer: person('person/schickling'),
+          reviewer: person('person/ada'),
           question: 'Apply the reviewed configuration and rollback plan?',
         }),
       ],

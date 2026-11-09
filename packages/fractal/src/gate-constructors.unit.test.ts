@@ -33,7 +33,7 @@ describe('typed native gate constructors', () => {
     expect(Object.isFrozen(harness.resume)).toBe(true)
     const reviewer = person('person/reviewer')
     expect(Object.isFrozen(reviewer)).toBe(true)
-    expect(Reflect.set(reviewer, 'subject', 'person/changed')).toBe(false)
+    expect(Reflect.set(reviewer, 'subject', 'person/someone-else')).toBe(false)
     const source = step({ id: 'source', agentless: true })
     for (const dependency of [completed(source), failed(source), terminal(source)]) {
       expect(Object.isFrozen(dependency)).toBe(true)
@@ -64,7 +64,7 @@ describe('typed native gate constructors', () => {
     const options = { reviewer, review, question: t`Accept ${question}?` }
     const checkpoint = gate.human(options)
     const fragment = Fragment.steps({ id: 'review', agentless: true, gates: [checkpoint] })
-    reviewer.subject = 'person/changed'
+    reviewer.subject = 'person/someone-else'
     review.push(Review.subject('mission/example/later'))
     expect(Object.isFrozen(reviewer)).toBe(false)
     expect(Object.isFrozen(review)).toBe(false)
