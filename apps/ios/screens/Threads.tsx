@@ -252,13 +252,43 @@ function EmbeddedThreadHeader({ title, state, expanded, toggle }: {
   </Pressable>;
 }
 
-export function InboxThread({ origin, agentId, initialTitle, onOpen }: {
-  origin: Pick<ThreadStartOrigin, 'sourceId' | 'episode'>; agentId?: string;
-  initialTitle: string; onOpen: (id: string) => void;
+export function InboxThread({ sourceId, origin, agentId, initialTitle, onOpen, pendingScope }: {
+  sourceId: string; origin?: Pick<ThreadStartOrigin, 'sourceId' | 'episode'>; agentId?: string;
+  initialTitle: string; onOpen: (id: string) => void; pendingScope?: string;
 }) {
-  const { threadClient, threadActions } = useStore();
-  return threadClient ? <InboxThreadStart key={threadStartScope(origin)} client={threadClient} origin={origin} agentId={agentId}
-    initialTitle={initialTitle} onOpen={onOpen} canStart={!!agentId && threadActions.has('thread.start')} /> : null;
+  const { threadClient, threadActions, threadDeliveries } = useStore();
+  if (!threadClient) return null;
+  const retained = [...(threadDeliveries?.values() ?? [])].find(delivery => delivery.start
+    && delivery.start.origin.sourceId === sourceId && (!pendingScope || threadStartScope(delivery.start.origin) === pendingScope));
+  const shownOrigin = retained?.start?.origin ?? origin;
+  if (!shownOrigin) return <T dim>Thread context is unavailable for this Inbox item.</T>;
+  return <InboxThreadStart key={threadStartScope(shownOrigin)} client={threadClient}
+    origin={shownOrigin} agentId={retained?.start?.origin.agentId ?? agentId}
+    initialTitle={retained?.start?.title ?? initialTitle} onOpen={onOpen} showHistory={!!origin}
+    canStart={!retained && !!origin && !!agentId && threadActions.has('thread.start')} />;
+}
+
+export function PendingInboxThreads({ onOpen }: { onOpen: (id: string) => void }) {
+  const { threadClient, threadDeliveries, data } = useStore();
+  if (!threadClient) return null;
+  const listed = new Set(data.attention.map(item => item.source_id));
+  const seen = new Set<string>();
+  const pending = [...(threadDeliveries?.values() ?? [])].flatMap(delivery => {
+    const start = delivery.start;
+    if (!start || listed.has(start.origin.sourceId)) return [];
+    const scope = threadStartScope(start.origin);
+    if (seen.has(scope)) return [];
+    seen.add(scope);
+    return [start];
+  });
+  if (!pending.length) return null;
+  return <View style={{ padding: 12, gap: 6 }}>
+    <T bold>Unconfirmed thread starts</T>
+    {pending.map(start => <View key={threadStartScope(start.origin)} style={{ gap: 4 }}>
+      <T dim>Original recipient · {start.origin.agentId}</T>
+      <InboxThread sourceId={start.origin.sourceId} pendingScope={threadStartScope(start.origin)} initialTitle={start.title} onOpen={onOpen} />
+    </View>)}
+  </View>;
 }
 
 type ThreadStartDraft = {
@@ -266,9 +296,9 @@ type ThreadStartDraft = {
   onAccepted: (id: string) => void; onCancel: () => void;
 };
 
-function InboxThreadStart({ client, origin, agentId, initialTitle, onOpen, canStart }: {
+function InboxThreadStart({ client, origin, agentId, initialTitle, onOpen, canStart, showHistory = true }: {
   client: ThreadClient; origin: Pick<ThreadStartOrigin, 'sourceId' | 'episode'>; agentId?: string;
-  initialTitle: string; onOpen: (id: string) => void; canStart: boolean;
+  initialTitle: string; onOpen: (id: string) => void; canStart: boolean; showHistory?: boolean;
 }) {
   const { status, threadRefresh, threadDeliveries, draftCache, draftsReady, saveDrafts } = useStore();
   const scope = threadStartScope(origin);
@@ -289,7 +319,7 @@ function InboxThreadStart({ client, origin, agentId, initialTitle, onOpen, canSt
     },
   } : undefined;
   return <View style={{ gap: 6 }}>
-    <ThreadGroup context={{ origin_source: origin.sourceId, origin_episode: origin.episode }} openThread={onOpen} excludeId={accepted ? target : undefined} />
+    {showHistory ? <ThreadGroup context={{ origin_source: origin.sourceId, origin_episode: origin.episode }} openThread={onOpen} excludeId={accepted ? target : undefined} /> : null}
     {draft ? <InlineThread key={`${scope}:${current?.generation ?? 0}`} client={client} id={target} refresh={threadRefresh}
       onOpen={target && accepted ? () => onOpen(target) : undefined} start={draft} embedded /> : null}
     {!agentId ? <T dim>No agent is assigned to this Inbox item.</T> : null}

@@ -10,13 +10,13 @@ test('native start signs the canonical Inbox source and sends the exact generic 
   const { outputText } = ts.transpileModule(`exports.action = { ${source.slice(a, b)} }.startThread;`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   });
-  const signed = [], sent = [];
+  const signed = [], sent = [], presentations = [];
   const exports = {};
   const scope = origin => JSON.stringify([origin.sourceId, origin.episode]);
   const ports = {
     signingKeyRef: { current: 'profile/exact' },
     threadStartScope: scope,
-    trackThreadDelivery: (_scope, _target, send) => send(),
+    trackThreadDelivery: (_scope, _target, send, _onSent, presentation) => { presentations.push(presentation); return send(); },
     readPhoneSigning: async () => ({ person: 'person/avery' }),
     signThreadMessage: async (_key, _signing, fields) => { signed.push(fields); return { signature: 'exact-signature', messageId: 'message/first' }; },
     submitThreadAction: async (_target, _kind, _revisions, prepare) => {
@@ -27,6 +27,7 @@ test('native start signs the canonical Inbox source and sends the exact generic 
   new Function('exports', ...Object.keys(ports), outputText)(exports, ...Object.values(ports));
   const origin = { agentId: 'agent/canonical', sourceId: 'notice/canonical-source', episode: 'episode/original' };
   await exports.action('thread/new', origin, 'Notice', 'Follow up');
+  assert.deepEqual(presentations, [{ origin, title: 'Notice' }]);
   assert.deepEqual(signed, [{
     content: 'Follow up', from: 'person/avery', to: origin.agentId, thread_id: 'thread/new', title: 'Notice',
     thread_origin_source: origin.sourceId, thread_origin_episode: origin.episode,

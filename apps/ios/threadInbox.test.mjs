@@ -25,10 +25,11 @@ const find = (element, type) => !element || typeof element !== 'object' ? undefi
   : element.children?.map(child => find(child, type)).find(Boolean);
 
 function render(item, enabled = true, start = true) {
-  const navigation = { navigate() {}, goBack() {} };
+  const navigated = [];
+  const navigation = { navigate: (...args) => navigated.push(args), goBack() {} };
   const InboxThread = component('./screens/Threads.tsx', 'InboxThread', 'InboxThreadStart', {
     useStore: () => ({ threadClient: enabled ? {} : null, threadActions: new Set(start ? ['thread.start'] : []) }),
-    InboxThreadStart: 'InboxThreadStart', threadStartScope: origin => JSON.stringify([origin.sourceId, origin.episode]),
+    InboxThreadStart: 'InboxThreadStart', T: 'T', threadStartScope: origin => JSON.stringify([origin.sourceId, origin.episode]),
   });
   const dependencies = {
     useStore: () => ({ data: { attention: [item], agents: [], missions: [] }, actions: {} }),
@@ -40,7 +41,7 @@ function render(item, enabled = true, start = true) {
   const AttentionScreen = component('./screens/Now.tsx', 'AttentionScreen', undefined, dependencies);
   const screen = AttentionScreen({ route: { params: { id: item.id } }, navigation });
   const entry = find(screen, InboxThread);
-  return { screen, entry, gated: entry ? InboxThread(entry.props) : undefined };
+  return { screen, entry, navigated, gated: entry ? InboxThread(entry.props) : undefined };
 }
 
 const ask = {
@@ -85,5 +86,16 @@ test('missing canonical agent disables starts without guessing requester respons
   assert.equal(gated.props.canStart, false);
   assert.equal(render(ask, false).gated, null);
   assert.equal(render(ask, true, false).gated.props.canStart, false);
-  assert.equal(render({ ...ask, episode: undefined }).entry, undefined);
+  assert.ok(render({ ...ask, episode: undefined }).entry);
+  assert.equal(render({ ...ask, episode: undefined }).gated.type, 'T');
+});
+
+
+test('agent navigation uses canonical responsibility while request attribution stays with its publisher', () => {
+  const { screen, navigated } = render(ask);
+  const button = node => !node || typeof node !== 'object' ? undefined : node.props?.label === 'Open agent conversation' ? node
+    : node.children?.map(button).find(Boolean);
+  button(screen).props.onPress();
+  assert.deepEqual(navigated, [['Conversation', { target: 'agent/authoritative', title: undefined }]]);
+  assert.equal(find(screen, 'RequestAnswers').props.from, 'builder');
 });

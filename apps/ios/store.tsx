@@ -140,7 +140,8 @@ export function threadStartScope(origin: Pick<ThreadStartOrigin, 'sourceId' | 'e
   return JSON.stringify([origin.sourceId, origin.episode]);
 }
 export function threadEditScope(thread: string): string { return `edit/${thread}`; }
-type ThreadDelivery = { target: string; retry?: () => Promise<ThreadEditResult> };
+export type ThreadStartPresentation = { origin: ThreadStartOrigin; title: string };
+type ThreadDelivery = { target: string; retry?: () => Promise<ThreadEditResult>; start?: ThreadStartPresentation };
 type ThreadEdit = { kind: 'rename'; title: string } | { kind: 'close' | 'reopen' };
 export type ThreadEditResult =
   | { how: 'sent' }
@@ -974,7 +975,7 @@ function useAppStore(proof?: FabricProfile) {
     }));
   }
 
-  async function trackThreadDelivery(scope: string, target: string, send: () => Promise<ThreadEditResult>, onSent?: () => void): Promise<ThreadEditResult> {
+  async function trackThreadDelivery(scope: string, target: string, send: () => Promise<ThreadEditResult>, onSent?: () => void, start?: ThreadStartPresentation): Promise<ThreadEditResult> {
     if (!threadClient) return { how: 'failed', error: 'This connection cannot send thread messages.' };
     let deliveries = deliveriesByClient.current.get(threadClient);
     if (!deliveries) {
@@ -984,7 +985,7 @@ function useAppStore(proof?: FabricProfile) {
     const active = deliveries;
     if (active.has(scope)) return { how: 'failed', error: 'Resolve the earlier send before starting another.' };
     const run = async (operation: () => Promise<ThreadEditResult>): Promise<ThreadEditResult> => {
-      active.set(scope, { target });
+      active.set(scope, { target, start });
       setThreadDeliveryRevision(previous => previous + 1);
       let result: ThreadEditResult;
       try { result = await operation(); }
@@ -992,7 +993,7 @@ function useAppStore(proof?: FabricProfile) {
       if (result.how === 'unconfirmed') {
         const original = result.retry;
         const retry = () => active.get(scope)?.retry === retry ? run(original) : Promise.resolve(result);
-        active.set(scope, { target, retry });
+        active.set(scope, { target, retry, start });
         result = { how: 'unconfirmed', retry };
       } else {
         if (result.how === 'sent') onSent?.();
@@ -1040,7 +1041,7 @@ function useAppStore(proof?: FabricProfile) {
           target_id: thread, agent_id: origin.agentId, origin: { source_id: origin.sourceId, episode: origin.episode },
           title, content, signature,
         } }) };
-      }));
+      }), undefined, { origin: { ...origin }, title });
     },
     replyToThread(thread: ThreadSummary, content: string, quoteId?: string): Promise<ThreadEditResult> {
       const signingProfile = signingKeyRef.current;

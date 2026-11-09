@@ -206,3 +206,89 @@ test('collapsing the first draft preserves its origin composer for reopening and
   assert.equal(find(tree, 'ThreadBody').props.thread, thread);
   assert.equal(find(tree, 'ThreadBody').props.start.cacheKey, start.cacheKey);
 });
+
+test('a lost Start receipt remains retryable after the source episode and agent disappear on remount', async () => {
+  const origin = { sourceId: 'notice/stable-source', episode: 'episode/original', agentId: 'agent/original' };
+  const client = {};
+  const byClient = { current: new WeakMap() };
+  const source = readFileSync(new URL('./store.tsx', import.meta.url), 'utf8');
+  const a = source.indexOf('  async function trackThreadDelivery(');
+  const b = source.indexOf('  const actions =', a);
+  const { outputText } = ts.transpileModule(source.slice(a, b) + ';exports.track = trackThreadDelivery;', {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
+  });
+  const exports = {};
+  new Function('exports', 'threadClient', 'deliveriesByClient', 'setThreadDeliveryRevision', 'errorText', outputText)(
+    exports, client, byClient, () => {}, String);
+  let exactRetries = 0;
+  const original = Object.freeze({ origin: { source_id: origin.sourceId, episode: origin.episode }, agent_id: origin.agentId, content: 'Original content', title: 'Original title', signature: 'original-signature', idempotency_key: 'original-key' });
+  const observed = [];
+  const retry = async () => { exactRetries++; observed.push(original); return { how: 'sent' }; };
+  const scope = value => JSON.stringify([value.sourceId, value.episode]);
+  await exports.track(scope(origin), 'thread/original', async () => ({ how: 'unconfirmed', retry }), undefined,
+    { origin: { ...origin }, title: original.title });
+  const ledger = byClient.current.get(client);
+  const cache = { current: new Map() };
+  const store = {
+    threadClient: client, threadActions: new Set(['thread.start']), threadDeliveries: ledger,
+    status: 'online', threadRefresh: 0, draftCache: cache, draftsReady: true, saveDrafts() {},
+    actions: { startThread: () => { throw new Error('must not construct a current Start'); } },
+  };
+  const entry = compile('InboxThread', 'type ThreadStartDraft', {
+    useStore: () => store, threadStartScope: scope, InboxThreadStart: 'InboxThreadStart', T: 'T',
+  });
+  // A fresh component instance sees the same valid source, but the new row carries no
+  // usable episode or assigned conversation. Its changed title cannot rewrite the retry.
+  const props = entry({ sourceId: origin.sourceId, initialTitle: 'Changed title', onOpen() {} }).props;
+  assert.deepEqual(props.origin, origin);
+  assert.equal(props.agentId, origin.agentId);
+  assert.equal(props.initialTitle, original.title);
+  assert.equal(props.canStart, false);
+  const startPanel = compile('InboxThreadStart', 'function InlineThread', {
+    useStore: () => store, useState: initial => [initial, () => {}], threadStartScope: scope,
+    threadDraftKey: value => value, threadTitleFromAsk: value => value,
+    View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
+  });
+  const start = find(startPanel(props), 'InlineThread').props.start;
+  assert.equal(start.target, 'thread/original');
+  const composer = compile('ThreadComposer', 'function ThreadComposeField', {
+    useStore: () => store, useRef: current => ({ current }), useState: initial => [typeof initial === 'function' ? initial() : initial, () => {}],
+    useEffect() {}, useFocusEffect() {}, useCallback: fn => fn, threadDraftKey: value => value, threadStartScope: scope,
+    readThreadDraft: () => ({ text: 'Original content' }), threadTextIssue: () => undefined,
+    View: 'View', T: 'T', Button: 'Button', ThreadComposeField: 'ThreadComposeField', ThreadActionFeedback: 'ThreadActionFeedback',
+  });
+  const tree = composer({ start, canReply: true, selectionVersion: 0 });
+  assert.equal(find(tree, 'ThreadComposeField').props.enabled, false);
+  find(tree, 'ThreadActionFeedback').props.onRetry();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(exactRetries, 1);
+  assert.deepEqual(observed, [original]);
+  assert.equal(ledger.size, 0);
+});
+
+test('Inbox recovery exposes orphaned first starts from the same ledger without duplicating listed origins', () => {
+  const listed = { sourceId: 'notice/listed', episode: 'episode/one', agentId: 'agent/one' };
+  const orphan = { sourceId: 'notice/orphan', episode: 'episode/first', agentId: 'agent/original' };
+  const nextEpisode = { ...orphan, episode: 'episode/second' };
+  const ledger = new Map([
+    ['listed', { target: 'thread/listed', start: { origin: listed, title: 'Listed' } }],
+    ['orphan-first', { target: 'thread/first', start: { origin: orphan, title: 'Original title' } }],
+    ['orphan-second', { target: 'thread/second', start: { origin: nextEpisode, title: 'Second title' } }],
+    ['metadata', { target: 'thread/metadata' }],
+  ]);
+  const component = compile('PendingInboxThreads', 'type ThreadStartDraft', {
+    useStore: () => ({ threadClient: {}, threadDeliveries: ledger, data: { attention: [{ source_id: listed.sourceId }] } }),
+    threadStartScope: origin => JSON.stringify([origin.sourceId, origin.episode]),
+    View: 'View', T: 'T', InboxThread: 'InboxThread',
+  });
+  const tree = component({ onOpen() {} });
+  const collect = node => !node || typeof node !== 'object' ? [] : node.type === 'InboxThread' ? [node]
+    : node.children?.flatMap(collect) ?? [];
+  const recovered = collect(tree);
+  assert.equal(recovered.length, 2);
+  assert.deepEqual(recovered.map(node => node.props.sourceId), [orphan.sourceId, orphan.sourceId]);
+  assert.deepEqual(recovered.map(node => node.props.pendingScope), [
+    JSON.stringify([orphan.sourceId, orphan.episode]), JSON.stringify([nextEpisode.sourceId, nextEpisode.episode]),
+  ]);
+  assert.ok(recovered.every(node => node.props.origin === undefined), 'retained context never authorizes a new Start');
+});
