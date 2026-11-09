@@ -120,3 +120,12 @@ fn admission_refuses_other_owners_and_malformed_positions() {
     assert_eq!(at_of(&store, SEAT), Some(7));
     assert!(positions(&store).iter().all(|row| row["owner"] == ADA));
 }
+
+#[test]
+fn replicated_admission_refuses_another_person_advancing_the_owner() {
+    let store = Store::open_memory("read-replica-admission").unwrap();
+    let mut claim = store.append_claim(&advance(SEAT, 1)).unwrap();
+    claim.actor = Some("person/bob".into());
+    let error = classify_replicated_claim_with_registry(&claim, fractal_schema::registry()).unwrap_err();
+    assert_eq!(error.code, "read-position-owner-forbidden");
+}
