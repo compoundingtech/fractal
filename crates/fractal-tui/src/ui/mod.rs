@@ -8271,13 +8271,18 @@ mod tests {
         };
         let mut ui = feedback("choice", vec![answer]);
         let screen = frame(&ui, 140, 50).join("\n");
-        assert!(screen.contains("Choose an answer"), "{screen}");
+        assert!(
+            screen.lines().any(|line| line.contains("Choose an answer")
+                && line.contains("Dismiss without answering")),
+            "{screen}"
+        );
         assert!(!screen.contains("Dismiss: nothing to do"), "{screen}");
-        assert!(screen.contains("Dismiss without answering"), "{screen}");
         ui.key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
         assert!(ui.confirm.is_some());
         assert!(ui.effects.is_empty(), "it asks first");
-        assert!(frame(&ui, 140, 50).join("\n").contains("you set it aside without answering"));
+        let confirmation = frame(&ui, 140, 50).join("\n");
+        assert!(confirmation.contains("you set it aside without answering"), "{confirmation}");
+        assert!(!confirmation.contains("Dismiss without answering"), "{confirmation}");
         ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
         assert!(
             matches!(&ui.effects[..], [Effect::Attention { id, action, answer: Some(answer), .. }]

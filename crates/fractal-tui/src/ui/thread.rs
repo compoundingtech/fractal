@@ -324,7 +324,7 @@ pub fn panel(
             );
         }
         if focused {
-            doc.button_rows(
+            doc.buttons_fit(
                 &[
                     (
                         "enter",
@@ -375,7 +375,7 @@ pub fn panel(
             theme::OVERLAY1,
         ));
     }
-    doc.button_rows(&actions, width);
+    doc.buttons_fit(&actions, width);
     doc
 }
 

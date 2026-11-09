@@ -118,7 +118,7 @@ pub trait DocExt<H = Hit> {
     fn field(&mut self, label: &str, value: &str, width: usize, value_style: Style);
     fn section(&mut self, title: &str, count: Option<usize>, width: usize);
     fn buttons(&mut self, buttons: &[(&str, &str, H, Color)]);
-    fn button_rows(&mut self, buttons: &[(&str, &str, H, Color)], width: usize);
+    fn buttons_fit(&mut self, buttons: &[(&str, &str, H, Color)], width: usize);
     fn card(&mut self, title: &str, color: Color, heavy: bool, inner: SharedDoc<H>, width: usize);
 }
 
@@ -183,23 +183,25 @@ impl<H: Clone> DocExt<H> for SharedDoc<H> {
         }
         self.lines.push(Line::from(spans));
     }
-    /// Keep related actions together, breaking only between buttons when the pane is narrow.
-    fn button_rows(&mut self, buttons: &[(&str, &str, H, Color)], width: usize) {
-        let mut row_start = 0;
+    /// Place whole buttons on the same row when the available cells allow it.
+    fn buttons_fit(&mut self, buttons: &[(&str, &str, H, Color)], width: usize) {
+        let mut start = 0;
         let mut used = 0;
         for (index, (key, label, _, _)) in buttons.iter().enumerate() {
-            let size = text::width(key) + text::width(label) + 4;
-            if index > row_start && used + 2 + size > width {
-                self.buttons(&buttons[row_start..index]);
-                row_start = index;
+            let button_width = text::width(key) + text::width(label) + 4;
+            if index > start && used + 2 + button_width > width {
+                self.buttons(&buttons[start..index]);
+                start = index;
                 used = 0;
             }
-            used += if index == row_start { size } else { size + 2 };
+            used += usize::from(index > start) * 2 + button_width;
         }
-        if !buttons.is_empty() {
-            self.buttons(&buttons[row_start..]);
+        if start < buttons.len() {
+            self.buttons(&buttons[start..]);
         }
     }
+
+
     /// A card in deck's style: a rounded frame with its title in the top edge. A heavy
     /// card (thick frame, coloured) is reserved for the thing that needs a person.
     fn card(&mut self, title: &str, color: Color, heavy: bool, inner: SharedDoc<H>, width: usize) {
@@ -287,6 +289,24 @@ mod tests {
                 .map(|target| &target.hit),
             Some(&Hit::Key('a'))
         );
+    }
+
+    #[test]
+    fn buttons_fit_wraps_whole_click_targets_at_the_available_width() {
+        let buttons = [
+            ("a", "Choose an answer", Hit::Key('a'), theme::ACCENT),
+            ("x", "Dismiss without answering", Hit::Key('x'), theme::OVERLAY1),
+        ];
+        let mut wide = Doc::new();
+        wide.buttons_fit(&buttons, 53);
+        assert_eq!(wide.lines.len(), 1);
+        assert_eq!((wide.targets[1].line, wide.targets[1].column), (0, 23));
+
+        let mut narrow = Doc::new();
+        narrow.buttons_fit(&buttons, 52);
+        assert_eq!(narrow.lines.len(), 2);
+        assert_eq!((narrow.targets[1].line, narrow.targets[1].column), (1, 0));
+        assert_eq!(narrow.targets[1].hit, Hit::Key('x'));
     }
 
     #[test]

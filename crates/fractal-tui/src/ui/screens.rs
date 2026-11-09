@@ -647,13 +647,14 @@ fn structured_request(
         if request.custom {
             buttons.push(("c", "Answer in words", Hit::Key('c'), theme::ACCENT));
         }
-        card.buttons(&buttons);
-        // A person can always set a request aside, whatever its answers: the asker is told it
-        // was dismissed (Nathan, 2026-10-11). It asks first.
-        card.blank();
-        let label = format!("Dismiss this: tell {from} you set it aside without answering");
-        if !confirm_row(card, drafts, &label) {
-            card.buttons(&[("x", "Dismiss without answering", Hit::Key('x'), theme::OVERLAY1)]);
+        if drafts.confirm.is_some() {
+            card.buttons_fit(&buttons, inner);
+            card.blank();
+            let label = format!("Dismiss this: tell {from} you set it aside without answering");
+            confirm_row(card, drafts, &label);
+        } else {
+            buttons.push(("x", "Dismiss without answering", Hit::Key('x'), theme::OVERLAY1));
+            card.buttons_fit(&buttons, inner);
         }
     }
     if !request.why_person.is_empty() {
