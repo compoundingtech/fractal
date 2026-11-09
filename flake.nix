@@ -34,8 +34,8 @@
         pkgs = import nixpkgs { inherit system; };
 
         # Client-side compilation needs sccache >= 0.18; the root pin has 0.16.
-        # Keep the rest of the toolchain pinned and use the upstream nixpkgs 0.19 hashes.
-        sccache = pkgs.sccache.overrideAttrs (old: {
+        # Keep the rest of the toolchain pinned; vendor with this pin's fetcher.
+        sccache = pkgs.sccache.overrideAttrs (final: old: {
           version = "0.19.0";
           src = pkgs.fetchFromGitHub {
             owner = "mozilla";
@@ -44,6 +44,12 @@
             hash = "sha256-iq9/SOS13z8hyt4x03azms+J19jtfYEr7ly4VIENi9s=";
           };
           cargoHash = "sha256-V8WH8QFBpOOP3QV/B+mvqBuSt12VD4sB89gJw86igAE=";
+          # buildRustPackage captures cargoHash before overrideAttrs runs.
+          cargoDeps = pkgs.rustPlatform.fetchCargoVendor {
+            inherit (final) src;
+            name = "${final.pname}-${final.version}";
+            hash = final.cargoHash;
+          };
           buildInputs = old.buildInputs ++ [ pkgs.zstd ];
         });
 
