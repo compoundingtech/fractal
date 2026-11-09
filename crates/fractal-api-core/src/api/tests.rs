@@ -8104,6 +8104,61 @@ async fn replying_settles_stream_routed_parents_and_replays_without_another_send
 }
 
 #[tokio::test]
+async fn a_retired_recipient_cannot_reply_or_settle_its_successors_stream_mail() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    crate::store::messages_shard::open(&state.store, root.path()).unwrap();
+    let source = format!(
+        "version 2\nagent \"example/old\" {{ host {:?}; command \"true\"; workspace \"/tmp\" }}\nagent \"example/new\" {{ command \"true\"; workspace \"/tmp\" }}",
+        state.store.origin(),
+    );
+    let intent = parse_intent(&source, state.store.origin()).unwrap();
+    state.store.apply_internal(&intent, "reply-retirement-fixture").unwrap();
+    let app = router(state.clone());
+    let (status, original) = json_request(app.clone(), "/v1/messages", json!({
+        "idempotency_key": "reply-retired-parent",
+        "from": "agent/example/sender",
+        "to": "agent/example/old",
+        "content": "Keep this for the successor."
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{original}");
+    let parent = original["subject"].as_str().unwrap();
+    assert!(state.store.message(parent).unwrap().unwrap().created_index
+        >= crate::store::messages_shard::STREAM_INDEX_BASE);
+    for lifecycle in ["delivered", "read"] {
+        crate::store::messages_shard::record_lifecycle(
+            &state.store, parent, &format!("message.{lifecycle}"),
+            Some("agent/example/old"),
+            &BTreeMap::from([("status".into(), json!(lifecycle))]),
+        ).unwrap();
+    }
+    let token = state.store.selected_desired_token("agent/example/old").unwrap().unwrap();
+    state.store.retire_agent_with_successor(
+        "agent/example/old", "person/avery", "Rollover", &token, None,
+        "reply-retired-custody", &[], Some("agent/example/new"), None,
+    ).unwrap();
+    let (status, refused) = json_request(app, "/v1/messages", json!({
+        "idempotency_key": "reply-retired-refused",
+        "from": "agent/example/old",
+        "to": "agent/example/sender",
+        "content": "A stale process answered.",
+        "in_reply_to": parent
+    })).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{refused}");
+    assert!(state.store.operation_claim("reply-retired-refused").unwrap().is_none());
+    // Also exercise settlement's own admission, independently of the pre-send check.
+    let refused = settle_answered_message(
+        &state.store, parent, "agent/example/old", "agent/example/sender",
+        "message/stale-reply", "claim/stale-reply",
+    ).unwrap_err();
+    assert_eq!(refused.code, "wrong-message-recipient");
+    assert_eq!(state.store.message(parent).unwrap().unwrap().status, "read");
+    let marks = crate::store::messages_shard::lifecycle_marks(&state.store, parent)
+        .unwrap().unwrap();
+    assert!(!marks.iter().any(|(kind, _, _)| kind == "message.closed"));
+}
+
+#[tokio::test]
 async fn reading_a_persons_message_says_who_signed_it_and_an_agents_says_nothing() {
     // Nathan, 2026-10-06: signatures existed but nothing showed them.
     let root = tempfile::tempdir().unwrap();
