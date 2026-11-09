@@ -1162,7 +1162,7 @@ fn feedback_refusals_leave_both_drafts_unchanged_and_success_is_retained() {
 }
 
 #[test]
-fn unconfirmed_start_remains_in_its_agents_draft_surface_after_inbox_source_disappears() {
+fn retained_start_keeps_its_captured_context_through_replacement_and_removal() {
     let mut threads = observed_threads(ThreadState::Open);
     let item = "attention/notice";
     threads.origins.insert(
@@ -1182,6 +1182,52 @@ fn unconfirmed_start_remains_in_its_agents_draft_surface_after_inbox_source_disa
         .start_with_text("home:attention/notice", item, "Please explain", &mut texts)
         .unwrap();
     let original = threads.writes().pop().unwrap();
+    let captured = ThreadInterest::Inbox {
+        source: "agent/example".into(),
+        episode: "claim/source".into(),
+    };
+    let replacement = ThreadInterest::Inbox {
+        source: "agent/replacement".into(),
+        episode: "claim/replacement".into(),
+    };
+    threads.lists.insert(captured.clone(), Vec::new());
+    threads.lists.insert(replacement.clone(), Vec::new());
+    threads.origins.insert(
+        item.into(),
+        Origin {
+            context: replacement,
+            agent: "agent/replacement".into(),
+            title: "Replacement title".into(),
+            snapshot: snapshot().id,
+        },
+    );
+    let home = Pane::Home(Some(item.into()));
+    assert_eq!(threads.context(&home), Some(captured.clone()));
+    assert!(
+        matches!(threads.start_input(item), Some(Input::Start { episode, .. }) if episode == "claim/source")
+    );
+    let assert_captured = |threads: &Threads, pane: &Pane, texts: &HashMap<String, String>| {
+        let doc = threads.mount(
+            pane,
+            100,
+            &edit::Cursor::default(),
+            &super::super::demo::test_world(),
+            texts,
+        );
+        let rendered = doc
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            rendered.contains("Fault context · Draft · to agent/atlas"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("Replacement title"), "{rendered}");
+        assert!(!rendered.contains("to agent/replacement"), "{rendered}");
+    };
+    assert_captured(&threads, &home, &texts);
     threads.complete(
         Receipt {
             write: original.clone(),
@@ -1189,11 +1235,15 @@ fn unconfirmed_start_remains_in_its_agents_draft_surface_after_inbox_source_disa
         },
         &mut texts,
     );
-    threads.origins.clear();
     let pane = Pane::Agent(Some("agent/atlas".into()));
     threads
         .lists
         .insert(ThreadInterest::Agent("agent/atlas".into()), Vec::new());
+    assert_captured(&threads, &home, &texts);
+    assert_captured(&threads, &pane, &texts);
+    threads.origins.clear();
+    assert_captured(&threads, &home, &texts);
+    assert_captured(&threads, &pane, &texts);
     let doc = threads.mount(
         &pane,
         100,
@@ -1215,6 +1265,14 @@ fn unconfirmed_start_remains_in_its_agents_draft_surface_after_inbox_source_disa
     let retry = threads.writes().pop().unwrap();
     assert_eq!(retry.key, original.key);
     assert_eq!(retry.id, original.id);
+    assert_eq!(retry.fence, original.fence);
+    let Mutation::Start(parameters) = retry.mutation else {
+        panic!("original start")
+    };
+    assert_eq!(parameters.agent_id, "agent/atlas");
+    assert_eq!(parameters.title, "Fault context");
+    assert_eq!(parameters.origin.source_id, "agent/example");
+    assert_eq!(parameters.origin.episode, "claim/source");
 }
 
 #[test]

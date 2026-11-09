@@ -509,13 +509,29 @@ impl Threads {
         Ok(())
     }
 
+    fn start_origin(&self, item: &str) -> Option<&Origin> {
+        let retained = self.retained_origins.get(item).filter(|origin| {
+            let ThreadInterest::Inbox { episode, .. } = &origin.context else {
+                return false;
+            };
+            self.drafts
+                .get(
+                    &Input::Start {
+                        item: item.into(),
+                        episode: episode.clone(),
+                    }
+                    .key(),
+                )
+                .and_then(|draft| draft.delivery.as_ref())
+                .is_some_and(|delivery| delivery.pending || delivery.unknown)
+        });
+        retained
+            .or_else(|| self.origins.get(item))
+            .or_else(|| self.retained_origins.get(item))
+    }
+
     fn start_input(&self, item: &str) -> Option<Input> {
-        let ThreadInterest::Inbox { episode, .. } = &self
-            .origins
-            .get(item)
-            .or_else(|| self.retained_origins.get(item))?
-            .context
-        else {
+        let ThreadInterest::Inbox { episode, .. } = &self.start_origin(item)?.context else {
             return None;
         };
         Some(Input::Start {
@@ -636,11 +652,7 @@ impl Threads {
 
     fn context(&self, pane: &Pane) -> Option<ThreadInterest> {
         match pane {
-            Pane::Home(Some(id)) => self
-                .origins
-                .get(id)
-                .or_else(|| self.retained_origins.get(id))
-                .map(|origin| origin.context.clone()),
+            Pane::Home(Some(id)) => self.start_origin(id).map(|origin| origin.context.clone()),
             Pane::Agent(Some(id)) if id.starts_with("agent/") => {
                 Some(ThreadInterest::Agent(id.clone()))
             }
@@ -944,12 +956,14 @@ impl Threads {
             }
             if let Some(input) = drafting {
                 if let Input::Start { item, .. } = input
-                    && let Some(ask) = self
-                        .origins
-                        .get(item)
-                        .or_else(|| self.retained_origins.get(item))
+                    && let Some(origin) = self.start_origin(item)
                 {
-                    doc.line(thread::heading(&ask.title, " · Draft", true, width));
+                    doc.line(thread::heading(
+                        &origin.title,
+                        &format!(" · Draft · to {}", origin.agent),
+                        true,
+                        width,
+                    ));
                 }
                 self.editor(
                     &mut doc,
@@ -1614,10 +1628,7 @@ impl Threads {
             ..Delivery::new(write.clone())
         });
         if let Input::Start { item, .. } = input
-            && let Some(origin) = self
-                .origins
-                .get(item)
-                .or_else(|| self.retained_origins.get(item))
+            && let Some(origin) = self.start_origin(item)
         {
             self.retained_origins.insert(item.clone(), origin.clone());
         }
