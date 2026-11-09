@@ -23,10 +23,10 @@ async fn completed_authority_reconciles_older_build_appends_without_reopen() {
                 'custom.client.assistant.v1.granted','node','person/owner','{}','[]','1')",
             [id],
         ).unwrap();
-        assert!(authority::ready(&store.readers.get()).is_err());
+        authority::ready(&store.readers.get()).unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                if authority::ready(&store.readers.get()).is_ok() { break; }
+                if !authority::maintenance_pending(&store.readers.get()).unwrap() { break; }
                 tokio::task::yield_now().await;
             }
         }).await.expect("a completed projection wakes and drains compatibility work");
@@ -52,12 +52,14 @@ async fn authority_commit_between_completed_drain_and_wait_is_not_lost() {
                 'custom.client.assistant.v1.granted','node','person/owner','{}','[]','1');
          COMMIT;"
     ).unwrap();
-    assert!(authority::ready(&store.readers.get()).is_err());
+    authority::ready(&store.readers.get()).unwrap();
+    assert!(authority::maintenance_pending(&store.readers.get()).unwrap());
     tokio::time::timeout(Duration::from_secs(5), maintenance.changes.changed())
         .await.expect("the intervening commit stays visible")
         .expect("the observer remains registered");
     assert!(maintenance.advance().await.unwrap());
     assert!(authority::ready(&store.readers.get()).is_ok());
+    assert!(!authority::maintenance_pending(&store.readers.get()).unwrap());
 }
 
 #[tokio::test]

@@ -170,7 +170,9 @@ fn assert_reference_and_rebuild(store: &Store) {
 
 fn decisions(store: &Store, now: u64) -> Vec<String> {
     authority::candidates(&store.readers.get(), "assistant/chatgpt", OWNER, Some(now), None, None)
-        .unwrap().into_iter().map(|claim| claim.id).collect()
+        .unwrap().into_iter()
+        .filter(|claim| authority::contains(&store.readers.get(), &claim.id).unwrap())
+        .map(|claim| claim.id).collect()
 }
 
 #[test]
@@ -212,7 +214,6 @@ fn late_envelope_signature_promotes_previously_admitted_grant() {
 fn backfill_markers(connection: &Connection) -> Vec<(String, String)> {
     connection.prepare(
         "SELECT key,value FROM meta WHERE key='assistant_grant_authority_version'
-            OR key='assistant_grant_authority_membership_generation'
             OR key LIKE 'assistant_grant_authority_cursor/%' ORDER BY key"
     ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
         .unwrap().collect::<rusqlite::Result<_>>().unwrap()
@@ -263,13 +264,16 @@ fn raw_signature_only_insert_survives_reopen_and_promotes_grant_policy_and_revok
             ).unwrap().query_map([], |row| row.get(0)).unwrap()
                 .collect::<rusqlite::Result<_>>().unwrap();
             assert_eq!(dirty, vec![claim.id.clone()]);
-            assert!(authority::ready(&connection).is_err());
+            authority::ready(&connection).unwrap();
+            assert!(authority::maintenance_pending(&connection).unwrap());
+            assert!(authority::subject_ready(&connection, SUBJECT).is_err());
             assert_eq!(backfill_markers(&connection), markers);
         }
         // Reopen before Store startup can drain the durable queue automatically.
         {
             let mut connection = Connection::open(&path).unwrap();
-            assert!(authority::ready(&connection).is_err());
+            authority::ready(&connection).unwrap();
+            assert!(authority::maintenance_pending(&connection).unwrap());
             let transaction = connection.transaction().unwrap();
             assert!(authority::backfill_slice(&transaction, Duration::from_secs(60)).unwrap());
             authority::ready(&transaction).unwrap();
@@ -310,7 +314,8 @@ fn malformed_raw_signature_row_is_drained_without_authenticating_a_pending_revok
             signature.signature = "not-an-ed25519-signature".into();
             insert_raw_signature(&connection, &signature);
         }
-        assert!(authority::ready(&connection).is_err());
+        authority::ready(&connection).unwrap();
+        assert!(authority::subject_ready(&connection, SUBJECT).is_err());
         let transaction = connection.transaction().unwrap();
         assert!(authority::backfill_slice(&transaction, Duration::from_secs(60)).unwrap());
         authority::ready(&transaction).unwrap();
@@ -323,7 +328,8 @@ fn malformed_raw_signature_row_is_drained_without_authenticating_a_pending_revok
         assert_eq!(backfill_markers(&transaction), markers);
         transaction.commit().unwrap();
     }
-    assert_eq!(decisions(&target, 0), vec![grant.id]);
+    assert!(decisions(&target, 0).is_empty());
+    assert_bearer_rejected(&target, &grant);
     assert_reference_and_rebuild(&target);
 }
 
@@ -459,8 +465,8 @@ fn reset_projection(connection: &Connection) {
          DELETE FROM assistant_grant_dirty;
          DELETE FROM assistant_grant_auth_cursor;
          DELETE FROM assistant_grant_membership_dirty;
+         UPDATE assistant_grant_membership_state SET applied_revision=-1 WHERE id=1;
          DELETE FROM meta WHERE key='assistant_grant_authority_version'
-            OR key='assistant_grant_authority_membership_generation'
             OR key LIKE 'assistant_grant_authority_cursor/%';"
     ).unwrap();
 }
@@ -513,7 +519,7 @@ fn victim_origin_legacy_fork_injected_after_partial_cursor_cannot_authenticate()
     receive(&victim, &unsigned(&export(&sender, &victim)));
     drain_authority(&victim);
     assert_bearer_rejected(&victim, &grant);
-    assert!(authority::contains(&victim.readers.get(), &local.id).unwrap());
+    assert_bearer_rejected(&victim, &local);
 }
 
 #[test]
@@ -545,7 +551,8 @@ fn older_build_raw_legacy_replication_cannot_authenticate_on_new_build_reopen() 
                 grant.accepted_at_unix_ms.to_string()],
         ).unwrap();
         transaction.commit().unwrap();
-        assert!(authority::ready(&connection).is_err());
+        authority::ready(&connection).unwrap();
+        assert!(authority::maintenance_pending(&connection).unwrap());
     }
     let reopened = Store::open(&path, "victim", Arc::new(Plain)).unwrap();
     drain_authority(&reopened);
@@ -711,7 +718,8 @@ fn malformed_and_unsigned_same_origin_flood_preserves_previous_authority_and_con
         let after = transition_cost(&target, &grant);
         assert_eq!(after, before, "same-origin flood changed selected authority or request VM/read cost at {count}");
         assert_eq!(candidate_cost(&target), candidate_before, "candidate request cost grew at {count}");
-        assert_eq!(decisions(&target, 15000), vec![grant.id.clone()]);
+        assert!(decisions(&target, 15000).is_empty(), "pending revokes fence only this subject");
+        assert_bearer_rejected(&target, &grant);
         assert_reference_and_rebuild(&target);
     }
 }
@@ -860,7 +868,9 @@ fn eligible_evidence_beyond_first_key_page_resumes_and_cryptographically_verifie
         assert_eq!(backfill_markers(&transaction),markers);
         if page<3 {
             assert!(!done,"invalid earlier evidence authenticated the claim");
-            assert!(authority::ready(&transaction).is_err());
+            assert!(authority::ready(&transaction).is_ok());
+            assert!(authority::subject_ready(&transaction, SUBJECT).is_err());
+            assert!(authority::maintenance_pending(&transaction).unwrap());
             let cursor: String = transaction.query_row(
                 "SELECT member_key FROM assistant_grant_auth_cursor WHERE claim_id=?1",
                 [&grant.id], |row| row.get(0)).unwrap();
@@ -901,7 +911,9 @@ fn changed_membership_writer_flood_uses_the_same_fixed_refresh_budget() {
     let refreshed: usize = transaction.query_row(
         "SELECT COUNT(*) FROM refreshed_items", [], |row| row.get(0)).unwrap();
     assert_eq!(refreshed,authority::CLAIMS_PER_SLICE);
-    assert!(authority::ready(&transaction).is_err());
+    assert!(authority::ready(&transaction).is_ok());
+    assert!(authority::subject_ready(&transaction, SUBJECT).is_err());
+    assert!(authority::maintenance_pending(&transaction).unwrap());
     assert_eq!(backfill_markers(&transaction),markers);
     transaction.commit().unwrap();
     drop(connection);
@@ -1002,3 +1014,87 @@ fn envelope_record_arriving_before_auth_cursor_restarts_preexisting_signature_se
         "the earlier signed record was hidden behind the old position/key cursor");
     transaction.commit().unwrap();
 }
+
+fn independent_grant(store: &Store) -> ClaimRecord {
+    let suffix = "fedcba9876543210fedcba98";
+    let mut independent = fields();
+    independent["grant_id"] = json!(format!("assistant-grant/{suffix}"));
+    independent["session_actor"] = json!(format!("assistant/chatgpt/session/assistant-grant/{suffix}"));
+    independent["credential_hash"] = json!("b".repeat(64));
+    append(store, &format!("custom/client/assistant-v1-{suffix}"), GRANTED, independent)
+}
+
+fn assert_subject_fenced(connection: &Connection, grant: &ClaimRecord, independent: &ClaimRecord) {
+    authority::ready(connection).unwrap();
+    assert!(authority::subject_ready(connection, &grant.subject).is_err());
+    assert!(!authority::contains(connection, &grant.id).unwrap());
+    assert!(authority::by_credential(connection, grant.body["fields"]["credential_hash"].as_str().unwrap()).unwrap().is_none());
+    assert!(authority::latest(connection, &grant.subject, GRANTED).is_err());
+    for kind in [POLICY, REVOKED] {
+        assert!(authority::transition(connection, grant, kind).is_err());
+    }
+    authority::subject_ready(connection, &independent.subject).unwrap();
+    assert!(authority::contains(connection, &independent.id).unwrap());
+    assert_eq!(authority::by_credential(connection, independent.body["fields"]["credential_hash"].as_str().unwrap()).unwrap().unwrap().id, independent.id);
+    assert_eq!(authority::latest(connection, &independent.subject, GRANTED).unwrap().unwrap().id, independent.id);
+    for kind in [POLICY, REVOKED] {
+        assert!(authority::transition(connection, independent, kind).unwrap().is_none());
+    }
+    for cutoff in [Some(0), None] {
+        let candidates = authority::candidates(connection, "assistant/chatgpt", OWNER, cutoff, None, None).unwrap();
+        // Conflict snapshots retain this authenticated witness even while its
+        // own credential is fenced; a pending revoke cannot clear a conflict.
+        assert_eq!(candidates.iter().map(|claim| claim.id.as_str()).collect::<BTreeSet<_>>(),
+            BTreeSet::from([grant.id.as_str(), independent.id.as_str()]));
+    }
+}
+
+#[test]
+fn dirty_and_auth_cursor_work_fence_only_their_subject_on_every_read_path() {
+    let store = node("issuer", None);
+    let grant = append(&store, SUBJECT, GRANTED, fields());
+    let independent = independent_grant(&store);
+    drain_authority(&store);
+    let connection = store.connection.write();
+    connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    assert!(authority::maintenance_pending(&connection).unwrap());
+    assert_subject_fenced(&connection, &grant, &independent);
+    connection.execute("DELETE FROM assistant_grant_dirty WHERE claim_id=?1", [&grant.id]).unwrap();
+    connection.execute(
+        "INSERT INTO assistant_grant_auth_cursor(claim_id,position,record_rowid,member_key) VALUES(?1,0,0,'')",
+        [&grant.id],
+    ).unwrap();
+    assert_subject_fenced(&connection, &grant, &independent);
+    connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&grant.id]).unwrap();
+    assert!(authority::contains(&connection, &grant.id).unwrap());
+}
+
+#[test]
+fn unsigned_pending_revoke_fences_only_its_established_subject_after_dirty_work_drains() {
+    let (source, key) = source();
+    let target = node("reader", Some(key.public()));
+    let grant = append(&source, SUBJECT, GRANTED, fields());
+    receive(&target, &export(&source, &target));
+    let independent = independent_grant(&target);
+    let revoke = append(&source, SUBJECT, REVOKED, fields());
+    let exchange = export(&source, &target);
+    receive(&target, &unsigned(&exchange));
+    drain_authority(&target);
+    {
+        let connection = target.readers.get();
+        assert!(!authority::maintenance_pending(&connection).unwrap());
+        let authenticated: bool = connection.query_row(
+            "SELECT authenticated FROM assistant_grant_pending WHERE claim_id=?1",
+            [&revoke.id], |row| row.get(0),
+        ).unwrap();
+        assert!(!authenticated);
+        assert_subject_fenced(&connection, &grant, &independent);
+    }
+    receive(&target, &signatures(&exchange));
+    let connection = target.readers.get();
+    authority::subject_ready(&connection, SUBJECT).unwrap();
+    assert_eq!(authority::transition(&connection, &grant, REVOKED).unwrap().unwrap().id, revoke.id);
+    assert_eq!(decisions(&target, 0), vec![independent.id]);
+}
+
+include!("assistant_grant_receipt_cost_tests.rs");

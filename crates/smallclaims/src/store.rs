@@ -3738,11 +3738,6 @@ impl<'a> VerifiedEnvelopeSignature<'a> {
                 self.signature,
                 now
             ])?;
-        if inserted != 0 {
-            assistant_grant_authority::refresh_envelope(
-                transaction, self.writer, self.sequence, self.envelope_hash,
-            )?;
-        }
         Ok(inserted)
     }
 }
@@ -3754,6 +3749,8 @@ pub trait FleetAuthority: Send + Sync {
     fn fleet_id(&self) -> Result<Option<String>>;
     /// Advances whenever the default store's membership may have changed.
     fn fleet_generation(&self) -> Result<i64>;
+    /// Projection-relevant evidence only; unrelated signatures do not advance it.
+    fn assistant_grant_membership_revision(&self) -> Result<i64>;
     fn fleet_membership(&self) -> Result<crate::fleet::Membership>;
     fn fleet_membership_sealed(&self) -> Result<crate::fleet::Membership>;
     /// Whether this is a default store that takes its fleet from no other store.
@@ -3767,6 +3764,10 @@ impl FleetAuthority for Store {
 
     fn fleet_generation(&self) -> Result<i64> {
         fleet_generation(&self.readers.get())
+    }
+
+    fn assistant_grant_membership_revision(&self) -> Result<i64> {
+        Store::assistant_grant_membership_revision(self)
     }
 
     fn fleet_membership(&self) -> Result<crate::fleet::Membership> {

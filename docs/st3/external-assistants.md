@@ -176,16 +176,28 @@ below applies; a restore is not a way to manufacture historical provenance.
 Authority maintenance is lifecycle-owned. While work remains, pages execute
 back-to-back as bounded transactions, releasing the writer between pages and
 yielding to the runtime rather than using sleep-based pacing.
-Each transaction shares a 64-unit budget across history, dirty-signature claims,
-and membership retries; empty membership-writer tasks also consume one unit.
+Each transaction shares a 64-unit budget across changed membership windows,
+history, dirty-signature claims, and membership retries; empty membership-writer
+tasks also consume one unit. Membership folding and snapshot comparison happen
+on readers before writer admission; only changed keys are applied, never a full
+window replacement in a receipt transaction.
 Each authentication refresh visits one indexed replica record and at most 16
 writer membership keys, looking up signatures by their full
 `(writer, sequence, envelope_hash, member_key)` key rather than enumerating
 nonmember signatures. Durable record/key cursors continue across units so later
-eligible evidence is eventually checked; new signature or membership retries
-reset that progress. Membership promotion is queued for maintenance, and
-authorization readiness fails closed while it is queued. Storing an identical
-signature again is a no-op: it neither refreshes authority nor dirties a claim.
+eligible evidence is eventually checked. Only relevant member-key evidence or
+membership retries reset that progress. Fresh nonmember signatures neither
+reset cursors nor enqueue projection work or invalidate its membership snapshot.
+An identical signature is also a no-op.
+
+Global not-ready applies only during initial/version backfill. Thereafter dirty
+or pending authentication fences only that grant subject, including a pending
+revoke; established credentials for unrelated subjects remain usable. The last
+authenticated effective snapshot remains a conflict witness until an authenticated
+transition changes it: pending work cannot clear an existing opposite-profile
+conflict. The inherited fleet-generation cache may still invalidate and aggregate historical
+signature keys independently; that pre-existing fleet-fold amplification is
+separate from this projection's receipt path and is not claimed fixed here.
 
 After the authority backfill completes, `fractal doctor` lists every pending
 unauthenticated, unmarked local grant claim ID under the claim-store check with

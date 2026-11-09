@@ -627,7 +627,6 @@ impl Store {
                 )?;
             }
         }
-        super::assistant_grant_authority::refresh_membership(transaction)?;
         Ok(true)
     }
 }

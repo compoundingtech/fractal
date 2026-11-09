@@ -118,13 +118,20 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
             claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL, record_rowid INTEGER NOT NULL, member_key TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS assistant_grant_membership_dirty (
             writer TEXT PRIMARY KEY, sequence INTEGER NOT NULL, claim_id TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS assistant_grant_membership_state (
+            id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, applied_revision INTEGER NOT NULL);
+         INSERT OR IGNORE INTO assistant_grant_membership_state VALUES(1,1,0);
          CREATE TABLE IF NOT EXISTS assistant_grant_local_appends (claim_id TEXT PRIMARY KEY);
          CREATE TRIGGER IF NOT EXISTS assistant_grant_dirty_insert AFTER INSERT ON claims
          WHEN NEW.kind IN ('custom.client.assistant.v1.granted','custom.client.assistant.v1.policy','custom.client.assistant.v1.revoked')
          BEGIN INSERT OR IGNORE INTO assistant_grant_dirty VALUES(NEW.id); END;
          DROP TRIGGER IF EXISTS assistant_grant_dirty_signature_insert;
-         CREATE TRIGGER IF NOT EXISTS assistant_grant_dirty_signature_insert_v2
+         DROP TRIGGER IF EXISTS assistant_grant_dirty_signature_insert_v2;
+         CREATE TRIGGER IF NOT EXISTS assistant_grant_dirty_signature_insert_v3
          AFTER INSERT ON replica_envelope_signatures
+         WHEN EXISTS(SELECT 1 FROM assistant_grant_membership_windows
+              WHERE writer=NEW.writer AND member_key=NEW.member_key
+                AND NEW.sequence>=start AND (end IS NULL OR NEW.sequence<=end))
          BEGIN
             INSERT OR IGNORE INTO assistant_grant_dirty(claim_id)
             SELECT records.claim_id FROM replica_records AS records
@@ -140,19 +147,96 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
             writer TEXT NOT NULL, member_key TEXT NOT NULL, start INTEGER NOT NULL, end INTEGER,
             PRIMARY KEY(writer,member_key));"
     )?;
+    install_membership_evidence_triggers(connection)?;
     connection.execute(/* sqlite-large-value: allow-for-now lv-h3f117dab1bdd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_local_origin',?1)", [local_origin])?;
+    Ok(())
+}
+
+/// Independent from the inherited fleet-generation counter: an irrelevant
+/// signature may invalidate that legacy cache, but never this projection.
+fn install_membership_evidence_triggers(connection: &Connection) -> Result<()> {
+    let bump = "UPDATE assistant_grant_membership_state SET revision=revision+1 WHERE id=1;";
+    for (event, row) in [("INSERT", "NEW"), ("DELETE", "OLD")] {
+        connection.execute_batch(&format!(
+            "CREATE TRIGGER IF NOT EXISTS assistant_grant_membership_claim_{event}
+             AFTER {event} ON claims WHEN {row}.kind IN ({FLEET_CLAIM_KINDS})
+             BEGIN {bump} END;
+             CREATE TRIGGER IF NOT EXISTS assistant_grant_membership_envelope_{event}
+             AFTER {event} ON replica_envelopes
+             WHEN EXISTS(SELECT 1 FROM claims WHERE batch_id={row}.batch_id
+                         AND kind IN ({FLEET_CLAIM_KINDS}))
+             BEGIN {bump} END;
+             CREATE TRIGGER IF NOT EXISTS assistant_grant_membership_anchor_{event}
+             AFTER {event} ON meta WHEN {row}.key IN ('fleet_anchor_key','fleet_id')
+             BEGIN {bump} END;"
+        ))?;
+    }
+    connection.execute_batch(&format!(
+        "CREATE TRIGGER IF NOT EXISTS assistant_grant_membership_claim_update
+         AFTER UPDATE OF kind,body,subject,batch_id ON claims
+         WHEN OLD.kind IN ({FLEET_CLAIM_KINDS}) OR NEW.kind IN ({FLEET_CLAIM_KINDS})
+         BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS assistant_grant_membership_envelope_update
+         AFTER UPDATE OF writer,sequence,batch_id,envelope_hash,receipt_state ON replica_envelopes
+         WHEN EXISTS(SELECT 1 FROM claims WHERE batch_id IN (OLD.batch_id,NEW.batch_id)
+                     AND kind IN ({FLEET_CLAIM_KINDS}))
+         BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS assistant_grant_membership_anchor_update
+         AFTER UPDATE OF value ON meta
+         WHEN NEW.key IN ('fleet_anchor_key','fleet_id') AND NEW.value IS NOT OLD.value
+         BEGIN {bump} END;
+         CREATE TRIGGER IF NOT EXISTS assistant_grant_membership_signature_insert
+         AFTER INSERT ON replica_envelope_signatures
+         WHEN EXISTS(SELECT 1 FROM assistant_grant_membership_windows
+              WHERE writer=NEW.writer AND member_key=NEW.member_key
+                AND NEW.sequence>=start AND (end IS NULL OR NEW.sequence<=end))
+          AND EXISTS(SELECT 1 FROM replica_envelopes AS envelopes
+              JOIN claims ON claims.batch_id=envelopes.batch_id
+              WHERE envelopes.writer=NEW.writer AND envelopes.sequence=NEW.sequence
+                AND envelopes.envelope_hash=NEW.envelope_hash
+                AND claims.kind IN ({FLEET_CLAIM_KINDS}))
+         BEGIN {bump} END;"
+    ))?;
     Ok(())
 }
 
 pub fn ready(connection: &Connection) -> Result<(), FractalError> {
     let complete: bool = connection.query_row(
-        "SELECT COALESCE((SELECT value FROM meta WHERE key='assistant_grant_authority_version'),'')=?1
-            AND NOT EXISTS(SELECT 1 FROM assistant_grant_dirty)
-            AND NOT EXISTS(SELECT 1 FROM assistant_grant_membership_dirty)",
+        "SELECT COALESCE((SELECT value FROM meta WHERE key='assistant_grant_authority_version'),'')=?1",
         [VERSION], |row| row.get(0),
     ).map_err(internal)?;
     if !complete {
         return Err(FractalError::new("assistant-grant-authority-not-ready", "external-grant authority backfill is in progress; retry after it completes"));
+    }
+    Ok(())
+}
+/// Durable maintenance work is independent of initial-backfill readiness.
+pub fn maintenance_pending(connection: &Connection) -> Result<bool, FractalError> {
+    let pending: bool = connection.query_row(
+        "SELECT COALESCE((SELECT value FROM meta WHERE key='assistant_grant_authority_version'),'')<>?1
+            OR EXISTS(SELECT 1 FROM assistant_grant_dirty)
+            OR EXISTS(SELECT 1 FROM assistant_grant_membership_dirty)
+            OR EXISTS(SELECT 1 FROM assistant_grant_membership_state WHERE revision<>applied_revision)",
+        [VERSION], |row| row.get(0),
+    ).map_err(internal)?;
+    Ok(pending)
+}
+fn subject_pending(connection: &Connection, subject: &str) -> Result<bool, FractalError> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_dirty AS dirty
+                JOIN claims ON claims.id=dirty.claim_id WHERE claims.subject=?1)
+            OR EXISTS(SELECT 1 FROM assistant_grant_auth_cursor AS cursor
+                JOIN claims ON claims.id=cursor.claim_id WHERE claims.subject=?1)
+            OR EXISTS(SELECT 1 FROM assistant_grant_pending
+                WHERE grant_subject=?1 AND authenticated=0)",
+        [subject], |row| row.get(0),
+    ).map_err(internal)
+}
+/// A pending proof or unauthenticated revoke fences only its grant subject.
+pub fn subject_ready(connection: &Connection, subject: &str) -> Result<(), FractalError> {
+    ready(connection)?;
+    if subject_pending(connection, subject)? {
+        return Err(FractalError::new("assistant-grant-authority-not-ready", "external-grant subject authentication is in progress"));
     }
     Ok(())
 }
@@ -163,7 +247,7 @@ pub const TRANSITION_QUERY: &str = "SELECT record FROM assistant_grant_authority
     WHERE grant_subject=?1 AND kind=?2 AND origin=?3 AND actor=?4 AND base_claim_id=?5
     ORDER BY store_index DESC LIMIT 1";
 pub fn transition(connection: &Connection, granted: &ClaimRecord, kind: &str) -> Result<Option<ClaimRecord>, FractalError> {
-    ready(connection)?;
+    subject_ready(connection, &granted.subject)?;
     transition_unchecked(connection, granted, kind).map_err(internal)
 }
 fn transition_unchecked(connection: &Connection, granted: &ClaimRecord, kind: &str) -> Result<Option<ClaimRecord>> {
@@ -172,7 +256,7 @@ fn transition_unchecked(connection: &Connection, granted: &ClaimRecord, kind: &s
     record.map(|record| serde_json::from_str(&record).map_err(Into::into)).transpose()
 }
 pub fn latest(connection: &Connection, subject: &str, kind: &str) -> Result<Option<ClaimRecord>, FractalError> {
-    ready(connection)?;
+    subject_ready(connection, subject)?;
     let record: Option<String> = connection.query_row(
         "SELECT record FROM assistant_grant_authority WHERE grant_subject=?1 AND kind=?2 ORDER BY store_index DESC LIMIT 1",
         params![subject,kind], |row| row.get(0)).optional().map_err(internal)?;
@@ -185,6 +269,9 @@ pub const CANDIDATES_QUERY: &str = "SELECT grant_record FROM assistant_grant_eff
     SELECT grant_record FROM assistant_grant_effective
     WHERE ?3 IS NULL AND principal=?1 AND owner=?2
       AND (?4 IS NULL OR claim_id<>?4) AND (?5 IS NULL OR profile<>?5)";
+/// Authenticated effective snapshots for conflict admission, not bearer access.
+/// A pending revoke must not erase an opposite-profile conflict witness before
+/// it authenticates. Bearer and transition readers independently fence subjects.
 pub fn candidates(connection: &Connection, principal: &str, owner: &str, expiry_cut: Option<u64>, excluded: Option<&str>, ignored_profile: Option<&str>) -> Result<Vec<ClaimRecord>, FractalError> {
     ready(connection)?;
     let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h556bdadaf8cd owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ CANDIDATES_QUERY).map_err(internal)?;
@@ -197,11 +284,22 @@ pub fn by_credential(connection: &Connection, digest: &str) -> Result<Option<Cla
     let record: Option<String> = connection.query_row(
         "SELECT record FROM assistant_grant_authority WHERE credential_hash=?1 AND kind='custom.client.assistant.v1.granted' ORDER BY store_index DESC LIMIT 1",
         [digest], |row| row.get(0)).optional().map_err(internal)?;
-    record.map(decode).transpose()
+    let grant = record.map(decode).transpose()?;
+    match grant {
+        Some(grant) if !subject_pending(connection, &grant.subject)? => Ok(Some(grant)),
+        _ => Ok(None),
+    }
 }
 pub fn contains(connection: &Connection, claim_id: &str) -> Result<bool, FractalError> {
     ready(connection)?;
-    connection.query_row("SELECT EXISTS(SELECT 1 FROM assistant_grant_authority WHERE claim_id=?1)", [claim_id], |row| row.get(0)).map_err(internal)
+    let subject: Option<String> = connection.query_row(
+        "SELECT grant_subject FROM assistant_grant_authority WHERE claim_id=?1 LIMIT 1",
+        [claim_id], |row| row.get(0),
+    ).optional().map_err(internal)?;
+    match subject {
+        Some(subject) => Ok(!subject_pending(connection, &subject)?),
+        None => Ok(false),
+    }
 }
 
 fn insert_authority(connection: &Connection, claim: &ClaimRecord, base: &ClaimRecord) -> Result<bool> {
@@ -331,6 +429,14 @@ fn authenticated_claim(connection: &Connection, id: &str) -> Result<Option<bool>
     let Some(fleet_id) = fleet_meta(connection,"assistant_grant_authority_fleet_id")? else {
         return Ok(Some(false));
     };
+    // Never first-authenticate against a partially applied or stale membership
+    // snapshot. Already admitted claims and durable local appends bypass this
+    // path; only this pending subject remains fenced until maintenance catches up.
+    let membership_ready: bool = connection.query_row(
+        "SELECT revision=applied_revision FROM assistant_grant_membership_state WHERE id=1",
+        [], |row| row.get(0),
+    )?;
+    if !membership_ready { return Ok(None); }
     let shard = fleet_meta(connection,"shard_id")?;
     let cursor: Option<(i64,i64,String)> = connection.query_row(
         "SELECT position,record_rowid,member_key FROM assistant_grant_auth_cursor WHERE claim_id=?1",
@@ -404,7 +510,6 @@ pub const AUTHENTICATION_KEYS_QUERY: &str =
 /// Refresh only this envelope's grant records, after receipt/signature state has
 /// been written, and before its transaction is committed.
 pub fn refresh_envelope(connection: &Connection, writer: &str, sequence: u64, hash: &str) -> Result<()> {
-    refresh_membership(connection)?;
     let ids = {
         let mut statement = connection.prepare_cached("SELECT records.claim_id FROM replica_records AS records JOIN claims ON claims.id=records.claim_id
             WHERE records.writer=?1 AND records.sequence=?2 AND records.envelope_hash=?3
@@ -421,63 +526,70 @@ pub fn refresh_envelope(connection: &Connection, writer: &str, sequence: u64, ha
     }
     Ok(())
 }
-/// Membership changes promote pending rows only in newly changed keyed windows.
-/// Authentication is an admission fact, not a live membership predicate: a later
-/// removal/fence cannot retract authentication already established for a past
-/// sequence. It can only prevent a pending row from first acquiring it.
-pub fn refresh_membership(connection: &Connection) -> Result<()> {
-    if fleet_meta(connection,"assistant_grant_authority_shared_fleet")?.is_some() {
-        return Ok(());
-    }
-    let generation = fleet_generation(connection)?;
-    let previous: Option<i64> = connection.query_row("SELECT CAST(value AS INTEGER) FROM meta WHERE key='assistant_grant_authority_membership_generation'",[],|row| row.get(0)).optional()?;
-    if previous==Some(generation) { return Ok(()); }
-    refresh_membership_from(connection, &fleet_membership_tx(connection)?, generation, fleet_meta(connection,"fleet_id")?.as_deref())?;
-    Ok(())
+fn membership_revision(connection: &Connection) -> Result<i64> {
+    Ok(connection.query_row(
+        "SELECT revision FROM assistant_grant_membership_state WHERE id=1", [], |row| row.get(0),
+    )?)
 }
 
-fn refresh_membership_from(connection: &Connection, membership: &crate::fleet::Membership, generation: i64, fleet_id: Option<&str>) -> Result<()> {
-    let mut changed = Vec::new();
-    for incarnation in membership.incarnations() {
-        let prior: Option<(u64,Option<u64>)> = connection.query_row(
-            "SELECT start,end FROM assistant_grant_membership_windows WHERE writer=?1 AND member_key=?2",
-            params![incarnation.name,incarnation.member_key], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
-        if prior!=Some((incarnation.start,incarnation.end)) {
-            changed.push((incarnation.name.clone(),incarnation.start,incarnation.end));
+struct MembershipUpdate {
+    revision: i64,
+    fleet_id: Option<String>,
+    // Only changed/deleted keys, never a replacement of the complete snapshot.
+    windows: Vec<(String, String, Option<(u64, Option<u64>)>)>,
+    complete: bool,
+}
+
+impl MembershipUpdate {
+    fn apply(&self, connection: &Connection) -> Result<usize> {
+        for (writer,key,window) in &self.windows {
+            if let Some((start,end)) = window {
+                connection.execute(
+                    "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,?3,?4)
+                     ON CONFLICT(writer,member_key) DO UPDATE SET start=excluded.start,end=excluded.end",
+                    params![writer,key,start,end],
+                )?;
+            } else {
+                connection.execute(
+                    "DELETE FROM assistant_grant_membership_windows WHERE writer=?1 AND member_key=?2",
+                    params![writer,key],
+                )?;
+            }
+            connection.execute(
+                "INSERT OR REPLACE INTO assistant_grant_membership_dirty
+                 SELECT ?1,0,'' WHERE EXISTS(
+                   SELECT 1 FROM assistant_grant_pending INDEXED BY assistant_grant_pending_writer_index
+                   WHERE origin=?1 AND authenticated=0)", [writer],
+            )?;
         }
+        if self.complete {
+            if let Some(fleet_id) = &self.fleet_id {
+                connection.execute(
+                    "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_fleet_id',?1)",
+                    [fleet_id],
+                )?;
+            } else {
+                connection.execute("DELETE FROM meta WHERE key='assistant_grant_authority_fleet_id'", [])?;
+            }
+            connection.execute(
+                "UPDATE assistant_grant_membership_state SET applied_revision=?1 WHERE id=1",
+                [self.revision],
+            )?;
+        }
+        Ok(self.windows.len())
     }
-    // Replace the window snapshot before promotions, including removal of keys
-    // no longer present in a conflicted membership fold.
-    connection.execute(/* sqlite-large-value: allow-for-now lv-hd11f3b7cf006 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_membership_windows", [])?;
-    for incarnation in membership.incarnations() {
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h679dd6776599 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_membership_windows(writer,member_key,start,end) VALUES(?1,?2,?3,?4)",
-            params![incarnation.name,incarnation.member_key,incarnation.start,incarnation.end])?;
-    }
-    if let Some(fleet_id) = fleet_id {
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h0ce05c43b4a2 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_fleet_id',?1)",[fleet_id])?;
-    } else {
-        connection.execute(/* sqlite-large-value: allow-for-now lv-ha3bce0201694 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='assistant_grant_authority_fleet_id'", [])?;
-    }
-    connection.execute(/* sqlite-large-value: allow-for-now lv-hbcecffaa18c4 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_membership_generation',?1)",[generation.to_string()])?;
-    for (writer,_,_) in changed {
-        // A durable writer cursor admits at most CLAIMS_PER_SLICE pending rows
-        // per maintenance unit, rather than draining a changed window here.
-        connection.execute(
-            "INSERT OR REPLACE INTO assistant_grant_membership_dirty
-             SELECT ?1,0,'' WHERE EXISTS(
-               SELECT 1 FROM assistant_grant_pending INDEXED BY assistant_grant_pending_writer_index
-               WHERE origin=?1 AND authenticated=0)", [writer])?;
-    }
-    Ok(())
 }
 /// Resumable, idempotent versioned backfill. Each page uses claims_kind_index;
 /// unrelated claims are never visited. Cursor and projection changes commit
 /// together in the caller's transaction. Old-build appends and signature-only
 /// arrivals are captured by persistent dirty triggers even after completion.
 pub fn backfill_slice(connection: &Connection, budget: Duration) -> Result<bool> {
+    backfill_slice_with_limit(connection, budget, CLAIMS_PER_SLICE)
+}
+
+fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut remaining: usize) -> Result<bool> {
     let started = Instant::now();
-    let mut remaining = CLAIMS_PER_SLICE;
-    refresh_membership(connection)?;
+    if remaining==0 { return Ok(false); }
     // Include membership-driven retries in the same fixed item budget. Each
     // empty writer task also consumes a unit, bounding sparse writer queues.
     while remaining>0 {
@@ -543,29 +655,90 @@ pub fn backfill_slice(connection: &Connection, budget: Duration) -> Result<bool>
 }
 
 impl Store {
-    /// Background work only; request handlers never call this method.
+    /// Relevant membership evidence only; unlike fleet_generation, arbitrary
+    /// nonmember signatures do not advance this projection-owned revision.
+    pub fn assistant_grant_membership_revision(&self) -> Result<i64> {
+        if let Some(authority) = self.fleet_authority.get() {
+            return authority.assistant_grant_membership_revision();
+        }
+        membership_revision(&self.readers.get())
+    }
+
+    // The membership fold and snapshot comparison run on readers, before the
+    // writer is acquired. A writer transaction applies at most 64 changed keys.
+    fn prepare_assistant_grant_membership(&self) -> Result<Option<MembershipUpdate>> {
+        let revision = self.assistant_grant_membership_revision()?;
+        let connection = self.readers.get();
+        let applied: i64 = connection.query_row(
+            "SELECT applied_revision FROM assistant_grant_membership_state WHERE id=1",
+            [], |row| row.get(0),
+        )?;
+        if revision==applied { return Ok(None); }
+        let membership = self.fleet_membership_sealed()?;
+        let fleet_id = if let Some(authority) = self.fleet_authority.get() {
+            authority.fleet_id()?
+        } else {
+            fleet_meta(&connection, "fleet_id")?
+        };
+        let desired: BTreeMap<_,_> = membership.incarnations().map(|incarnation| (
+            (incarnation.name.clone(),incarnation.member_key.clone()),
+            (incarnation.start,incarnation.end),
+        )).collect();
+        let current: BTreeMap<_,_> = connection.prepare(
+            "SELECT writer,member_key,start,end FROM assistant_grant_membership_windows",
+        )?.query_map([], |row| Ok(((row.get::<_,String>(0)?,row.get::<_,String>(1)?),
+                                  (row.get::<_,u64>(2)?,row.get::<_,Option<u64>>(3)?))))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut windows = Vec::with_capacity(CLAIMS_PER_SLICE);
+        let mut complete = true;
+        for (identity,window) in &desired {
+            if current.get(identity)==Some(window) { continue; }
+            if windows.len()==CLAIMS_PER_SLICE { complete=false; break; }
+            windows.push((identity.0.clone(),identity.1.clone(),Some(*window)));
+        }
+        if complete {
+            for identity in current.keys() {
+                if desired.contains_key(identity) { continue; }
+                if windows.len()==CLAIMS_PER_SLICE { complete=false; break; }
+                windows.push((identity.0.clone(),identity.1.clone(),None));
+            }
+        }
+        Ok(Some(MembershipUpdate { revision, fleet_id, windows, complete }))
+    }
+
+    /// Background work only; receipt transactions never fold fleet history.
     pub fn advance_assistant_grant_authority_backfill(&self) -> Result<bool> {
+        let prepared = self.prepare_assistant_grant_membership()?;
         let mut connection = self.connection.write_background();
         let transaction = connection.transaction()?;
         self.sync_assistant_grant_membership(&transaction)?;
-        let done = backfill_slice(&transaction,Duration::from_millis(100))?;
+        let used = if let Some(update) = &prepared {
+            if membership_revision(&transaction)? != update.revision {
+                return Ok(false);
+            }
+            update.apply(&transaction)?
+        } else { 0 };
+        let done = backfill_slice_with_limit(
+            &transaction, Duration::from_millis(100), CLAIMS_PER_SLICE-used,
+        )?;
+        let membership_ready: bool = transaction.query_row(
+            "SELECT revision=applied_revision FROM assistant_grant_membership_state WHERE id=1",
+            [], |row| row.get(0),
+        )?;
         transaction.commit()?;
-        Ok(done)
+        Ok(done && membership_ready)
     }
 
+    /// Shards copy only the authoritative relevant-evidence counter here. This
+    /// constant-size synchronization is safe in a receipt transaction; the
+    /// membership snapshot itself is prepared off-writer by maintenance.
     pub(super) fn sync_assistant_grant_membership(&self, connection: &Connection) -> Result<()> {
-        let Some(authority) = self.fleet_authority.get() else {
-            return refresh_membership(connection);
-        };
-        let generation = authority.fleet_generation()?;
-        let previous: Option<i64> = connection.query_row(
-            "SELECT CAST(value AS INTEGER) FROM meta WHERE key='assistant_grant_authority_membership_generation'", [], |row| row.get(0),
-        ).optional()?;
-        if previous==Some(generation) && fleet_meta(connection,"assistant_grant_authority_shared_fleet")?.is_some() {
-            return Ok(());
+        if let Some(authority) = self.fleet_authority.get() {
+            connection.execute(
+                "UPDATE assistant_grant_membership_state SET revision=?1 WHERE id=1",
+                [authority.assistant_grant_membership_revision()?],
+            )?;
         }
-        let membership = authority.fleet_membership_sealed()?;
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h437f9d145151 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_shared_fleet','1')", [])?;
-        refresh_membership_from(connection,&membership,generation,authority.fleet_id()?.as_deref())
+        Ok(())
     }
 }

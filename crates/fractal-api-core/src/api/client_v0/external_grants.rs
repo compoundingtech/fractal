@@ -17,6 +17,14 @@ pub const ROUTES: &[(&str, &str)] = &[
 pub const PRINCIPAL: &str = "assistant/chatgpt";
 pub const MCP_PRINCIPAL: &str = "assistant/mcp";
 
+fn authority_error(error: FractalError) -> ApiError {
+    if error.code == "assistant-grant-authority-not-ready" {
+        credential_rejected("the client credential is unknown or expired")
+    } else {
+        ApiError::bad(error)
+    }
+}
+
 /// Closed authority profiles: callers cannot register a profile or mix its rights.
 /// Service is reserved and cannot issue credentials or authorize any request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,7 +93,7 @@ fn candidate_grants_except(state: &AppState, principal: &str, expiry_cut: Option
         Profile::Assistant => "assistant", Profile::Service => "service",
     });
     authority::candidates(&state.store.readers.get(), principal, owning_person(state)?,
-        expiry_cut, excluded, ignored_profile).map_err(ApiError::bad)?
+        expiry_cut, excluded, ignored_profile).map_err(authority_error)?
         .into_iter().map(|grant| {
             let profile = Profile::stored(fields(&grant)?)?;
             Ok((grant, profile))
@@ -179,7 +187,7 @@ pub fn fields(claim: &ClaimRecord) -> Result<&Value, ApiError> {
 }
 pub fn latest(state: &AppState, subject: &str, kind: &str) -> Result<Option<ClaimRecord>, ApiError> {
     if matches!(kind, GRANTED | POLICY | REVOKED) {
-        return authority::latest(&state.store.readers.get(), subject, kind).map_err(ApiError::bad);
+        return authority::latest(&state.store.readers.get(), subject, kind).map_err(authority_error);
     }
     Ok(state.store.claims_for_subject_kind_at(subject, kind, None, true, 1)
         .map_err(ApiError::internal)?.claims.into_iter().next())
@@ -197,7 +205,7 @@ pub fn append(state: &AppState, subject: String, kind: &str, actor: &str,
         if kind == REVOKED {
             Profile::stored(&value)?;
             let granted = authority::latest(&state.store.readers.get(), &subject, GRANTED)
-                .map_err(ApiError::bad)?.ok_or_else(|| forbidden("assistant grant is absent"))?;
+                .map_err(authority_error)?.ok_or_else(|| forbidden("assistant grant is absent"))?;
             if actor != owning_person(state)? || granted.actor.as_deref() != Some(actor)
                 || granted.origin != state.store.origin()
                 || previous.is_none()
@@ -264,7 +272,7 @@ pub fn audit<T>(state: &AppState, operation: &str, actor: &str, transport: &str,
 }
 
 fn transition(state: &AppState, granted: &ClaimRecord, kind: &str) -> Result<Option<ClaimRecord>, ApiError> {
-    authority::transition(&state.store.readers.get(), granted, kind).map_err(ApiError::bad)
+    authority::transition(&state.store.readers.get(), granted, kind).map_err(authority_error)
 }
 
 pub fn revoked(state: &AppState, granted: &ClaimRecord) -> Result<bool, ApiError> {
@@ -317,13 +325,13 @@ pub fn projection_with_witness(state: &AppState, granted: &ClaimRecord) -> Resul
 pub fn authenticate(state: &AppState, digest: &str, transport: &'static str)
     -> Result<Option<ClientSession>, ApiError> {
     let Some(granted) = authority::by_credential(&state.store.readers.get(), digest)
-        .map_err(ApiError::bad)? else { return Ok(None); };
+        .map_err(authority_error)? else { return Ok(None); };
     session(state, &granted, transport).map(Some)
 }
 pub fn session(state: &AppState, granted: &ClaimRecord, transport: &'static str)
     -> Result<ClientSession, ApiError> {
-    if !authority::contains(&state.store.readers.get(), &granted.id).map_err(ApiError::bad)? {
-        return Err(forbidden("assistant grant is absent or unauthenticated"));
+    if !authority::contains(&state.store.readers.get(), &granted.id).map_err(authority_error)? {
+        return Err(credential_rejected("the client credential is unknown or expired"));
     }
     let now = client_now_ms() as u64;
     let policy = effective(state, granted)?;

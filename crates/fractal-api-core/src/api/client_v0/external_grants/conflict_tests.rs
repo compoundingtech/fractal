@@ -1,6 +1,7 @@
 use super::*;
 use fractal_client::ErrorCode;
 use smallclaims::fleet::MemberKey;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 const FLEET: &str = "86700000-0000-4000-8000-000000000001";
@@ -41,6 +42,7 @@ fn replicate(from: &AppState, to: &AppState) {
     to.store.receive_replication_exchange(from.store.origin(), FLEET, &exchange).unwrap();
     to.store.validate_replication_backlog().unwrap();
     to.store.project_replication_backlog().unwrap();
+    while !to.store.advance_assistant_grant_authority_backfill().unwrap() {}
 }
 
 fn admitted_pair(root: &std::path::Path) -> (AppState, AppState) {
@@ -586,4 +588,56 @@ fn p1_policy_candidates_keep_read_acquisitions_bounded_with_expired_history() {
         }
         operation.finish();
     }
+}
+
+#[test]
+fn dirty_grant_reads_and_bearers_fail_closed_without_blocking_an_unrelated_credential() {
+    let root = tempfile::tempdir().unwrap();
+    let state = member(root.path(), "issuer");
+    let grant = issue(&state, ASSISTANT_ID, "assistant").unwrap();
+    let independent = issue(&state, SERVICE_ID, "assistant").unwrap();
+    while !state.store.advance_assistant_grant_authority_backfill().unwrap() {}
+    authenticate_id(&state, ASSISTANT_ID).unwrap().unwrap();
+    authenticate_id(&state, SERVICE_ID).unwrap().unwrap();
+    state.store.connection.write().execute(
+        "INSERT INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&grant.id],
+    ).unwrap();
+    assert!(authenticate_id(&state, ASSISTANT_ID).unwrap().is_none());
+    authenticate_id(&state, SERVICE_ID).unwrap().unwrap();
+    let denied = credential_rejected("the client credential is unknown or expired");
+    for error in [
+        session(&state, &grant, "http").unwrap_err(),
+        effective(&state, &grant).unwrap_err(),
+        revoked(&state, &grant).unwrap_err(),
+        projection(&state, &grant).unwrap_err(),
+        latest(&state, &grant.subject, GRANTED).unwrap_err(),
+    ] {
+        assert_eq!(error.status, denied.status);
+        assert_eq!(error.code, denied.code);
+        assert_eq!(error.message, denied.message);
+        assert_eq!(error.details, denied.details);
+    }
+    assert_eq!(candidate_grants(&state, PRINCIPAL, Some(0)).unwrap()
+        .iter().map(|(claim, _)| claim.id.as_str()).collect::<BTreeSet<_>>(),
+        BTreeSet::from([grant.id.as_str(), independent.id.as_str()]));
+}
+
+#[test]
+fn dirty_opposite_profile_witness_does_not_clear_an_established_conflict() {
+    let _service = ServiceFixture::enable();
+    let root = tempfile::tempdir().unwrap();
+    let (a, b) = admitted_pair(root.path());
+    issue(&a, ASSISTANT_ID, "assistant").unwrap();
+    let service = issue(&b, SERVICE_ID, "service").unwrap();
+    replicate(&a, &b);
+    replicate(&b, &a);
+    assert_conflict(&authenticate_id(&a, ASSISTANT_ID).unwrap_err());
+    a.store.connection.write().execute(
+        "INSERT INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&service.id],
+    ).unwrap();
+    assert!(authenticate_id(&a, SERVICE_ID).unwrap().is_none(),
+        "the dirty subject's own credential is fenced");
+    assert_conflict(&authenticate_id(&a, ASSISTANT_ID).unwrap_err());
+    assert_eq!(candidate_grants(&a, PRINCIPAL, Some(0)).unwrap().len(), 2,
+        "pending work cannot erase the last authenticated opposite-profile snapshot");
 }

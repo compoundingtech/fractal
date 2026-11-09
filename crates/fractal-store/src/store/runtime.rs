@@ -984,14 +984,18 @@ mod schema_install_tests {
                     && step.contains("principal=? AND owner=? AND revoked=? AND expires_at>?")), "{plan:?}");
                 assert!(plan.iter().all(|step| !step.contains("SCAN claims") && !step.contains("SEARCH claims")), "{plan:?}");
 
-                // An older build can append raw evidence after backfill. The
-                // trigger closes admission until reconciliation, but origin
-                // text alone cannot authenticate this unmarked late revoke.
+                // An older build's raw revoke fences its subject before and
+                // after reconciliation: origin text cannot authenticate it,
+                // but pending revocation must not authorize a stale grant.
                 append(&connection, "late-revoke", 1, authority::REVOKED, "assistant/chatgpt", 200);
-                assert!(authority::candidates(&connection, "assistant/chatgpt", "person/owner", Some(100), None, None).is_err());
+                authority::ready(&connection).unwrap();
+                assert_eq!(authority::candidates(&connection, "assistant/chatgpt", "person/owner", Some(100), None, None)
+                    .unwrap().iter().map(|claim| claim.id.as_str()).collect::<Vec<_>>(), vec!["active"]);
+                assert!(!authority::contains(&connection, "active").unwrap());
                 while !authority::backfill_slice(&connection, Duration::from_secs(1)).unwrap() {}
                 assert_eq!(authority::candidates(&connection, "assistant/chatgpt", "person/owner", Some(100), None, None)
                     .unwrap().iter().map(|claim| claim.id.as_str()).collect::<Vec<_>>(), vec!["active"]);
+                assert!(!authority::contains(&connection, "active").unwrap());
                 assert!(!authority::contains(&connection, "late-revoke").unwrap());
                 let after = snapshot(&connection);
                 let cookie: u32 = connection.pragma_query_value(None, "schema_version", |row| row.get(0)).unwrap();
