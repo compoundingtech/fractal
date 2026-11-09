@@ -257,6 +257,15 @@ fn measure(children: usize, steps_per_run: usize, extra_generations: usize, hist
                     wall_times.push((exchange.envelopes.len(), page_started.elapsed()));
                     received += exchange.envelopes.len();
                 }
+                // Concurrent local probe writes can advance the index past a finishing pass,
+                // which then keeps the deferral (smallclaims store.rs "Preserve newer projection
+                // deferrals"). The daemon's next pass settles it; count those timed passes.
+                let mut settle_passes = 0;
+                while worker.replication_projection_deferred() && settle_passes < 8 {
+                    worker.project_replication_backlog().unwrap();
+                    settle_passes += 1;
+                }
+                eprintln!("huge_receive_settle passes={settle_passes}");
             });
             assert!(!worker.replication_projection_deferred());
             for run in &runs {
