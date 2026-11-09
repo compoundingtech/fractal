@@ -233,7 +233,6 @@ impl Ui {
             confirm: None,
             answering: None,
             needs_words: None,
-            chat: None,
             form: Default::default(),
         };
         let doc = screens::home_detail(&self.world, Some(subject), 120, &drafts);
@@ -661,7 +660,6 @@ mod tests {
                     confirm: None,
                     answering: None,
                     needs_words: None,
-                    chat: None,
                     form: Default::default(),
                 },
             );

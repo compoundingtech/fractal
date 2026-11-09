@@ -319,18 +319,8 @@ pub struct Drafts<'a> {
     pub answering: Option<usize>,
     /// The chosen answer that needs the person's words, while they write them.
     pub needs_words: Option<String>,
-    /// "Chat about this": who it goes to, the draft, and the thread so far.
-    pub chat: Option<Chat<'a>>,
     /// A prompt's form: its mark, whether it has the keys, and a question's choices.
     pub form: super::alerts::FormState<'a>,
-}
-
-pub struct Chat<'a> {
-    pub to: String,
-    pub text: &'a str,
-    pub cursor: usize,
-    pub editing: bool,
-    pub thread: Vec<Line<'static>>,
 }
 
 /// A clickable reference to a graph subject; clicking it opens a popover.
@@ -794,12 +784,6 @@ fn confirm_row(doc: &mut Doc, drafts: &Drafts<'_>, label: &str) -> bool {
 }
 
 pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Drafts<'_>) -> Doc {
-    home_detail_with_threads(world, id, width, drafts, false)
-}
-
-pub(super) fn home_detail_with_threads(
-    world: &World, id: Option<&str>, width: usize, drafts: &Drafts<'_>, thread_start: bool,
-) -> Doc {
     let mut doc = Doc::new();
     let Some(item) = id.and_then(|id| world.attention.items().iter().find(|item| item.id == id))
     else {
@@ -1484,48 +1468,9 @@ pub(super) fn home_detail_with_threads(
         }
     }
     card.blank();
-    // Every item: talk to whoever can act on it, or go to what it is about.
-    if let Some(chat) = &drafts.chat {
-        card.section(&format!("chat with {} about this", chat.to), None, inner);
-        if chat.thread.is_empty() {
-            card.wrap(
-                &[run(
-                    format!(
-                        "{} gets this item as context: its title, mission and question.",
-                        chat.to
-                    ),
-                    theme::dim(),
-                )],
-                inner,
-            );
-        } else {
-            card.lines(chat.thread.iter().cloned());
-        }
-        card.blank();
-        let box_drafts = Drafts {
-            text: Some(chat.text),
-            cursor: chat.cursor,
-            editing: chat.editing,
-            answering: None,
-            needs_words: None,
-            confirm: None,
-            chat: None,
-            form: Default::default(),
-        };
-        text_box(
-            &mut card,
-            &format!("message {}", chat.to),
-            &box_drafts,
-            "",
-            inner,
-        );
-        card.buttons(&[
-            ("enter", "Send", Hit::Enter, theme::ACCENT),
-            ("esc", "Close chat", Hit::Escape, theme::OVERLAY1),
-        ]);
-    } else if !drafts.editing && drafts.confirm.is_none() {
+    // Thread controls are composed below the item by the shared thread component.
+    if !drafts.editing && drafts.confirm.is_none() {
         let mut buttons = Vec::new();
-        if !thread_start { buttons.push(("t", "Chat about this", Hit::Key('t'), theme::SAPPHIRE)); }
         if item.mission.is_some() || item.agent.is_some() {
             buttons.push((
                 "g",
@@ -3479,7 +3424,7 @@ mod tree_tests {
         let id = item.id.clone();
         let drafts = Drafts {
             text: None, cursor: 0, editing: false, confirm: None,
-            answering: None, needs_words: None, chat: None, form: Default::default(),
+            answering: None, needs_words: None, form: Default::default(),
         };
         let shown = home_detail(&world, Some(&id), 120, &drafts)
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");
@@ -3507,7 +3452,7 @@ mod tree_tests {
         let id = item.id.clone();
         let drafts = Drafts {
             text: None, cursor: 0, editing: false, confirm: None,
-            answering: None, needs_words: None, chat: None, form: Default::default(),
+            answering: None, needs_words: None, form: Default::default(),
         };
         let shown = home_detail(&world, Some(&id), 120, &drafts)
             .lines.iter().map(text::plain).collect::<Vec<_>>().join("\n");

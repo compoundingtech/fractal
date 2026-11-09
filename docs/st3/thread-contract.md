@@ -47,10 +47,11 @@ the same link returns the original operation receipt. An attachment failure leav
 ask available to retry with its exact episode.
 
 The initial lifecycle is Open, Close and Reopen. Closing moves a thread into Recently closed
-threads, leaves history readable and keeps any linked ask answerable. An ordinary incoming reply
-from the agent joins closed history without reopening the thread, adding an alert or resurrecting
-the Inbox row. When admission sees a closed thread, the owning person must explicitly reopen it
-before sending a reply. A fresh linked ask can still show the closed thread. An authorized rename changes the shared title everywhere and
+threads, leaves history readable and keeps any linked ask answerable. Ordinary replies from
+the person or agent join closed history without reopening the thread, adding an alert or
+resurrecting the Inbox row. Reopen is an explicit lifecycle action, independent of replying.
+A fresh linked ask can still show the closed thread. An authorized rename changes the shared
+title everywhere and
 preserves the thread, messages, links, unread state and current lifecycle.
 
 Show rename, close and reopen as events in the thread timeline with their actor and time.

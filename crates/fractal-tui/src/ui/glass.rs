@@ -3398,13 +3398,14 @@ impl Ui {
         // has the keys, whose own letters (b and p in Usage) must not type into a tab behind it.
         let conversation = self.composing_agent().filter(|_| !sidebar_keys);
         let undelivered = self.undelivered().is_some();
+        let thread_editing = self.threads.editing_in(&self.main_pane());
         // A document page or the documents list has no box to type in: its plain letters act.
         if !sidebar_keys
             && !self.home_open()
             && !self.editing
             && self.find.is_none()
             && !mission_form
-            && self.chat.as_ref().is_none_or(|chat| !chat.editing)
+            && !thread_editing
             && self.confirm.is_none()
             && self.popover.is_none()
             && self.document_key(key)
@@ -3416,7 +3417,7 @@ impl Ui {
         if glasses.home
             && !self.editing
             && self.confirm.is_none()
-            && self.chat.as_ref().is_none_or(|chat| !chat.editing)
+            && !thread_editing
         {
             match key.code {
                 KeyCode::Esc => self.close_home(),
@@ -3431,7 +3432,7 @@ impl Ui {
         if self.editing
             || self.find.is_some()
             || mission_form
-            || self.chat.as_ref().is_some_and(|chat| chat.editing)
+            || thread_editing
         {
             return false;
         }
@@ -3448,7 +3449,7 @@ impl Ui {
         let tabs = glass.count(glass.focus).max(1);
         let current = glass.layout.groups()[glass.focus].current;
         let subject = glass.focused().is_some_and(|key| key != "list:home");
-        let quiet = !self.editing && self.new_mission.is_none() && self.chat.is_none();
+        let quiet = !self.editing && self.new_mission.is_none() && !thread_editing;
         // Letters type, chords command (Nathan, 2026-10-03): in a conversation tab a plain
         // printable key opens its message box and types itself, the first key included. Keys
         // that act are chords below, so a sentence never starts by running a command.
@@ -4848,7 +4849,6 @@ impl Ui {
         }
         self.focus_seen = now;
         self.editing = false;
-        self.chat = None;
         self.answering = None;
         self.confirm = None;
     }
