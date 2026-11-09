@@ -159,3 +159,10 @@ test('a lost receipt followed by a definitive refusal still retains the original
   assert.equal(log.built, 1);
   assert.deepEqual(outcome.request, log.sent[0]);
 });
+
+
+test('a direct explicit retry keeps the original unknown outcome after permission disappears', async () => {
+  const { ports } = world([refused('forbidden', 403)]);
+  const request = await world([]).ports.build();
+  assert.deepEqual(await resendAction(ports, request), { how: 'unconfirmed', request });
+});

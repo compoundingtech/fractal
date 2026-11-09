@@ -70,7 +70,8 @@ async function deliver<TRequest>(ports: DeliveryPorts<TRequest>, next: () => Pro
       // The first may still land, so a new request could be a second message: keep this one.
       return { how: 'unconfirmed', request: original ?? request };
     }
-    if (!notApplied(last)) return { how: 'failed', error: last };
+    if (!notApplied(last)) return original && !(last instanceof ActionRejected)
+      ? { how: 'unconfirmed', request: original } : { how: 'failed', error: last };
   }
   return original ? { how: 'unconfirmed', request: original } : { how: 'failed', error: last };
 }
