@@ -126,6 +126,7 @@ fn replicated_admission_refuses_another_person_advancing_the_owner() {
     let store = Store::open_memory("read-replica-admission").unwrap();
     let mut claim = store.append_claim(&advance(SEAT, 1)).unwrap();
     claim.actor = Some("person/bob".into());
-    let error = classify_replicated_claim_with_registry(&claim, fractal_schema::registry()).unwrap_err();
+    let error = classify_replicated_claim_with_registry(&claim, fractal_schema::registry())
+        .err().expect("another person cannot advance the owner's position");
     assert_eq!(error.code, "read-position-owner-forbidden");
 }
