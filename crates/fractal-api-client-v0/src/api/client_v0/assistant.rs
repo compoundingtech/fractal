@@ -524,7 +524,7 @@ mod tests {
         let state = state(root.path());
         let grant = paired(&state).await;
         let credential = "paired-owner-test-credential";
-        state.store.append_claim(&ClaimInput {
+        state.store.append_client_operation_claim(&ClaimInput {
             subject: "custom/client/paired-owner".into(),
             kind: "custom.client.pairing-completed".into(), actor: Some(ISSUER.into()),
             fields: serde_json::from_value(json!({
