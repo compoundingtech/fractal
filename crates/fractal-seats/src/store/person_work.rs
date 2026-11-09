@@ -360,7 +360,7 @@ pub mod tests {
             ]),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         };
-        let (_created, _) = start_from_inbox(&store, StartFromInbox {
+        let (created, _) = start_from_inbox(&store, StartFromInbox {
             thread: "thread/history-c", title: "Current thread", person, origin: &origin,
             key: "history-new", first_message: &message,
         }).unwrap();
