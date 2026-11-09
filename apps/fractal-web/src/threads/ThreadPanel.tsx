@@ -1,6 +1,7 @@
 import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
+import { Button as ActionButton } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
 
 import { colorVars as c, spaceVars as s, typeVars as t } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 
@@ -85,16 +86,16 @@ export function ThreadPanel({
     {open ? <div id={contentId} {...stylex.props(styles.body)}>
       {children}
       <div {...stylex.props(styles.actions)}>
-        {onRename === undefined || titleRevision === undefined ? null : <Button isDisabled={pending || pendingChange !== undefined} onPress={() => setRename({ title: thread.title, revision: titleRevision })}>Rename</Button>}
-        {onChangeState === undefined ? null : <Button isDisabled={pending || pendingChange !== undefined} onPress={() => {
+        {onRename === undefined || titleRevision === undefined ? null : <ActionButton variant="outline" isDisabled={pending || pendingChange !== undefined} onPress={() => setRename({ title: thread.title, revision: titleRevision })}>Rename</ActionButton>}
+        {onChangeState === undefined ? null : <ActionButton variant="outline" isDisabled={pending || pendingChange !== undefined} onPress={() => {
           void run(() => onChangeState(thread.state === 'open' ? 'closed' : 'open'))
-        }}>{thread.state === 'open' ? 'Close thread' : 'Reopen thread'}</Button>}
-        {onHideDraft === undefined ? null : <Button onPress={onHideDraft}>Hide draft</Button>}
-        {embedded && onOpenInTab !== undefined ? <Button onPress={onOpenInTab}>Open in tab</Button> : null}
+        }}>{thread.state === 'open' ? 'Close thread' : 'Reopen thread'}</ActionButton>}
+        {onHideDraft === undefined ? null : <ActionButton onPress={onHideDraft}>Hide draft</ActionButton>}
+        {embedded && onOpenInTab !== undefined ? <ActionButton onPress={onOpenInTab}>Open in tab</ActionButton> : null}
       </div>
       {pendingChange === undefined || onRetryChange === undefined ? null : <div role="status">
         Fractal has not confirmed the previous {pendingChange}.
-        <Button isDisabled={pending} onPress={() => { void run(onRetryChange, () => setRename(undefined)) }}>Retry {pendingChange}</Button>
+        <ActionButton variant="outline" isDisabled={pending} onPress={() => { void run(onRetryChange, () => setRename(undefined)) }}>Retry {pendingChange}</ActionButton>
       </div>}
       {rename === undefined || onRename === undefined ? null : <form onSubmit={event => {
         event.preventDefault()
@@ -102,8 +103,8 @@ export function ThreadPanel({
         if (title !== '' && title !== thread.title && !pending && pendingChange === undefined) void run(() => onRename(title, rename.revision), () => setRename(undefined))
       }} {...stylex.props(styles.actions)}>
         <label>Thread title <input autoFocus value={rename.title} onChange={event => setRename({ ...rename, title: event.target.value })} /></label>
-        <Button type="submit" isDisabled={pending || pendingChange !== undefined || rename.title.trim() === '' || rename.title.trim() === thread.title}>Save</Button>
-        <Button isDisabled={pending} onPress={() => setRename(undefined)}>Cancel</Button>
+        <ActionButton variant="outline" type="submit" isDisabled={pending || pendingChange !== undefined || rename.title.trim() === '' || rename.title.trim() === thread.title}>Save</ActionButton>
+        <ActionButton isDisabled={pending} onPress={() => setRename(undefined)}>Cancel</ActionButton>
       </form>}
       {onMarkRead === undefined ? feedback : null}
     </div> : null}
