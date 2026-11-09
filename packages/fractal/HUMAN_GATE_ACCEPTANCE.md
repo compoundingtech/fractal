@@ -53,17 +53,15 @@ pinned fixture binary explicitly; do not substitute it for the production binary
 ```sh
 NIX_CONFIG='builders =' ST_BIN=/path/to/production-st \
   ST_FIXTURE_BIN=/path/to/d5e2302-test-support/bin/st3-fixture \
-  gate-slot --class gate -- devenv shell -- \
-  bash -c 'cd packages/@overeng/genie-fractal && vitest run src/mod.unit.test.ts'
+  gate-slot --class gate -- nix develop .#web -c \
+  bash -c 'pnpm install --frozen-lockfile && pnpm --filter fractal exec vitest run src/mod.unit.test.ts'
 ```
 
 This runs the pure/type authoring assertions, round-trip and four real
-human-gate fixtures. The source-side dependency view must be materialized first
-through the repository's `buck2:editor:publish` task when it is absent.
-Leave both binary variables unset for the pure authoring suite. `ST_BIN` alone
-enables production conformance; `ST_FIXTURE_BIN` alone enables the four synthetic
-human-gate semantic cases. Required `check:quick` and focused package typecheck
-remain independent pre-ready checks.
+human-gate fixtures. Leave both binary variables unset for the pure authoring
+suite. `ST_BIN` alone enables production conformance; `ST_FIXTURE_BIN` alone
+enables the four synthetic human-gate semantic cases. The package typecheck
+remains an independent pre-ready check.
 
 ## Edge matrix
 

@@ -10,10 +10,16 @@ const catalog = defineCatalog({
   typescript: '6.0.3',
   vitest: '4.1.9',
 })
+const declarations = {
+  data: { name: '@fractal/declarations' },
+  meta: { workspace: { repoName: 'fractal', memberPath: 'clients/typescript/fractal-declarations', deps: [] } },
+}
 const deps = catalog.compose({
   workspace: { repoName: 'fractal', memberPath: 'packages/fractal' },
   dependencies: { workspace: [kdlPkg], external: catalog.pick('effect', '@noble/hashes') },
   devDependencies: {
+    // Parity tests compare this package's KDL with the generated declaration encoder.
+    workspace: [declarations],
     external: catalog.pick('@effect/platform-node', '@effect/vitest', '@types/node', 'typescript', 'vitest'),
   },
 })

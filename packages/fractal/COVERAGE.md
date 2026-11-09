@@ -2,26 +2,19 @@
 
 The generic declaration contract is specified by [requirements](./docs/requirements.md) and [spec](./docs/spec.md). This document records separate conformance evidence and support boundaries.
 
-## Fractal migration and compatibility
+## Package identity
 
-`@overeng/genie-fractal` is the primary package. Move imports from
-`@overeng/genie-smalltalk` to `@overeng/genie-fractal`, including the Node-only
-`/tree` and `/testing` entrypoints, and update workspace paths from
-`packages/@overeng/genie-smalltalk` to `packages/@overeng/genie-fractal`.
-Rename the generator helper `smalltalkKdl` to `fractalKdl`.
+This is the private workspace package `fractal` (`packages/fractal`). It moved
+here from `@overeng/genie-fractal` in overengineeringstudio/effect-utils; the
+root, `/tree` and `/testing` exports keep the same names, so a consumer switches
+by changing import specifiers. The root additionally exports the `Fractal`
+authoring namespace. `fractalKdl` returns Genie's output shape without depending
+on Genie.
 
-The thin `@overeng/genie-smalltalk` compatibility package re-exports the same
-root, `/tree` and `/testing` APIs, retaining `smalltalkKdl` as an alias of
-`fractalKdl`. Its migration marker is
-`arn:lmig:smalltalk:2026-10-26-genie-fractal-alias`.
-Other exports retain their names, including declaration constructors, schemas,
-`defineAgent`, `defineMission`, `defineSchedule`, `loadSubjectTree`,
-`scratchDaemonLayer` and `ScratchDaemon`.
-
-Schema annotation identifiers change from `St.*` to `Fractal.*` for diagnostics
-only; they do not change encoded declarations or native wire identifiers.
-Historical native repository URLs, `ST_*` environment variables, `st` commands
-and `st3` paths remain unchanged.
+Schema annotation identifiers use `Fractal.*` for diagnostics only; they do not
+change encoded declarations or native wire identifiers. Historical native
+repository URLs, `ST_*` environment variables, `st` commands and `st3` paths
+remain unchanged.
 
 ## Native grammar coverage
 
@@ -42,7 +35,7 @@ Authoritative grammar: `compoundingtech/smalltalk`, `crates/st3/src/graph.rs` an
 
 Schedule work accepts either a pinned `mission@revision` or an unpinned mission ID.
 
-## Subject trees (`@overeng/genie-fractal/tree`, Node only)
+## Subject trees (`fractal/tree`, Node only)
 
 `loadSubjectTree({ root, context })` discovers `agent.ts|kdl`, `mission.ts|kdl` and `schedule.ts|kdl` declarations recursively. IDs come from directories relative to the root. A seat and mission may share a directory; mission and schedule cannot. Symlink aliases load once under their canonical path, and declarations outside the tree are rejected.
 
@@ -53,17 +46,19 @@ Mission modules pass through `missionWire` before strict schema decoding, preser
 Native conformance is opt-in: `ST_BIN` selects the production binary for the agent-attributed round-trip; `ST_FIXTURE_BIN` selects upstream's separately compiled, pinned `st3-fixture` test-support binary for synthetic-person gate semantics. Both use isolated private runtime directories. The fixture mode does not prove production person authentication; see [the acceptance boundary](./HUMAN_GATE_ACCEPTANCE.md).
 The unified conformance target is native `d5e2302`. Assertions derive run subjects from the native start response, including mission-scoped run IDs; they do not assume the legacy `mission-run/ID` shape.
 
-Both native modes use `scratchDaemonLayer` from the Node-only `@overeng/genie-fractal/testing` export. It scopes `st up`, HOME/XDG directories, private config, state, PTY root and sockets to one temporary directory, stops the daemon and its scratch processes, and removes the directory on scope close. `ScratchDaemon` exposes the directory, endpoint, isolated environment and an Effect-based `run` command with a timeout. Options select the binary, node, optional private-config person, readiness/command timeouts and directory retention. PATH defaults to `/nonexistent`; native conformance explicitly supplies the caller's PATH to exercise host shell commands.
+Both native modes use `scratchDaemonLayer` from the Node-only `fractal/testing` export. It scopes `st up`, HOME/XDG directories, private config, state, PTY root and sockets to one temporary directory, stops the daemon and its scratch processes, and removes the directory on scope close. `ScratchDaemon` exposes the directory, endpoint, isolated environment and an Effect-based `run` command with a timeout. Options select the binary, node, optional private-config person, readiness/command timeouts and directory retention. PATH defaults to `/nonexistent`; native conformance explicitly supplies the caller's PATH to exercise host shell commands.
 
-Daemonless native KDL parsing is an upstream prerequisite for a pinned-binary
-CI parse check. At native revision `14311260cf907e9b8dabf629588314e63dec3665`,
-`st apply --dry-run` still calls the daemon's `/v1/sets/preview`, and
-`st missions check` calls `/v1/gate-checks`. The daemonless `st2 validate`
-command parses the legacy agent catalog, not the st3 mission/schedule grammar,
-so it is not a substitute. Add a native offline st3 document parse/check
-entrypoint before wiring its pinned binary into this package's CI; retain the
-existing isolated-daemon conformance test meanwhile. A binary predating native
-mission reporting must not be used to check generated `report-to` declarations.
+## Native parse parity
+
+`fixtures/*.kdl` are byte-exact goldens of this package's output, asserted by
+`src/parity.unit.test.ts`. `crates/fractal/tests/validate.rs` parses each with
+the parser behind `fractal validate`. `fixtures/daily-review.kdl` is rendered
+from the `fixtures/daily-review` tree, written with the `Fractal` namespace; its
+parsed agents and mission, including the native mission revision, equal those of
+the `@fractal/declarations` daily-review fixture. The TypeScript test also
+compares the same declarations structurally with `@fractal/declarations`'
+`encodeKdl`. The two encoders format differently (property order, blank lines),
+so equality is on parsed declarations, not bytes.
 
 ## Step dependency fan-in
 
@@ -112,7 +107,7 @@ and depend on its completion. This illustrative Berlin cutover declares no
 live operation or artifact:
 
 ```ts
-import { gate, mission, person } from '@overeng/genie-fractal'
+import { gate, mission, person } from 'fractal'
 import owner from './agents/owner.ts'
 import worker from './agents/worker.ts'
 
@@ -168,7 +163,7 @@ Agent `pty` and `exec` tasks require one canonical `launch: Launch.shell({ comma
 
 All root agents use the generalist runtime and one contract: orchestrate and delegate heavy work to harness subagents and missions. Inline work is limited to accountable-boundary actions (pairing, asks, mission disposition, final merge/publish) and minimal small sequential commands or fixes. `AgentSchema` exposes no per-agent `role`, `persona`, or `runtime` selector; constructors reject these fields.
 
-Every OMP or Codex harness declaration requires a nonempty `model`, including agent declarations referenced by missions. OMP effort is optional and, when set, must be `low | medium | high | xhigh`. Omitting it emits no effort child and leaves effort selection to OMP; model selectors such as `@generalist_root` pass through unchanged, without DSL role policy or a default effort. Codex still requires explicit nonempty model and effort provider-native strings. Command/argv agents and agentless mission steps have no harness routing fields. Mission steps assigned to an agent use that agent's declaration; the DSL has no separate mission-agent launch configuration.
+Every OMP, Codex or Claude Code harness declaration requires a nonempty `model`, including agent declarations referenced by missions. OMP effort is optional and, when set, must be `low | medium | high | xhigh`. Omitting it emits no effort child and leaves effort selection to OMP; model selectors such as `@generalist_root` pass through unchanged, without DSL role policy or a default effort. Codex still requires explicit nonempty model and effort provider-native strings. Claude Code (`kind: 'claude'`) takes an optional provider-native effort string. Command/argv agents and agentless mission steps have no harness routing fields. Mission steps assigned to an agent use that agent's declaration; the DSL has no separate mission-agent launch configuration.
 
 Codex supports optional `args` and `resume: { session }`. Resume lowers to `env.ST3_NATIVE_RESUME_SESSION`, binding the exact native thread; conflicting authored values are rejected without changing explicit model/effort routing.
 
@@ -230,7 +225,7 @@ Exec declarations and agent root/nested tasks use `launch: Launch.shell({ comman
 
 The public authoring export is isomorphic ES2024. UTF-8 name limits use an allocation-free byte counter with TextEncoder-compatible surrogate handling. Long derived gate names retain their exact SHA-256 identities through the portable `@noble/hashes` implementation; no Node Buffer or crypto imports are required by authoring consumers.
 
-Source-module definitions and loading are Node-only exports of `@overeng/genie-fractal/tree`: import `defineAgent`, `defineMission`, `defineSchedule`, `pinMission`, `loadSubjectTree`, and their intent/reference types there. Canonical values, immutable composition, scoped handles and low-level renderers belong to the isomorphic `@overeng/genie-fractal` root entrypoint.
+Subject definitions are isomorphic: `Fractal.agent|mission|schedule({ meta, ... })` and the low-level `Fractal.defineAgent|defineMission|defineSchedule({ meta, intent })`, plus `Fractal.pinMission`. Tree loading is the Node-only `fractal/tree` export (`loadSubjectTree`), which also re-exports the define forms and their intent/reference types. Canonical values, immutable composition, scoped handles and low-level renderers belong to the isomorphic `fractal` root entrypoint.
 
 ## Child mission outputs and exact revisions
 

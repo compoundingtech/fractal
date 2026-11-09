@@ -5,22 +5,19 @@ import { Effect, FileSystem, Schema } from 'effect'
 
 import { parse } from '@overeng/kdl'
 
-import {
-  AgentSchema,
-  MissionSchema,
-  missionWire,
-  type MissionInput,
-  SubjectId,
-  type ScheduleSchema,
-  type WorkSchema,
-} from './mod.ts'
-import type {
-  SubjectKind,
-  SubjectRef,
-  SubjectDefinition,
-  AgentRef,
-  MissionRef,
-} from './subject-ref.ts'
+import { AgentSchema, MissionSchema, missionWire, type MissionInput, SubjectId } from './mod.ts'
+import type { PinnedMissionRef } from './define.ts'
+import type { SubjectKind, SubjectRef } from './subject-ref.ts'
+export {
+  defineAgent,
+  defineMission,
+  defineSchedule,
+  pinMission,
+  type AgentIntent,
+  type MissionIntent,
+  type PinnedMissionRef,
+  type ScheduleIntent,
+} from './define.ts'
 export type {
   SubjectKind,
   SubjectRef,
@@ -35,108 +32,6 @@ export class SubjectTreeError extends Schema.TaggedError<SubjectTreeError>()('Su
   message: Schema.String,
   cause: Schema.optional(Schema.Defect()),
 }) {}
-
-/** Exact source revision binding; zero requests the graph renderer's ST_REVISION receipt. */
-export interface PinnedMissionRef {
-  readonly _tag: 'PinnedMissionRef'
-  readonly subject: MissionRef
-  readonly revision: string
-}
-
-/**
- * Pins imported mission work, never its moving published head. Without an explicit hash,
- * the graph renderer binds the zero sentinel to this source mission's native revision.
- * A step's `waitFor` requires an explicit revision and is exclusive with native `usesMission`;
- * scoped producer handles authored with `step({ waitFor })` retain their native semantics.
- */
-export const pinMission = ({
-  subject,
-  revision = '0'.repeat(64),
-}: {
-  readonly subject: MissionRef
-  readonly revision?: string
-}): PinnedMissionRef => {
-  if (/^[0-9a-fA-F]{64}$/u.test(revision) === false)
-    throw new TypeError('Pinned mission revision must be a 64-hex native revision')
-  return Object.freeze({ _tag: 'PinnedMissionRef', subject, revision })
-}
-
-type WorkWire = typeof WorkSchema.Encoded
-
-/** Agent fields without `id`; supervisor targets may be typed seat references. */
-export type AgentIntent = Omit<typeof AgentSchema.Encoded, 'id' | 'under'> & {
-  readonly under?: ReadonlyArray<{
-    readonly target: AgentRef | NonNullable<(typeof AgentSchema.Encoded)['under']>[number]['target']
-    readonly reason?: string
-  }>
-}
-
-type TreeStep<T> = T extends { readonly round: infer R }
-  ? Omit<T, 'round'> & { readonly round: TreeRound<R> }
-  : {
-      [K in keyof T]: K extends 'assignedTo' ? T[K] | AgentRef : T[K]
-    } & (
-      | { readonly waitFor?: never }
-      | { readonly waitFor: PinnedMissionRef; readonly usesMission?: never }
-    )
-
-type TreeSteps<T> = T extends readonly unknown[] ? { [K in keyof T]: TreeStep<T[K]> } : T
-
-type TreeRound<T> = {
-  [K in keyof T]: K extends 'steps' | 'finally' ? TreeSteps<T[K]> : T[K]
-}
-
-/** Path-derived mission ID with current authoring handles and typed seat references. */
-export type MissionIntent = Omit<
-  MissionInput<string>,
-  'id' | 'steps' | 'finally' | 'schedule' | 'reportTo' | 'assignedTo'
-> & {
-  readonly reportTo: AgentRef | MissionInput<string>['reportTo']
-  readonly assignedTo?: AgentRef | MissionInput<string>['assignedTo']
-  readonly steps: ReadonlyArray<TreeStep<MissionInput<string>['steps'][number]>>
-  readonly finally?: ReadonlyArray<TreeStep<NonNullable<MissionInput<string>['finally']>[number]>>
-}
-
-type TreeSchedule<TSchedule> = TSchedule extends unknown
-  ? Omit<TSchedule, 'work'> & {
-      readonly work: Omit<WorkWire, 'mission'> & {
-        readonly mission: MissionRef | PinnedMissionRef | WorkWire['mission']
-      }
-    }
-  : never
-
-/** Mission fields for a schedule file; its work may name a typed mission reference. */
-export type ScheduleIntent = MissionIntent & {
-  readonly schedule: TreeSchedule<typeof ScheduleSchema.Encoded>
-}
-
-/** `meta` is the defining module's `import.meta`; `intent` is a value or a context factory. */
-type DefineArgs<I, C> = {
-  readonly meta: { readonly url: string }
-  readonly intent: I | ((context: C) => I)
-}
-
-type Define<K extends SubjectKind, I> = <C = never>(
-  args: DefineArgs<I, C>,
-) => SubjectDefinition<K, I, C>
-
-const define =
-  <K extends SubjectKind>(kind: K) =>
-  <I, C>({ meta, intent }: DefineArgs<I, C>): SubjectDefinition<K, I, C> => ({
-    _tag: 'SubjectRef',
-    kind,
-    url: meta.url,
-    intent,
-  })
-
-/** Defines the seat declared by an `agent.ts` module. */
-export const defineAgent: Define<'agent', AgentIntent> = define('agent')
-
-/** Defines the mission declared by a `mission.ts` module. */
-export const defineMission: Define<'mission', MissionIntent> = define('mission')
-
-/** Defines the scheduled mission declared by a `schedule.ts` module. */
-export const defineSchedule: Define<'schedule', ScheduleIntent> = define('schedule')
 
 type Declaration<T> =
   | { readonly _tag: 'Kdl'; readonly text: string }
@@ -516,7 +411,7 @@ const loadKdl = Effect.fnUntraced(function* ({
  * `context`. Typed references are lowered, then intents are decoded with `AgentSchema` or
  * `MissionSchema`. Subject modules are trusted code and are imported.
  */
-export const loadSubjectTree = Effect.fn('genie-fractal.loadSubjectTree')(function* <C>({
+export const loadSubjectTree = Effect.fn('fractal.loadSubjectTree')(function* <C>({
   root,
   context,
 }: {

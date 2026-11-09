@@ -296,6 +296,9 @@ importers:
       '@effect/vitest':
         specifier: 4.1.0
         version: 4.1.0(effect@4.1.0)(vitest@4.1.9(@opentelemetry/api@1.9.1)(@types/node@24.10.0)(jsdom@26.1.0(supports-color@8.1.1))(vite@8.2.2(@types/node@24.10.0)(esbuild@0.28.2)(jiti@2.7.0)(terser@5.51.2)(yaml@2.9.1)))
+      '@fractal/declarations':
+        specifier: workspace:^
+        version: link:../../clients/typescript/fractal-declarations
       '@types/node':
         specifier: 24.10.0
         version: 24.10.0

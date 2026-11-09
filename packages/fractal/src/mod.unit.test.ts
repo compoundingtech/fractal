@@ -1314,6 +1314,19 @@ describe('Fractal declarations', () => {
       ]),
     ).toContain('harness "omp" {\n    model "example-model"\n    effort "high"\n')
   })
+  it('renders a Claude Code harness with an optional effort', () => {
+    expect(
+      emit([agent({ id: 'garden/worker', harness: { kind: 'claude', model: 'sonnet' } })]),
+    ).toBe('version 2\nagent "garden/worker" {\n  harness "claude" {\n    model "sonnet"\n  }\n}\n')
+    expect(
+      emit([
+        agent({ id: 'garden/worker', harness: { kind: 'claude', model: 'opus', effort: 'high' } }),
+      ]),
+    ).toContain('harness "claude" {\n    model "opus"\n    effort "high"\n  }\n')
+    expect(() =>
+      agent({ id: 'garden/worker', harness: { kind: 'claude', model: '' } }),
+    ).toThrow()
+  })
   it('decodes and renders an OMP role selector without adding effort', () => {
     const harness = { kind: 'omp', model: '@generalist_root' } as const
     const declaration = { id: 'example/omp', harness }

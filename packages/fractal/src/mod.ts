@@ -289,6 +289,13 @@ export const CodexSchema = Schema.Struct({
   resume: Schema.optionalKey(Schema.Struct({ session: Text })),
 }).annotate({ identifier: 'Fractal.Codex' })
 
+/** Claude Code harness selection; effort is the native driver's optional effort level. */
+export const ClaudeSchema = Schema.Struct({
+  kind: Schema.Literal('claude'),
+  model: Text,
+  effort: Schema.optionalKey(Text),
+}).annotate({ identifier: 'Fractal.Claude' })
+
 /**
  * The ID view of an imported agent declaration. Validation still checks the full
  * AgentSchema; this structural view keeps under references from recursively
@@ -410,7 +417,7 @@ const AgentSchemaFields = Schema.Struct({
   ),
   env: Schema.optionalKey(Env),
   render: Schema.optionalKey(Schema.Array(RenderOperation)),
-  harness: Schema.optionalKey(Schema.Union([OmpSchema, CodexSchema])),
+  harness: Schema.optionalKey(Schema.Union([OmpSchema, CodexSchema, ClaudeSchema])),
   freshContext: Schema.optionalKey(Schema.Literal(true)),
   handlesFaults: Schema.optionalKey(Schema.Literal(true)),
   missionAuthority: Schema.optionalKey(Authority),
