@@ -24722,6 +24722,7 @@ mission "example/zero-run" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "status-cache");
         let subject = "agent/cedar";
+        let stale_age = fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis() + 1_000;
         let append = |kind: &str, fields: Value| {
             state.store.append_claim(&ClaimInput {
                 subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
@@ -24730,7 +24731,7 @@ mission "example/zero-run" state="ready" {
             }).unwrap()
         };
         append("runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
-        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one", "observed_at_ms":(client_now_ms() - 91_000) as u64}));
+        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one", "observed_at_ms":(client_now_ms() - stale_age) as u64}));
         let index = state.store.index().unwrap();
         let before = client_agent_resources(&state.store, false, "", index).unwrap();
         let before = before.iter().find(|item| item["id"] == subject).unwrap();
@@ -24745,7 +24746,7 @@ mission "example/zero-run" state="ready" {
         peer.store.import_replication("status-cache", &state.store.export_replication(0).unwrap()).unwrap();
         let mut aged = vec![before.clone()];
         let mut cached_harness = state.store.observed_harness_at(subject, index).unwrap().unwrap();
-        cached_harness.observed_at_unix_ms = client_now_ms() - 91_000;
+        cached_harness.observed_at_unix_ms = client_now_ms() - stale_age;
         aged[0]["_status_source"] = json!(cached_harness);
         let mut on_host = aged.clone();
         overlay_agent_resources(&peer.store, &mut aged, "").unwrap();
