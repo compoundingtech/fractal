@@ -20821,37 +20821,61 @@ async fn build_transport_observation_index(store: Arc<Store>) {
 /// compatibility-trigger work on commits. Subscribe before checking readiness so
 /// an older-build append between the check and the wait cannot be lost.
 async fn build_assistant_grant_authority(store: Arc<Store>) {
-    let (changed, mut receiver) = tokio::sync::watch::channel(());
-    let _observer = store.observe_commits(move |connection| {
-        if connection.is_autocommit() {
-            changed.send_replace(());
-        }
-    });
-    loop {
-        receiver.borrow_and_update();
-        let worker = store.clone();
-        let result = tokio::task::spawn_blocking(move || {
+    AssistantGrantAuthorityMaintenance::new(store).run().await;
+}
+
+/// Own the subscription for exactly the maintenance task's lifetime. Splitting
+/// one page from the wait also makes the drain-to-wait boundary explicit.
+struct AssistantGrantAuthorityMaintenance {
+    store: Arc<Store>,
+    changes: tokio::sync::watch::Receiver<()>,
+    _observer: smallclaims::sqlite::CommitObserver,
+}
+
+impl AssistantGrantAuthorityMaintenance {
+    fn new(store: Arc<Store>) -> Self {
+        let (changed, changes) = tokio::sync::watch::channel(());
+        let observer = store.observe_commits(move |connection| {
+            if connection.is_autocommit() {
+                changed.send_replace(());
+            }
+        });
+        Self { store, changes, _observer: observer }
+    }
+
+    async fn advance(&mut self) -> Result<bool> {
+        // Consume before the read, not after draining: a commit between the
+        // read/drain and changed().await must remain an unseen generation.
+        self.changes.borrow_and_update();
+        let worker = self.store.clone();
+        tokio::task::spawn_blocking(move || {
             if smallclaims::store::assistant_grant_authority::ready(&worker.readers.get()).is_ok() {
                 return Ok(true);
             }
             worker.advance_assistant_grant_authority_backfill()
-        }).await;
-        match result {
-            Ok(Ok(true)) => {
-                if receiver.changed().await.is_err() {
+        }).await?
+    }
+
+    async fn run(mut self) {
+        loop {
+            match self.advance().await {
+                Ok(true) => {
+                    if self.changes.changed().await.is_err() {
+                        return;
+                    }
+                    continue;
+                }
+                Ok(false) => {}
+                Err(error) if maintenance_contention(&error) => {}
+                error => {
+                    stderr_message("st", format_args!("assistant grant authority backfill stopped: {error:?}; restart resumes its committed cursor"));
                     return;
                 }
-                continue;
             }
-            Ok(Ok(false)) => {}
-            Ok(Err(error)) if maintenance_contention(&error) => {}
-            error => {
-                stderr_message("st", format_args!("assistant grant authority backfill stopped: {error:?}; restart resumes its committed cursor"));
-                return;
-            }
+            // Each page releases the writer. Yield scheduling, never time-based
+            // pacing: persisted work resumes immediately in another transaction.
+            tokio::task::yield_now().await;
         }
-        // Finite, persisted cursor work; yield the writer between pages.
-        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
