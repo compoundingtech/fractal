@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Restore replication worker admission when Linux service-manager ancestry is unreadable",
+  "replay": {"status": "none", "detail": "No claim, projection or replay changes."},
+  "schema": {"status": "none", "detail": "No storage or schema changes."},
+  "rules": {"status": "none", "detail": "Replication and consistency rules are unchanged."},
+  "compatibility": {"status": "changed", "detail": "The supervised replication worker can reach its own routes when local harness ancestry is unavailable. Admission requires the socket connector's live process generation to match the supervisor's worker PID, independently of the worker ingress observe/enforce mode. Other unverifiable callers, non-worker internal routes, and person-header requests remain refused."},
+  "downtime": {"status": "none", "detail": "No additional downtime beyond the normal binary restart."},
+  "manual": {"status": "none", "detail": "No configuration changes required."},
+  "recovery": {"status": "none", "detail": "Binary swap-back requires no data migration."}
+}
