@@ -208,6 +208,10 @@ const NOT_MEASURED: &[(&str, &str)] = &[
         "GET /v1/harness-prompts/state",
         "one newest harness.observed read by its subject index and one answer read by its operation index",
     ),
+    (
+        "GET /v1/client/attention-budget",
+        "ordinary read probes use a raw Unix person header, which this recipient-authenticated route rejects; the paired push fixture does not seed scaling mission/person native asks and lineage; attention_budget API tests cover scoped admission, recipient revalidation and text-free reports, but populated report cost is not measured here",
+    ),
     // Aliases: the same handler as a measured route under the name a person reads.
     (
         "GET /v1/client/alerts",
