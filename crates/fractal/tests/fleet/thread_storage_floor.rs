@@ -1,4 +1,5 @@
 use super::*;
+use fractal_client::Client as ClientV0;
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: an actual storage-version-22 thread reader"]
@@ -16,7 +17,7 @@ async fn version_22_reader_refuses_upgraded_state_without_losing_history_or_pair
         "content":"Retained before causal metadata upgrade",
     })).await.unwrap();
     let subject = receipt["subject"].as_str().unwrap().to_owned();
-    let person = Client::unix_as(node.socket(), PERSON);
+    let person = ClientV0::unix_as(node.socket(), PERSON);
     let begun: Value = person.post("/v1/client/pairings", &json!({
         "api_version":"st3.client.v0","device_name":"Floor fixture","person_id":PERSON,
     })).await.unwrap();
@@ -26,7 +27,7 @@ async fn version_22_reader_refuses_upgraded_state_without_losing_history_or_pair
         "api_version":"st3.client.v0","code":challenge["code"],"device_public_key":"b".repeat(64),
     })).await.unwrap();
     let credential = paired["value"]["credential"].as_str().unwrap().to_owned();
-    let _: Value = Client::unix_gateway(node.socket(), &credential).get("/v1/client/capabilities").await.unwrap();
+    let _: Value = ClientV0::unix_gateway(node.socket(), &credential).get("/v1/client/capabilities").await.unwrap();
     node.stop();
     let before = {
         let connection = rusqlite::Connection::open_with_flags(&database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
@@ -38,7 +39,7 @@ async fn version_22_reader_refuses_upgraded_state_without_losing_history_or_pair
     node.binary = PathBuf::from(st3());
     node.start().await;
     assert_eq!(database_schema(&database),23);
-    let _: Value = Client::unix_gateway(node.socket(), &credential).get("/v1/client/capabilities").await.unwrap();
+    let _: Value = ClientV0::unix_gateway(node.socket(), &credential).get("/v1/client/capabilities").await.unwrap();
     let retained: Value = node.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
     assert_eq!(retained["content"],"Retained before causal metadata upgrade");
     node.stop();
@@ -55,7 +56,7 @@ async fn version_22_reader_refuses_upgraded_state_without_losing_history_or_pair
     assert_eq!(database_schema(&database),23,"old-reader refusal must not alter the upgraded header");
     node.binary = PathBuf::from(st3());
     node.start().await;
-    let _: Value = Client::unix_gateway(node.socket(), credential).get("/v1/client/capabilities").await.unwrap();
+    let _: Value = ClientV0::unix_gateway(node.socket(), credential).get("/v1/client/capabilities").await.unwrap();
     let retained: Value = node.client().get(&format!("/v1/messages/read/{subject}")).await.unwrap();
     assert_eq!(retained["content"],"Retained before causal metadata upgrade");
 }
