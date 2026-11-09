@@ -305,7 +305,11 @@ pub fn panel(
     }
     if state.can_reply {
         let focused = state.cursor.is_some();
-        doc.line(composer::divider(width, focused));
+        doc.line(if state.pending_reply && !focused {
+            composer::pending_divider(width, "Send reply")
+        } else {
+            composer::divider(width, focused)
+        });
         if let Some(quote) = state.reply_to {
             doc.line(Line::from(Span::styled(
                 text::truncate(&format!("Reply to {}", inline(quote)), width),
@@ -331,9 +335,9 @@ pub fn panel(
                 );
             }
         }
-        if state.pending_reply {
+        if state.pending_reply && focused {
             doc.line(composer::pending("Send reply"));
-        } else if focused {
+        } else if focused && !state.pending_reply {
             doc.buttons_fit(
                 &[
                     (

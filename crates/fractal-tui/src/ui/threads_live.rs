@@ -1016,6 +1016,10 @@ impl Threads {
     ) {
         let timeline = ThreadInterest::Timeline(id.into());
         let summary = self.summary(id);
+        let panel_open = open && self.histories.contains_key(id);
+        let reply_editor_visible = panel_open && self.access.reply;
+        let rename_editor_visible =
+            self.focused.as_ref() == Some(&(host.into(), Input::Rename(id.into())));
         if open && (summary.is_none() || !self.histories.contains_key(id)) {
             let reason = self
                 .failures
@@ -1024,6 +1028,7 @@ impl Threads {
                 .unwrap_or("Loading thread…");
             doc.wrap(&[text::run(reason, theme::dim())], width);
             if standalone || summary.is_none() {
+                self.panel_feedback(doc, host, id, false, false, width);
                 return;
             }
         }
@@ -1059,7 +1064,7 @@ impl Threads {
             summary,
             &history,
             &thread::State {
-                open: open && self.histories.contains_key(id),
+                open: panel_open,
                 standalone,
                 draft: draft_text,
                 cursor: focus.then(|| cursor.at(&key, draft_text)),
@@ -1100,25 +1105,17 @@ impl Threads {
             }
             doc.append(shell_doc(rendered, host, id), 0);
             if open {
-                if let Some(delivery) = self.pending_actions.get(id) {
-                    self.feedback(doc, host, delivery, width);
-                }
-                for (input, draft) in &self.drafts {
-                    if let Some(delivery) = &draft.delivery
-                        && delivery.write.id == id
-                        && !(input == &Input::Reply(id.into()).key()
-                            && delivery.pending
-                            && self.access.reply)
-                        && !(input == &Input::Rename(id.into()).key()
-                            && self.focused.as_ref()
-                                == Some(&(host.into(), Input::Rename(id.into()))))
-                    {
-                        self.feedback(doc, host, delivery, width);
-                    }
-                }
+                self.panel_feedback(
+                    doc,
+                    host,
+                    id,
+                    reply_editor_visible,
+                    rename_editor_visible,
+                    width,
+                );
             }
         }
-        if self.focused.as_ref() == Some(&(host.into(), Input::Rename(id.into()))) {
+        if rename_editor_visible {
             self.editor(
                 doc,
                 host,
@@ -1128,6 +1125,31 @@ impl Threads {
                 width,
                 texts,
             );
+        }
+    }
+
+    fn panel_feedback(
+        &self,
+        doc: &mut Doc,
+        host: &str,
+        id: &str,
+        reply_editor_visible: bool,
+        rename_editor_visible: bool,
+        width: usize,
+    ) {
+        if let Some(delivery) = self.pending_actions.get(id) {
+            self.feedback(doc, host, delivery, width);
+        }
+        for (input, draft) in &self.drafts {
+            if let Some(delivery) = &draft.delivery
+                && delivery.write.id == id
+                && !(input == &Input::Reply(id.into()).key()
+                    && delivery.pending
+                    && reply_editor_visible)
+                && !(input == &Input::Rename(id.into()).key() && rename_editor_visible)
+            {
+                self.feedback(doc, host, delivery, width);
+            }
         }
     }
 

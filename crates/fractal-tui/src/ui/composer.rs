@@ -9,6 +9,13 @@ pub(super) fn pending(action: &str) -> Line<'static> {
     Line::from(Span::styled(format!("{action}…"), theme::dim()))
 }
 
+/// An unfocused composer has no action row; retain its height by using the divider.
+pub(super) fn pending_divider(width: usize, action: &str) -> Line<'static> {
+    let label = text::truncate(&format!("─ {action}… "), width);
+    let tail = "─".repeat(width.saturating_sub(text::width(&label)));
+    Line::from(Span::styled(format!("{label}{tail}"), theme::dim()))
+}
+
 pub(super) fn divider(width: usize, focused: bool) -> Line<'static> {
     Line::from(Span::styled(
         "─".repeat(width),

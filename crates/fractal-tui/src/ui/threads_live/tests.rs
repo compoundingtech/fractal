@@ -788,6 +788,146 @@ fn original_close_retry_survives_changed_summary_collapse_and_later_refusal() {
 }
 
 #[test]
+fn a_pending_reply_without_loaded_history_keeps_fallback_status_and_retry() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let id = "thread/worker";
+    let tab = Pane::Thread(id.into());
+    let agent = Pane::Agent(Some("agent/atlas".into()));
+    let mut texts = HashMap::new();
+    threads.tap(&tab.key(), thread::Tap::Compose(id.into()), &mut texts);
+    threads.paste(
+        &tab,
+        "Retain this reply",
+        &edit::Cursor::default(),
+        &mut texts,
+    );
+    threads.submit(&tab.key(), Input::Reply(id.into()), &texts);
+    let original = threads.writes().pop().unwrap();
+    threads.histories.remove(id);
+    threads.open.insert(agent.key(), id.into());
+    threads
+        .lists
+        .insert(ThreadInterest::Agent("agent/atlas".into()), vec![id.into()]);
+    let mount = |threads: &Threads, pane: &Pane, texts: &HashMap<String, String>| {
+        threads.mount(
+            pane,
+            100,
+            &edit::Cursor::default(),
+            &super::super::demo::test_world(),
+            texts,
+        )
+    };
+    for pane in [&tab, &agent] {
+        let doc = mount(&threads, pane, &texts);
+        let lines = doc
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        assert!(lines.iter().any(|line| line.contains("Loading thread")));
+        assert_eq!(
+            lines.iter().filter(|line| *line == "Send reply…").count(),
+            1,
+            "a missing editor must not hide its retained request"
+        );
+        assert!(!doc.targets.iter().any(|target| matches!(
+            &target.hit,
+            Hit::Thread(_, thread::Tap::Send(_) | thread::Tap::Compose(_))
+        )));
+    }
+    threads.complete(
+        Receipt {
+            write: original.clone(),
+            confirmation: Confirmation::Failed(ClientError::Transport("lost receipt".into())),
+        },
+        &mut texts,
+    );
+    for pane in [&tab, &agent] {
+        let doc = mount(&threads, pane, &texts);
+        assert!(doc.targets.iter().any(|target| matches!(&target.hit, Hit::Thread(_, thread::Tap::Retry(key)) if key == &original.key)));
+    }
+}
+
+#[test]
+fn an_unfocused_pending_reply_uses_the_existing_divider_without_growing_the_panel() {
+    let mut threads = observed_threads(ThreadState::Closed);
+    let id = "thread/worker";
+    let pane = Pane::Thread(id.into());
+    let mut texts = HashMap::new();
+    threads.tap(
+        &pane.key(),
+        thread::Tap::Reply {
+            thread: id.into(),
+            message: "message/question".into(),
+        },
+        &mut texts,
+    );
+    threads.paste(
+        &pane,
+        "Original quoted draft",
+        &edit::Cursor::default(),
+        &mut texts,
+    );
+    threads.tap(
+        &pane.key(),
+        thread::Tap::LeaveComposer(id.into()),
+        &mut texts,
+    );
+    let mount = |threads: &Threads, texts: &HashMap<String, String>| {
+        threads.mount(
+            &pane,
+            100,
+            &edit::Cursor::default(),
+            &super::super::demo::test_world(),
+            texts,
+        )
+    };
+    let lines = |doc: &Doc| {
+        doc.lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    };
+    let before = lines(&mount(&threads, &texts));
+    let divider = before
+        .iter()
+        .position(|line| line == &"─".repeat(100))
+        .unwrap();
+    threads.tap(&pane.key(), thread::Tap::Compose(id.into()), &mut texts);
+    threads.submit(&pane.key(), Input::Reply(id.into()), &texts);
+    let original = threads.writes().pop().unwrap();
+    threads.tap(
+        &pane.key(),
+        thread::Tap::LeaveComposer(id.into()),
+        &mut texts,
+    );
+    let queued = mount(&threads, &texts);
+    let mut expected = before;
+    let status = lines(&queued)[divider].clone();
+    assert!(status.starts_with("─ Send reply… "));
+    assert_eq!(text::width(&status), 100);
+    expected[divider] = status;
+    assert_eq!(
+        lines(&queued),
+        expected,
+        "the existing quote, draft and actions keep their rows without focus"
+    );
+    assert!(!queued.targets.iter().any(|target| matches!(
+        &target.hit,
+        Hit::Thread(_, thread::Tap::Send(_) | thread::Tap::Compose(_))
+    )));
+    assert_eq!(
+        threads.drafts[&Input::Reply(id.into()).key()]
+            .delivery
+            .as_ref()
+            .unwrap()
+            .write
+            .key,
+        original.key
+    );
+}
+
+#[test]
 fn a_pending_reply_uses_the_existing_action_row_without_a_second_send_target() {
     let mut threads = observed_threads(ThreadState::Closed);
     let pane = Pane::Thread("thread/worker".into());
