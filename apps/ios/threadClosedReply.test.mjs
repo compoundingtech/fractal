@@ -49,6 +49,7 @@ test('a closed thread keeps its composer and exact-message quote without implici
   const state = hooks();
   const body = compile('ThreadBody', 'type Quote', {
     ...state, useStore: () => store, useCallback: fn => fn, useRef: current => ({ current }),
+    threadEditScope: id => { assert.ok(id); return `edit/${id}`; },
     useThreadPage: () => ({ items: [message] }), useWindowDimensions: () => ({ width: 400, height: 800 }),
     useSafeAreaInsets: () => ({}), useHeaderHeight: () => 0, useContext: () => 0, BottomTabBarHeightContext: {},
     useNavigation: () => ({}), useThreadViewports: () => [], agentName: () => 'Reviewer', ago: () => '1m',
@@ -78,6 +79,12 @@ test('a closed thread keeps its composer and exact-message quote without implici
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(calls, [['reply', thread, 'Follow up', message.id]]);
   assert.equal(thread.state, 'closed');
+  store.threadDeliveries = new Map();
+  state.reset();
+  const start = { cacheKey: 'origin', accepted: false, title: 'Unsent' };
+  assert.equal(find(body({ client: {}, start }), 'ThreadComposer').props.start, start,
+    'an unsent draft does not look up metadata delivery for a nonexistent server thread');
+
 });
 
 test('the first draft uses the retained composer through its receipt and accepted summary', async () => {

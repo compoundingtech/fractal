@@ -374,7 +374,7 @@ function ThreadBody({ client, thread, start, onOpen, revealComposer }: {
   };
   const [editing, setEditing] = useState(false);
   const [editResult, setEditResult] = useState<ThreadEditResult>();
-  const editDelivery = threadDeliveries?.get(threadEditScope(thread.id));
+  const editDelivery = thread ? threadDeliveries?.get(threadEditScope(thread.id)) : undefined;
   const editFeedback = editDelivery?.retry ? { how: 'unconfirmed' as const, retry: editDelivery.retry } : editResult;
   const editable = status === 'online' && !editing && !editDelivery && editFeedback?.how !== 'unconfirmed';
   const runEdit = async (send: () => Promise<ThreadEditResult>, retained = false) => {
