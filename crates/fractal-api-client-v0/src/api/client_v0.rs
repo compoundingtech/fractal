@@ -13439,13 +13439,30 @@ mission "differential" state="ready" {
         let begun: Value = serde_json::from_slice(&bytes).unwrap();
         let challenge = &begun["value"];
         let id = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
-        let response = app.oneshot(Request::builder()
+        let subject = format!("custom/client/pairing-{id}");
+        for kind in ["custom.client.pairing-begun", "custom.client.pairing-completed"] {
+            state.store.graph.append_claim(&ClaimInput {
+                subject: subject.clone(), kind: kind.into(), actor: Some("person/ada".into()),
+                fields: serde_json::from_value(json!({
+                    "pairing_id": challenge["pairing_id"], "person_id": "person/ada",
+                    "code_hash": "unadmitted-retained-code", "scopes": [],
+                    "expires_at_unix_ms": client_now_ms() as u64 + 60_000,
+                })).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let complete = || app.clone().oneshot(Request::builder()
             .method("POST").uri(format!("/v1/client/pairings/{id}/complete"))
             .header("Content-Type", "application/json")
             .body(Body::from(json!({
                 "api_version": CLIENT_API_VERSION, "code": challenge["code"],
                 "device_public_key": "test-device-public-key-with-at-least-32-characters"
-            }).to_string())).unwrap()).await.unwrap();
+            }).to_string())).unwrap());
+        let (first, second) = tokio::join!(complete(), complete());
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(usize::from(first.status() == StatusCode::OK) + usize::from(second.status() == StatusCode::OK), 1);
+        let response = if first.status() == StatusCode::OK { first } else { second };
         let status = response.status();
         let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
         let completed: Value = serde_json::from_slice(&bytes).unwrap();
