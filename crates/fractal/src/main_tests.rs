@@ -634,6 +634,7 @@ async fn todo_liveness_confirmation_requires_full_period_including_eof() {
         }).unwrap();
     };
     let state = fractal_daemon::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),
@@ -2466,6 +2467,8 @@ fn stopped_agent(end_reason: serde_json::Value) -> fractal_client::Agent {
 fn declared_admission_human_output_is_explicitly_not_enforced() {
     let mut agent = stopped_agent(serde_json::Value::Null);
     assert!(!render_client_agent(&agent, &[], 0).contains("Declared admission"));
+    // Historical agent responses still decode and display mission-only numeric
+    // budgets; this is read compatibility, not a new-authoring fixture.
     agent.declared_admission = Some(serde_json::from_value(serde_json::json!({
         "priority": "normal", "lane": "check",
         "budgets": {"cpu_seconds": 300, "memory_max": "8G", "disk_max": "20G", "token_budget": 100000}
@@ -2819,6 +2822,7 @@ async fn a_pi_family_delivery_after_the_recipient_read_the_message_keeps_the_cha
             .unwrap();
     }
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
@@ -2916,6 +2920,7 @@ async fn trace_after_index_reads_the_first_bounded_page() {
         })
         .collect::<Vec<_>>();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store,
@@ -2996,6 +3001,7 @@ async fn trace_wait_starts_after_existing_events() {
             .store_index;
     }
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store,
@@ -6209,6 +6215,7 @@ async fn message_read_returns_the_committed_lifecycle_state() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("message-read-state").unwrap()),
@@ -6309,6 +6316,7 @@ async fn successor_who_sent_mail_still_signs_one_custody_read() {
     store.retire_agent_with_successor("agent/example/old", "person/avery", "Rollover",
         &token, None, "custody-sender-retire", &[], Some("agent/example/new"), None).unwrap();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         store: store.clone(), notify: Arc::new(Notify::new()),
         event_notify: watch::channel(0_u64).0, node: "custody-sender".into(),
@@ -8409,6 +8417,7 @@ async fn serve_test_store(
 ) -> (Client, tokio::task::JoinHandle<()>) {
     let socket = root.join("st3.sock");
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store,
@@ -9619,6 +9628,7 @@ impl MovedSeat {
             cedar.apply_internal(&fractal_daemon::parse_intent(source, "cedar").unwrap(), "moved-seat").unwrap();
         }
         let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: cedar.clone(), notify: std::sync::Arc::new(tokio::sync::Notify::new()),

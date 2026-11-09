@@ -7,6 +7,8 @@ import type { ConversationPage, Feed } from '../data/source.ts'
 import type { FeedSyncObservation } from '../data/feedSync.ts'
 
 // Node rendering exercises the real kit composition, not the CSS compiler.
+// One stable empty roster: a fresh map per render would re-project the transcript every frame.
+const noRosterNames = vi.hoisted((): ReadonlyMap<string, string> => new Map())
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
 const source = vi.hoisted(() => ({
@@ -25,6 +27,8 @@ vi.mock('../data/react.tsx', async () => {
   useConversation: (ref: string) => { source.conversation(ref); return source.feed },
   useConversationSync: (ref: string) => { source.conversationSync(ref); return source.sync },
   useConnection: () => ({ _tag: 'Live' }),
+  // Roster names for mail headers; an empty roster reads refs by their last segment.
+  useFleetSelection: () => noRosterNames,
   useDataSource: () => ({ agents, conversationInterest: undefined, retryConversation: source.retryConversation }),
   useFeedInterest: source.feedInterest,
   useNow: () => 1000,

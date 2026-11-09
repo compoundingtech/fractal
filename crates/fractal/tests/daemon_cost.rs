@@ -142,6 +142,18 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "POST /v1/client/pairing/browser-requests",
+        "interactive configured-owner pairing requires an authenticated publisher device and native person decision ask, absent from generated cost stores; browser_pairing_tests covers admission and pending limits; the pending count scans browser request history, whose growth is not measured here",
+    ),
+    (
+        "POST /v1/client/pairing/browser-requests/{id}/redeem",
+        "one-use interactive redemption requires a receipt-authenticated request and its exact answered native person ask, absent from generated cost stores; browser_pairing_tests covers pending, deny, expiry, exact scopes and single use; request, answer and completion lookups are subject-keyed, but receipt and completion write costs are not measured here",
+    ),
+    (
+        "POST /v1/client/pairing/browser-requests/revoke-current",
+        "browser self-revocation requires its real paired bearer and operation receipts, absent from generated cost stores; browser_pairing_tests covers authenticated revocation; subject-keyed completion and request reads plus the revocation write are not measured here",
+    ),
+    (
         "POST /v1/fleet/admission-override",
         "an operator's rare release of a waiting member; it reads this member's peers and its newest daemon.started claim and appends one claim, none of which grows with claim history; placement_handoff::a_waiting_member_goes_on_without_an_unreachable_peer_only_by_its_override covers the real route through the CLI",
     ),
@@ -1827,6 +1839,7 @@ async fn populated_ready_work_cost_by_cohort_size() {
     }
 
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
@@ -1939,6 +1952,7 @@ mission "cost/history" state="ready" {
         }).unwrap();
     }
     let app = fractal_daemon::api::router(AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
@@ -3048,6 +3062,7 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
     })
     .unwrap();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
