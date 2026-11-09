@@ -16470,6 +16470,11 @@ subscription "watch/source" {
                     completed.actor.as_deref(), &completed.body["fields"]).unwrap(),
                 until_unix_ms:fractal_store::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS as u64,
             }]).is_err());
+            if !native {
+                let mut shadow = input.clone();
+                shadow.subject = "custom/client/unrevoked-legacy-shadow".into();
+                state.store.append_claim(&shadow).unwrap();
+            }
             let devices = device_resources(&state, &new_client_snapshot(&state), "person/alex").unwrap();
             assert_eq!(devices.len(), 1);
             assert_eq!(devices[0]["state"], "revoked");

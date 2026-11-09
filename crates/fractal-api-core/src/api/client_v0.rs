@@ -1850,6 +1850,12 @@ pub fn device_resources(
     let mut paired = BTreeMap::<String, (&ClaimRecord, Option<&ClaimRecord>)>::new();
     let mut names = BTreeMap::<String, String>::new();
     let mut unadmitted = BTreeSet::new();
+    let mut withdrawals = BTreeMap::<&str, Vec<&ClaimRecord>>::new();
+    for claim in &claims {
+        if claim.kind == "custom.client.pairing-revoked" {
+            withdrawals.entry(&claim.subject).or_default().push(claim);
+        }
+    }
     for claim in &claims {
         let fields = claim.body.get("fields").unwrap_or(&claim.body);
         if claim.kind == "custom.client.pairing-begun"
@@ -1872,11 +1878,20 @@ pub fn device_resources(
             "custom.client.pairing-completed"
                 if fields.get("person_id").and_then(Value::as_str) == Some(person) =>
             {
-                if unadmitted.contains(&claim.id)
-                    && paired.get(device_id).is_some_and(|(current, _)| !unadmitted.contains(&current.id)) {
-                    continue;
+                let mut withdrawn = None;
+                if unadmitted.contains(&claim.id) {
+                    if paired.get(device_id).is_some_and(|(current, _)| !unadmitted.contains(&current.id)) {
+                        continue;
+                    }
+                    for revoked in withdrawals.get(claim.subject.as_str()).into_iter().flatten() {
+                        if state.store.pairing_revocation_is_trusted(revoked, claim).map_err(ApiError::internal)? {
+                            withdrawn = Some(*revoked);
+                        }
+                    }
+                    // Raw shadows cannot replace admitted grants or withdrawn legacy history.
+                    if withdrawn.is_none() { continue; }
                 }
-                paired.insert(device_id.to_owned(), (claim, None));
+                paired.insert(device_id.to_owned(), (claim, withdrawn));
             }
             "custom.client.pairing-revoked" => {
                 if let Some(entry) = paired.get_mut(device_id)
@@ -1887,8 +1902,6 @@ pub fn device_resources(
             _ => {}
         }
     }
-    // Retained legacy grants remain hidden until withdrawn; showing history grants no authority.
-    paired.retain(|_, (completed, revoked)| revoked.is_some() || !unadmitted.contains(&completed.id));
     // Pairing and revocation are fenced by the graph snapshot above. Expiration is
     // live state: its clock must advance even when no claim advances that snapshot.
     let at = client_now_ms();
