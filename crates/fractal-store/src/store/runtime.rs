@@ -853,7 +853,8 @@ mod schema_install_tests {
         connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
         let indexes = [
             "claims_thread_conversation_index", "claims_thread_message_accepted_index",
-            "claims_thread_origin_index", "claims_thread_mission_index", "claims_thread_closed_owner_index",
+            "claims_thread_inbox_origin_index", "claims_thread_mission_index", "claims_thread_closed_owner_index",
+            "claims_operational_episode_index",
         ];
         let has_index = |name: &str| {
             connection.query_row(
