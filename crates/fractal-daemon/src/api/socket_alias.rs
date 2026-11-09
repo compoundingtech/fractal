@@ -147,7 +147,8 @@ pub async fn serve_unix_bound_with_ready(
     store: Arc<crate::store::Store>, ready: impl FnOnce(),
 ) -> Result<()> {
     let reserved = reserve_unix_socket(socket, Some(state_socket)).await?;
-    serve_reserved_unix_with_ready(reserved, app, Some(store), None, ready).await
+    let worker = super::worker_observer(None)?;
+    serve_reserved_unix_with_ready(reserved, app, Some(store), Some(worker), ready).await
 }
 
 pub async fn serve_unix_bound(
