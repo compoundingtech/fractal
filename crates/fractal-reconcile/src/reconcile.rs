@@ -9282,7 +9282,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         let Some(operation) = attempt.body["fields"]["operation"].as_str() else {
             return Ok(None);
         };
-        let receipts = self.store.claims_for(subject, Some("runtime.action.succeeded"))?;
+        // Start completion is a local observation, not a replicated claim. Include
+        // both storage classes so retained legacy receipts remain readable too.
+        let receipts = self.store.observations_for(subject, "runtime.action.succeeded")?;
         let receipt = receipts.iter().rev().find(|claim| {
             claim.body["fields"]["action"] == "start"
                 && claim.body["fields"]["operation_status"] == "verified"

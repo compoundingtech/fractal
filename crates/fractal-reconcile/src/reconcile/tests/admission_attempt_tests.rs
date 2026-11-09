@@ -63,7 +63,7 @@ fn restart_diagnostic_distinguishes_verified_start_then_exit_from_interrupted_at
             Some(format!("agent-restart-attempt:{}", request.id)),
         );
         if let Some(operation) = receipt_operation {
-            append(
+            let receipt = append(
                 "runtime.action.succeeded",
                 None,
                 BTreeMap::from([
@@ -74,6 +74,15 @@ fn restart_diagnostic_distinguishes_verified_start_then_exit_from_interrupted_at
                 ]),
                 vec![attempt.id.clone()],
                 None,
+            );
+            assert!(receipt.id.starts_with("local-observation/"), "{}", receipt.id);
+            assert!(
+                store.claims_for(SEAT, Some("runtime.action.succeeded")).unwrap().is_empty(),
+                "verified start completions live outside the replicated claim log"
+            );
+            assert_eq!(
+                store.observations_for(SEAT, "runtime.action.succeeded").unwrap().len(),
+                1
             );
             append(
                 "harness.observed",
@@ -89,6 +98,11 @@ fn restart_diagnostic_distinguishes_verified_start_then_exit_from_interrupted_at
                 None,
             );
         }
+        assert_eq!(
+            reconciler.verified_restart_exit(SEAT, &attempt).unwrap().is_some(),
+            expect_started,
+            "only the exact attempt's verified local start receipt supplies a completed launch"
+        );
         append(
             "harness.diagnostic",
             Some(SEAT),
