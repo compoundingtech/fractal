@@ -71,6 +71,7 @@ pub struct State<'a> {
     pub loading_earlier: bool,
     pub can_mark_read: bool,
     pub can_reply: bool,
+    pub pending_reply: bool,
     pub can_rename: bool,
     pub can_close: bool,
     pub can_reopen: bool,
@@ -319,16 +320,20 @@ pub fn panel(
             state.cursor,
             "Message thread · type or click".to_owned(),
         ));
-        for line in start..doc.lines.len() {
-            target(
-                &mut doc,
-                line,
-                0,
-                width,
-                Tap::Compose(summary.id.to_owned()),
-            );
+        if !state.pending_reply {
+            for line in start..doc.lines.len() {
+                target(
+                    &mut doc,
+                    line,
+                    0,
+                    width,
+                    Tap::Compose(summary.id.to_owned()),
+                );
+            }
         }
-        if focused {
+        if state.pending_reply {
+            doc.line(composer::pending("Send reply"));
+        } else if focused {
             doc.buttons_fit(
                 &[
                     (

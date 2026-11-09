@@ -1069,6 +1069,9 @@ impl Threads {
                 loading_earlier: source.is_some_and(|history| history.loading),
                 can_mark_read: self.can_mark_read(id),
                 can_reply: self.access.reply,
+                pending_reply: draft
+                    .and_then(|draft| draft.delivery.as_ref())
+                    .is_some_and(|delivery| delivery.pending),
                 can_rename: self.access.rename,
                 can_close: self.access.close,
                 can_reopen: self.access.reopen,
@@ -1103,6 +1106,9 @@ impl Threads {
                 for (input, draft) in &self.drafts {
                     if let Some(delivery) = &draft.delivery
                         && delivery.write.id == id
+                        && !(input == &Input::Reply(id.into()).key()
+                            && delivery.pending
+                            && self.access.reply)
                         && !(input == &Input::Rename(id.into()).key()
                             && self.focused.as_ref()
                                 == Some(&(host.into(), Input::Rename(id.into()))))
@@ -1172,13 +1178,19 @@ impl Threads {
             Input::Rename(id) => (thread::Tap::Rename(id.clone()), "Save title"),
             Input::Reply(_) => return,
         };
-        doc.buttons(&[("enter", label, Hit::Thread(host.into(), tap), theme::ACCENT)]);
-        doc.blank();
-        if let Some(delivery) = self
+        let delivery = self
             .drafts
             .get(&key)
-            .and_then(|draft| draft.delivery.as_ref())
-        {
+            .and_then(|draft| draft.delivery.as_ref());
+        if let Some(delivery) = delivery.filter(|delivery| delivery.pending) {
+            // Keep the action's status in its existing row, without leaving a second
+            // active-looking Send control or pushing neighboring thread panels down.
+            doc.line(composer::pending(delivery.write.label()));
+        } else {
+            doc.buttons(&[("enter", label, Hit::Thread(host.into(), tap), theme::ACCENT)]);
+        }
+        doc.blank();
+        if let Some(delivery) = delivery.filter(|delivery| !delivery.pending) {
             self.feedback(doc, host, delivery, width);
         }
     }

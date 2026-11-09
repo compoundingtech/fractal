@@ -4,6 +4,11 @@ use ratatui::text::{Line, Span};
 
 use super::{edit, text, theme};
 
+/// Replace a composer's action row while its retained request is in flight.
+pub(super) fn pending(action: &str) -> Line<'static> {
+    Line::from(Span::styled(format!("{action}…"), theme::dim()))
+}
+
 pub(super) fn divider(width: usize, focused: bool) -> Line<'static> {
     Line::from(Span::styled(
         "─".repeat(width),

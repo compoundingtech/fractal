@@ -516,6 +516,25 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     ));
     let write = threads.writes().pop().unwrap();
     assert_ne!(write.id, older.id);
+    let queued = lines(&threads, &texts);
+    let action_row = draft
+        .iter()
+        .position(|line| line.contains("Send first message"))
+        .unwrap();
+    let mut pending_layout = draft.clone();
+    pending_layout[action_row] = "Send first message…".into();
+    assert_eq!(
+        queued, pending_layout,
+        "only the existing action row changes while sending; draft identity, composer and sibling positions stay fixed"
+    );
+    let pending_doc = threads.mount(&inbox, 100, &cursor, &world, &texts);
+    assert!(
+        !pending_doc
+            .targets
+            .iter()
+            .any(|target| matches!(&target.hit, Hit::Thread(_, thread::Tap::Start(_)))),
+        "the pending action must not retain an active Send target"
+    );
     let new = ThreadSummary {
         id: write.id.clone(),
         ..older.clone()
@@ -529,7 +548,7 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
         vec![older.id.clone(), new.id.clone()],
         false,
     );
-    assert_eq!(lines(&threads, &texts), draft);
+    assert_eq!(lines(&threads, &texts), queued);
     threads.window(
         context.clone(),
         snapshot(),
@@ -766,6 +785,86 @@ fn original_close_retry_survives_changed_summary_collapse_and_later_refusal() {
         &mut texts,
     );
     assert!(!threads.pending_actions.contains_key(id));
+}
+
+#[test]
+fn a_pending_reply_uses_the_existing_action_row_without_a_second_send_target() {
+    let mut threads = observed_threads(ThreadState::Closed);
+    let pane = Pane::Thread("thread/worker".into());
+    let mut texts = HashMap::new();
+    threads.tap(
+        &pane.key(),
+        thread::Tap::Reply {
+            thread: "thread/worker".into(),
+            message: "message/question".into(),
+        },
+        &mut texts,
+    );
+    threads.paste(
+        &pane,
+        "Reply without reopening",
+        &edit::Cursor::default(),
+        &mut texts,
+    );
+    let mount = |threads: &Threads, texts: &HashMap<String, String>| {
+        threads.mount(
+            &pane,
+            100,
+            &edit::Cursor::default(),
+            &super::super::demo::test_world(),
+            texts,
+        )
+    };
+    let lines = |doc: &Doc| {
+        doc.lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    };
+    let before = lines(&mount(&threads, &texts));
+    let action_row = before
+        .iter()
+        .position(|line| line.contains("Send"))
+        .unwrap();
+    threads.submit(&pane.key(), Input::Reply("thread/worker".into()), &texts);
+    let original = threads.writes().pop().unwrap();
+    let queued = mount(&threads, &texts);
+    let mut expected = before;
+    expected[action_row] = "Send reply…".into();
+    assert_eq!(
+        lines(&queued),
+        expected,
+        "quote, draft and lifecycle geometry stay fixed; only the action row changes"
+    );
+    assert!(!queued.targets.iter().any(|target| matches!(
+        &target.hit,
+        Hit::Thread(_, thread::Tap::Send(_) | thread::Tap::Compose(_))
+    )));
+    threads.submit(&pane.key(), Input::Reply("thread/worker".into()), &texts);
+    assert!(
+        threads.writes().is_empty(),
+        "a pending request cannot queue another Send"
+    );
+    threads.put_summary(Envelope {
+        value: ThreadSummary {
+            state: ThreadState::Closed,
+            revision: "claim/feed".into(),
+            ..summary()
+        },
+        snapshot: snapshot(),
+        request_id: "request/feed".into(),
+        api_version: fractal_client::API_VERSION.into(),
+    });
+    assert_eq!(lines(&mount(&threads, &texts)), expected);
+    assert_eq!(
+        threads.drafts[&Input::Reply("thread/worker".into()).key()]
+            .delivery
+            .as_ref()
+            .unwrap()
+            .write
+            .key,
+        original.key
+    );
 }
 
 #[test]
