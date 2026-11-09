@@ -51,7 +51,11 @@ export default githubWorkflow(scopeLinuxNixSandbox(readyPRJobs(auditCaches({
         "scripts/release-build-stamp.py",
         "scripts/release-rust-version",
         "scripts/fixtures/install-release-v0.3.17",
+        "scripts/release-zig-preseed*",
+        "vendor/libghostty-vt-sys/**",
         "scripts/release-fractal*",
+        "scripts/release_artifact.py",
+        "scripts/release_draft_recovery.py",
         "scripts/release-fractal-embed.mjs",
         "apps/fractal-web/**",
         "scripts/release_notes*",
@@ -127,7 +131,7 @@ fi`,
         }
       },
       "runs-on": "${{ matrix.runner }}",
-      "timeout-minutes": 5,
+      "timeout-minutes": "${{ matrix.runner == 'macos-15' && 10 || 5 }}",
       "steps": [
         {
           // Exercise the workflow's current publication automation, including tests absent from historical candidates.
@@ -261,7 +265,11 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         },
         {
           "name": "Test installer",
-          "run": "scripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release-fractal-test\npython3 scripts/release_notes_test.py\n"
+          "run": "scripts/install-release-test\npython3 scripts/install-macos-test\npython3 scripts/release-fractal-test\npython3 scripts/release_notes_test.py\npython3 scripts/release-zig-preseed-test.py\n"
+        },
+        {
+          name: 'Preseed hash-verified Zig GitHub archives',
+          run: 'python3 scripts/release-zig-preseed.py --github-env "$GITHUB_ENV"',
         },
         {
           "name": "Build, package, and test extracted tools",
@@ -287,6 +295,7 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         "installer"
       ],
       "runs-on": "ubuntu-latest",
+      "outputs": { "artifact-id": "${{ steps.release.outputs.artifact-id }}" },
       "steps": [
         {
           "uses": "actions/checkout@v4",
@@ -311,9 +320,10 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
           "run": "set -euo pipefail\ncd dist\ncat ./*.sha256 > SHA256SUMS\nsha256sum --check SHA256SUMS\npython3 ../scripts/release-fractal-manifest.py \"$SOURCE_SHA\"\ncp ../docs/st3/binary-releases.md RELEASE-NOTES.md\n# Markdown backticks are literal, not command substitution.\n# shellcheck disable=SC2016\nprintf '\\nExact source: `%s`. See RELEASE.json for the PTY revision and targets.\\n' \"$SOURCE_SHA\" >> RELEASE-NOTES.md\n"
         },
         {
+          "id": "release",
           "uses": "actions/upload-artifact@v4",
           "with": {
-            "name": "fractal-release",
+            "name": "fractal-release-attempt-${{ github.run_attempt }}",
             "path": "dist/*",
             "if-no-files-found": "error",
             "retention-days": 7
@@ -346,7 +356,8 @@ printf '%s/bin\n' "$compiler" >> "$GITHUB_PATH"`,
         {
           "uses": "actions/download-artifact@v4",
           "with": {
-            "name": "fractal-release",
+            "artifact-ids": "${{ needs.assemble.outputs.artifact-id }}",
+            "merge-multiple": true,
             "path": "dist"
           }
         },

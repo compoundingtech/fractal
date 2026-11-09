@@ -317,9 +317,9 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
         let credential = "notice-history-paired-credential";
-        state.store.append_claim(&ClaimInput {
+        state.store.append_client_operation_claim(&ClaimInput {
             subject: "custom/client/notice-history-pair".into(),
-            kind: "custom.client.pairing-completed".into(), actor: None,
+            kind: "custom.client.pairing-completed".into(), actor: Some("person/example".into()),
             fields: BTreeMap::from([
                 ("credential_hash".into(), json!(client_v0::credential_digest(credential))),
                 ("session_actor".into(), json!("client/notice-history")),

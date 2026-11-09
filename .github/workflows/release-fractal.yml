@@ -34,7 +34,11 @@ on:
       - scripts/release-build-stamp.py
       - scripts/release-rust-version
       - scripts/fixtures/install-release-v0.3.17
+      - scripts/release-zig-preseed*
+      - vendor/libghostty-vt-sys/**
       - scripts/release-fractal*
+      - scripts/release_artifact.py
+      - scripts/release_draft_recovery.py
       - scripts/release-fractal-embed.mjs
       - apps/fractal-web/**
       - scripts/release_notes*
@@ -444,7 +448,7 @@ jobs:
       matrix:
         runner: [ubuntu-latest, macos-15]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 5
+    timeout-minutes: ${{ matrix.runner == 'macos-15' && 10 || 5 }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -640,7 +644,10 @@ jobs:
           python3 scripts/install-macos-test
           python3 scripts/release-fractal-test
           python3 scripts/release_notes_test.py
+          python3 scripts/release-zig-preseed-test.py
 
+      - name: Preseed hash-verified Zig GitHub archives
+        run: python3 scripts/release-zig-preseed.py --github-env "$GITHUB_ENV"
       - name: Build, package, and test extracted tools
         run: "scripts/release-fractal '${{ matrix.target }}' dist"
       - id: build-snapshot-save
@@ -694,6 +701,8 @@ jobs:
     name: release-assemble
     needs: [build, embed, installer]
     runs-on: ubuntu-latest
+    outputs:
+      artifact-id: ${{ steps.release.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -718,9 +727,10 @@ jobs:
           # shellcheck disable=SC2016
           printf '\nExact source: `%s`. See RELEASE.json for the PTY revision and targets.\n' "$SOURCE_SHA" >> RELEASE-NOTES.md
 
-      - uses: actions/upload-artifact@v4
+      - id: release
+        uses: actions/upload-artifact@v4
         with:
-          name: fractal-release
+          name: "fractal-release-attempt-${{ github.run_attempt }}"
           path: dist/*
           if-no-files-found: error
           retention-days: 7
@@ -781,7 +791,8 @@ jobs:
           git fsck --connectivity-only --no-dangling --no-progress
       - uses: actions/download-artifact@v4
         with:
-          name: fractal-release
+          artifact-ids: ${{ needs.assemble.outputs.artifact-id }}
+          merge-multiple: true
           path: dist
       - name: Move the rolling edge pre-release to this verified commit
         run: scripts/release-fractal-edge --source "$SOURCE_SHA" --dist dist --run-url "$RUN_URL"

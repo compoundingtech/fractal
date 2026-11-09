@@ -8,6 +8,9 @@ import re
 import subprocess
 import tempfile
 
+from release_artifact import assert_current_attempt, download_release, get_attempt
+from release_tag import ensure_tag
+
 
 def run(*args, **kwargs):
     return subprocess.run(args, check=True, text=True, capture_output=True, **kwargs).stdout.strip()
@@ -54,27 +57,26 @@ def publish(tag, sha, go_ref, allow_superseded=''):
         run('python3', str(Path(__file__).resolve().with_name('release-fractal-manifest.py')), sha, cwd=dist)
         proof = json.loads((dist / 'CANDIDATE.json').read_text())
         if (proof['source'] != sha or type(proof['build_run']) is not int or proof['build_run'] <= 0
-                or type(proof['build_attempt']) is not int or proof['build_attempt'] <= 0):
+                or type(proof['build_attempt']) is not int or proof['build_attempt'] <= 0
+                or type(proof['build_artifact']) is not int or proof['build_artifact'] <= 0):
             raise ValueError('candidate build proof does not identify this exact source')
         build_run = str(proof['build_run'])
         workflow = json.loads(run('gh', 'api', f'repos/{repository}/actions/workflows/release-fractal.yml'))
-        identity = json.loads(run('gh', 'api', f'repos/{repository}/actions/runs/{build_run}'))
-        if identity['workflow_id'] != workflow['id']:
+        built = get_attempt(build_run, repository, proof['build_attempt'], run)
+        if built['workflow_id'] != workflow['id']:
             raise ValueError('candidate proof belongs to a different workflow ID')
-        if identity['run_attempt'] != proof['build_attempt']:
-            raise ValueError('candidate build was rerun; create a fresh candidate for that attempt')
-        built = json.loads(run('gh', 'run', 'view', build_run, '--json',
-                               'status,conclusion,event,headBranch,headSha,displayTitle'))
-        exact_source = (built['headSha'] == sha if built['event'] == 'push'
-                        else built['displayTitle'].startswith(f'Fractal candidate {sha} '))
+        assert_current_attempt(build_run, repository, proof['build_attempt'], run)
+        exact_source = (built['head_sha'] == sha if built['event'] == 'push'
+                        else built['display_title'].startswith(f'Fractal candidate {sha} '))
         if (built['status'] != 'completed' or built['conclusion'] != 'success'
-                or built['headBranch'] != 'main'
+                or built['head_branch'] != 'main'
                 or built['event'] not in ('push', 'workflow_dispatch') or not exact_source):
             raise ValueError('candidate build run did not succeed at the exact approved SHA')
         # Do not trust an edited draft proof alone: compare it to the successful run artifact.
         build_dist = dist / 'build-proof'
         build_dist.mkdir()
-        run('gh', 'run', 'download', build_run, '--name', 'fractal-release', '--dir', str(build_dist))
+        download_release(build_run, repository, proof['build_attempt'], build_dist, run,
+                         artifact_id=proof['build_artifact'])
         if json.loads((build_dist / 'RELEASE.json').read_text())['source'] != sha:
             raise ValueError('successful build artifact source differs from approved SHA')
         if (build_dist / 'SHA256SUMS').read_bytes() != (dist / 'SHA256SUMS').read_bytes():
@@ -88,7 +90,9 @@ def publish(tag, sha, go_ref, allow_superseded=''):
         receipt = f'\n\n## Product release GO\n\n- Source: `{sha}`\n- GO reference: {go_ref}\n- Publisher: {actor}\n- Workflow run: {run_url}\n'
         notes = dist / 'PUBLISH-NOTES.md'
         notes.write_text(state['body'] + receipt)
-        # Publishing the draft creates its tag at the already-validated target SHA.
+        # Keep stable drafts untagged until every proof check and the product GO pass.
+        assert_current_attempt(build_run, repository, proof['build_attempt'], run)
+        ensure_tag(repository, tag, sha, cwd=Path(__file__).resolve().parent.parent, call=run)
         run('gh', 'release', 'edit', tag, '--target', sha, '--notes-file', str(notes),
             '--draft=false', '--latest')
     print(f'Published {tag} at {sha}; product GO: {go_ref}')

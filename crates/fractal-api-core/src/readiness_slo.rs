@@ -19,6 +19,9 @@ const MINUTE_MS: u64 = 60_000;
 const MINUTES: u64 = 7 * 24 * 60;
 const MAX_AGE_MS: u64 = 3 * MINUTE_MS;
 const MAX_BYTES: u64 = 1024;
+const RETAINED_MAX_BYTES: u64 = 8 * 1024;
+const SHORT_MINUTES: u64 = 5;
+const MAX_RETAINED_PAIRS: usize = 4;
 const EVIDENCE_DIR: &str = "/run/fractal-slo-evidence";
 static POLICY: OnceLock<Policy> = OnceLock::new();
 
@@ -39,6 +42,146 @@ struct Reading {
     expected: u64,
     known: u64,
     good: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedPairs {
+    version: u64,
+    pairs: Vec<RetainedPair>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RetainedPair {
+    weekly: Reading,
+    short: ShortReading,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShortReading {
+    version: u64,
+    objective: String,
+    member: String,
+    end_ms: u64,
+    observed_at_ms: u64,
+    observations: Vec<ShortObservation>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ShortObservation {
+    at_ms: u64,
+    ready: bool,
+}
+
+struct ShortSummary {
+    end_ms: u64,
+    known: usize,
+    failed: usize,
+}
+
+impl ShortReading {
+    fn summary(&self, weekly: &Reading) -> Result<ShortSummary> {
+        ensure!(
+            self.version == 1
+                && self.objective == weekly.objective
+                && self.member == weekly.member
+                && self.end_ms == weekly.end_ms
+                && self.observed_at_ms == weekly.observed_at_ms
+                && self.observations.len() <= SHORT_MINUTES as usize,
+            "short and weekly evidence must match"
+        );
+        let start = self
+            .end_ms
+            .checked_sub(SHORT_MINUTES * MINUTE_MS)
+            .context("short evidence has no complete window")?;
+        let mut previous = None;
+        let mut failed = 0;
+        for observation in &self.observations {
+            let minute = observation.at_ms / MINUTE_MS;
+            ensure!(
+                (start..self.end_ms).contains(&observation.at_ms)
+                    && previous.is_none_or(|prior| minute > prior),
+                "short evidence has invalid or repeated minute"
+            );
+            previous = Some(minute);
+            failed += usize::from(!observation.ready);
+        }
+        Ok(ShortSummary {
+            end_ms: self.end_ms,
+            known: self.observations.len(),
+            failed,
+        })
+    }
+}
+
+impl RetainedPairs {
+    fn latest_at(&self, anchor: &Reading, now: u64) -> Result<Option<ShortSummary>> {
+        Ok(self.fresh_through(anchor, now)?.pop())
+    }
+
+    fn fresh_through(&self, anchor: &Reading, now: u64) -> Result<Vec<ShortSummary>> {
+        ensure!(
+            self.version == 1 && self.pairs.len() <= MAX_RETAINED_PAIRS,
+            "invalid retained pair bundle"
+        );
+        let mut previous = None;
+        let mut fresh = Vec::new();
+        for pair in &self.pairs {
+            let weekly = &pair.weekly;
+            // Check old entries structurally without letting them age out the entire bundle.
+            weekly.check(&anchor.member, weekly.observed_at_ms)?;
+            ensure!(
+                weekly.observed_at_ms <= now,
+                "retained cut is from the future"
+            );
+            ensure!(
+                previous.is_none_or(|end| weekly.end_ms > end),
+                "retained cuts must be strictly ordered"
+            );
+            previous = Some(weekly.end_ms);
+            let summary = pair.short.summary(weekly)?;
+            if weekly.end_ms == anchor.end_ms {
+                ensure!(
+                    weekly == anchor,
+                    "retained cut conflicts with the weekly source"
+                );
+            }
+            if weekly.end_ms <= anchor.end_ms && now - weekly.end_ms <= MAX_AGE_MS {
+                fresh.push(summary);
+            }
+        }
+        if let (Some(first), Some(last)) = (self.pairs.first(), previous) {
+            ensure!(
+                last - first.weekly.end_ms <= MAX_AGE_MS,
+                "retained cuts span too much time"
+            );
+        }
+        Ok(fresh)
+    }
+}
+
+fn short_row(member: &str, reading: Option<ShortSummary>) -> Value {
+    let status = match &reading {
+        Some(reading) if reading.known >= 4 && reading.failed >= 3 => "missed",
+        Some(reading) if reading.known >= 4 => "met",
+        _ => "no-data",
+    };
+    json!({
+        "id": format!("{OBJECTIVE}-early/{member}"),
+        "kind": "objective",
+        "about": "API readiness early-warning evidence",
+        "target": "Fewer than 3 failed probe minutes with at least 4 completed",
+        "current": reading.map_or_else(|| "No trusted paired short reading".to_owned(), |reading| {
+            format!("{} failed of {} completed probe minutes at cut {}", reading.failed, reading.known, reading.end_ms)
+        }),
+        "window": "5m",
+        "remaining_percent": null,
+        "status": status,
+        "explain": "The most recent trusted pair at or before the weekly cut. Fewer than four completed minutes is unknown. This row is observational.",
+    })
 }
 
 #[derive(Deserialize, Serialize)]
@@ -66,12 +209,15 @@ pub fn configure(
         return Ok(());
     };
     ensure!(
-        config.evidence_file.parent() == Some(Path::new(EVIDENCE_DIR))
-            && config
-                .evidence_file
-                .components()
-                .all(|part| matches!(part, Component::RootDir | Component::Normal(_))),
+        evidence_path_valid(&config.evidence_file),
         "readiness_slo.evidence_file must name a file directly under {EVIDENCE_DIR}"
+    );
+    ensure!(
+        config
+            .retained_pairs_file
+            .as_deref()
+            .is_none_or(|path| { path != config.evidence_file && evidence_path_valid(path) }),
+        "readiness_slo.retained_pairs_file must name a different file directly under {EVIDENCE_DIR}"
     );
     ensure!(
         !config.member.is_empty()
@@ -97,6 +243,22 @@ pub fn configure(
         }),
         "readiness_slo.reviewer must name an agent"
     );
+    ensure!(
+        !config.shared_case || config.retained_pairs_file.is_some(),
+        "shared readiness cases require retained_pairs_file"
+    );
+    if let Some(backup) = &config.backup {
+        ensure!(
+            backup != &config.reviewer
+                && backup.strip_prefix("agent/").is_some_and(|id| {
+                    !id.is_empty() && id.len() <= 128 && id.split('/').all(|part| {
+                        !part.is_empty() && part != "." && part != ".."
+                            && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+                    })
+                }),
+            "readiness_slo.backup must name a distinct agent"
+        );
+    }
     POLICY
         .set(Policy {
             config: config.clone(),
@@ -105,17 +267,35 @@ pub fn configure(
         .map_err(|_| anyhow::anyhow!("readiness SLO policy already configured"))
 }
 
+fn evidence_path_valid(path: &Path) -> bool {
+    path.parent() == Some(Path::new(EVIDENCE_DIR))
+        && path
+            .components()
+            .all(|part| matches!(part, Component::RootDir | Component::Normal(_)))
+}
+
 fn read_json<T: serde::de::DeserializeOwned>(reader: impl std::io::Read) -> Result<T> {
+    read_json_bounded(reader, MAX_BYTES)
+}
+
+fn read_json_bounded<T: serde::de::DeserializeOwned>(
+    reader: impl std::io::Read,
+    limit: u64,
+) -> Result<T> {
     let mut bytes = Vec::new();
-    reader.take(MAX_BYTES + 1).read_to_end(&mut bytes)?;
+    reader.take(limit + 1).read_to_end(&mut bytes)?;
     ensure!(
-        bytes.len() as u64 <= MAX_BYTES,
+        bytes.len() as u64 <= limit,
         "readiness evidence is too large"
     );
     Ok(serde_json::from_slice(&bytes)?)
 }
 
 fn trusted_evidence(path: &Path) -> Result<Reading> {
+    read_json(trusted_file(path)?)
+}
+
+fn trusted_file(path: &Path) -> Result<File> {
     // Root-owned, non-writable ancestors prevent directory replacement by the daemon user.
     for parent in path.ancestors().skip(1) {
         let meta = fs::symlink_metadata(parent)?;
@@ -133,7 +313,7 @@ fn trusted_evidence(path: &Path) -> Result<Reading> {
         meta.is_file() && meta.uid() == 0 && meta.mode() & 0o022 == 0,
         "readiness evidence is not a root-controlled regular file"
     );
-    read_json(file)
+    Ok(file)
 }
 
 fn now_ms() -> u64 {
@@ -218,6 +398,21 @@ impl Policy {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    fn current_rows(
+        &self,
+        store: &Store,
+        weekly: Option<&Reading>,
+        retained: Option<&RetainedPairs>,
+        now: u64,
+    ) -> Vec<Value> {
+        let mut rows = vec![self.with_binding(store, self.row(weekly)).0];
+        if self.config.retained_pairs_file.is_some() {
+            let short = weekly.and_then(|weekly| retained?.latest_at(weekly, now).ok().flatten());
+            rows.push(short_row(&self.config.member, short));
+        }
+        rows
     }
 
     fn row(&self, reading: Option<&Reading>) -> Value {
@@ -330,15 +525,18 @@ impl Policy {
     }
 }
 
-/// Read the current objective without issuing claims or changing the evidence checkpoint.
-pub fn current(store: &Store) -> Option<Value> {
-    POLICY.get().map(|policy| {
-        let reading = policy
-            .checked_reading(now_ms())
-            .ok()
-            .map(|(reading, _)| reading);
-        policy.with_binding(store, policy.row(reading.as_ref())).0
-    })
+/// Read the current objectives without issuing claims or changing the evidence checkpoint.
+pub fn current(store: &Store) -> Vec<Value> {
+    let Some(policy) = POLICY.get() else {
+        return Vec::new();
+    };
+    let now = now_ms();
+    let reading = policy.checked_reading(now).ok().map(|(reading, _)| reading);
+    let retained = policy.config.retained_pairs_file.as_ref().and_then(|path| {
+        let file = trusted_file(path).ok()?;
+        read_json_bounded::<RetainedPairs>(file, RETAINED_MAX_BYTES).ok()
+    });
+    policy.current_rows(store, reading.as_ref(), retained.as_ref(), now)
 }
 
 /// Evaluate and route one source reading on the existing SLO history cadence.
@@ -346,9 +544,12 @@ pub fn sample(store: &Store) -> Option<Value> {
     static FAILING: AtomicBool = AtomicBool::new(false);
     static INVALID_BINDING: AtomicBool = AtomicBool::new(false);
     let policy = POLICY.get()?;
-    let row = match policy.reconcile(store, now_ms(), || {
-        trusted_evidence(&policy.config.evidence_file)
-    }) {
+    let result = if policy.config.shared_case {
+        retained_admission::run_sampler(policy, store, now_ms())
+    } else {
+        policy.reconcile(store, now_ms(), || trusted_evidence(&policy.config.evidence_file))
+    };
+    let row = match result {
         Ok(row) => {
             FAILING.store(false, Ordering::Relaxed);
             row
@@ -392,6 +593,176 @@ mod tests {
         }
     }
 
+    fn retained_pair(weekly: &Reading, failures: u64) -> Value {
+        json!({
+            "weekly": weekly,
+            "short": {
+                "version": 1,
+                "objective": weekly.objective,
+                "member": weekly.member,
+                "end_ms": weekly.end_ms,
+                "observed_at_ms": weekly.observed_at_ms,
+                "observations": (1..=4).rev().map(|offset| json!({
+                    "at_ms": weekly.end_ms - offset * MINUTE_MS + 1,
+                    "ready": offset > failures,
+                })).collect::<Vec<_>>()
+            }
+        })
+    }
+
+    #[test]
+    fn latest_at_preserves_main_reader_result_for_the_same_bundle() {
+        let anchor = reading(10, MINUTES, MINUTES);
+        let bundle: RetainedPairs = serde_json::from_value(json!({
+            "version": 1,
+            "pairs": (8..=11).map(|minute| {
+                retained_pair(&reading(minute, MINUTES, MINUTES), minute % 4)
+            }).collect::<Vec<_>>(),
+        })).unwrap();
+        for minute in [11, 12, 14] {
+            let now = reading(minute, MINUTES, MINUTES).end_ms;
+            // Main's reader replaces the latest summary for each eligible pair.
+            let mut main_latest = None;
+            for pair in &bundle.pairs {
+                let summary = pair.short.summary(&pair.weekly).unwrap();
+                if pair.weekly.end_ms <= anchor.end_ms
+                    && now - pair.weekly.end_ms <= MAX_AGE_MS
+                {
+                    main_latest = Some(summary);
+                }
+            }
+            let values = |summary: ShortSummary| (summary.end_ms, summary.known, summary.failed);
+            assert_eq!(
+                bundle.latest_at(&anchor, now).unwrap().map(values),
+                main_latest.map(values),
+            );
+        }
+    }
+
+    #[test]
+    fn usage_observes_last_fresh_pair_without_writing_the_weekly_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("graph.db"), "node").unwrap();
+        let weekly = reading(8, MINUTES, MINUTES);
+        let earlier = reading(7, MINUTES, MINUTES - 3);
+        let bundle: RetainedPairs = serde_json::from_value(json!({
+            "version": 1, "pairs": [retained_pair(&earlier, 3)]
+        }))
+        .unwrap();
+        let mut policy = Policy {
+            config: ReadinessSloConfig {
+                executor: "node".into(),
+                member: weekly.member.clone(),
+                reviewer: "agent/node.ops".into(),
+                evidence_file: dir.path().join("weekly.json"),
+                retained_pairs_file: None,
+                shared_case: false,
+                backup: None,
+            },
+            checkpoint: dir.path().join("checkpoint.json"),
+        };
+        policy.checkpoint(&weekly, false).unwrap();
+        let before = fs::read(&policy.checkpoint).unwrap();
+        let index = store.index().unwrap();
+        let legacy = policy.current_rows(&store, Some(&weekly), Some(&bundle), weekly.end_ms);
+        assert_eq!(legacy.len(), 1);
+        policy.config.retained_pairs_file = Some(dir.path().join("retained.json"));
+        let rows = policy.current_rows(&store, Some(&weekly), Some(&bundle), weekly.end_ms);
+        assert_eq!(rows[0], legacy[0]);
+        assert_eq!(rows[1]["status"], "missed");
+        assert!(
+            rows[1]["current"]
+                .as_str()
+                .unwrap()
+                .ends_with(&earlier.end_ms.to_string())
+        );
+        assert_eq!(
+            policy.current_rows(&store, Some(&weekly), None, weekly.end_ms)[1]["status"],
+            "no-data"
+        );
+        assert_eq!(
+            policy.current_rows(&store, None, Some(&bundle), weekly.end_ms)[1]["status"],
+            "no-data"
+        );
+        assert_eq!(fs::read(&policy.checkpoint).unwrap(), before);
+        assert_eq!(store.index().unwrap(), index);
+    }
+
+    #[test]
+    fn retained_usage_rejects_conflicts_ordering_and_oversize() {
+        let weekly = reading(8, MINUTES, MINUTES);
+        let earlier = reading(7, MINUTES, MINUTES - 3);
+        let old = reading(5, MINUTES, MINUTES - 3);
+        let parse = |pairs| -> RetainedPairs {
+            serde_json::from_value(json!({"version": 1, "pairs": pairs})).unwrap()
+        };
+        let boundary = parse(vec![retained_pair(&old, 3)]);
+        assert!(
+            boundary
+                .latest_at(&weekly, weekly.end_ms)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            boundary
+                .latest_at(&weekly, weekly.end_ms + 1)
+                .unwrap()
+                .is_none()
+        );
+        let reversed = parse(vec![retained_pair(&weekly, 2), retained_pair(&earlier, 3)]);
+        assert!(reversed.latest_at(&weekly, weekly.end_ms).is_err());
+        let conflicting = parse(vec![retained_pair(&reading(8, MINUTES, MINUTES - 1), 3)]);
+        assert!(conflicting.latest_at(&weekly, weekly.end_ms).is_err());
+        let mut wrong_short = retained_pair(&weekly, 3);
+        wrong_short["short"]["observed_at_ms"] = json!(weekly.observed_at_ms - 1);
+        assert!(
+            parse(vec![wrong_short])
+                .latest_at(&weekly, weekly.end_ms)
+                .is_err()
+        );
+        let oversized = vec![b' '; RETAINED_MAX_BYTES as usize + 1];
+        assert!(
+            read_json_bounded::<RetainedPairs>(oversized.as_slice(), RETAINED_MAX_BYTES).is_err()
+        );
+    }
+
+    #[test]
+    fn retained_usage_rejects_untrusted_parent_and_config_paths() {
+        let mut config: ReadinessSloConfig = serde_json::from_value(json!({
+            "executor": "node", "member": "node-sample-a", "reviewer": "agent/node.ops",
+            "evidence_file": "/run/fractal-slo-evidence/weekly.json",
+        }))
+        .unwrap();
+        assert!(config.retained_pairs_file.is_none());
+        assert!(!config.shared_case);
+        assert!(config.backup.is_none());
+        assert!(
+            serde_json::to_value(&config)
+                .unwrap()
+                .get("retained_pairs_file")
+                .is_none()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let unsafe_dir = dir.path().join("mutable");
+        fs::create_dir(&unsafe_dir).unwrap();
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(&unsafe_dir, fs::Permissions::from_mode(0o777)).unwrap();
+        let path = unsafe_dir.join("retained.json");
+        fs::write(&path, "{}").unwrap();
+        assert!(trusted_file(&path).is_err());
+        config.retained_pairs_file = Some(config.evidence_file.clone());
+        assert!(configure(Some(&config), dir.path(), "node").is_err());
+        assert!(evidence_path_valid(Path::new(
+            "/run/fractal-slo-evidence/retained.json"
+        )));
+        assert!(!evidence_path_valid(Path::new(
+            "/run/fractal-slo-evidence/sub/retained.json"
+        )));
+        assert!(!evidence_path_valid(Path::new(
+            "/run/fractal-slo-evidence/../retained.json"
+        )));
+    }
+
     #[test]
     fn counts_can_prove_a_verdict_even_when_minutes_are_unknown() {
         assert_eq!(reading(0, MINUTES - 10, MINUTES - 10).status(), "met");
@@ -409,9 +780,17 @@ mod tests {
                 .check("node-sample-a", evidence.end_ms + MAX_AGE_MS + 1)
                 .is_err()
         );
-        assert!(evidence.check("node-sample-a", evidence.end_ms - 1).is_err());
+        assert!(
+            evidence
+                .check("node-sample-a", evidence.end_ms - 1)
+                .is_err()
+        );
         assert!(evidence.check("node-sample-b", evidence.end_ms).is_err());
-        assert!(reading(1, 0, 1).check("node-sample-a", evidence.end_ms).is_err());
+        assert!(
+            reading(1, 0, 1)
+                .check("node-sample-a", evidence.end_ms)
+                .is_err()
+        );
         let payload = vec![b' '; MAX_BYTES as usize + 1];
         assert!(read_json::<Reading>(payload.as_slice()).is_err());
     }
@@ -426,6 +805,9 @@ mod tests {
                 member: "node-sample-a".into(),
                 reviewer: "agent/node.ops".into(),
                 evidence_file: dir.path().join("unused.json"),
+                retained_pairs_file: None,
+                shared_case: false,
+                backup: None,
             },
             checkpoint: dir.path().join("readiness-slo-cut.json"),
         };
@@ -516,6 +898,9 @@ mod tests {
                 member: "node-sample-a".into(),
                 reviewer: "agent/node.ops".into(),
                 evidence_file: dir.path().join("unused.json"),
+                retained_pairs_file: None,
+                shared_case: false,
+                backup: None,
             },
             checkpoint: dir.path().join("readiness-slo-cut.json"),
         };
@@ -675,3 +1060,6 @@ mod tests {
         );
     }
 }
+
+#[path = "readiness_retained_admission.rs"]
+mod retained_admission;

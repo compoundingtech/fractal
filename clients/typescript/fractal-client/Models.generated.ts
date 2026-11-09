@@ -1855,6 +1855,7 @@ export type ErrorCode = (
   | "legacy-action-receipt-untrusted"
   | "issuer-required"
   | "pairing-origin-required"
+  | "pairing-restart-required"
   | "suspend-authored-session-selection"
   | "stale-fence"
   | "cursor-gap"
@@ -2401,9 +2402,17 @@ export type MissionActionOffer = {
 export type MissionDeclaration = {
   legacy: boolean;
   mission: string;
+  provenance?: MissionDeclarationProvenance;
   published_at: number;
   revision: Revision;
   text: string;
+};
+
+export type MissionDeclarationProvenance = {
+  commit: string;
+  path: string;
+  renderer?: string;
+  repository: string;
 };
 
 export type MissionId = string;
@@ -2517,13 +2526,16 @@ export type MissionStep = {
   agentless?: boolean;
   assignee?: (ActorRef | null);
   attempt: number;
+  attempts?: Array<MissionStepAttempt>;
   blocked_reason?: string | null;
   blockers?: Array<Id>;
   claim_expires_at?: (Timestamp | null);
   claimant?: (ActorRef | null);
   completed_at?: number | null;
   constraints?: Array<string>;
+  eta?: MissionStepEta;
   goals?: Array<string>;
+  history_complete?: boolean;
   id: Id;
   keep_open?: boolean;
   last_progress?: string | null;
@@ -2538,8 +2550,25 @@ export type MissionStep = {
   started_at?: number | null;
   state: WorkState;
   title?: string | null;
+  transitions?: Array<MissionStepTransition>;
+  waits?: Array<MissionStepWait>;
   wake?: (MissionWake | null);
   wake_reason?: string | null;
+};
+
+export type MissionStepAttempt = {
+  claimant: (ActorRef | null);
+  ended_at: number | null;
+  n: number;
+  outcome: ("done" | "failed" | "cancelled" | "running" | string);
+  reason?: string;
+  started_at: number | null;
+};
+
+export type MissionStepEta = {
+  high_ms: number;
+  low_ms: number;
+  samples: number;
 };
 
 export type MissionStepPresentation = {
@@ -2561,6 +2590,43 @@ export type MissionStepPresentation = {
   | "failed"
   | "pending"
 ;
+};
+
+export type MissionStepTransition = {
+  at: number;
+  attempt: number;
+  event: (
+  "state"
+  | "carried"
+  | "retried"
+  | "claimed"
+  | "submitted"
+  | "failed"
+  | "released"
+  | "nudged"
+ | string);
+  idle_since?: number;
+  reason?: string;
+  status: (
+  "waiting-person"
+  | "waiting"
+  | "ready"
+  | "claimed"
+  | "blocked"
+  | "verifying"
+  | "completed"
+  | "failed"
+  | "cancelled"
+ | string);
+};
+
+export type MissionStepWait = {
+  attempt: number;
+  end: number | null;
+  kind: ("you" | "paused" | "retry" | "dependency" | "queue" | string);
+  reason?: string;
+  start: number;
+  until?: number;
 };
 
 export type MissionStuck = {
