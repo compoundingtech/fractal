@@ -42,7 +42,8 @@ it('marks only the current visible message rows through their newest message', a
     if (url.pathname.endsWith('/capabilities')) return Response.json({
       ...base, value: { ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
-        { id: 'threads-v1', version: 1, state: 'granted' },
+        { id: 'threads-v1', version: 2, state: 'granted' },
+        { id: 'thread-summary-feed', version: 1, state: 'granted' },
         { id: 'thread.read', version: 0, state: 'granted' },
       ] },
     })

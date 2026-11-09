@@ -13,6 +13,7 @@ import { useAgent, useDataSource, useNow } from '../data/react.tsx'
 import { ThreadPanel } from './ThreadPanel.tsx'
 import { waiting, type Feed } from '../data/source.ts'
 import { ThreadEditor } from './ThreadEditor.tsx'
+import { Button as ActionButton } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Controls.tsx'
 import type { ThreadObservation, ThreadSource } from './threadSource.ts'
 
 type OpenThread = { readonly onOpenThread?: ((id: string) => void) | undefined }
@@ -66,42 +67,44 @@ function ThreadListPage({ source, query, onOpenThread, exclude }: OpenThread & {
     {list.value.items.filter(thread => thread.id !== exclude).map(thread => <LiveThread key={thread.id} source={source} thread={thread} onOpenThread={onOpenThread} />)}
     {next === undefined ? null : showNext
       ? <ThreadListPage source={source} query={{ ...query, cursor: next }} onOpenThread={onOpenThread} exclude={exclude} />
-      : <Button onPress={() => setShowNext(true)}>Load more threads</Button>}
+      : <ActionButton onPress={() => setShowNext(true)}>Load more threads</ActionButton>}
   </>
 }
 
-export function LiveAskThreads({ alert, onOpenThread }: OpenThread & { readonly alert: Attention }) {
+export function LiveInboxThreads({ alert, onOpenThread }: OpenThread & { readonly alert: Attention }) {
   const source = useDataSource().threads
-  const agent = alert.requester_id
-  if (source === undefined || agent?.startsWith('agent/') !== true || alert.episode === undefined
-    || !alert.source_id.startsWith('step-run/') || (alert.attention_kind !== 'agent-request' && alert.attention_kind !== 'person-step')) return null
-  return <AskThreadsContent key={alert.id} source={source} agent={agent} ask={alert.source_id} episode={alert.episode}
-    title={alert.title} canStart={alert.state === 'open' && alert.update === undefined} onOpenThread={onOpenThread} />
+  if (source === undefined || alert.episode === undefined) return null
+  const agent = alert.conversation_id?.startsWith('agent/') === true ? alert.conversation_id : undefined
+  return <InboxThreadsContent key={JSON.stringify([alert.source_id, alert.episode])} source={source} agent={agent}
+    originSource={alert.source_id} episode={alert.episode} title={alert.title}
+    canStart={alert.state === 'open'} onOpenThread={onOpenThread} />
 }
 
-function AskThreadsContent({ source, agent, ask, episode, title, canStart, onOpenThread }: OpenThread & {
+function InboxThreadsContent({ source, agent, originSource, episode, title, canStart, onOpenThread }: OpenThread & {
   readonly source: ThreadSource
-  readonly agent: string
-  readonly ask: string
+  readonly agent: string | undefined
+  readonly originSource: string
   readonly episode: string
   readonly title: string
   readonly canStart: boolean
 }) {
-  const { read, actions, upgradeRequired } = useAtomValue(source.access)
+  const { read, actions, inboxOrigins, upgradeRequired } = useAtomValue(source.access)
   const [starting, setStarting] = React.useState(false)
   const [focused, setFocused] = React.useState<string>()
   const threadTitle = threadTitleFromAsk(title)
   const startInput = React.useCallback((input: HTMLTextAreaElement | null) => { input?.focus() }, [])
-  const draftKey = `ask:${ask}:${episode}`
-  if (upgradeRequired) return <ReadStatus state="Unavailable" detail={upgradeThreadEndpoint} />
+  const draftKey = `inbox:${JSON.stringify([originSource, episode])}`
+  if (upgradeRequired || (read && !inboxOrigins)) return <ReadStatus state="Unavailable" detail={upgradeThreadEndpoint} />
   if (!read) return null
   return <div {...stylex.props(styles.groupBody)}>
     {focused === undefined ? null : <ThreadById source={source} threadId={focused} embedded focusComposer onOpenThread={onOpenThread} />}
-    <ThreadListPage source={source} query={{ origin_ask: ask, origin_ask_episode: episode }} exclude={focused} onOpenThread={onOpenThread} />
-    {!actions.has('thread.start') || !canStart ? null : !starting ? <Button onPress={() => setStarting(true)}>Start thread</Button>
+    <ThreadListPage source={source} query={{ origin_source: originSource, origin_episode: episode }} exclude={focused} onOpenThread={onOpenThread} />
+    {!actions.has('thread.start') || !canStart ? null : agent === undefined
+      ? <p {...stylex.props(styles.note)}>No responsible agent is configured for this Inbox item.</p>
+      : !starting ? <ActionButton onPress={() => setStarting(true)}>Start thread</ActionButton>
       : <ThreadPanel thread={{ title: threadTitle, state: 'open' }} initiallyExpanded onHideDraft={() => setStarting(false)}>
         <ThreadEditor source={source} destination={draftKey} label={threadTitle} inputRef={startInput}
-          send={content => source.start(draftKey, { agent_id: agent, origin_ask: ask, origin_ask_episode: episode, title: threadTitle, content })}
+          send={content => source.start(draftKey, { agent_id: agent, origin: { source_id: originSource, episode }, title: threadTitle, content })}
           onSent={id => { setFocused(id); setStarting(false) }} />
       </ThreadPanel>}
   </div>
@@ -309,7 +312,7 @@ function ThreadTimeline({ source, threadId, cursor, agentId, agentName, onQuote 
   return <>
     {next === undefined ? null : showOlder
       ? <ThreadTimeline source={source} threadId={threadId} cursor={next} agentId={agentId} agentName={agentName} onQuote={onQuote} />
-      : <Button onPress={() => setShowOlder(true)}>Load earlier messages</Button>}
+      : <ActionButton onPress={() => setShowOlder(true)}>Load earlier messages</ActionButton>}
     {feed.freshness === 'stale' ? <p role="status" {...stylex.props(styles.note)}>Updates paused</p> : null}
     <ol {...stylex.props(styles.timeline)}>
       {feed.value.items.toReversed().map(event => {

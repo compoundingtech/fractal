@@ -13,7 +13,7 @@ import type { AlertAction, AlertActionResult } from '../conversation/alerts/aler
 import type { PromptAnswerResult } from '../conversation/alerts/prompt-answer-port.ts'
 import { useAttention, useAttentionDecode, useDataSource, useNow } from '../data/react.tsx'
 import { credentialExpiredMessage, decodedRoster, type Feed, type RosterDecode } from '../data/source.ts'
-import { LiveAskThreads, LiveRecentlyClosedThreads } from '../threads/LiveThreads.tsx'
+import { LiveInboxThreads, LiveRecentlyClosedThreads } from '../threads/LiveThreads.tsx'
 import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
 import { DecodeNotice } from './LiveRoster.tsx'
 
@@ -35,7 +35,7 @@ export const AlertsTab = ({ onOpen }: { readonly onOpen: (ref: string) => void }
       decode={useAttentionDecode()}
       now={useNow()}
       onOpen={onOpen}
-      renderThreads={alert => <LiveAskThreads alert={alert} onOpenThread={onOpen} />}
+      renderThreads={alert => <LiveInboxThreads alert={alert} onOpenThread={onOpen} />}
       footer={<LiveRecentlyClosedThreads onOpenThread={onOpen} />}
       onAct={actions === undefined ? undefined : (alert, action) => actions.act({ alert, action })}
       onAnswer={prompts === undefined ? undefined : (alert, _answer, sent) => {

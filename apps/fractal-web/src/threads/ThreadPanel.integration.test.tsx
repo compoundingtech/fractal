@@ -98,7 +98,7 @@ it.each(['close', 'rename'] as const)('keeps the original %s reachable after its
   const writes: Array<{ id: string; parameters: { target_id: string } }> = []
   const client = new FractalClient({ baseUrl: 'http://example.test', fetchImpl: async (input, init) => {
     if (String(input).endsWith('/capabilities')) return Response.json({ ...base, value: { ...base.value, capabilities: [
-      ...base.value.capabilities, ...['threads-v1', 'thread-summary-feed', 'thread.close', 'thread.reopen', 'thread.rename'].map(id => ({ id, version: 1, state: 'granted' })),
+      ...base.value.capabilities, ...['threads-v1', 'thread-summary-feed', 'thread.close', 'thread.reopen', 'thread.rename'].map(id => ({ id, version: id === 'threads-v1' ? 2 : 1, state: 'granted' })),
     ] } })
     const action = JSON.parse(String(init?.body)) as typeof writes[number]
     writes.push(action)

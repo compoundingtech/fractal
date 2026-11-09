@@ -28,7 +28,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario) {
   const now = fixtureProjections.now
   const attention = (name: string, subject: string, claim: string, unread?: true) => Native.decodeUnknownSync(Native.Attention)({
     id: `attention/${claim.split('/').at(-1)}`, kind: 'attention', revision: claim, episode: claim,
-    person_id: actor, source_id: subject, requester_id: agentRef, attention_kind: 'agent-request',
+    person_id: actor, source_id: subject, requester_id: agentRef, conversation_id: agentRef, attention_kind: 'agent-request',
     title: name, detail: 'Can we proceed with this change?', priority: 'high', state: 'open', alert: true,
     actions: ['work.done'], requested_at: new Date(now - 25 * 60_000).toISOString(), updated_at: new Date(now).toISOString(),
     ...(unread === undefined ? {} : { thread_unread: unread }),
@@ -73,12 +73,12 @@ function createThreadStory(readOnly: boolean, scenario: Scenario) {
     update(id, row => ({ ...row, message_count: previous.filter(event => event.kind === 'message').length + 1 }))
   }
   const threads: ThreadSource = {
-    access: Atom.make({ read: true, actor, actions: new Set<string>(readOnly
+    access: Atom.make({ read: true, inboxOrigins: true, actor, actions: new Set<string>(readOnly
       ? [] : ['thread.start', 'thread.reply', 'thread.rename', 'thread.close', 'thread.reopen', 'thread.read']) }),
     titles: Atom.make(get => new Map(get(summaries).map(row => [row.id, row.title]))),
     list: query => Atom.make(get => observed({ value: {
       items: get(summaries).filter(row => 'recently_closed' in query ? row.state === 'closed'
-        : 'origin_ask' in query ? get(origins)[row.id] === query.origin_ask : true),
+        : 'origin_source' in query ? get(origins)[row.id] === query.origin_source && query.origin_episode === episode : true),
       next_cursor: Option.none(),
     } })),
     detail: id => Atom.make(get => {
@@ -90,7 +90,7 @@ function createThreadStory(readOnly: boolean, scenario: Scenario) {
     start: async (_draft, input) => {
       const id = `thread/story-${++next}`
       registry.set(summaries, [...registry.get(summaries), summary(id, input.title, 'open', 0, false)])
-      registry.set(origins, { ...registry.get(origins), [id]: input.origin_ask })
+      registry.set(origins, { ...registry.get(origins), [id]: input.origin.source_id })
       append(id, input.content)
       return { _tag: 'Sent', threadId: id }
     },
