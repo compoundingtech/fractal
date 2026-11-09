@@ -270,22 +270,17 @@ export const NarrowValueColumns:Story={
       const description=descriptions[0];requireContract(description,'Missing description layout control');const direction=description.style.flexDirection
       try{description.style.flexDirection='row';await rejectsControl('Narrow mission/duration values did not stack at a readable width',()=>assertDescription(description))}finally{description.style.flexDirection=direction}
       assertDescription(description)
-      const rows=[...pane.querySelectorAll<HTMLElement>('[data-testid="taste-agent-row"]')];requireContract(rows.length===2,'Missing production subagent rows')
+      const rows=[...pane.querySelectorAll<HTMLElement>('section[aria-label$="Subagents"] [data-thing-fact]')];requireContract(rows.length===2,'Missing production subagent facts')
       for(const row of rows){
-        const button=row.querySelector<HTMLButtonElement>(':scope > button'),title=row.querySelector('[data-row-column="title-text"]')?.textContent?.trim(),location=row.querySelector('[data-row-field="host"]')?.textContent?.trim();requireContract(button&&title&&location,'Missing production row name fields')
-        // The row button is named by exactly its visible title (label-in-name); the painted location and every other fact live in its description.
-        const assertRowName=()=>requireContract(within(row).queryByRole('button',{name:title,description:description=>description.includes(location)})===button,'Subagent row name differs from its visible title or its description omits the location')
-        // Current work paints beside the button; the hidden description legitimately repeats facts, so only painted fields count.
-        const assertOneTitle=()=>requireContract(button.innerText.split(title).length===2&&!row.querySelector('[data-row-field="current-work"]')?.textContent?.includes(title),'Subagent current work repeats its painted title')
-        assertRowName();assertOneTitle()
-        // aria-labelledby overrides aria-label, so the control widens the real name source with the hidden description's facts.
-        const labelledBy=button.getAttribute('aria-labelledby');requireContract(labelledBy,'Subagent row button is not named by its painted title')
-        button.setAttribute('aria-labelledby',`${labelledBy} ${button.getAttribute('aria-describedby')}`)
-        try{await rejectsControl('Subagent row name differs from its visible title or its description omits the location',assertRowName)}finally{button.setAttribute('aria-labelledby',labelledBy)}
-        assertRowName()
-        const duplicate=button.ownerDocument.createElement('span');duplicate.textContent=title;button.append(duplicate)
-        try{await rejectsControl('Subagent current work repeats its painted title',assertOneTitle)}finally{duplicate.remove()}
-        assertOneTitle()
+        const title=row.querySelector('[data-thing-title]')?.textContent?.trim();requireContract(title,'Missing subagent title')
+        const assertFact=()=>requireContract(!row.hasAttribute('tabindex')&&!row.hasAttribute('role')&&!row.querySelector('button,a,[tabindex]'),'Subagent fact gained an interaction')
+        const assertOneTitle=()=>requireContract(row.innerText.split(title).length===2,'Subagent fact repeats its painted title')
+        assertFact();assertOneTitle()
+        row.setAttribute('tabindex','0')
+        try{await rejectsControl('Subagent fact gained an interaction',assertFact)}finally{row.removeAttribute('tabindex')}
+        const duplicate=row.ownerDocument.createElement('span');duplicate.textContent=title;row.append(duplicate)
+        try{await rejectsControl('Subagent fact repeats its painted title',assertOneTitle)}finally{duplicate.remove()}
+        assertFact();assertOneTitle()
       }
     }
   },

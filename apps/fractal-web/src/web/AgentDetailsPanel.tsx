@@ -263,7 +263,7 @@ const styles = stylex.create({
   tabList: { display: 'flex', alignItems: 'center', gap: s.xs2, minWidth: 0, flexShrink: 0 },
   tab: { display: 'inline-flex', alignItems: 'center', gap: s.xs, height: g.controlSm, paddingInline: s.sm, borderRadius: r.control, color: c.fgMuted, fontSize: t.metaSize, whiteSpace: 'nowrap', cursor: 'pointer', outline: 'none', ':hover': { color: c.fg }, ':is([data-selected])': { backgroundColor: c.rowActive, color: c.fg }, ':is([data-focus-visible])': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusInset } },
   tabTouch: { height: g.touchTarget, paddingInline: s.lg },
-  accessory: { marginInlineStart: 'auto', display: 'flex', alignItems: 'center', gap: s.xs2, flexShrink: 0, alignSelf: 'stretch', minWidth: 0 },
+  accessory: { marginInlineStart: 'auto', display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: s.xs2, flexGrow: 1, flexShrink: 1, flexBasis: 0, alignSelf: 'stretch', minWidth: 0, containerType: 'inline-size', containerName: 'pane-header' },
   close: { display: 'inline-flex', alignItems: 'center', justifyContent: 'center', width: g.controlSm, height: g.controlSm, flexShrink: 0, padding: 0, borderWidth: 0, borderRadius: r.sm, backgroundColor: 'transparent', color: c.fgMuted, cursor: 'pointer', ':hover': { backgroundColor: c.rowHover, color: c.fg }, ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: interaction.focusRing, outlineOffset: g.focusInset } },
   closeTouch: { width: g.touchTarget, height: g.touchTarget },
   panel: { display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0, outline: 'none', containerType: 'inline-size', containerName: 'pane-mount' },

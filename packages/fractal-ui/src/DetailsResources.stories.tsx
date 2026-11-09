@@ -328,8 +328,7 @@ export const Interactions: Story = { parameters: { scenario: { _tag: 'contract-f
   const painted = () => [terminal.querySelector('[data-thing-title]')?.textContent, ...[...terminal.querySelectorAll('[data-thing-meta-item],[data-thing-act]')].map(node => node.textContent)].filter((text): text is string => Boolean(text))
   const assertName = () => requireContract(within(pane).queryByRole('link', { name: name => name.startsWith('Terminal ') && painted().every(text => name.includes(text)) }) === terminal, 'Resource name differs from its painted text')
   assertName()
-  const label = terminal.getAttribute('aria-label'); requireContract(label, 'Resource row lacks its accessible name')
-  try { terminal.setAttribute('aria-label', 'Open'); await rejectsControl('Resource name differs from its painted text', assertName) } finally { terminal.setAttribute('aria-label', label) }
+  try { terminal.setAttribute('aria-label', 'Open'); await rejectsControl('Resource name differs from its painted text', assertName) } finally { terminal.removeAttribute('aria-label') }
   assertName()
   await userEvent.click(terminal); await waitFor(() => requireContract(events().at(-1)?.key === 'terminal:sample/1' && !events().at(-1)?.split, 'Details terminal callback loses exact session identity'))
   await userEvent.click(terminal); requireContract(events().length === 2 && writes() === before + 2, 'Repeated terminal request alters layout intent or fails to reattach')
@@ -400,7 +399,7 @@ export const ResourceGeometry: Story = { parameters: { scenario: { _tag: 'contra
   if (fitted) assertCraft(pane, item)
   if (fitted && item.state === 'busy') assertChevron(pane)
   if (item.name === 'busy/320') {
-    const row = [...pane.querySelectorAll<HTMLElement>('[data-thing-openable]')].find(row => [...row.querySelectorAll('[data-thing-meta-item]')].some(meta => meta.getBoundingClientRect().width > 0))
+    const row = [...pane.querySelectorAll<HTMLElement>('[data-thing-openable]')].find(row => [...row.querySelectorAll<HTMLElement>('[data-thing-meta-item]')].some(meta => meta.getBoundingClientRect().width > 0 && meta.getBoundingClientRect().top < meta.parentElement!.getBoundingClientRect().bottom - 0.5))
     requireContract(row, 'Row negative controls have no row with shown metadata')
     const title = row.querySelector<HTMLElement>('[data-thing-title]')!, maxWidth = title.style.maxWidth
     try { title.style.maxWidth = '8px'; await rejectsControl('Title truncates beside shown metadata', () => assertRows(pane)) } finally { title.style.maxWidth = maxWidth }

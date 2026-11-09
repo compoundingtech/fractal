@@ -103,7 +103,7 @@ describe('live header parity', () => {
     expect(host.querySelector('[data-testid="thread-header"]')?.contains(dialog)).toBe(false)
     const row = dialog?.querySelector('[data-thing-openable]')
     expect(row).not.toBeNull()
-    expect(row?.getAttribute('aria-label')).toContain('File')
+    expect(row?.querySelector('svg[aria-label="File"]')).not.toBeNull()
     expect(row?.textContent).not.toContain('filesystem.file')
     // A receipt timestamp is not a reported event time.
     expect(row?.querySelector('time')).toBeNull()

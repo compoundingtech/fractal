@@ -239,19 +239,19 @@ export const States: Story = {
 export const Sections: Story = {
   parameters: fixture('Invented GitHub, subagent and review sections at both panel widths, with a whole-feed reconnect line.'),
   render: () => <div {...stylex.props(styles.page)}>{widths.map(width => <Column key={width} width={width}>
-    <ThingSection title="Pull requests · issues · CI" items={githubSection} now={now} cap={5} />
-    <ThingSection title="Subagents" items={sectionItems([{ key: 'subagent', observed: live(faces.subagent), fact: true }, { key: 'subagent-done', observed: live({ ...faces.subagent, title: 'Map the registry callers', mark: { shape: 'ended', word: 'completed' }, at: { at: ago(30), verb: 'started' } } as ThingFace), fact: true }])} now={now} notice="Reconnecting; rows show when each was last seen." />
-    <ThingSection title="Reviews" items={[]} now={now} unknown="This session doesn’t report reviews." />
+    <ThingSection title={`Pull requests · issues · CI — ${width}px`} items={githubSection} now={now} cap={5} />
+    <ThingSection title={`Subagents — ${width}px`} items={sectionItems([{ key: 'subagent', observed: live(faces.subagent), fact: true }, { key: 'subagent-done', observed: live({ ...faces.subagent, title: 'Map the registry callers', mark: { shape: 'ended', word: 'completed' }, at: { at: ago(30), verb: 'started' } } as ThingFace), fact: true }])} now={now} notice="Reconnecting; rows show when each was last seen." />
+    <ThingSection title={`Reviews — ${width}px`} items={[]} now={now} unknown="This session doesn’t report reviews." />
     <ThingSection title="Declared bindings" items={[]} now={now} />
   </Column>)}</div>,
   play: async ({ canvasElement }) => {
     const column = canvasElement.querySelector<HTMLElement>('[data-width="360"]')!
-    const github = column.querySelector<HTMLElement>('[data-thing-section="Pull requests · issues · CI"]')!
+    const github = column.querySelector<HTMLElement>('[data-thing-section="Pull requests · issues · CI — 360px"]')!
     const titles = Array.from(github.querySelectorAll<HTMLElement>('[data-thing-title]')).map(title => title.textContent)
     await expect(titles).toEqual([faces.pullRequest.title, faces.ciFailed.title, faces.ciRun.title, faces.issue.title, 'Quiet the conversation header'])
     await userEvent.click(Array.from(github.querySelectorAll('button')).find(button => button.textContent === 'Show 1 more')!)
     await expect(github.querySelectorAll('[data-thing-row]')).toHaveLength(6)
-    await expect(column.querySelector('[data-thing-section="Reviews"] [data-thing-section-unknown]')).toHaveTextContent('doesn’t report reviews')
+    await expect(column.querySelector('[data-thing-section="Reviews — 360px"] [data-thing-section-unknown]')).toHaveTextContent('doesn’t report reviews')
     await expect(column.querySelector('[data-thing-section="Declared bindings"]')).toBeNull()
   },
 }

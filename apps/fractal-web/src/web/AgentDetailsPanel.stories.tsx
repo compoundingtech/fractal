@@ -75,7 +75,6 @@ export const scenarioExemptions: readonly string[] = [
   'Resources280Light:contract-fixture',
   'Resources360Dark:contract-fixture',
   'Resources360Light:contract-fixture',
-  'AllStates:contract-fixture',
 ]
 
 /** Whole rows open; no raw types, no Open button, no paperclip. */
@@ -126,9 +125,6 @@ export const Resources280Dark: Story = { args: { width: 280 }, play: assertSplit
 export const Resources280Light: Story = { args: { width: 280, scheme: 'light' }, play: assertSplit }
 export const Resources360Dark: Story = { args: { width: 360 }, play: assertSplit }
 export const Resources360Light: Story = { args: { width: 360, scheme: 'light' }, play: assertSplit }
-export const AllStates: Story = {
-  render: args => <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>{(['dark', 'light'] as const).flatMap(scheme => ([280, 360] as const).flatMap(width => (['details', 'resources'] as const).map(view => <Surface key={`${scheme}-${width}-${view}`} {...args} scheme={scheme} width={width} view={view} />)))}</div>,
-}
 
 const styles = stylex.create({
   root: { display: 'flex', flexDirection: 'column', height: '100vh', backgroundColor: c.canvas, color: c.fg, fontFamily: t.fontSans },

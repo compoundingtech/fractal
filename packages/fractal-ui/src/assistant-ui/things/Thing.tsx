@@ -51,10 +51,10 @@ function Title({ face }: { readonly face: Pick<ThingFace, 'title' | 'titleStyle'
 
 const actStyle = (paint: ActPaint) => paint === 'act' ? styles.actAmber : paint === 'failed' ? styles.actRed : null
 
-/** Openable spread for a row or chip: the host's handlers plus a link role, a focus stop and a name. */
+/** The visible content owns the name; the full face describes metadata clipped at narrow widths. */
 function interactive(openable: ThingOpenable | undefined, label: string) {
   if (openable === undefined) return {}
-  return { ...openable, role: 'link', tabIndex: 0, 'aria-label': label, 'data-thing-openable': true }
+  return { ...openable, role: 'link', tabIndex: 0, 'aria-description': label, 'data-thing-openable': true }
 }
 
 function withHover(element: React.ReactElement, card: ThingHoverCard | undefined, openable: ThingOpenable | undefined, placement: HoverCardPlacement, label: string) {
@@ -86,7 +86,7 @@ export function ThingRow({ observed, now, openable, hoverCard, hoverPlacement = 
     const note = unknownNote(observed)
     return <div data-thing-row={observed._tag} data-thing-fact={fact || undefined} aria-busy={observed._tag === 'Loading' || undefined} {...interactive(openable, `${observed.hint.kind} ${face.title}, ${note}`)} {...stylex.props(styles.row, !fact && styles.rowOpenable, touch && styles.rowTouch)}>
       <ThingMarkGlyph mark={{ shape: 'none', word: '' }} />
-      <span {...stylex.props(styles.icon)}><Icon name={observed.hint.icon} /></span>
+      <span {...stylex.props(styles.icon)}><Icon name={observed.hint.icon} label={fact ? undefined : observed.hint.kind} /></span>
       <span {...stylex.props(styles.rowMain)}>
         {observed._tag === 'Loading' && observed.hint.title === undefined ? <span data-thing-skeleton {...stylex.props(styles.skeleton)} /> : <Title face={face} />}
         <span data-thing-note {...stylex.props(styles.note)}>{note}</span>
@@ -99,7 +99,7 @@ export function ThingRow({ observed, now, openable, hoverCard, hoverPlacement = 
   const label = thingLabel(observed, now)
   const row = <div data-thing-row={observed.freshness} data-thing-fact={fact || undefined} data-thing-read-only={observed.readOnly === true || undefined} {...interactive(openable, label)} {...stylex.props(styles.row, !fact && styles.rowOpenable, touch && styles.rowTouch)}>
     <ThingMarkGlyph mark={face.mark} />
-    <span {...stylex.props(styles.icon)}><Icon name={face.icon} /></span>
+    <span {...stylex.props(styles.icon)}><Icon name={face.icon} label={fact ? undefined : face.kind} /></span>
     <span {...stylex.props(styles.rowMain)}>
       <Title face={face} />
       <RowMeta age={age} id={face.id} word={face.act === undefined ? face.mark.word : undefined} />
@@ -140,7 +140,7 @@ export function ThingInline({ observed, now, openable, hoverCard, text }: ThingI
   if (observed._tag !== 'Known') {
     const title = text ?? observed.hint.title ?? observed.hint.kind
     return <span data-thing-inline={observed._tag} {...interactive(openable, `${observed.hint.kind} ${title}, ${unknownNote(observed)}`)} {...stylex.props(styles.chip, styles.chipMuted, openable !== undefined && styles.chipOpenable)}>
-      <Icon name={observed.hint.icon} size={12} /><span {...stylex.props(styles.chipTitle)}>{title}</span>
+      <Icon name={observed.hint.icon} size={12} label={openable === undefined ? undefined : observed.hint.kind} /><span {...stylex.props(styles.chipTitle)}>{title}</span>
     </span>
   }
   const face = observed.value
@@ -149,7 +149,7 @@ export function ThingInline({ observed, now, openable, hoverCard, text }: ThingI
     ? <span data-thing-dot={paint} aria-hidden="true" {...stylex.props(styles.chipDot, paint === 'act' ? styles.dotAmber : styles.dotRed)} />
     : <ThingMarkGlyph mark={face.mark} />
   const chip = <span data-thing-inline={text === undefined ? 'bare' : 'written'} {...interactive(openable, text === undefined ? thingLabel(observed, now) : `${text}, ${thingLabel(observed, now)}`)} {...stylex.props(styles.chip, openable !== undefined && styles.chipOpenable)}>
-    <Icon name={face.icon} size={12} />
+    <Icon name={face.icon} size={12} label={openable === undefined ? undefined : face.kind} />
     {text !== undefined
       ? <>{state}<span {...stylex.props(styles.chipTitle)}>{text}</span></>
       : <>
@@ -256,7 +256,7 @@ const styles = stylex.create({
   // Title first: it shrinks last (meta absorbs the squeeze) and ellipsises only once the meta is gone.
   title: { flexGrow: 0, flexShrink: 1, flexBasis: 'auto', minWidth: 0, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis', color: ink.fg },
   pathTitle: { display: 'flex' },
-  pathHead: { minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgMuted },
+  pathHead: { minWidth: 0, flexShrink: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: ink.fgSoft },
   pathTail: { flexShrink: 0, maxWidth: '100%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   row: { display: 'flex', alignItems: 'center', gap: s.md, minWidth: 0, minHeight: g.controlMd, paddingInline: s.sm, borderRadius: r.sm, color: ink.fgSoft, fontFamily: t.fontSans, fontSize: t.uiSize, lineHeight: t.uiLeading },
   rowOpenable: {
