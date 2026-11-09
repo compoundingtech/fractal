@@ -43,7 +43,10 @@ async fn start(state: &AppState, session: &ClientSession, key: &str) -> Value {
     })).unwrap())).await.unwrap().0
 }
 fn begun(state: &AppState, started: &Value) -> ClaimRecord {
-    state.store.claims_for_subject_kind_at(&format!("custom/client/pairing-{}",started["requestId"].as_str().unwrap()), "custom.client.pairing-begun", None, true, 1).unwrap().claims.remove(0)
+    state.store.newest_admitted_client_operation(
+        &format!("custom/client/pairing-{}", started["requestId"].as_str().unwrap()),
+        "custom.client.pairing-begun",
+    ).unwrap().expect("the real browser begin must retain its admitted operation")
 }
 fn answer(state: &AppState, session: &ClientSession, started: &Value, choice: &str) -> Result<(), ApiError> {
     let request = begun(state, started);
