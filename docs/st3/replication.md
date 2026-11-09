@@ -396,7 +396,7 @@ recorded. A seat it left out, such as one whose declaration hasn't reached it ye
 host retries it a minute later without waiting for a commit, then less often while it stays owed,
 doubling up to every 15 minutes. An agent card's freshness and a
 mail hold read the latest of the replicated report, the local log, and that time. The card's
-90-second rule ages it, so a host that stops pushing reads stale.
+shared `HARNESS_OBSERVATION_FRESHNESS` window ages it, so a host that stops pushing reads stale.
 
 A member that doesn't advertise the feature is never pushed to, and it keeps reading replicated
 re-stamps. A worker that advertises it but answers the unsigned 404/405 of a build without the
