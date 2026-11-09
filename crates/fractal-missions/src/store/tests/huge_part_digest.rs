@@ -189,7 +189,7 @@ pub(super) fn print_whole_store_digest(connection: &Connection, phase: &str) -> 
                 if !excluded.contains(&index) { value(&mut hash, row.get_ref(index).unwrap()); }
             }
             count += 1;
-            if count % 4096 == 0 && progress.elapsed() >= std::time::Duration::from_secs(30) {
+            if count.is_multiple_of(4096) && progress.elapsed() >= std::time::Duration::from_secs(30) {
                 println!("real_part_whole_digest_progress phase={phase} table={table:?} rows={count} elapsed_ms={}",
                     started.elapsed().as_millis());
                 progress = std::time::Instant::now();

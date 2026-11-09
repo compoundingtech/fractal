@@ -161,7 +161,7 @@ fn measure(children: usize, steps_per_run: usize, extra_generations: usize, hist
     // step's actual final fixture state (including the single-claim measurement above)
     // so every requested backlog entry is a real state change, even across full rounds.
     let mut backlog_steps: Vec<_> = (0..steps_per_run).flat_map(|step| {
-        runs.iter().map(move |run| (&run.steps[step].subject, history % 2 == 0))
+        runs.iter().map(move |run| (&run.steps[step].subject, history.is_multiple_of(2)))
     }).collect();
     backlog_steps[0].1 = state == "ready";
     for index in 0..backlog {
