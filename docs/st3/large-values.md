@@ -603,3 +603,32 @@ commit. Preserve these scenarios when the representation changes.
 provider/account/reference/window, so an excluded writer cannot delete another
 writer's evidence. Existing inline keys remain; the owner must preserve this
 per-writer reclamation boundary in the eventual bounded representation.
+
+## Causal thread metadata snapshot inventory review
+
+`fractal_store::store::thread_metadata_snapshot` owns `lv-h2488f1c93c2b`
+in the [metadata snapshot reader](../../crates/fractal-store/src/store/thread_metadata_snapshot.rs).
+It replaces the removed timestamp-tip read sites `lv-h7f574845282c` and
+`lv-h9d96c131cb28` in `fractal_store::store::thread_metadata`. The new read binds
+one exact thread subject and selects retained creation, title and lifecycle claims,
+including IDs, bodies, predecessor arrays, operation state and canonical eligibility.
+It also retains repaired and noncanonical intermediates because their immutable
+predecessor edges can connect effective causal successors to older field claims.
+Conversation ownership is checked before exposing the summary or admitting an edit;
+the snapshot, authority check, revision comparison and appended frontier parents
+remain on the caller's admitted connection and transaction cut.
+
+The complete causal history is required to distinguish concurrent edits from
+causal successors and to fail closed on missing ancestry. Truncating this query
+with a row limit would change those semantics. Exact-subject and kind filtering
+do not bound historical row count, body/predecessor bytes, canonical ordering work
+or the in-memory graph and returned identifiers. The separate foreign-parent
+probe reads only an existence scalar; it does not copy that parent's claim body.
+This exception establishes neither a size nor an execution-cost bound.
+
+The module maintainer retains `trace-statement-and-value-representation`: trace
+these retained values and graph costs into a bounded/reference representation or
+an incremental causal projection. Preserve complete frontier ancestry, repaired
+intermediates, canonical concurrent ties, effective field selection, missing-parent
+refusal and snapshot CAS under replication, restart and reclamation. This review
+changes no schema declarations, logical limits, claim formats or authority rules.

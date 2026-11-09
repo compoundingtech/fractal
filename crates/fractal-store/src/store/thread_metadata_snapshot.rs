@@ -23,7 +23,9 @@ impl MetadataSnapshot {
              WHERE claims.subject=?1 AND claims.kind IN ('thread.created','thread.title-set','thread.state-set')
              ORDER BY CANONICAL_DESC(claims)"
         ));
-        let mut statement = connection.prepare_cached(&sql).map_err(internal)?;
+        let mut statement = connection.prepare_cached(
+            /* sqlite-large-value: allow-for-now lv-h2488f1c93c2b owner=fractal_store::store::thread_metadata_snapshot TODO=trace-statement-and-value-representation */ &sql
+        ).map_err(internal)?;
         let claims = statement.query_map([subject], |row| {
             let state: Option<String> = row.get(10)?;
             Ok(MetadataClaim {
