@@ -146,7 +146,7 @@ public actor FractalClient {
         let context: [String: JSONValue]
         switch scope {
         case .agent(let id): context = ["agent_id": .string(id)]
-        case .ask(let id, let episode): context = ["origin_ask": .string(id), "origin_ask_episode": .string(episode)]
+        case .inbox(let source, let episode): context = ["origin_source": .string(source), "origin_episode": .string(episode)]
         case .mission(let id): context = ["mission_id": .string(id)]
         case .recentlyClosed: context = ["recently_closed": .bool(true)]
         }

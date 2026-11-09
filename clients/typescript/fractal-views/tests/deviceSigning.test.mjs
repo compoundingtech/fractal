@@ -86,11 +86,11 @@ assert.throws(() => signedMessageFields({ from: 'person/avery', in_reply_to: nul
 // These subjects follow the daemon's length-prefixed thread message key. Start and reply
 // deliberately use separate signing domains, even for the same thread and action key.
 const baseThreadFields = { content: 'Check the test.', from: 'person/operator', thread_id: 'thread/fixture', to: 'agent/example' };
-const startFields = { ...baseThreadFields, title: 'Worker test', thread_origin_ask: 'step-run/one', thread_origin_episode: 'episode/one' };
+const startFields = { ...baseThreadFields, title: 'Worker test', thread_origin_source: 'step-run/one', thread_origin_episode: 'episode/one' };
 const replyFields = { ...baseThreadFields, thread_quote_id: 'message/original' };
 const threadHash = async bytes => new Uint8Array(createHash('sha256').update(bytes).digest());
 for (const [fields, expectedSubject, expectedNames] of [
-  [startFields, 'message/c07e68f7def32fe2', ['content', 'from', 'thread_id', 'thread_origin_ask', 'thread_origin_episode', 'thread_reader_version', 'title', 'to']],
+  [startFields, 'message/c07e68f7def32fe2', ['content', 'from', 'thread_id', 'thread_origin_episode', 'thread_origin_source', 'thread_reader_version', 'title', 'to']],
   [replyFields, 'message/366e001f45c5c8cd', ['content', 'from', 'thread_id', 'thread_quote_id', 'thread_reader_version', 'to']],
   [baseThreadFields, 'message/366e001f45c5c8cd', ['content', 'from', 'thread_id', 'thread_reader_version', 'to']],
 ]) {

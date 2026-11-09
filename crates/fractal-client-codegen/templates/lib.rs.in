@@ -580,7 +580,7 @@ impl CollectionStream {
         use serde_json::json;
         let context = match scope {
             ThreadListScope::Agent(id) => json!({"agent_id":id}),
-            ThreadListScope::Ask { id, episode } => json!({"origin_ask":id, "origin_ask_episode":episode}),
+            ThreadListScope::Inbox { source, episode } => json!({"origin_source":source, "origin_episode":episode}),
             ThreadListScope::Mission(id) => json!({"mission_id":id}),
             ThreadListScope::RecentlyClosed => json!({"recently_closed":true}),
         };

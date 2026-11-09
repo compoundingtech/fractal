@@ -256,10 +256,10 @@ impl Device {
             &parameters.agent_id,
             &parameters.content,
             [
-                ("thread_origin_ask", parameters.origin_ask.as_str()),
+                ("thread_origin_source", parameters.origin.source_id.as_str()),
                 (
                     "thread_origin_episode",
-                    parameters.origin_ask_episode.as_str(),
+                    parameters.origin.episode.as_str(),
                 ),
                 ("title", parameters.title.as_str()),
             ],

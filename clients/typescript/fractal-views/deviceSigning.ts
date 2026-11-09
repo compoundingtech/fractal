@@ -99,8 +99,8 @@ export type ThreadMessageFields = {
   thread_id: string;
   to: string;
 } & (
-  | { title: string; thread_origin_ask: string; thread_origin_episode: string; thread_quote_id?: never }
-  | { title?: never; thread_origin_ask?: never; thread_origin_episode?: never; thread_quote_id?: string }
+  | { title: string; thread_origin_source: string; thread_origin_episode: string; thread_quote_id?: never }
+  | { title?: never; thread_origin_source?: never; thread_origin_episode?: never; thread_quote_id?: string }
 );
 
 export async function threadMessageSubject(
@@ -109,7 +109,7 @@ export async function threadMessageSubject(
   sha256: (bytes: Uint8Array) => Promise<Uint8Array>,
 ): Promise<string> {
   const utf8 = new TextEncoder();
-  const action = fields.thread_origin_ask === undefined ? 'reply' : 'start';
+  const action = fields.thread_origin_source === undefined ? 'reply' : 'start';
   const parts = ['fractal.thread-message.v1', fields.from, fields.thread_id, action, key].map(part => utf8.encode(part));
   const input = new Uint8Array(parts.reduce((size, part) => size + 8 + part.length, 0));
   const prefix = new DataView(input.buffer);

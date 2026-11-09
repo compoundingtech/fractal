@@ -1286,17 +1286,23 @@ public struct ThreadCollectionStreamError: Decodable, Error, Sendable {
     public let retryable: Bool?
 }
 public enum ThreadListScope: Sendable {
-    case agent(String), ask(id: String, episode: String), mission(String), recentlyClosed
+    case agent(String), inbox(source: String, episode: String), mission(String), recentlyClosed
+}
+public struct ThreadStartOrigin: Codable, Sendable {
+    public let sourceID, episode: String
+    public init(sourceID: String, episode: String) { self.sourceID = sourceID; self.episode = episode }
+    enum CodingKeys: String, CodingKey { case sourceID = "source_id", episode }
 }
 public struct ThreadStartParameters: Codable, Sendable {
-    public let targetID, agentID, originAsk, originAskEpisode, title, content: String
+    public let targetID, agentID, title, content: String
+    public let origin: ThreadStartOrigin
     public let signature: DeviceSignature?
-    public init(targetID: String, agentID: String, originAsk: String, originAskEpisode: String, title: String, content: String, signature: DeviceSignature? = nil) {
-        self.targetID = targetID; self.agentID = agentID; self.originAsk = originAsk; self.originAskEpisode = originAskEpisode
+    public init(targetID: String, agentID: String, origin: ThreadStartOrigin, title: String, content: String, signature: DeviceSignature? = nil) {
+        self.targetID = targetID; self.agentID = agentID; self.origin = origin
         self.title = title; self.content = content; self.signature = signature
     }
     enum CodingKeys: String, CodingKey {
-        case targetID = "target_id", agentID = "agent_id", originAsk = "origin_ask", originAskEpisode = "origin_ask_episode", title, content, signature
+        case targetID = "target_id", agentID = "agent_id", origin, title, content, signature
     }
 }
 public struct ThreadReplyParameters: Codable, Sendable {

@@ -249,7 +249,7 @@ fn rust_operation_methods(
     pub async fn thread_list_in(&self, scope: ThreadListScope<'_>, cursor: Option<&str>, limit: Option<usize>) -> Result<Envelope<ThreadSummaryPage>, ClientError> {{
         let selection = match scope {{
             ThreadListScope::Agent(id) => format!("agent_id={{}}", percent_encode(id)),
-            ThreadListScope::Ask {{ id, episode }} => format!("origin_ask={{}}&origin_ask_episode={{}}", percent_encode(id), percent_encode(episode)),
+            ThreadListScope::Inbox {{ source, episode }} => format!("origin_source={{}}&origin_episode={{}}", percent_encode(source), percent_encode(episode)),
             ThreadListScope::Mission(id) => format!("mission_id={{}}", percent_encode(id)),
             ThreadListScope::RecentlyClosed => "recently_closed=true".into(),
         }};
@@ -495,7 +495,7 @@ fn swift_operation_methods(
         var query: [URLQueryItem]
         switch scope {{
         case .agent(let id): query = [.init(name: "agent_id", value: id)]
-        case .ask(let id, let episode): query = [.init(name: "origin_ask", value: id), .init(name: "origin_ask_episode", value: episode)]
+        case .inbox(let source, let episode): query = [.init(name: "origin_source", value: source), .init(name: "origin_episode", value: episode)]
         case .mission(let id): query = [.init(name: "mission_id", value: id)]
         case .recentlyClosed: query = [.init(name: "recently_closed", value: "true")]
         }}
