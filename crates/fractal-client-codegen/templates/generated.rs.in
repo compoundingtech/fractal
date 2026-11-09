@@ -620,7 +620,7 @@ pub struct AttentionPresentation {
     /// The card; `None` for a row that is no card.
     #[serde(default)]
     pub kind: Option<String>,
-    /// Who Chat about this reaches; `None` means the chief of staff.
+    /// The daemon-assigned responsible agent; `None` means discussion is unassigned.
     #[serde(default)]
     pub agent: Option<AttentionActor>,
     #[serde(default)]

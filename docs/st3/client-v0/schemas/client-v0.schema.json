@@ -1029,7 +1029,7 @@
             "mission_run_id": { "$ref": "#/$defs/Id" },
             "step_run_id": { "$ref": "#/$defs/Id" },
             "blocked": { "$ref": "#/$defs/AttentionBlocked", "description": "The mission step waiting on this ask, on an ask a mission step made; absent on a standalone ask." },
-            "presentation": { "$ref": "#/$defs/AttentionPresentation", "description": "st's presentation of this row: its Now group and card, who Chat about this reaches, who raised it, and the step it holds. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Attention row). Absent on older daemons." },
+            "presentation": { "$ref": "#/$defs/AttentionPresentation", "description": "Fractal's presentation of this row: its Now group and card, the responsible thread agent, who raised it, and the step it holds. Clients use the daemon's assignment (docs/clients/ui-contract.md, Attention row)." },
             "title": { "type": "string" },
             "detail": { "type": "string" },
             "priority": { "enum": ["critical", "high", "normal", "low"] },
@@ -2074,7 +2074,7 @@
           "fault",
           null
         ], "description": "The card; null for a row that is no card (an unread message stays in its conversation)." },
-        "agent": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "Who Chat about this reaches: the conversation, else the step's claimant, else an agent working in the mission, else the agent that asked. null means the chief of staff." },
+        "agent": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "The daemon-assigned responsible agent for a thread, including the configured Inbox fallback when needed. null means discussion is unassigned; clients must not infer another recipient." },
         "raised_by": { "oneOf": [{ "$ref": "#/$defs/AttentionActor" }, { "type": "null" }], "description": "Who raised it: the requester, else the agent behind it, with st's own actors labeled st; else its mission." },
         "waiting": { "oneOf": [{ "$ref": "#/$defs/AttentionWaiting" }, { "type": "null" }], "description": "The step it holds." },
         "revision": { "$ref": "#/$defs/AttentionRevision", "description": "On a revision card: what the candidate revision changes. Absent elsewhere, and when st no longer has the proposal or either revision." },

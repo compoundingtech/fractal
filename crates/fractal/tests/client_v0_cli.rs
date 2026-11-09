@@ -2173,11 +2173,12 @@ async fn cli_person_ask_is_completed_by_its_assigned_person() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn attention_discuss_sends_the_message_tui_chat_about_this_sends() {
+async fn attention_discuss_starts_a_durable_inbox_thread_and_retries_exactly() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let state = test_state(root.path());
     let store = state.store.clone();
+    store.configure_thread_write_rollout([]);
     let intent = fractal_daemon::graph::parse_intent(
         "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
         store.origin(),
@@ -2219,7 +2220,8 @@ async fn attention_discuss_sends_the_message_tui_chat_about_this_sends() {
         .await,
     );
     let listed = value(&run_cli(&socket, &["attention", "ls", "--as", "person/avery"]).await);
-    let attention_id = listed["value"]["items"][0]["id"].as_str().unwrap();
+    let item = &listed["value"]["items"][0];
+    let attention_id = item["id"].as_str().unwrap();
     let sent = run_cli(
         &socket,
         &[
@@ -2230,26 +2232,43 @@ async fn attention_discuss_sends_the_message_tui_chat_about_this_sends() {
             "person/avery",
             "--body",
             "Why does it need a date?",
+            "--idempotency-key",
+            "cli-discuss-thread",
         ],
     )
     .await;
     assert!(sent.status.success(), "{}", failure(&sent));
-    let inbox = value(&run_cli(&socket, &["conversations", "ls", &actor]).await);
-    let message = inbox
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|message| message["from"] == "person/avery")
-        .unwrap_or_else(|| panic!("no message reached the asker: {inbox}"));
-    assert_eq!(message["title"], "About: Choose release date");
-    let id = message["subject"].as_str().unwrap();
-    let read = value(&run_cli(&socket, &["conversations", "read", id, "--as", &actor]).await);
-    let body = read["content"].as_str().unwrap_or_default();
-    assert!(body.starts_with("Why does it need a date?"), "{read}");
-    assert!(
-        body.contains(&format!("This is about Choose release date ({attention_id}")),
-        "{body}"
-    );
+    let receipt = value(&sent);
+    let thread = receipt["affected_ids"][0].as_str().unwrap();
+    let message = receipt["affected_ids"][1].as_str().unwrap();
+    let summary = fractal_daemon::store::thread_metadata::summary(&store, "person/avery", thread).unwrap();
+    assert_eq!(summary.title, "Choose release date");
+    assert_eq!(summary.agent_id, actor);
+    assert_eq!(summary.message_count, 1);
+    let creation = store.claims_for(thread, Some("thread.created")).unwrap().remove(0);
+    assert_eq!(creation.body["fields"]["origin_source"], item["source_id"]);
+    assert_eq!(creation.body["fields"]["origin_episode"], item["episode"]);
+    let sent_claim = store.claims_for(message, Some("message.sent")).unwrap().remove(0);
+    assert_eq!(sent_claim.body["fields"]["thread_id"], thread);
+    assert_eq!(sent_claim.body["fields"]["content"], "Why does it need a date?");
+    let retry = value(&run_cli(&socket, &[
+        "alerts", "discuss", attention_id, "--as", "person/avery", "--body",
+        "Why does it need a date?", "--idempotency-key", "cli-discuss-thread",
+    ]).await);
+    assert_eq!(retry["affected_ids"], receipt["affected_ids"]);
+    assert_eq!(retry["operation_id"], receipt["operation_id"]);
+    assert_eq!(store.claims_for(thread, Some("thread.created")).unwrap().len(), 1);
+    assert_eq!(fractal_daemon::store::thread_metadata::summary(&store, "person/avery", thread).unwrap().message_count, 1);
+    let mismatch = run_cli(&socket, &[
+        "alerts", "discuss", attention_id, "--as", "person/avery", "--body",
+        "A changed request", "--idempotency-key", "cli-discuss-thread",
+    ]).await;
+    assert!(!mismatch.status.success(), "same key must not accept changed input");
+    let overridden = run_cli(&socket, &[
+        "alerts", "discuss", attention_id, "--as", "person/avery", "--body", "hello",
+        "--to", "agent/other",
+    ]).await;
+    assert!(!overridden.status.success(), "Inbox responsibility cannot be overridden");
     let nobody = run_cli(
         &socket,
         &[
@@ -2265,6 +2284,54 @@ async fn attention_discuss_sends_the_message_tui_chat_about_this_sends() {
     .await;
     assert!(!nobody.status.success());
     assert!(String::from_utf8_lossy(&nobody.stderr).contains("not currently actionable"));
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn attention_discuss_requires_the_configured_fallback_for_a_person_owned_source() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("st3.sock");
+    let state = test_state(root.path());
+    let store = state.store.clone();
+    store.configure_thread_write_rollout([]);
+    let intent = fractal_daemon::graph::parse_intent(
+        r#"version 2
+agent "discussion" { workspace "/tmp"; command "true" }
+mission "owner-decision" state="ready" {
+  goal "A person-owned source";
+  step "review" { assigned-to "person/avery"; goal "Choose a path"; }
+}
+"#, store.origin(),
+    ).unwrap();
+    store.apply_internal(&intent, "declare-fallback-source").unwrap();
+    let agent = format!("agent/{}.discussion", store.origin());
+    let run = store.create_mission_run(&MissionRunRequest {
+        mission: "owner-decision".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/avery".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "person-owned-source".into(),
+    }).unwrap();
+    let source = run.steps.into_iter().find(|step| step.step == "review").unwrap();
+    let server_socket = socket.clone();
+    let server = tokio::spawn(async move {
+        fractal_daemon::api::serve_unix(&server_socket, fractal_daemon::api::router(state)).await
+    });
+    for _ in 0..100 {
+        if socket.exists() { break; }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    let args = ["alerts", "discuss", source.subject.as_str(), "--as", "person/avery",
+        "--body", "Explain the choices", "--idempotency-key", "person-owned-discussion"];
+    let refused = run_cli(&socket, &args).await;
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("inbox_fallback_agent"), "{}", failure(&refused));
+    store.configure_inbox_fallback_agent(Some(&agent)).unwrap();
+    let receipt = value(&run_cli(&socket, &args).await);
+    let thread = receipt["affected_ids"][0].as_str().unwrap();
+    let summary = fractal_daemon::store::thread_metadata::summary(&store, "person/avery", thread).unwrap();
+    assert_eq!(summary.agent_id, agent);
+    assert_eq!(summary.message_count, 1);
+    let creation = store.claims_for(thread, Some("thread.created")).unwrap().remove(0);
+    assert_eq!(creation.body["fields"]["origin_source"], source.subject);
     server.abort();
 }
 

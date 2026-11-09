@@ -40,6 +40,11 @@ and show its full history without reopening it. An explicit predecessor and reas
 a future decision-history view. Existing mission step gates own dependency trees and
 conditional activation.
 
+The native CLI convenience `fractal alerts discuss ITEM --body TEXT --as PERSON`
+starts the same durable thread through `thread.start`. It uses the exact current source and
+episode and the daemon-assigned responsible agent. It offers no recipient override. Use
+`--idempotency-key KEY` to recover an uncertain start with the same input.
+
 A bound agent can create an ask with `fractal work ask`, then run
 `fractal work link-thread ASK --thread THREAD --episode CLAIM --as "$ST_AGENT"`.
 The `work.person-asked` claim ID is available in `fractal --json trace show ASK`. Repeating

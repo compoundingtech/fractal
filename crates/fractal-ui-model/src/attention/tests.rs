@@ -106,47 +106,34 @@ fn each_kind_has_its_group_and_card() {
 }
 
 #[test]
-fn chat_reaches_the_conversation_then_the_claimant_then_the_mission_then_the_requester() {
+fn thread_responsibility_uses_only_the_daemon_assignment() {
     let known = Known {
         labels: BTreeMap::from([("agent/example/auditor", "Auditor")]),
         claimants: BTreeMap::from([("step-run/example/audit/1/review", "agent/example/auditor")]),
         working: BTreeMap::from([("mission/example/audit", "agent/example/builder")]),
         ..Known::default()
     };
-    let agent = |fields: Value| present(&row(fields), &known).agent;
-    let gate = json!({"attention_kind": "human-gate", "mission_id": "mission/example/audit",
-        "step_run_id": "step-run/example/audit/1/review", "requester_id": "agent/example/planner"});
-    let mut named = gate.clone();
-    named["conversation_id"] = json!("agent/example/reviewer");
-    assert_eq!(
-        agent(named),
-        Some(Who {
-            id: "agent/example/reviewer".into(),
-            label: "example/reviewer".into()
-        }),
-        "an agent st does not know reads as its id"
-    );
-    assert_eq!(
-        agent(gate.clone()),
-        Some(Who {
-            id: "agent/example/auditor".into(),
-            label: "Auditor".into()
-        })
-    );
-    let mut unclaimed = gate.clone();
-    unclaimed["step_run_id"] = json!("step-run/example/audit/1/other");
-    assert_eq!(
-        agent(unclaimed.clone()).unwrap().id,
-        "agent/example/builder"
-    );
-    unclaimed["mission_id"] = json!("mission/example/elsewhere");
-    assert_eq!(
-        agent(unclaimed.clone()).unwrap().id,
-        "agent/example/planner"
-    );
-    // A person who asked is nobody to chat with: the chief of staff answers.
-    unclaimed["requester_id"] = json!("person/blair");
-    assert_eq!(agent(unclaimed), None);
+    for kind in ["human-gate", "person-step", "fault", "harness-login", "harness-prompt"] {
+        let mut facts = json!({"attention_kind": kind, "mission_id": "mission/example/audit",
+            "step_run_id": "step-run/example/audit/1/review", "requester_id": "agent/example/planner"});
+        assert_eq!(present(&row(facts.clone()), &known).agent, None,
+            "{kind}: source context cannot replace missing discussion responsibility");
+        let mut source_only = facts.clone();
+        source_only.as_object_mut().unwrap().remove("requester_id");
+        let presented = present(&row(source_only), &known);
+        assert_eq!(presented.agent, None);
+        assert_eq!(presented.raised_by, Some(Who {
+            id: "agent/example/auditor".into(), label: "Auditor".into(),
+        }), "source attribution remains independent of discussion responsibility");
+        facts["conversation_id"] = json!("agent/example/auditor");
+        assert_eq!(present(&row(facts.clone()), &known).agent, Some(Who {
+            id: "agent/example/auditor".into(), label: "Auditor".into(),
+        }));
+        facts["conversation_id"] = json!("agent/example/historical");
+        assert_eq!(present(&row(facts), &known).agent, Some(Who {
+            id: "agent/example/historical".into(), label: "example/historical".into(),
+        }), "a retained assignment remains visible even outside the current roster");
+    }
 }
 
 #[test]

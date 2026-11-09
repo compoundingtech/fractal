@@ -3992,8 +3992,7 @@ enum AttentionCommand {
         #[arg(long = "as", value_parser = parse_person_subject)]
         actor: Option<String>,
     },
-    /// Chat about an alert: send a message to the agent whose conversation it belongs to, titled
-    /// after it, with a reference to what it is about. This is what "Chat about this" does in the Fractal terminal UI.
+    /// Start a durable thread about an Inbox item with its responsible agent.
     Discuss(AttentionDiscussArgs),
     /// Legacy mutation: returns attention-migrated. Use work ask or remedy the source.
     Request(AttentionRequestArgs),
@@ -4014,17 +4013,13 @@ struct AttentionDiscussArgs {
     /// The item to talk about: its `attention/...` ID from `fractal alerts ls`.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Attention)))]
     subject: String,
-    /// What to say. The message also names the item, so the agent knows what it is about.
+    /// The first message in the thread. Its origin retains the exact Inbox item and episode.
     #[arg(short = 'm', long)]
     body: String,
-    /// Who to talk to. By default the agent that asked for the item.
-    #[arg(long)]
-    #[arg(add = ArgValueCompleter::new(Complete(Entity::Agent { running_only: false })))]
-    to: Option<String>,
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Person)))]
     #[arg(long = "as", value_parser = parse_person_subject)]
     actor: Option<String>,
-    /// Name this message for retries, as `conversations send --idempotency-key` does.
+    /// Name this thread start for retries; reuse the same key and input after an uncertain response.
     #[arg(long)]
     idempotency_key: Option<String>,
 }
