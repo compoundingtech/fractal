@@ -839,6 +839,9 @@ mod tests {
             },
         )
         .unwrap();
+        let observed_revision = thread_metadata::summary(
+            &state.store, "person/operator", "thread/fixture",
+        ).unwrap().revision;
         let app = crate::api::router(state);
         for (person, bound, status) in [
             ("person/operator", false, StatusCode::OK),
@@ -866,7 +869,7 @@ mod tests {
                     body["value"],
                     json!({
                         "id":"thread/fixture", "agent_id":"agent/example", "title":"Review",
-                        "title_revision": created.id, "revision": created.id, "state":"open",
+                        "title_revision": created.id, "revision": observed_revision, "state":"open",
                         "message_count": 0, "unread": false
                     })
                 );
@@ -892,6 +895,7 @@ mod tests {
             },
         )
         .unwrap();
+        let creation_revision = thread_metadata::summary(&state.store, person, subject).unwrap().revision;
         let (renamed, _) = thread_metadata::apply(
             &state.store,
             person,
@@ -900,17 +904,18 @@ mod tests {
             thread_metadata::Edit::Rename {
                 title: "New title",
                 title_revision: &created.id,
-                revision: &created.id,
+                revision: &creation_revision,
             },
         )
         .unwrap();
+        let renamed_revision = thread_metadata::summary(&state.store, person, subject).unwrap().revision;
         thread_metadata::apply(
             &state.store,
             person,
             subject,
             "close",
             thread_metadata::Edit::Close {
-                revision: &renamed.id,
+                revision: &renamed_revision,
             },
         )
         .unwrap();
@@ -948,6 +953,7 @@ mod tests {
         .await;
         let rename = &next["items"][0];
         assert_eq!(rename["kind"], "thread.renamed");
+        assert_eq!(rename["id"], renamed.id);
         assert_eq!(rename["actor_id"], person);
         assert_eq!(rename["previous_title"], "Review");
         assert_eq!(rename["title"], "New title");
@@ -960,7 +966,7 @@ mod tests {
         state.store.configure_thread_write_rollout([]);
         let person = "person/operator";
         let subject = "thread/fixture";
-        let (created, _) = thread_metadata::apply(
+        thread_metadata::apply(
             &state.store,
             person,
             subject,
@@ -971,6 +977,7 @@ mod tests {
             },
         )
         .unwrap();
+        let observed_revision = thread_metadata::summary(&state.store, person, subject).unwrap().revision;
         let snapshot = new_client_snapshot(&state);
         let app = crate::api::router(state.clone());
         let request = json!({
@@ -978,7 +985,7 @@ mod tests {
             "id": "action/thread-close",
             "type": "thread.close",
             "idempotency_key": "thread-close-request",
-            "fence": {"snapshot_id": snapshot.id, "subject_revisions": {(subject): created.id}},
+            "fence": {"snapshot_id": snapshot.id, "subject_revisions": {(subject): observed_revision}},
             "parameters": {"target_id": subject}
         });
         let post = |actor: &'static str| {
@@ -1144,7 +1151,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
             (owner, "thread/reopened", true),
             ("person/other", "thread/private", false),
         ] {
-            let (created, _) = thread_metadata::apply(
+            thread_metadata::apply(
                 &state.store,
                 person,
                 thread,
@@ -1155,24 +1162,26 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
                 },
             )
             .unwrap();
-            let (closed, _) = thread_metadata::apply(
+            let creation_revision = thread_metadata::summary(&state.store, person, thread).unwrap().revision;
+            thread_metadata::apply(
                 &state.store,
                 person,
                 thread,
                 &format!("{thread}:close"),
                 Edit::Close {
-                    revision: &created.id,
+                    revision: &creation_revision,
                 },
             )
             .unwrap();
             if reopen {
+                let closed_revision = thread_metadata::summary(&state.store, person, thread).unwrap().revision;
                 thread_metadata::apply(
                     &state.store,
                     person,
                     thread,
                     &format!("{thread}:reopen"),
                     Edit::Reopen {
-                        revision: &closed.id,
+                        revision: &closed_revision,
                     },
                 )
                 .unwrap();
@@ -1500,7 +1509,7 @@ agent "garden/other" { workspace "/work/garden"; harness "omp" {} }
             .store
             .apply_internal(&intent, "declare-agent")
             .unwrap();
-        let (created, _) = thread_metadata::apply(
+        thread_metadata::apply(
             &state.store,
             person,
             thread,
@@ -1511,13 +1520,14 @@ agent "garden/other" { workspace "/work/garden"; harness "omp" {} }
             },
         )
         .unwrap();
+        let observed_revision = thread_metadata::summary(&state.store, person, thread).unwrap().revision;
         let (closed, _) = thread_metadata::apply(
             &state.store,
             person,
             thread,
             "close",
             thread_metadata::Edit::Close {
-                revision: &created.id,
+                revision: &observed_revision,
             },
         )
         .unwrap();

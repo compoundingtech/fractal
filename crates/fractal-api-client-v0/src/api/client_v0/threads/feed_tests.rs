@@ -77,7 +77,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         .store
         .apply_internal(&intent, "declare-agent")
         .unwrap();
-    let (created, _) = thread_metadata::apply(
+    thread_metadata::apply(
         &state.store,
         person,
         thread,
@@ -88,13 +88,14 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         },
     )
     .unwrap();
+    let observed_revision = thread_metadata::summary(&state.store, person, thread).unwrap().revision;
     thread_metadata::apply(
         &state.store,
         person,
         thread,
         "close",
         thread_metadata::Edit::Close {
-            revision: &created.id,
+            revision: &observed_revision,
         },
     )
     .unwrap();

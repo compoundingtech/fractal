@@ -510,12 +510,13 @@ async fn bound_work_link_thread_cli_attaches_exact_pending_episode_without_reope
     let source = "version 2\nagent \"garden/reviewer\" { workspace \"/work/garden\"; harness \"omp\" {} }\n";
     let intent = fractal_daemon::graph::parse_intent(source, state.store.origin()).unwrap();
     state.store.apply_internal(&intent, source).unwrap();
-    let (created, _) = thread_metadata::apply(
+    thread_metadata::apply(
         &state.store, person, thread, "create-link-cli",
         Edit::Create { agent, title: "Worker tests" },
     ).unwrap();
+    let observed_revision = thread_metadata::summary(&state.store, person, thread).unwrap().revision;
     let (closed, _) = thread_metadata::apply(
-        &state.store, person, thread, "close-link-cli", Edit::Close { revision: &created.id },
+        &state.store, person, thread, "close-link-cli", Edit::Close { revision: &observed_revision },
     ).unwrap();
     let socket = root.path().join("thread-link.sock");
     let app = fractal_daemon::api::router(state.clone());

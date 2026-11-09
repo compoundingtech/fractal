@@ -3170,9 +3170,12 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             agent: &subjects.seats[0], title: "Cost fixture",
         },
     ).unwrap();
+    let observed_revision = fractal_daemon::store::thread_metadata::summary(
+        &store, "person/bench-operator", &thread.subject,
+    ).unwrap().revision;
     fractal_daemon::store::thread_metadata::apply(
         &store, "person/bench-operator", &thread.subject, "cost-thread-close",
-        fractal_daemon::store::thread_metadata::Edit::Close { revision: &thread.id },
+        fractal_daemon::store::thread_metadata::Edit::Close { revision: &observed_revision },
     ).unwrap();
     let mut fixture = fixture(&person, &client, subjects).await;
     fixture.items.insert("thread", thread.subject.trim_start_matches("thread/").into());
