@@ -5,6 +5,9 @@ use crate::model::ClaimInput;
 use crate::model::IntentInput;
 use std::collections::BTreeMap;
 
+#[path = "readiness_case_keys.rs"]
+mod keys;
+
 const CASE_JOURNAL_MAX_BYTES: u64 = 16 * 1024;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -149,7 +152,7 @@ impl Admission {
         path: &Path,
         config: &ReadinessSloConfig,
         next: impl FnOnce() -> Result<Vec<ShortSummary>>,
-        dispatch: impl Fn(&Opening) -> Result<()>,
+        dispatch: impl Fn(&Opening) -> Result<bool>,
     ) -> Result<()> {
         self.replay(path, &dispatch)?;
         for summary in next()? {
@@ -170,10 +173,15 @@ impl Admission {
         store: &Store,
         reading: &Reading,
         now: u64,
-        dispatch: impl Fn(&Opening, &WeeklyAction) -> Result<()>,
+        dispatch: impl Fn(&Opening, &WeeklyAction) -> Result<bool>,
     ) -> Result<()> {
         self.replay(path, |opening| record(store, config, opening))?;
         self.replay_weekly(path, &dispatch)?;
+        // An unresolved recovery receipt keeps its original admitted cut on replay.
+        // Other drain items run independently; fresh input cannot discard this work.
+        if matches!(self.weekly.pending, Some(WeeklyAction::Recover { .. })) {
+            return Ok(());
+        }
         reading.check(&self.member, now)?;
         if self.legacy_draining || reading.end_ms <= self.weekly.through {
             return Ok(());
@@ -213,13 +221,13 @@ impl Admission {
     fn replay_weekly(
         &mut self,
         path: &Path,
-        dispatch: impl FnOnce(&Opening, &WeeklyAction) -> Result<()>,
+        dispatch: impl FnOnce(&Opening, &WeeklyAction) -> Result<bool>,
     ) -> Result<()> {
         let Some(action) = self.weekly.pending.as_ref() else {
             return Ok(());
         };
         let opening = self.case.as_ref().context("weekly phase has no case")?;
-        dispatch(opening, action)?;
+        if !dispatch(opening, action)? { return Ok(()); }
         let mut settled = self.clone();
         match action {
             WeeklyAction::Escalate { .. } => settled.weekly.escalated = true,
@@ -237,10 +245,10 @@ impl Admission {
         Ok(())
     }
 
-    fn replay(&mut self, path: &Path, dispatch: impl FnOnce(&Opening) -> Result<()>) -> Result<()> {
+    fn replay(&mut self, path: &Path, dispatch: impl FnOnce(&Opening) -> Result<bool>) -> Result<()> {
         let mut settled = self.clone();
         if let Some(opening) = settled.case.as_mut().filter(|opening| !opening.recorded) {
-            dispatch(opening)?;
+            if !dispatch(opening)? { return Ok(()); }
             opening.recorded = true;
             settled.persist(path)?;
             *self = settled;
@@ -249,21 +257,43 @@ impl Admission {
     }
 }
 
-fn record(store: &Store, config: &ReadinessSloConfig, opening: &Opening) -> Result<()> {
+fn phase_receipt(store: &Store, opening: &Opening, phase: &str) -> Result<keys::Lookup> {
+    let root = format!("{}:{phase}", opening.episode);
+    let source = format!("daemon/{}", store.origin());
+    let (severity, title) = if phase == "early" {
+        ("warning", "API readiness early warning")
+    } else {
+        ("error", "API readiness weekly breach")
+    };
+    keys::lookup(store, &root, &opening.reviewer, |receipt, _key| {
+        receipt.kind == "operational.failure"
+            && receipt.actor.as_deref() == Some("daemon/runtime")
+            && receipt.origin == store.origin() && receipt.subject == source
+            && receipt.body["fields"]["episode"] == opening.episode
+            && receipt.body["fields"]["reviewer"] == opening.reviewer
+            && receipt.body["fields"]["condition"] == crate::store::API_READINESS_SLO_MISSED
+            && receipt.body["fields"]["severity"] == severity
+            && receipt.body["fields"]["title"] == title
+    })
+}
+
+fn record(store: &Store, config: &ReadinessSloConfig, opening: &Opening) -> Result<bool> {
     ensure!(
         store.origin() == config.executor,
         "early readiness store is not the executor"
     );
     let key = format!("{}:early", opening.episode);
-    if store.operation_claim(&key)?.is_some() {
-        return Ok(());
+    match phase_receipt(store, opening, "early")? {
+        keys::Lookup::Recorded(_) => return Ok(true),
+        keys::Lookup::Blocked => return Ok(false),
+        keys::Lookup::Vacant(_) => {},
     }
     ensure!(
         store.fault_reviewer_is_declared(&opening.reviewer)?,
         "early readiness requires the originally configured active reviewer"
     );
     let source = format!("daemon/{}", store.origin());
-    store.append_claim(&ClaimInput {
+    let mut input = ClaimInput {
         subject: source.clone(),
         kind: "operational.failure".into(),
         actor: Some("daemon/runtime".into()),
@@ -288,24 +318,26 @@ fn record(store: &Store, config: &ReadinessSloConfig, opening: &Opening) -> Resu
         evidence: Vec::new(),
         expected_subject: None,
         idempotency_key: Some(key),
-    })?;
-    Ok(())
+    };
+    Ok(keys::append(store, &mut input, &opening.reviewer)?.is_some())
 }
 
-fn record_weekly(store: &Store, opening: &Opening, action: &WeeklyAction) -> Result<()> {
+fn record_weekly(store: &Store, opening: &Opening, action: &WeeklyAction) -> Result<bool> {
     let source = format!("daemon/{}", store.origin());
-    let early = store.operation_claim(&format!("{}:early", opening.episode))?;
+    let early = phase_receipt(store, opening, "early")?;
     let weekly_key = format!("{}:weekly", opening.episode);
     match action {
         WeeklyAction::Escalate { cut } => {
-            if store.operation_claim(&weekly_key)?.is_some() {
-                return Ok(());
+            match phase_receipt(store, opening, "weekly")? {
+                keys::Lookup::Recorded(_) => return Ok(true),
+                keys::Lookup::Blocked => return Ok(false),
+                keys::Lookup::Vacant(_) => {},
             }
             ensure!(
                 store.fault_reviewer_is_declared(&opening.reviewer)?,
                 "original reviewer is unavailable"
             );
-            store.append_claim(&ClaimInput {
+            let mut input = ClaimInput {
                 subject: source.clone(),
                 kind: "operational.failure".into(),
                 actor: Some("daemon/runtime".into()),
@@ -324,16 +356,31 @@ fn record_weekly(store: &Store, opening: &Opening, action: &WeeklyAction) -> Res
                     ("severity".into(), json!("error")),
                     ("targets".into(), json!([source])),
                 ]),
-                evidence: early.into_iter().map(|claim| claim.id).collect(),
+                evidence: match early {
+                    keys::Lookup::Recorded(claim) => vec![claim.id],
+                    keys::Lookup::Vacant(_) | keys::Lookup::Blocked => Vec::new(),
+                },
                 expected_subject: None,
                 idempotency_key: Some(weekly_key),
-            })?;
+            };
+            Ok(keys::append(store, &mut input, &opening.reviewer)?.is_some())
         }
         WeeklyAction::Recover { cut } => {
-            let weekly = store.operation_claim(&weekly_key)?.map(|claim| claim.id);
-            for prior in early.into_iter().map(|claim| claim.id).chain(weekly) {
+            let weekly = phase_receipt(store, opening, "weekly")?;
+            // A bounded lookup can conceal a previously accepted continuation.
+            // Blocked is unknown occupancy, never proof that no failure exists.
+            let mut complete = true;
+            for phase in [early, weekly] {
+                let prior = match phase {
+                    keys::Lookup::Recorded(claim) => claim.id,
+                    keys::Lookup::Blocked => {
+                        complete = false;
+                        continue;
+                    },
+                    keys::Lookup::Vacant(_) => continue,
+                };
                 let key = format!("{prior}:recovered");
-                store.append_claim(&ClaimInput {
+                let mut input = ClaimInput {
                     subject: source.clone(),
                     kind: "operational.recovered".into(),
                     actor: Some("daemon/runtime".into()),
@@ -348,69 +395,79 @@ fn record_weekly(store: &Store, opening: &Opening, action: &WeeklyAction) -> Res
                     evidence: Vec::new(),
                     expected_subject: None,
                     idempotency_key: Some(key),
-                })?;
+                };
+                complete &= keys::append(store, &mut input, &opening.reviewer)?.is_some();
             }
+            Ok(complete)
         }
     }
-    Ok(())
+}
+
+fn notice_input(notice: &Notice) -> ClaimInput {
+    use sha2::Digest as _;
+    let key = if notice.held {
+        format!("{}:{}:{}", notice.episode, notice.phase, notice.recipient)
+    } else {
+        format!("{}:notice:{}", notice.episode, notice.phase)
+    };
+    ClaimInput {
+        subject: format!("message/{}", &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..16]),
+        kind: "message.sent".into(), actor: Some("daemon/runtime".into()),
+        fields: BTreeMap::from([
+            ("from".into(), json!("daemon/runtime")),
+            ("to".into(), json!(notice.recipient)),
+            ("title".into(), json!(format!("API readiness {}", notice.phase))),
+            ("content".into(), json!(format!(
+                "{}Readiness case {} is owned by {}. Inspect failure {}.",
+                if notice.held { "Informational only. " } else { "Action required. " },
+                notice.episode, notice.owner, notice.failure
+            ))),
+            ("status".into(), json!("sent")),
+            ("tags".into(), if notice.held { json!(["st3-silent"]) } else { json!([]) }),
+        ]),
+        evidence: vec![notice.failure.clone()], expected_subject: None, idempotency_key: Some(key),
+    }
+}
+
+fn send_notice(store: &Store, notice: &Notice) -> Result<Option<crate::model::ClaimRecord>> {
+    let mut input = notice_input(notice);
+    match keys::lookup(store, input.idempotency_key.as_deref().unwrap(), &notice.owner,
+        |receipt, key| keys::matches(store, &input, receipt, key))? {
+        keys::Lookup::Recorded(receipt) => return Ok(Some(*receipt)),
+        keys::Lookup::Blocked => return Ok(None),
+        keys::Lookup::Vacant(_) => {},
+    }
+    // A held recipient cannot block or replace the canonical owner.
+    if !store.fault_reviewer_is_declared(&notice.recipient)? {
+        if notice.held { return Ok(None); }
+        anyhow::bail!("original readiness owner is unavailable");
+    }
+    keys::append(store, &mut input, &notice.owner)
 }
 
 #[cfg(test)]
 fn send_backup(
-    store: &Store,
-    opening: &Opening,
-    failure: &str,
-    phase: &str,
-    backup: Option<&str>,
+    store: &Store, opening: &Opening, failure: &str, phase: &str, backup: Option<&str>,
 ) -> Result<Option<String>> {
-    use sha2::Digest as _;
-    let Some(backup) = backup else {
-        return Ok(None);
+    let Some(backup) = backup else { return Ok(None) };
+    ensure!(backup != opening.reviewer && store.fault_reviewer_is_declared(backup)?,
+        "backup must be a distinct declared seat");
+    let notice = Notice {
+        episode: opening.episode.clone(), owner: opening.reviewer.clone(),
+        phase: phase.into(), recipient: backup.into(), failure: failure.into(),
+        held: true, recorded: false,
     };
-    ensure!(
-        backup != opening.reviewer && store.fault_reviewer_is_declared(backup)?,
-        "backup must be a distinct declared seat"
-    );
-    let key = format!("{}:{phase}:{backup}", opening.episode);
-    let message = crate::store::message_routing::send(
-        store,
-        &ClaimInput {
-            subject: format!(
-                "message/{}",
-                &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..16]
-            ),
-            kind: "message.sent".into(),
-            actor: Some("daemon/runtime".into()),
-            fields: BTreeMap::from([
-                ("from".into(), json!("daemon/runtime")),
-                ("to".into(), json!(backup)),
-                ("title".into(), json!(format!("API readiness {phase}"))),
-                (
-                    "content".into(),
-                    json!(format!(
-                        "Informational only. Readiness case {} is owned by {}.",
-                        opening.episode, opening.reviewer
-                    )),
-                ),
-                ("status".into(), json!("sent")),
-                ("tags".into(), json!(["st3-silent"])),
-            ]),
-            evidence: vec![failure.into()],
-            expected_subject: None,
-            idempotency_key: Some(key),
-        },
-    )?;
-    Ok(Some(message.id))
+    Ok(send_notice(store, &notice)?.map(|receipt| receipt.id))
 }
 
 fn drain_notices(admission: &mut Admission, journal: &Path, store: &Store, backup: Option<&str>) -> Result<()> {
-    use sha2::Digest as _;
     let mut queued = admission.clone();
     if let Some(opening) = admission.case.as_ref() {
     for phase in ["early", "weekly"] {
-        let failure = store.operation_claim(&format!("{}:{phase}", opening.episode))?
-            .map(|claim| claim.id);
-        let Some(failure) = failure else { continue };
+        let failure = match phase_receipt(store, opening, phase)? {
+            keys::Lookup::Recorded(claim) => claim.id,
+            keys::Lookup::Vacant(_) | keys::Lookup::Blocked => continue,
+        };
         let recipients = std::iter::once((opening.reviewer.as_str(), false))
             .chain(backup.filter(|backup| *backup != opening.reviewer).map(|backup| (backup, true)));
         for (recipient, held) in recipients {
@@ -434,46 +491,7 @@ fn drain_notices(admission: &mut Admission, journal: &Path, store: &Store, backu
         if notice.recorded {
             continue;
         }
-        let key = if notice.held {
-            format!("{}:{}:{}", notice.episode, notice.phase, notice.recipient)
-        } else {
-            format!("{}:notice:{}", notice.episode, notice.phase)
-        };
-        if let Some(receipt) = store.operation_claim(&key)? {
-            ensure!(receipt.kind == "message.sent"
-                && receipt.body["fields"]["from"] == "daemon/runtime"
-                && receipt.body["fields"]["to"] == notice.recipient,
-                "readiness notice receipt does not match its intent");
-            notice.recorded = true;
-            continue;
-        }
-        // A held recipient cannot block or replace the canonical owner.
-        if !store.fault_reviewer_is_declared(&notice.recipient)? {
-            if notice.held { continue; }
-            anyhow::bail!("original readiness owner is unavailable");
-        }
-        let tags = if notice.held { vec!["st3-silent"] } else { vec![] };
-        crate::store::message_routing::send(store, &ClaimInput {
-            subject: format!("message/{}", &hex::encode(sha2::Sha256::digest(key.as_bytes()))[..16]),
-            kind: "message.sent".into(),
-            actor: Some("daemon/runtime".into()),
-            fields: BTreeMap::from([
-                ("from".into(), json!("daemon/runtime")),
-                ("to".into(), json!(notice.recipient)),
-                ("title".into(), json!(format!("API readiness {}", notice.phase))),
-                ("content".into(), json!(format!(
-                    "{}Readiness case {} is owned by {}. Inspect failure {}.",
-                    if notice.held { "Informational only. " } else { "Action required. " },
-                    notice.episode, notice.owner, notice.failure
-                ))),
-                ("status".into(), json!("sent")),
-                ("tags".into(), json!(tags)),
-            ]),
-            evidence: vec![notice.failure.clone()],
-            expected_subject: None,
-            idempotency_key: Some(key),
-        })?;
-        notice.recorded = true;
+        notice.recorded = send_notice(store, notice)?.is_some();
     }
     queued.persist(journal)?;
     *admission = queued;
@@ -974,7 +992,7 @@ mod migration_tests {
         assert!(faults.iter().any(|fault| fault.item.episode == failure.request));
     }
 
-    fn fixture() -> (tempfile::TempDir, Policy, Store) {
+    pub(super) fn fixture() -> (tempfile::TempDir, Policy, Store) {
         let dir = tempfile::tempdir().unwrap();
         let policy = Policy {
             config: serde_json::from_value(json!({
@@ -996,7 +1014,7 @@ mod migration_tests {
         (dir, policy, store)
     }
 
-    fn reading(end_ms: u64, failed: u64) -> Reading {
+    pub(super) fn reading(end_ms: u64, failed: u64) -> Reading {
         Reading {
             version: 1, objective: OBJECTIVE.into(), member: "member-a".into(),
             start_ms: end_ms - MINUTES * MINUTE_MS, end_ms, observed_at_ms: end_ms,
@@ -1218,3 +1236,7 @@ mod migration_tests {
         assert!(store.messages(backup, true).unwrap().is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "readiness_case_key_tests.rs"]
+mod key_tests;
