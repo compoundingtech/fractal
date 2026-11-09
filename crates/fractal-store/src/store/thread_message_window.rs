@@ -520,7 +520,7 @@ mod read_progress_tests {
         let owner = "person/example";
         let agent = "agent/example";
         let thread = "thread/read-test";
-        let (created, _) = apply(&left, owner, thread, "create-read-test", Edit::Create {
+        let (_created, _) = apply(&left, owner, thread, "create-read-test", Edit::Create {
             agent, title: "Review",
         }).unwrap();
         let replicate = |source: &Store, target: &Store| {

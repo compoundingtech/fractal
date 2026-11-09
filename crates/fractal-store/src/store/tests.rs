@@ -13296,7 +13296,7 @@ fn thread_lifecycle_projection_selects_the_same_receipt_across_members() {
     let right = Store::open_memory("thread-right").unwrap();
     let owner = "person/example";
     let thread = "thread/approval";
-    let (created, _) = apply(
+    let (_created, _) = apply(
         &left, owner, thread, "create",
         Edit::Create { agent: "agent/example", title: "Review" },
     ).unwrap();
@@ -13362,7 +13362,7 @@ fn thread_pairing_revocation_precedes_receipt_recovery() {
     let actor = "client/paired/example";
     let thread = "thread/approval";
     let grant = "custom/client/pairing-thread-fixture";
-    let (created, _) = apply(
+    let (_created, _) = apply(
         &store, person, thread, "create",
         Edit::Create { agent: "agent/example", title: "Review" },
     ).unwrap();

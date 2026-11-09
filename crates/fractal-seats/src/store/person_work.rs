@@ -360,7 +360,7 @@ pub mod tests {
             ]),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         };
-        let (created, _) = start_from_inbox(&store, StartFromInbox {
+        let (_created, _) = start_from_inbox(&store, StartFromInbox {
             thread: "thread/history-c", title: "Current thread", person, origin: &origin,
             key: "history-new", first_message: &message,
         }).unwrap();
@@ -391,7 +391,7 @@ pub mod tests {
             ThreadContext::Inbox { source: &ask.subject, episode: "different-episode" },
             Some(&cursor), 20).is_err());
         let historical = list_context(&store, person, context(), None, 1).unwrap().items.remove(0);
-        let (closed, _) = apply(&store, person, &historical.id, "close-history", Edit::Close {
+        let (_closed, _) = apply(&store, person, &historical.id, "close-history", Edit::Close {
             revision: &historical.revision,
         }).unwrap();
         apply(&store, person, &historical.id, "reopen-history", Edit::Reopen { revision: &crate::store::thread_metadata::summary(&store, person, &historical.id).unwrap().revision }).unwrap();
@@ -548,7 +548,7 @@ pub mod tests {
             evidence: vec![], expected_subject: None, idempotency_key: None,
         };
         let origin = InboxOrigin { source_id: first_ask.subject.clone(), episode: original.id.clone() };
-        let (created, _) = start_from_inbox(&store, StartFromInbox {
+        let (_created, _) = start_from_inbox(&store, StartFromInbox {
             thread, title: "Worker tests", person, origin: &origin,
             key: "start-thread-link", first_message: &message,
         }).unwrap();

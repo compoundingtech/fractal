@@ -272,7 +272,7 @@ mod tests {
         let person = "person/avery";
         let agent = "agent/reviewer";
         let thread = "thread/worker";
-        let (created, _) = apply(
+        let (_created, _) = apply(
             &store,
             person,
             thread,
