@@ -1825,7 +1825,9 @@ impl Threads {
             }
             return Some(error.human());
         }
-        self.pending_actions.remove(&write.id);
+        if write.input.is_none() {
+            self.pending_actions.remove(&write.id);
+        }
         if matches!(confirmation, Confirmation::Rejected) {
             if matches!(write.mutation, Mutation::Start(_))
                 && let Some(item) = write.host.strip_prefix("home:")

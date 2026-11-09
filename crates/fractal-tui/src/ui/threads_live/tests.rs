@@ -762,6 +762,46 @@ fn original_close_retry_survives_changed_summary_collapse_and_later_refusal() {
 }
 
 #[test]
+fn a_confirmed_reply_does_not_consume_a_concurrent_unknown_close() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let mut texts = HashMap::new();
+    let id = "thread/worker";
+    let pane = Pane::Thread(id.into());
+    threads.lifecycle(&pane.key(), id.into(), Mutation::Close);
+    let close = threads.writes().pop().unwrap();
+    threads.complete(
+        Receipt {
+            write: close.clone(),
+            confirmation: Confirmation::Failed(ClientError::Transport("lost receipt".into())),
+        },
+        &mut texts,
+    );
+    threads.tap(&pane.key(), thread::Tap::Compose(id.into()), &mut texts);
+    threads.paste(
+        &pane,
+        "Reply while Close settles",
+        &edit::Cursor::default(),
+        &mut texts,
+    );
+    threads.submit(&pane.key(), Input::Reply(id.into()), &texts);
+    let reply = threads.writes().pop().unwrap();
+    assert!(matches!(reply.mutation, Mutation::Reply(_)));
+    threads.complete(
+        Receipt {
+            write: reply,
+            confirmation: Confirmation::Applied(None),
+        },
+        &mut texts,
+    );
+    assert!(threads.pending_actions[id].unknown);
+    threads.retry(&close.key);
+    let retried = threads.writes().pop().unwrap();
+    assert_eq!(retried.key, close.key);
+    assert_eq!(retried.fence, close.fence);
+    assert!(matches!(retried.mutation, Mutation::Close));
+}
+
+#[test]
 fn read_retry_keeps_the_original_shown_ids_even_after_the_view_moves() {
     let mut threads = observed_threads(ThreadState::Open);
     threads.set_read_enabled(true);
