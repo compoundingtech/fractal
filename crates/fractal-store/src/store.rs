@@ -251,6 +251,7 @@ pub const AGENTS_REQUEST_SLO_MISSED: &str = "fractal-agents-success-fast-slo-mis
 /// The explicitly owned weekly API readiness fault.
 pub const API_READINESS_SLO_MISSED: &str = "fractal-api-readiness-slo-missed";
 pub mod person_rename;
+mod run_fence;
 pub mod revision_seats;
 pub mod delegation;
 pub mod limits;
@@ -2749,13 +2750,8 @@ impl Store {
         subject: &str,
         action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E> + Send,
     ) -> std::result::Result<T, E> {
-        let (value, drained) = self.connection.batched(|transaction| {
-            let drained = finish_run_mutation_fence_tx(transaction, RunMutationFence::Run(subject))
-                .map_err(E::from)?;
-            action(transaction).map(|value| (value, drained))
-        }).map_err(|error| E::from(internal(error)))??;
-        if drained { self.run_projection_finished(); }
-        Ok(value)
+        run_fence::execute(&self.graph, Some(RunMutationFence::Run(subject)),
+            Some(run_fence::API_TURN_BUDGET), action)
     }
 
     /// Fence a mutation that reads descendants, capacity or other cross-run state.
@@ -2763,13 +2759,25 @@ impl Store {
         &self,
         action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E> + Send,
     ) -> std::result::Result<T, E> {
-        let (value, drained) = self.connection.batched(|transaction| {
-            let drained = finish_run_mutation_fence_tx(transaction, RunMutationFence::All)
-                .map_err(E::from)?;
-            action(transaction).map(|value| (value, drained))
-        }).map_err(|error| E::from(internal(error)))??;
-        if drained { self.run_projection_finished(); }
-        Ok(value)
+        run_fence::execute(&self.graph, Some(RunMutationFence::All),
+            Some(run_fence::API_TURN_BUDGET), action)
+    }
+
+    /// Daemon-only decisions may finish the finite pending set without a client budget.
+    pub fn with_all_runs_fenced_internal<T: Send, E: From<FractalError> + Send>(
+        &self,
+        action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E> + Send,
+    ) -> std::result::Result<T, E> {
+        run_fence::execute(&self.graph, Some(RunMutationFence::All), None, action)
+    }
+
+    /// Daemon-only counterpart of `with_run_fence`.
+    pub fn with_run_fence_internal<T: Send, E: From<FractalError> + Send>(
+        &self,
+        subject: &str,
+        action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E> + Send,
+    ) -> std::result::Result<T, E> {
+        run_fence::execute(&self.graph, Some(RunMutationFence::Run(subject)), None, action)
     }
 
     /// The explicitly registered keyed views for this graph. This getter performs no reads
@@ -17271,33 +17279,12 @@ pub fn finish_all_run_projections_tx(
     Ok(drained)
 }
 
+#[derive(Clone, Copy)]
 enum RunMutationFence<'a> {
     Run(&'a str),
     All,
 }
 
-// Append admission already owns its writer transaction; use the same selector without
-// nesting a writer loan. Unrelated claims do not request a run fence.
-fn finish_run_mutation_fence_tx(
-    transaction: &Transaction<'_>,
-    fence: RunMutationFence<'_>,
-) -> Result<bool, FractalError> {
-    match fence {
-        RunMutationFence::Run(subject) => {
-            if !projection_work_pending_tx(transaction)? {
-                return Ok(false);
-            }
-            let root = run_tree_of_tx(transaction, subject)?;
-            let mut drained = false;
-            if let Some(root) = root {
-                drained |= finish_run_projection_tx(transaction, &format!("mission-run/{root}"))?;
-            }
-            drained |= finish_run_projection_tx(transaction, subject)?;
-            Ok(drained)
-        }
-        RunMutationFence::All => finish_all_run_projections_tx(transaction),
-    }
-}
 
 pub fn try_project_simple_replication_tx(
     transaction: &Transaction<'_>,
@@ -23140,10 +23127,15 @@ pub fn append_claim_with_commit_context(
         let input = identities::normalize_claim_input(&connection, input)?;
         return append_latest_observation_fenced(graph, &input, now_ms(), event_runtime);
     }
-    // One claim in a savepoint of the writer's next batch; its caller hears back once that
-    // batch commits.
-    graph.connection
-        .batched(|transaction| -> Result<(ClaimRecord, bool), FractalError> {
+    // Probe before consuming callbacks or deriving persisted request fields. On pending
+    // work the executor returns the first writer before taking the projection gate.
+    let run_fence = if context.all_run_projections || context.run_projection_subjects.len() > 1 {
+        Some(RunMutationFence::All)
+    } else {
+        context.run_projection_subjects.first().map(|subject| RunMutationFence::Run(subject))
+    };
+    run_fence::execute(graph, run_fence, Some(run_fence::API_TURN_BUDGET),
+        |transaction| -> Result<(ClaimRecord, bool), FractalError> {
             let normalized_input = if context.signature.is_none() {
                 identities::normalize_claim_input(transaction, input)?
             } else { std::borrow::Cow::Borrowed(input) };
@@ -23160,16 +23152,6 @@ pub fn append_claim_with_commit_context(
             } else { input };
             let mut prepared_input;
             let input = if let Some(prepare) = context.prepare_request_fields {
-                let recorded = if let Some((operation, _)) = identities::claim_operation(input)? {
-                    operation_tx(transaction, &operation).map_err(internal)?.is_some()
-                } else { false };
-                if !recorded {
-                    if context.all_run_projections || context.run_projection_subjects.len() > 1 {
-                        finish_run_mutation_fence_tx(transaction, RunMutationFence::All)?;
-                    } else if let Some(subject) = context.run_projection_subjects.first() {
-                        finish_run_mutation_fence_tx(transaction, RunMutationFence::Run(subject))?;
-                    }
-                }
                 prepared_input = input.clone();
                 prepared_input.fields = prepare(transaction, input)?;
                 &prepared_input
@@ -23247,11 +23229,6 @@ pub fn append_claim_with_commit_context(
             }
             // Replays and key/body mismatches settle before lifecycle admission. A new send
             // and retirement serialize here, in the same savepoint as their durable claims.
-            if context.all_run_projections || context.run_projection_subjects.len() > 1 {
-                finish_run_mutation_fence_tx(transaction, RunMutationFence::All)?;
-            } else if let Some(subject) = context.run_projection_subjects.first() {
-                finish_run_mutation_fence_tx(transaction, RunMutationFence::Run(subject))?;
-            }
             admission(transaction)?;
             if let Some(expected_subjects) = expected_subjects {
                 for (subject, expected) in expected_subjects {
@@ -23515,7 +23492,6 @@ pub fn append_claim_with_commit_context(
             }
             Ok(outcome)
         })
-        .map_err(|error| FractalError::new("internal", error))?
 }
 
 pub fn validate_claim_input(input: &ClaimInput) -> Result<(), FractalError> {

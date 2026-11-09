@@ -67,14 +67,6 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
     ]);
     guard("fractal-store/store.rs", /* sqlite-large-value: allow-for-now lv-he22304140063 owner=fractal_missions::store::tests::run_mutation_writer_guard TODO=trace-statement-and-value-representation */ include_str!("../../../../fractal-store/src/store.rs"), &[
         Exception {
-            reason: "with_run_fence and with_all_runs_fenced are the two central wrapper bodies",
-            counts: [0, 0, 2, 0, 0],
-        },
-        Exception {
-            reason: "append_claim_with_commit_context is the shared claim writer: its run-mutation selector drains before action admission in that same transaction",
-            counts: [0, 0, 1, 0, 0],
-        },
-        Exception {
             reason: "finish_open, open_with_ivm_views and open_shared_memory install schema at startup; migrate_mission_run_deadlines is a schema migration",
             counts: [3, 0, 0, 0, 1],
         },
@@ -105,6 +97,12 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
         Exception {
             reason: "cfg(test)/test-support helpers: cache_idempotency_response, roll_back_claim_for_test, replace_desired_member_for_test, step-state fixture and inventory proof fixture",
             counts: [1, 3, 1, 2, 0],
+        },
+    ]);
+    guard("fractal-store/store/run_fence.rs", include_str!("../../../../fractal-store/src/store/run_fence.rs"), &[
+        Exception {
+            reason: "the central bounded fence executor probes in one batched job, then rebuilds one aggregate per standalone writer loan",
+            counts: [1, 0, 1, 0, 0],
         },
     ]);
 }

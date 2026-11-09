@@ -1863,6 +1863,7 @@ export type ErrorCode = (
   | "agent-roster-not-ready"
   | "agent-roster-cut-not-ready"
   | "message-selectors-not-ready"
+  | "database-busy"
   | "rate-limited"
   | "runtime-not-local"
   | "runtime-authority-indeterminate"

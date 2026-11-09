@@ -2081,7 +2081,7 @@ fn set_step_state_guarded(
     reject_terminal: bool,
 ) -> Result<bool> {
     let subject = normalize_step_run(subject);
-    store.with_run_fence(&subject, |transaction| -> Result<bool> {
+    store.with_run_fence_internal(&subject, |transaction| -> Result<bool> {
             let current: Option<StepStateRow> = transaction
                 .query_row(
                     "SELECT step_runs.status,
@@ -4980,7 +4980,7 @@ impl MissionsStore for Store {
 
     fn terminate_mission_run_descendants(&self, run: &str, reason: &str) -> Result<bool> {
         let run = run.strip_prefix("mission-run/").unwrap_or(run);
-        self.with_all_runs_fenced(|transaction| -> Result<bool> {
+        self.with_all_runs_fenced_internal(|transaction| -> Result<bool> {
                 let generation: Option<String> = transaction
                     .query_row(
                         "SELECT current_generation_id FROM mission_runs WHERE id=?1",
@@ -6477,7 +6477,7 @@ impl MissionsStore for Store {
             backoff_ms: u64,
         ) -> Result<bool> {
         let subject = normalize_step_run(subject);
-        self.with_run_fence(&subject, |transaction| {
+        self.with_run_fence_internal(&subject, |transaction| {
                 retry_step_tx(
                     transaction,
                     &self.origin,
@@ -6498,7 +6498,7 @@ impl MissionsStore for Store {
             reviewer: &str,
         ) -> Result<bool> {
         let subject = normalize_step_run(subject);
-        self.with_all_runs_fenced(|transaction| -> Result<bool> {
+        self.with_all_runs_fenced_internal(|transaction| -> Result<bool> {
                 let current: Option<(String, u32, String)> = transaction
                     .query_row(
                         "SELECT status, attempt, goals FROM step_runs WHERE subject=?1",
@@ -6557,7 +6557,7 @@ impl MissionsStore for Store {
             phase: &str,
             reason: Option<&str>,
         ) -> Result<bool> {
-        self.with_all_runs_fenced(|transaction| -> Result<bool> {
+        self.with_all_runs_fenced_internal(|transaction| -> Result<bool> {
                 let changed = set_mission_run_state_tx(
                     transaction,
                     &self.origin,
@@ -6986,7 +6986,8 @@ impl MissionsStore for Store {
         #[cfg(any(test, feature = "test-support"))]
         let cached = std::sync::atomic::AtomicBool::new(false);
         // Owner routing selects among opened-by and authoring runs, so fence all pending parts.
-        let result = self.with_all_runs_fenced(|transaction| -> Result<Option<(ResourceObservationOutcome, bool)>, FractalError> {
+        let result = self.with_all_runs_fenced_internal(
+            |transaction| -> Result<Option<(ResourceObservationOutcome, bool)>, FractalError> {
                 #[cfg(any(test, feature = "test-support"))]
                 let _measurement = resource_preparation::WriterMeasure::new(&measurement);
                 #[cfg(any(test, feature = "test-support"))]
@@ -8135,7 +8136,7 @@ impl MissionsStore for Store {
     }
 
     fn settle_runs_for_canonical_replay(&self) -> Result<Vec<String>> {
-        self.with_all_runs_fenced(|transaction| -> Result<Vec<String>> {
+        self.with_all_runs_fenced_internal(|transaction| -> Result<Vec<String>> {
         if transaction
             .query_row(
                 "SELECT 1 FROM meta WHERE key='canonical_replay_settled'",
