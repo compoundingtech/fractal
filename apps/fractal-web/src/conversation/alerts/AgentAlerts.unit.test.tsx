@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import { ClientError, type FractalClient } from '@fractal/client'
 import type * as Native from '@fractal/client/schema'
-import { Option } from 'effect'
+import { DateTime, Option } from 'effect'
 
 // Node rendering exercises the real composition, not the CSS compiler.
 vi.mock('@stylexjs/stylex', () => ({
@@ -214,5 +214,18 @@ describe('gatewayPromptAnswers', () => {
     } as unknown as FractalClient)
     expect((await ungranted.respond({ alert: promptAlert as never, answer: 'allow' }))._tag).toBe('Refused')
     expect(called).toBe(false)
+  })
+})
+
+
+describe('contextual alert landmarks', () => {
+  it('distinguishes the same item in Inbox and conversation for prompt and ordinary alerts', () => {
+    const prompt = { ...alert('attention/shared', ['allow'], 'Allow this command?', 'call/shared'), requested_at: DateTime.makeUnsafe('2026-10-13T10:00:00Z') }
+    for (const item of [prompt, { ...prompt, attention_kind: 'custom.garden.report' }]) {
+      const conversation = renderToStaticMarkup(<AgentAlerts alerts={[item]} />)
+      const inbox = renderToStaticMarkup(<AgentAlerts alerts={[item]} context="Inbox" />)
+      expect(conversation).toContain(`aria-label="${item.title}"`)
+      expect(inbox).toContain(`aria-label="Inbox: ${item.title}"`)
+    }
   })
 })

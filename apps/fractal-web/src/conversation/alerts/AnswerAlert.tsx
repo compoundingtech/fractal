@@ -273,10 +273,12 @@ export const AnswerAlert = ({
   alert,
   onAct,
   now = Date.now(),
+  context,
 }: {
   readonly alert: Native.Attention
   readonly onAct?: Act
   readonly now?: number
+  readonly context?: string
 }): React.ReactNode => {
   const choices = alertChoices(alert)
   const from = alertFrom(alert)
@@ -313,7 +315,7 @@ export const AnswerAlert = ({
     now,
   )
   return (
-    <section {...stylex.props(styles.alert)} aria-label={alert.title} data-alert-kind={alert.attention_kind}>
+    <section {...stylex.props(styles.alert)} aria-label={context === undefined ? alert.title : `${context}: ${alert.title}`} data-alert-kind={alert.attention_kind}>
       <div {...stylex.props(styles.title)}>◆ {alert.title}</div>
       <div {...stylex.props(styles.meta)}>
         {KIND_WORDS[alert.attention_kind] ?? 'Alert'} · from {from}

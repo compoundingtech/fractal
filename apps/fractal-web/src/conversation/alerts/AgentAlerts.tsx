@@ -90,17 +90,19 @@ export const AgentAlerts = ({
   alerts,
   onAnswer,
   onAct,
+  context,
 }: {
   readonly alerts: readonly Native.Attention[]
   readonly onAnswer?: Answer
   readonly onAct?: Act
+  readonly context?: string
 }): React.ReactNode => {
   if (alerts.length === 0) return null
   const one = (alert: Native.Attention) =>
     alert.attention_kind === 'harness-prompt'
       // A new prompt or revision behind the same alert starts with nothing chosen.
-      ? <PromptAlert key={promptAlertKey(alert)} alert={alert} onAnswer={onAnswer} />
-      : <AnswerAlert key={alert.id} alert={alert} onAct={onAct} />
+      ? <PromptAlert key={promptAlertKey(alert)} alert={alert} onAnswer={onAnswer} context={context} />
+      : <AnswerAlert key={alert.id} alert={alert} onAct={onAct} context={context} />
   const [first, ...rest] = alerts
   return (
     <div {...stylex.props(styles.pinned)} data-testid="conversation-alerts">
@@ -122,9 +124,11 @@ export const AgentAlerts = ({
 const PromptAlert = ({
   alert,
   onAnswer,
+  context,
 }: {
   readonly alert: Native.Attention
   readonly onAnswer?: Answer
+  readonly context?: string
 }): React.ReactNode => {
   const prompt = promptAnswers(alert)
   const card = alert.presentation?.prompt
@@ -157,7 +161,7 @@ const PromptAlert = ({
     })
   }
   return (
-    <section {...stylex.props(styles.alert)} aria-label={alert.title}>
+    <section {...stylex.props(styles.alert)} aria-label={context === undefined ? alert.title : `${context}: ${alert.title}`}>
       <div {...stylex.props(styles.title)}>◆ {alert.title}</div>
       {alert.detail ? <div {...stylex.props(styles.detail)}>{alert.detail}</div> : null}
       {prompt === null || served.calls === null ? (
