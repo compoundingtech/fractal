@@ -45,6 +45,7 @@ const busyItems: Readonly<Record<DetailsSectionName, DetailsValue<readonly Detai
     item('pr:sample/43', 'PR #43 · Expand observation coverage', 'Open · sample-app · checks passed', '⑂'),
     item('pr:sample/44', 'PR #44 · Tighten projection fixtures', 'Draft · sample-app · checks running', '⑂'),
   ]),
+  Issues: known(emptyItems),
   'CI runs': known([
     item('ci-run:sample/42', 'Projection checks', 'CI run · succeeded', '✓'),
     item('ci-run:sample/43', 'Observation coverage', 'CI run · running', '✓'),
