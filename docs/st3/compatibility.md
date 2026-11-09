@@ -123,6 +123,16 @@ It does not prevent an old member from joining later.
 An old member drops agent metadata and fails mission revision validation.
 Remove the metadata with upgraded readers before a rollback.
 
+New agent authoring accepts only peak `memory-max` and `disk-max` budgets.
+`cpu-seconds` and `token-budget` are mission-run totals, including all retries,
+and refuse new agent publication through CLI and API paths. Historical agent
+readers and wire types retain those fields unchanged; replay is unchanged.
+The compatibility assessment found no published uses: the supplied search of
+`schickling/factory` at `origin/main` (`b2dacb7`) and dotfiles `nixpkgs/smalltalk`
+found zero matches for `declaredBudgets`, `tokenBudget`, `cpuSeconds`,
+`token-budget`, or `cpu-seconds`. This evidence is scoped to those sources,
+not a claim about every external declaration.
+
 This per-feature gate does not establish the general adjacent-release guarantee
 described above. See [declared admission](priority.md#declared-admission).
 
