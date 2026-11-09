@@ -1,10 +1,13 @@
 // Loading, empty, offline, stale and error outside the conversation. Explicit-fact presentation only.
 // One amber band under the thread header owns the gateway connection; panes keep quiet one-line rows,
 // never repeat the connection, and only a pane's own error turns red.
+import * as React from 'react'
 import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
 import { accentVars as accent, borderVars as border, geometryVars as g, radiusVars as r, spaceVars as s, statusVars as tone, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { Icon } from './Icons'
+import { LiveRing } from './LiveRing'
+import { loadingGlyphDelayMs } from './loading-glyph-delay'
 
 export type SystemStateKind = 'loading' | 'empty' | 'offline' | 'stale' | 'error'
 /** `live` shows nothing. */
@@ -25,11 +28,21 @@ export interface SystemNoticeProps extends DataAttributes {
   readonly onRetry?: () => void
 }
 
+/** Its slot is reserved from the first paint, so the text never moves when the ring appears; fast loads show no ring. */
+function LoadingRing() {
+  const [shown, setShown] = React.useState(false)
+  React.useEffect(() => {
+    const timer = setTimeout(() => setShown(true), loadingGlyphDelayMs)
+    return () => clearTimeout(timer)
+  }, [])
+  return <span data-system-loading-ring={shown ? 'shown' : 'pending'} {...stylex.props(!shown && styles.ringPending)}><LiveRing size="sm" /></span>
+}
+
 /** One quiet system-state row for a pane or the sidebar; `role="status"` sits on the statement. */
 export function SystemNotice({ kind, title, detail, scope = 'pane', connection = false, onRetry, ...data }: SystemNoticeProps) {
   return <div data-system-state={kind} {...data} {...stylex.props(styles.quiet, scope === 'rail' ? styles.quietRail : styles.quietPane)}>
     <span role="status" {...stylex.props(styles.quietStatus, kind === 'error' && !connection && styles.toneError)}>
-      {kind === 'loading' && <Icon name="spinner" size={12} spinning />}
+      {kind === 'loading' && <LoadingRing />}
       <span {...stylex.props(styles.lineText)}>{connection || detail === undefined ? title : `${title}. ${detail}`}</span>
     </span>
     {onRetry !== undefined && !connection && <Button aria-label={`Retry: ${title}`} onPress={onRetry} {...stylex.props(styles.lineButton, styles.focusable)}>Retry</Button>}
@@ -69,6 +82,7 @@ export function ConnectionStatus({ state, text, onReconnect }: ConnectionStatusP
 }
 
 const styles = stylex.create({
+  ringPending: { visibility: 'hidden' },
   focusable: { ':focus-visible': { outlineWidth: g.focusRing, outlineStyle: 'solid', outlineColor: accent.primary, outlineOffset: g.hairline } },
   toneMuted: { color: ink.fgMuted },
   toneWarning: { color: tone.attention },
