@@ -3,8 +3,8 @@
 This file is generated from `fractal-schema`.
 
 Schema: `st3.v1`
-Storage version: `22`
-Storage digest: `87061a9be91ee6d6007367294c3afc2be879cda75363d1784492686956fc095d`
+Storage version: `23`
+Storage digest: `2ff9359bf57a5c31fa1ecd71e881d76828371529876191f16b3d6ce73fc24d1d`
 
 ## Subject families
 

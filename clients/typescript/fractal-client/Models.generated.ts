@@ -94,7 +94,7 @@ export type ActionResult = {
   harness_answer?: HarnessAnswerResult;
   kind: "action-result";
   membership_revision?: Revision;
-  metadata_revision?: Revision;
+  metadata_claim_id?: Revision;
   operation_id: Id;
   private_notes?: PrivateNotesFence;
   snapshot_id: Id;
