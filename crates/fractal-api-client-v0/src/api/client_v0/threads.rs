@@ -663,11 +663,15 @@ mod tests {
         body["value"].clone()
     }
 
-    async fn paired_native_device(state: &AppState, name: &str, scopes: &[&str]) -> Value {
-        let begun = local_post(state, "/v1/client/pairings", json!({
-            "api_version": CLIENT_API_VERSION, "person_id": "person/operator",
-            "device_name": name, "scopes": scopes,
-        })).await;
+    async fn paired_native_device(state: &AppState, name: &str, limited_scopes: Option<&[&str]>) -> Value {
+        let mut request = json!({
+            "api_version": CLIENT_API_VERSION, "person_id": "person/operator", "device_name": name,
+        });
+        match limited_scopes {
+            Some(scopes) => request["scopes"] = json!(scopes),
+            None => request["full_control"] = json!(true),
+        }
+        let begun = local_post(state, "/v1/client/pairings", request).await;
         let id = begun["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
         let key = smallclaims::fleet::MemberKey::generate().unwrap().0;
         local_post(state, &format!("/v1/client/pairings/{id}/complete"), json!({
@@ -719,7 +723,7 @@ mod tests {
         let state = super::super::tests::test_state_named(root.path(), "thread-capability-pair");
         state.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
         state.store.configure_thread_write_rollout([]);
-        let paired = paired_native_device(&state, "Thread reader", &["read.projections"]).await;
+        let paired = paired_native_device(&state, "Thread reader", Some(&["read.projections"])).await;
         let bearer = format!("Bearer {}", paired["credential"].as_str().unwrap());
         let (status, read) = get_capabilities(&state, AUTHORIZATION.as_str(), &bearer).await;
         assert_eq!(status, StatusCode::OK, "{read}");
@@ -774,10 +778,9 @@ mod tests {
             ]),
             evidence: vec![], expected_subject: None, idempotency_key: Some("send-device-reply".into()),
         }, thread_metadata::PersonAuthority::TrustedLocal, None).unwrap();
-        let writer = paired_native_device(
-            &state, "Thread writer", &["read.projections", "control.messages"],
-        ).await;
-        let observer = paired_native_device(&state, "Thread observer", &["read.projections"]).await;
+        // Message controls require the ordinary explicit full-control device grant.
+        let writer = paired_native_device(&state, "Thread writer", None).await;
+        let observer = paired_native_device(&state, "Thread observer", Some(&["read.projections"])).await;
         let writer = format!("Bearer {}", writer["credential"].as_str().unwrap());
         let observer = format!("Bearer {}", observer["credential"].as_str().unwrap());
         // These are actual existing enrollments, including their operation receipts:
