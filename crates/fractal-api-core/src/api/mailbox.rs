@@ -4,6 +4,16 @@ use crate::SeatsStore;
 use crate::store::messages_shard::mailbox_reads;
 use super::*;
 
+pub const RECOVERY_CUTOFF_MS: u128 = 7 * 24 * 60 * 60 * 1_000;
+pub const RECOVERY_BACKLOG_LIMIT: usize = 5;
+
+/// None holds mail outside the recovery window; true consumes a backlog slot.
+pub fn recovery_backlog(accepted_at: u128, since: u128) -> Option<bool> {
+    (accepted_at >= since.saturating_sub(RECOVERY_CUTOFF_MS)).then_some(
+        accepted_at < since.saturating_sub(u128::from(super::mail_backlog::THRESHOLD_MS)),
+    )
+}
+
 /// Recover only recent mail which has never been offered. A prior staging claim is
 /// already an offer attempt, even when its delivered receipt has not arrived yet.
 pub fn never_offered(store: &Store, message: &crate::model::MessageView) -> anyhow::Result<bool> {

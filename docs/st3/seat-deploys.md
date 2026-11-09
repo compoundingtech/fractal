@@ -126,12 +126,13 @@ the provider. Several Fractal processes carry the seat's messages for the whole 
 
 New seats receive `ST3_MAILBOX_TRANSPORT=push`. Each delivery component connects to `/v1/mailbox`
 over the local daemon Unix socket. The stream sends the full seat record and pushes new mail.
-Every connection starts a new automatic-delivery boundary. Pre-connection mail older than one
-hour stays held in the graph mailbox. Recent mail with no staging or delivery claim is admitted
-once so an in-flight send survives a daemon restart. Previously staged or delivered-but-unread
-mail stays held regardless of age; a missing receipt never authorizes another offer. The one-hour
-window uses the original send time and the same threshold as the unread backlog. SQLite
-fences both subscriptions and receipts to the live runtime
+Every connection starts a new automatic-delivery boundary. Never-offered pre-connection mail
+sent within the preceding seven days is eligible for recovery; older mail stays held in the graph
+mailbox. Of that recovery backlog, mail older than one hour is admitted oldest first, at most five
+messages per connection. Mail at most one hour old and new live mail do not consume that cap.
+Both age boundaries use the original send time relative to connection start, including late imports.
+Previously staged or delivered-but-unread mail stays held regardless of age; a missing receipt
+never authorizes another offer. SQLite fences both subscriptions and receipts to the live runtime
 incarnation and replacement owner; reconnecting an older channel cannot retake ownership, including
 after a daemon restart. A stream item's receipt is the exception: its fence is read on the graph
 just before the record goes to the messages shard, so a token revoked between them can still
@@ -146,8 +147,9 @@ uncertain handoffs, and successful handoffs retry lost receipt acknowledgements 
 No push component projects message bodies into `resources/inbox` or `resources/archive`.
 
 `delivered` records native transport acceptance, not model consumption. A boot or channel reconnect
-never authorizes another offer of old mail. Older polling drivers also recover recent unoffered
-pre-boot mail and retain the current boot's staging attempt until its receipts finish;
+never authorizes another offer of previously offered mail. Older polling drivers retain the one-hour
+pre-boot cutoff (not the stream's seven-day recovery and five-message cap), recover never-offered
+mail within that hour and retain the current boot's staging attempt until its receipts finish;
 their local archive projection removes old native inbox files without closing the graph messages.
 An agent can explicitly inspect that retained mail with `fractal conversations ls --as "$ST_AGENT"`
 and read it with `fractal conversations read MESSAGE --as "$ST_AGENT"`. New mail on the live connection
