@@ -305,6 +305,7 @@ public actor FractalClient {
     public func machinesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("machines", cursor: cursor, limit: limit, history: history) }
     public func devicesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("devices", cursor: cursor, limit: limit, history: history) }
     public func attentionList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("attention", cursor: cursor, limit: limit, history: history) }
+    public func attentionBudget(mission: String, person: String? = nil, at: UInt64? = nil) async throws -> Envelope<AttentionBudgetReport> { var query: [URLQueryItem] = [.init(name: "mission", value: mission)]; if let person { query.append(.init(name: "person", value: person)) }; if let at { query.append(.init(name: "at", value: String(at))) }; return try await get("v1/client/attention-budget", query: query) }
     public func attentionGet(id: String) async throws -> Envelope<Resource> { try await resource("attention", id: id) }
     public func messagesList(cursor: String? = nil, limit: Int? = nil, history: Bool = false) async throws -> Envelope<ResourcePage> { try await list("messages", cursor: cursor, limit: limit, history: history) }
     public func messagesGet(id: String) async throws -> Envelope<Resource> { try await resource("messages", id: id) }

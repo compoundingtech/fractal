@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Added: data-only local attention-budget reports through client-v0 for embedded-web recipients.",
+  "replay": {
+    "status": "none",
+    "detail": "Reads retained native asks and existing mission declarations and lineage; no replay or backfill. Results are replica-local, never fleet-complete."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "Uses existing indexes; no database, claim format, migration, or storage-version change."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "Data only: no admission, limit enforcement, scheduling, delivery, approval, or write behavior changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Additive attention-budget GET /v1/client/attention-budget with mission, optional person, and optional at Unix milliseconds. Only embedded-web recipient sessions may read their own reports. Agents and paired clients are refused even with read.projections, including over Fabric; raw Unix person headers grant no authority. No CLI transport is provided; CLI and agent access require a separate wider-authority decision. Person defaults to the authenticated recipient. Reports include local index/window bounds, declared or undeclared asks, charged/inclusive/not-charged/unattributed counts, and at most 128 newest ID/subject-only request references with explicit completeness. Older daemons lack this operation; existing clients are unaffected."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "No additional downtime or index construction required by this read."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Upgrade the serving daemon before using the new client operation with an embedded-web recipient session. No state, grant, or identity migration."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Rollback removes the new read surface without rewriting retained asks, declarations, or policy."
+  }
+}

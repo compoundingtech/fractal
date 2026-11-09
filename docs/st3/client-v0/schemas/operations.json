@@ -64,6 +64,7 @@
     { "id": "machines.list", "method": "GET", "path": "/v1/client/machines", "response": "Page" },
     { "id": "devices.list", "method": "GET", "path": "/v1/client/devices", "response": "Page" },
     { "id": "attention.list", "method": "GET", "path": "/v1/client/attention", "response": "Page" },
+    { "id": "attention-budget", "method": "GET", "path": "/v1/client/attention-budget", "response": "AttentionBudgetReport", "scope": "read.projections", "query": {"mission": "required canonical mission/ subject", "person": "optional authenticated embedded-web recipient; defaults to that person", "at": "optional Unix milliseconds; defaults to now"} },
     { "id": "attention.get", "method": "GET", "path": "/v1/client/attention/{id}", "response": "Resource" },
     { "id": "messages.list", "method": "GET", "path": "/v1/client/messages", "response": "Page" },
     { "id": "messages.get", "method": "GET", "path": "/v1/client/messages/{id}", "response": "Resource" },

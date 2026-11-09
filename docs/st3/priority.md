@@ -121,8 +121,7 @@ Typed entries are strict objects `{"person":"person/reviewer","asks":3}` in the
 `declared_budgets.attention` array. Authored order is preserved; an empty array is
 omitted. Semantic errors identify `declared_budgets.attention` or
 `declared_budgets.attention[<person>].asks`. A missing person entry is undeclared,
-never zero or unlimited. These declarations do not implement counting, comparison,
-admission or enforcement; the existing local report above is unchanged.
+never zero or unlimited. These declarations do not implement admission or enforcement.
 
 **Agents.** New agent declarations accept only `memory-max` and `disk-max` in
 `declared-budgets`; `cpu-seconds`, `token-budget` and `attention` refuse publication
@@ -185,6 +184,27 @@ members or fence old peers before publishing attention. Remove attention using
 supporting readers before a mixed-version rollback. Old KDL and typed authoring
 already reject unknown budget members rather than silently dropping attention.
 There is no database, replay or enforcement change.
+
+### Attention report
+
+The client-v0 operation
+`GET /v1/client/attention-budget?mission=M[&person=P][&at=UNIX_MS]`
+reads the [attention window and declaration](#declared-admission) for one mission and person.
+Omitted person means the authenticated person. Only an embedded-web recipient session
+may read its own report. Agents and paired clients are refused even with `read.projections`,
+including over Fabric; a raw Unix person header does not authorize this read.
+There is no CLI transport for this operation. CLI and agent access would require a
+separate decision to widen read authority.
+
+The report distinguishes declared asks from undeclared, charged from inclusive usage,
+not-charged requests, and unattributed requests for the person. It identifies the canonical
+mission and person, exclusive window start, inclusive end, and local claim index.
+The window is `(at - 7 days, at]`. `declared` reads the current revision; charging
+uses each originating or ancestor run's initial revision, so adding a limit later
+does not charge older runs. Every declaring ancestor is charged independently.
+`fleet_complete` is always false. At most 128 newest request references expose only claim
+IDs and subjects, never request text; `request_refs_complete` states whether all fit.
+This is data only: no limit enforcement, delivery decision, write, or fleet-complete promise.
 
 ## Linux
 

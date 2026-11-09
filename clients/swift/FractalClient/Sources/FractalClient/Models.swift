@@ -528,6 +528,40 @@ public struct DeclaredAdmission: Codable, Sendable { public let priority, lane: 
 public struct AgentDeclaration: Codable, Sendable { public let accountable: String?; public let declaredAdmission: DeclaredAdmission?; public let id, revision, kdl: String; public let tree: [String: JSONValue]; public let revisions: [String]; enum CodingKeys: String, CodingKey { case accountable, declaredAdmission = "declared_admission", id, revision, tree, kdl, revisions } }
 public struct CanonicalNode: Codable, Sendable { public let name: String; public let arguments: [JSONValue]?; public let properties: [String: JSONValue]?; public let children: [CanonicalNode]? }
 public struct PublicationDefinition: Codable, Sendable { public let kind, subject, revision, token: String; public let declaration: [String: JSONValue] }
+public struct AttentionBudgetReport: Codable, Sendable {
+    public let mission, person: String
+    public let windowStartExclusiveUnixMs, windowEndInclusiveUnixMs, localClaimIndex: UInt64
+    public let declared: AttentionBudgetDeclared
+    public let charged, inclusive, notCharged, unattributedForPerson: UInt64
+    public let fleetComplete, requestRefsComplete: Bool
+    public let requestRefs: [AttentionBudgetRequestRef]
+    enum CodingKeys: String, CodingKey {
+        case mission, person, declared, charged, inclusive
+        case windowStartExclusiveUnixMs = "window_start_exclusive_unix_ms", windowEndInclusiveUnixMs = "window_end_inclusive_unix_ms"
+        case localClaimIndex = "local_claim_index", notCharged = "not_charged", unattributedForPerson = "unattributed_for_person"
+        case fleetComplete = "fleet_complete", requestRefsComplete = "request_refs_complete", requestRefs = "request_refs"
+    }
+}
+public enum AttentionBudgetDeclared: Codable, Sendable {
+    case declared(asks: UInt64), undeclared
+    private enum CodingKeys: String, CodingKey { case state, asks }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        switch try c.decode(String.self, forKey: .state) {
+        case "declared": self = .declared(asks: try c.decode(UInt64.self, forKey: .asks))
+        case "undeclared": self = .undeclared
+        default: throw DecodingError.dataCorruptedError(forKey: .state, in: c, debugDescription: "Unknown attention budget declaration state")
+        }
+    }
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        switch self {
+        case let .declared(asks): try c.encode("declared", forKey: .state); try c.encode(asks, forKey: .asks)
+        case .undeclared: try c.encode("undeclared", forKey: .state)
+        }
+    }
+}
+public struct AttentionBudgetRequestRef: Codable, Sendable { public let claimID, subject: String; enum CodingKeys: String, CodingKey { case claimID = "claim_id", subject } }
 public struct MissionDeclaration: Codable, Sendable { public let mission, revision, text: String; public let publishedAt: UInt64; public let legacy: Bool; public let provenance: MissionDeclarationProvenance?; enum CodingKeys: String, CodingKey { case mission, revision, text, legacy, publishedAt = "published_at", provenance } }
 /// Where a mission revision's source lives. Inert text; nothing is fetched.
 public struct MissionDeclarationProvenance: Codable, Sendable { public let repository, commit, path: String; public let renderer: String? }
