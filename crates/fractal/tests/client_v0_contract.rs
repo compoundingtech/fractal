@@ -473,6 +473,9 @@ fn resource_fields_and_generation_map_keys_enforce_family_references() {
 #[test]
 fn mission_detail_step_history_eta_and_declaration_provenance_conform() {
     let mission = fixture("mission-detail-step-history.json");
+    let retry = &mission["run_details"][0]["steps"][0]["waits"][2];
+    assert_eq!(retry["kind"], "retry");
+    assert_eq!(retry["end"], retry["until"], "this example's later claim must not extend its backoff");
     for validator in [consumer_validator("Mission"), contract_validator("Mission")] {
         assert_conforms(&validator, "mission detail step history fixture", &mission);
         // Older daemons, lists and steps outside the enriched runs omit every new field.

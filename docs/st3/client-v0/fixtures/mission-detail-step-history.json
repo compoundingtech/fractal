@@ -40,7 +40,7 @@
       "waits": [
         {"kind": "dependency", "attempt": 1, "start": 1794132000000, "end": 1794132030000},
         {"kind": "queue", "attempt": 1, "start": 1794132030000, "end": 1794132060000},
-        {"kind": "retry", "attempt": 2, "start": 1794133210000, "end": 1794133500000, "until": 1794133270000, "reason": "The tests failed."},
+        {"kind": "retry", "attempt": 2, "start": 1794133210000, "end": 1794133270000, "until": 1794133270000, "reason": "The tests failed."},
         {"kind": "paused", "attempt": 2, "start": 1794133600000, "end": 1794133900000, "until": 1794137200000, "reason": "Waiting for CI."},
         {"kind": "you", "attempt": 2, "start": 1794134000000, "end": 1794134400000, "reason": "Which target?"}
       ],

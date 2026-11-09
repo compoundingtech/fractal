@@ -243,6 +243,11 @@ pub(crate) fn mission_step_timestamps_sql() -> String {
 /// Bounded per-kind suffixes for each selected step, including one boundary event. The inner
 /// index seek limits rows before reading bodies (including ordinary progress notes). Canonical
 /// sorting and folding therefore see at most `(CLAIMS_PER_KIND_LIMIT + 1) * kinds` rows per step.
+/// These are already-admitted claims, not pending envelopes. Like `step_timing_events` and
+/// `project_mission_run_update`, history accepts lifecycle claims from any admitted member:
+/// remote workers and the run owner can be different origins. Operation receipts deduplicate
+/// writes; they are not a second per-claim read-admission relation. This diagnostic fold grants
+/// no work authority and must not discard legitimate cross-member events by origin.
 pub(crate) fn mission_step_history_sql() -> String {
     let kinds = step_history::STEP_HISTORY_KINDS.split(',').map(|kind| format!("({kind})"))
         .collect::<Vec<_>>().join(",");
