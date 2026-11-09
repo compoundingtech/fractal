@@ -1,4 +1,5 @@
-//! Read-only accounting of native person-step requests in retained local claims.
+//! Local, read-only report of native person asks by mission × person over a rolling 7 days.
+//! This is not a budget window, admission or enforcement, and is not fleet-complete.
 use super::*;
 
 const WEEK_MS: u128 = 7 * 24 * 60 * 60 * 1000;
@@ -100,7 +101,7 @@ fn count(
         };
         let fields = &ask.body["fields"];
         // Native updates share the claim kind. Legacy conversions are historical
-        // attention migrations rather than new requests under this budget.
+        // attention migrations rather than new requests in this report.
         if ask.accepted_at_unix_ms <= start
             || ask.accepted_at_unix_ms > at
             || fields["person"] != person
