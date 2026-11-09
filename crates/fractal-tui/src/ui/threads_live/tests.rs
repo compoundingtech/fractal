@@ -397,7 +397,11 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         "{visible}"
     );
     assert!(visible.contains("Reopen thread"), "{visible}");
-    assert!(visible.contains("Message thread"), "{visible}");
+    assert!(
+        matches!(ui.threads.focused.as_ref(), Some((where_, Input::Reply(thread))) if where_ == &host && thread == id),
+        "closing must preserve the active ordinary reply composer"
+    );
+    assert!(visible.contains("Send"), "{visible}");
     let quoted = client
         .thread_timeline(id, None, Some(50))
         .await
@@ -497,7 +501,7 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     let draft = lines(&threads, &texts);
     let slot = draft
         .iter()
-        .position(|line| line == "▾ Worker test · Draft")
+        .position(|line| line == "▾ Worker test · Draft · to agent/atlas")
         .unwrap();
     assert!(
         draft[slot + 1..]
