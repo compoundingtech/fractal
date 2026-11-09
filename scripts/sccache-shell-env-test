@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Evaluate and exercise both Rust shell hooks without realizing their closures."""
+"""Exercise evaluated Rust shell hooks; --offline evaluates only their shared hook."""
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
+import sys
 
 root = Path(__file__).resolve().parent.parent
 fields = ('RUSTC_WRAPPER', 'SCCACHE_CLIENT_SIDE', 'SCCACHE_SERVER_UDS', 'SCCACHE_DIR')
@@ -15,8 +17,23 @@ in builtins.map (name: let
   cache = builtins.head (builtins.filter (p: (p.pname or "") == "sccache") shell.nativeBuildInputs);
 in { inherit name; inherit (shell) shellHook; inherit (cache) version; }) [ "default" "perf" ]
 '''.replace('ROOT', str(root))
-shells = json.loads(subprocess.check_output(
-    ['nix', 'eval', '--impure', '--json', '--expr', expression], cwd=root, text=True))
+if sys.argv[1:] == ['--offline']:
+    # The sparse script-test lane has Nix but no flake inputs or network access.
+    # Evaluate the actual shared Nix string with fixture package paths, not a copy
+    # of its shell logic. Full-flake mode additionally checks both shell closures.
+    source = (root / 'flake.nix').read_text()
+    hook = re.search(r"sccacheShellHook = (''\n.*?\n        '');", source, re.S).group(1)
+    hook = hook.replace('${./scripts/sccache-read-cache-env}',
+                        '${' + str(root / 'scripts/sccache-read-cache-env') + '}')
+    assert source.count("shellHook = sccacheShellHook + ''") == 2
+    assert not re.search(r'^\s*RUSTC_WRAPPER\s*=', source, re.M)
+    expression = 'let sccache = "/fixture/sccache-0.19.0"; ciRustcWrapper = "/fixture/ci-rustc-wrapper"; in ' + hook
+    hook = subprocess.check_output(['nix', '--offline', 'eval', '--impure', '--raw', '--expr', expression], text=True)
+    shells = [{'name': 'shared-offline', 'version': '0.19.0', 'shellHook': hook}]
+else:
+    assert not sys.argv[1:], 'usage: sccache-shell-env-test [--offline]'
+    shells = json.loads(subprocess.check_output(
+        ['nix', 'eval', '--impure', '--json', '--expr', expression], cwd=root, text=True))
 for shell in shells:
     assert shell['version'] == '0.19.0', shell
     for label, wrapper, github, host in (
@@ -25,6 +42,12 @@ for shell in shells:
         ('empty', '', False, True),
         ('ci', None, True, False),
         ('ci-inherited', '/host/bin/rustc-wrapper', True, True),
+        ('ci-empty', '', True, True),
+        ('ci-empty-no-host', '', True, False),
+        ('client-side-only', None, False, 'client'),
+        ('socket-only', None, False, 'socket'),
+        ('ci-client-side-only', None, True, 'client'),
+        ('ci-socket-only', None, True, 'socket'),
         ('ci-host-unset', None, True, True),
     ):
         environment = {key: value for key, value in os.environ.items()
@@ -33,7 +56,11 @@ for shell in shells:
         if wrapper is not None:
             environment['RUSTC_WRAPPER'] = wrapper
         if host:
-            environment.update(SCCACHE_CLIENT_SIDE='1', SCCACHE_SERVER_UDS='/host/cache.sock', SCCACHE_DIR='/host/cache')
+            environment['SCCACHE_DIR'] = '/host/cache'
+            if host != 'socket':
+                environment['SCCACHE_CLIENT_SIDE'] = '1'
+            if host != 'client':
+                environment['SCCACHE_SERVER_UDS'] = '/host/cache.sock'
         command = shell['shellHook'] + '\nprintf "%s\\0" ' + ' '.join('"${' + field + '-}"' for field in fields)
         values = subprocess.check_output(['bash', '--noprofile', '--norc', '-c', command],
                                          cwd=root, env=environment).decode().split('\0')[:-1]

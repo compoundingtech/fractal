@@ -105,6 +105,8 @@ unchanged. GitHub Actions still defaults to the CI wrapper, except when a host
 client-side configuration is inherited. Run tests with
 `cargo nextest run --workspace --locked`. The shell's environment contract can
 be checked without building it: `python3 scripts/sccache-shell-env-test`.
+The `ci-script-tests` lane runs its `--offline` mode, evaluating the shared hook
+with fixture package paths and no flake inputs or network access.
 The default and perf shells can opt into an owner-provisioned read-only WebDAV
 cache with `ST_SCCACHE_READ_ENDPOINT` and `ST_SCCACHE_READ_SERVER_PORT`. Leave
 both unset for the existing cache behavior. The port must be separate from the
