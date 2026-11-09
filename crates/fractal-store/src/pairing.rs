@@ -36,7 +36,8 @@ pub fn append_operation_receipt_tx(tx: &Transaction<'_>, claim: &ClaimRecord) ->
         }.ok_or_else(|| anyhow::anyhow!("a completion from this issuer is required"))?;
         anyhow::ensure!(completion.subject == claim.subject && completion.origin == claim.origin,
             "revocation must name a completion from this issuer");
-        if !operation_is_trusted(tx, &completion.id, &completion.origin, completion.actor.as_deref(), &completion.body["fields"])? {
+        if !completion_is_admitted(tx, &completion.id, &completion.origin, completion.actor.as_deref(),
+            &completion.body["fields"], smallclaims::store::now_ms())? {
             let person = completion.body["fields"]["person_id"].as_str();
             anyhow::ensure!(person.is_some_and(|person| person.starts_with("person/")
                 && claim.actor.as_deref() == Some(person)),

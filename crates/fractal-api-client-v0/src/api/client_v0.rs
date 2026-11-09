@@ -9223,12 +9223,14 @@ async fn dispatch_action(
                     )])),
                 });
             }
-            if session.transport != "unix" || !authority_actor.starts_with("person/")
-                || paired.body.pointer("/fields/person_id").and_then(Value::as_str) != Some(authority_actor.as_str()) {
-                return Err(forbidden("only the issuing Unix person can revoke this pairing"));
-            }
-            if state.store.pairing_completion_is_revoked(paired).map_err(ApiError::internal)? {
-                return Err(validation("paired device is already revoked"));
+            if !state.store.pairing_completion_is_admitted(paired, client_now_ms()).map_err(ApiError::internal)? {
+                if session.transport != "unix" || !authority_actor.starts_with("person/")
+                    || paired.body.pointer("/fields/person_id").and_then(Value::as_str) != Some(authority_actor.as_str()) {
+                    return Err(forbidden("only the issuing Unix person can revoke this legacy pairing"));
+                }
+                if state.store.pairing_completion_is_revoked(paired).map_err(ApiError::internal)? {
+                    return Err(validation("paired device is already revoked"));
+                }
             }
             state
                 .store
@@ -16418,7 +16420,7 @@ subscription "watch/source" {
                 fields: serde_json::from_value(json!({
                     "device_id":"device/legacy-revoke", "person_id":"person/alex",
                     "credential_hash":credential_digest("legacy-revoke-secret"),
-                    "session_actor":"client/legacy-revoke", "scopes":["read.projections"],
+                    "session_actor":"client/legacy-revoke", "scopes":["read.projections","control.pairing"],
                     "expires_at_unix_ms":client_now_ms() as u64 + 60_000
                 })).unwrap(),
                 evidence:vec![], expected_subject:None, idempotency_key:None,
@@ -16450,11 +16452,17 @@ subscription "watch/source" {
                 ClientSession::local(Some("person/other")).unwrap(),
                 ClientSession::local(Some("agent/bound")).unwrap(),
                 ClientSession::for_tests("client/remote", "person/alex", "fabric-loopback"),
-            ] {
+            ].into_iter().filter(|_| !native) {
                 assert_eq!(dispatch_action(&state, &snapshot, &session, &request).await.unwrap_err().status,
                     StatusCode::FORBIDDEN);
             }
-            let owner = ClientSession::local(Some("person/alex")).unwrap();
+            let owner = if native {
+                let remote = authenticate(&state, &bearer, "fabric-loopback").unwrap();
+                validate_action_admission(&remote, &request).unwrap();
+                remote
+            } else {
+                ClientSession::local(Some("person/alex")).unwrap()
+            };
             request.parameters = json!({"target_id":"device/unknown"});
             assert_eq!(dispatch_action(&state, &snapshot, &owner, &request).await.unwrap_err().status,
                 StatusCode::NOT_FOUND);
@@ -16467,8 +16475,12 @@ subscription "watch/source" {
             assert!(state.store.pairing_revocation_is_trusted(&revoked, &completed).unwrap());
             assert_eq!(state.store.client_operation_is_trusted(&completed).unwrap(), native);
             assert!(authenticate(&state, &bearer, "fabric-loopback").is_err());
-            assert!(dispatch_action(&state, &snapshot, &owner, &request).await.unwrap_err()
-                .message.contains("already revoked"));
+            if native {
+                dispatch_action(&state, &snapshot, &owner, &request).await.unwrap();
+            } else {
+                assert!(dispatch_action(&state, &snapshot, &owner, &request).await.unwrap_err()
+                    .message.contains("already revoked"));
+            }
             assert!(state.store.configure_pairing_legacy_allowances(&[crate::config::LegacyPairingAllowance {
                 completion_id:completed.id.clone(),
                 record_hash:fractal_store::pairing::record_hash(&completed.origin,
@@ -16480,8 +16492,10 @@ subscription "watch/source" {
                 shadow.subject = "custom/client/unrevoked-legacy-shadow".into();
                 state.store.append_claim(&shadow).unwrap();
             }
-            assert!(dispatch_action(&state, &snapshot, &owner, &request).await.unwrap_err()
-                .message.contains("already revoked"));
+            if !native {
+                assert!(dispatch_action(&state, &snapshot, &owner, &request).await.unwrap_err()
+                    .message.contains("already revoked"));
+            }
             let devices = device_resources(&state, &new_client_snapshot(&state), "person/alex").unwrap();
             assert_eq!(devices.len(), 1);
             assert_eq!(devices[0]["state"], "revoked");
