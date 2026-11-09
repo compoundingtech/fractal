@@ -4044,6 +4044,7 @@ mod tests {
         let socket = root.path().join("daemon.sock");
         let store = Arc::new(fractal_daemon::store::Store::open(&root.path().join("graph.db"), "ui-hint").unwrap());
         let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
@@ -4103,6 +4104,7 @@ mod tests {
         async fn serve(root: &std::path::Path, socket: &std::path::Path) -> (Arc<fractal_daemon::store::Store>, tokio::task::JoinHandle<()>) {
             let store = Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "sidebar-edit-test").unwrap());
             let state = fractal_daemon::api::AppState {
+                browser_pairing_login: None,
                 seat_admission: Default::default(),
                 owning_person: None,
                 store: store.clone(), notify: Arc::new(tokio::sync::Notify::new()), event_notify: tokio::sync::watch::channel(0_u64).0,
@@ -4156,6 +4158,7 @@ mod tests {
             let store =
                 Arc::new(fractal_daemon::store::Store::open(&root.join("graph.db"), "ui-actions").unwrap());
             let state = fractal_daemon::api::AppState {
+                browser_pairing_login: None,
                 seat_admission: Default::default(),
                 owning_person: None,
                 store: store.clone(),
@@ -4584,6 +4587,7 @@ mod tests {
                 .unwrap();
         }
         let state = fractal_daemon::api::AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
