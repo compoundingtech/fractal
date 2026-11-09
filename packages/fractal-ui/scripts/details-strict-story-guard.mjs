@@ -35,18 +35,24 @@ export async function strictStoryGuard(page, base) {
     // A failed a11y report names its axe rules and the nodes that broke them (or the error that stopped axe),
     // so the failure message says what to fix.
     const summarize = result => result?.error ? { error: String(result.error?.message ?? result.error) } : { violations: (result?.violations ?? []).map(({ id, impact, nodes }) => ({ id, impact, nodes: nodes.map(({ target, html, failureSummary }) => ({ target, html: html.slice(0, 200), failureSummary })) })) }
-    const timer = setInterval(() => {
-      const channel = window.__STORYBOOK_ADDONS_CHANNEL__
-      if (!channel) return
-      clearInterval(timer)
-      channel.on('storyRenderPhaseChanged', payload => {
-        window.__kitPlayTiming.phases.push({ storyId: payload.storyId, phase: payload.newPhase, at: performance.now() })
-      })
-      channel.on('storyFinished', payload => {
-        window.__kitPlayTiming.finished = { storyId: payload.storyId, at: performance.now() }
-      })
-      for (const name of ['storyFinished', 'playFunctionThrewException', 'storyThrewException', 'storyErrored']) channel.on(name, payload => window.__dt10StrictEvents.push({ name, payload: name === 'storyFinished' ? { storyId: payload?.storyId, status: payload?.status, reporters: payload?.reporters?.map(({ type, status, result }) => ({ type, status, ...(status === 'passed' ? {} : { failure: summarize(result) }) })) } : { message: typeof payload === 'string' ? payload : payload?.message, stack: payload?.stack } }))
-    }, 5)
+    // Subscribe in the publication task. A timer can run after storyFinished and lose it forever.
+    let channel
+    Object.defineProperty(window, '__STORYBOOK_ADDONS_CHANNEL__', {
+      configurable: true,
+      enumerable: true,
+      get: () => channel,
+      set: value => {
+        if (!value || value === channel) { channel = value; return }
+        channel = value
+        channel.on('storyRenderPhaseChanged', payload => {
+          window.__kitPlayTiming.phases.push({ storyId: payload.storyId, phase: payload.newPhase, at: performance.now() })
+        })
+        channel.on('storyFinished', payload => {
+          window.__kitPlayTiming.finished = { storyId: payload.storyId, at: performance.now() }
+        })
+        for (const name of ['storyFinished', 'playFunctionThrewException', 'storyThrewException', 'storyErrored']) channel.on(name, payload => window.__dt10StrictEvents.push({ name, payload: name === 'storyFinished' ? { storyId: payload?.storyId, status: payload?.status, reporters: payload?.reporters?.map(({ type, status, result }) => ({ type, status, ...(status === 'passed' ? {} : { failure: summarize(result) }) })) } : { message: typeof payload === 'string' ? payload : payload?.message, stack: payload?.stack } }))
+      },
+    })
   })
   const check = async () => {
     assertDocument()
