@@ -1805,8 +1805,12 @@ fn concurrent_thread_metadata_is_fenced_and_merged_by_the_next_edit() {
     let (renamed, _) = apply(&world.nodes[0].store, person, thread, "concurrent-rename", Edit::Rename {
         title: "Concurrent title", title_revision: &created.id, revision: &created.id,
     }).unwrap();
+    let (fork_title, _) = apply(&world.nodes[1].store, person, thread, "concurrent-slow-rename", Edit::Rename {
+        title: "Slower concurrent title", title_revision: &created.id, revision: &created.id,
+    }).unwrap();
+    assert!(fork_title.accepted_at_unix_ms < renamed.accepted_at_unix_ms);
     let (closed, _) = apply(&world.nodes[1].store, person, thread, "concurrent-close", Edit::Close {
-        revision: &created.id,
+        revision: &fork_title.id,
     }).unwrap();
     assert!(world.exchange(0, 1, true) > 0);
     assert!(world.exchange(1, 0, true) > 0);

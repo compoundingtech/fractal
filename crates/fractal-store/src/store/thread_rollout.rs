@@ -96,6 +96,12 @@ mod tests {
         writer
             .import_replication("reader", &reader.export_replication(0).unwrap())
             .unwrap();
+        assert_eq!(check().unwrap_err().code, "thread-rollout-unavailable",
+            "message privacy alone does not supply causal metadata reads");
+        advertise(&reader, fractal_schema::threads::READ_PRIVACY_VERSION);
+        writer
+            .import_replication("reader", &reader.export_replication(0).unwrap())
+            .unwrap();
         // After the attested reader has advertised its floor, this check can pass offline.
         assert!(check().is_ok());
     }
@@ -108,7 +114,9 @@ mod tests {
         assert!(!writer.initialize_thread_write_rollout(1, []));
         assert_eq!(check().unwrap_err().code, "thread-rollout-unavailable");
 
-        assert!(writer.initialize_thread_write_rollout(2, []));
+        assert!(!writer.initialize_thread_write_rollout(2, []));
+        assert_eq!(check().unwrap_err().code, "thread-rollout-unavailable");
+        assert!(writer.initialize_thread_write_rollout(fractal_schema::threads::READ_PRIVACY_VERSION, []));
         assert!(check().is_ok());
     }
 

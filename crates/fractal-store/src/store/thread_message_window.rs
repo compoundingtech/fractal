@@ -513,7 +513,7 @@ mod read_progress_tests {
             store.append_claim(&ClaimInput {
                 subject: format!("daemon/{}", store.origin()), kind: "daemon.started".into(),
                 actor: None, fields: serde_json::from_value(json!({
-                    "status":"running", "features":{"thread_read_privacy":2}
+                    "status":"running", "features":{"thread_read_privacy":fractal_schema::threads::READ_PRIVACY_VERSION}
                 })).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None,
             }).unwrap();
         }

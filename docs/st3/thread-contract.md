@@ -132,7 +132,11 @@ Writes validate authority in the admitting daemon transaction. Bind idempotency 
 operation and target, and reauthorize receipt recovery after revocation. Rename, Close and Reopen
 check the metadata revision visible at admission. A stale client refreshes and may retry. An
 accepted incoming reply remains append-only and does not change the title or lifecycle
-revision. Existing historical subject-based discussion remains readable through its existing
+revision. Metadata successors override their causal ancestors even if the writer's clock is
+behind. Canonical claim order resolves only concurrent edits. The opaque metadata revision
+fences every known causal frontier branch; the next accepted edit retains all those branches
+as predecessors. A title's revision still identifies the exact effective title claim.
+Existing historical subject-based discussion remains readable through its existing
 path. There is no inferred migration from subjects to durable thread IDs.
 
 ### Fleet behavior and receipts
@@ -205,6 +209,9 @@ and [normalized conversation contract](conversation-normalization-design.md) pro
 
 Install the privacy reader release on all serving fleet members before enabling typed writes.
 The writer verifies the configured and active readers' privacy capability inside its transaction.
+Reader readiness version 3 includes causal metadata projection and its frontier revision fence;
+version 2 protects message content but cannot enable current writes. The signed message envelope
+marker remains `thread_reader_version: 2`: this rollout changes metadata semantics, not that format.
 A legacy member that receives a signed thread-bearing message retains the envelope in quarantine.
 After upgrade, normal startup retries admission and restores the original timeline entry once.
 The SQLite storage floor keeps pre-privacy binaries from reopening upgraded state.
