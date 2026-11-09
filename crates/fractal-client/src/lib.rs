@@ -3691,15 +3691,10 @@ impl Client {
         mut parameters: ThreadReplyParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let idempotency_key = idempotency_key.into();
-        if parameters.signature.is_none()
-            && let Some(device) = &self.signing_device
-        {
+        if parameters.signature.is_none() && self.signing_device.is_some() {
             let agent_id = self.thread_get(&parameters.target_id).await?.value.agent_id;
-            parameters.signature = Some(
-                device
-                    .sign_thread_reply(&idempotency_key, &agent_id, &parameters)
-                    .map_err(|error| ClientError::Protocol(error.to_string()))?,
-            );
+            self.prepare_thread_reply(&idempotency_key, &agent_id, &mut parameters)
+                .map_err(|error| ClientError::Protocol(error.to_string()))?;
         }
         let request = ActionRequest::thread_reply(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
@@ -3713,14 +3708,9 @@ impl Client {
         mut parameters: ThreadStartParameters,
     ) -> Result<Envelope<ActionResult>, ClientError> {
         let idempotency_key = idempotency_key.into();
-        if parameters.signature.is_none()
-            && let Some(device) = &self.signing_device
-        {
-            parameters.signature = Some(
-                device
-                    .sign_thread_start(&idempotency_key, &parameters)
-                    .map_err(|error| ClientError::Protocol(error.to_string()))?,
-            );
+        if parameters.signature.is_none() && self.signing_device.is_some() {
+            self.prepare_thread_start(&idempotency_key, &mut parameters)
+                .map_err(|error| ClientError::Protocol(error.to_string()))?;
         }
         let request = ActionRequest::thread_start(id, idempotency_key, fence, parameters)
             .map_err(|error| ClientError::Protocol(error.to_string()))?;
