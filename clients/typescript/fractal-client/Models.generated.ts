@@ -3813,13 +3813,18 @@ export type ThreadClosedEvent = {
 export type ThreadCollectionContext = ({
   agent_id: AgentId;
 } | {
-  origin_ask: Id;
-  origin_ask_episode: Revision;
+  origin_episode: Revision;
+  origin_source: Id;
 } | {
   mission_id: Id;
 } | {
   recently_closed: true;
 });
+
+export type ThreadInboxOrigin = {
+  episode: Revision;
+  source_id: Id;
+};
 
 export type ThreadListQuery = ({
   agent_id: Id;
@@ -3828,8 +3833,8 @@ export type ThreadListQuery = ({
 } | {
   cursor?: string;
   limit?: number;
-  origin_ask: Id;
-  origin_ask_episode: Revision;
+  origin_episode: Revision;
+  origin_source: Id;
 } | {
   cursor?: string;
   limit?: number;
@@ -3887,8 +3892,7 @@ export type ThreadReplyParameters = {
 export type ThreadStartParameters = {
   agent_id: Id;
   content: string;
-  origin_ask: Id;
-  origin_ask_episode: Revision;
+  origin: ThreadInboxOrigin;
   signature?: DeviceSignature;
   target_id: Id;
   title: string;

@@ -146,7 +146,7 @@ public actor FractalClient {
         let context: [String: JSONValue]
         switch scope {
         case .agent(let id): context = ["agent_id": .string(id)]
-        case .ask(let id, let episode): context = ["origin_ask": .string(id), "origin_ask_episode": .string(episode)]
+        case .inbox(let source, let episode): context = ["origin_source": .string(source), "origin_episode": .string(episode)]
         case .mission(let id): context = ["mission_id": .string(id)]
         case .recentlyClosed: context = ["recently_closed": .bool(true)]
         }
@@ -335,7 +335,7 @@ public actor FractalClient {
         var query: [URLQueryItem]
         switch scope {
         case .agent(let id): query = [.init(name: "agent_id", value: id)]
-        case .ask(let id, let episode): query = [.init(name: "origin_ask", value: id), .init(name: "origin_ask_episode", value: episode)]
+        case .inbox(let source, let episode): query = [.init(name: "origin_source", value: source), .init(name: "origin_episode", value: episode)]
         case .mission(let id): query = [.init(name: "mission_id", value: id)]
         case .recentlyClosed: query = [.init(name: "recently_closed", value: "true")]
         }

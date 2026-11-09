@@ -1622,10 +1622,10 @@ export type ClientConnections = typeof ClientConnections.Type
 export type ClientConnectionsEncoded = typeof ClientConnections.Encoded
 
 export const ThreadCollectionContext = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "agent_id": AgentId, "mission_id": Schema.optionalKey(Schema.Never), "origin_ask": Schema.optionalKey(Schema.Never), "origin_ask_episode": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "origin_ask": Id, "origin_ask_episode": Revision, "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "mission_id": Id, "agent_id": Schema.optionalKey(Schema.Never), "origin_ask": Schema.optionalKey(Schema.Never), "origin_ask_episode": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "recently_closed": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_ask": Schema.optionalKey(Schema.Never), "origin_ask_episode": Schema.optionalKey(Schema.Never) })
+  Schema.Struct({ "agent_id": AgentId, "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "origin_episode": Revision, "origin_source": Id, "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "mission_id": Id, "agent_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "recently_closed": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never) })
 ], { mode: "oneOf" }).annotate({ identifier: "ThreadCollectionContext" }))()
 export type ThreadCollectionContext = typeof ThreadCollectionContext.Type
 export type ThreadCollectionContextEncoded = typeof ThreadCollectionContext.Encoded
@@ -4235,10 +4235,10 @@ export type ScgReadAuthorization = typeof ScgReadAuthorization.Type
 export type ScgReadAuthorizationEncoded = typeof ScgReadAuthorization.Encoded
 
 export const ThreadListQuery = /*#__PURE__*/ (() => Schema.Union([
-  Schema.Struct({ "agent_id": Id, "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "mission_id": Schema.optionalKey(Schema.Never), "origin_ask": Schema.optionalKey(Schema.Never), "origin_ask_episode": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "origin_ask": Id, "origin_ask_episode": Revision, "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "mission_id": Id, "agent_id": Schema.optionalKey(Schema.Never), "origin_ask": Schema.optionalKey(Schema.Never), "origin_ask_episode": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
-  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "recently_closed": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_ask": Schema.optionalKey(Schema.Never), "origin_ask_episode": Schema.optionalKey(Schema.Never) })
+  Schema.Struct({ "agent_id": Id, "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "origin_episode": Revision, "origin_source": Id, "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "mission_id": Id, "agent_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never), "recently_closed": Schema.optionalKey(Schema.Never) }),
+  Schema.Struct({ "cursor": optionalKey(Schema.String), "limit": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(100))), "recently_closed": Schema.Literal(true), "agent_id": Schema.optionalKey(Schema.Never), "mission_id": Schema.optionalKey(Schema.Never), "origin_episode": Schema.optionalKey(Schema.Never), "origin_source": Schema.optionalKey(Schema.Never) })
 ], { mode: "oneOf" }).annotate({ identifier: "ThreadListQuery" }))()
 export type ThreadListQuery = typeof ThreadListQuery.Type
 export type ThreadListQueryEncoded = typeof ThreadListQuery.Encoded

@@ -328,11 +328,17 @@ export const ThreadReplyParameters = /*#__PURE__*/ (() => Schema.Struct({
 export type ThreadReplyParameters = typeof ThreadReplyParameters.Type
 export type ThreadReplyParametersEncoded = typeof ThreadReplyParameters.Encoded
 
+export const ThreadInboxOrigin = /*#__PURE__*/ (() => Schema.Struct({
+  "episode": Revision,
+  "source_id": Id
+}).annotate({ identifier: "ThreadInboxOrigin" }))()
+export type ThreadInboxOrigin = typeof ThreadInboxOrigin.Type
+export type ThreadInboxOriginEncoded = typeof ThreadInboxOrigin.Encoded
+
 export const ThreadStartParameters = /*#__PURE__*/ (() => Schema.Struct({
   "agent_id": Id,
   "content": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(8192)),
-  "origin_ask": Id,
-  "origin_ask_episode": Revision,
+  "origin": ThreadInboxOrigin,
   "signature": optionalKey(DeviceSignature),
   "target_id": Id,
   "title": Schema.String.check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(512))

@@ -4940,17 +4940,22 @@ pub struct ThreadTimelinePage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadListScope<'a> {
     Agent(&'a str),
-    Ask { id: &'a str, episode: &'a str },
+    Inbox { source: &'a str, episode: &'a str },
     Mission(&'a str),
     RecentlyClosed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ThreadStartOrigin {
+    pub source_id: String,
+    pub episode: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct ThreadStartParameters {
     pub target_id: String,
     pub agent_id: String,
-    pub origin_ask: String,
-    pub origin_ask_episode: String,
+    pub origin: ThreadStartOrigin,
     pub title: String,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
