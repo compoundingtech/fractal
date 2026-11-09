@@ -107,7 +107,7 @@ fn operational_repair_rejects_expired_lease_token_after_pending_renewal() {
     let error = store.apply_operational_repair(&plan.token).unwrap_err();
     assert_eq!(error.code, "stale-repair-plan");
     assert_eq!(store.index().unwrap(), before, "stale repair writes no release claim");
-    assert!(store.run_projection_pending(&run.subject).unwrap(), "refusal rolls back its speculative drain");
+    assert!(!store.run_projection_pending(&run.subject).unwrap(), "refusal preserves its committed projection repair");
     let renewed = store.step_run_fenced(subject).unwrap().unwrap();
     assert_eq!(renewed.claimant.as_deref(), Some("agent/node.worker"));
     assert_eq!(renewed.claim_incarnation.as_deref(), Some("one"));
@@ -178,11 +178,13 @@ fn cancellation_drains_current_generation_and_unprojected_descendants() {
         transaction.commit().unwrap();
     }
     restore_pending_generation(&store, &first);
+    let before = store.index().unwrap();
     let stale = store.request_mission_run_cancellation_at_generation(
         &first.subject, "cancel current tree", Some(&first.generation),
     ).unwrap_err();
     assert_eq!(stale.code, "stale-fence");
-    assert!(store.run_projection_pending(&first.subject).unwrap());
+    assert_eq!(store.index().unwrap(), before, "refusal writes no claims");
+    assert!(!store.run_projection_pending(&first.subject).unwrap());
     assert!(store.request_mission_run_cancellation_at_generation(
         &first.subject, "cancel current tree", Some(&second.generation),
     ).unwrap());
@@ -342,7 +344,7 @@ fn capacity_refuses_creation_and_reopening_adoption_with_another_pending_reopen(
         assert_eq!(refused.code, "mission-run-capacity");
         assert!(refused.message.contains(&failed.subject));
         assert_eq!(target.index().unwrap(), before, "refusal writes no claims");
-        assert!(target.run_projection_pending(&failed.subject).unwrap(), "refusal rolls back its drain");
+        assert!(!target.run_projection_pending(&failed.subject).unwrap(), "refusal preserves its committed projection repair");
         let other_after = target.mission_run(&other.id).unwrap().unwrap();
         assert_eq!(other_after.generation, other_before.generation);
         assert_eq!(other_after.status, "failed");
@@ -357,12 +359,14 @@ fn capacity_refuses_creation_and_reopening_adoption_with_another_pending_reopen(
 fn revision_adoption_revalidates_generation_after_pending_drain() {
     let (store, first, second, candidate, _) = pending_revision_fixture(false);
     restore_pending_generation(&store, &first);
+    let before = store.index().unwrap();
     let stale = store.adopt_mission_revision_inner(
         &first.subject, &candidate, "person/requester", "replace current work",
         "pending-adopt", Some(&first.generation), true, None, false,
     ).unwrap_err();
     assert_eq!(stale.code, "stale-revision-proposal");
-    assert!(store.run_projection_pending(&first.subject).unwrap());
+    assert_eq!(store.index().unwrap(), before, "refusal writes no claims");
+    assert!(!store.run_projection_pending(&first.subject).unwrap());
     let adopted = store.adopt_mission_revision_inner(
         &first.subject, &candidate, "person/requester", "replace current work",
         "pending-adopt", Some(&second.generation), true, None, false,
@@ -3906,6 +3910,21 @@ fn catch_up_projection_preserves_out_of_order_work_and_local_progress_between_ch
     assert!(
         worker
             .project_replication_backlog_with_yield(|| {
+                // This callback holds the projection gate on the projection thread.
+                // Drain its committed prefix before making a synchronous fenced write;
+                // a real API writer waits on the gate from another thread.
+                let drained = {
+                    let mut connection = worker.connection.lock().unwrap();
+                    let transaction = connection.transaction().unwrap();
+                    let drained = fractal_store::store::finish_run_projection_tx(
+                        &transaction, &step,
+                    ).unwrap();
+                    transaction.commit().unwrap();
+                    drained
+                };
+                if drained {
+                    worker.run_projection_finished();
+                }
                 writes += 1;
                 worker.set_write_clock_at(accepted + 10 + writes).unwrap();
                 worker_work(
@@ -3992,6 +4011,13 @@ fn standalone_person_ask(store: &Store) -> StepRunView {
 }
 
 fn assert_local_standalone_person_ask_is_not_rebuilt(unrelated_future_claim: bool) {
+    struct ResetClock;
+    impl Drop for ResetClock {
+        fn drop(&mut self) {
+            smallclaims::store::set_thread_clock(None);
+        }
+    }
+    let _reset = ResetClock;
     let (controller, worker, unrelated_step) = standalone_person_ask_fixture();
     let local_time = now_ms() + 10_000;
     if unrelated_future_claim {
@@ -4002,6 +4028,8 @@ fn assert_local_standalone_person_ask_is_not_rebuilt(unrelated_future_claim: boo
         assert!(!projection_replayed(&worker, "controller", &controller));
     }
     worker.set_write_clock_at(local_time).unwrap();
+    // Liveness reads must observe the same clock as this future-dated local write.
+    smallclaims::store::set_thread_clock(Some(local_time));
     let ask = standalone_person_ask(&worker);
     let written = worker.step_run(&ask.subject).unwrap().unwrap();
     assert_eq!(written.status, "ready");
@@ -4579,6 +4607,7 @@ fn attention_explicit_step_revalidates_after_pending_completion() {
     controller.set_step_state(step, "completed", None).unwrap();
     receive_until_run_projection_is_pending(&controller, &worker);
     assert!(worker.run_projection_pending(step).unwrap());
+    let before = worker.index().unwrap();
     let error = worker.request_attention_closing(
         "attention/pending-ended-step",
         &AttentionRequest {
@@ -4593,9 +4622,10 @@ fn attention_explicit_step_revalidates_after_pending_completion() {
         &AttentionClosing { step: Some(step.clone()), ..Default::default() },
     ).unwrap_err();
     assert_eq!(error.code, "attention-step-ended");
+    assert_eq!(worker.index().unwrap(), before, "refusal writes no claims");
     assert!(worker.attention_request("attention/pending-ended-step").unwrap().is_none());
-    // Failed action admission rolls back its attempted drain as well as the new request.
-    assert!(worker.run_projection_pending(step).unwrap());
+    // Projection repair commits before admission; refusal still writes no request.
+    assert!(!worker.run_projection_pending(step).unwrap());
     worker.project_replication_backlog().unwrap();
     assert_eq!(worker.step_run(step).unwrap().unwrap().status, "completed");
 }
@@ -9422,7 +9452,7 @@ fn mission_retirement_refuses_a_pending_reopened_run() {
         target.mission_spec(&failed.mission, None).unwrap().unwrap().state,
         MissionState::Ready,
     );
-    assert!(target.run_projection_pending(&failed.subject).unwrap(), "refusal rolls its drain back");
+    assert!(!target.run_projection_pending(&failed.subject).unwrap(), "refusal preserves its committed projection repair");
     target.project_replication_backlog().unwrap();
     assert_eq!(target.mission_run(&failed.id).unwrap().unwrap().generation, reopened.generation);
     assert_eq!(

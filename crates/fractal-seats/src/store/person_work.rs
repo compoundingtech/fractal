@@ -1221,6 +1221,9 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
     /// applied. A person cannot answer it afterwards.
     #[test]
     fn a_structured_ask_resolves_with_its_default_answer_at_its_deadline() {
+        let asked = 1_800_000_000_000u128;
+        // The fixture's claimant lease must be live at the simulated ask time.
+        smallclaims::store::set_thread_clock(Some(asked));
         let (store, origin, mut input) = fixture();
         store.set_ask_deadlines(true);
         input.title = "Land the browser gateway?".into();
@@ -1235,8 +1238,6 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
         too_soon.deadline_ms = Some(10_000);
         assert_eq!(store.ask_person(&too_soon).unwrap_err().code, "invalid-ask-deadline");
         input.default_answer = Some("keep-open".into());
-        let asked = 1_800_000_000_000u128;
-        smallclaims::store::set_thread_clock(Some(asked));
         let ask = store.ask_person(&input).unwrap();
         smallclaims::store::set_thread_clock(None);
         let claim = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
@@ -1319,14 +1320,15 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
     /// with no answer.
     #[test]
     fn a_plain_ask_times_out_without_an_answer_at_the_fleet_default_deadline() {
+        let asked = 1_800_000_000_000u128;
+        // The fixture's claimant lease must be live at the simulated ask time.
+        smallclaims::store::set_thread_clock(Some(asked));
         let (store, origin, mut input) = fixture();
         store.set_ask_deadlines(true);
         input.default_answer = Some("friday".into());
         assert_eq!(store.ask_person(&input).unwrap_err().code, "invalid-default-answer");
         input.default_answer = None;
         store.set_default_ask_deadline_ms(2 * 3_600_000).unwrap();
-        let asked = 1_800_000_000_000u128;
-        smallclaims::store::set_thread_clock(Some(asked));
         let ask = store.ask_person(&input).unwrap();
         smallclaims::store::set_thread_clock(None);
         let claim = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
@@ -1418,11 +1420,12 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
     #[test]
     fn an_answer_stored_at_the_deadline_is_refused_on_another_member() {
         const ASKED: u128 = 1_800_000_000_000;
+        // The fixture's claimant lease must be live at the simulated ask time.
+        smallclaims::store::set_thread_clock(Some(ASKED));
         let (owner, _, mut input) = fixture();
         owner.set_ask_deadlines(true);
         input.request = Some(gateway_decision());
         input.deadline_ms = Some(3_600_000);
-        smallclaims::store::set_thread_clock(Some(ASKED));
         let ask = owner.ask_person(&input).unwrap();
         let episode = request(&owner.readers.get(), &ask.subject).unwrap().unwrap().id;
         let other = Store::open_memory("birch").unwrap();
