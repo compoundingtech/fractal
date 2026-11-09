@@ -478,11 +478,14 @@ pub fn refresh_envelope(connection: &Connection, writer: &str, sequence: u64, ha
     Ok(())
 }
 
+// Inclusive membership bounds; an absent end denotes a current incarnation.
+type MembershipWindow = (u64, Option<u64>);
+
 struct MembershipUpdate {
     generation: i64,
     fleet_id: Option<String>,
     // Only changed/deleted keys, never a replacement of the complete snapshot.
-    windows: Vec<(String, String, Option<(u64, Option<u64>)>)>,
+    windows: Vec<(String, String, Option<MembershipWindow>)>,
     complete: bool,
 }
 
