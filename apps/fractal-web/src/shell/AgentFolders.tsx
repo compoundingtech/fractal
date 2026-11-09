@@ -35,7 +35,7 @@ import { SubjectAddress } from '../resources/contract.ts'
 import { AgentUsageRow, AgentUsageSignals, openAgentUsage } from './AgentUsage.tsx'
 import { filterFolders, matchesRow, parseSidebarQuery, sortMembers, type SidebarRow } from './sidebar/filter.ts'
 import { fixtureSidebarState, sidebarState } from './sidebar/state.ts'
-import { useMachineMemory, withRememberedMachines } from './sidebar/show.ts'
+import { outsideFilterMenu, showRowFacts, useMachineMemory, withRememberedMachines } from './sidebar/show.ts'
 import type { SidebarFilters } from './sidebar/state.ts'
 import { StatusIcon, agentStatus, compactTime, type AgentStatus } from './sidebar/StatusIcon.tsx'
 import { SidebarToolbar } from './sidebar/Toolbar.tsx'
@@ -203,6 +203,8 @@ const LegacyAgentFolders = React.memo(
       [filters],
     )
     const fleet = useFleetSelection({ select: identityFleet, equal: equalFleet })
+    // The Filter menu counts facts the collection's comparator ignores under default filters, so it subscribes to them itself.
+    const menuFacts = useFleetSelection({ select: filterMenuFacts, equal: sameFilterMenuFacts })
     const selectAttention = React.useCallback(
       (subjects: readonly { readonly ref: string; readonly attention?: boolean }[]) =>
         filters.sort === 'status'
@@ -272,11 +274,12 @@ const LegacyAgentFolders = React.memo(
       rows: rows,
       sort: filters.sort,
     })
-    // Faceted Show counts: visibility under every other filter, folder-context text matches included.
+    // Faceted Filter counts: what lies outside the menu, folder-context text matches included. The counts apply the menu's own filters.
     const othersQuery = { ...parsedQuery, asking: false, machines: [] }
+    const othersFilters = outsideFilterMenu(filters)
     const othersVisible = new Set(
       view.unfiled.filter((id) =>
-        matchesRow({ row: rows.get(id)!, filters: filters, query: othersQuery }),
+        matchesRow({ row: rows.get(id)!, filters: othersFilters, query: othersQuery }),
       ),
     )
     const collectVisible = (items: readonly ProjectedFolder[]) => {
@@ -285,11 +288,12 @@ const LegacyAgentFolders = React.memo(
         collectVisible(folder.folders)
       }
     }
-    collectVisible(filterFolders({ folders: view.folders, rows: rows, filters: filters, sort: 'manual', query: othersQuery }))
+    collectVisible(filterFolders({ folders: view.folders, rows: rows, filters: othersFilters, sort: 'manual', query: othersQuery }))
     const showRows = workspaces.map((workspace) => ({
       host: workspace.host,
       asking: asking.has(workspace.id),
       others: othersVisible.has(workspace.id),
+      ...(menuFacts.get(workspace.id) ?? showRowFacts(rows.get(workspace.id)!)),
     }))
     const searching = parsedQuery.text !== ''
     // Any typed query term, including facet-only and machine-only searches, reveals matches and
@@ -861,6 +865,15 @@ const RevealAgentRow = ({ selected, treeRef, items, revealKey = '', expandAncest
 
 const noAttention: readonly string[] = []
 const identityFleet = (fleet: Feed<Fleet>): Feed<Fleet> => fleet
+type FilterMenuFacts = ReadonlyMap<string, ReturnType<typeof showRowFacts>>
+const filterMenuFacts = (fleet: Feed<Fleet>): FilterMenuFacts =>
+  new Map(fleet._tag !== 'Observed' ? [] : fleet.value.agents.map((agent) => [agent.ref, showRowFacts({ agent, status: agentStatus({ agent, fleet }) })] as const))
+// oxlint-disable-next-line overeng/named-args -- Fixed positional Equivalence shape.
+const sameFilterMenuFacts = (left: FilterMenuFacts, right: FilterMenuFacts): boolean =>
+  left.size === right.size && [...left].every(([ref, facts]) => {
+    const other = right.get(ref)
+    return other !== undefined && other.status === facts.status && other.ended === facts.ended && other.retired === facts.retired
+  })
 // oxlint-disable-next-line overeng/named-args -- Retained-ref array comparator; fixed positional Equivalence shape.
 const sameRefs = (left: readonly string[], right: readonly string[]): boolean =>
   left.length === right.length && left.every((ref, index) => ref === right[index])

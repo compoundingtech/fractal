@@ -627,7 +627,7 @@ describe('shipped live sidebar Show filter', () => {
     })
     expect(names()).toHaveLength(1)
     expect(names()[0]).toContain('Asker')
-    const trigger = [...sidebar().querySelectorAll('button')].find(button => button.textContent?.startsWith('Show'))
+    const trigger = [...sidebar().querySelectorAll('button')].find(button => button.textContent?.startsWith('Filter'))
     expect(trigger?.textContent).toContain(', 2 active')
     await act(async () => root.unmount())
     root = createRoot(host)

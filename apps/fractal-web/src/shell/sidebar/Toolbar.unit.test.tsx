@@ -13,7 +13,7 @@ vi.mock('@stylexjs/stylex', () => ({ create: (styles: unknown) => styles, define
 
 afterEach(() => vi.unstubAllGlobals())
 
-it('writes Show menu choices into the query, ANDs them with typed facets, counts them, and resets facets while preserving bare text and sort', async () => {
+it('writes Filter menu choices into the query and settings, ANDs them with typed facets, counts them, and resets while preserving bare text and sort', async () => {
   vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   // React Aria uses CSS.escape for generated collection keys; jsdom does not supply it.
@@ -31,10 +31,11 @@ it('writes Show menu choices into the query, ANDs them with typed facets, counts
     await act(async () => render())
     const search = host.querySelector<HTMLInputElement>('input[aria-label="Search agents"]')!
     expect(search.getAttribute('aria-description')).toBe('Free text matches agent names and IDs. Use is:asking for agents waiting for an answer, repo:, state:, or tool: to search other facts, and machine:build-1 or host:build-1,build-2 to filter host prefixes, ignoring case. Comma-separated values match any host; separate tokens must all match.')
-    expect(host.querySelector('button[aria-label="Filter agents · 2 active"]')).not.toBeNull()
-    const trigger = [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.startsWith('Show'))!
-    expect(trigger.textContent).toContain(', 2 active')
-    await act(async () => trigger.click())
+    const trigger = () => [...host.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent?.startsWith('Filter'))!
+    expect(host.querySelector('button[aria-label="Show finished agents"]')).toBeNull()
+    expect(search.getAttribute('placeholder')).toBe('Find an agent')
+    expect(trigger().textContent).toContain(', 2 active')
+    await act(async () => trigger().click())
     // Typed facets check their entries; an unobserved typed machine stays listed so it can be cleared.
     expect(item('host-a, 1')?.getAttribute('aria-checked')).toBe('true')
     expect(item('host, 2')?.getAttribute('aria-checked')).toBe('true')
@@ -50,19 +51,59 @@ it('writes Show menu choices into the query, ANDs them with typed facets, counts
     expect(filters.query).toBe('is:asking machine:host-a,host,host-b compiler')
     expect(matchesRow({ row, filters })).toBe(false)
     expect(matchesRow({ row: { ...row, asking: true }, filters })).toBe(true)
-    expect(host.querySelector('button[aria-label="Filter agents · 2 active"]')).not.toBeNull()
+    expect(trigger().textContent).toContain(', 4 active')
 
     await act(async () => item('Waiting for answer, 1')!.click())
     expect(filters.query).toBe('machine:host-a,host,host-b compiler')
 
-    const filterButton = host.querySelector<HTMLButtonElement>('button[aria-label="Filter agents · 1 active"]')!
-    await act(async () => filterButton.click())
-    const reset = [...document.body.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Reset filters')!
-    await act(async () => reset.click())
+    // Statuses and finished agents live in the same menu, and stay checked as they toggle.
+    await act(async () => item('Working, 0')!.click())
+    expect(filters.statuses).toEqual(['working'])
+    await act(async () => item('Show ended, 0')!.click())
+    expect(filters.hideEnded).toBe(true)
+    expect(trigger().textContent).toContain(', 5 active')
+    expect(item('Show ended, 0')?.getAttribute('aria-checked')).toBe('false')
+
+    // Rare statuses fold behind More until asked for.
+    const menuItem = (name: string) => [...document.body.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(node => node.textContent === name)
+    expect(item('Offline, 0')).toBeNull()
+    await act(async () => menuItem('More')!.click())
+    expect(item('Offline, 0')).not.toBeNull()
+    expect(menuItem('Fewer')).not.toBeUndefined()
+
+    await act(async () => menuItem('Reset filters')!.click())
     expect(filters).toEqual({ ...defaultFilters, query: 'compiler', sort: 'name' })
-    expect(host.querySelector('button[aria-label="Filter agents"]')).not.toBeNull()
+    expect(trigger().textContent).toBe('Filter')
   } finally {
     await act(async () => root.unmount())
     host.remove()
   }
 })
+
+it('offers Clear search only with text, clears like Escape and keeps focus in the field', async () => {
+  vi.stubGlobal('IS_REACT_ACT_ENVIRONMENT', true)
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+  vi.stubGlobal('CSS', { escape: (value: string) => value })
+  const host = document.createElement('div')
+  document.body.append(host)
+  const root = createRoot(host)
+  let filters: SidebarFilters = { ...defaultFilters, query: 'compiler is:asking machine:host-a repo:api', hideEnded: true, sort: 'name' }
+  const update = (value: SidebarFilters) => { filters = value; render() }
+  const render = () => root.render(<SidebarToolbar filters={filters} update={update} hosts={['host-a']} showRows={[]} />)
+  const clear = () => host.querySelector<HTMLButtonElement>('button[aria-label="Clear search"]')
+  try {
+    await act(async () => render())
+    expect(host.querySelector('kbd')).toBeNull()
+    expect(clear()?.tabIndex).toBe(0)
+    await act(async () => clear()!.click())
+    // Escape's semantics: the whole query goes, and nothing outside the query changes.
+    expect(filters).toEqual({ ...defaultFilters, query: '', hideEnded: true, sort: 'name' })
+    expect(document.activeElement).toBe(host.querySelector('input[aria-label="Search agents"]'))
+    expect(clear()).toBeNull()
+    expect(host.querySelector('kbd')?.textContent).toBe('/')
+  } finally {
+    await act(async () => root.unmount())
+    host.remove()
+  }
+})
+

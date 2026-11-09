@@ -64,7 +64,7 @@ export function sidebarRowDescription(row: Row, reportedStatusOnly = false): str
     if (progress._tag === 'Known') parts.push(`${progress.done} of ${progress.total} steps`)
     if (step._tag === 'Step') parts.push(`Step: ${step.name}`)
     if (step._tag === 'Waiting') parts.push(`Waiting for you: ${step.handle === undefined ? '' : `${step.handle} `}${step.question}`)
-    if (queued.length > 0) parts.push(`Queued missions: ${queued.map(mission => mission.slug).join(', ')}`)
+    if (queued.length > 0) parts.push(`Queued missions: ${queued.map(mission => mission.title ?? mission.slug).join(', ')}`)
   }
   parts.push(row.subagentObservation?._tag === 'Reported' ? `Subagents: ${row.children.length}` : sidebarSubagentObservationText(row.subagentObservation))
   parts.push(`ID: ${row.ref}`)
