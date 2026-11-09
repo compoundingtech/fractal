@@ -65,6 +65,15 @@ async fn browser_pairing_wrong_login_disabled_and_rate_limit() {
     let (_root, mut state, session) = fixture().await;
     let body = || Json(serde_json::from_value(json!({"deviceLabel":"Browser","tailnetLogin":"wrong@example.test","requestKeyDigest":"a".repeat(64)})).unwrap());
     assert!(begin(State(state.clone()),Extension(session.clone()),body()).await.is_err());
+    for n in 0..3 {
+        state.store.graph.append_claim(&ClaimInput {
+            subject: format!("custom/client/pairing-retained-{n}"), kind: "custom.client.pairing-begun".into(),
+            actor: Some(session.authority_actor.clone()), fields: serde_json::from_value(json!({
+                "browser_request": true, "tailnet_login": "owner@example.test",
+                "expires_at_unix_ms": client_now_ms() as u64 + 60_000,
+            })).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None,
+        }).unwrap();
+    }
     for _ in 0..3 { start(&state,&session,&"a".repeat(64)).await; }
     assert!(begin(State(state.clone()),Extension(session.clone()),Json(serde_json::from_value(json!({"deviceLabel":"Browser","tailnetLogin":"owner@example.test","requestKeyDigest":"b".repeat(64)})).unwrap())).await.is_err());
     state.browser_pairing_login = None;
