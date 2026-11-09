@@ -81,7 +81,7 @@ pub fn expiry_key(value: u64) -> String { format!("{value:020}") }
 
 pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
     connection.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h19226e0dde9c owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-variable-columns */
+        /* sqlite-large-value: allow-for-now lv-hd3babb5b6b9a owner=smallclaims::store::assistant_grant_authority TODO=chunk-or-reference-variable-columns */
         "CREATE TABLE IF NOT EXISTS assistant_grant_authority (
             claim_id TEXT NOT NULL, base_claim_id TEXT NOT NULL,
             grant_subject TEXT NOT NULL, kind TEXT NOT NULL, origin TEXT NOT NULL,
@@ -105,12 +105,12 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
             ON assistant_grant_effective(grant_subject);
          CREATE TABLE IF NOT EXISTS assistant_grant_pending (
             claim_id TEXT PRIMARY KEY, grant_subject TEXT NOT NULL, kind TEXT NOT NULL,
-            origin TEXT NOT NULL, sequence INTEGER NOT NULL, authenticated INTEGER NOT NULL,
-            record TEXT NOT NULL);
+            origin TEXT NOT NULL, actor TEXT NOT NULL, sequence INTEGER NOT NULL,
+            authenticated INTEGER NOT NULL, record TEXT NOT NULL);
          CREATE INDEX IF NOT EXISTS assistant_grant_pending_subject_index
-            ON assistant_grant_pending(grant_subject,authenticated);
+            ON assistant_grant_pending(grant_subject,authenticated,origin,actor,kind);
          CREATE INDEX IF NOT EXISTS assistant_grant_pending_writer_index
-            ON assistant_grant_pending(origin,sequence,authenticated);
+            ON assistant_grant_pending(origin,authenticated,sequence,claim_id);
          CREATE TABLE IF NOT EXISTS assistant_grant_dirty (claim_id TEXT PRIMARY KEY);
          CREATE TRIGGER IF NOT EXISTS assistant_grant_dirty_insert AFTER INSERT ON claims
          WHEN NEW.kind IN ('custom.client.assistant.v1.granted','custom.client.assistant.v1.policy','custom.client.assistant.v1.revoked')
@@ -124,13 +124,12 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
 }
 
 pub fn ready(connection: &Connection) -> Result<(), FractalError> {
-    let version: Option<String> = connection.query_row(
-        "SELECT value FROM meta WHERE key='assistant_grant_authority_version'", [], |row| row.get(0),
-    ).optional().map_err(internal)?;
-    let dirty: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM assistant_grant_dirty)", [], |row| row.get(0),
+    let complete: bool = connection.query_row(
+        "SELECT COALESCE((SELECT value FROM meta WHERE key='assistant_grant_authority_version'),'')=?1
+            AND NOT EXISTS(SELECT 1 FROM assistant_grant_dirty)",
+        [VERSION], |row| row.get(0),
     ).map_err(internal)?;
-    if version.as_deref() != Some(VERSION) || dirty {
+    if !complete {
         return Err(FractalError::new("assistant-grant-authority-not-ready", "external-grant authority backfill is in progress; retry after it completes"));
     }
     Ok(())
@@ -168,8 +167,8 @@ pub fn candidates(connection: &Connection, principal: &str, owner: &str, expiry_
     ready(connection)?;
     let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h556bdadaf8cd owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ CANDIDATES_QUERY).map_err(internal)?;
     let records = statement.query_map(params![principal,owner,expiry_cut.map(expiry_key),excluded,ignored_profile], |row| row.get::<_,String>(0))
-        .map_err(internal)?.collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?;
-    records.into_iter().map(decode).collect()
+        .map_err(internal)?;
+    records.map(|record| decode(record.map_err(internal)?)).collect()
 }
 pub fn by_credential(connection: &Connection, digest: &str) -> Result<Option<ClaimRecord>, FractalError> {
     ready(connection)?;
@@ -200,11 +199,13 @@ fn insert_authority(connection: &Connection, claim: &ClaimRecord, base: &ClaimRe
 pub fn rebuild_subject(connection: &Connection, subject: &str) -> Result<()> {
     connection.execute(/* sqlite-large-value: allow-for-now lv-h47619972ac92 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_effective WHERE grant_subject=?1", [subject])?;
     let mut statement = connection.prepare_cached("SELECT record FROM assistant_grant_authority WHERE grant_subject=?1 AND kind=?2")?;
-    let records = statement.query_map(params![subject,GRANTED], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let records = statement.query_map(params![subject,GRANTED], |row| row.get::<_,String>(0))?;
     for record in records {
+        let record = record?;
         let grant: ClaimRecord = serde_json::from_str(&record)?;
-        let policy = transition_unchecked(connection,&grant,POLICY)?.unwrap_or_else(|| grant.clone());
-        if !structurally_valid(&grant,&policy) { continue; }
+        let policy_claim = transition_unchecked(connection,&grant,POLICY)?;
+        let policy = policy_claim.as_ref().unwrap_or(&grant);
+        if !structurally_valid(&grant,policy) { continue; }
         let fields = &policy.body["fields"];
         connection.execute(/* sqlite-large-value: allow-for-now lv-h2909dd1a0b9c owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_effective(claim_id,grant_subject,principal,owner,profile,expires_at,revoked,grant_record)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
@@ -214,20 +215,35 @@ pub fn rebuild_subject(connection: &Connection, subject: &str) -> Result<()> {
     }
     Ok(())
 }
-fn attach_subject(connection: &Connection, subject: &str) -> Result<()> {
-    let records = {
-        let mut statement = connection.prepare_cached("SELECT record FROM assistant_grant_pending WHERE grant_subject=?1 AND authenticated=1")?;
-        statement.query_map([subject], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?
-    };
-    let claims: Vec<ClaimRecord> = records.into_iter().map(|record| serde_json::from_str(&record)).collect::<serde_json::Result<_>>()?;
+fn attach_claim(connection: &Connection, claim: &ClaimRecord) -> Result<()> {
     let mut changed = false;
-    for grant in claims.iter().filter(|claim| claim.kind==GRANTED) {
-        changed |= insert_authority(connection,grant,grant)?;
-        for transition in claims.iter().filter(|claim| claim.kind!=GRANTED) {
-            if transition_valid(grant,transition) { changed |= insert_authority(connection,transition,grant)?; }
+    if claim.kind == GRANTED {
+        changed |= insert_authority(connection,claim,claim)?;
+        // Only this base's issuer prefix can attach to it. In particular, an
+        // authenticated wrong-actor history cannot enlarge later admission work.
+        let mut statement = connection.prepare_cached(
+            "SELECT record FROM assistant_grant_pending WHERE grant_subject=?1
+             AND authenticated=1 AND origin=?2 AND actor=?3 AND kind<>?4")?;
+        let records = statement.query_map(params![claim.subject,claim.origin,claim.actor,GRANTED], |row| row.get::<_,String>(0))?;
+        for record in records {
+            let transition: ClaimRecord = serde_json::from_str(&record?)?;
+            if transition_valid(claim,&transition) {
+                changed |= insert_authority(connection,&transition,claim)?;
+            }
+        }
+    } else {
+        let mut statement = connection.prepare_cached(
+            "SELECT record FROM assistant_grant_authority WHERE grant_subject=?1
+             AND kind=?2 AND origin=?3 AND actor=?4")?;
+        let records = statement.query_map(params![claim.subject,GRANTED,claim.origin,claim.actor], |row| row.get::<_,String>(0))?;
+        for record in records {
+            let grant: ClaimRecord = serde_json::from_str(&record?)?;
+            if transition_valid(&grant,claim) {
+                changed |= insert_authority(connection,claim,&grant)?;
+            }
         }
     }
-    if changed { rebuild_subject(connection,subject)?; }
+    if changed { rebuild_subject(connection,&claim.subject)?; }
     Ok(())
 }
 fn local_origin(connection: &Connection) -> Result<String> {
@@ -247,10 +263,11 @@ pub fn refresh_claim(connection: &Connection, id: &str, trusted_local: bool) -> 
         let sequence: u64 = connection.query_row("SELECT replica_sequence FROM batches WHERE id=?1", [&claim.batch_id], |row| row.get(0))?;
         let authenticated = (trusted_local && claim.origin == local_origin(connection)?)
             || authenticated_claim(connection,&claim.id)?;
-        connection.execute(/* sqlite-large-value: allow-for-now lv-h4276e804ce28 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_pending(claim_id,grant_subject,kind,origin,sequence,authenticated,record)
-            VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(claim_id) DO UPDATE SET authenticated=MAX(authenticated,excluded.authenticated)",
-            params![claim.id,claim.subject,claim.kind,claim.origin,sequence,authenticated,serde_json::to_string(&claim)?])?;
-        if authenticated { attach_subject(connection,&claim.subject)?; }
+        let changed = connection.execute(/* sqlite-large-value: allow-for-now lv-h9cf86ad98d1e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_pending(claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record)
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(claim_id) DO UPDATE SET authenticated=excluded.authenticated
+            WHERE assistant_grant_pending.authenticated<excluded.authenticated",
+            params![claim.id,claim.subject,claim.kind,claim.origin,claim.actor,sequence,authenticated,serde_json::to_string(&claim)?])? != 0;
+        if changed && authenticated { attach_claim(connection,&claim)?; }
     }
     connection.execute(/* sqlite-large-value: allow-for-now lv-h3221720b83b7 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_dirty WHERE claim_id=?1", [id])?;
     Ok(())
@@ -328,12 +345,24 @@ fn refresh_membership_from(connection: &Connection, membership: &crate::fleet::M
     }
     connection.execute(/* sqlite-large-value: allow-for-now lv-hbcecffaa18c4 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_membership_generation',?1)",[generation.to_string()])?;
     for (writer,start,end) in changed {
-        let ids = {
-            let mut statement = connection.prepare_cached("SELECT claim_id FROM assistant_grant_pending INDEXED BY assistant_grant_pending_writer_index
-                WHERE origin=?1 AND sequence>=?2 AND (?3 IS NULL OR sequence<=?3) AND authenticated=0")?;
-            statement.query_map(params![writer,start,end], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        for id in ids { refresh_claim(connection,&id,false)?; }
+        let mut cursor = (0_u64, String::new());
+        loop {
+            let ids = {
+                let mut statement = connection.prepare_cached(
+                    "SELECT sequence,claim_id FROM assistant_grant_pending INDEXED BY assistant_grant_pending_writer_index
+                     WHERE origin=?1 AND authenticated=0 AND sequence>=?2
+                       AND (?3 IS NULL OR sequence<=?3) AND (sequence,claim_id)>(?4,?5)
+                     ORDER BY sequence,claim_id LIMIT 64")?;
+                statement.query_map(params![writer,start,end,cursor.0,cursor.1],
+                    |row| Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?)))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?
+            };
+            if ids.is_empty() { break; }
+            for (sequence,id) in ids {
+                refresh_claim(connection,&id,false)?;
+                cursor = (sequence,id);
+            }
+        }
     }
     Ok(())
 }
@@ -345,8 +374,9 @@ pub fn backfill_slice(connection: &Connection, budget: Duration) -> Result<bool>
     let started = Instant::now();
     let origin = local_origin(connection)?;
     refresh_membership(connection)?;
-    let complete = ready(connection).is_ok();
-    if !complete {
+    // A completed version only drains the old-build dirty queue. Readiness also
+    // includes that queue, but must never cause a completed history rescan.
+    if fleet_meta(connection,"assistant_grant_authority_version")?.as_deref() != Some(VERSION) {
         for kind in KINDS {
             let key = format!("assistant_grant_authority_cursor/{kind}");
             loop {
