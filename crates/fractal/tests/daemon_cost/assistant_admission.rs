@@ -116,10 +116,12 @@ fn execution_identity() -> Value {
     let expected = required("ST_ADMISSION_EXPECT_REVISION");
     assert_eq!(expected.len(), 40, "use a full commit ID");
     assert!(expected.bytes().all(|byte| byte.is_ascii_hexdigit()), "use a full commit ID");
-    let built_revision = option_env!("ST_ADMISSION_BUILD_REVISION")
-        .expect("build with ST_ADMISSION_BUILD_REVISION; do not reuse an unidentified executable");
-    let build_provenance = option_env!("ST_ADMISSION_BUILD_PROVENANCE")
-        .expect("build with ST_ADMISSION_BUILD_PROVENANCE");
+    let (Some(built_revision), Some(build_provenance)) = (
+        option_env!("ST_ADMISSION_BUILD_REVISION"),
+        option_env!("ST_ADMISSION_BUILD_PROVENANCE"),
+    ) else {
+        panic!("opt-in measurement requires build revision and provenance; see harness instructions");
+    };
     assert!(!build_provenance.trim().is_empty(), "build provenance must not be empty");
     assert_eq!(built_revision, expected, "the executable was built for a different source revision");
     let binary = std::env::current_exe().unwrap().canonicalize().unwrap();
