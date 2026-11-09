@@ -18,7 +18,7 @@ let
       if name == "fractal-daemon" then { __toString = _: text; }
       else basePkgs.writeShellScript name text;
   };
-  evaluate = darwin: extraArgs:
+  evaluate = darwin: phase: extraArgs:
     (lib.evalModules {
       specialArgs = {
         pkgs = mkPkgs darwin;
@@ -50,7 +50,7 @@ let
             inboxFallbackAgent = "agent/example/inbox";
             binary.path = "/opt/fractal/bin/fractal";
             ptyPackage = null;
-            fractalMigration.phase = "completed";
+            fractalMigration.phase = phase;
             inherit extraArgs;
           };
         })
@@ -63,7 +63,7 @@ let
   };
   check = darwin: name: case:
     let
-      config = evaluate darwin case.extraArgs;
+      config = evaluate darwin "completed" case.extraArgs;
       command = if darwin then builtins.head config.launchd.agents.fractal.config.ProgramArguments
         else config.systemd.user.services.fractal.Service.ExecStart;
       equals = name == "equals";
@@ -77,6 +77,8 @@ let
       "${name}: expected exactly one config option";
     assert lib.assertMsg (lib.hasInfix expected command)
       "${name}: expected caller config or default in emitted daemon command";
+    assert lib.assertMsg (darwin || lib.hasInfix "${expected} \"--client-gateway-socket\" \"%t/fractal-client.sock\"" command)
+      "${name}: config and runtime gateway must be separate systemd arguments";
     assert lib.assertMsg (lib.hasInfix "inbox_fallback_agent = \"agent/example/inbox\"" config.xdg.configFile."st3/config.toml".text)
       "${name}: missing explicit Inbox fallback in managed configuration";
     { inherit command; config = case.expected; };
@@ -84,7 +86,13 @@ in
 {
   systemd = lib.mapAttrs (check false) cases;
   launchd = lib.mapAttrs (check true) cases;
+  legacySystemdBoundary = lib.mapAttrs (name: case:
+    let command = (evaluate false "legacy" case.extraArgs).systemd.user.services.smalltalk.Service.ExecStart;
+    in assert lib.assertMsg (lib.hasSuffix "\" \"--client-gateway-socket\" \"%t/fractal-client.sock\"" command)
+      "${name}: legacy service must separate its final argument from the runtime gateway";
+    true
+  ) cases;
   # Multiple caller options must be rejected by the new completed-phase guard.
   rejectsDuplicate = assert !(builtins.all (item: item.assertion)
-    (evaluate false [ "--config" "/one" "--config=/two" ]).assertions); true;
+    (evaluate false "completed" [ "--config" "/one" "--config=/two" ]).assertions); true;
 }

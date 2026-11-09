@@ -671,7 +671,7 @@ in
           ExecStart = lib.concatStringsSep " " (map systemdArg ([ executable ] ++ upArgs))
             # Preserve systemd's runtime-directory specifier; systemdArg escapes literal percent signs.
             + lib.optionalString (cfg.clientGatewaySocket == null)
-              '' "--client-gateway-socket" "%t/fractal-client.sock"'';
+              " \"--client-gateway-socket\" \"%t/fractal-client.sock\"";
           Environment = lib.mapAttrsToList (name: value: "${name}=${value}") (environment // { MALLOC_ARENA_MAX = "2"; });
           Restart = "on-failure";
           RestartSec = "5s";
@@ -715,7 +715,7 @@ in
           ExecCondition = toString targetGuard;
           ExecStart = lib.concatStringsSep " " (map systemdArg ([ targetExecutable ] ++ targetUpArgs))
             + lib.optionalString (cfg.clientGatewaySocket == null)
-              '' "--client-gateway-socket" "%t/fractal-client.sock"'';
+              " \"--client-gateway-socket\" \"%t/fractal-client.sock\"";
           Environment = lib.mapAttrsToList (name: value: "${name}=${value}") (targetEnvironment // { MALLOC_ARENA_MAX = "2"; });
           Restart = "on-failure";
           RestartSec = "5s";
