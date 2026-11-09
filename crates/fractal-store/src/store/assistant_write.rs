@@ -1,5 +1,6 @@
-//! Server-established assistant provenance, checked in the mutation's writer transaction.
+//! Server-established assistant provenance, rechecked against projected authority in the mutation's writer transaction.
 use super::*;
+use smallclaims::store::assistant_grant_authority as authority;
 
 #[derive(Clone, Debug)]
 pub struct AssistantWriteAuthorization {
@@ -17,142 +18,6 @@ impl AssistantWriteAuthorization {
     }
 }
 
-pub fn principal(fields: &Value) -> Option<&str> {
-    match fields.get("principal") {
-        None => Some("assistant/chatgpt"),
-        Some(value) => value.as_str().filter(|principal| matches!(*principal, "assistant/chatgpt" | "assistant/mcp")),
-    }
-}
-
-/// Select the last structurally valid transition. Foreign results require full
-/// cryptographic member-writer verification by the caller, including its keyed
-/// membership window; a signature row alone does not authenticate provenance.
-pub fn validated_transition(
-    connection: &Connection, granted: &ClaimRecord, owner: &str, local_origin: &str, kind: &str,
-) -> Result<Option<ClaimRecord>, FractalError> {
-    validated_transition_before(connection, granted, owner, local_origin, kind, None)
-}
-
-/// Continue an indexed seek past a structurally valid but unauthenticated row.
-pub fn validated_transition_before(
-    connection: &Connection, granted: &ClaimRecord, owner: &str, local_origin: &str,
-    kind: &str, before: Option<u64>,
-) -> Result<Option<ClaimRecord>, FractalError> {
-    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-        validated_transition_query().replace(
-            "ORDER BY claims.store_index DESC LIMIT 1",
-            "AND (?7 IS NULL OR claims.store_index<?7) ORDER BY claims.store_index DESC LIMIT 1",
-        )
-    });
-    connection.query_row(
-        /* sqlite-large-value: allow-for-now lv-h1cad9af7ef23 owner=fractal_store::store::assistant_write TODO=trace-statement-and-value-representation */
-        &QUERY,
-        params![granted.subject, kind, granted.origin, owner, granted.id, local_origin, before],
-        claim_from_row,
-    ).optional().map_err(internal)
-}
-
-/// The origin/actor prefix bounds work independently of unauthoritative overlays.
-/// All field checks precede LIMIT, so malformed newer policies cannot hide a
-/// previous valid transition. Ordering intentionally matches subject history.
-pub fn validated_transition_query() -> &'static str {
-    static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!(
-        "WITH original AS (SELECT body FROM claims WHERE id=?5) SELECT {CLAIM_COLUMNS}
-        FROM claims INDEXED BY claims_assistant_v1_transition_index
-        WHERE claims.subject=?1 AND claims.kind=?2 AND claims.origin=?3 AND claims.actor=?4
-        AND ?2 IN ('custom.client.assistant.v1.policy','custom.client.assistant.v1.revoked')
-        AND json_type(body,'$.fields')='object'
-        AND json_extract(body,'$.fields.issuer')=?4
-        AND json_extract(body,'$.fields.grant_id')=json_extract((SELECT body FROM original),'$.fields.grant_id')
-        AND json_extract(body,'$.fields.issuer')=json_extract((SELECT body FROM original),'$.fields.issuer')
-        AND (json_type(body,'$.fields.principal') IS NULL
-             OR json_extract(body,'$.fields.principal') IN ('assistant/chatgpt','assistant/mcp'))
-        AND (json_type((SELECT body FROM original),'$.fields.principal') IS NULL
-             OR json_extract((SELECT body FROM original),'$.fields.principal') IN ('assistant/chatgpt','assistant/mcp'))
-        AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')
-            =COALESCE(json_extract((SELECT body FROM original),'$.fields.principal'),'assistant/chatgpt')
-        AND (json_type(body,'$.fields.profile') IS NULL OR json_extract(body,'$.fields.profile') IN ('assistant','service'))
-        AND (json_type((SELECT body FROM original),'$.fields.profile') IS NULL OR json_extract((SELECT body FROM original),'$.fields.profile') IN ('assistant','service'))
-        AND COALESCE(json_extract(body,'$.fields.profile'),'assistant')
-            =COALESCE(json_extract((SELECT body FROM original),'$.fields.profile'),'assistant')
-        AND (?2='custom.client.assistant.v1.revoked' OR (
-            json_extract(body,'$.fields.session_actor')=json_extract((SELECT body FROM original),'$.fields.session_actor')
-            AND json_extract(body,'$.fields.profile') IS json_extract((SELECT body FROM original),'$.fields.profile')
-            AND json_extract(body,'$.fields.session_actor')
-                =COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt') || '/session/' || json_extract(body,'$.fields.grant_id')
-            AND ((length(json_extract(body,'$.fields.grant_id'))=24
-                  AND json_extract(body,'$.fields.grant_id') NOT GLOB '*[^0-9a-fA-F]*'
-                  AND claims.subject='custom/client/assistant-v1-' || json_extract(body,'$.fields.grant_id'))
-                 OR (length(json_extract(body,'$.fields.grant_id'))=40
-                  AND substr(json_extract(body,'$.fields.grant_id'),1,16)='assistant-grant/'
-                  AND substr(json_extract(body,'$.fields.grant_id'),17) NOT GLOB '*[^0-9a-fA-F]*'
-                  AND claims.subject='custom/client/assistant-v1-' || substr(json_extract(body,'$.fields.grant_id'),17)))
-            AND json_extract(body,'$.fields.minimal_read_mode') IN ('approval-once','caller-bound-allow')
-            AND json_type(body,'$.fields.disclosure_consent')='true'
-            AND json_type(body,'$.fields.expires_at_unix_ms') IN ('integer','real')
-            AND (body -> '$.fields.expires_at_unix_ms') NOT GLOB '*[^0-9]*'
-            AND (length(body -> '$.fields.expires_at_unix_ms')<20
-                 OR (length(body -> '$.fields.expires_at_unix_ms')=20
-                     AND (body -> '$.fields.expires_at_unix_ms')<='18446744073709551615'))
-            AND json_type(body,'$.fields.scopes')='array'
-            AND NOT EXISTS (SELECT 1 FROM json_each(body,'$.fields.scopes') AS scope
-                WHERE scope.type<>'text' OR scope.value NOT IN (
-                    'read.assistant.summary','read.assistant.attention','read.assistant.missions',
-                    'read.assistant.agents','read.assistant.conversation','read.assistant.terminal',
-                    'write.assistant.messages','write.assistant.custom-reply','write.assistant.answers'))
-            AND json_type(body,'$.fields.credential') IS NULL AND json_type(body,'$.fields.code') IS NULL
-            AND json_type((SELECT body FROM original),'$.fields.credential') IS NULL AND json_type((SELECT body FROM original),'$.fields.code') IS NULL
-            AND json_type((SELECT body FROM original),'$.fields.credential_hash')='text'
-            AND length(json_extract((SELECT body FROM original),'$.fields.credential_hash'))=64
-            AND json_extract((SELECT body FROM original),'$.fields.credential_hash') NOT GLOB '*[^0-9a-fA-F]*'
-            AND NOT EXISTS (SELECT 1 FROM json_each(body,'$.fields') AS digest
-                WHERE digest.key IN ('credential_hash','code_hash')
-                  AND (digest.type<>'text' OR length(digest.value)<>64 OR digest.value GLOB '*[^0-9a-fA-F]*'))
-            AND NOT EXISTS (SELECT 1 FROM json_each((SELECT body FROM original),'$.fields') AS digest
-                WHERE digest.key IN ('credential_hash','code_hash')
-                  AND (digest.type<>'text' OR length(digest.value)<>64 OR digest.value GLOB '*[^0-9a-fA-F]*'))
-        ))
-        AND (?3=?6 OR EXISTS (
-            SELECT 1 FROM replica_records AS records
-            JOIN replica_envelopes AS envelopes USING(writer,sequence,envelope_hash)
-            JOIN replica_envelope_signatures AS signatures USING(writer,sequence,envelope_hash)
-            WHERE records.claim_id=claims.id AND records.writer=claims.origin
-              AND records.state='valid' AND envelopes.receipt_state IN ('validated','degraded')))
-        ORDER BY claims.store_index DESC LIMIT 1"));
-    QUERY.as_str()
-}
-
-/// Hydrate candidates and their latest structurally valid transitions in one
-/// statement. `selection` returns grant IDs using parameters 1 through 6;
-/// parameter 7 is the owner, 8 an optional profile to ignore, 9 an excluded ID.
-/// The correlated subqueries use the same validation as the mutation writer.
-pub fn validated_candidates_query(selection: &str) -> String {
-    let seek = |kind: &str| {
-        validated_transition_query()
-            .replace(&format!("SELECT {CLAIM_COLUMNS}"), "SELECT claims.id")
-            .replace("?5", "granted.id")
-            .replace("?1", "granted.subject")
-            .replace("?2", &format!("'{kind}'"))
-            .replace("?3", "granted.origin")
-            .replace("?4", "?7")
-    };
-    let policy = seek("custom.client.assistant.v1.policy");
-    let revoked = seek("custom.client.assistant.v1.revoked");
-    format!(
-        "WITH selected AS ({selection}), grants AS (
-            SELECT claims.* FROM selected JOIN claims ON claims.id=selected.id
-            WHERE (?9 IS NULL OR claims.id<>?9)
-              AND (?8 IS NULL OR COALESCE(json_extract(claims.body,'$.fields.profile'),'assistant') IS NOT ?8)
-         )
-         SELECT {CLAIM_COLUMNS}, claims.id, 'grant' FROM grants AS claims
-         UNION ALL
-         SELECT {CLAIM_COLUMNS}, granted.id, 'policy' FROM grants AS granted
-             JOIN claims ON claims.id=({policy})
-         UNION ALL
-         SELECT {CLAIM_COLUMNS}, granted.id, 'revoked' FROM grants AS granted
-             JOIN claims ON claims.id=({revoked})"
-    )
-}
 
 pub fn authorize_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<String, FractalError> {
     let granted = authorized_grant(connection, origin, authorization)?;
@@ -162,28 +27,23 @@ pub fn authorize_grant(connection: &Connection, origin: &str, authorization: &As
 
 pub fn authorized_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<ClaimRecord, FractalError> {
     let denied = || FractalError::new("forbidden", "assistant write authorization changed or expired before commit");
-    let claim = |kind: &str| -> Result<Option<ClaimRecord>, FractalError> {
-        connection.query_row(/* sqlite-large-value: allow-for-now lv-hd82c937baff5 owner=fractal_store::store::assistant_write TODO=trace-statement-and-value-representation */ &latest_claim_of_kind_query(),
-            params![authorization.grant_subject,kind],claim_from_row).optional().map_err(internal)
-    };
-    let granted = claim("custom.client.assistant.v1.granted")?.ok_or_else(denied)?;
-    let policy_claim = validated_transition(connection, &granted, &authorization.owner, origin, "custom.client.assistant.v1.policy")?;
+    let granted = authority::latest(connection, &authorization.grant_subject, authority::GRANTED)?
+        .ok_or_else(denied)?;
+    let policy_claim = authority::transition(connection, &granted, authority::POLICY)?;
     let policy = policy_claim.as_ref().unwrap_or(&granted);
     if granted.origin != origin || policy.origin != origin
-        || validated_transition(connection, &granted, &authorization.owner, origin, "custom.client.assistant.v1.revoked")?.is_some() {
+        || !authority::structurally_valid(&granted, policy)
+        || authority::transition(connection, &granted, authority::REVOKED)?.is_some() {
         return Err(denied());
     }
     let fields = &policy.body["fields"];
-    let principal = principal(fields).ok_or_else(denied)?;
-    if self::principal(&granted.body["fields"]) != Some(principal)
-        || ["grant_id", "session_actor", "issuer"].iter().any(|key| fields[*key] != granted.body["fields"][*key])
+    let principal = authority::principal(fields).ok_or_else(denied)?;
+    if fields.get("profile").is_some_and(|profile| profile != "assistant")
         || authorization.principal() != principal
         || fields["session_actor"] != authorization.actor
-        || fields["session_actor"].as_str().and_then(|actor| actor.strip_prefix(principal))
-            .and_then(|suffix| suffix.strip_prefix("/session/")) != fields["grant_id"].as_str()
         || granted.actor.as_deref() != Some(authorization.owner.as_str())
         || policy.actor.as_deref() != Some(authorization.owner.as_str())
-        || fields["issuer"] != authorization.owner || fields["disclosure_consent"] != true
+        || fields["issuer"] != authorization.owner
         || fields["policy_revision"].as_u64() != Some(authorization.policy_revision)
         || fields["expires_at_unix_ms"].as_u64().map(u128::from).is_none_or(|expiry| expiry <= now_ms())
         || !fields["scopes"].as_array().is_some_and(|scopes| scopes.iter().any(|scope| scope.as_str() == Some(&authorization.scope)))
@@ -234,11 +94,8 @@ pub fn validate_replicated(kind: &str, actor: Option<&str>, fields: &Value) -> R
 mod tests {
     use super::*;
 
-    fn transition_fixture() -> (Connection, String, Value) {
-        let connection = Connection::open_in_memory().unwrap();
-        connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
-        connection.execute_batch(SCHEMA).unwrap();
-        connection.execute("INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES('batch','local',1,'hash','1')", []).unwrap();
+    fn transition_fixture() -> (Store, String, Value) {
+        let store = Store::open_memory("local").unwrap();
         let suffix = "0123456789abcdef01234567";
         let subject = format!("custom/client/assistant-v1-{suffix}");
         let body = json!({"fields":{
@@ -248,65 +105,53 @@ mod tests {
             "disclosure_consent":true, "scopes":["write.assistant.messages"],
             "expires_at_unix_ms":u64::MAX
         }});
-        insert_transition(&connection, &subject, "original", "custom.client.assistant.v1.granted", "local", "person/owner", &body);
-        (connection, subject, body)
+        insert_transition(&store, &subject, authority::GRANTED, "person/owner", &body);
+        (store, subject, body)
     }
 
-    fn insert_transition(connection: &Connection, subject: &str, id: &str, kind: &str, origin: &str, actor: &str, body: &Value) {
-        connection.execute(
-            "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
-             VALUES(?1,'batch',?2,?3,?4,?5,?6,'[]','1')",
-            params![id,subject,kind,origin,actor,body.to_string()],
-        ).unwrap();
-    }
-
-    #[test]
-    fn validated_transition_index_is_installed_for_existing_stores() {
-        let (connection, _, _) = transition_fixture();
-        connection.execute_batch("DROP INDEX claims_assistant_v1_transition_index").unwrap();
-        connection.execute_batch(SCHEMA).unwrap();
-        let definition: String = connection.query_row(
-            "SELECT sql FROM sqlite_master WHERE name='claims_assistant_v1_transition_index'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert!(definition.contains("(subject, kind, origin, actor, store_index)"));
-        connection.execute_batch(SCHEMA).unwrap();
+    fn insert_transition(store: &Store, subject: &str, kind: &str, actor: &str, body: &Value) -> ClaimRecord {
+        store.append_claim(&ClaimInput {
+            subject: subject.into(), kind: kind.into(), actor: Some(actor.into()),
+            fields: serde_json::from_value(body["fields"].clone()).unwrap(),
+            evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+        }).unwrap()
     }
 
     #[test]
-    fn validated_transition_p1_indexed_seek_is_independent_of_wrong_origin_actor_overlays() {
-        let (connection, subject, body) = transition_fixture();
-        let kind = "custom.client.assistant.v1.policy";
-        insert_transition(&connection, &subject, "valid", kind, "local", "person/owner", &body);
-        let query = validated_transition_query();
-        let original = "original";
+    fn projected_transition_ignores_actor_overlay_flood() {
+        let (store, subject, body) = transition_fixture();
+        let granted = authority::latest(&store.readers.get(), &subject, authority::GRANTED).unwrap().unwrap();
+        let valid = insert_transition(&store, &subject, authority::POLICY, "person/owner", &body);
         let mut prior = None;
         for count in [32, 512, 7900] {
             for index in 0..count {
-                insert_transition(&connection, &subject, &format!("overlay-{count}-{index}"), kind,
-                    if index % 2 == 0 { "other" } else { "local" },
-                    if index % 2 == 0 { "person/owner" } else { "person/other" }, &body);
+                let mut overlay = body.clone();
+                overlay["fields"]["nonce"] = json!(format!("{count}-{index}"));
+                insert_transition(&store, &subject, authority::POLICY, "person/other", &overlay);
             }
-            let args = params![subject,kind,"local","person/owner",original,"local"];
-            let mut statement = connection.prepare(query).unwrap();
-            assert_eq!(statement.query_row(args, |row| row.get::<_, String>(0)).unwrap(), "valid");
+            let selected = authority::transition(&store.readers.get(), &granted, authority::POLICY).unwrap().unwrap();
+            assert_eq!(selected.id, valid.id);
+            let connection = store.readers.get();
+            let args = params![subject, authority::POLICY, granted.origin, "person/owner", granted.id];
+            let mut statement = connection.prepare(authority::TRANSITION_QUERY).unwrap();
+            let _: String = statement.query_row(args, |row| row.get(0)).unwrap();
             let cost = statement.get_status(rusqlite::StatementStatus::VmStep);
             if let Some(prior) = prior { assert!(cost <= prior + 20, "{prior} -> {cost}"); }
             prior = Some(cost);
-            let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {query}")).unwrap()
+            let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {}", authority::TRANSITION_QUERY)).unwrap()
                 .query_map(args, |row| row.get::<_, String>(3)).unwrap()
                 .collect::<rusqlite::Result<Vec<_>>>().unwrap().join("; ");
-            assert!(plan.contains("claims_assistant_v1_transition_index (subject=? AND kind=? AND origin=? AND actor=?)"), "{plan}");
+            assert!(plan.contains("assistant_grant_authority_transition_index"), "{plan}");
             assert!(!plan.contains("USE TEMP B-TREE FOR ORDER BY"), "{plan}");
         }
     }
 
     #[test]
-    fn validated_transition_ignores_malformed_newer_policies_and_revocations() {
-        let (connection, subject, body) = transition_fixture();
-        for kind in ["custom.client.assistant.v1.policy", "custom.client.assistant.v1.revoked"] {
-            let valid = format!("valid-{kind}");
-            insert_transition(&connection, &subject, &valid, kind, "local", "person/owner", &body);
+    fn projected_transition_ignores_malformed_newer_policies_and_revocations() {
+        let (store, subject, body) = transition_fixture();
+        let granted = authority::latest(&store.readers.get(), &subject, authority::GRANTED).unwrap().unwrap();
+        for kind in [authority::POLICY, authority::REVOKED] {
+            let valid = insert_transition(&store, &subject, kind, "person/owner", &body);
             let mut patches = vec![
                 json!({"principal":null}), json!({"principal":"assistant/mcp"}),
                 json!({"profile":null}), json!({"profile":"service"}),
@@ -323,41 +168,39 @@ mod tests {
                     json!({"credential_hash":"invalid"}), json!({"code_hash":null}),
                 ]);
             }
-            for (index, patch) in patches.into_iter().enumerate() {
+            for patch in patches {
                 let mut malformed = body.clone();
                 malformed["fields"].as_object_mut().unwrap().extend(patch.as_object().unwrap().clone());
-                insert_transition(&connection, &subject, &format!("malformed-{kind}-{index}"), kind, "local", "person/owner", &malformed);
+                insert_transition(&store, &subject, kind, "person/owner", &malformed);
             }
-            let selected = connection.query_row(validated_transition_query(),
-                params![subject,kind,"local","person/owner","original","local"],
-                |row| row.get::<_, String>(0)).unwrap();
-            assert_eq!(selected, valid);
+            let selected = authority::transition(&store.readers.get(), &granted, kind).unwrap().unwrap();
+            assert_eq!(selected.id, valid.id);
         }
     }
 
     #[test]
-    fn validated_transition_accepts_raw_hex_grant_identity() {
-        let (connection, subject, mut body) = transition_fixture();
+    fn projected_transition_accepts_raw_hex_grant_identity() {
+        let store = Store::open_memory("local").unwrap();
         let suffix = "0123456789abcdef01234567";
-        body["fields"]["grant_id"] = json!(suffix);
-        body["fields"]["session_actor"] = json!(format!("assistant/chatgpt/session/{suffix}"));
-        connection.execute("UPDATE claims SET body=?1 WHERE id='original'", [body.to_string()]).unwrap();
-        let kind = "custom.client.assistant.v1.policy";
-        insert_transition(&connection, &subject, "raw-policy", kind, "local", "person/owner", &body);
-        let selected = connection.query_row(validated_transition_query(),
-            params![subject,kind,"local","person/owner","original","local"],
-            |row| row.get::<_, String>(0)).unwrap();
-        assert_eq!(selected, "raw-policy");
+        let subject = format!("custom/client/assistant-v1-{suffix}");
+        let body = json!({"fields":{"grant_id":suffix,"issuer":"person/owner",
+            "session_actor":format!("assistant/chatgpt/session/{suffix}"),
+            "credential_hash":"a".repeat(64),"minimal_read_mode":"approval-once",
+            "disclosure_consent":true,"scopes":[],"expires_at_unix_ms":u64::MAX}});
+        let granted = insert_transition(&store, &subject, authority::GRANTED, "person/owner", &body);
+        let valid = insert_transition(&store, &subject, authority::POLICY, "person/owner", &body);
+        let selected = authority::transition(&store.readers.get(), &granted, authority::POLICY).unwrap().unwrap();
+        assert_eq!(selected.id, valid.id);
     }
 
     #[test]
     fn grant_principal_defaults_only_absent_legacy_fields_to_chatgpt() {
-        assert_eq!(principal(&json!({})), Some("assistant/chatgpt"));
+        assert_eq!(authority::principal(&json!({})), Some("assistant/chatgpt"));
         for expected in ["assistant/chatgpt", "assistant/mcp"] {
-            assert_eq!(principal(&json!({"principal":expected})), Some(expected));
+            assert_eq!(authority::principal(&json!({"principal":expected})), Some(expected));
         }
         for forged in [Value::Null, json!("assistant/other"), json!("person/other"), json!(7)] {
-            assert_eq!(principal(&json!({"principal":forged})), None);
+            assert_eq!(authority::principal(&json!({"principal":forged})), None);
         }
     }
 

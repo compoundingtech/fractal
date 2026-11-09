@@ -499,6 +499,7 @@ impl ApiError {
             "identity-unknown" | "lane-not-found" | "not-found" => StatusCode::NOT_FOUND,
             "private-notes-unreachable" | "private-notes-indeterminate" => StatusCode::SERVICE_UNAVAILABLE,
             "database-busy" | "database-locked" | "message-selectors-not-ready"
+            | "assistant-grant-authority-not-ready"
             | "checkpoint-proof-in-progress" | "backup-busy" => StatusCode::SERVICE_UNAVAILABLE,
             "client-diagnostics-rate-limit" => StatusCode::TOO_MANY_REQUESTS,
             "read-deadline" => StatusCode::GATEWAY_TIMEOUT,
@@ -2060,6 +2061,7 @@ pub fn client_error_code(code: Option<&str>) -> String {
         | "mission-list-not-ready"
         | "mission-list-ended"
         | "message-selectors-not-ready"
+        | "assistant-grant-authority-not-ready"
         | "response-too-large"
         | "runtime-not-local"
         | "runtime-authority-indeterminate"

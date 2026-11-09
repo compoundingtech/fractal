@@ -218,9 +218,16 @@ async fn revoke_inner(State(state): State<AppState>, Extension(session): Extensi
     }
     if !revoked(&state, &granted)? {
         let previous = effective(&state, &granted)?;
-        append(&state, subject, REVOKED, issuer, json!({"version":1,"grant_id":fields(&granted)?["grant_id"],
-            "principal":principal(fields(&granted)?)?,"issuer":issuer,"transport":session.transport,
-            "timestamp":client_timestamp(client_now_ms()),"outcome":"revoked"}), Some(&previous))?;
+        let source = fields(&granted)?;
+        let mut value = json!({"version":1,"grant_id":source["grant_id"],
+            "principal":principal(source)?,"issuer":issuer,"transport":session.transport,
+            "timestamp":client_timestamp(client_now_ms()),"outcome":"revoked"});
+        // Revocation is not issuance: retain the immutable profile, including
+        // the absence of a profile on legacy assistant grants.
+        if let Some(profile) = source.get("profile") {
+            value["profile"] = profile.clone();
+        }
+        append(&state, subject, REVOKED, issuer, value, Some(&previous))?;
         signal_changed(&state);
     }
     Ok(Json(projection(&state, &granted)?))
@@ -294,6 +301,107 @@ mod tests {
             "code":challenge["code"],"device_public_key":base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8;32])})).unwrap();
         complete(state, challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap(),
                  &request, "fabric-loopback").await.unwrap().unwrap().0
+    }
+
+    fn seeded_grant(state: &AppState, profile: Option<&str>) -> ClaimRecord {
+        let id = "111111111111111111111111";
+        let mut source = json!({"version":1,"grant_id":format!("assistant-grant/{id}"),
+            "principal":PRINCIPAL,"sender_class":"external-assistant","issuer":ISSUER,
+            "session_actor":format!("{PRINCIPAL}/session/assistant-grant/{id}"),
+            "credential_hash":credential_digest("reserved-service-credential"),
+            "device_id":"device/service-history","key_id":"service-history",
+            "scopes":SCOPES[..4],"expires_at_unix_ms":client_now_ms()+3_600_000,
+            "policy_revision":1,"minimal_read_mode":"approval-once","recipient_allowlist":[],
+            "disclosure_consent":true,"consent_evidence":"recorded owner consent"});
+        if let Some(profile) = profile {
+            source["profile"] = json!(profile);
+        }
+        // Retain pre-existing evidence without opening the production issuance gate.
+        state.store.append_claim(&ClaimInput {
+            subject: subject(id).unwrap(), kind: GRANTED.into(), actor: Some(ISSUER.into()),
+            fields: serde_json::from_value(source).unwrap(), evidence: Vec::new(),
+            expected_subject: None, idempotency_key: None,
+        }).unwrap()
+    }
+
+    #[tokio::test]
+    async fn owner_revoke_endpoint_preserves_profiles_and_is_idempotent() {
+        use axum::{body::{Body, to_bytes}, http::Request};
+        use tower::ServiceExt;
+
+        for profile in [None, Some("assistant"), Some("service")] {
+            let root = tempfile::tempdir().unwrap();
+            let state = state(root.path());
+            let granted = seeded_grant(&state, profile);
+            let app = super::super::super::router_for_transport(state.clone(),
+                ClientTransportBoundary::Unix, &[crate::api::client_v0::routes]);
+            let path = "/v1/client/assistant/grants/111111111111111111111111/revoke";
+            // An arbitrary local person must not gain the owner's revocation right.
+            let mut denied = Request::builder().method("POST").uri(path)
+                .header(LOCAL_PERSON_HEADER, "person/other").body(Body::empty()).unwrap();
+            denied.extensions_mut().insert(super::super::super::LocalPeer { pid: 8, peer_process: None, ancestor: None });
+            assert_eq!(app.clone().oneshot(denied).await.unwrap().status(), StatusCode::FORBIDDEN);
+            assert!(latest(&state, &granted.subject, REVOKED).unwrap().is_none());
+
+            let mut revocation_id = None;
+            for _ in 0..2 {
+                let mut request = Request::builder().method("POST").uri(path)
+                    .header(LOCAL_PERSON_HEADER, ISSUER).body(Body::empty()).unwrap();
+                request.extensions_mut().insert(super::super::super::LocalPeer { pid: 8, peer_process: None, ancestor: None });
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{profile:?}");
+                let body: Value = serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+                assert_eq!(body["value"]["revoked"], true);
+                let revoked = latest(&state, &granted.subject, REVOKED).unwrap().unwrap();
+                assert_eq!(fields(&revoked).unwrap().get("profile"), fields(&granted).unwrap().get("profile"));
+                assert_eq!(revoked.actor.as_deref(), Some(ISSUER));
+                assert_eq!(revoked.origin, granted.origin);
+                if let Some(id) = &revocation_id {
+                    assert_eq!(&revoked.id, id, "repeat revocation must not append another transition");
+                } else {
+                    revocation_id = Some(revoked.id);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn service_history_does_not_enable_issuance_policy_or_requests() {
+        use axum::{body::Body, http::Request};
+        use tower::ServiceExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let granted = seeded_grant(&state, Some("service"));
+        let app = super::super::super::router_for_transport(state.clone(),
+            ClientTransportBoundary::Unix, &[crate::api::client_v0::routes]);
+        for path in ["/v1/client/assistant/summary", "/v1/client/capabilities"] {
+            let request = Request::builder().uri(path)
+                .header(AUTHORIZATION, "Bearer reserved-service-credential")
+                .body(Body::empty()).unwrap();
+            assert_eq!(app.clone().oneshot(request).await.unwrap().status(), StatusCode::FORBIDDEN);
+        }
+        let policy = json!({"api_version":CLIENT_API_VERSION,"scopes":SCOPES[..4],
+            "expires_in_seconds":3600,"disclosure_consent":true,
+            "consent_evidence":"recorded owner consent","minimal_read_mode":"approval-once"});
+        let mut request = Request::builder().method("POST")
+            .uri("/v1/client/assistant/grants/111111111111111111111111/policy")
+            .header(LOCAL_PERSON_HEADER, ISSUER).header("content-type", "application/json")
+            .body(Body::from(policy.to_string())).unwrap();
+        request.extensions_mut().insert(super::super::super::LocalPeer { pid: 8, peer_process: None, ancestor: None });
+        assert_eq!(app.clone().oneshot(request).await.unwrap().status(), StatusCode::FORBIDDEN);
+        assert!(latest(&state, &granted.subject, POLICY).unwrap().is_none());
+
+        let issuance = json!({"api_version":CLIENT_API_VERSION,"device_name":"service",
+            "assistant_id":PRINCIPAL,"profile":"service","scopes":SCOPES[..4],
+            "expires_in_seconds":3600,"disclosure_consent":true,
+            "consent_evidence":"recorded owner consent"});
+        let mut request = Request::builder().method("POST").uri("/v1/client/pairings")
+            .header(LOCAL_PERSON_HEADER, ISSUER).header("content-type", "application/json")
+            .body(Body::from(issuance.to_string())).unwrap();
+        request.extensions_mut().insert(super::super::super::LocalPeer { pid: 8, peer_process: None, ancestor: None });
+        assert_eq!(app.oneshot(request).await.unwrap().status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(state.store.claims_for_kind_at(BEGUN, None, true, 10).unwrap().claims.is_empty());
     }
 
     // Frozen pre-witness shape, independent of today's generated grant model.
@@ -603,6 +711,39 @@ mod tests {
         assert_eq!(response.status(),StatusCode::FORBIDDEN);
         let body=axum::body::to_bytes(response.into_body(),usize::MAX).await.unwrap();
         assert!(!String::from_utf8(body.to_vec()).unwrap().contains("max_message_bytes"));
+    }
+
+    #[tokio::test]
+    async fn authority_backfill_refusal_is_typed_retryable_and_recovers() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let paired = paired(&state).await;
+        state.store.connection.write().execute(
+            "DELETE FROM meta WHERE key='assistant_grant_authority_version'", [],
+        ).unwrap();
+        let app = super::super::super::router_for_transport(
+            state.clone(), ClientTransportBoundary::Unix, &[crate::api::client_v0::routes],
+        );
+        let inspect = format!("/v1/client/assistant/grants/{}",
+            urlencoding::encode(paired["grant"]["id"].as_str().unwrap()));
+        for (path, bearer) in [("/v1/client/assistant/summary", true), (inspect.as_str(), false)] {
+            let mut request = Request::builder().uri(path);
+            if bearer {
+                request = request.header(AUTHORIZATION,
+                    format!("Bearer {}", paired["credential"].as_str().unwrap()));
+            } else {
+                request = request.header(LOCAL_PERSON_HEADER, ISSUER);
+            }
+            let response = app.clone().oneshot(request.body(Body::empty()).unwrap()).await.unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["code"], "assistant-grant-authority-not-ready");
+            assert_eq!(value["retryable"], true);
+        }
+        while !state.store.advance_assistant_grant_authority_backfill().unwrap() {}
+        assert!(authenticate(&state,
+            &credential_digest(paired["credential"].as_str().unwrap()), "unix").unwrap().is_some());
     }
 
     #[tokio::test]

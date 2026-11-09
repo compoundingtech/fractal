@@ -43,6 +43,11 @@ pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
 
 mod proof;
 pub mod prepared_envelope;
+pub mod assistant_grant_authority;
+#[cfg(test)]
+mod assistant_grant_authority_tests;
+#[cfg(test)]
+mod assistant_grant_authority_bench;
 mod replica_record;
 use crate::operation_metadata::OperationMetadata;
 #[cfg(test)]
@@ -1268,6 +1273,14 @@ impl Store {
             readers.path == path && readers.shared_memory == shared_memory,
             "st database writer and read pool must use the same opened database path and mode"
         );
+        assistant_grant_authority::install(&connection, &origin)?;
+        {
+            let transaction = connection.unchecked_transaction()?;
+            assistant_grant_authority::backfill_slice(
+                &transaction, std::time::Duration::from_secs(2),
+            )?;
+            transaction.commit()?;
+        }
         // Batch rowids are the sealing frontier. Checkpoint adoption can remove the highest
         // rows, so SQLite's default rowid allocator cannot be used: it reuses those keys and
         // leaves new local batches behind the frontier. Persist the allocation high water.
@@ -2179,7 +2192,11 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h8ff255a3c271 owner=smallclai
             serde_json::to_string(predecessors)?,
             now.to_string(),
         ])?;
-    Ok(transaction.last_insert_rowid() as u64)
+    let store_index = transaction.last_insert_rowid() as u64;
+    if matches!(kind, assistant_grant_authority::GRANTED | assistant_grant_authority::POLICY | assistant_grant_authority::REVOKED) {
+        assistant_grant_authority::refresh_claim(transaction, id, true)?;
+    }
+    Ok(store_index)
 }
 
 /// The next sequence for a local batch: one past the writer's highest batch, including one a
@@ -3702,7 +3719,7 @@ impl<'a> VerifiedEnvelopeSignature<'a> {
     }
 
     fn store(&self, transaction: &Transaction<'_>, now: &str) -> Result<usize> {
-        Ok(transaction
+        let inserted = transaction
             .prepare_cached(
                 /* sqlite-large-value: allow-for-now lv-hece070718e6e owner=smallclaims::store TODO=chunk-or-reference-exact-wire-values */ "INSERT OR IGNORE INTO replica_envelope_signatures(
              writer, sequence, envelope_hash, member_key, signature, stored_at_unix_ms
@@ -3715,7 +3732,11 @@ impl<'a> VerifiedEnvelopeSignature<'a> {
                 self.member_key,
                 self.signature,
                 now
-            ])?)
+            ])?;
+        assistant_grant_authority::refresh_envelope(
+            transaction, self.writer, self.sequence, self.envelope_hash,
+        )?;
+        Ok(inserted)
     }
 }
 
@@ -7158,7 +7179,12 @@ impl Store {
         );
         self.fleet_authority
             .set(authority)
-            .map_err(|_| anyhow::anyhow!("this shard already has a fleet authority"))
+            .map_err(|_| anyhow::anyhow!("this shard already has a fleet authority"))?;
+        let mut connection = self.connection.write_background();
+        let transaction = connection.transaction()?;
+        self.sync_assistant_grant_membership(&transaction)?;
+        transaction.commit()?;
+        Ok(())
     }
 
     /// The fleet this store's envelopes sign for: its authority's, for a shard.
@@ -7948,6 +7974,7 @@ impl Store {
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(internal)?;
+            self.sync_assistant_grant_membership(&transaction).map_err(internal)?;
             let counts = (|transaction: &Transaction<'_>| -> Result<(usize, usize, usize, u128), FractalError> {
                 let mut received = 0;
                 let mut duplicate = 0;
@@ -8470,6 +8497,7 @@ impl Store {
                     membership = None;
                     continue;
                 }
+                self.sync_assistant_grant_membership(&pass)?;
                 let started = std::time::Instant::now();
                 let end = (next + ADMISSION_CHUNK_ENVELOPES).min(pending.len());
                 let first = next;

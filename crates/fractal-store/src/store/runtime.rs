@@ -846,48 +846,15 @@ mod schema_install_tests {
     use super::*;
 
     #[test]
-    fn assistant_principal_index_installs_on_existing_claims_and_reopens_without_ddl() {
-        const GRANTED: &str = "custom.client.assistant.v1.granted";
-        const REVOKED: &str = "custom.client.assistant.v1.revoked";
-        const POLICY: &str = "custom.client.assistant.v1.policy";
-        const INDEX: &str = "claims_assistant_v1_principal_index";
-        const EXPIRY_INDEX: &str = "claims_assistant_v1_principal_expiry_index";
-        const SELECT: &str = "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2";
-        // Keep this differential reference identical to the production constant;
-        // the API-core real-Store plan test covers that constant directly.
-        const ACTIVE: &str =
-    "WITH eligible(id) AS (
-         SELECT id FROM claims INDEXED BY claims_assistant_v1_principal_index
-         WHERE ?5 IS NULL AND kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
-         UNION
-         SELECT id FROM claims
-         WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
-             AND json_extract(body,'$.fields.expires_at_unix_ms')>?5
-             AND json_type(body,'$.fields.expires_at_unix_ms')='integer'
-         UNION
-         SELECT id FROM claims
-         WHERE ?5 IS NOT NULL AND kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2
-             AND json_extract(body,'$.fields.expires_at_unix_ms') IS NULL AND json_type(body,'$.fields') IS NULL
-         UNION
-         SELECT granted.id FROM claims AS policy INDEXED BY claims_assistant_v1_principal_expiry_index
-         JOIN claims AS granted INDEXED BY claims_subject_kind_accepted_index
-             ON granted.subject=policy.subject AND granted.kind=?1
-         WHERE ?5 IS NOT NULL AND policy.kind=?4 AND policy.origin=granted.origin
-             AND COALESCE(json_extract(policy.body,'$.fields.principal'),'assistant/chatgpt')=?2
-             AND json_extract(policy.body,'$.fields.expires_at_unix_ms')>?5
-             AND COALESCE(json_extract(granted.body,'$.fields.principal'),'assistant/chatgpt')=?2)
-     SELECT claims.id FROM eligible JOIN claims ON claims.id=eligible.id
-     WHERE ?5 IS NULL OR claims.origin<>?6 OR NOT EXISTS (
-         SELECT 1 FROM claims AS revoked INDEXED BY claims_assistant_v1_transition_index
-         WHERE revoked.subject=claims.subject AND revoked.kind=?3
-         AND revoked.origin=claims.origin AND revoked.actor=claims.actor
-         AND json_extract(revoked.body,'$.fields.issuer')=revoked.actor
-         AND (json_type(revoked.body,'$.fields.principal') IS NULL OR json_extract(revoked.body,'$.fields.principal') IN ('assistant/chatgpt','assistant/mcp'))
-         AND (json_type(revoked.body,'$.fields.profile') IS NULL OR json_extract(revoked.body,'$.fields.profile') IN ('assistant','service'))
-         AND json_extract(revoked.body,'$.fields.issuer') IS json_extract(claims.body,'$.fields.issuer')
-         AND json_extract(revoked.body,'$.fields.grant_id') IS json_extract(claims.body,'$.fields.grant_id')
-         AND COALESCE(json_extract(revoked.body,'$.fields.principal'),'assistant/chatgpt')=COALESCE(json_extract(claims.body,'$.fields.principal'),'assistant/chatgpt')
-         AND COALESCE(json_extract(revoked.body,'$.fields.profile'),'assistant')=COALESCE(json_extract(claims.body,'$.fields.profile'),'assistant'))";
+    fn assistant_projection_backfills_existing_claims_without_changing_baseline_schema() {
+        use smallclaims::store::assistant_grant_authority as authority;
+        use std::time::Duration;
+
+        const OBSOLETE_INDEXES: [&str; 3] = [
+            "claims_assistant_v1_principal_index",
+            "claims_assistant_v1_principal_expiry_index",
+            "claims_assistant_v1_transition_index",
+        ];
 
         fn snapshot(connection: &Connection) -> Vec<Vec<rusqlite::types::Value>> {
             connection
@@ -901,106 +868,138 @@ mod schema_install_tests {
                 .unwrap()
         }
 
-        fn plan(connection: &Connection, sql: &str, active: bool) -> Vec<String> {
-            let parameters: Vec<&dyn rusqlite::ToSql> = if active {
-                vec![&GRANTED, &"assistant/chatgpt", &REVOKED, &POLICY, &100_u64, &"node"]
-            } else {
-                vec![&GRANTED, &"assistant/chatgpt"]
-            };
+        fn claims_indexes(connection: &Connection) -> Vec<(String, Option<String>)> {
             connection
-                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .prepare("SELECT name,sql FROM sqlite_schema WHERE type='index' AND tbl_name='claims' ORDER BY name")
                 .unwrap()
-                .query_map(parameters.as_slice(), |row| row.get(3))
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
                 .unwrap()
                 .collect::<rusqlite::Result<_>>()
                 .unwrap()
         }
 
-        // These supported stores need additive DDL, not a data or version conversion.
-        for version in [18, 19, fractal_schema::STORAGE_VERSION] {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("claims.sqlite");
-            let connection = Connection::open(&path).unwrap();
-            connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
-            install_initial_schema(&connection, true).unwrap();
-            connection.execute_batch("DROP INDEX claims_assistant_v1_principal_index; DROP INDEX claims_assistant_v1_principal_expiry_index; DROP INDEX claims_assistant_v1_transition_index;").unwrap();
-            connection.pragma_update(None, "user_version", version).unwrap();
+        fn append(connection: &Connection, id: &str, slot: u8, kind: &str, principal: &str, expiry: u64) {
+            let suffix = format!("{slot:024x}");
+            let grant_id = format!("assistant-grant/{suffix}");
+            let body = json!({"fields": {
+                "grant_id": grant_id,
+                "issuer": "person/owner",
+                "principal": principal,
+                "profile": "assistant",
+                "session_actor": format!("{principal}/session/{grant_id}"),
+                "credential_hash": "a".repeat(64),
+                "minimal_read_mode": "approval-once",
+                "disclosure_consent": true,
+                "expires_at_unix_ms": expiry,
+                "scopes": ["read.assistant.summary"]
+            }});
             connection.execute(
-                "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms) VALUES('batch','node',1,'hash','1')",
-                [],
+                "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+                 VALUES(?1,'batch',?2,?3,'node','person/owner',?4,'[]','1')",
+                params![id, format!("custom/client/assistant-v1-{suffix}"), kind, body.to_string()],
             ).unwrap();
-            for (id, subject, kind, body) in [
-                ("legacy", "custom/client/legacy", GRANTED, r#"{"fields":{"issuer":"person/owner","expires_at_unix_ms":200}}"#),
-                ("chatgpt", "custom/client/chatgpt", GRANTED, r#"{"fields":{"issuer":"person/owner","principal":"assistant/chatgpt","expires_at_unix_ms":50}}"#),
-                ("mcp", "custom/client/mcp", GRANTED, r#"{"fields":{"issuer":"person/owner","principal":"assistant/mcp","expires_at_unix_ms":200}}"#),
-                ("policy", "custom/client/chatgpt", POLICY, r#"{"fields":{"issuer":"person/owner","expires_at_unix_ms":200}}"#),
-                ("revoked", "custom/client/legacy", REVOKED, r#"{"fields":{"issuer":"person/owner"}}"#),
-                ("unrelated", "custom/test/unrelated", "custom.test.recorded", r#"{"fields":{}}"#),
-            ] {
-                connection.execute(
-                    "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms) VALUES(?1,'batch',?2,?3,'node','person/owner',?4,'[]','1')",
-                    params![id, subject, kind, body],
-                ).unwrap();
-            }
-            let before = snapshot(&connection);
-            let plans_before = [plan(&connection, SELECT, false)];
-            assert!(plans_before.iter().flatten().all(|detail| !detail.contains(INDEX) && !detail.contains(EXPIRY_INDEX)));
-            drop(connection);
+        }
 
-            let connection = Connection::open(&path).unwrap();
-            migrate_schema(&connection).unwrap();
-            install_initial_schema(&connection, false).unwrap();
-            assert_eq!(snapshot(&connection), before, "version {version}: claim bytes");
-            assert_eq!(
-                connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(),
-                version,
-            );
-            for (sql, active, previous) in [(SELECT, false, &plans_before[0]), (ACTIVE, true, &plans_before[0])] {
-                let current = plan(&connection, sql, active);
-                eprintln!("assistant admission version={version} active={active} before={previous:?} after={current:?}");
-                assert!(
-                    current.iter().any(|detail| detail.contains("SEARCH")
-                        && (detail.contains(INDEX) || (!active && detail.contains(EXPIRY_INDEX)))
-                        && detail.contains("kind=?") && detail.contains("<expr>=?")),
-                    "version {version}: before={previous:?}; after={current:?}",
+        // Supported older stores retain their version and raw evidence. An intermediate
+        // build's indexes must also survive: rollback is additive, never DROP INDEX.
+        for version in [18, 19, fractal_schema::STORAGE_VERSION] {
+            for had_obsolete_indexes in [false, true] {
+                let directory = tempfile::tempdir().unwrap();
+                let path = directory.path().join("claims.sqlite");
+                // Use the public constructor so fleet-generation state and all other
+                // smallclaims initialization exist before exercising historical raw writes.
+                drop(Store::open(&path, "node").unwrap());
+                let connection = Connection::open(&path).unwrap();
+                let baseline_indexes = claims_indexes(&connection);
+                assert!(baseline_indexes.iter().any(|(name, _)| name == "claims_assistant_v1_credential_index"));
+                assert!(baseline_indexes.iter().all(|(name, _)| !OBSOLETE_INDEXES.contains(&name.as_str())));
+                if had_obsolete_indexes {
+                    // Historical DDL is a rollback fixture, not a production installation.
+                    connection.execute_batch(
+                        "CREATE INDEX claims_assistant_v1_principal_index
+                         ON claims(kind, COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'));
+                         CREATE INDEX claims_assistant_v1_principal_expiry_index
+                         ON claims(kind, COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'),
+                                   json_extract(body,'$.fields.expires_at_unix_ms'));
+                         CREATE INDEX claims_assistant_v1_transition_index
+                         ON claims(subject, kind, origin, actor, store_index);"
+                    ).unwrap();
+                }
+                connection.pragma_update(None, "user_version", version).unwrap();
+                connection.execute(
+                    "INSERT INTO batches(id,origin,replica_sequence,hash,accepted_at_unix_ms)
+                     VALUES('batch','node',1,'hash','1')", [],
+                ).unwrap();
+                append(&connection, "active", 1, authority::GRANTED, "assistant/chatgpt", 50);
+                append(&connection, "extended", 1, authority::POLICY, "assistant/chatgpt", 200);
+                append(&connection, "expired", 2, authority::GRANTED, "assistant/chatgpt", 50);
+                append(&connection, "revoked", 3, authority::GRANTED, "assistant/chatgpt", 200);
+                append(&connection, "revoke", 3, authority::REVOKED, "assistant/chatgpt", 200);
+                append(&connection, "mcp", 4, authority::GRANTED, "assistant/mcp", 200);
+                append(&connection, "unrelated", 5, "custom.test.recorded", "assistant/chatgpt", 200);
+                let before = snapshot(&connection);
+                let indexes_before = claims_indexes(&connection);
+                drop(connection);
+
+                let connection = Connection::open(&path).unwrap();
+                migrate_schema(&connection).unwrap();
+                install_initial_schema(&connection, false).unwrap();
+                authority::install(&connection, "node").unwrap();
+                assert!(authority::candidates(&connection, "assistant/chatgpt", "person/owner", Some(100), None, None).is_err());
+                // A zero-budget slice makes partial progress without marking it ready.
+                assert!(!authority::backfill_slice(&connection, Duration::ZERO).unwrap());
+                assert!(authority::ready(&connection).is_err());
+                while !authority::backfill_slice(&connection, Duration::from_secs(1)).unwrap() {}
+                authority::ready(&connection).unwrap();
+                assert_eq!(snapshot(&connection), before, "version {version}: raw evidence");
+                assert_eq!(claims_indexes(&connection), indexes_before, "projection must not build or drop raw claims indexes");
+                assert_eq!(
+                    connection.pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0)).unwrap(),
+                    version,
+                );
+                let active = authority::candidates(&connection, "assistant/chatgpt", "person/owner", Some(100), None, None).unwrap();
+                assert_eq!(active.iter().map(|claim| claim.id.as_str()).collect::<Vec<_>>(), vec!["active"]);
+                assert_eq!(
+                    authority::candidates(&connection, "assistant/mcp", "person/owner", Some(100), None, None).unwrap()
+                        .iter().map(|claim| claim.id.as_str()).collect::<Vec<_>>(),
+                    vec!["mcp"],
+                );
+                assert_eq!(
+                    authority::candidates(&connection, "assistant/chatgpt", "person/owner", None, None, None).unwrap().len(),
+                    3,
+                    "no cutoff retains expired and revoked validation candidates",
+                );
+                let plan = connection.prepare(&format!("EXPLAIN QUERY PLAN {}", authority::CANDIDATES_QUERY)).unwrap()
+                    .query_map(params!["assistant/chatgpt", "person/owner", authority::expiry_key(100), Option::<String>::None, Option::<String>::None], |row| row.get::<_, String>(3))
+                    .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                assert!(plan.iter().any(|step| step.contains("SEARCH")
+                    && step.contains("assistant_grant_effective_active_index")
+                    && step.contains("principal=? AND owner=? AND revoked=? AND expires_at>?")), "{plan:?}");
+                assert!(plan.iter().all(|step| !step.contains("SCAN claims") && !step.contains("SEARCH claims")), "{plan:?}");
+
+                // An older build can append raw evidence after backfill. The additive
+                // trigger closes admission until that evidence has been projected.
+                append(&connection, "late-revoke", 1, authority::REVOKED, "assistant/chatgpt", 200);
+                assert!(authority::candidates(&connection, "assistant/chatgpt", "person/owner", Some(100), None, None).is_err());
+                while !authority::backfill_slice(&connection, Duration::from_secs(1)).unwrap() {}
+                assert!(authority::candidates(&connection, "assistant/chatgpt", "person/owner", Some(100), None, None).unwrap().is_empty());
+                let after = snapshot(&connection);
+                let cookie: u32 = connection.pragma_query_value(None, "schema_version", |row| row.get(0)).unwrap();
+                drop(connection);
+
+                let connection = Connection::open(&path).unwrap();
+                migrate_schema(&connection).unwrap();
+                install_initial_schema(&connection, false).unwrap();
+                authority::install(&connection, "node").unwrap();
+                authority::ready(&connection).unwrap();
+                assert_eq!(snapshot(&connection), after);
+                assert_eq!(claims_indexes(&connection), indexes_before);
+                assert_eq!(
+                    connection.pragma_query_value(None, "schema_version", |row| row.get::<_, u32>(0)).unwrap(),
+                    cookie,
+                    "an unchanged reopen must not rebuild projection or baseline indexes",
                 );
             }
-            assert!(plan(&connection, ACTIVE, true).iter().any(|step|
-                step.contains(EXPIRY_INDEX) && step.contains("<expr>>?")));
-            assert!(plan(&connection, ACTIVE, true).iter().any(|step|
-                step.contains("claims_assistant_v1_transition_index")
-                    && step.contains("subject=? AND kind=? AND origin=? AND actor=?")));
-            for (principal, mut expected) in [
-                ("assistant/chatgpt", vec!["chatgpt".to_owned(), "legacy".to_owned()]),
-                ("assistant/mcp", vec!["mcp".to_owned()]),
-            ] {
-                let mut found = connection.prepare(SELECT).unwrap()
-                    .query_map(params![GRANTED, principal], |row| row.get::<_, String>(0))
-                    .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-                found.sort();
-                expected.sort();
-                assert_eq!(found, expected);
-            }
-            let active = connection.prepare(ACTIVE).unwrap()
-                .query_map(params![GRANTED, "assistant/chatgpt", REVOKED, POLICY, 100_u64, "node"], |row| row.get::<_, String>(0))
-                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-            assert_eq!(active, vec!["chatgpt"]);
-            let unfiltered = connection.prepare(ACTIVE).unwrap()
-                .query_map(params![GRANTED, "assistant/chatgpt", REVOKED, POLICY, Option::<u64>::None, "node"], |row| row.get::<_, String>(0))
-                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-            assert_eq!(unfiltered.len(), 2, "no cutoff preserves unfiltered validation candidates");
-            let cookie: u32 = connection.pragma_query_value(None, "schema_version", |row| row.get(0)).unwrap();
-            drop(connection);
-
-            let connection = Connection::open(&path).unwrap();
-            migrate_schema(&connection).unwrap();
-            install_initial_schema(&connection, false).unwrap();
-            assert_eq!(snapshot(&connection), before);
-            assert_eq!(
-                connection.pragma_query_value(None, "schema_version", |row| row.get::<_, u32>(0)).unwrap(),
-                cookie,
-                "an unchanged reopen must not rebuild the index",
-            );
         }
     }
 

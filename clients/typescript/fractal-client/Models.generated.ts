@@ -1860,6 +1860,7 @@ export type ErrorCode = (
   | "validation-failed"
   | "idempotency-conflict"
   | "grant-profile-conflict"
+  | "assistant-grant-authority-not-ready"
   | "legacy-action-receipt-untrusted"
   | "issuer-required"
   | "pairing-origin-required"

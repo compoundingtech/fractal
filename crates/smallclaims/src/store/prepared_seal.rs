@@ -349,6 +349,9 @@ pub(crate) fn write_sealed_batch_tx(
             ],
         )?;
     }
+    super::assistant_grant_authority::refresh_envelope(
+        transaction, &batch.writer, batch.sequence, &sealed.envelope_hash,
+    )?;
     Ok(())
 }
 
@@ -537,6 +540,7 @@ impl Store {
         transaction: &Transaction<'_>,
         prepared: &PreparedSeal,
     ) -> Result<bool> {
+        self.sync_assistant_grant_membership(transaction)?;
         if prepared.origin != self.origin {
             return Ok(false);
         }
@@ -618,8 +622,12 @@ impl Store {
                         now
                     ],
                 )?;
+                super::assistant_grant_authority::refresh_envelope(
+                    transaction, &self.origin, envelope.0, &envelope.1,
+                )?;
             }
         }
+        super::assistant_grant_authority::refresh_membership(transaction)?;
         Ok(true)
     }
 }

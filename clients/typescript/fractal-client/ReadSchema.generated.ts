@@ -1699,6 +1699,7 @@ export const ErrorCode = /*#__PURE__*/ (() => openEnum([
   "validation-failed",
   "idempotency-conflict",
   "grant-profile-conflict",
+  "assistant-grant-authority-not-ready",
   "legacy-action-receipt-untrusted",
   "issuer-required",
   "pairing-origin-required",

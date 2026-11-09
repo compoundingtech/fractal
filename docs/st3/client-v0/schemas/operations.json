@@ -17,6 +17,16 @@
     "public_listener": false,
     "remote_mode": "online-thin-client"
   },
+  "assistant_grant_authority_contract": {
+    "projection_version": 1,
+    "backfill": "resumable-background",
+    "authorization_during_backfill": "fail-closed",
+    "not_ready_error": {
+      "code": "assistant-grant-authority-not-ready",
+      "http_status": 503,
+      "retryable": true
+    }
+  },
   "agents_publication_contract": {
     "description": "Complete current agents publications with an explicit version-1 collections-stream opt-in. No HTTP endpoint or capability availability is added.",
     "metadata": "AgentsPublicationMetadata",

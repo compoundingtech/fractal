@@ -486,23 +486,23 @@ fn unverifiable_foreign_grant_cannot_suspend_a_local_credential() {
 }
 
 #[test]
-fn admission_scan_uses_the_real_principal_index() {
+fn admission_reads_the_authority_projection_index() {
     let root = tempfile::tempdir().unwrap();
     let state = member(root.path(), "alder");
-    issue(&state, ASSISTANT_ID, "assistant").unwrap();
+    let grant = issue(&state, ASSISTANT_ID, "assistant").unwrap();
+    let candidates = candidate_grants(&state, PRINCIPAL, Some(client_now_ms() as u64)).unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].0.id, grant.id);
     let connection = state.store.readers.get();
-    let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-hf4201606586b owner=fractal_api_core::api::client_v0::external_grants::conflict_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {ADMISSION_QUERY}")).unwrap();
-    let plan = query.query_map(rusqlite::params![GRANTED, PRINCIPAL, REVOKED, POLICY,
-        Some(client_now_ms() as u64), state.store.origin()], |row| row.get::<_, String>(3)).unwrap()
+    let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-ha14d9df71ca8 owner=fractal_api_core::api::client_v0::external_grants::conflict_tests TODO=trace-statement-and-value-representation */ &format!("EXPLAIN QUERY PLAN {}", authority::CANDIDATES_QUERY)).unwrap();
+    let expiry = authority::expiry_key(client_now_ms() as u64);
+    let plan = query.query_map(rusqlite::params![PRINCIPAL, OWNER, expiry,
+        Option::<&str>::None, Option::<&str>::None], |row| row.get::<_, String>(3)).unwrap()
         .collect::<Result<Vec<_>, _>>().unwrap();
-    println!("external grant admission query plan:\n{}", plan.join("\n"));
-    assert!(plan.iter().any(|step| step.contains("claims_assistant_v1_principal_index")),
-        "principal admission must use its production index: {plan:?}");
-    assert!(plan.iter().any(|step| step.contains("revoked USING INDEX claims_assistant_v1_transition_index")),
-        "revocation must seek by subject, kind, origin and actor rather than scan overlays: {plan:?}");
-    assert!(plan.iter().any(|step| step.contains("claims_assistant_v1_principal_expiry_index")
-        && step.contains("<expr>>?")),
-        "expired grant bodies must be pruned by an index range: {plan:?}");
+    assert!(plan.iter().any(|step| step.contains("assistant_grant_effective_active_index")),
+        "admission must use the effective authority projection: {plan:?}");
+    assert!(plan.iter().all(|step| !step.contains("claims")),
+        "admission must never scan raw claim history: {plan:?}");
 }
 
 #[test]

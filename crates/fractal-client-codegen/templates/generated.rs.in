@@ -135,6 +135,7 @@ pub enum ErrorCode {
     ValidationFailed,
     IdempotencyConflict,
     GrantProfileConflict,
+    AssistantGrantAuthorityNotReady,
     LegacyActionReceiptUntrusted,
     IssuerRequired,
     PairingOriginRequired,

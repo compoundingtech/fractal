@@ -154,6 +154,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case validationFailed
     case idempotencyConflict
     case grantProfileConflict
+    case assistantGrantAuthorityNotReady
     case agentsPublicationRowTooLarge
     case attentionMigrated
     case invalidAnswer, notAnswerable
@@ -247,6 +248,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "validation-failed": .validationFailed
         case "idempotency-conflict": .idempotencyConflict
         case "grant-profile-conflict": .grantProfileConflict
+        case "assistant-grant-authority-not-ready": .assistantGrantAuthorityNotReady
         case "stale-fence": .staleFence
         case "issuer-required": .issuerRequired
         case "pairing-origin-required": .pairingOriginRequired
@@ -340,6 +342,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .validationFailed: "validation-failed"
         case .idempotencyConflict: "idempotency-conflict"
         case .grantProfileConflict: "grant-profile-conflict"
+        case .assistantGrantAuthorityNotReady: "assistant-grant-authority-not-ready"
         case .staleFence: "stale-fence"
         case .issuerRequired: "issuer-required"
         case .pairingOriginRequired: "pairing-origin-required"

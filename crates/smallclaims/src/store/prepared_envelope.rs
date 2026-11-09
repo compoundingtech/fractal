@@ -561,5 +561,8 @@ pub fn admit_prepared_envelope_tx(
             batch.id,
         ])
         .map_err(internal)?;
+    super::assistant_grant_authority::refresh_envelope(
+        transaction, &envelope.writer, envelope.sequence, &envelope.hash,
+    ).map_err(internal)?;
     Ok(())
 }

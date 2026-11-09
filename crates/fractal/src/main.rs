@@ -7746,6 +7746,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
             spawn_publication_evidence(store.clone());
             tokio::spawn(build_transport_observation_index(store.clone()));
             tokio::spawn(build_operation_claim_digests(store.clone()));
+            tokio::spawn(build_assistant_grant_authority(store.clone()));
             startup_telemetry.serving();
             let ready_at = Instant::now();
             startup_phases.log_ready(
@@ -20729,6 +20730,27 @@ async fn build_transport_observation_index(store: Arc<Store>) {
                 return;
             }
         }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Continue the persisted authority cursor after serving begins. Authorization
+/// fails closed until the final page commits; requests never advance the cursor.
+async fn build_assistant_grant_authority(store: Arc<Store>) {
+    loop {
+        let worker = store.clone();
+        let result = tokio::task::spawn_blocking(move ||
+            worker.advance_assistant_grant_authority_backfill()).await;
+        match result {
+            Ok(Ok(true)) => return,
+            Ok(Ok(false)) => {}
+            Ok(Err(error)) if maintenance_contention(&error) => {}
+            error => {
+                stderr_message("st", format_args!("assistant grant authority backfill stopped: {error:?}; restart resumes its committed cursor"));
+                return;
+            }
+        }
+        // Finite, persisted cursor work; yield the writer between pages.
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
