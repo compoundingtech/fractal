@@ -589,9 +589,10 @@ async fn thread_detail_requires_conversation_grant_and_owner_visible_thread() {
         &allowed.state.store, OWNER, "thread/elsewhere-conflict", "elsewhere-create",
         Edit::Create { agent: "agent/unobserved", title: "Private elsewhere title" },
     ).unwrap();
+    let elsewhere_revision = thread_metadata::summary(&allowed.state.store, OWNER, &elsewhere.subject).unwrap().revision;
     let (rename, _) = thread_metadata::apply(
         &allowed.state.store, OWNER, &elsewhere.subject, "elsewhere-rename",
-        Edit::Rename { title: "Private rename", title_revision: &elsewhere.id, revision: &elsewhere.id },
+        Edit::Rename { title: "Private rename", title_revision: &elsewhere.id, revision: &elsewhere_revision },
     ).unwrap();
     for operation in [foreign.operation_id.unwrap(), rename.operation_id.unwrap()] {
         allowed.state.store.connection.write().execute(
@@ -691,17 +692,19 @@ async fn thread_timeline_cursors_cannot_cross_threads_sessions_or_grant_revision
     let (session, _, _) = content_source(&mut fixture, &"Agent conversation ".repeat(512));
     projection_read_mode(&mut fixture, "caller-bound-allow").await;
     for id in ["thread/first", "thread/second"] {
-        let (created, _) = thread_metadata::apply(
+        thread_metadata::apply(
             &fixture.state.store, OWNER, id, &format!("create-{id}"),
             Edit::Create { agent: "agent/reads-codex", title: "Thread" },
         ).unwrap();
-        let (closed, _) = thread_metadata::apply(
+        let revision = thread_metadata::summary(&fixture.state.store, OWNER, id).unwrap().revision;
+        thread_metadata::apply(
             &fixture.state.store, OWNER, id, &format!("close-{id}"),
-            Edit::Close { revision: &created.id },
+            Edit::Close { revision: &revision },
         ).unwrap();
+        let revision = thread_metadata::summary(&fixture.state.store, OWNER, id).unwrap().revision;
         thread_metadata::apply(
             &fixture.state.store, OWNER, id, &format!("reopen-{id}"),
-            Edit::Reopen { revision: &closed.id },
+            Edit::Reopen { revision: &revision },
         ).unwrap();
     }
 
