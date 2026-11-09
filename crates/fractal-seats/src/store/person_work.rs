@@ -2614,6 +2614,40 @@ mission "writer-load" state="ready" {
             .map(|item| item.title.clone())
             .collect::<Vec<_>>();
         assert_eq!(updates, vec!["Cancelled: Choose a release date".to_owned()]);
+        let check = |store: &Store| {
+            let home = store.attention_items(Some("person/avery")).unwrap();
+            let update = home.iter().find(|item| item.title == "Cancelled: Choose a release date").unwrap();
+            assert_eq!(update.requester_id.as_deref(), Some("daemon/runtime"));
+            assert_eq!(update.conversation.as_deref(), Some("agent/alder.asker"));
+            assert_eq!(update.request.as_ref().unwrap()["about"], ask.subject);
+            assert!(!update.is_alert(), "a conversation link must not revive the cancelled ask");
+            let (indexed, _) = store.attention_collection_snapshot(Some("person/avery"), now_ms()).unwrap();
+            let indexed = indexed.iter().find(|item| item.subject == update.subject).unwrap();
+            assert_eq!(indexed.conversation, update.conversation);
+        };
+        check(&store);
+        store.replay_replication_graph().unwrap();
+        check(&store);
+    }
+
+    #[test]
+    fn an_updates_about_link_alone_does_not_choose_its_conversation() {
+        let (store, _origin, input) = fixture();
+        let ask = store.ask_person(&input).unwrap();
+        let asked = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+        for (person, key) in [
+            ("person/avery", "unrelated-update".to_owned()),
+            ("person/robin", format!("st3-ask-ended:{}", asked.id)),
+        ] {
+            let update = store.connection.batched(|tx| {
+                store.append_update_tx(tx, "daemon/runtime", person, "A runtime update", "Some context.",
+                    &key, &json!({"version": 1, "type": "update", "about": ask.subject}))
+            }).unwrap().unwrap();
+            let items = store.attention_items(Some(person)).unwrap();
+            let item = items.iter().find(|item| item.subject == update.subject).unwrap();
+            assert_eq!(item.requester_id.as_deref(), Some("daemon/runtime"));
+            assert!(item.conversation.is_none(), "an unbound source or another person's ask must not supply a conversation");
+        }
     }
 
     /// A notice that cannot be written never undoes the cancellation: the ask still ends, and

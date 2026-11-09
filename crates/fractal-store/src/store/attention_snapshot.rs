@@ -1834,7 +1834,10 @@ pub fn person_attention_item(
             .and_then(agent)
         {
             Some(actor) => Some(actor),
-            None => conversation_agent(connection, None, Some(&view.run))?,
+            None => match ask.as_ref().map(|ask| cancelled_ask_conversation(connection, ask)).transpose()?.flatten() {
+                Some(agent) => Some(agent),
+                None => conversation_agent(connection, None, Some(&view.run))?,
+            },
         },
         requester_id: ask.and_then(|ask| ask.actor),
         launch_id: None,
@@ -1864,6 +1867,29 @@ pub fn person_attention_item(
         )],
         request,
     }))
+}
+
+/// A cancellation notice is published by the runtime, but still belongs to the original
+/// asker's conversation. Read the immutable source even after that agent has stopped; a
+/// presentation link neither revives the ask nor grants permission to answer it.
+fn cancelled_ask_conversation(connection: &Connection, update: &ClaimRecord) -> Result<Option<String>> {
+    if update.actor.as_deref() != Some("daemon/runtime") || !person_work::is_update(update) {
+        return Ok(None);
+    }
+    let fields = &update.body["fields"];
+    let Some(about) = fields["request"]["about"].as_str() else { return Ok(None) };
+    smallclaims::touched::note_read(|| about.to_owned());
+    let Some(original) = person_work::request(connection, about)? else { return Ok(None) };
+    // `about` alone is descriptive context, not proof of a cancellation's source. Bind the
+    // runtime's stable notice key and recipient to that canonical asking claim.
+    if fields["key"] != format!("st3-ask-ended:{}", original.id)
+        || fields["person"] != original.body["fields"]["person"]
+        || original.accepted_at_unix_ms > update.accepted_at_unix_ms
+        || person_work::is_update(&original)
+    {
+        return Ok(None);
+    }
+    Ok(original.actor.as_deref().and_then(agent))
 }
 
 /// The live agents whose declaration carries `handles-faults`, by subject.

@@ -73,7 +73,7 @@ impl View for Family {
     fn definition(&self) -> Definition {
         Definition {
             name: self.view(),
-            fingerprint: "projected-source.v1;canonical-person-fences.v3.lowercase-range;custom-source.v1;u128-time.v1;public-row.v3.notice-isolation",
+            fingerprint: "projected-source.v1;canonical-person-fences.v4.cancelled-ask-context;custom-source.v1;u128-time.v1;public-row.v3.notice-isolation",
             kinds: &[],
             local_kinds: match self {
                 Self::Person => &[PERSON_CHANGE, PERSON_CLOCK],
@@ -266,6 +266,12 @@ fn person_row(
                     run_dependencies(tx, source, &run)?;
                 }
             }
+        }
+        if ask.actor.as_deref() == Some("daemon/runtime") && person_work::is_update(ask)
+            && let Some(about) = ask.body["fields"]["request"]["about"].as_str()
+        {
+            // Canonical source corrections must also refresh the notice's conversation link.
+            dependency(tx, "person", source, about)?;
         }
         for field in ["owner_run", "origin_step"] {
             if let Some(key) = ask.body["fields"][field].as_str() {
