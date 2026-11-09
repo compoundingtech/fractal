@@ -113,3 +113,99 @@ pub(super) fn print_part_digest(
     println!("real_part_digest_combined tables=7 rows={total_rows} claims={} sha256={combined}", claim_ids.len());
     combined
 }
+
+// Used by fractal-store's real_part_rebuild_bench, which includes this file by path.
+#[allow(dead_code)]
+fn quote_identifier(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Stream every non-internal table in this caller's transaction. This deliberately
+/// includes caches, digest-maintenance rows, local state and metadata: unexplained
+/// differences there must not be hidden by a projection-only equivalence check.
+// Used by fractal-store's real_part_rebuild_bench, which includes this file by path.
+#[allow(dead_code)]
+pub(super) fn print_whole_store_digest(connection: &Connection, phase: &str) -> String {
+    let started = std::time::Instant::now();
+    let mut progress = started;
+    let mut combined = Sha256::new();
+    let mut total_rows = 0_u64;
+    let mut table_count = 0_u64;
+    println!("real_part_whole_digest_format phase={phase} version=1 values=sqlite_typed_length_delimited order=primary_key_or_rowid streaming=true");
+    let mut table_query = connection.prepare(
+        "SELECT name,sql FROM sqlite_master WHERE type='table' AND substr(name,1,7)<>'sqlite_' ORDER BY name",
+    ).unwrap();
+    let mut tables = table_query.query([]).unwrap();
+    while let Some(table_row) = tables.next().unwrap() {
+        let table: String = table_row.get(0).unwrap();
+        let definition: String = table_row.get(1).unwrap();
+        let quoted = quote_identifier(&table);
+        let mut schema = connection.prepare(/* sqlite-large-value: allow-for-now lv-hb8afecd653a5 owner=fractal_missions::store::tests::huge_part_digest TODO=trace-statement-and-value-representation */ &format!("PRAGMA table_info({quoted})")).unwrap();
+        // Only column metadata is collected; data rows and their large cells are streamed.
+        let columns = schema.query_map([], |row| Ok((row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?, row.get::<_, i64>(5)?)))
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert!(!columns.is_empty(), "missing columns for whole-store table {table}");
+        let mut primary = columns.iter().filter(|column| column.2 > 0).collect::<Vec<_>>();
+        primary.sort_by_key(|column| column.2);
+        let order = if primary.is_empty() {
+            assert!(!definition.to_ascii_uppercase().contains("WITHOUT ROWID"),
+                "WITHOUT ROWID table {table} must declare its primary key");
+            ["rowid", "_rowid_", "oid"].into_iter()
+                .find(|alias| !columns.iter().any(|column| column.0.eq_ignore_ascii_case(alias)))
+                .expect("all implicit rowid aliases are shadowed").to_owned()
+        } else {
+            primary.iter().map(|column| quote_identifier(&column.0)).collect::<Vec<_>>().join(",")
+        };
+        let excluded = columns.iter().enumerate().filter_map(|(index, column)| {
+            let reason = match (table.as_str(), column.0.as_str()) {
+                ("projection_health", "updated_at_unix_ms") =>
+                    Some("project_claim_isolated_tx stamps quarantine failures with now_ms"),
+                ("local_observations", "observed_at_unix_ms") =>
+                    Some("note_run_projection_finished_tx stamps local completion observations with now_ms"),
+                _ => None,
+            };
+            if let Some(reason) = reason {
+                println!("real_part_whole_digest_excluded phase={phase} table={table:?} column={:?} reason={reason:?}", column.0);
+                Some(index)
+            } else { None }
+        }).collect::<BTreeSet<_>>();
+        let mut hash = Sha256::new();
+        bytes(&mut hash, table.as_bytes());
+        for (index, column) in columns.iter().enumerate() {
+            if !excluded.contains(&index) {
+                bytes(&mut hash, column.0.as_bytes());
+                bytes(&mut hash, column.1.as_bytes());
+                hash.update(column.2.to_be_bytes());
+            }
+        }
+        println!("real_part_whole_digest_start phase={phase} table={table:?} elapsed_ms={}", started.elapsed().as_millis());
+        let mut query = connection.prepare(/* sqlite-large-value: allow-for-now lv-h4596258c4e6d owner=fractal_missions::store::tests::huge_part_digest TODO=trace-statement-and-value-representation */ &format!("SELECT * FROM {quoted} ORDER BY {order}")).unwrap();
+        let mut rows = query.query([]).unwrap();
+        let mut count = 0_u64;
+        while let Some(row) = rows.next().unwrap() {
+            hash.update([0xff]);
+            for index in 0..columns.len() {
+                if !excluded.contains(&index) { value(&mut hash, row.get_ref(index).unwrap()); }
+            }
+            count += 1;
+            if count % 4096 == 0 && progress.elapsed() >= std::time::Duration::from_secs(30) {
+                println!("real_part_whole_digest_progress phase={phase} table={table:?} rows={count} elapsed_ms={}",
+                    started.elapsed().as_millis());
+                progress = std::time::Instant::now();
+            }
+        }
+        hash.update(count.to_be_bytes());
+        let digest = hash.finalize();
+        println!("real_part_whole_digest phase={phase} table={table:?} rows={count} sha256={}", hex::encode(digest));
+        bytes(&mut combined, table.as_bytes());
+        combined.update(count.to_be_bytes());
+        combined.update(digest);
+        total_rows += count;
+        table_count += 1;
+    }
+    let combined = hex::encode(combined.finalize());
+    println!("real_part_whole_digest_combined phase={phase} tables={table_count} rows={total_rows} sha256={combined}");
+    println!("real_part_whole_digest_time phase={phase} elapsed_ms={}", started.elapsed().as_millis());
+    combined
+}

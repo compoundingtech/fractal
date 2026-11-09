@@ -22507,6 +22507,8 @@ pub fn expire_work_lease_by_claim(store: &Store, subject: &str, actor: &str, inc
 
 #[cfg(test)]
 pub mod tests;
+#[cfg(test)]
+mod real_part_rebuild_bench;
 
 /// The projected tables the graph digest commits: digest label, table, digested columns in
 /// order, and row order. Triggers built from the same list bump `graph_generation` whenever one
