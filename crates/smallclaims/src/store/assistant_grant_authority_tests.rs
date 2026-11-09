@@ -63,6 +63,7 @@ fn receive(target: &Store, exchange: &ReplicationExchange) {
     target.receive_replication_exchange(&exchange.peer, FLEET, exchange).unwrap();
     target.validate_replication_backlog().unwrap();
     target.project_replication_backlog().unwrap();
+    drain_authority(target);
 }
 
 fn unsigned(exchange: &ReplicationExchange) -> ReplicationExchange {
@@ -379,6 +380,7 @@ fn sealing_local_membership_promotes_an_already_received_peer_grant() {
     assert!(!target.claim_has_authenticated_member_writer(&grant.id).unwrap());
     assert!(decisions(&target, 0).is_empty());
     target.seal_local_batches().unwrap();
+    drain_authority(&target);
     assert!(target.claim_has_authenticated_member_writer(&grant.id).unwrap());
     assert_eq!(decisions(&target, 0), vec![grant.id]);
     assert_reference_and_rebuild(&target);
@@ -439,6 +441,7 @@ fn deterministic_event_permutations_match_raw_history_and_subject_rebuilds() {
         // Drain predecessors that an out-of-order envelope initially held.
         target.validate_replication_backlog().unwrap();
         target.project_replication_backlog().unwrap();
+        drain_authority(&target);
         assert_reference_and_rebuild(&target);
         assert!(authority::contains(&target.readers.get(), &grant.id).unwrap());
         assert_eq!(reference(&target), vec![(grant.id, format!("{:020}", 20000), true)]);
@@ -454,6 +457,8 @@ fn reset_projection(connection: &Connection) {
          DELETE FROM assistant_grant_pending;
          DELETE FROM assistant_grant_membership_windows;
          DELETE FROM assistant_grant_dirty;
+         DELETE FROM assistant_grant_auth_cursor;
+         DELETE FROM assistant_grant_membership_dirty;
          DELETE FROM meta WHERE key='assistant_grant_authority_version'
             OR key='assistant_grant_authority_membership_generation'
             OR key LIKE 'assistant_grant_authority_cursor/%';"
@@ -709,4 +714,291 @@ fn malformed_and_unsigned_same_origin_flood_preserves_previous_authority_and_con
         assert_eq!(decisions(&target, 15000), vec![grant.id.clone()]);
         assert_reference_and_rebuild(&target);
     }
+}
+
+#[test]
+fn duplicate_verified_signature_does_not_refresh_or_dirty_claims() {
+    let (source, key) = source();
+    let target = node("reader", Some(key.public()));
+    let grant = append(&source, SUBJECT, GRANTED, fields());
+    let exchange = export(&source, &target);
+    receive(&target, &exchange);
+    let signature = signatures(&exchange).signatures.into_iter().find(|signature| {
+        target.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND sequence=?2)",
+            params![grant.id,signature.sequence], |row| row.get::<_,bool>(0)).unwrap()
+    }).unwrap();
+    let mut connection = target.connection.write();
+    // Any refresh would delete this sentinel. Abort that attempted write rather
+    // than merely checking the final projection, which might be unchanged.
+    connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    connection.execute_batch(
+        "CREATE TEMP TRIGGER reject_duplicate_refresh BEFORE DELETE ON assistant_grant_dirty
+         BEGIN SELECT RAISE(ABORT,'duplicate refreshed authority'); END;",
+    ).unwrap();
+    let transaction = connection.transaction().unwrap();
+    assert_eq!(store_envelope_signature_tx(
+        &transaction,None,FLEET,&signature.writer,signature.sequence,&signature.hash,
+        &signature.member_key,&signature.signature,"1",
+    ).unwrap(), 0);
+    let dirty: usize = transaction.query_row("SELECT COUNT(*) FROM assistant_grant_dirty", [], |row| row.get(0)).unwrap();
+    assert_eq!(dirty,1);
+    transaction.commit().unwrap();
+    connection.execute_batch("DROP TRIGGER reject_duplicate_refresh; DELETE FROM assistant_grant_dirty;").unwrap();
+    drop(connection);
+    assert_reference_and_rebuild(&target);
+}
+
+#[test]
+fn dirty_claim_flood_is_limited_to_sixty_four_refreshes_per_transaction() {
+    let store = node("issuer", None);
+    for index in 0..(authority::CLAIMS_PER_SLICE * 3 + 7) {
+        let mut invalid = fields();
+        invalid["issuer"] = json!(format!("invalid/{index}"));
+        append(&store,SUBJECT,GRANTED,invalid);
+    }
+    drain_authority(&store);
+    let mut connection = store.connection.write();
+    let markers = backfill_markers(&connection);
+    connection.execute("INSERT INTO assistant_grant_dirty SELECT id FROM claims WHERE kind=?1", [GRANTED]).unwrap();
+    let mut remaining = authority::CLAIMS_PER_SLICE * 3 + 7;
+    loop {
+        let transaction = connection.transaction().unwrap();
+        let done = authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap();
+        let after: usize = transaction.query_row("SELECT COUNT(*) FROM assistant_grant_dirty", [], |row| row.get(0)).unwrap();
+        assert_eq!(remaining-after, remaining.min(authority::CLAIMS_PER_SLICE));
+        assert_eq!(backfill_markers(&transaction),markers,"completed history was rescanned");
+        transaction.commit().unwrap();
+        remaining = after;
+        if done { break; }
+    }
+    assert_eq!(remaining,0);
+}
+
+fn authentication_key_cost(connection: &Connection, signature: &ReplicaEnvelopeSignature) -> (usize,i32,i32) {
+    let mut statement = connection.prepare(authority::AUTHENTICATION_KEYS_QUERY).unwrap();
+    let rows = statement.query_map(
+        params![signature.writer,signature.sequence,signature.hash,"",authority::MEMBERSHIP_KEYS_PER_REFRESH],
+        |row| Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?)),
+    ).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    (rows.len(),statement.get_status(StatementStatus::VmStep),statement.get_status(StatementStatus::FullscanStep))
+}
+
+#[test]
+fn nonmember_signature_flood_has_constant_membership_first_vm_cost() {
+    let (source,key) = source();
+    let target = node("reader",Some(key.public()));
+    receive(&target,&export(&source,&target));
+    let grant = append(&source,SUBJECT,GRANTED,fields());
+    let exchange = export(&source,&target);
+    receive(&target,&unsigned(&exchange));
+    let signature = signatures(&exchange).signatures.into_iter().find(|signature| {
+        target.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND sequence=?2)",
+            params![grant.id,signature.sequence], |row| row.get::<_,bool>(0)).unwrap()
+    }).unwrap();
+    let mut connection = target.connection.write();
+    let before = authentication_key_cost(&connection,&signature);
+    assert_eq!(before.0,1);
+    assert_eq!(before.2,0);
+    for count in [128,4096] {
+        for index in 0..count {
+            let mut nonmember = signature.clone();
+            nonmember.member_key = format!("nonmember/{count}/{index:08}");
+            nonmember.signature = "invalid".into();
+            insert_raw_signature(&connection,&nonmember);
+        }
+        assert_eq!(authentication_key_cost(&connection,&signature),before,
+            "nonmember signature rows increased authentication VM work");
+        let transaction = connection.transaction().unwrap();
+        assert!(authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap());
+        assert!(!authority::contains(&transaction,&grant.id).unwrap());
+        transaction.commit().unwrap();
+    }
+    // Real late evidence still verifies after the arbitrary-signature flood.
+    insert_raw_signature(&connection,&signature);
+    let transaction = connection.transaction().unwrap();
+    assert!(authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap());
+    assert!(authority::contains(&transaction,&grant.id).unwrap());
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn eligible_evidence_beyond_first_key_page_resumes_and_cryptographically_verifies() {
+    let (source,key) = source();
+    let target = node("reader",Some(key.public()));
+    receive(&target,&export(&source,&target));
+    let grant = append(&source,SUBJECT,GRANTED,fields());
+    let exchange = export(&source,&target);
+    receive(&target,&unsigned(&exchange));
+    let signature = signatures(&exchange).signatures.into_iter().find(|signature| {
+        target.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND sequence=?2)",
+            params![grant.id,signature.sequence], |row| row.get::<_,bool>(0)).unwrap()
+    }).unwrap();
+    let mut connection = target.connection.write();
+    let markers = backfill_markers(&connection);
+    // These deliberately malformed persisted proofs must not authenticate.
+    // Their eligible windows sort before the real member's key.
+    for index in 0..(authority::MEMBERSHIP_KEYS_PER_REFRESH*3+1) {
+        let mut invalid = signature.clone();
+        invalid.member_key = format!("!{index:08}");
+        invalid.signature = "invalid".into();
+        connection.execute(
+            "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,0,NULL)",
+            params![invalid.writer,invalid.member_key]).unwrap();
+        insert_raw_signature(&connection,&invalid);
+    }
+    insert_raw_signature(&connection,&signature);
+    let cost = authentication_key_cost(&connection,&signature);
+    assert_eq!(cost.0,authority::MEMBERSHIP_KEYS_PER_REFRESH);
+    assert_eq!(cost.2,0);
+    let mut previous_key = String::new();
+    for page in 0..4 {
+        let transaction = connection.transaction().unwrap();
+        let done = authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap();
+        assert_eq!(backfill_markers(&transaction),markers);
+        if page<3 {
+            assert!(!done,"invalid earlier evidence authenticated the claim");
+            assert!(authority::ready(&transaction).is_err());
+            let cursor: String = transaction.query_row(
+                "SELECT member_key FROM assistant_grant_auth_cursor WHERE claim_id=?1",
+                [&grant.id], |row| row.get(0)).unwrap();
+            assert!(cursor>previous_key,"authentication did not advance durably");
+            previous_key = cursor;
+            let admitted: bool = transaction.query_row(
+                "SELECT authenticated FROM assistant_grant_pending WHERE claim_id=?1", [&grant.id], |row| row.get(0)).unwrap();
+            assert!(!admitted);
+        } else {
+            assert!(done);
+            assert!(authority::contains(&transaction,&grant.id).unwrap());
+        }
+        transaction.commit().unwrap();
+    }
+}
+
+#[test]
+fn changed_membership_writer_flood_uses_the_same_fixed_refresh_budget() {
+    let (source,key) = source();
+    let target = node("reader",Some(key.public()));
+    receive(&target,&export(&source,&target));
+    for _ in 0..(authority::CLAIMS_PER_SLICE*2+7) {
+        append(&source,SUBJECT,GRANTED,fields());
+    }
+    receive(&target,&unsigned(&export(&source,&target)));
+    let mut connection = target.connection.write();
+    let markers = backfill_markers(&connection);
+    connection.execute(
+        "INSERT INTO assistant_grant_membership_dirty VALUES('anchor',0,'')", [],
+    ).unwrap();
+    connection.execute_batch(
+        "CREATE TEMP TABLE refreshed_items (claim_id TEXT);
+         CREATE TEMP TRIGGER count_membership_refresh AFTER UPDATE ON assistant_grant_membership_dirty
+         BEGIN INSERT INTO refreshed_items VALUES(NEW.claim_id); END;",
+    ).unwrap();
+    let transaction = connection.transaction().unwrap();
+    assert!(!authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap());
+    let refreshed: usize = transaction.query_row(
+        "SELECT COUNT(*) FROM refreshed_items", [], |row| row.get(0)).unwrap();
+    assert_eq!(refreshed,authority::CLAIMS_PER_SLICE);
+    assert!(authority::ready(&transaction).is_err());
+    assert_eq!(backfill_markers(&transaction),markers);
+    transaction.commit().unwrap();
+    drop(connection);
+    drain_authority(&target);
+    assert!(decisions(&target,0).is_empty(),"unsigned pending grants acquired authority");
+}
+
+#[test]
+fn late_signature_restarts_an_in_progress_key_cursor_before_its_old_position() {
+    let (source,key) = source();
+    let target = node("reader",Some(key.public()));
+    receive(&target,&export(&source,&target));
+    let grant = append(&source,SUBJECT,GRANTED,fields());
+    let exchange = export(&source,&target);
+    receive(&target,&unsigned(&exchange));
+    let signature = signatures(&exchange).signatures.into_iter().find(|signature| {
+        target.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND sequence=?2)",
+            params![grant.id,signature.sequence], |row| row.get::<_,bool>(0)).unwrap()
+    }).unwrap();
+    let mut connection = target.connection.write();
+    for index in 0..(authority::MEMBERSHIP_KEYS_PER_REFRESH*2) {
+        connection.execute(
+            "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,0,NULL)",
+            params![signature.writer,format!("~{index:08}")]).unwrap();
+    }
+    connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    let transaction = connection.transaction().unwrap();
+    assert!(!authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap());
+    let cursor: String = transaction.query_row(
+        "SELECT member_key FROM assistant_grant_auth_cursor WHERE claim_id=?1",
+        [&grant.id], |row| row.get(0)).unwrap();
+    assert!(cursor>signature.member_key);
+    transaction.commit().unwrap();
+    insert_raw_signature(&connection,&signature);
+    let cursors: usize = connection.query_row(
+        "SELECT COUNT(*) FROM assistant_grant_auth_cursor WHERE claim_id=?1",
+        [&grant.id], |row| row.get(0)).unwrap();
+    assert_eq!(cursors,0,"new evidence did not invalidate the earlier search position");
+    let transaction = connection.transaction().unwrap();
+    assert!(authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap());
+    assert!(authority::contains(&transaction,&grant.id).unwrap());
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn envelope_record_arriving_before_auth_cursor_restarts_preexisting_signature_search() {
+    let (source,key) = source();
+    let target = node("reader",Some(key.public()));
+    receive(&target,&export(&source,&target));
+    let grant = append(&source,SUBJECT,GRANTED,fields());
+    let exchange = export(&source,&target);
+    receive(&target,&unsigned(&exchange));
+    let signature = signatures(&exchange).signatures.into_iter().find(|signature| {
+        target.readers.get().query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND sequence=?2)",
+            params![grant.id,signature.sequence], |row| row.get::<_,bool>(0)).unwrap()
+    }).unwrap();
+    let mut connection = target.connection.write();
+    // Keep an unsigned later-position copy, leaving the signed envelope with
+    // no attached claim record when its signature arrives.
+    connection.execute(
+        "INSERT INTO replica_envelopes
+         SELECT writer,sequence,'decoy-envelope',previous_hash,accepted_at_unix_ms,
+                payload,batch_id,relay,receipt_state,validation_error,received_at_unix_ms
+         FROM replica_envelopes WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3",
+        params![signature.writer,signature.sequence,signature.hash]).unwrap();
+    connection.execute(
+        "UPDATE replica_records SET envelope_hash='decoy-envelope',position=1 WHERE claim_id=?1",
+        [&grant.id]).unwrap();
+    for index in 0..(authority::MEMBERSHIP_KEYS_PER_REFRESH*2) {
+        connection.execute(
+            "INSERT INTO assistant_grant_membership_windows VALUES(?1,?2,0,NULL)",
+            params![signature.writer,format!("~{index:08}")]).unwrap();
+    }
+    connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&grant.id]).unwrap();
+    let transaction = connection.transaction().unwrap();
+    assert!(!authority::backfill_slice(&transaction,Duration::from_secs(60)).unwrap());
+    let position: i64 = transaction.query_row(
+        "SELECT position FROM assistant_grant_auth_cursor WHERE claim_id=?1",
+        [&grant.id], |row| row.get(0)).unwrap();
+    assert_eq!(position,1);
+    transaction.commit().unwrap();
+    insert_raw_signature(&connection,&signature);
+    let cursors: usize = connection.query_row(
+        "SELECT COUNT(*) FROM assistant_grant_auth_cursor WHERE claim_id=?1",
+        [&grant.id], |row| row.get(0)).unwrap();
+    assert_eq!(cursors,1,"signature unexpectedly had a linked claim record");
+    let transaction = connection.transaction().unwrap();
+    transaction.execute(
+        "INSERT INTO replica_records
+            (record_ref,writer,sequence,envelope_hash,position,raw,state,claim_id,updated_at_unix_ms)
+         SELECT 'earlier-signed-record',writer,sequence,?2,0,raw,'valid',claim_id,'0'
+         FROM replica_records WHERE claim_id=?1",
+        params![grant.id,signature.hash]).unwrap();
+    authority::refresh_envelope(&transaction,&signature.writer,signature.sequence,&signature.hash).unwrap();
+    assert!(authority::contains(&transaction,&grant.id).unwrap(),
+        "the earlier signed record was hidden behind the old position/key cursor");
+    transaction.commit().unwrap();
 }

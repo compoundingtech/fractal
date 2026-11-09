@@ -172,6 +172,8 @@ fn assistant_grant_authority_measure_realistic_backfill() {
              DELETE FROM assistant_grant_effective;
              DELETE FROM assistant_grant_pending;
              DELETE FROM assistant_grant_dirty;
+             DELETE FROM assistant_grant_auth_cursor;
+             DELETE FROM assistant_grant_membership_dirty;
              DELETE FROM assistant_grant_membership_windows;
              DELETE FROM meta WHERE key='assistant_grant_authority_version'
                 OR key LIKE 'assistant_grant_authority_cursor/%'

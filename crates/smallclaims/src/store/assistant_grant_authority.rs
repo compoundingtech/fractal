@@ -7,6 +7,8 @@ pub const POLICY: &str = "custom.client.assistant.v1.policy";
 pub const REVOKED: &str = "custom.client.assistant.v1.revoked";
 const VERSION: &str = "1";
 const KINDS: [&str; 3] = [GRANTED, POLICY, REVOKED];
+pub const CLAIMS_PER_SLICE: usize = 64;
+pub const MEMBERSHIP_KEYS_PER_REFRESH: usize = 16;
 const SCOPES: &[&str] = &[
     "read.assistant.summary", "read.assistant.attention", "read.assistant.missions",
     "read.assistant.agents", "read.assistant.conversation", "read.assistant.terminal",
@@ -112,11 +114,16 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
          CREATE INDEX IF NOT EXISTS assistant_grant_pending_writer_index
             ON assistant_grant_pending(origin,authenticated,sequence,claim_id);
          CREATE TABLE IF NOT EXISTS assistant_grant_dirty (claim_id TEXT PRIMARY KEY);
+         CREATE TABLE IF NOT EXISTS assistant_grant_auth_cursor (
+            claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL, record_rowid INTEGER NOT NULL, member_key TEXT NOT NULL);
+         CREATE TABLE IF NOT EXISTS assistant_grant_membership_dirty (
+            writer TEXT PRIMARY KEY, sequence INTEGER NOT NULL, claim_id TEXT NOT NULL);
          CREATE TABLE IF NOT EXISTS assistant_grant_local_appends (claim_id TEXT PRIMARY KEY);
          CREATE TRIGGER IF NOT EXISTS assistant_grant_dirty_insert AFTER INSERT ON claims
          WHEN NEW.kind IN ('custom.client.assistant.v1.granted','custom.client.assistant.v1.policy','custom.client.assistant.v1.revoked')
          BEGIN INSERT OR IGNORE INTO assistant_grant_dirty VALUES(NEW.id); END;
-         CREATE TRIGGER IF NOT EXISTS assistant_grant_dirty_signature_insert
+         DROP TRIGGER IF EXISTS assistant_grant_dirty_signature_insert;
+         CREATE TRIGGER IF NOT EXISTS assistant_grant_dirty_signature_insert_v2
          AFTER INSERT ON replica_envelope_signatures
          BEGIN
             INSERT OR IGNORE INTO assistant_grant_dirty(claim_id)
@@ -125,6 +132,9 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
             WHERE records.writer=NEW.writer AND records.sequence=NEW.sequence
               AND records.envelope_hash=NEW.envelope_hash
               AND claims.kind IN ('custom.client.assistant.v1.granted','custom.client.assistant.v1.policy','custom.client.assistant.v1.revoked');
+            DELETE FROM assistant_grant_auth_cursor WHERE claim_id IN (
+              SELECT claim_id FROM replica_records
+              WHERE writer=NEW.writer AND sequence=NEW.sequence AND envelope_hash=NEW.envelope_hash);
          END;
          CREATE TABLE IF NOT EXISTS assistant_grant_membership_windows (
             writer TEXT NOT NULL, member_key TEXT NOT NULL, start INTEGER NOT NULL, end INTEGER,
@@ -137,7 +147,8 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
 pub fn ready(connection: &Connection) -> Result<(), FractalError> {
     let complete: bool = connection.query_row(
         "SELECT COALESCE((SELECT value FROM meta WHERE key='assistant_grant_authority_version'),'')=?1
-            AND NOT EXISTS(SELECT 1 FROM assistant_grant_dirty)",
+            AND NOT EXISTS(SELECT 1 FROM assistant_grant_dirty)
+            AND NOT EXISTS(SELECT 1 FROM assistant_grant_membership_dirty)",
         [VERSION], |row| row.get(0),
     ).map_err(internal)?;
     if !complete {
@@ -289,37 +300,107 @@ pub fn refresh_claim(connection: &Connection, id: &str) -> Result<()> {
             "SELECT EXISTS(SELECT 1 FROM assistant_grant_local_appends WHERE claim_id=?1)",
             [&claim.id], |row| row.get(0),
         )?;
-        let authenticated = (local_append && claim.origin == local_origin(connection)?)
-            || authenticated_claim(connection,&claim.id)?;
+        let admitted: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assistant_grant_pending WHERE claim_id=?1 AND authenticated=1)",
+            [&claim.id], |row| row.get(0),
+        )?;
+        let authentication = if admitted || (local_append && claim.origin == local_origin(connection)?) {
+            Some(true)
+        } else {
+            authenticated_claim(connection,&claim.id)?
+        };
+        let authenticated = authentication == Some(true);
         let changed = connection.execute(/* sqlite-large-value: allow-for-now lv-h9cf86ad98d1e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_pending(claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(claim_id) DO UPDATE SET authenticated=excluded.authenticated
             WHERE assistant_grant_pending.authenticated<excluded.authenticated",
             params![claim.id,claim.subject,claim.kind,claim.origin,claim.actor,sequence,authenticated,serde_json::to_string(&claim)?])? != 0;
         if changed && authenticated { attach_claim(connection,&claim)?; }
+        if authentication.is_none() {
+            connection.execute("INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [id])?;
+            return Ok(());
+        }
     }
     connection.execute(/* sqlite-large-value: allow-for-now lv-h3221720b83b7 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_dirty WHERE claim_id=?1", [id])?;
     Ok(())
 }
-fn authenticated_claim(connection: &Connection, id: &str) -> Result<bool> {
-    let fleet_id = fleet_meta(connection,"assistant_grant_authority_fleet_id")?;
-    let Some(fleet_id) = fleet_id else { return Ok(false); };
+/// One record and at most sixteen membership keys per refresh. Nonmember
+/// signatures are never enumerated: every signature lookup supplies its full PK.
+/// Persist progress even through missing/invalid evidence, so a later valid key
+/// or record cannot be hidden behind an arbitrary number of earlier candidates.
+fn authenticated_claim(connection: &Connection, id: &str) -> Result<Option<bool>> {
+    let Some(fleet_id) = fleet_meta(connection,"assistant_grant_authority_fleet_id")? else {
+        return Ok(Some(false));
+    };
     let shard = fleet_meta(connection,"shard_id")?;
-    let mut statement = connection.prepare_cached(
-        "SELECT records.writer,records.sequence,records.envelope_hash,signatures.member_key,signatures.signature
-         FROM replica_records AS records JOIN claims ON claims.id=records.claim_id AND claims.origin=records.writer
-         JOIN replica_envelopes AS envelopes USING(writer,sequence,envelope_hash)
-         JOIN replica_envelope_signatures AS signatures USING(writer,sequence,envelope_hash)
-         JOIN assistant_grant_membership_windows AS windows
-           ON windows.writer=records.writer AND windows.member_key=signatures.member_key
-          AND records.sequence>=windows.start AND (windows.end IS NULL OR records.sequence<=windows.end)
-         WHERE records.claim_id=?1 AND records.state='valid' AND envelopes.receipt_state IN ('validated','degraded')")?;
-    let rows = statement.query_map([id], |row| Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?,row.get::<_,String>(2)?,row.get::<_,String>(3)?,row.get::<_,String>(4)?)))?;
-    for row in rows {
-        let (writer,sequence,hash,key,signature) = row?;
-        if VerifiedEnvelopeSignature::verify(shard.as_deref(),&fleet_id,&writer,sequence,&hash,&key,&signature).is_some() { return Ok(true); }
+    let cursor: Option<(i64,i64,String)> = connection.query_row(
+        "SELECT position,record_rowid,member_key FROM assistant_grant_auth_cursor WHERE claim_id=?1",
+        [id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+    let initial = cursor.is_none();
+    let (position_cursor,rowid_cursor,key_cursor) = cursor.unwrap_or((i64::MIN,i64::MIN,String::new()));
+    let record: Option<(i64,i64,String,u64,String,bool)> = connection.query_row(
+        "SELECT records.position,records.rowid,records.writer,records.sequence,records.envelope_hash,
+            records.state='valid' AND claims.origin=records.writer
+            AND EXISTS(SELECT 1 FROM replica_envelopes AS envelopes
+                WHERE envelopes.writer=records.writer AND envelopes.sequence=records.sequence
+                  AND envelopes.envelope_hash=records.envelope_hash
+                  AND envelopes.receipt_state IN ('validated','degraded'))
+         FROM replica_records AS records INDEXED BY replica_records_claim
+         JOIN claims ON claims.id=records.claim_id
+         WHERE records.claim_id=?1 AND (records.position,records.rowid)>=(?2,?3)
+           AND (?5 OR (records.position,records.rowid)<>(?2,?3) OR ?4<>'')
+         ORDER BY records.position,records.rowid LIMIT 1",
+        params![id,position_cursor,rowid_cursor,key_cursor,initial],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?))).optional()?;
+    let Some((position,record_rowid,writer,sequence,hash,eligible)) = record else {
+        connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [id])?;
+        return Ok(Some(false));
+    };
+    // A nonempty key resumes this record; an empty key advances past it.
+    // The index seek skips at most the one completed record at the cursor.
+    let mut next_key = String::new();
+    if eligible {
+        let mut statement = connection.prepare_cached(AUTHENTICATION_KEYS_QUERY)?;
+        let keys = statement.query_map(
+            params![writer,sequence,hash,if (position,record_rowid)==(position_cursor,rowid_cursor) { key_cursor.as_str() } else { "" },MEMBERSHIP_KEYS_PER_REFRESH],
+            |row| Ok((row.get::<_,String>(0)?,row.get::<_,Option<String>>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (key,signature) in &keys {
+            if signature.as_deref().is_some_and(|signature|
+                VerifiedEnvelopeSignature::verify(shard.as_deref(),&fleet_id,&writer,sequence,&hash,key,signature).is_some()) {
+                connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [id])?;
+                return Ok(Some(true));
+            }
+        }
+        if keys.len()==MEMBERSHIP_KEYS_PER_REFRESH {
+            next_key = keys.into_iter().last().expect("full key page").0;
+        }
     }
-    Ok(false)
+    if next_key.is_empty() {
+        let more: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM replica_records INDEXED BY replica_records_claim
+             WHERE claim_id=?1 AND (position,rowid)>(?2,?3))",
+            params![id,position,record_rowid], |row| row.get(0))?;
+        if !more {
+            connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [id])?;
+            return Ok(Some(false));
+        }
+    }
+    connection.execute(
+        "INSERT INTO assistant_grant_auth_cursor VALUES(?1,?2,?3,?4)
+         ON CONFLICT(claim_id) DO UPDATE SET position=excluded.position,
+            record_rowid=excluded.record_rowid,member_key=excluded.member_key",
+        params![id,position,record_rowid,next_key])?;
+    Ok(None)
 }
+pub const AUTHENTICATION_KEYS_QUERY: &str =
+    "SELECT windows.member_key,signatures.signature
+     FROM assistant_grant_membership_windows AS windows
+     LEFT JOIN replica_envelope_signatures AS signatures
+       ON signatures.writer=windows.writer AND signatures.sequence=?2
+      AND signatures.envelope_hash=?3 AND signatures.member_key=windows.member_key
+      AND ?2>=windows.start AND (windows.end IS NULL OR ?2<=windows.end)
+     WHERE windows.writer=?1 AND windows.member_key>?4
+     ORDER BY windows.member_key LIMIT ?5";
 /// Refresh only this envelope's grant records, after receipt/signature state has
 /// been written, and before its transaction is committed.
 pub fn refresh_envelope(connection: &Connection, writer: &str, sequence: u64, hash: &str) -> Result<()> {
@@ -331,7 +412,13 @@ pub fn refresh_envelope(connection: &Connection, writer: &str, sequence: u64, ha
         statement.query_map(params![writer,sequence,hash], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?
     };
     // A replicated same-origin claim does NOT acquire the local-write exception.
-    for id in ids { refresh_claim(connection,&id)?; }
+    for id in ids {
+        // Signatures may predate their replica record and therefore could not
+        // invalidate a claim cursor when inserted. New evidence must restart
+        // its claim even when its indexed position precedes that cursor.
+        connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&id])?;
+        refresh_claim(connection,&id)?;
+    }
     Ok(())
 }
 /// Membership changes promote pending rows only in newly changed keyed windows.
@@ -372,25 +459,14 @@ fn refresh_membership_from(connection: &Connection, membership: &crate::fleet::M
         connection.execute(/* sqlite-large-value: allow-for-now lv-ha3bce0201694 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key='assistant_grant_authority_fleet_id'", [])?;
     }
     connection.execute(/* sqlite-large-value: allow-for-now lv-hbcecffaa18c4 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_membership_generation',?1)",[generation.to_string()])?;
-    for (writer,start,end) in changed {
-        let mut cursor = (0_u64, String::new());
-        loop {
-            let ids = {
-                let mut statement = connection.prepare_cached(
-                    "SELECT sequence,claim_id FROM assistant_grant_pending INDEXED BY assistant_grant_pending_writer_index
-                     WHERE origin=?1 AND authenticated=0 AND sequence>=?2
-                       AND (?3 IS NULL OR sequence<=?3) AND (sequence,claim_id)>(?4,?5)
-                     ORDER BY sequence,claim_id LIMIT 64")?;
-                statement.query_map(params![writer,start,end,cursor.0,cursor.1],
-                    |row| Ok((row.get::<_,u64>(0)?,row.get::<_,String>(1)?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-            };
-            if ids.is_empty() { break; }
-            for (sequence,id) in ids {
-                refresh_claim(connection,&id)?;
-                cursor = (sequence,id);
-            }
-        }
+    for (writer,_,_) in changed {
+        // A durable writer cursor admits at most CLAIMS_PER_SLICE pending rows
+        // per maintenance unit, rather than draining a changed window here.
+        connection.execute(
+            "INSERT OR REPLACE INTO assistant_grant_membership_dirty
+             SELECT ?1,0,'' WHERE EXISTS(
+               SELECT 1 FROM assistant_grant_pending INDEXED BY assistant_grant_pending_writer_index
+               WHERE origin=?1 AND authenticated=0)", [writer])?;
     }
     Ok(())
 }
@@ -400,7 +476,32 @@ fn refresh_membership_from(connection: &Connection, membership: &crate::fleet::M
 /// arrivals are captured by persistent dirty triggers even after completion.
 pub fn backfill_slice(connection: &Connection, budget: Duration) -> Result<bool> {
     let started = Instant::now();
+    let mut remaining = CLAIMS_PER_SLICE;
     refresh_membership(connection)?;
+    // Include membership-driven retries in the same fixed item budget. Each
+    // empty writer task also consumes a unit, bounding sparse writer queues.
+    while remaining>0 {
+        let task: Option<(String,u64,String)> = connection.query_row(
+            "SELECT writer,sequence,claim_id FROM assistant_grant_membership_dirty ORDER BY writer LIMIT 1",
+            [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).optional()?;
+        let Some((writer,sequence,id)) = task else { break; };
+        let pending: Option<(u64,String)> = connection.query_row(
+            "SELECT sequence,claim_id FROM assistant_grant_pending INDEXED BY assistant_grant_pending_writer_index
+             WHERE origin=?1 AND authenticated=0 AND (sequence,claim_id)>(?2,?3)
+             ORDER BY sequence,claim_id LIMIT 1", params![writer,sequence,id],
+            |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
+        if let Some((sequence,id)) = pending {
+            connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&id])?;
+            refresh_claim(connection,&id)?;
+            connection.execute(
+                "UPDATE assistant_grant_membership_dirty SET sequence=?2,claim_id=?3 WHERE writer=?1",
+                params![writer,sequence,id])?;
+        } else {
+            connection.execute("DELETE FROM assistant_grant_membership_dirty WHERE writer=?1", [writer])?;
+        }
+        remaining -= 1;
+        if remaining==0 || started.elapsed()>=budget { return Ok(false); }
+    }
     // A completed version only drains the old-build dirty queue. Readiness also
     // includes that queue, but must never cause a completed history rescan.
     if fleet_meta(connection,"assistant_grant_authority_version")?.as_deref() != Some(VERSION) {
@@ -415,25 +516,28 @@ pub fn backfill_slice(connection: &Connection, budget: Duration) -> Result<bool>
                 if rows.is_empty() { break; }
                 for (id,index) in rows {
                     refresh_claim(connection,&id)?;
+                    remaining -= 1;
                     connection.execute(/* sqlite-large-value: allow-for-now lv-h3f49c0e579cd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",params![key,index.to_string()])?;
-                    if started.elapsed()>=budget { return Ok(false); }
+                    if remaining==0 || started.elapsed()>=budget { return Ok(false); }
                 }
             }
         }
     }
-    loop {
-        let rows = {
-            let mut statement = connection.prepare_cached("SELECT claim_id FROM assistant_grant_dirty ORDER BY claim_id LIMIT 64")?;
-            statement.query_map([],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        if rows.is_empty() { break; }
-        for id in rows {
-            refresh_claim(connection,&id)?;
-            connection.execute(/* sqlite-large-value: allow-for-now lv-hd91341d01a91 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_dirty WHERE claim_id=?1",[&id])?;
-            if started.elapsed()>=budget { return Ok(false); }
-        }
+    // Visit each selected dirty claim once. An unfinished authentication page
+    // keeps its dirty row for a later transaction, not a loop in this one.
+    let rows = {
+        let mut statement = connection.prepare_cached("SELECT claim_id FROM assistant_grant_dirty ORDER BY claim_id LIMIT ?1")?;
+        statement.query_map([remaining],|row|row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for id in rows {
+        refresh_claim(connection,&id)?;
+        remaining -= 1;
+        if remaining==0 || started.elapsed()>=budget { break; }
     }
-    refresh_membership(connection)?;
+    let dirty: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_dirty)
+             OR EXISTS(SELECT 1 FROM assistant_grant_membership_dirty)", [], |row| row.get(0))?;
+    if dirty { return Ok(false); }
     connection.execute(/* sqlite-large-value: allow-for-now lv-h9b70e51e754e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_version',?1)",[VERSION])?;
     Ok(true)
 }

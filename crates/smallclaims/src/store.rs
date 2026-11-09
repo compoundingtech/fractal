@@ -3738,9 +3738,11 @@ impl<'a> VerifiedEnvelopeSignature<'a> {
                 self.signature,
                 now
             ])?;
-        assistant_grant_authority::refresh_envelope(
-            transaction, self.writer, self.sequence, self.envelope_hash,
-        )?;
+        if inserted != 0 {
+            assistant_grant_authority::refresh_envelope(
+                transaction, self.writer, self.sequence, self.envelope_hash,
+            )?;
+        }
         Ok(inserted)
     }
 }
