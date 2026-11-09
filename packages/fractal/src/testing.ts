@@ -47,7 +47,7 @@ export class ScratchDaemon extends Context.Service<
       args: ReadonlyArray<string>,
     ) => Effect.Effect<ScratchCommandResult, ScratchDaemonError>
   }
->()('@overeng/genie-fractal/testing/ScratchDaemon') {}
+>()('fractal/testing/ScratchDaemon') {}
 
 /** Options for {@link scratchDaemonLayer}. */
 export interface ScratchDaemonOptions {
@@ -189,7 +189,7 @@ export const scratchDaemonLayer = (options: ScratchDaemonOptions) =>
     Effect.gen(function* () {
       const binary = resolveBinary(options.binary)
       const directory = yield* Effect.acquireRelease(
-        Effect.sync(() => mkdtempSync(join(tmpdir(), 'genie-st-'))),
+        Effect.sync(() => mkdtempSync(join(tmpdir(), 'fractal-scratch-'))),
         (created) =>
           options.keepDirectory === true
             ? Effect.logInfo(`kept scratch daemon directory ${created}`)

@@ -2,8 +2,6 @@ import { sha256 } from '@noble/hashes/sha2.js'
 import { bytesToHex } from '@noble/hashes/utils.js'
 import { Schema, SchemaGetter } from 'effect'
 
-import type { GenieOutput } from '@overeng/genie'
-
 import type {
   ChildMission,
   DocumentReference,
@@ -2576,8 +2574,27 @@ export const agent = (input: typeof AgentSchema.Encoded): Node => {
   return node({ name: 'agent', args: [a.id], children })
 }
 
+/** One validation finding, in the shape Genie's `GenieValidationIssue` expects. */
+export interface KdlValidationIssue {
+  readonly severity: 'error'
+  readonly packageName: string
+  readonly dependency: string
+  readonly rule: string
+  readonly message: string
+}
+
+/**
+ * A generated KDL declaration file. The shape is Genie's `GenieOutput` contract, declared
+ * structurally so a Genie file can return it without this package depending on Genie.
+ */
+export interface KdlFileOutput {
+  readonly data: readonly Node[]
+  readonly stringify: () => string
+  readonly validate: () => KdlValidationIssue[]
+}
+
 /** Genie output for a Fractal KDL declaration file. */
-export const fractalKdl = (nodes: readonly Node[]): GenieOutput<readonly Node[]> => ({
+export const fractalKdl = (nodes: readonly Node[]): KdlFileOutput => ({
   data: nodes,
   stringify: () => emit(nodes),
   validate: () => {
@@ -2588,7 +2605,7 @@ export const fractalKdl = (nodes: readonly Node[]): GenieOutput<readonly Node[]>
       return [
         {
           severity: 'error',
-          packageName: '@overeng/genie-fractal',
+          packageName: 'fractal',
           dependency: '',
           rule: 'fractal-kdl',
           message: cause instanceof Error ? cause.message : String(cause),

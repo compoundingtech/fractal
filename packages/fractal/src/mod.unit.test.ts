@@ -1411,7 +1411,7 @@ describe('Fractal declarations', () => {
     ).toBe('version 2\n"quoted key" "a\\n\\"b" #true #false 12 a="x" z=#true {\n  nested\n}\n')
     expect(() => emit([node({ name: 'bad', args: [Infinity] })])).toThrow()
     expect(
-      fractalKdl([node({ name: 'bad', args: [Infinity] })]).validate?.({ cwd: '', location: '' }),
+      fractalKdl([node({ name: 'bad', args: [Infinity] })]).validate(),
     ).toMatchObject([{ severity: 'error', rule: 'fractal-kdl' }])
   })
   it('rejects invalid or excess authored fields before rendering', () => {
@@ -1502,7 +1502,7 @@ describe('Fractal declarations', () => {
         harness: { kind: 'omp', model: 'example', effort: 'medium' },
       }),
     ]
-    expect(fractalKdl(nodes).stringify({ cwd: '', location: '' })).toContain(
+    expect(fractalKdl(nodes).stringify()).toContain(
       'workspace "/tmp/seat" create=#false',
     )
   })
