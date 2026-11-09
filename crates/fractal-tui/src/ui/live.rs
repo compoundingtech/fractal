@@ -1205,7 +1205,6 @@ pub fn run(context: Context) -> Result<()> {
                 }
                 Fetched::Said(query, outcome) => {
                     ui.said = Some((query, outcome));
-                    changed = true;
                 }
                 Fetched::Inventory { generation, result } => {
                     if generation != resources_generation || extras.inventory_supported != Some(false) { continue; }
