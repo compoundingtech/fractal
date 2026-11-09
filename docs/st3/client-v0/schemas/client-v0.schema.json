@@ -524,16 +524,27 @@
     "AgentLifecycle": {"anyOf": [{"enum": ["standing", "owner", "bounded"]}, {"type": "string"}], "description": "Declared agent lifecycle. Publication accepts standing, owner, or bounded; clients retain future values as Unknown."},
     "DeclaredPriority": {"anyOf": [{"enum": ["background", "normal"]}, {"type": "string"}], "description": "Declared priority, not process priority. Readers retain future values as Unknown."},
     "DeclaredLane": {"anyOf": [{"enum": ["check", "build"]}, {"type": "string"}], "description": "Unordered declared lane. Readers retain future values as Unknown."},
+    "DeclaredAttentionBudget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["person", "asks"],
+      "properties": {
+        "person": {"type": "string", "pattern": "^person/[^/\\s]+$"},
+        "asks": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
+      },
+      "description": "Mission-only declared asks to a person/<id>, in authored order. Data only: no counters, reservations, person resolution or enforcement."
+    },
     "DeclaredBudgets": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "attention": {"type": "array", "items": {"$ref": "#/$defs/DeclaredAttentionBudget"}},
         "cpu_seconds": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
         "memory_max": {"type": "string"},
         "disk_max": {"type": "string"},
         "token_budget": {"type": "integer", "minimum": 1, "maximum": 9007199254740991}
       },
-      "description": "Declared mission-run totals, including all retries: accumulated CPU seconds and cost-weighted tokens, sum(tokens * class price / base input price), for input, output, cache writes including 1-hour writes, and cached reads. The unit is a base input token at the pricing version pinned at admission and recorded on the run, never repriced; unknown pricing reports unknown, never zero, and USD is reported alongside weighted tokens. Peak memory/disk have no accumulation window. New agent authoring accepts only memory/disk; historical agent reads retain all fields. Agents have no retry/run boundary or budget window; usage belongs to routing/quota/SLO accounting. Step-run windows are a future extension. These are data-only definitions: no counters, resets, aggregation, pricing capture, reporting, reservations or enforcement are implemented by declared admission."
+      "description": "Declared mission-run totals, including all retries: accumulated CPU seconds and cost-weighted tokens, sum(tokens * class price / base input price), for input, output, cache writes including 1-hour writes, and cached reads. The unit is a base input token at the pricing version pinned at admission and recorded on the run, never repriced; unknown pricing reports unknown, never zero, and USD is reported alongside weighted tokens. Peak memory/disk have no accumulation window. Attention is mission-only asks per person/<id>, preserved in authored order and omitted when empty. New agent authoring accepts only memory/disk; historical agent reads retain all fields. Agents have no retry/run boundary or budget window; usage belongs to routing/quota/SLO accounting. Step-run windows are a future extension. These are data-only definitions: no counters, resets, aggregation, pricing capture, reporting, reservations or enforcement are implemented by declared admission."
     },
     "DeclaredAdmission": {
       "type": "object",
