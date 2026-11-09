@@ -81,7 +81,7 @@ group('an alert', () => {
   it('is its question, asked by its agent, waiting on you', () => {
     const descriptor = describe(examples.Alert)
     expect(descriptor).toMatchObject({ title: { _tag: 'Known', text: 'Q24: Complexity skill interview' }, kind: 'Request', detail: 'Global complexity', card: { kind: 'alert', id: question.id } })
-    expect(descriptor.mark).toEqual({ _tag: 'Status', status: { tone: 'needs-you', label: 'Waiting for you' } })
+    expect(descriptor.mark).toEqual({ _tag: 'Status', status: { tone: 'needs-you', label: 'Q24: Complexity skill interview' } })
   })
 
   it('is pending while alerts load, and gone once answered', () => {

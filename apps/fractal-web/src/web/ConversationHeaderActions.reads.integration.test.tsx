@@ -102,11 +102,11 @@ it('reopens within the TTL with the retained Observed value and no second read',
   expect(reads).toBe(1)
   release()
 })
-it('shows the agent Todos as the first Resources section, naming a missing snapshot', async () => {
+it('hides empty resource kinds and names a missing to-do snapshot', async () => {
   await showPanel('agent/example-details')
   const sections = [...document.querySelectorAll('[data-agent-resources] section[aria-label]')]
-  expect(sections.slice(0, 3).map(section => section.getAttribute('aria-label'))).toEqual(['To-dos', 'Agent queue', 'Observed resources'])
-  expect(sections[0]!.textContent).toBe('To-dosThis session has not shared a to-do list.')
+  expect(sections).toEqual([])
+  expect(document.querySelector('[data-agent-resources]')?.textContent).toContain('This session has not shared a to-do list.')
 })
 it('keeps the To-dos plan with phase and progress without developer identity fields', async () => {
   const state = projectTodos({ feed: observed({ value: [todoAgent] }), agentRef: todoAgentRef })

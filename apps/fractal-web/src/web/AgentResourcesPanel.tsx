@@ -88,6 +88,7 @@ export const AgentResourcesView = ({ agentRef, onOpen, opening, cache, contribut
   const settled = queue._tag === 'Observed' && resources._tag === 'Observed' && !resources.value.loadingMore
   React.useLayoutEffect(() => { if (settled) return measureEnd('resources_panel', agentRef) }, [agentRef, settled])
   React.useEffect(() => () => cancelMeasure('resources_panel'), [])
+  const accessNotice = credentialNotice(resources) ?? credentialNotice(queue)
   const reported = resources._tag === 'Observed' && !credentialNotice(resources) ? resources.value.items : []
   const observed = (resource: ResourceObservation): PanelItem => ({ key: resource.id, ref: resource.id, observed: { _tag: 'Known', value: observedResourceFace(resource), observedAt: DateTime.toEpochMillis(resource.observed_at), freshness: resources._tag === 'Observed' ? resources.freshness : 'live' } })
   const nativeSections = new Map<string, DetailsSection>([...native.sections, ...contributedSections].map(section => [section.title, section]))
@@ -98,7 +99,7 @@ export const AgentResourcesView = ({ agentRef, onOpen, opening, cache, contribut
   const knownKinds = new Set<string>(groups.flatMap(group => [...group.kinds]))
   const otherKinds = [...new Set(reported.filter(resource => !knownKinds.has(resource.kind)).map(resource => resource.kind))]
   return <div data-agent-resources {...stylex.props(styles.contents)}>
-    {resources._tag !== 'Observed' ? <p role="status" {...stylex.props(styles.note)}>{notices('Agent resources', resources)}</p> : credentialNotice(resources) ? <p role="status" {...stylex.props(styles.note)}>{credentialNotice(resources)}</p> : resources.freshness === 'stale' ? <p role="status" {...stylex.props(styles.note)}>Showing the last verified resources while reconnecting.</p> : null}
+    {accessNotice ? <p role="status" {...stylex.props(styles.note)}>{accessNotice}</p> : resources._tag !== 'Observed' ? <p role="status" {...stylex.props(styles.note)}>{notices('Agent resources', resources)}</p> : resources.freshness === 'stale' ? <p role="status" {...stylex.props(styles.note)}>Showing the last verified resources while reconnecting.</p> : null}
     {todos._tag === 'Observed' && todos.total > 0 ? <section aria-label="To-dos"><h2 {...stylex.props(styles.sectionTitle)}>To-dos</h2><LiveAgentTodos agentRef={agentRef} placement="resources" /></section> : todos._tag !== 'Observed' ? <LiveAgentTodos agentRef={agentRef} placement="resources" /> : null}
     <AgentMissions agentRef={agentRef} onOpen={onOpen} section={nativeSections.get('Missions')} />
     {groups.map(group => {
@@ -118,7 +119,7 @@ export const AgentResourcesView = ({ agentRef, onOpen, opening, cache, contribut
       {resources.value.pagingError === undefined ? null : <p role="status" data-wf-resource-paging="failed" {...stylex.props(styles.note)}>More resources could not be loaded.</p>}
       {resources.value.nextCursor === null ? null : <Aria.Button isDisabled={resources.value.loadingMore === true} onPress={() => source.resources?.loadMore(agentRef)} {...stylex.props(styles.action)}>{resources.value.loadingMore ? 'Loading more resources…' : 'Load more resources'}</Aria.Button>}
     </>}
-    {source.resources === undefined || credentialNotice(resources) ? null : <Aria.Button onPress={() => source.resources?.refresh(agentRef)} {...stylex.props(styles.action)}>Refresh resources</Aria.Button>}
+    {source.resources === undefined || accessNotice ? null : <Aria.Button onPress={() => source.resources?.refresh(agentRef)} {...stylex.props(styles.action)}>Refresh resources</Aria.Button>}
   </div>
 }
 const styles = stylex.create({

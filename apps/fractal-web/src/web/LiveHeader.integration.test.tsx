@@ -7,7 +7,6 @@ import * as Atom from 'effect/reactivity/Atom'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { within } from 'storybook/test'
-import { formatRelative } from '@fractal/ui/human-time/format'
 import { DataSourceProvider } from '../data/react.tsx'
 import { fixtureSource } from '../data/fixtureSource.ts'
 import { credentialExpiredMessage, observed, unavailable, type Feed } from '../data/source.ts'
@@ -96,21 +95,19 @@ describe('live header parity', () => {
     expect(host.textContent).not.toContain('An event this view cannot show yet.')
     await closeSettings()
   }, 20_000)
-  it('opens real resources and queue observations, and closes their inspector', async () => {
+  it('opens resource faces without raw queue identities, and closes their inspector', async () => {
     const dialog = await openResources()
     expect(dialog?.textContent).toContain('Observed project notes')
     // Inside its own pane, not a global dock.
     expect(dialog?.closest('[data-pane-aside]')?.closest('[data-pane]')).not.toBeNull()
     expect(host.querySelector('[data-testid="thread-header"]')?.contains(dialog)).toBe(false)
-    const row = dialog?.querySelector('[aria-label="Observed resources"] li')
-    // The kind is named by its icon in words, never as the raw type.
-    expect(row?.querySelector('svg[aria-label="File"]')).not.toBeNull()
+    const row = dialog?.querySelector('[data-thing-openable]')
+    expect(row).not.toBeNull()
+    expect(row?.getAttribute('aria-label')).toContain('File')
     expect(row?.textContent).not.toContain('filesystem.file')
-    expect(row?.textContent).toContain('open')
-    expect(row?.querySelector('time')?.textContent).toBe(formatRelative(Date.parse('2026-10-04T12:00:00.000Z'), Date.parse('2026-10-06T12:00:00.000Z')))
-    expect(row?.querySelector('time')?.getAttribute('datetime')).toBe('2026-10-04T12:00:00.000Z')
-    expect(dialog?.textContent).toContain('1 current work item')
-    expect(dialog?.textContent).toContain('mission-run/example')
+    // A receipt timestamp is not a reported event time.
+    expect(row?.querySelector('time')).toBeNull()
+    expect(dialog?.textContent).not.toContain('mission-run/example')
     await click('Close agent inspector')
     expect(host.querySelector('[data-agent-resources]')).toBeNull()
   })
@@ -182,7 +179,7 @@ describe('live header parity', () => {
     await openResources()
     await act(async () => registry.set(resources, unavailable({ reason: 'ungranted', detail: 'raw-denial-code' })))
     const panel = host.querySelector<HTMLElement>('[data-agent-resources]')!
-    expect(within(panel).getByRole('region', { name: 'Observed resources' }).textContent).toContain('Read access to agent resources has not been granted.')
+    expect(panel.textContent).toContain('Read access to agent resources has not been granted.')
     expect(panel.textContent).not.toMatch(/raw-denial-code|Unknown/)
   })
   it.each(['resources', 'queue'] as const)('requires pairing, not refresh, after a rejected %s read', async (target) => {
@@ -197,7 +194,7 @@ describe('live header parity', () => {
       }
     })
     const panel = host.querySelector<HTMLElement>('[data-agent-resources]')!
-    expect(within(panel).getByRole('region', { name: target === 'queue' ? 'Agent queue' : 'Observed resources' }).textContent).toContain(credentialExpiredMessage)
+    expect(panel.textContent).toContain(credentialExpiredMessage)
     expect(panel.textContent).not.toContain('private diagnostic')
     expect(within(panel).queryByRole('button', { name: 'Refresh resources' })).toBeNull()
   })

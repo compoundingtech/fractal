@@ -99,20 +99,20 @@ export function AgentDetailsPanel({ agentRef, width, onClose, onOpen, variants =
       </div>
       <TabPanel id="details" {...stylex.props(styles.panel)}>
         <PaneHeaderAccessoryHost value={accessoryHost ?? undefined}>
-          <AgentPanelData agentRef={agentRef} contributions={sectionContributions} tab="details">{(native, contributions) =>
+          {selected === 'details' && <AgentPanelData agentRef={agentRef} contributions={sectionContributions} tab="details">{(native, contributions) =>
             <NativeDetailsPane native={native} contributions={contributions} variants={variants} intent={intent} onIntentChange={setIntent} onOpen={onOpen} />
-          }</AgentPanelData>
+          }</AgentPanelData>}
         </PaneHeaderAccessoryHost>
       </TabPanel>
       <TabPanel id="changes" {...stylex.props(styles.panel)}><ChangesInspector agentRef={agentRef} width={width} /></TabPanel>
       <TabPanel id="resources" {...stylex.props(styles.panel)}>
-        <AgentPanelData agentRef={agentRef} contributions={sectionContributions} tab="resources">{(native, contributions) => {
+        {selected === 'resources' && <AgentPanelData agentRef={agentRef} contributions={sectionContributions} tab="resources">{(native, contributions) => {
           const supplemented = projectContributions(native, contributions)
           const sections = mergePanelSections([], contributions.flatMap(data => data.sections))
           const contributedSections = contributions.some(data => data.supplement !== undefined)
             ? mergePanelSections(sections, [traceSubagentSection(supplemented.trace)]) : sections
           return <AgentResourcesView agentRef={agentRef} onOpen={onOpen} contributedSections={contributedSections} {...(opening?.operation === undefined ? {} : { opening: opening.operation })} {...(opening === undefined ? {} : { cache: opening.cache })} />
-        }}</AgentPanelData>
+        }}</AgentPanelData>}
       </TabPanel>
     </Tabs>
   </aside>
@@ -224,7 +224,7 @@ function NativeDetailsPane({ native, contributions, variants, intent, onIntentCh
       <span data-details-accounting-summary {...stylex.props(styles.noteSummary)}>{data.accountingNote.summary}</span>
       <DetailsWhy explains="Agent and total spend" reasons={data.accountingNote.reasons} />
     </div>}
-    <DetailsPane overview={overview} sections={suppliedSections} trace={data.trace} now={now}
+    <DetailsPane overview={overview} sections={suppliedSections} trace={{ ...data.trace, subagents: { _tag: 'Unknown', reason: 'not-covered', detail: 'Per-subagent spend is shown in Resources.' } }} now={now}
       variants={variants} state={native.state} intent={intent} onIntentChange={onIntentChange}
       onOpen={onOpen} onRetry={native.onRetry} syncStatus={status}
       hasPriorContent={native.state !== 'loading' && native.state !== 'error'}
