@@ -11345,6 +11345,19 @@ pub fn append_claim_tx(
     predecessors: &[String],
     forced_batch: Option<&str>,
 ) -> Result<ClaimRecord> {
+    fn sorted(value: &Value) -> bool {
+        match value {
+            Value::Object(fields) => fields.keys().is_sorted() && fields.values().all(sorted),
+            Value::Array(values) => values.iter().all(sorted),
+            _ => true,
+        }
+    }
+    let canonical;
+    let body = if (kind.starts_with("custom.client.pairing") || kind.starts_with("custom.client.terminal"))
+        && !sorted(body) {
+        canonical = smallclaims::hash::canonical_json_value(body);
+        &canonical
+    } else { body };
     append_claim_tx_with_assistant_answer(transaction, origin, subject, kind, actor, body, predecessors, forced_batch, None)
 }
 

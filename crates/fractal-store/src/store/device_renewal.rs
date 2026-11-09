@@ -63,7 +63,7 @@ impl Store {
             replacement.actor.as_deref(), &json!({"fields":replacement.fields}), &replacement.evidence, None)?;
         append_operation_receipt_tx(&tx, &completed)?;
         let retired = append_claim_tx(&tx, self.origin(), &source.subject, "custom.client.pairing-revoked",
-            Some(person), &json!({"fields":{"person_id":person,"device_id":device,"completion_id":source.id}}),
+            Some(person), &json!({"fields":BTreeMap::from([("person_id",json!(person)),("device_id",json!(device)),("completion_id",json!(source.id))])}),
             std::slice::from_ref(&source.id), Some(&completed.batch_id))?;
         append_operation_receipt_tx(&tx, &retired)?;
         let receipt = append_claim_tx(&tx, self.origin(), &consumed.subject, &consumed.kind,
@@ -105,6 +105,11 @@ mod tests {
             Some("person/example"), &json!({"fields":{"person_id":"person/example","device_id":"device/old","completion_id":source.id}}), &[], None).unwrap();
         append_operation_receipt_tx(&tx, &withdrawal).unwrap();
         tx.commit().unwrap();
+        drop(connection);
+        let reloaded = store.claim_by_id(&withdrawal.id).unwrap().unwrap();
+        assert_eq!(serde_json::to_string(&withdrawal.body).unwrap(), serde_json::to_string(&reloaded.body).unwrap());
+        assert!(store.client_operation_is_trusted(&reloaded).unwrap());
+        assert!(store.pairing_completion_is_revoked(source).unwrap());
     }
     #[test]
     fn device_renewal_commits_receipts_and_replacement_once() {
@@ -112,6 +117,11 @@ mod tests {
         let result=store.commit_device_renewal(&stage,&source,&challenge,&consumed,&replacement).unwrap();
         assert!(store.client_operation_is_trusted(&result).unwrap());
         assert_eq!(result.body["fields"]["expires_at_unix_ms"], stage.body["fields"]["grant_expires_at_unix_ms"]);
+        let retired=store.claims_for_subject_kind_at(&source.subject,"custom.client.pairing-revoked",None,true,1).unwrap().claims.remove(0);
+        assert!(store.client_operation_is_trusted(&retired).unwrap());
+        assert!(store.pairing_completion_is_revoked(&source).unwrap());
+        assert!(crate::pairing::revocation_is_trusted(&store.readers.get(), &retired, &source).unwrap());
+        assert_eq!(retired.batch_id,result.batch_id);
         let receipt=store.claims_for_subject_kind_at(&stage.subject,"custom.client.pairing-renewal-consumed",None,true,1).unwrap().claims.remove(0);
         assert!(store.client_operation_is_trusted(&receipt).unwrap());
         assert_eq!(receipt.batch_id,result.batch_id);
