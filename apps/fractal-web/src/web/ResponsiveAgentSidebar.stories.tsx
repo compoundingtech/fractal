@@ -9,6 +9,7 @@ import { AgentFolders } from '../shell/AgentFolders.tsx'
 import type { SidebarNode } from '../folders/sidebarContract.ts'
 import { ResponsiveAgentSidebar, sidebarDrawerBreakpoint, sidebarMinimumWidth, useSidebarShortcut } from './ResponsiveAgentSidebar.tsx'
 import { tooltipFor } from '../../../../packages/fractal-ui/src/story-play.ts'
+import { SidebarTabs, type SidebarTab } from '../../../../packages/fractal-ui/src/assistant-ui/sidebar/SidebarTabs.tsx'
 
 const storyNow = Date.UTC(2026, 9, 8, 12)
 const rows: readonly SidebarAgentRowData[] = ['Builder', 'Reviewer'].map(title => ({
@@ -48,6 +49,59 @@ const ResponsiveSidebarSurface = ({ viewport, scheme = 'dark', shortcut = true, 
     {/* The last raster row belongs to fixed chrome, matching the deployed devbar boundary. */}
     <div aria-hidden="true" data-fixed-chrome-boundary="" {...stylex.props(styles.chromeBoundary)} />
   </main>
+}
+
+/** Exercise capped counts and the mission fault separately: both must fit without changing the tab language. */
+const widestTabs: readonly (readonly SidebarTab[])[] = [
+  [
+    { id: 'agents', label: 'Agents', icon: 'person', count: 1234 },
+    { id: 'alerts', label: 'Alerts', icon: 'bell', questionCount: 1234 },
+    { id: 'missions', label: 'Missions', icon: 'checklist', needsYouCount: 1234 },
+  ],
+  [
+    { id: 'agents', label: 'Agents', icon: 'person', count: 1234 },
+    { id: 'alerts', label: 'Alerts', icon: 'bell', needsYouCount: 1234 },
+    { id: 'missions', label: 'Missions', icon: 'checklist', status: { glyph: '!', label: '1 stalled or failed' } },
+  ],
+]
+const TabsFitSurface = ({ scheme = 'dark', width }: { readonly scheme?: 'dark' | 'light'; readonly width: number }) => {
+  const [selected, setSelected] = React.useState('agents')
+  const [variant, setVariant] = React.useState(0)
+  return <main {...stylex.props(styles.root, scheme === 'dark' ? assistantDarkTheme : compositionLightTheme)}>
+    <ResponsiveAgentSidebar viewport={1280} width={width} maxWidth={440} collapsed={false} drawerOpen={false} onDrawerOpenChange={() => undefined} onToggleCollapsed={() => undefined} onWidthChange={() => undefined} onWidthCommit={() => undefined} onWidthReset={() => undefined}>
+      <SidebarTabs tabs={widestTabs[variant]!} selectedId={selected} onSelectionChange={setSelected} panelHasTabbableContent>
+        <SidebarAgentRow item={rows[0]!} now={storyNow} active onOpen={() => undefined} />
+      </SidebarTabs>
+    </ResponsiveAgentSidebar>
+    <Aria.Button onPress={() => setVariant(value => 1 - value)}>Change tab markers</Aria.Button>
+  </main>
+}
+const tabsFitPlay = async ({ canvasElement }: { readonly canvasElement: HTMLElement }) => {
+  const canvas = within(canvasElement)
+  const sidebar = canvas.getByRole('complementary', { name: 'Agents' })
+  const assertFits = async () => {
+    await waitFor(() => expect(sidebar.scrollWidth).toBeLessThanOrEqual(sidebar.clientWidth))
+    const bounds = sidebar.getBoundingClientRect()
+    // Hidden intrinsic replicas deliberately have wider geometry, but must never enlarge the scroll area.
+    for (const child of sidebar.querySelectorAll<HTMLElement>('*')) {
+      const computed = getComputedStyle(child)
+      if (computed.visibility === 'hidden' || computed.display === 'none' || child.getClientRects().length === 0) continue
+      const rect = child.getBoundingClientRect()
+      await expect(rect.left).toBeGreaterThanOrEqual(bounds.left - 0.5)
+      await expect(rect.right).toBeLessThanOrEqual(bounds.right + 0.5)
+    }
+    await expect(sidebar.scrollLeft).toBe(0)
+  }
+  for (let variant = 0; variant < widestTabs.length; variant++) {
+    await assertFits()
+    const row = within(sidebar).getByRole('button', { name: /Builder session/ })
+    row.focus()
+    await expect(row).toHaveFocus()
+    await expect(sidebar.scrollLeft).toBe(0)
+    await userEvent.click(row)
+    await assertFits()
+    if (variant + 1 < widestTabs.length) await userEvent.click(canvas.getByRole('button', { name: 'Change tab markers' }))
+  }
 }
 
 type LayoutShiftEntry = PerformanceEntry & { readonly value: number; readonly hadRecentInput: boolean; readonly sources: readonly { readonly node: Node | null }[] }
@@ -295,6 +349,10 @@ export const scenarioExemptions: readonly string[] = [
   'FixedResizeRange:contract-fixture',
   'NonfiniteResizeRange:contract-fixture',
   'ReversedResizeRange:contract-fixture',
+  'TabsAtDefault:contract-fixture',
+  'TabsAtDefaultLight:contract-fixture',
+  'TabsAtMinimum:contract-fixture',
+  'TabsAtMinimumLight:contract-fixture',
 ]
 type Story = StoryObj<typeof meta>
 export const At440: Story = { args: { viewport: 440 }, play: drawerPlay }
@@ -302,6 +360,10 @@ export const At700: Story = { args: { viewport: 700 }, play: drawerPlay }
 export const At900: Story = { args: { viewport: 900 }, play: drawerPlay }
 export const At1440: Story = { args: { viewport: 1440 }, play: drawerPlay }
 export const DragUnmountCleanup: Story = { args: { viewport: 1440 }, play: dragUnmountPlay }
+export const TabsAtMinimum: Story = { tags: ['critical'], render: args => <TabsFitSurface scheme={args.scheme} width={sidebarMinimumWidth} />, play: tabsFitPlay }
+export const TabsAtMinimumLight: Story = { ...TabsAtMinimum, args: { scheme: 'light' } }
+export const TabsAtDefault: Story = { tags: ['critical'], render: args => <TabsFitSurface scheme={args.scheme} width={256} />, play: tabsFitPlay }
+export const TabsAtDefaultLight: Story = { ...TabsAtDefault, args: { scheme: 'light' } }
 const assertFrozenTrack = (track: HTMLElement): void => {
   if (track.hasAttribute('tabindex') || track.hasAttribute('role')) throw new Error('Frozen resize track must not be focusable or interactive')
   if (getComputedStyle(track).cursor === 'col-resize' || getComputedStyle(track).cursor === 'row-resize') throw new Error('Frozen resize track must not advertise resizing')
