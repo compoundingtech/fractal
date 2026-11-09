@@ -1181,3 +1181,7 @@ pub fn work_window(rows: &WorkRows, actor: Option<&str>, limit: usize) -> (Vec<V
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests_shared_client_v0_tests;
+
+#[cfg(test)]
+#[path = "published_run_drain_tests.rs"]
+mod run_drain_tests;

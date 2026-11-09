@@ -365,7 +365,7 @@ async fn push_cleanup_rejects_malformed_proof_and_redacts_database_failures() {
 }
 
 #[derive(Clone, Default)]
-struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+pub(crate) struct LogBuffer(pub(crate) Arc<Mutex<Vec<u8>>>);
 impl std::io::Write for LogBuffer {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         self.0

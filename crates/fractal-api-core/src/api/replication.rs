@@ -1,6 +1,10 @@
 use crate::DeliveryStore;
 use super::*;
 
+#[cfg(test)]
+#[path = "replication_receive_tests.rs"]
+mod receive_tests;
+
 pub async fn replication_status(
     State(state): State<AppState>,
 ) -> Result<Json<ReplicationStatus>, ApiError> {
@@ -298,12 +302,59 @@ pub async fn replication_checkpoint_adopt(
     Ok(Json(actions))
 }
 
+/// One INFO event describes all work charged to this receive, including failed requests.
+/// Admission time covers validation and repairs; projection time includes its lock waits.
+/// Counts include backlog work done by this request, not only envelopes it offered.
+/// Commits count successful managed transactions, not savepoints or implicit autocommit.
+/// `projection_stage` identifies failed final drains or other projection failure boundaries.
 pub async fn replication_receive(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<ReplicationReceiveRequest>,
+) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
+    let started = std::time::Instant::now();
+    let correlation_id = headers
+        .get("x-fractal-exchange-id")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("-");
+    let peer = request.peer.clone();
+    let envelopes_offered = request.exchange.envelopes.len();
+    let metrics = smallclaims::receive_metrics::RequestMetrics::default();
+    let result = replication_receive_inner(state, request, metrics.clone()).await;
+    let counters = metrics.snapshot();
+    let outcome = match &result {
+        Err(error) if matches!(error.code.as_str(), "database-busy" | "database-locked") => "contended",
+        Err(error) => error.code.as_str(),
+        Ok(_) if counters.contended => "contended",
+        Ok(_) => counters.projection_error.unwrap_or(if counters.deferred { "deferred" } else { "ok" }),
+    };
+    tracing::info!(
+        correlation_id = %correlation_id,
+        peer = %peer,
+        envelopes_offered,
+        envelopes_admitted = counters.envelopes_admitted,
+        admit_ms = counters.admit_time.as_secs_f64() * 1000.0,
+        project_ms = counters.project_time.as_secs_f64() * 1000.0,
+        projection_chunks = counters.projection_chunks,
+        rebuild_part_count = counters.rebuild_part_count,
+        rebuild_part_ms = counters.rebuild_part_time.as_secs_f64() * 1000.0,
+        commits = counters.commits,
+        total_ms = started.elapsed().as_secs_f64() * 1000.0,
+        outcome = %outcome,
+        projection_stage = %counters.projection_stage.as_deref().unwrap_or("-"),
+        "replication receive summary",
+    );
+    result
+}
+
+async fn replication_receive_inner(
+    state: AppState,
+    request: ReplicationReceiveRequest,
+    metrics: smallclaims::receive_metrics::RequestMetrics,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
     let store = state.store.clone();
     let (response, reconcile_changed, notice_visible) = blocking_action(move || {
+        let _metrics = metrics.enter();
         let before_index = store
             .index()
             .map_err(|error| FractalError::new("internal", error.to_string()))?;
@@ -332,6 +383,9 @@ pub async fn replication_receive(
         }
         let new_data = replication_receive_has_new_data(receipt.received + receipt.signatures);
         let (admission, repairs) = if new_data {
+            let _admission = smallclaims::receive_metrics::Timer::start(
+                smallclaims::receive_metrics::Stage::Admission,
+            );
             let admission = store
                 .validate_replication_backlog()
                 .map_err(|error| FractalError::new("internal", error.to_string()))?;
@@ -346,6 +400,9 @@ pub async fn replication_receive(
         // with or without new data, projects what it admitted meanwhile.
         let was_deferred = store.replication_projection_deferred();
         let projection = if new_data || was_deferred {
+            let _projection = smallclaims::receive_metrics::Timer::start(
+                smallclaims::receive_metrics::Stage::Projection,
+            );
             use opentelemetry::trace::{Span as _, TraceContextExt as _};
             use tracing_opentelemetry::OpenTelemetrySpanExt as _;
             let receive = crate::otel::export_enabled().then(|| {
@@ -382,6 +439,9 @@ pub async fn replication_receive(
         } else {
             Some(true)
         };
+        if projection.is_none() {
+            smallclaims::receive_metrics::deferred();
+        }
         let projected = projection.unwrap_or(false);
         let store_index = store
             .index()

@@ -75,6 +75,11 @@ pub enum StartCompletion {
 
 impl<R: RuntimeControl> Reconciler<R> {
     pub fn dispatch_start(&self, mut prepared: PreparedStart) -> Result<bool> {
+        if let Some(run) = &prepared.subject.owner_run
+            && self.store.run_projection_pending(run)?
+        {
+            return Ok(false);
+        }
         let failed_start = self.store.runtime_start_for(&prepared.subject.subject)?;
         let recovery_lock = if let Some(pending) = &failed_start {
             if prepared.request.is_none() {
@@ -367,6 +372,11 @@ impl<R: RuntimeControl> Reconciler<R> {
         snapshot: &PassPtySnapshot,
     ) -> Result<()> {
         let prepared: PreparedStart = serde_json::from_value(operation.body.clone())?;
+        if let Some(run) = &prepared.subject.owner_run
+            && self.store.run_projection_pending(run)?
+        {
+            return Ok(());
+        }
         let current =
             self.store.selected_desired_token(&operation.subject)? == prepared.selected_token;
         if !current || !prepared.requests_retained(&self.store)? {

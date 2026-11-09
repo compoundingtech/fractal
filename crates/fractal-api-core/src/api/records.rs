@@ -679,7 +679,7 @@ fn review_owner(state: &AppState, target: &str) -> Result<String, ApiError> {
     if target.contains('/')
         && state
             .store
-            .step_run(&step)
+            .step_run_fenced(&step)
             .map_err(ApiError::internal)?
             .is_some()
     {
@@ -839,7 +839,7 @@ pub async fn post_review(
             .and_then(Value::as_str)
         && owner.starts_with("step-run/")
     {
-        let step = state.store.step_run(owner).map_err(ApiError::internal)?;
+        let step = state.store.step_run_fenced(owner).map_err(ApiError::internal)?;
         let claimant = if let Some(step) = step {
             if step.claimant.is_some() || step.carried_claimant.is_some() {
                 step.claimant.or(step.carried_claimant)
