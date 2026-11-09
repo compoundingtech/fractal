@@ -147,10 +147,12 @@ uncertain handoffs, and successful handoffs retry lost receipt acknowledgements 
 No push component projects message bodies into `resources/inbox` or `resources/archive`.
 
 `delivered` records native transport acceptance, not model consumption. A boot or channel reconnect
-never authorizes another offer of previously offered mail. Older polling drivers retain the one-hour
-pre-boot cutoff (not the stream's seven-day recovery and five-message cap), recover never-offered
-mail within that hour and retain the current boot's staging attempt until its receipts finish;
-their local archive projection removes old native inbox files without closing the graph messages.
+never authorizes another offer of previously offered mail. Polling drivers use the same seven-day
+recovery window and five-message oldest-first backlog cap. Their connection boundary is the
+consumer's boot/session floor; the daemon's store keeps one in-memory budget per recipient and
+replaces it when that floor changes. Pagination and filtered reads share the budget. Admitted mail
+remains visible through the current boot's staging attempt until its receipts finish; their local
+archive projection removes old native inbox files without closing the graph messages.
 An agent can explicitly inspect that retained mail with `fractal conversations ls --as "$ST_AGENT"`
 and read it with `fractal conversations read MESSAGE --as "$ST_AGENT"`. New mail on the live connection
 continues to arrive normally, with the channel's usual handoff deduplication and receipt handling.

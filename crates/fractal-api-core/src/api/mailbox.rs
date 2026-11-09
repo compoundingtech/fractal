@@ -14,7 +14,7 @@ pub fn recovery_backlog(accepted_at: u128, since: u128) -> Option<bool> {
     )
 }
 
-/// Recover only recent mail which has never been offered. A prior staging claim is
+/// Recover only mail which has never been offered. A prior staging claim is
 /// already an offer attempt, even when its delivered receipt has not arrived yet.
 pub fn never_offered(store: &Store, message: &crate::model::MessageView) -> anyhow::Result<bool> {
     // A stream item's offers are this member's own lifecycle records, not graph claims.
@@ -32,8 +32,75 @@ pub fn never_offered(store: &Store, message: &crate::model::MessageView) -> anyh
             .is_none())
 }
 
-/// Older drivers poll instead of subscribing. Preserve a recent message admitted
-/// by this boot while its current staging attempt finishes; older attempts stay held.
+/// Store-local budgets: one latest boot floor and at most five identities per recipient.
+#[derive(Default)]
+struct PollRecovery(BTreeMap<String, PollBoot>);
+
+#[derive(Default)]
+struct PollBoot {
+    floor: (u128, u64),
+    admitted: std::collections::BTreeSet<String>,
+}
+
+fn poll_backlog(
+    store: &Store,
+    recovery: &Mutex<PollRecovery>,
+    recipient: &str,
+    floor: (u128, u64),
+    messages: &[crate::model::MessageView],
+) -> anyhow::Result<std::collections::BTreeSet<String>> {
+    let mut has_backlog = false;
+    for message in messages {
+        if message.status == "sent" && !crate::silent::waits_for_turn(message)
+            && let Some(sent) = sent_claim(store, message)?
+            && recovery_backlog(sent.accepted_at_unix_ms, floor.0) == Some(true)
+        {
+            has_backlog = true;
+            break;
+        }
+    }
+    // Empty/recent-only polls and exhausted sessions need no second mailbox scan.
+    if let Some(PollBoot { floor: current, admitted }) = recovery.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner).0.get(recipient)
+        && *current == floor && (!has_backlog || admitted.len() == RECOVERY_BACKLOG_LIMIT)
+    {
+        return Ok(admitted.clone());
+    }
+    if !has_backlog {
+        return Ok(Default::default());
+    }
+    // A page or filtered query must not choose newer mail ahead of older eligible mail.
+    // Read before locking: the mutex protects only the five-slot admission decision.
+    let mut candidates = Vec::new();
+    for message in store.messages(Some(recipient), false)? {
+        if !crate::silent::waits_for_turn(&message)
+            && never_offered(store, &message)?
+            && let Some(sent) = sent_claim(store, &message)?
+            && recovery_backlog(sent.accepted_at_unix_ms, floor.0) == Some(true)
+        {
+            candidates.push((sent.accepted_at_unix_ms, message.subject));
+        }
+    }
+    candidates.sort_unstable();
+    let mut recovery = recovery.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let PollBoot { floor: current, admitted } = recovery.0.entry(recipient.into()).or_default();
+    if *current > floor {
+        return Ok(Default::default()); // A concurrent poll from an obsolete boot cannot refill.
+    }
+    if *current != floor {
+        *current = floor;
+        admitted.clear();
+    }
+    let available = RECOVERY_BACKLOG_LIMIT.saturating_sub(admitted.len());
+    let selected = candidates.iter().filter(|(_, subject)| !admitted.contains(subject))
+        .take(available).filter(|(_, subject)| messages.iter().any(|m| &m.subject == subject))
+        .map(|(_, subject)| subject.clone()).collect::<Vec<_>>();
+    admitted.extend(selected);
+    Ok(admitted.clone())
+}
+
+/// Polling preserves this boot's admitted mail until its current offer finishes.
+/// Previously offered mail from earlier boots stays held, regardless of age.
 pub fn hold_pre_boot_mail(
     store: &Store,
     peer: Option<&NativeDeliveryPeer>,
@@ -51,6 +118,9 @@ pub fn hold_pre_boot_mail(
         }
         return Ok(());
     };
+    // Domain-owned ephemeral state shares the daemon's Store lifetime without changing callers.
+    let recovery = store.extension::<Mutex<PollRecovery>>();
+    let admitted = poll_backlog(store, &recovery, &peer.agent, (since, through), messages)?;
     // A closed projection only removes old native inbox files. Explicit conversation
     // reads still see the original graph status, with no synthetic receipt or close.
     for message in messages {
@@ -64,9 +134,9 @@ pub fn hold_pre_boot_mail(
         // A stream item's index is past every graph index, so only its accepted time places
         // it against the boot; its staging is a local record without a graph index.
         let after_boot = message.created_index > through && sent.accepted_at_unix_ms >= since;
-        let recent = sent.accepted_at_unix_ms
-            > since.saturating_sub(u128::from(super::mail_backlog::THRESHOLD_MS));
-        let current_offer = recent
+        let recent = recovery_backlog(sent.accepted_at_unix_ms, since) == Some(false);
+        let recovered = admitted.contains(&message.subject);
+        let current_offer = (recent || recovered)
             && if mailbox_reads::is_stream_item(message) {
                 mailbox_reads::lifecycle_step(store, &message.subject, "message.staged")?
                     .is_some_and(|(actor, at)| at >= since && actor == peer.agent)
@@ -82,7 +152,7 @@ pub fn hold_pre_boot_mail(
                             && claim.actor.as_deref() == Some(peer.agent.as_str())
                     })
             };
-        if !after_boot && !(recent && (never_offered(store, message)? || current_offer)) {
+        if !after_boot && !((recent || recovered) && (never_offered(store, message)? || current_offer)) {
             message.status = "closed".into();
         }
     }
@@ -156,7 +226,7 @@ mod tests {
     }
 
     #[test]
-    fn native_poll_recovers_unoffered_preboot_mail_until_its_current_offer_finishes() {
+    fn native_poll_recovers_hour_old_unoffered_mail_until_its_current_offer_finishes() {
         for transport in [
             "claude-channel",
             "omp-channel",
@@ -176,7 +246,6 @@ mod tests {
             };
             for (id, phase) in [
                 ("fresh", "sent"),
-                ("hour-old", "sent"),
                 ("offered", "staged"),
                 ("accepted", "delivered"),
             ] {
@@ -197,7 +266,7 @@ mod tests {
                         idempotency_key: Some(format!("send:{id}")),
                     })
                     .unwrap();
-                if id == "hour-old" {
+                if id == "fresh" {
                     age_sent(&store, &database, &subject);
                 }
                 if phase != "sent" {
@@ -266,6 +335,79 @@ mod tests {
                     .is_empty()
             );
         }
+    }
+
+    #[test]
+    fn native_poll_caps_oldest_backlog_across_pages_and_resets_only_at_next_boot() {
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("graph.db");
+        let store = Store::open(&database, "node").unwrap();
+        let recovery = store.extension::<Mutex<PollRecovery>>();
+        let seat = "agent/eval.worker";
+        let peer = NativeDeliveryPeer { agent: seat.into(), transport: "omp-channel", pid: 37, archives_inbox: true };
+        // Creation order deliberately disagrees with original send age.
+        for id in (0..9).rev() {
+            store.append_claim(&ClaimInput {
+                subject: format!("message/{id}"), kind: "message.sent".into(),
+                actor: Some("person/eval".into()),
+                fields: BTreeMap::from([
+                    ("status".into(), json!("sent")), ("from".into(), json!("person/eval")),
+                    ("to".into(), json!(seat)), ("content".into(), json!("QUARTZ SIGNAL")),
+                ]),
+                evidence: Vec::new(), expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        crate::store::message_marks::record(&store, "message/0", "message.staged", seat).unwrap();
+        crate::store::mailbox_tests::ready(&store, "first-boot");
+        let (since, _) = store.native_mail_boot_floor(seat).unwrap().unwrap();
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        crate::store::configure_projection_writer(&connection).unwrap();
+        for id in 0..9 {
+            let age = match id {
+                0 | 1 => RECOVERY_CUTOFF_MS, // The cutoff itself is inclusive.
+                8 => RECOVERY_CUTOFF_MS + 1,
+                _ => (10 - id) * 3_600_000,
+            };
+            let sent = store.latest_claim(&format!("message/{id}"), Some("message.sent")).unwrap().unwrap();
+            connection.execute(
+                "UPDATE claims SET accepted_at_unix_ms=?1 WHERE id=?2",
+                rusqlite::params![(since - age).to_string(), sent.id],
+            ).unwrap();
+        }
+        let poll = |subjects: &[&str]| {
+            let mut messages = store.messages(Some(seat), false).unwrap();
+            if !subjects.is_empty() {
+                messages.retain(|m| subjects.contains(&m.subject.as_str()));
+            }
+            hold_pre_boot_mail(&store, Some(&peer), Some(seat), &mut messages).unwrap();
+            messages
+        };
+        assert_eq!(poll(&["message/7"])[0].status, "closed",
+            "a filtered page must not admit newer backlog before the oldest five");
+        assert!(recovery.lock().unwrap().0[seat].admitted.is_empty(), "a preview spent the budget");
+        for id in 1..=5 {
+            let subject = format!("message/{id}");
+            assert_eq!(poll(&[&subject])[0].status, "sent");
+            crate::store::message_marks::record(&store, &subject, "message.staged", seat).unwrap();
+        }
+        assert_eq!(recovery.lock().unwrap().0[seat].admitted.len(), 5);
+        let held = poll(&[]);
+        for message in &held {
+            let admitted = ["message/1", "message/2", "message/3", "message/4", "message/5"]
+                .contains(&message.subject.as_str());
+            assert_eq!(message.status, if admitted { "staged" } else { "closed" });
+        }
+        // Neither completed nor staged offers refund a slot in this session.
+        crate::store::message_marks::record(&store, "message/1", "message.read", seat).unwrap();
+        assert_eq!(poll(&["message/6"])[0].status, "closed");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        crate::store::mailbox_tests::ready(&store, "second-boot");
+        for message in poll(&[]) {
+            assert_eq!(message.status,
+                if ["message/6", "message/7"].contains(&message.subject.as_str()) { "sent" } else { "closed" },
+                "the next boot re-offered staged or expired mail");
+        }
+        assert_eq!(recovery.lock().unwrap().0.len(), 1, "old boot entries leaked");
     }
 
 }
