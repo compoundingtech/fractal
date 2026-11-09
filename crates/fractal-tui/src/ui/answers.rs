@@ -141,11 +141,11 @@ mod tests {
         press(&mut ui, KeyCode::Char('c'));
         press(&mut ui, KeyCode::Char('A'));
         ui.click(Hit::Answer(1));
-        assert_eq!(ui.note_answers["attention/first"], "yes");
+        assert_eq!(ui.note_answers.get("attention/first").map(String::as_str), Some("yes"));
         ui.click(Hit::Key('c'));
         press(&mut ui, KeyCode::Char('B'));
-        assert_eq!(ui.conversation_state.drafts["answer:attention/first:yes"], "A");
-        assert_eq!(ui.conversation_state.drafts["answer:attention/first:other"], "B");
+        assert_eq!(ui.conversation_state.drafts.get("answer:attention/first:yes").map(String::as_str), Some("A"));
+        assert_eq!(ui.conversation_state.drafts.get("answer:attention/first:other").map(String::as_str), Some("B"));
         ui
     }
 
@@ -258,10 +258,11 @@ mod tests {
         ui.click(Hit::Answer(0));
         ui.click(Hit::Enter);
         assert!(ui.effects.is_empty());
-        let error = ui.answer_errors["attention/first"].clone();
+        let error = ui.answer_errors.get("attention/first").cloned();
+        assert!(error.is_some(), "the refusal must have an inline error");
         ui.flash = None;
         ui.set_world(ui.world.clone());
-        assert_eq!(ui.answer_errors["attention/first"], error);
+        assert_eq!(ui.answer_errors.get("attention/first"), error.as_ref());
         assert!(ui.editing);
         press(&mut ui, KeyCode::Char('x'));
         ui.click(Hit::Enter);
@@ -279,9 +280,9 @@ mod tests {
         ui.note_acted(&effect);
         ui.finish_answer("attention/first", false);
         ui.flash = None;
-        assert_eq!(ui.note_answers["attention/first"], "yes");
-        assert_eq!(ui.conversation_state.drafts["answer:attention/first:yes"], "retain this");
-        assert!(ui.answer_errors["attention/first"].contains("Could not confirm answer"));
+        assert_eq!(ui.note_answers.get("attention/first").map(String::as_str), Some("yes"));
+        assert_eq!(ui.conversation_state.drafts.get("answer:attention/first:yes").map(String::as_str), Some("retain this"));
+        assert!(ui.answer_errors.get("attention/first").is_some_and(|error| error.contains("Could not confirm answer")));
         ui.set_world(ui.world.clone());
         assert!(ui.answer_errors.contains_key("attention/first"));
     }
@@ -442,10 +443,10 @@ mod tests {
         ui.finish_answer("attention/first", false);
         assert_eq!(ui.world.attention.items().len(), 2);
         assert_eq!(ui.selected_id().as_deref(), Some("attention/next"), "rollback does not steal focus");
-        assert_eq!(ui.conversation_state.drafts["attention/next"], "new draft");
+        assert_eq!(ui.conversation_state.drafts.get("attention/next").map(String::as_str), Some("new draft"));
         assert!(ui.pending_answers.is_empty());
         assert!(!ui.acted.contains("attention/first"));
-        assert!(ui.answer_errors["attention/first"].contains("Could not confirm answer"));
+        assert!(ui.answer_errors.get("attention/first").is_some_and(|error| error.contains("Could not confirm answer")));
     }
 
     #[test]
@@ -457,7 +458,7 @@ mod tests {
         };
         ui.note_acted(&effect);
         ui.finish_answer("attention/first", false);
-        assert_eq!(ui.conversation_state.drafts["attention/first"], "my answer");
+        assert_eq!(ui.conversation_state.drafts.get("attention/first").map(String::as_str), Some("my answer"));
         ui.note_acted(&effect);
         // Live calls finish(true) only after BOTH the RPC and complete window agree.
         let confirmed = ui.world.clone();

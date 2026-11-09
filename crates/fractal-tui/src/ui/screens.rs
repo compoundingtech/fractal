@@ -544,7 +544,7 @@ fn structured_request(
             tags.push(("needs your words", theme::YELLOW));
         }
         // Every answer that has a saved note says so, highlighted or not.
-        let noted = drafts.noted_answers.iter().any(|id| *id == answer.id)
+        let noted = drafts.noted_answers.contains(&answer.id)
             || (has_text && drafts.note_answer.as_deref() == Some(answer.id.as_str()));
         if noted {
             tags.push(("✎ note", theme::LAVENDER));
