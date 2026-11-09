@@ -4248,8 +4248,11 @@ mod request_notes {
             Case {
                 answering: Some(2),
                 noted: &["ship"],
-                shows: &["Your notes on “Ship it” go with “Revise first” once you write what should change."],
-                hides: &["Enter sends"],
+                shows: &[
+                    "what should change? Start typing; Enter sends it with “Revise first”",
+                    "Your notes on “Ship it” go with “Revise first” once you write what should change.",
+                ],
+                hides: &["Enter sends “Revise first”"],
                 ..case("decision changes highlighted beside a note", decision())
             },
             Case {
