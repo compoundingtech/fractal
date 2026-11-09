@@ -146,10 +146,12 @@ export function SidebarTabs({ tabs, selectedId, onSelectionChange, panelHasTabba
     return () => observer.disconnect()
   }, [fits])
   return <ThemePortal><div ref={bar} data-sidebar-tabs data-sidebar-tab-fit={fit.fit} data-sidebar-tab-counts={fit.counts ? 'shown' : 'dropped'} {...stylex.props(styles.root)}>
-    {/* Hidden replicas of each step at intrinsic width, outside the tablist; the first is the whole row. */}
-    {fits.map((step, index) => <div key={step.fit} ref={row => { replicas.current[index] = row }} aria-hidden inert data-sidebar-tabs-measure={index === 0 ? '' : undefined} data-sidebar-tabs-measure-fit={step.fit} {...stylex.props(styles.bar, narrow && styles.touch, styles.measure)}>
-      {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount={step.counts} showIcon={step.icon} showLabel={step.label} /></span>)}
-    </div>)}
+    {/* Intrinsic replicas must not contribute their wider boxes to the sidebar's scrollable overflow. */}
+    <div aria-hidden inert {...stylex.props(styles.measureHost)}>
+      {fits.map((step, index) => <div key={step.fit} ref={row => { replicas.current[index] = row }} data-sidebar-tabs-measure={index === 0 ? '' : undefined} data-sidebar-tabs-measure-fit={step.fit} {...stylex.props(styles.bar, narrow && styles.touch, styles.measure)}>
+        {tabs.map(tab => <span key={tab.id} {...stylex.props(styles.tab, narrow && styles.touchTab)}><TabFace tab={tab} showCount={step.counts} showIcon={step.icon} showLabel={step.label} /></span>)}
+      </div>)}
+    </div>
     <div {...stylex.props(styles.root)}>
       <div {...tabListProps} ref={list} {...stylex.props(styles.bar, narrow && styles.touch)}>
         {tabs.map(tab => <SidebarTabButton key={tab.id} tab={tab} state={state} prefix={prefix} narrow={narrow} fit={fit} />)}
@@ -182,6 +184,8 @@ const styles = stylex.create({
   root: { position: 'relative', display: 'flex', flexDirection: 'column', flex: '1 1 0', minWidth: 0, minHeight: 0 },
   // Side padding lines the tabs up with the search field and lists below; the gap keeps chips apart at every step.
   bar: { display: 'grid', gridAutoFlow: 'column', gridAutoColumns: 'auto', alignItems: 'center', gap: s.xs, paddingInline: s.md, flexShrink: 0, boxSizing: 'border-box', height: g.controlLg, borderBottomWidth: g.hairline, borderBottomStyle: 'solid', borderBottomColor: border.border },
+  // Clip only the invisible measuring surface, not the interactive bar or its focus rings.
+  measureHost: { position: 'absolute', insetInline: 0, top: 0, height: 0, overflow: 'clip' },
   // Same box as the bar but sized by its content and taking no layout space, so measuring never changes what is measured.
   measure: { position: 'absolute', top: 0, insetInlineStart: 0, width: 'max-content', visibility: 'hidden', pointerEvents: 'none' },
   // Tracks start from content and share the rest; labels never shrink, the row steps down instead.
