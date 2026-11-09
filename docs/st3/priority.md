@@ -173,12 +173,18 @@ declarations; this does not permit new agent authoring of those fields. Replay a
 historical interpretation are unchanged.
 
 **Publication compatibility.** Every new declared-admission publication requires
-anchored `features.declared_admission=2` from every active incarnation, including the
-local daemon; this replaces version 1 for all declared-admission fields, not only
-attention. Upgrade active members or fence old peers before publishing. Missing or
-older support refuses before writes with `declared-admission-feature-barrier`.
-Old KDL and typed authoring already reject unknown budget members rather than
-silently dropping attention. There is no database, replay or enforcement change.
+`features.declared_admission=1` from every active incarnation, including the local
+daemon. Publications containing attention additionally require
+`features.declared_attention=1` from every active incarnation. Both capabilities
+must appear in each incarnation's latest signed, authenticated, own-origin
+`daemon.started` advertisement anchored to the admitted incarnation. Missing or
+unsupported capability evidence refuses before writes with
+`declared-admission-feature-barrier`. Attention-free declarations continue
+publishing in mixed fleets with version-1 declared-admission support; upgrade active
+members or fence old peers before publishing attention. Remove attention using
+supporting readers before a mixed-version rollback. Old KDL and typed authoring
+already reject unknown budget members rather than silently dropping attention.
+There is no database, replay or enforcement change.
 
 ## Linux
 
