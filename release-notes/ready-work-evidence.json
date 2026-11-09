@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Add opt-in GET /v1/client/ready-work evidence for ready demand in an explicit declared cohort at a current local graph cut. HEAD returns 405. Coverage is local graph demand, not immediate dispatchability or fleet-wide coverage.",
+  "replay": {"status": "none", "detail": "No claim or projection replay changes; the read uses an existing published work cut and separately fences graph head and attention frontier."},
+  "schema": {"status": "none", "detail": "No persistent schema, table, index or data rewrite changes."},
+  "rules": {"status": "none", "detail": "No claim admission, permission or trust rule changes; no production cohort, threshold, dashboard or activation is included."},
+  "compatibility": {"status": "changed", "detail": "Additive opt-in HTTP read with an explicit cohort query, local-graph-cut coverage, evaluated_at, projection_frontier and ready_count. A publication above 5,000 work rows, graph-head mismatch, absent/unhealthy/mismatched attention frontier, replication catching up or diverged, expiry seen inside the pinned read, or an unresolved/non-live cohort declaration returns 503 ready-work-unavailable. No served work publication at entry, or expiry/publication-list or generation replacement seen after counting, returns 503 work-list-not-ready. Malformed cohorts return validation errors. Existing reads and clients are unchanged. HEAD is explicitly refused with 405 rather than running GET."},
+  "downtime": {"status": "none", "detail": "No new startup work or coordinated deployment required."},
+  "manual": {"status": "none", "detail": "No operator action or configuration migration required; consumers must explicitly request a cohort to use this evidence."},
+  "recovery": {"status": "none", "detail": "No persistent state changes or rollback restrictions; reverting removes the additive endpoint."}
+}

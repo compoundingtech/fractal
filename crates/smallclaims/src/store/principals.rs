@@ -1333,6 +1333,16 @@ impl Store {
         }))
     }
 
+    /// Sign a device-renewal offer with the person's local root.
+    pub fn sign_device_renewal_offer(&self, person: &str, tuple: &Value) -> Result<String, FractalError> {
+        self.person_root_grant(person)?;
+        let root = self.held_root(person).ok_or_else(|| {
+            FractalError::new("no-person-key", "this member holds no person root")
+        })?;
+        let message = format!("fractal-device-renewal-offer-v1\n{tuple}");
+        Ok(root.key.sign(message.as_bytes()))
+    }
+
     /// Withdraw a device key of `person`, as the node.
     pub fn revoke_device_key(&self, person: &str, key: &str, reason: &str) -> Result<(), FractalError> {
         self.append_claim(&ClaimInput {

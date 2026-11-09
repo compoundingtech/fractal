@@ -2470,7 +2470,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         }
         let faults = {
             let mut phase = crate::reconcile_telemetry::phase("fault_snapshot");
-            let faults = self.store.fault_snapshot(now)?;
+            let faults = self.store.fault_delivery_snapshot(now)?;
             phase.items(faults.len());
             faults
         };

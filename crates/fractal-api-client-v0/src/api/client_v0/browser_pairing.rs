@@ -23,10 +23,11 @@ fn request(state: &AppState, id: &str) -> Result<ClaimRecord, ApiError> {
     if id.len() != 32 || !id.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
         return Err(validation("invalid browser request id"));
     }
-    state.store.claims_for_subject_kind_at(&format!("custom/client/pairing-{id}"), "custom.client.pairing-begun", None, true, 1)
-        .map_err(ApiError::internal)?.claims.into_iter()
-        .find(|c| c.body["fields"]["browser_request"] == true && c.origin == state.store.origin()
-            && crate::trusted_pairing_fields(c.actor.as_deref(), &c.body["fields"]))
+    state.store.newest_admitted_client_operation(
+        &format!("custom/client/pairing-{id}"), "custom.client.pairing-begun",
+    ).map_err(ApiError::internal)?
+        .filter(|claim| claim.body["fields"]["browser_request"] == true
+            && claim.origin == state.store.origin())
         .ok_or_else(|| ApiError::not_found("browser request does not exist"))
 }
 fn owner(state: &AppState, session: &ClientSession) -> Result<(), ApiError> {
@@ -76,10 +77,9 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
         .ok_or_else(|| forbidden("browser approval ask was not retained"))?;
     let expires = u128::from(asking.body["fields"]["deadline_unix_ms"].as_u64()
         .ok_or_else(|| forbidden("browser approval ask has no deadline"))?);
-    state.store.append_claim(&ClaimInput {
+    state.store.append_client_operation_claim(&ClaimInput {
         subject: format!("custom/client/pairing-{id}"), kind: "custom.client.pairing-begun".into(), actor: Some(session.authority_actor.clone()),
         fields: BTreeMap::from([
-            (crate::PAIRING_OPERATION_VERSION.into(), json!(1)),
             ("pairing_id".into(), json!(format!("pairing/{id}"))), ("person_id".into(), json!(session.authority_actor)),
             ("device_name".into(), json!(body.device_label)), ("tailnet_login".into(), json!(body.tailnet_login)),
             ("code_hash".into(), json!(body.request_key_digest)), ("scopes".into(), json!(SCOPES)),
@@ -92,7 +92,7 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
 }
 
 pub fn approval(state: &AppState, begun: &ClaimRecord) -> Result<&'static str, ApiError> {
-    if !crate::trusted_pairing_fields(begun.actor.as_deref(), &begun.body["fields"]) {
+    if !state.store.client_operation_is_trusted(begun).map_err(ApiError::internal)? {
         return Err(forbidden("browser request requires a pairing operation record"));
     }
     let expires = begun.body["fields"]["expires_at_unix_ms"].as_u64().unwrap_or(0);
@@ -136,16 +136,20 @@ pub async fn redeem(State(state): State<AppState>, Extension(session): Extension
 pub async fn revoke_current(State(state): State<AppState>, Extension(session): Extension<ClientSession>) -> Result<Json<Value>, ApiError> {
     owner(&state, &session)?;
     let grant = session.pairing_grant.as_deref().ok_or_else(|| forbidden("a paired browser device is required"))?;
-    let paired = state.store.claims_for_subject_kind_at(grant, "custom.client.pairing-completed", None, true, 1).map_err(ApiError::internal)?.claims.into_iter()
-        .next().filter(|c| field(c, "session_actor") == Some(session.actor.as_str())
-            && crate::trusted_pairing_fields(c.actor.as_deref(), &c.body["fields"]))
+    let paired = state.store.newest_admitted_pairing_completion(grant, client_now_ms())
+        .map_err(ApiError::internal)?
+        .filter(|claim| field(claim, "session_actor") == Some(session.actor.as_str())
+            && session.pairing_completion.as_deref() == Some(claim.id.as_str()))
         .ok_or_else(|| forbidden("a paired browser device is required"))?;
-    let begun = state.store.claims_for_subject_kind_at(&paired.subject, "custom.client.pairing-begun", None, true, 1).map_err(ApiError::internal)?;
-    if paired.origin != state.store.origin() || !begun.claims.first().is_some_and(|c| c.body["fields"]["browser_request"] == true
-        && crate::trusted_pairing_fields(c.actor.as_deref(), &c.body["fields"])) {
+    let id = grant.strip_prefix("custom/client/pairing-")
+        .ok_or_else(|| forbidden("a paired browser device is required"))?;
+    let begun = request(&state, id)?;
+    if paired.origin != state.store.origin()
+        || !paired.body["evidence"].as_array().is_some_and(|evidence| evidence.contains(&json!(begun.id)))
+    {
         return Err(forbidden("only this browser's issuer can revoke it"));
     }
-    state.store.append_claim(&ClaimInput { subject: paired.subject.clone(), kind: "custom.client.pairing-revoked".into(), actor: Some(session.authority_actor),
+    state.store.append_client_operation_claim(&ClaimInput { subject: paired.subject.clone(), kind: "custom.client.pairing-revoked".into(), actor: Some(session.authority_actor),
         fields: BTreeMap::from([("device_id".into(), paired.body["fields"]["device_id"].clone())]), evidence: vec![paired.id], expected_subject: None, idempotency_key: None }).map_err(ApiError::bad)?;
     signal_changed(&state);
     Ok(Json(json!({"revoked":true})))

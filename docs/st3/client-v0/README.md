@@ -250,6 +250,15 @@ omit their stored principal remain ChatGPT grants. MCP pairing is an explicit
 choice, not a reinterpretation of a ChatGPT profile. Older servers that do not
 recognize `assistant/mcp` reject it; clients must not retry as a person or ChatGPT.
 
+Assistant challenge storage uses the member-local keyed verifier, bound to the
+stored full `assistant-grant/<hex>` grant ID. Request/response shapes and bearer
+credential digests are unchanged. Unknown verifier markers or key replacement
+require HTTP 403 `pairing-restart-required` (`start pairing again`), without
+changing BEGUN or writing GRANTED, credentials, or completion state; the denied
+completion audit is retained. Unmarked legacy challenges have a bounded
+five-minute lifetime. See [assistant verifier recovery](../external-assistants.md#pairing-verifier-and-recovery)
+for secret storage, logical-backup exclusions, and restart/downgrade guidance.
+
 ### Mission run timing
 
 `GET /v1/client/missions/{id}` requires `read.projections`, like other projection reads.
@@ -1811,6 +1820,37 @@ socket. The selected concrete scopes are sealed into that pairing; existing limi
 not silently upgraded and must be re-paired, then revoked when no longer needed. Revocation takes
 effect for every subsequent request, including a new bounded terminal WebSocket exchange.
 
+Person challenges use 40-bit random codes with a 300-second expiry and independent random
+128-bit pairing IDs and begin-claim subjects, not IDs derived from the code. New
+`custom.client.pairing-begun` claims carry `verifier: "hmac-sha256-v1"`:
+`code_hash` holds HMAC-SHA-256, and
+`verifier_key_id` holds the SHA-256 fingerprint of the member-local secret. The secret lives
+at `state_dir/pairing-verifier/key` (0600, parent directory 0700), never in claims or backups.
+The MAC input is the domain bytes `fractal/pairing-code-verifier/v1` (no NUL),
+then the full prefixed pairing ID's UTF-8 bytes, then the code's UTF-8 bytes, each
+prefixed by its byte length as an unsigned big-endian u32, without normalization.
+Verifiers are bound to the stored pairing ID, including its namespace prefix.
+Replicated claims alone cannot support offline guessing against this keyed verifier.
+The threat bound remains a 40-bit code valid for 300 seconds, not a high-entropy credential;
+use an encrypted path and independently verify the person-root fingerprint.
+
+Reopening the same state directory with the same secret preserves live challenges. After a
+claim-only restore or a missing, replaced, or rotated verifier secret, old pending challenges
+require a fresh trusted-local begin. Completion returns HTTP 403 `pairing-restart-required`,
+`retryable: false`, with message `start pairing again`; retrying the old code cannot recover it.
+A wrong code with the matching verifier secret still returns the existing `forbidden` error.
+Legacy challenges without the marker are accepted only if unexpired and their expiry minus
+the claim timestamp is at most 300,000 ms; a longer legacy lifetime returns
+`pairing-restart-required`. Existing completed person pairings remain usable.
+Downgrading to a pre-keyed-verifier binary makes in-flight keyed pairings fail with
+HTTP 403 `forbidden`, message `the pairing code is invalid, expired, or already used`:
+the older binary ignores the marker and compares the stored HMAC with the unkeyed
+code digest. Restart those pairings on the downgraded member; no stored claims or
+verifier state need cleanup.
+There is no rollback protection when both secret and claims are restored to an earlier state:
+a previously consumed challenge can become usable again until its original expiry. This is
+an accepted limitation, not a guarantee of preserved single-use history across such a restore.
+
 ### External assistant grants
 
 External assistants use a separate, closed principal namespace, never person delegation.
@@ -2285,22 +2325,36 @@ Errors have `error_version: st3.client.error.v0`, a stable kebab-case code, safe
 
 Pairing records are reserved for the dedicated pairing operations: ordinary claim writes
 cannot use a `custom.client.pairing*` kind or a `custom/client/pairing*` subject.
-The pairing operation stamps `pairing_operation_version: 1` on its challenge and session
-records. Authentication requires this marker and the concrete person actor matching
-`person_id`. Unmarked challenges require a new pairing. Unmarked credentials also require
+Each pairing operation atomically writes a native `client.operation-authorized` receipt,
+bound to the exact operation record ID, content hash, writer and issuing member.
+Authentication requires this receipt; historical numeric admission fields confer no trust.
+Unreceipted challenges require a new pairing. Unreceipted credentials also require
 a new pairing unless an operator configures a temporary migration allowance for an exact
 existing completion record. `pairing_legacy_allowances` defaults to an empty list. Each entry
 contains `completion_id`, `record_hash`, and `until_unix_ms`. The hash is
 `fractal_store::pairing::record_hash(origin, actor, fields)` over the retained completion.
-Startup refuses entries whose hash does not match an existing completion. An allowance
-never extends recorded scopes or expiry, bypasses revocation, or lasts beyond
+Startup refuses entries whose hash does not match an existing completion or whose writer
+is not exactly the recorded person.
+An allowance never extends recorded scopes or expiry, bypasses revocation, or lasts beyond
 2026-11-15T23:00:00Z, regardless of its configured deadline. The allowance is member-local
 and must be configured explicitly on each member where the existing credential is used.
+An allowance entry must come from an audited record: it admits exactly the recorded
+contents, not independently verified provenance. Held terminal streams use the earlier of
+the credential expiry and allowance deadline and recheck admission at continuation.
+Revocation of a receipted credential requires a matching operation receipt from its issuing
+member. For an allowance-backed credential, any revocation from that issuer applies,
+including one received after startup. Other revocation records are counted in an operator
+warning, without credential data.
 
 Terminal attachment lifecycle records likewise require the dedicated terminal operations:
 `custom.client.terminal*` kinds and `custom/client/terminal-*` subjects are reserved.
-Attachments and their consumption/detachment records carry `terminal_operation_version: 1`.
-Unmarked attachments require a new attach operation; they cannot provide stream authority.
+Attachments and their consumption/detachment records require the same native receipt.
+Unreceipted attachments require a new attach operation; they cannot provide stream authority.
+The receipt kind is registered system-only and cannot be submitted through ordinary claims;
+older schemas reject it as an unknown native kind. A receipt requires member-local operation
+proof or an envelope signed by a keyed fleet member for its issuing origin. Unsigned receipt
+envelopes are refused by both replication and backup admission. Lifecycle selection ignores
+unadmitted records before choosing the current completion or terminal transition.
 
 Unknown, expired, or revoked paired-device credentials return HTTP 403, `code: forbidden`,
 `retryable: false`, and `details.reason: credential-rejected`. Pair the device again to restore
@@ -2327,6 +2381,12 @@ or start a new pairing on the desired member.
 This guarantee holds only when every member accepting pairing completion runs this
 version or later. An older member has no origin check and can still complete a replicated
 challenge begun on an upgraded member, so upgrade all members.
+
+Person pairing completion returns HTTP 403 `pairing-restart-required`, `retryable: false`,
+and message `start pairing again` when the challenge's verifier key is missing or changed,
+or a legacy challenge's expiry exceeds 300,000 ms after its claim timestamp. Begin a fresh
+pairing on the intended member; do not retry completion of the old challenge. This is
+distinct from an incorrect code, which retains the existing `forbidden` response.
 
 Adding optional fields is compatible. Removing or retyping a field, changing ordering or token
 rules, adding a required action parameter, or changing action semantics requires a new capability

@@ -81,28 +81,22 @@ impl PersonAuthority<'_> {
                 actor,
             }
             | Self::PairedBrowser(BrowserSendAuthority { grant, completion, actor }) => {
-                let find = |kind| {
-                    connection
-                        .query_row(
-                            &latest_claim_of_kind_query(),
-                            params![grant, kind],
-                            claim_from_row,
-                        )
-                        .optional()
-                        .map_err(internal)
-                };
-                let pair = find("custom.client.pairing-completed")?.ok_or_else(forbidden)?;
+                let now = now_ms();
+                let pair = crate::pairing::latest_completion(connection, grant, None, now)
+                    .map_err(internal)?.ok_or_else(forbidden)?;
                 let fields = &pair.body["fields"];
                 if pair.id != *completion
                     || fields["person_id"].as_str() != Some(person)
                     || fields["session_actor"].as_str() != Some(actor)
-                    || !fields["expires_at_unix_ms"]
-                        .as_u64()
-                        .is_some_and(|expiry| u128::from(expiry) > now_ms())
+                    || crate::pairing::completion_deadline(
+                        connection, &pair.id, &pair.origin, pair.actor.as_deref(), fields, now,
+                    ).map_err(internal)?.is_none()
                     || !fields["scopes"].as_array().is_some_and(|scopes| {
                         scopes.iter().any(|scope| scope == "control.messages")
                     })
-                    || find("custom.client.pairing-revoked")?.is_some()
+                    || crate::pairing::completion_is_revoked(
+                        connection, grant, &pair.id, &pair.origin,
+                    ).map_err(internal)?
                 {
                     return Err(forbidden());
                 }
@@ -125,7 +119,9 @@ fn has_browser_pairing_provenance(
     person: &str,
 ) -> Result<bool, FractalError> {
     let fields = &pair.body["fields"];
-    if !crate::trusted_pairing_fields(pair.actor.as_deref(), fields) {
+    if !crate::pairing::operation_is_trusted(
+        connection, &pair.id, &pair.origin, pair.actor.as_deref(), fields,
+    ).map_err(internal)? {
         return Ok(false);
     }
     let Some([evidence]) = pair.body["evidence"].as_array().map(Vec::as_slice) else {
@@ -138,7 +134,9 @@ fn has_browser_pairing_provenance(
         && begun.subject == pair.subject
         && begun.origin == pair.origin
         && begun.actor.as_deref() == Some(person)
-        && crate::trusted_pairing_fields(begun.actor.as_deref(), request)
+        && crate::pairing::operation_is_trusted(
+            connection, &begun.id, &begun.origin, begun.actor.as_deref(), request,
+        ).map_err(internal)?
         && request["pairing_id"].as_str().is_some()
         && request["pairing_id"] == fields["pairing_id"]
         && request["browser_request"] == true

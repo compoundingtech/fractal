@@ -1365,6 +1365,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::AttentionMigrated
         | ErrorCode::IssuerRequired
         | ErrorCode::PairingOriginRequired
+        | ErrorCode::PairingRestartRequired
         | ErrorCode::SuspendAuthoredSessionSelection
         | ErrorCode::LegacyActionReceiptUntrusted
         | ErrorCode::RuntimeNotLocal

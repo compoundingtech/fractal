@@ -2177,6 +2177,10 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             Cardinality::Append, None, true, &[],
         ),
         (
+            "client.operation-authorized", &["custom"], WritePolicy::SystemOnly,
+            Cardinality::Append, None, true, &[],
+        ),
+        (
             "agent.retired",
             &["agent"],
             WritePolicy::SystemOnly,
@@ -3617,6 +3621,11 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
             ("preserved_incarnation", string()),
             ("request", FieldSpec { required: true, ..object() }),
         ],
+        "client.operation-authorized" => &[
+            ("record_id", required_string()),
+            ("record_hash", required_string()),
+            ("completion_id", string()),
+        ],
         "custom.client.action-result" | "client.action-result" => &[
             ("authority_actor", string()),
             ("request_digest", required_string()),
@@ -4958,6 +4967,7 @@ mod tests {
         // Reconstruct the registry at the principal transition, before usage observations.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
+        current.claims.remove("client.operation-authorized").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =

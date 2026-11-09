@@ -33,12 +33,11 @@ fn state(root: &std::path::Path) -> AppState {
 fn grant(state: &AppState, expiry: u64) {
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: GRANT.into(),
             kind: "custom.client.pairing-completed".into(),
             actor: Some(PERSON.into()),
             fields: serde_json::from_value(json!({
-                "pairing_operation_version":1,
                 "credential_hash":hex::encode(Sha256::digest(CREDENTIAL.as_bytes())),
                 "session_actor":ACTOR,"person_id":PERSON,"device_id":"device/phone",
                 "scopes":["read.projections"],"expires_at_unix_ms":expiry
@@ -190,7 +189,7 @@ async fn push_terminal_cleanup_preserves_normal_authentication_and_local_authori
     assert_eq!(status, StatusCode::OK, "{response}");
     state
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: GRANT.into(),
             kind: "custom.client.pairing-revoked".into(),
             actor: Some(PERSON.into()),
