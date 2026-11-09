@@ -1228,6 +1228,17 @@ mod tests {
         ).unwrap();
         assert_eq!(summary, "ship today");
         assert_eq!(answer.unwrap().text.as_deref(), Some("ship today"));
+        let (summary, answer) = person_step_response(
+            Some(&request),
+            Some("land".into()),
+            None,
+            vec![("hold".into(), "Wait until Monday.".into())],
+        ).unwrap();
+        assert_eq!(summary, "Land");
+        let answer = answer.unwrap();
+        assert_eq!(answer.text, None);
+        assert_eq!(answer.option_notes[0].id, "hold");
+        assert_eq!(answer.option_notes[0].text, "Wait until Monday.");
         assert!(person_step_response(None, None, None, Vec::new()).is_err());
     }
 
