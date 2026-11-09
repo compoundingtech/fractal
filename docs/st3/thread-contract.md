@@ -36,9 +36,9 @@ to an existing thread when authorized on both sides. A reply in the thread and a
 are separate operations. An ask created from a thread can carry the thread reference explicitly.
 An ask created elsewhere must explicitly attach to that thread. Closing, answering or replacing
 one ask leaves the thread and the other asks intact. A fresh ask may link to a closed thread
-and show its full history without reopening it. A related ask can record an explicit predecessor
-and the reason for revisiting a decision. The initial release presents this history. Any
-conditional activation continues to use existing mission step gates.
+and show its full history without reopening it. An explicit predecessor and reason can support
+a future decision-history view. Existing mission step gates own dependency trees and
+conditional activation.
 
 A bound agent can create an ask with `fractal work ask`, then run
 `fractal work link-thread ASK --thread THREAD --episode CLAIM --as "$ST_AGENT"`.
@@ -147,12 +147,15 @@ convergence and retry behavior.
 | --- | --- |
 | TUI, web and iOS | Start inline in Inbox, type and reply to a message, show a fresh linked ask with full discussion, and answer that ask independently. Use the same thread in Inbox, agent session, mission and a dedicated tab or screen. Compact embeds start collapsed. Web and terminal can reveal Reply on hover with accessible keyboard equivalents. Mobile supplies an equivalent touch action. |
 | TUI, web and iOS | Rename, close, list under Recently closed threads, read replies while closed, reopen, and retain selection and draft destination across navigation. State and unread progress agree when another authorized client changes them. |
-| MCP | Bounded list by readable context, get summary and read a message window through the daemon. The existing conversation read grant and conversation visibility checks apply. No transcript scraping or adapter-owned reconstruction. |
-| MCP writes | Use the same typed daemon actions and idempotency, with the existing assistant grant checks. A conversation send grant confers no lifecycle or link authority. Preserve assistant attribution. Production write issuance follows the [keyed issuer prerequisite](https://github.com/compoundingtech/fractal/pull/3324) and [assistant access review](https://github.com/compoundingtech/fractal/issues/3326). Expose only capabilities the current grant and daemon support. |
+| MCP | The current conversation read grant permits bounded discovery, summary and timeline reads for all threads in every conversation that grant can already read, within its existing owner and visibility scope. Each request selects one exact conversation. Revalidate grant and visibility on every request, page and cursor. Reuse the daemon's thread projection. A context link does not expand the grant. |
+| MCP writes | Production writes remain gated on a separate scope decision, the [keyed issuer prerequisite](https://github.com/compoundingtech/fractal/pull/3324) and the [assistant access review](https://github.com/compoundingtech/fractal/issues/3326). Future write capabilities must preserve existing authority and assistant attribution through typed daemon actions. |
 
-Implement and review behind capability negotiation. TUI, web, iOS and MCP are part of one
-release acceptance rather than independently inventing thread protocols. The MCP authorization
-gate remains separate from client parity and must pass before granting production writes.
+Implement and review behind capability negotiation. TUI, web, iOS and MCP reads share one
+release acceptance and the same thread protocol. Production MCP writes have their own
+authorization review.
+Existing conversation read grants apply to existing and future threads in all conversations
+they already authorize, including fleet-wide access where the existing grant has that breadth.
+Thread reads add no grant or scope and convey no write authority.
 
 The minimum integrated fixture starts on ask A, creates a thread, quotes a message, renames
 and closes it, receives an ordinary reply, and links a fresh ask B. Inspect the same history
@@ -168,7 +171,10 @@ members, verify the same-key retry after exchange and
 show that local acceptance, peer observation and agent delivery are distinct. Verify that an
 agent moved using the existing placement mechanism can continue the thread when the prior
 host is offline, within ordinary conversation availability and without claiming unreplicated
-receipts were recovered.
+receipts were recovered. For MCP, verify that a granted conversation exposes all its threads without
+including threads from another conversation in the same page. Reject cross-conversation cursor
+reuse and refuse a
+continued read after grant revocation.
 
 ## Decisions before wire freeze
 
