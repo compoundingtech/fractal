@@ -5857,19 +5857,10 @@ pub async fn pairing_complete(
     let _completion = PAIRING_COMPLETIONS.lock().await;
     let pairing_id = client_detail_id("pairing", &id);
     let subject = format!("custom/client/pairing-{id}");
-    let begun = state
-        .store
-        .claims_for_subject_kind_at(&subject, "custom.client.pairing-begun", None, true, 1)
-        .map_err(ApiError::internal)?
-        .claims
-        .into_iter()
-        .find(|claim| {
-            claim
-                .body
-                .pointer("/fields/pairing_id")
-                .and_then(Value::as_str)
-                == Some(pairing_id.as_str())
-        })
+    let begun = state.store.newest_admitted_client_operation(
+        &subject, "custom.client.pairing-begun",
+    ).map_err(ApiError::internal)?
+        .filter(|claim| claim.body["fields"]["pairing_id"] == pairing_id)
         .ok_or_else(|| ApiError::not_found(format!("pairing `{pairing_id}` does not exist")))?;
     if begun.origin != state.store.origin() {
         return Err(ApiError {
@@ -5882,12 +5873,8 @@ pub async fn pairing_complete(
     if !state.store.client_operation_is_trusted(&begun).map_err(ApiError::internal)? {
         return Err(forbidden("the pairing challenge requires a new pairing"));
     }
-    let used = !state
-        .store
-        .claims_for_subject_kind_at(&subject, "custom.client.pairing-completed", None, true, 1)
-        .map_err(ApiError::internal)?
-        .claims
-        .is_empty();
+    let used = state.store.newest_admitted_pairing_completion(&subject, client_now_ms())
+        .map_err(ApiError::internal)?.is_some();
     let restart = pairing_verifier::restart;
     let expires = begun
         .body
@@ -6035,15 +6022,15 @@ pub async fn pairing_complete(
     if let Some(node) = request.fabric_node_id.as_ref().filter(|_| fabric_wanted) {
         fields.insert("fabric_node_id".into(), Value::String(node.clone()));
     }
-    let completed = state.store.append_client_operation_claim(&ClaimInput {
+    let completed = state.store.complete_client_pairing(&ClaimInput {
         subject: begun.subject.clone(),
         kind: "custom.client.pairing-completed".into(),
         actor: Some(person_id.clone()),
         fields,
         evidence: vec![begun.id.clone()],
-        expected_subject: Some(Some(begun.id.clone())),
+        expected_subject: None,
         idempotency_key: None,
-    });
+    }, &begun.id);
     if let Err(error) = completed {
         if error.code == "stale-subject" {
             return Err(forbidden(
@@ -13369,13 +13356,30 @@ mission "differential" state="ready" {
         let begun: Value = serde_json::from_slice(&bytes).unwrap();
         let challenge = &begun["value"];
         let id = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
-        let response = app.oneshot(Request::builder()
+        let subject = format!("custom/client/pairing-{id}");
+        for kind in ["custom.client.pairing-begun", "custom.client.pairing-completed"] {
+            state.store.graph.append_claim(&ClaimInput {
+                subject: subject.clone(), kind: kind.into(), actor: Some("person/ada".into()),
+                fields: serde_json::from_value(json!({
+                    "pairing_id": challenge["pairing_id"], "person_id": "person/ada",
+                    "code_hash": "unadmitted-retained-code", "scopes": [],
+                    "expires_at_unix_ms": client_now_ms() as u64 + 60_000,
+                })).unwrap(),
+                evidence: vec![], expected_subject: None, idempotency_key: None,
+            }).unwrap();
+        }
+        let complete = || app.clone().oneshot(Request::builder()
             .method("POST").uri(format!("/v1/client/pairings/{id}/complete"))
             .header("Content-Type", "application/json")
             .body(Body::from(json!({
                 "api_version": CLIENT_API_VERSION, "code": challenge["code"],
                 "device_public_key": "test-device-public-key-with-at-least-32-characters"
-            }).to_string())).unwrap()).await.unwrap();
+            }).to_string())).unwrap());
+        let (first, second) = tokio::join!(complete(), complete());
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(usize::from(first.status() == StatusCode::OK) + usize::from(second.status() == StatusCode::OK), 1);
+        let response = if first.status() == StatusCode::OK { first } else { second };
         let status = response.status();
         let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
         let completed: Value = serde_json::from_slice(&bytes).unwrap();
