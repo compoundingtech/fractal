@@ -3640,7 +3640,13 @@ fn fleet_workflows_have_no_path_filter() {
         ),
         "fleet compatibility must exercise baseline rollback after authority projection backfill"
     );
-    assert!(stages.contains("test result: ok. 10 passed"));
+    assert!(
+        stages.contains(
+            "fleet::service_grants::authority_projection_resumes_after_daemon_is_killed_with_committed_partial_backfill"
+        ),
+        "fleet compatibility must exercise abrupt daemon death with an incomplete authority projection"
+    );
+    assert!(stages.contains("test result: ok. 11 passed"));
     // The optional macOS job lives in macos.yml so label events cannot restart this gate.
     assert!(
         !compat.to_ascii_lowercase().contains("macos-"),

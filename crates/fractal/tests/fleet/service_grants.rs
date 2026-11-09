@@ -321,6 +321,123 @@ fn assert_authority_projection_ready(node: &Node) {
     assert_eq!(version, "1", "candidate must complete authority backfill before rollback");
 }
 
+fn authority_projection_snapshot(connection: &rusqlite::Connection) -> (Vec<String>, Vec<String>) {
+    let authority = connection.prepare(
+        "SELECT json_array(claim_id,base_claim_id,grant_subject,kind,origin,actor,principal,profile,
+            expires_at,store_index,credential_hash,record)
+         FROM assistant_grant_authority ORDER BY claim_id,base_claim_id",
+    ).unwrap().query_map([], |row| row.get(0)).unwrap()
+        .collect::<rusqlite::Result<Vec<String>>>().unwrap();
+    let effective = connection.prepare(
+        "SELECT json_array(claim_id,grant_subject,principal,owner,profile,expires_at,revoked,grant_record)
+         FROM assistant_grant_effective ORDER BY claim_id",
+    ).unwrap().query_map([], |row| row.get(0)).unwrap()
+        .collect::<rusqlite::Result<Vec<String>>>().unwrap();
+    (authority, effective)
+}
+
+fn authority_backfill_progress(connection: &rusqlite::Connection) -> (u64, bool) {
+    connection.query_row(
+        "SELECT COALESCE((SELECT CAST(value AS INTEGER) FROM meta WHERE key=?1),0),
+            EXISTS(SELECT 1 FROM meta WHERE key='assistant_grant_authority_version')",
+        [format!("assistant_grant_authority_cursor/{GRANTED}")],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the pinned previous published release"]
+async fn authority_projection_resumes_after_daemon_is_killed_with_committed_partial_backfill() {
+    use smallclaims::store::assistant_grant_authority as authority;
+
+    if fractal_daemon::test_support::supervise_test() { return; }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = Node::new(root.path(), "issuer");
+    node.binary = compat_binary();
+    node.start().await;
+    let active = issue_with_policy(&node, 7).await;
+    let revoked = issue_with_policy(&node, 8).await;
+    let owner = Client::unix_as(node.socket(), PERSON).unwrap();
+    let _: Value = owner.post(
+        &format!("/v1/client/assistant/grants/{}/revoke", revoked.id), &json!({}),
+    ).await.unwrap();
+    let history = authority_history(&node);
+    assert_eq!(history.len(), 5);
+    node.stop();
+
+    let database = node.state_dir().join("claims.sqlite3");
+    let mut connection = rusqlite::Connection::open(&database).unwrap();
+    fractal_daemon::store::configure_projection_writer(&connection).unwrap();
+    authority::install(&connection, &node.name).unwrap();
+    let reference_path = root.path().join("uninterrupted.sqlite3");
+    connection.execute("VACUUM INTO ?1", [reference_path.to_str().unwrap()]).unwrap();
+    let mut reference = rusqlite::Connection::open(&reference_path).unwrap();
+    fractal_daemon::store::configure_projection_writer(&reference).unwrap();
+    loop {
+        let transaction = reference.transaction().unwrap();
+        let done = authority::backfill_slice(&transaction, Duration::from_secs(2)).unwrap();
+        transaction.commit().unwrap();
+        if done { break; }
+    }
+    let expected = authority_projection_snapshot(&reference);
+    assert_eq!(expected.0.len(), 5);
+    assert_eq!(expected.1.len(), 2);
+    drop(reference);
+
+    // Commit one real backfill step rather than making the fixture's size depend on
+    // machine speed. The writer fence holds startup at this incomplete migration,
+    // so an actual process kill cannot race a fast daemon finishing all five rows.
+    let transaction = connection.transaction().unwrap();
+    assert!(!authority::backfill_slice(&transaction, Duration::ZERO).unwrap());
+    transaction.commit().unwrap();
+    let partial = authority_backfill_progress(&connection);
+    assert!(partial.0 > 0, "must kill with durable forward progress");
+    assert!(!partial.1, "the committed projection must still be incomplete");
+    assert_eq!(authority_projection_snapshot(&connection).0.len(), 1);
+    let blocker = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+    node.binary = PathBuf::from(st3());
+    let pty = node.root.join("bin/pty");
+    let mut daemon = DaemonProcess::spawn_isolated(
+        node.command(&["up", "--pty-binary", pty.to_str().unwrap(), "--web-listen", "off"]),
+        fs::File::create(node.root.join("daemon.log")).unwrap(),
+        fs::File::create(node.root.join("daemon.stderr.log")).unwrap(),
+    ).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(daemon.try_wait().unwrap().is_none(), "candidate exited before interrupted startup:\n{}", node.logs());
+        // Startup owns the directory fence before opening/migrating the store.
+        if fractal_daemon::node_identity::lock_directory(&node.state_dir()).is_err() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "candidate did not acquire its startup state fence:\n{}", node.logs());
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(authority_backfill_progress(&blocker), partial);
+    daemon.kill().unwrap();
+    assert!(!daemon.wait().unwrap().success(), "the interrupted daemon must not exit gracefully");
+    assert_eq!(authority_backfill_progress(&blocker), partial, "kill must retain the committed cursor");
+    blocker.rollback().unwrap();
+    drop(connection);
+    assert_eq!(authority_history(&node), history, "process kill must not alter raw evidence");
+
+    node.start().await;
+    wait_until("authority backfill becomes ready after daemon restart", 30, || async {
+        let reader = rusqlite::Connection::open_with_flags(
+            &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ).unwrap();
+        authority_backfill_progress(&reader).1
+    }).await;
+    assert_authority_projection_ready(&node);
+    let reader = rusqlite::Connection::open_with_flags(
+        &database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).unwrap();
+    assert_eq!(authority_projection_snapshot(&reader), expected,
+        "restart must converge exactly to uninterrupted authority and effective rows");
+    assert_auth(&node, &active, true).await;
+    assert_auth(&node, &revoked, false).await;
+    assert_eq!(authority_history(&node), history, "restart must preserve every raw claim body");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: the pinned previous published release"]
 async fn previous_release_authorizes_and_revokes_after_authority_projection_rollback() {
