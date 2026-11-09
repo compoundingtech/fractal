@@ -1,32 +1,32 @@
 {
   "version": 1,
-  "summary": "Show live Fractal threads in web Inbox, agent, mission, and tab views",
+  "summary": "Compose live durable threads into the web Inbox, agent, mission and standalone views",
   "replay": {
     "status": "none",
-    "detail": "No runtime replay change."
+    "detail": "The web client renders retained daemon history and existing conversation state."
   },
   "schema": {
     "status": "none",
-    "detail": "No database schema change."
+    "detail": "The web presentation adds no database format."
   },
   "rules": {
     "status": "none",
-    "detail": "No checkpoint rules change."
+    "detail": "The shared ordinary/thread delivery policy validates receipts and preserves existing ordinary attachments, outbox and echo behavior."
   },
   "compatibility": {
     "status": "changed",
-    "detail": "The web client uses the current daemon’s thread capability and authenticated collection connection for context discovery, updates, and scoped thread actions. Its thread surfaces stay hidden with an older daemon."
+    "detail": "The current web app requires threads-v1 version 2 and exact summary updates. Every eligible Inbox item starts in its local embedded composer with its canonical responsible agent. Multiple threads, closed replies, exact quotes, Rename, Close, Reopen, Recently closed and explicit visible-message read use reusable thread components. Original uncertain Start and metadata requests remain retryable across remount, changed association and vanished Inbox items, without retargeting or manufacturing an alert. Paired browser sends additionally require the issuer capability and current send grant; native-looking or forged browser markers cannot authorize unsigned sends."
   },
   "downtime": {
     "status": "none",
-    "detail": "No additional service interruption introduced."
+    "detail": "Refreshing the current web bundle does not interrupt the daemon."
   },
   "manual": {
-    "status": "none",
-    "detail": "No manual upgrade step."
+    "status": "changed",
+    "detail": "Upgrade the web app with the daemon and other clients before enabling thread writes. Existing browser and device pairing flows remain in place; unsupported daemons request an upgrade."
   },
   "recovery": {
     "status": "none",
-    "detail": "No database or runtime recovery change."
+    "detail": "Use the original unconfirmed-action Retry while retaining the current draft state. Existing history and browser pairing are preserved; no reset or re-pairing is required."
   }
 }

@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "summary": "Add private durable threads across Inbox, agent conversations, missions and clients",
+  "replay": {
+    "status": "changed",
+    "detail": "Stored thread history, historical ask origins and existing pairings remain readable. Compatible readers retry signed marked messages held by older schema readers through the existing replication backlog; no history rewrite is required."
+  },
+  "schema": {
+    "status": "changed",
+    "detail": "Store open advances the local reader floor to 22, including direct upgrades from 20 or 21, and installs additive thread, Inbox-origin and operational-episode indexes. Typed thread claims, signed reader markers, generic Inbox source/episode origins and generated Rust, TypeScript and Swift contracts share the same boundary.",
+    "transitions": [
+      [
+        20,
+        22
+      ],
+      [
+        21,
+        22
+      ]
+    ]
+  },
+  "rules": {
+    "status": "changed",
+    "detail": "Thread creation, titles, lifecycle and ask links are durable. Existing message delivery and message.read receipts remain authoritative; thread quotes do not answer or settle an ask. Explicit read acknowledgements apply only to the exact shown message IDs. Existing checkpoint and replication signatures are preserved."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "Current clients require threads-v1 version 2 and the exact summary feed. Every Inbox source can start an atomic first-message thread with its server-resolved responsible agent; historical source discovery remains readable after resolution. Rename, Close, Reopen, closed-thread replies, message quotes and explicit read progress use scoped actions. The existing Inbox row gains an opt-in unread hint without a new alert or count. MCP reads and bound agent delivery retain their existing owner, session and revocation boundaries. Private thread contents stay out of ordinary conversations, generic graph/status/event reads and foreign-owner reads. Native sends require their enrolled signature; an approved browser can reuse its existing send grant only on its issuer, with writer-time revalidation."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Normal startup advances the local floor and installs additive indexes on existing databases once. Use the existing rolling restart and reconnection path; no planned work interruption is required."
+  },
+  "manual": {
+    "status": "changed",
+    "detail": "Deploy the complete reader build with thread_writes disabled, then verify all configured and active peers and upgrade TUI, web, iOS and MCP clients before separately enabling thread_writes. The default stays disabled. Where an Inbox source has no originating agent, configure an explicitly approved inbox_fallback_agent (Home Manager inboxFallbackAgent); the server never guesses a recipient."
+  },
+  "recovery": {
+    "status": "changed",
+    "detail": "Version-20 and version-21 binaries refuse a version-22 database, and older peers quarantine signed marked thread messages. Recover using a compatible version-22 build while preserving history and pairings. A rollback to an older reader requires a coordinated stopped restore of a pre-upgrade backup; it cannot retain later thread writes."
+  }
+}
