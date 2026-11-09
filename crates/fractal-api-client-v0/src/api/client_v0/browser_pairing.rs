@@ -2,6 +2,19 @@
 use super::*;
 
 pub const SCOPES: &[&str] = &["read.projections", "read.declarations", "read.glasses", "read.arrangements", "terminal.read", "control.messages"];
+pub const VERIFIER: &str = "browser-request-key-v1";
+/// The wire protocol hashes the canonical lowercase-hex key's UTF-8 bytes.
+pub fn verify_request_key(key: &str, expected: &str) -> bool {
+    if key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)) {
+        return false;
+    }
+    let mut digest = [0_u8; 32];
+    if hex::decode_to_slice(expected, &mut digest).is_err() {
+        return false;
+    }
+    sha2::digest::CtOutput::<Sha256>::new(Sha256::digest(key.as_bytes()))
+        == sha2::digest::CtOutput::<Sha256>::new(digest.into())
+}
 const REQUESTER: &str = "daemon/browser-pairing";
 static REQUESTS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -50,6 +63,37 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
     }
     let _guard = REQUESTS.lock().await;
     let now = client_now_ms();
+    // Retained records without a client-operation receipt cannot consume a device's quota.
+    let recent = {
+        let connection = state.store.readers.get();
+        let mut subjects = connection.prepare_cached(
+            "SELECT DISTINCT subject FROM claims WHERE kind='custom.client.pairing-begun' AND origin=?1 AND json_extract(body,'$.fields.browser_request')=1 AND json_extract(body,'$.fields.publisher_grant')=?2 AND json_extract(body,'$.fields.requested_at_unix_ms')>?3",
+        ).map_err(ApiError::internal)?;
+        let cutoff = now.saturating_sub(300_000);
+        let mut rows = subjects.query(rusqlite::params![state.store.origin(), session.pairing_grant, cutoff as u64])
+            .map_err(ApiError::internal)?;
+        let mut recent = 0;
+        while let Some(row) = rows.next().map_err(ApiError::internal)? {
+            let subject: String = row.get(0).map_err(ApiError::internal)?;
+            let Some(begun) = state.store.newest_admitted_client_operation(
+                &subject, "custom.client.pairing-begun",
+            ).map_err(ApiError::internal)? else { continue };
+            if begun.origin == state.store.origin()
+                && begun.body["fields"]["browser_request"] == true
+                && begun.body["fields"]["publisher_grant"].as_str() == session.pairing_grant.as_deref()
+                && begun.body["fields"]["requested_at_unix_ms"].as_u64()
+                    .is_some_and(|requested| u128::from(requested) > cutoff)
+            {
+                recent += 1;
+                if recent == 10 { break; }
+            }
+        }
+        recent
+    };
+    if recent >= 10 {
+        return Err(ApiError {status:StatusCode::TOO_MANY_REQUESTS,code:"rate-limited".into(),
+            message:"at most ten browser pairing requests per device in five minutes".into(),details:Box::default()});
+    }
     let pending = {
         let connection = state.store.readers.get();
         let mut subjects = connection.prepare_cached(
@@ -82,7 +126,7 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
         title: format!("Pair browser: {}", body.device_label),
         reason: format!("Approve only after comparing this display code with the browser you are using. Device labels and login text are supplied by the requester, not proof of browser identity.\n\nDevice: {}\nTailnet login: {}\nDisplay code: {display}\nRequest: {id}\n\nGrants web read access and message sending for 30 days; revocable in Devices.", body.device_label, body.tailnet_login),
         step: None, new_run: None, incarnation: None, legacy_request: None,
-        idempotency_key: format!("browser-pairing:{id}"), deadline_ms: Some(300_000), default_answer: Some("deny".into()),
+        idempotency_key: format!("browser-pairing:{id}"), deadline_ms: Some(300_000), default_answer: None,
         request: Some(json!({"version":1,"type":"decision",
             "question":format!("Pair {} ({display})?", body.device_label),
             "why_person":"Only you can compare this display code with the browser you are using. The requester supplies the device label and login text.",
@@ -102,12 +146,43 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
             ("pairing_id".into(), json!(format!("pairing/{id}"))), ("person_id".into(), json!(session.authority_actor)),
             ("device_name".into(), json!(body.device_label)), ("tailnet_login".into(), json!(body.tailnet_login)),
             ("code_hash".into(), json!(body.request_key_digest)), ("scopes".into(), json!(SCOPES)),
+            ("verifier".into(), json!(VERIFIER)),
+            ("publisher_grant".into(), json!(session.pairing_grant)), ("requested_at_unix_ms".into(), json!(now)),
             ("expires_at_unix_ms".into(), json!(expires)), ("browser_request".into(), json!(true)),
             ("browser_ask".into(), json!(ask.subject)), ("display_code".into(), json!(display)),
         ]), evidence: vec![], expected_subject: Some(None), idempotency_key: None,
     }).map_err(ApiError::bad)?;
     signal_changed(&state);
     Ok(Json(json!({"requestId":id,"displayCode":display,"expiresAt":client_timestamp(expires)})))
+}
+
+fn answer_is_admitted(state: &AppState, begun: &ClaimRecord, asking: &ClaimRecord, answer: &ClaimRecord) -> Result<bool, ApiError> {
+    let receipt = state.store.claims_for_subject_kind_at(
+        &format!("custom/client/browser-answer-{}",answer.id),
+        "custom.client.pairing-browser-answer-admitted",None,true,1,
+    ).map_err(ApiError::internal)?.claims.into_iter().next();
+    let Some(receipt) = receipt else { return Ok(false); };
+    if receipt.origin != answer.origin || receipt.actor != answer.actor
+        || !state.store.client_operation_is_trusted(&receipt).map_err(ApiError::internal)?
+        || field(&receipt,"answer_id") != Some(answer.id.as_str())
+        || field(&receipt,"ask") != Some(asking.subject.as_str())
+        || field(&receipt,"episode") != Some(asking.id.as_str())
+        || field(&receipt,"person") != field(begun,"person_id")
+        || field(&receipt,"request_id") != field(begun,"pairing_id").and_then(|id|id.strip_prefix("pairing/")) {
+        return Ok(false);
+    }
+    let Some(grant_id) = field(&receipt,"grant_id") else { return Ok(false); };
+    let connection = state.store.readers.get();
+    let grant = fractal_store::store::claim_by_id_tx(&connection,grant_id).map_err(ApiError::internal)?;
+    let Some(grant) = grant else { return Ok(false); };
+    let fields = &grant.body["fields"];
+    Ok(grant.kind == "custom.client.pairing-completed"
+        && Some(grant.subject.as_str()) == field(&receipt,"grant_subject")
+        && fields["person_id"].as_str() == field(begun,"person_id")
+        && fields["scopes"].as_array().is_some_and(|scopes|scopes.iter().any(|scope|scope == "control.pairing"))
+        && fields["expires_at_unix_ms"].as_u64().is_some_and(|expiry|u128::from(expiry) > client_now_ms())
+        && fractal_store::pairing::completion_is_trusted(&connection,&grant.id,&grant.origin,grant.actor.as_deref(),fields,client_now_ms()).map_err(ApiError::internal)?
+        && !fractal_store::pairing::completion_is_revoked(&connection,&grant.subject,&grant.id,&grant.origin).map_err(ApiError::internal)?)
 }
 
 pub fn approval(state: &AppState, begun: &ClaimRecord) -> Result<&'static str, ApiError> {
@@ -126,6 +201,7 @@ pub fn approval(state: &AppState, begun: &ClaimRecord) -> Result<&'static str, A
             || field(answer, "episode") != Some(asking.id.as_str())
             || answer.body["fields"].get("sender_class").is_some()
             || answer.body["fields"].get("delegation").is_some()
+            || !answer_is_admitted(state,begun,&asking,answer)?
         {
             return Ok("denied");
         }
@@ -139,7 +215,9 @@ pub async fn redeem(State(state): State<AppState>, Extension(session): Extension
     owner(&state, &session)?;
     let _guard = REQUESTS.lock().await;
     let begun = request(&state, &id)?;
-    if field(&begun, "person_id") != Some(session.authority_actor.as_str()) || field(&begun, "code_hash") != Some(credential_digest(&body.request_key).as_str()) {
+    if field(&begun, "person_id") != Some(session.authority_actor.as_str())
+        || field(&begun, "verifier") != Some(VERIFIER)
+        || !verify_request_key(&body.request_key, field(&begun, "code_hash").unwrap_or_default()) {
         return Err(forbidden("browser request key does not match"));
     }
     let status = approval(&state, &begun)?;

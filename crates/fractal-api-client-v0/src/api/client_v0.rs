@@ -5949,6 +5949,12 @@ pub async fn pairing_complete(
     let now = client_now_ms();
     let expected = begun.body.pointer("/fields/code_hash").and_then(Value::as_str).unwrap_or_default();
     let valid_code = match begun.body.pointer("/fields/verifier") {
+        Some(Value::String(marker)) if marker == browser_pairing::VERIFIER => {
+            if begun.body["fields"]["browser_request"] != true {
+                return Err(restart());
+            }
+            browser_pairing::verify_request_key(&request.code, expected)
+        }
         Some(Value::String(marker)) if marker == pairing_verifier::MARKER => {
             let key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
             if begun.body.pointer("/fields/verifier_key_id").and_then(Value::as_str)
@@ -5962,6 +5968,9 @@ pub async fn pairing_complete(
         }
         Some(_) => return Err(restart()),
         None => {
+            if begun.body["fields"]["browser_request"] == true {
+                return Err(restart());
+            }
             if !pairing_verifier::legacy_window_open(expires, begun.accepted_at_unix_ms, now) {
                 return Err(restart());
             }
