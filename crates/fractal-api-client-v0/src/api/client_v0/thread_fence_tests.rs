@@ -69,14 +69,14 @@ async fn both_arrangement_actions_authorize_extra_thread_fences_before_the_write
         let arrangement = "arrangement/person/operator/019a0000-0000-7000-8000-000000000001";
         let own_thread = "thread/arrangement-owned";
         let private_thread = "thread/arrangement-private";
-        for (thread, owner) in [(own_thread, person), (private_thread, "person/private")] {
+        for (thread, owner) in [(own_thread, person), (private_thread, "person/blair")] {
             crate::store::thread_metadata::apply(&state.store, owner, thread, thread,
                 crate::store::thread_metadata::Edit::Create {
                     agent:"agent/reviewer",title:"Private sentinel title",
                 }).unwrap();
         }
         let own_revision = crate::store::thread_metadata::summary(&state.store,person,own_thread).unwrap().revision;
-        let private_revision = crate::store::thread_metadata::summary(&state.store,"person/private",private_thread).unwrap().revision;
+        let private_revision = crate::store::thread_metadata::summary(&state.store,"person/blair",private_thread).unwrap().revision;
         let owner = ClientSession::local(Some(person)).unwrap();
         let request = |key: &str, selected: Option<(&str,&str)>, create: bool| -> ActionRequest {
             let subject_revisions = selected.into_iter().map(|(id,revision)|(id.to_owned(),revision.to_owned()))
@@ -191,7 +191,7 @@ async fn arrangement_thread_authority_is_rechecked_after_preflight_before_writes
             if interruption == "owner-change" {
                 let peer = Store::open_memory("ownership-peer").unwrap();
                 peer.set_write_clock_at(creation.accepted_at_unix_ms+1_000).unwrap();
-                crate::store::thread_metadata::apply(&peer,"person/private",thread,"concurrent-owner",
+                crate::store::thread_metadata::apply(&peer,"person/blair",thread,"concurrent-owner",
                     crate::store::thread_metadata::Edit::Create { agent:"agent/private",title:"Foreign after preflight" }).unwrap();
                 state.store.import_replication(peer.origin(),&peer.export_replication(0).unwrap()).unwrap();
             } else {
