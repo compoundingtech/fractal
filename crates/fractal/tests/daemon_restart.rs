@@ -818,10 +818,10 @@ time.sleep(300)
             })
     }));
     daemon.stop().await;
-    // Pass the real 90 s client freshness horizon by running the client clock 95 s ahead, not by a
-    // test-only shortened timeout and not by sleeping through it. Open a fresh Store too: the
-    // driver's spool and mailbox fence must survive real cache loss.
-    fractal_daemon::test_support::skew_client_clock(95_000);
+    // Pass the real shared freshness horizon by advancing the client clock, not by a
+    // test-only shortened timeout or by sleeping. A fresh Store also checks cache loss.
+    let stale_after_ms = u64::try_from(fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis()).unwrap() + 5_000;
+    fractal_daemon::test_support::skew_client_clock(stale_after_ms);
     assert_alive(&mut driver, "the quiet driver");
     daemon.store = Arc::new(Store::open(&root.join("daemon.sqlite3"), "restart-node").unwrap());
     daemon.start_admitted_protocol().await;

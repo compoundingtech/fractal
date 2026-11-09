@@ -24517,14 +24517,14 @@ mission "example/zero-run" state="ready" {
 
     #[test]
     fn a_seat_that_reports_at_its_idle_heartbeat_is_never_called_down() {
-        // Two seats of the second audit (2026-10-14) had a driver and pty daemon a day old, a
-        // runtime row stuck pending and an idle report every five minutes: older than the 90 s
-        // freshness window nearly all the time, never older than a heartbeat.
+        // An idle report remains current through the shared freshness window; after that it
+        // still proves liveness until the separate heartbeat grace period expires.
         let started = 1_790_000_000_000_u64;
         for age in [91_000, 150_000, 299_000, 301_000, HEARTBEAT_MS] {
             let mut card = sessionless_card(json!("indeterminate"));
             overlay_down(&mut card, Some(started), Some(age), Some("idle"), started + 100 * LAUNCH_WINDOW_MS);
-            assert_eq!(card["state"], "waiting", "{age}");
+            let current = u128::from(age) <= fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis();
+            assert_eq!(card["state"], if current { "running" } else { "waiting" }, "{age}");
             assert!(card.get("down_since").is_none(), "{age}");
             assert!(card["current_work"][0].get("holder_down_since").is_none(), "{age}");
         }
