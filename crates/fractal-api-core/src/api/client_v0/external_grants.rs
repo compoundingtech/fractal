@@ -310,8 +310,20 @@ pub fn projection_with_witness(state: &AppState, granted: &ClaimRecord) -> Resul
         let mut cleared = Vec::new();
         for (other, other_profile) in candidate_grants(state, principal(source)?, None)? {
             if profile == other_profile { continue; }
-            let policy = effective(state, &other)?;
-            let cause = if revoked(state, &other)? || revoked(state, granted)? { Some("revoked") }
+            // Historical explanations are optional: another subject's pending proof
+            // must not turn inspection of this clean grant into a bearer denial.
+            let explanation = (|| {
+                let connection = state.store.readers.get();
+                let policy = authority::transition(&connection, &other, POLICY)?
+                    .unwrap_or_else(|| other.clone());
+                let revoked = authority::transition(&connection, &other, REVOKED)?.is_some();
+                Ok::<_, FractalError>((policy, revoked))
+            })();
+            let (policy, other_revoked) = match explanation {
+                Err(error) if error.code == "assistant-grant-subject-not-ready" => continue,
+                result => result.map_err(authority_error)?,
+            };
+            let cause = if other_revoked || value["revoked"] == true { Some("revoked") }
                 else if !unexpired(fields(&policy)?, now) || !unexpired(source, now) { Some("expired") } else { None };
             if let Some(cause) = cause {
                 cleared.push(json!({"grants":[witness(granted, profile),witness(&other, other_profile)],"cause":cause}));

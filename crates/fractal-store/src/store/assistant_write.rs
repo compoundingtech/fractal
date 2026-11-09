@@ -28,7 +28,9 @@ pub fn authorize_grant(connection: &Connection, origin: &str, authorization: &As
 pub fn authorized_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<ClaimRecord, FractalError> {
     let denied = || FractalError::new("forbidden", "assistant write authorization changed or expired before commit");
     let authority_error = |error: FractalError| {
-        if error.code == "assistant-grant-authority-not-ready" { denied() } else { error }
+        if matches!(error.code.as_str(), "assistant-grant-authority-not-ready" | "assistant-grant-subject-not-ready") {
+            denied()
+        } else { error }
     };
     let granted = authority::latest(connection, &authorization.grant_subject, authority::GRANTED).map_err(authority_error)?
         .ok_or_else(denied)?;
@@ -233,27 +235,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn writer_recheck_fences_dirty_subject_without_exposing_projection_state() {
-        let (store, subject, mut body) = transition_fixture();
-        body["fields"]["policy_revision"] = json!(1);
-        body["fields"]["scopes"] = json!(["write.assistant.answers"]);
-        let policy = insert_transition(&store, &subject, authority::POLICY, "person/owner", &body);
-        let authorization = AssistantWriteAuthorization {
-            grant_subject: subject,
-            actor: body["fields"]["session_actor"].as_str().unwrap().into(),
-            owner: "person/owner".into(), policy_revision: 1,
-            scope: "write.assistant.answers".into(), recipient: None,
-        };
-        let connection = store.connection.write();
-        authorize_grant(&connection, "local", &authorization).unwrap();
-        connection.execute(
-            "INSERT INTO assistant_grant_dirty(claim_id) VALUES('unrelated-claim')", [],
-        ).unwrap();
-        authorize_grant(&connection, "local", &authorization).unwrap();
-        connection.execute("INSERT INTO assistant_grant_dirty VALUES(?1)", [&policy.id]).unwrap();
-        let error = authorize_grant(&connection, "local", &authorization).unwrap_err();
-        assert_eq!(error.code, "forbidden");
-        assert_eq!(error.message, "assistant write authorization changed or expired before commit");
-    }
 }

@@ -641,3 +641,33 @@ fn dirty_opposite_profile_witness_does_not_clear_an_established_conflict() {
     assert_eq!(candidate_grants(&a, PRINCIPAL, Some(0)).unwrap().len(), 2,
         "pending work cannot erase the last authenticated opposite-profile snapshot");
 }
+
+#[test]
+fn clean_grant_inspection_omits_pending_expired_or_revoked_opposite_history() {
+    let _service = ServiceFixture::enable();
+    for cause in ["expired", "revoked"] {
+        let root = tempfile::tempdir().unwrap();
+        let (a, b) = admitted_pair(root.path());
+        let assistant = issue(&a, ASSISTANT_ID, "assistant").unwrap();
+        let service = issue(&b, SERVICE_ID, "service").unwrap();
+        let mut source = fields(&service).unwrap().clone();
+        let kind = if cause == "expired" {
+            source["expires_at_unix_ms"] = json!(1_u64);
+            POLICY
+        } else { REVOKED };
+        append(&b, service.subject.clone(), kind, OWNER, source, Some(&service)).unwrap();
+        replicate(&b, &a);
+        let inspected = projection_with_witness(&a, &assistant).unwrap();
+        assert_eq!(inspected["cleared_conflicts"][0]["cause"], cause);
+        a.store.connection.write().execute(
+            "INSERT INTO assistant_grant_dirty(claim_id) VALUES(?1)", [&service.id],
+        ).unwrap();
+        assert!(authenticate_id(&a, SERVICE_ID).unwrap().is_none());
+        assert!(authenticate_id(&a, ASSISTANT_ID).unwrap().is_some());
+        let inspected = projection_with_witness(&a, &assistant).unwrap();
+        assert!(inspected["conflict"].is_null());
+        assert_eq!(inspected["cleared_conflicts"], json!([]));
+        assert_eq!(inspected["revoked"], false);
+        assert_eq!(inspected["id"], ASSISTANT_ID);
+    }
+}
