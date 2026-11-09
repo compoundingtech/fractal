@@ -4,14 +4,24 @@ use fractal_client::Client as ClientV0;
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs ST3_COMPAT_BIN: an actual storage-version-22 thread reader"]
 async fn version_22_reader_refuses_upgraded_state_without_losing_history_or_pairing() {
+    retained_history_and_pairing_survive_upgrade(22).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: an actual published-main storage-version-20 reader"]
+async fn published_version_20_reader_refuses_upgraded_state_without_losing_history_or_pairing() {
+    retained_history_and_pairing_survive_upgrade(20).await;
+}
+
+async fn retained_history_and_pairing_survive_upgrade(previous_storage_version: u32) {
     if fractal_daemon::test_support::supervise_test() { return; }
-    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("a real version-22 compatibility binary"));
+    let old = PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("a real compatibility binary matching the selected storage version"));
     let root = tempfile::tempdir().unwrap();
     let mut node = Node::new(root.path(), "thread-floor");
     node.binary = old.clone();
     node.start().await;
     let database = node.state_dir().join("claims.sqlite3");
-    assert_eq!(database_schema(&database),22,"this case requires the v22 reader, not an arbitrary older baseline");
+    assert_eq!(database_schema(&database), previous_storage_version,"the selected compatibility binary must actually create the expected storage version");
     let receipt: Value = node.client().post("/v1/messages", &json!({
         "idempotency_key":"retained-floor-mail","from":PERSON,"to":"agent/fleet-reader",
         "content":"Retained before causal metadata upgrade",
@@ -52,7 +62,7 @@ async fn version_22_reader_refuses_upgraded_state_without_losing_history_or_pair
         }
     }
     node.binary = old;
-    assert!(!node.start_with_schema_refusal(Some(23)).await,"the timestamp-only reader must refuse this upgraded store");
+    assert!(!node.start_with_schema_refusal(Some(23)).await,"the previous reader must refuse this upgraded store");
     assert_eq!(database_schema(&database),23,"old-reader refusal must not alter the upgraded header");
     node.binary = PathBuf::from(st3());
     node.start().await;
