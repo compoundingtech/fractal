@@ -503,6 +503,12 @@ fn parse_mission(
                     format!("mission `{id}` cannot own an account"),
                 ));
             }
+            "objective" => {
+                return Err(FractalError::new(
+                    "objective-inside-mission",
+                    format!("mission `{id}` cannot own an objective"),
+                ));
+            }
             "capacity" => {
                 if capacity.is_some() {
                     return Err(FractalError::new(
@@ -1403,6 +1409,12 @@ fn parse_step(
                     return Err(FractalError::new(
                         "account-inside-mission",
                         format!("step `{path}` cannot own an account"),
+                    ));
+                }
+                "objective" => {
+                    return Err(FractalError::new(
+                        "objective-inside-mission",
+                        format!("step `{path}` cannot own an objective"),
                     ));
                 }
                 "lane" => {
@@ -3113,6 +3125,12 @@ fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Res
         return Err(FractalError::new(
             "account-inside-mission",
             "an account declaration must be at the root",
+        ));
+    }
+    if node.name().value() == "objective" {
+        return Err(FractalError::new(
+            "objective-inside-mission",
+            "an objective declaration must be at the root",
         ));
     }
     if node.name().value() == "env" {
