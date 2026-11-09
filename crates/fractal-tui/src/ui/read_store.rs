@@ -512,8 +512,8 @@ mod tests {
         assert!(positions.advance("agent/a", 10_000));
         assert!(positions.unread("agent/a", Some(20_000)));
         assert!(!positions.unread("agent/a", Some(10_000)));
-        assert!(positions.due(now + POLL, true).is_empty(), "nothing is sent to an older daemon");
-        assert_eq!(positions.list_due(now + POLL * 10), None, "nor its list asked again");
+        assert!(positions.due(now + RETRY_CAP, true).is_empty(), "nothing is sent to an older daemon");
+        assert_eq!(positions.list_due(now + RETRY_CAP * 10), None, "nor its list asked again");
         assert_eq!(read(&path).unsent.get("agent/a"), Some(&10_000), "kept for a daemon that keeps positions");
         positions.stream_frame(now);
         assert_eq!(positions.list_due(now), None, "a frame does not list an older daemon either");
