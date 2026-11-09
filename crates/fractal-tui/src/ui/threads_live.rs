@@ -205,7 +205,6 @@ impl Earlier {
 pub(super) struct Threads {
     available: bool,
     read_enabled: bool,
-    exact_summary: bool,
     asks: BTreeMap<String, Ask>,
     unread_asks: BTreeSet<String>,
     sessions: BTreeMap<String, String>,
@@ -229,7 +228,6 @@ impl Threads {
         self.available = available;
         if !available {
             self.read_enabled = false;
-            self.exact_summary = false;
             self.lists.clear();
             self.unread_asks.clear();
             self.start_slot = None;
@@ -246,9 +244,8 @@ impl Threads {
         }
     }
 
-    pub(super) fn set_read_enabled(&mut self, enabled: bool, exact_summary: bool) {
+    pub(super) fn set_read_enabled(&mut self, enabled: bool) {
         self.read_enabled = self.available && enabled;
-        self.exact_summary = self.available && exact_summary;
     }
 
     pub(super) fn available(&self) -> bool {
@@ -384,20 +381,17 @@ impl Threads {
             out.push(ThreadInterest::RecentlyClosed);
         }
         if let Pane::Thread(id) = pane {
-            if self.exact_summary {
-                out.push(ThreadInterest::Summary(id.clone()));
-            }
+            out.push(ThreadInterest::Summary(id.clone()));
             out.push(ThreadInterest::Timeline(id.clone()));
         } else if let Pane::Home(Some(id)) = pane
             && id.starts_with("thread/")
         {
-            if self.exact_summary {
-                out.push(ThreadInterest::Summary(id.clone()));
-            }
+            out.push(ThreadInterest::Summary(id.clone()));
             if !self.folded_inbox_details.contains(&pane.key()) {
                 out.push(ThreadInterest::Timeline(id.clone()));
             }
         } else if let Some(id) = self.open.get(&pane.key()) {
+            out.push(ThreadInterest::Summary(id.clone()));
             out.push(ThreadInterest::Timeline(id.clone()));
         }
         out
@@ -429,24 +423,6 @@ impl Threads {
 
     pub(super) fn summary(&self, id: &str) -> Option<&ThreadSummary> {
         self.summaries.get(id).map(|row| &row.value)
-    }
-
-    pub(super) fn detail(
-        &mut self,
-        id: &str,
-        result: Result<Envelope<ThreadSummary>, ClientError>,
-    ) {
-        match result {
-            Ok(summary) => {
-                self.failures.remove(&ThreadInterest::Timeline(id.into()));
-                self.put_summary(summary);
-            }
-            Err(error) => {
-                self.failures
-                    .insert(ThreadInterest::Timeline(id.into()), error.human());
-                self.summaries.remove(id);
-            }
-        }
     }
 
     fn put_summary(&mut self, summary: Envelope<ThreadSummary>) {

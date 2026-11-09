@@ -28,7 +28,7 @@ function sameHead<T extends { id: string }>(left: readonly T[], right: readonly 
 
 // The live window owns the head; HTTP owns continuation cursors. Never show an
 // older tail unless its first page still aligns with the live head.
-function useThreadPage<T extends { id: string }>(read: ReadPage<T>, refresh: number, follow?: FollowPage<T>, onHeadChange?: () => void) {
+function useThreadPage<T extends { id: string }>(read: ReadPage<T>, refresh: number, follow?: FollowPage<T>) {
   const active = useRef<AbortController | null>(null);
   const [result, setResult] = useState<{ read: ReadPage<T>; head: T[]; page: ThreadPage<T>; issue?: string }>();
   const [live, setLive] = useState<{ read: ReadPage<T>; follow: FollowPage<T>; window?: CollectionWindow<T>; issue?: string; refused?: boolean }>();
@@ -68,7 +68,6 @@ function useThreadPage<T extends { id: string }>(read: ReadPage<T>, refresh: num
     const held = follow({
       onWindow: window => {
         const changed = !current || !sameHead(current.items, window.items) || current.hasMore !== window.hasMore;
-        if (changed) onHeadChange?.();
         current = window;
         setLive({ read, follow, window });
         if (changed) void load();
@@ -83,7 +82,7 @@ function useThreadPage<T extends { id: string }>(read: ReadPage<T>, refresh: num
       },
     });
     return () => held?.close();
-  }, [follow, load, onHeadChange, read]));
+  }, [follow, load, read]));
 
   const liveWindow = visibleLive?.window;
   const aligned = !liveWindow || !!visible && sameHead(visible.head, liveWindow.items);
@@ -218,14 +217,14 @@ function ThreadDetail({ client, id }: { client: ThreadClient; id: string }) {
   </ScrollView>;
 }
 
-function ThreadDetailContent({ thread, issue, loading, reload, client, onOpen, onTimelineChange }: {
-  thread?: ThreadSummary; issue?: string; loading: boolean; reload: () => void; client: ThreadClient; onOpen?: () => void; onTimelineChange?: () => void;
+function ThreadDetailContent({ thread, issue, loading, reload, client, onOpen }: {
+  thread?: ThreadSummary; issue?: string; loading: boolean; reload: () => void; client: ThreadClient; onOpen?: () => void;
 }) {
   const [expanded, setExpanded] = useState(true);
   if (thread) return <>
     {onOpen ? <EmbeddedThreadHeader title={thread.title} state={threadSummaryLine(thread)} expanded={expanded} toggle={() => setExpanded(value => !value)} />
       : <T bold>{thread.title}<T dim> · {threadSummaryLine(thread)}</T></T>}
-    {expanded || !onOpen ? <ThreadBody client={client} thread={thread} onOpen={onOpen} onTimelineChange={onTimelineChange} /> : null}
+    {expanded || !onOpen ? <ThreadBody client={client} thread={thread} onOpen={onOpen} /> : null}
   </>;
   if (issue) return <>
     <T color={theme.waiting}>{issue}</T>
@@ -320,20 +319,15 @@ function AskThreadStart({ client, origin, initialTitle, onOpen, canStart }: {
 }
 
 function InlineThread({ client, id, refresh, onOpen }: { client: ThreadClient; id: string; refresh: number; onOpen?: () => void }) {
-  const { caps, feed } = useStore();
+  const { feed } = useStore();
   const read = useCallback(async (_cursor: string | undefined, signal: AbortSignal) => {
     const { value } = await client.threadGet(id, { signal });
     return { value: { items: [value], next_cursor: null } };
   }, [client, id]);
-  const [timelineRevision, bumpTimelineRevision] = useState(0);
-  const onTimelineChange = useCallback(() => bumpTimelineRevision(previous => previous + 1), []);
-  const exactFeed = feed?.belongsTo(client) && caps?.capabilities.some(capability =>
-    capability.id === 'thread-summary-feed' && capability.state === 'granted');
   const follow = useCallback((handlers: ThreadWindowHandlers<ThreadSummary>) =>
-    feed?.followThreadSummary(id, handlers), [feed, id]);
-  const page = useThreadPage<ThreadSummary>(read, refresh + timelineRevision, exactFeed ? follow : undefined);
-  return <ThreadDetailContent thread={page.items[0]} issue={page.issue} loading={page.loading} reload={page.reload} client={client} onOpen={onOpen}
-    onTimelineChange={exactFeed ? undefined : onTimelineChange} />;
+    feed?.belongsTo(client) ? feed.followThreadSummary(id, handlers) : undefined, [client, feed, id]);
+  const page = useThreadPage<ThreadSummary>(read, refresh, follow);
+  return <ThreadDetailContent thread={page.items[0]} issue={page.issue} loading={page.loading} reload={page.reload} client={client} onOpen={onOpen} />;
 }
 
 function threadTextIssue(content: string): string | undefined {
@@ -362,14 +356,14 @@ function eventLine(event: Exclude<ThreadTimelineEvent, ThreadMessage>): string {
 }
 
 // The same thread view renders inside a conversation and on its own screen.
-function ThreadBody({ client, thread, onOpen, onTimelineChange, revealComposer }: {
-  client: ThreadClient; thread: ThreadSummary; onOpen?: () => void; onTimelineChange?: () => void; revealComposer?: (row: View) => void;
+function ThreadBody({ client, thread, onOpen, revealComposer }: {
+  client: ThreadClient; thread: ThreadSummary; onOpen?: () => void; revealComposer?: (row: View) => void;
 }) {
   const { actions, threadActions, status, threadRefresh, threadDeliveries, actor, data, feed } = useStore();
   const read = useCallback((cursor: string | undefined, signal: AbortSignal) => client.threadTimeline(thread.id, { cursor, limit: THREAD_WINDOW_SIZE }, { signal }), [client, thread.id]);
   const follow = useCallback((handlers: ThreadWindowHandlers<ThreadTimelineEvent>) =>
     feed?.belongsTo(client) ? feed.followThreadTimeline(thread.id, handlers) : undefined, [client, feed, thread.id]);
-  const page = useThreadPage<ThreadTimelineEvent>(read, threadRefresh, follow, onTimelineChange);
+  const page = useThreadPage<ThreadTimelineEvent>(read, threadRefresh, follow);
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
   const headerHeight = useHeaderHeight();

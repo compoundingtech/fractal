@@ -17,6 +17,8 @@ import type { ThreadObservation, ThreadSource } from './threadSource.ts'
 
 type OpenThread = { readonly onOpenThread?: ((id: string) => void) | undefined }
 
+const upgradeThreadEndpoint = 'Upgrade the connected Fractal to use threads. Your browser pairing is kept.'
+
 export function LiveAgentThreads({ agentId, onOpenThread }: OpenThread & { readonly agentId: string }) {
   return <ThreadGroup query={{ agent_id: agentId }} label="Threads" onOpenThread={onOpenThread} />
 }
@@ -39,8 +41,9 @@ function ThreadGroupContent({ source, query, label, onOpenThread }: OpenThread &
   readonly query: ThreadListQuery
   readonly label: string
 }) {
-  const { read } = useAtomValue(source.access)
+  const { read, upgradeRequired } = useAtomValue(source.access)
   const list = useAtomValue(source.list(query))
+  if (upgradeRequired) return <ReadStatus state="Unavailable" detail={upgradeThreadEndpoint} />
   if (!read || (list._tag === 'Observed' && list.value.items.length === 0 && Option.isNone(list.value.next_cursor))) return null
   return <details {...stylex.props(styles.group)}>
     <summary>{label}</summary>
@@ -84,12 +87,13 @@ function AskThreadsContent({ source, agent, ask, episode, title, canStart, onOpe
   readonly title: string
   readonly canStart: boolean
 }) {
-  const { read, actions } = useAtomValue(source.access)
+  const { read, actions, upgradeRequired } = useAtomValue(source.access)
   const [starting, setStarting] = React.useState(false)
   const [focused, setFocused] = React.useState<string>()
   const threadTitle = threadTitleFromAsk(title)
   const startInput = React.useCallback((input: HTMLTextAreaElement | null) => { input?.focus() }, [])
   const draftKey = `ask:${ask}:${episode}`
+  if (upgradeRequired) return <ReadStatus state="Unavailable" detail={upgradeThreadEndpoint} />
   if (!read) return null
   return <div {...stylex.props(styles.groupBody)}>
     {focused === undefined ? null : <ThreadById source={source} threadId={focused} embedded focusComposer onOpenThread={onOpenThread} />}
@@ -115,8 +119,9 @@ function ThreadById({ source, threadId, embedded = false, focusComposer = false,
   readonly embedded?: boolean
   readonly focusComposer?: boolean
 }) {
-  const { read } = useAtomValue(source.access)
+  const { read, upgradeRequired } = useAtomValue(source.access)
   const detail = useAtomValue(source.detail(threadId))
+  if (upgradeRequired) return <ReadStatus state="Unavailable" detail={upgradeThreadEndpoint} />
   if (!read) return <p>This connection does not support threads.</p>
   if (detail._tag !== 'Observed') return <ReadStatus state={detail._tag} />
   return <LiveThread source={source} thread={detail.value.summary} embedded={embedded} initiallyExpanded focusComposer={focusComposer} onOpenThread={onOpenThread} />
@@ -335,8 +340,8 @@ function EventText({ event, excerpt }: { readonly event: ThreadTimelineEvent; re
   }
 }
 
-function ReadStatus({ state }: { readonly state: 'Waiting' | 'Unavailable' }) {
-  return state === 'Waiting' ? <p role="status">Loading threads…</p> : <p role="alert">Threads could not be loaded.</p>
+function ReadStatus({ state, detail }: { readonly state: 'Waiting' | 'Unavailable'; readonly detail?: string }) {
+  return state === 'Waiting' ? <p role="status">Loading threads…</p> : <p role="alert">{detail ?? 'Threads could not be loaded.'}</p>
 }
 
 const styles = stylex.create({

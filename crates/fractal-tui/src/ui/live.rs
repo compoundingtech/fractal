@@ -388,7 +388,6 @@ impl AnswerTiming {
 }
 
 enum Fetched {
-    ThreadDetail(u64, String, Result<fractal_client::Envelope<fractal_client::ThreadSummary>, fractal_client::ClientError>),
     ThreadWrite(u64, super::threads_live::Receipt),
     ThreadEarlier(u64, String, Result<fractal_client::ThreadTimelinePage, String>),
     Content(super::content::Key, Result<super::content::Fetched, String>),
@@ -634,8 +633,6 @@ pub fn run(context: Context) -> Result<()> {
     let mut resources_reading = false;
     let mut resources_generation = 0_u64;
     let mut thread_interests = Vec::new();
-    let mut thread_refresh = std::collections::BTreeSet::new();
-    let mut thread_reads = std::collections::BTreeSet::new();
     // Whether the feed was last told to follow the missions window, and until when the last time
     // one was on screen keeps it followed.
     let mut missions_sent = false;
@@ -733,8 +730,6 @@ pub fn run(context: Context) -> Result<()> {
                     resources_generation += 1;
                     ui.threads.enable(false);
                     thread_interests.clear();
-                    thread_refresh.clear();
-                    thread_reads.clear();
                     resources_stale = true;
                     extras.inventory_supported = None;
                     extras.inventory_partial.clear();
@@ -749,19 +744,17 @@ pub fn run(context: Context) -> Result<()> {
                     body_requested.clear();
                     changed = true;
                 }
-                feed::Update::ThreadSupport { available, mark_read, exact_summary } => {
+                feed::Update::ThreadSupport { available, mark_read, upgrade_required } => {
                     ui.threads.enable(available);
-                    ui.threads.set_read_enabled(mark_read, exact_summary);
+                    ui.threads.set_read_enabled(mark_read);
+                    if upgrade_required {
+                        ui.flash("Upgrade the connected Fractal to use threads. Your pairing is kept.");
+                    }
                     if available { ui.threads.model(&model); }
                     changed = true;
                 }
                 feed::Update::ThreadWindow { interest, snapshot, replace, rows, removes, order, has_more } => {
                     if !ui.threads.interests(&ui.main_pane()).contains(&interest) { continue; }
-                    if let feed::ThreadInterest::Timeline(id) = &interest
-                        && !thread_interests.contains(&feed::ThreadInterest::Summary(id.clone()))
-                    {
-                        thread_refresh.insert(id.clone());
-                    }
                     ui.threads.window(interest, snapshot, replace, rows, removes, order, has_more);
                     changed = true;
                 }
@@ -1124,12 +1117,6 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::Body(id, from, title, content) => {
                     extras.bodies.insert(id, (from, title, content));
                 }
-                Fetched::ThreadDetail(generation, id, result) => {
-                    if generation == resources_generation {
-                        thread_reads.remove(&id);
-                        ui.threads.detail(&id, result);
-                    }
-                }
                 Fetched::ThreadEarlier(generation, id, page) => {
                     if generation == resources_generation
                         && let Some(error) = ui.threads.earlier_loaded(&id, page) {
@@ -1473,32 +1460,10 @@ pub fn run(context: Context) -> Result<()> {
         }
         let wanted_threads = ui.threads.interests(&ui.main_pane());
         if wanted_threads != thread_interests {
-            for interest in &wanted_threads {
-                if let feed::ThreadInterest::Timeline(id) = interest
-                    && !thread_interests.contains(interest)
-                    && !wanted_threads.contains(&feed::ThreadInterest::Summary(id.clone()))
-                {
-                    thread_refresh.insert(id.clone());
-                }
-            }
             ui.threads.keep_windows(&wanted_threads);
             let _ = commands.send(Command::Threads(wanted_threads.clone()));
             thread_interests = wanted_threads;
             changed = true;
-        }
-        thread_refresh.retain(|id| thread_interests.contains(&feed::ThreadInterest::Timeline(id.clone())));
-        for id in std::mem::take(&mut thread_refresh) {
-            if !thread_reads.insert(id.clone()) {
-                thread_refresh.insert(id);
-                continue;
-            }
-            let reader = client.clone();
-            let tx = fetched_tx.clone();
-            let generation = resources_generation;
-            runtime.spawn(async move {
-                let result = reader.thread_get(&id).await;
-                let _ = tx.send(Fetched::ThreadDetail(generation, id, result));
-            });
         }
         for earlier in ui.threads.take_earlier() {
             let reader = client.clone();

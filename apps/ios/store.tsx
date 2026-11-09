@@ -346,8 +346,10 @@ function useAppStore(proof?: FabricProfile) {
   });
   const push = pushRef.current;
   const pushGranted = !proof && capsClient.current === client && !!caps?.capabilities.some(capability => capability.id === 'push-registration' && capability.version >= 1 && capability.state === 'granted');
-  const threadClient = capsClient.current === client && caps?.capabilities.some(capability =>
-    capability.id === 'threads-v1' && capability.version >= 1 && capability.state === 'granted') ? client : null;
+  const threadUpgradeRequired = capsClient.current === client && !!caps && ['threads-v1', 'thread-summary-feed'].some(id =>
+    !caps.capabilities.some(capability => capability.id === id && capability.version >= 1));
+  const threadClient = capsClient.current === client && ['threads-v1', 'thread-summary-feed'].every(id => caps?.capabilities.some(capability =>
+    capability.id === id && capability.version >= 1 && capability.state === 'granted')) ? client : null;
   const threadActions = new Set(caps?.capabilities.filter(capability =>
     capability.state === 'granted' && capability.id.startsWith('thread.')).map(capability => capability.id));
   const [threadRefresh, setThreadRefresh] = useState(0);
@@ -1467,7 +1469,7 @@ function useAppStore(proof?: FabricProfile) {
 
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
-    error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
+    error: error || (status === 'online' && threadUpgradeRequired ? 'Upgrade the connected Fractal to use threads. This device’s pairing is kept.' : ''), setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
     gatewayMachineId, gatewayHost, canControlTerminal, threadClient, threadActions, threadRefresh, threadDeliveries, loadLists, watchLists, inventoryGranted, actions,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },

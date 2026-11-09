@@ -133,6 +133,9 @@ fn native_mounts_share_the_same_timeline_and_a_direct_reply() {
                 .is_none()
         );
         assert!(
+            threads.interests(pane).contains(&ThreadInterest::Summary(thread.into()))
+        );
+        assert!(
             threads
                 .mount(pane, 100, &cursor, &world, &texts)
                 .lines
@@ -292,7 +295,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     world.person = person.into();
     let mut ui = super::super::Ui::new(world);
     ui.threads.enable(true); // The disposable member keeps public capability advertisement off.
-    ui.threads.detail(id, client.thread_get(id).await);
+    ui.threads.put_summary(client.thread_get(id).await.unwrap());
     apply_window(&mut ui, &mut stream, id).await;
 
     let pane = Pane::Thread(id.into());
@@ -469,7 +472,7 @@ fn mark_visible_read_fences_the_observed_incoming_messages() {
     let visible = ["message/own", "message/shown", "message/older", "message/other-thread"]
         .into_iter().map(str::to_owned).collect();
     assert!(!threads.mark_visible_read("home:ask", id.into(), &visible));
-    threads.set_read_enabled(true, false);
+    threads.set_read_enabled(true);
     assert!(!threads.mark_visible_read("home:ask", id.into(), &HashSet::new()));
     assert!(threads.mark_visible_read("home:ask", id.into(), &visible));
     assert!(!threads.mark_visible_read("home:ask", id.into(), &visible));

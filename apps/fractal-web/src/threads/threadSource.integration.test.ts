@@ -29,6 +29,26 @@ it('issues no thread reads or edits when the daemon has not advertised the featu
   }
 })
 
+it.each(['missing', 'ungranted'] as const)('does not infer current metadata when the summary capability is %s', async state => {
+  const fetchImpl = vi.fn(async () => Response.json({
+    ...base, value: { ...base.value, capabilities: [
+      ...base.value.capabilities,
+      { id: 'threads-v1', version: 1, state: 'granted' },
+      { id: 'thread.start', version: 0, state: 'granted' },
+      ...(state === 'missing' ? [] : [{ id: 'thread-summary-feed', version: 1, state: 'ungranted' }]),
+    ] },
+  }))
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(new FractalClient({ baseUrl: 'http://example.test', fetchImpl }), registry)
+  const list = source.list({ agent_id: agent })
+  const stop = registry.mount(list)
+  try {
+    await vi.waitFor(() => expect(registry.get(source.access)).toMatchObject({ read: false, upgradeRequired: state === 'missing', actions: new Set() }))
+    expect(registry.get(list)).toEqual({ _tag: 'Waiting' })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  } finally { stop(); registry.dispose() }
+})
+
 it('reads the exact agent, paginates by opaque cursor and sends the observed metadata fence', async () => {
   const requests: Array<{ readonly url: URL; readonly body: unknown }> = []
   const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -40,6 +60,7 @@ it('reads the exact agent, paginates by opaque cursor and sends the observed met
       value: { ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
         { id: 'threads-v1', version: 1, state: 'granted' },
+        { id: 'thread-summary-feed', version: 1, state: 'granted' },
         { id: 'thread.close', version: 0, state: 'granted' },
       ] },
     })
@@ -93,6 +114,7 @@ it('starts with the exact ask episode and retries the same first message after a
       value: { ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
         { id: 'threads-v1', version: 1, state: 'granted' },
+        { id: 'thread-summary-feed', version: 1, state: 'granted' },
         { id: 'thread.start', version: 0, state: 'granted' },
       ] },
     })
@@ -139,6 +161,7 @@ it('offers metadata edits but omits the unsigned composer on paired web transpor
     value: { ...base.value, capabilities: [
       ...base.value.capabilities,
       { id: 'threads-v1', version: 1, state: 'granted' },
+      { id: 'thread-summary-feed', version: 1, state: 'granted' },
       ...['thread.start', 'thread.reply', 'thread.close'].map(id => ({ id, version: 0, state: 'granted' })),
     ] },
   }) })
@@ -208,6 +231,7 @@ it('sends the same typed actions for approved browsers and blocks writes if the 
       ...base, value: { ...base.value, capabilities: [
         ...base.value.capabilities,
         { id: 'threads-v1', version: 1, state: 'granted' },
+        { id: 'thread-summary-feed', version: 1, state: 'granted' },
         { id: 'thread-browser-send', version: 1, state: browserGrant ? 'granted' : 'ungranted' },
         { id: 'thread.start', version: 0, state: 'granted' },
         { id: 'thread.reply', version: 0, state: replyGrant ? 'granted' : 'ungranted' },

@@ -19,7 +19,7 @@ export type ThreadSendResult =
   | { readonly _tag: 'Sent'; readonly threadId: string }
   | { readonly _tag: 'Refused'; readonly detail: string }
 
-type ThreadAccess = { readonly read: boolean; readonly exactSummary?: boolean; readonly actions: ReadonlySet<string>; readonly actor?: string }
+type ThreadAccess = { readonly read: boolean; readonly upgradeRequired?: boolean; readonly actions: ReadonlySet<string>; readonly actor?: string }
 
 export interface ThreadSource {
   readonly access: Atom.Atom<ThreadAccess>
@@ -42,7 +42,7 @@ interface ThreadWatches {
   readonly timeline: (id: string) => Watch<ThreadTimelineEvent>
 }
 
-// Older daemons may grant the paired native actions, which require a device signature.
+// Paired native actions require a device signature; browser sends need their own grant.
 const canSendUnsignedThread = (caps: Pick<Native.Capabilities, 'transport' | 'capabilities'>): boolean =>
   caps.transport === 'local-web' || caps.capabilities.some(capability =>
     capability.id === 'thread-browser-send' && capability.version >= 1 && capability.state === 'granted',
@@ -60,14 +60,15 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     get.addFinalizer(() => abort.abort())
     void client.capabilities({ signal: abort.signal }).then(({ value }) => {
       const caps = Native.decodeUnknownSync(Native.Capabilities)(value)
-      const read = hasConversationCapability(caps, 'threads-v1') && hasConversationCapability(caps, 'read.projections')
+      const upgradeRequired = ['threads-v1', 'thread-summary-feed'].some(id => !caps.capabilities.some(capability => capability.id === id && capability.version >= 1))
+      const read = hasConversationCapability(caps, 'threads-v1') && hasConversationCapability(caps, 'read.projections') && hasConversationCapability(caps, 'thread-summary-feed')
       if (!abort.signal.aborted) {
         if (!read && registry.get(titles).size > 0) registry.set(titles, new Map())
         const actions = new Set(read ? caps.capabilities.filter(capability =>
           capability.state === 'granted' && capability.id.startsWith('thread.')
           && (canSendUnsignedThread(caps) || (capability.id !== 'thread.start' && capability.id !== 'thread.reply'))
         ).map(capability => capability.id) : [])
-        get.setSelf({ read, exactSummary: read && hasConversationCapability(caps, 'thread-summary-feed'), actions, actor: caps.session_actor })
+        get.setSelf({ read, upgradeRequired, actions, actor: caps.session_actor })
       }
     }).catch(() => { if (!abort.signal.aborted) get.setSelf(noAccess) })
     return noAccess
@@ -79,11 +80,9 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     if (changed.length > 0) registry.set(titles, new Map([...previous, ...changed.map(item => [item.id, item.title] as const)]))
   }
   const revision = Atom.make(0)
-  const metadata = Atom.family((_threadId: string) => Atom.make<string | undefined>(undefined))
   function reader<T>(
     read: (signal: AbortSignal) => Promise<T>,
     settings?: {
-      readonly dependsOn?: Atom.Atom<unknown>
       readonly follow?: (publish: (value: T) => void, reload: () => void, stale: () => void) => () => void
     },
   ): Atom.Atom<Feed<T>> {
@@ -91,7 +90,6 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     return Atom.make(get => {
       const demand = get(access)
       get(revision)
-      if (settings?.dependsOn !== undefined) get(settings.dependsOn)
       if (!demand.read) return previous = waiting
       let active = true
       let abort: AbortController | undefined
@@ -140,7 +138,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
   }
   const readDetail = Atom.family((threadId: string) => {
     const follow = (publish: (value: ThreadObservation) => void, reload: () => void, stale: () => void) => {
-      if (registry.get(access).exactSummary !== true || watches === undefined) return () => {}
+      if (watches === undefined) return () => {}
       return watches.detail(threadId)(event => {
         if (event._tag !== 'Observed') {
           if (event._tag === 'Failed' && event.error._tag === 'Rejected') reload()
@@ -163,7 +161,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       signal.throwIfAborted()
       rememberTitles([summary])
       return { summary, snapshotId: snapshot.id }
-    }, { dependsOn: metadata(threadId), follow })
+    }, { follow })
   })
   const readList = Atom.family((key: string) => {
     const query = JSON.parse(key) as ThreadListQuery
@@ -179,12 +177,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
   })
   const readTimeline = Atom.family((key: string) => {
     const [threadId, cursor] = key.split('\n') as [string, string | undefined]
-    const follow = followPage(cursor === undefined ? watches?.timeline(threadId) : undefined, window => {
-      if (registry.get(access).exactSummary === true && watches !== undefined) return
-      const latestMetadata = window.items.find(event => event.kind !== 'message')?.id
-      const atom = metadata(threadId)
-      if (registry.get(atom) !== latestMetadata) registry.set(atom, latestMetadata)
-    })
+    const follow = followPage(cursor === undefined ? watches?.timeline(threadId) : undefined)
     return reader(async signal => {
       const { value } = await client.threadTimeline(threadId, { limit: 40, ...(cursor === undefined ? {} : { cursor }) }, { signal })
       return Native.decodeUnknownSync(Native.ThreadTimelinePage)(value)

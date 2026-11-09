@@ -1,12 +1,13 @@
 # Fractal topic threads
 
-Status: proposed contract for review. The examples describe the intended behavior. The existing
-client protocol and daemon do not yet provide this thread resource.
+Status: implemented contract. Thread clients require the current daemon thread resource and
+exact summary feed; upgrade older endpoints before using threads. Stored history and existing
+device pairings are preserved across that upgrade.
 
-Fractal already stores addressed messages and their `in_reply_to` edges. Inbox's **Chat about
-this** currently finds a discussion by the message subject. That works while returning to the
-same Inbox item. A fresh request with a different title can refer to the same discussion even
-though it needs its own answer and decision history.
+Fractal stores addressed messages and their `in_reply_to` edges. Earlier Inbox discussions
+were found by message subject. Durable threads replace that subject-based identity: a fresh
+request with a different title can refer to the same discussion while retaining its own answer
+and decision history. Existing subject-based messages remain ordinary conversation history.
 
 ## Identity and history
 
