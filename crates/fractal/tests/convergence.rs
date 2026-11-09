@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v17.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v18.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -985,7 +985,11 @@ impl World {
             // optional candidate revision stops the store's projection, so a restart fails;
             // only the planner writes those, always with one.
             .filter(|spec| {
-                !spec.kind.starts_with("checkpoint.") && !spec.kind.starts_with("planning-session.")
+                !spec.kind.starts_with("checkpoint.")
+                    && !spec.kind.starts_with("planning-session.")
+                    // Thread metadata needs the typed owner/revision admission. Dedicated
+                    // store tests cover its real replicated lifecycle and historical origins.
+                    && !fractal_schema::threads::is_reserved_kind(&spec.kind)
             })
             .collect::<Vec<_>>();
         let spec = *self.rng.pick(&kinds);
@@ -1693,6 +1697,44 @@ fn append_generated_claim(
 }
 
 #[test]
+fn typed_thread_metadata_converges_after_replication_and_restart() {
+    use fractal_daemon::store::thread_metadata::{Edit, apply, summary};
+    let mut world = World::new(1, Sabotage::None);
+    let person = "person/robin";
+    let thread = "thread/convergence";
+    let agent = "agent/sample/reviewer";
+    let (created, _) = apply(&world.nodes[0].store, person, thread, "thread-create", Edit::Create {
+        agent, title: "Initial title",
+    }).unwrap();
+    assert!(world.exchange(0, 1, true) > 0);
+    let (renamed, _) = apply(&world.nodes[1].store, person, thread, "thread-rename", Edit::Rename {
+        title: "Reviewed title", title_revision: &created.id, revision: &created.id,
+    }).unwrap();
+    assert!(world.exchange(1, 0, true) > 0);
+    let (closed, _) = apply(&world.nodes[0].store, person, thread, "thread-close", Edit::Close {
+        revision: &renamed.id,
+    }).unwrap();
+    assert!(world.exchange(0, 1, true) > 0);
+    world.restart(0);
+    world.restart(1);
+    assert!(world.failures.is_empty(), "{:?}", world.failures);
+    for node in &world.nodes[..2] {
+        let current = summary(&node.store, person, thread).unwrap();
+        assert_eq!(current.title, "Reviewed title");
+        assert_eq!(current.title_revision, renamed.id);
+        assert_eq!(current.revision, closed.id);
+        assert_eq!(current.state, "closed");
+        assert_eq!(current.agent_id, agent);
+        assert!(summary(&node.store, "person/other", thread).is_err());
+        let (retry, appended) = apply(&node.store, person, thread, "thread-create", Edit::Create {
+            agent, title: "Initial title",
+        }).unwrap();
+        assert_eq!(retry.id, created.id);
+        assert!(!appended, "replicated operation receipts survive restart");
+    }
+}
+
+#[test]
 fn generated_mission_publications_replicate_as_canonical_missions() {
     let mut world = World::new(1, Sabotage::None);
     let mut input = world.claim_of(&corpus()["mission.published"], 0).unwrap();
@@ -1814,7 +1856,7 @@ const NEVER_TRIMS: &[u64] = &[2];
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v17 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v18 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -2043,7 +2085,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v16.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v18.json"
         }))
         .unwrap(),
     )

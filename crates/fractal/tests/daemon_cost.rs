@@ -924,6 +924,9 @@ const PROBES: &[Probe] = &[
     get("GET /v1/client/lanes", "/v1/client/lanes"),
     get("GET /v1/client/lanes/{*id}", "/v1/client/lanes/{lane}"),
     get("GET /v1/client/history", "/v1/client/history"),
+    get("GET /v1/client/threads", "/v1/client/threads?agent_id={seat}"),
+    get("GET /v1/client/threads/{id}", "/v1/client/threads/{thread}"),
+    get("GET /v1/client/threads/{id}/timeline", "/v1/client/threads/{thread}/timeline"),
     get(
         "GET /v1/client/history/{*id}",
         "/v1/client/history/{history}",
@@ -3141,7 +3144,18 @@ async fn measure(scale: f64, source: &Path, peer_source: &Path, usage_window: (u
             .insert("incarnation_id".into(), json!(SEAT_RUNTIME));
         store.append_claim(&running).unwrap();
     }
+    let (thread, _) = fractal_daemon::store::thread_metadata::apply(
+        &store, "person/bench-operator", "thread/cost", "cost-thread-create",
+        fractal_daemon::store::thread_metadata::Edit::Create {
+            agent: &subjects.seats[0], title: "Cost fixture",
+        },
+    ).unwrap();
+    fractal_daemon::store::thread_metadata::apply(
+        &store, "person/bench-operator", &thread.subject, "cost-thread-close",
+        fractal_daemon::store::thread_metadata::Edit::Close { revision: &thread.id },
+    ).unwrap();
     let mut fixture = fixture(&person, &client, subjects).await;
+    fixture.items.insert("thread", thread.subject.trim_start_matches("thread/").into());
     fixture.items.insert(
         "harness_question",
         urlencoding::encode(&harness_question.id).into_owned(),
