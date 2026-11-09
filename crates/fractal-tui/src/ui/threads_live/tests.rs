@@ -792,7 +792,10 @@ fn a_closed_summary_keeps_the_active_reply_focus_and_quote() {
         request_id: "request/closed".into(),
         api_version: fractal_client::API_VERSION.into(),
     });
-    assert_eq!(threads.focused, Some((pane.key(), input.clone())));
+    assert!(
+        threads.focused == Some((pane.key(), input.clone())),
+        "a closed summary must preserve the exact focused pane and reply input"
+    );
     assert_eq!(
         threads.drafts[&input.key()].quote.as_deref(),
         Some("message/question")
