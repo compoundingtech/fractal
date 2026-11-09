@@ -15,7 +15,7 @@ mod inventory;
 mod terminal;
 pub mod tree;
 mod thread_windows;
-pub use thread_windows::ThreadInterest;
+pub use thread_windows::{ThreadAccess, ThreadInterest};
 use thread_windows::{MAX_THREADS, ThreadSubscription};
 #[cfg(test)]
 mod revisioned_agents_tests;
@@ -182,7 +182,7 @@ pub enum Update {
     /// are out of date and must not be shown as current.
     WindowStopped(Window),
     Terminal { generation: u64, update: TerminalUpdate },
-    ThreadSupport { available: bool, mark_read: bool, upgrade_required: bool },
+    ThreadSupport { available: bool, access: ThreadAccess, upgrade_required: bool },
     ThreadWindow {
         interest: ThreadInterest,
         snapshot: Snapshot,
@@ -600,11 +600,9 @@ async fn connected(
         })
     });
     let threads_granted = !upgrade_required && supports("threads-v1") && supports("collections") && supports("thread-summary-feed");
-    let thread_read_granted = threads_granted && capabilities.value.capabilities.iter().any(|capability| {
-        capability.id == "thread.read" && capability.state == CapabilityState::Granted
-    });
+    let access = if threads_granted { thread_windows::access(&capabilities.value, client.has_message_signer()) } else { ThreadAccess::default() };
     let attention_thread_hints = threads_granted && supports("collection.attention.thread-hints");
-    if updates.send(Update::ThreadSupport { available: threads_granted, mark_read: thread_read_granted, upgrade_required }).is_err() { return Ended::Closed; }
+    if updates.send(Update::ThreadSupport { available: threads_granted, access, upgrade_required }).is_err() { return Ended::Closed; }
     if threads_granted {
         for window in threads.iter() {
             if let Err(error) = window.subscribe(stream).await { return Ended::Dropped(error.human()); }

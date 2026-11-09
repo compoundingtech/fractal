@@ -9,7 +9,7 @@ use fractal_client::{
     ThreadRenameParameters, ThreadReplyParameters, ThreadStartParameters, ThreadState,
     ThreadSummary, ThreadTargetParameters, ThreadTimelineChange, ThreadTimelineEvent,
 };
-use fractal_feed::{ThreadInterest, model::Model};
+use fractal_feed::{ThreadAccess, ThreadInterest, model::Model};
 use ratatui::text::{Line, Span};
 
 use super::{
@@ -71,6 +71,7 @@ pub(super) struct Write {
     fence: Fence,
     mutation: Mutation,
     client: Option<Client>,
+    agent: String,
 }
 
 pub(super) struct Receipt {
@@ -82,6 +83,7 @@ enum Confirmation {
     Applied(Option<Envelope<ThreadSummary>>),
     Rejected,
     Failed(ClientError),
+    NotSent(ClientError),
 }
 
 #[derive(Clone)]
@@ -128,16 +130,29 @@ impl Draft {
 }
 
 impl Write {
+    pub(super) fn not_sent(self, error: ClientError) -> Receipt {
+        Receipt {
+            write: self,
+            confirmation: Confirmation::NotSent(error),
+        }
+    }
+
     pub(super) fn offline(self) -> Receipt {
         Receipt {
             write: self,
-            confirmation: Confirmation::Failed(ClientError::Transport(
+            confirmation: Confirmation::NotSent(ClientError::Transport(
                 "Reconnect to send this thread action".into(),
             )),
         }
     }
     pub(super) async fn perform(mut self, client: Client) -> Receipt {
-        let client = self.client.get_or_insert(client).clone();
+        if let Err(error) = self.prepare(client) {
+            return Receipt {
+                write: self,
+                confirmation: Confirmation::NotSent(error),
+            };
+        }
+        let client = self.client.as_ref().unwrap().clone();
         let action = format!("action/{}", self.key);
         let key = self.key.as_str();
         let fence = self.fence.clone();
@@ -196,6 +211,20 @@ impl Write {
             write: self,
             confirmation,
         }
+    }
+
+    fn prepare(&mut self, client: Client) -> Result<(), ClientError> {
+        let client = self.client.as_ref().unwrap_or(&client);
+        let prepared = match &mut self.mutation {
+            Mutation::Start(parameters) => client.prepare_thread_start(&self.key, parameters),
+            Mutation::Reply(parameters) => {
+                client.prepare_thread_reply(&self.key, &self.agent, parameters)
+            }
+            _ => Ok(()),
+        };
+        prepared.map_err(|error| ClientError::Protocol(error.to_string()))?;
+        self.client = Some(client.clone());
+        Ok(())
     }
 
     fn matches_receipt(&self, receipt: &fractal_client::ActionResult) -> bool {
@@ -303,7 +332,7 @@ impl Earlier {
 #[derive(Default)]
 pub(super) struct Threads {
     available: bool,
-    read_enabled: bool,
+    access: ThreadAccess,
     origins: BTreeMap<String, Origin>,
     retained_origins: BTreeMap<String, Origin>,
     unread_items: BTreeSet<String>,
@@ -327,7 +356,7 @@ impl Threads {
     pub(super) fn enable(&mut self, available: bool) {
         self.available = available;
         if !available {
-            self.read_enabled = false;
+            self.access = ThreadAccess::default();
             self.lists.clear();
             self.unread_items.clear();
             self.start_slot = None;
@@ -351,7 +380,30 @@ impl Threads {
     }
 
     pub(super) fn set_read_enabled(&mut self, enabled: bool) {
-        self.read_enabled = self.available && enabled;
+        self.access.mark_read = self.available && enabled;
+    }
+
+    pub(super) fn set_access(&mut self, access: ThreadAccess) {
+        self.access = if self.available {
+            access
+        } else {
+            ThreadAccess::default()
+        };
+        let allowed = self
+            .focused
+            .as_ref()
+            .is_none_or(|(_, input)| self.allowed(input));
+        if !allowed {
+            self.focused = None;
+        }
+    }
+
+    fn allowed(&self, input: &Input) -> bool {
+        match input {
+            Input::Start { .. } => self.access.start,
+            Input::Reply(_) => self.access.reply,
+            Input::Rename(_) => self.access.rename,
+        }
     }
 
     pub(super) fn available(&self) -> bool {
@@ -359,7 +411,7 @@ impl Threads {
     }
 
     pub(super) fn can_start(&self, id: &str) -> bool {
-        self.available && self.origins.contains_key(id)
+        self.available && self.access.start && self.origins.contains_key(id)
     }
 
     pub(super) fn editing_in(&self, pane: &Pane) -> bool {
@@ -374,7 +426,7 @@ impl Threads {
         item: &str,
         texts: &mut HashMap<String, String>,
     ) -> bool {
-        if !self.available {
+        if !self.available || !self.access.start {
             return false;
         }
         let Some(input) = self.start_input(item) else {
@@ -399,8 +451,8 @@ impl Threads {
         text: &str,
         texts: &mut HashMap<String, String>,
     ) -> Result<(), String> {
-        if !self.available {
-            return Err("Reconnect to a current Fractal before starting this thread".into());
+        if !self.available || !self.access.start {
+            return Err("This connection cannot start a thread; your feedback is kept".into());
         }
         if text.trim().is_empty()
             || text.starts_with("doc/")
@@ -506,11 +558,15 @@ impl Threads {
             return Some(thread::Tap::Retry(original.write.key.clone()));
         }
         Some(match key.code {
-            KeyCode::Char('Z' | 'z') if summary.state == ThreadState::Open => {
+            KeyCode::Char('Z' | 'z') if summary.state == ThreadState::Open && self.access.close => {
                 thread::Tap::Close(id.clone())
             }
-            KeyCode::Char('Z' | 'z') => thread::Tap::Reopen(id.clone()),
-            KeyCode::Char('N' | 'n') => thread::Tap::Rename(id.clone()),
+            KeyCode::Char('Z' | 'z')
+                if summary.state == ThreadState::Closed && self.access.reopen =>
+            {
+                thread::Tap::Reopen(id.clone())
+            }
+            KeyCode::Char('N' | 'n') if self.access.rename => thread::Tap::Rename(id.clone()),
             KeyCode::Char('V' | 'v') if self.can_mark_read(id) => {
                 thread::Tap::MarkVisibleRead(id.clone())
             }
@@ -1010,6 +1066,10 @@ impl Threads {
                 has_earlier: source.is_some_and(History::more),
                 loading_earlier: source.is_some_and(|history| history.loading),
                 can_mark_read: self.can_mark_read(id),
+                can_reply: self.access.reply,
+                can_rename: self.access.rename,
+                can_close: self.access.close,
+                can_reopen: self.access.reopen,
             },
             &world.person,
             |actor| {
@@ -1075,6 +1135,24 @@ impl Threads {
     ) {
         let key = mode.key();
         let draft = texts.get(&key).map_or("", String::as_str);
+        if !self.allowed(mode) {
+            doc.wrap(
+                &[text::run(
+                    "Draft kept; this connection cannot send it",
+                    theme::dim(),
+                )],
+                width,
+            );
+            doc.lines(text::markdown(draft, width, theme::dim()));
+            if let Some(delivery) = self
+                .drafts
+                .get(&key)
+                .and_then(|draft| draft.delivery.as_ref())
+            {
+                self.feedback(doc, host, delivery, width);
+            }
+            return;
+        }
         let focused = self
             .focused
             .as_ref()
@@ -1126,7 +1204,7 @@ impl Threads {
                     if !self.folded_inbox_details.remove(host) {
                         self.folded_inbox_details.insert(host.into());
                         self.focused = None;
-                    } else if self.summary(&id).is_some() {
+                    } else if self.access.reply && self.summary(&id).is_some() {
                         self.focused = Some((host.into(), Input::Reply(id)));
                     }
                     return None;
@@ -1136,13 +1214,19 @@ impl Threads {
                     self.focused = None;
                 } else {
                     self.open.insert(host.into(), id.clone());
-                    if self.summary(&id).is_some() {
+                    if self.access.reply && self.summary(&id).is_some() {
                         self.focused = Some((host.into(), Input::Reply(id)));
                     }
                 }
             }
-            thread::Tap::Compose(id) => self.focused = Some((host.into(), Input::Reply(id))),
+            thread::Tap::Compose(id) if self.access.reply => {
+                self.focused = Some((host.into(), Input::Reply(id)))
+            }
+            thread::Tap::Compose(_) => {}
             thread::Tap::Reply { thread, message } => {
+                if !self.access.reply {
+                    return None;
+                }
                 let input = Input::Reply(thread);
                 let draft = self.drafts.entry(input.key()).or_default();
                 if draft.locked() {
@@ -1162,6 +1246,9 @@ impl Threads {
                 }
             }
             thread::Tap::Rename(id) => {
+                if !self.access.rename {
+                    return None;
+                }
                 self.activate(host, Input::Rename(id), texts);
             }
             thread::Tap::Send(id) => self.submit(host, Input::Reply(id), texts),
@@ -1294,6 +1381,7 @@ impl Threads {
                 return true;
             }
             if let Pane::Thread(id) = pane
+                && self.access.reply
                 && matches!(key.code, KeyCode::Char(_))
                 && !key
                     .modifiers
@@ -1396,7 +1484,7 @@ impl Threads {
         text: &str,
         draft: &Draft,
     ) -> Result<Write, String> {
-        if !self.available || text.trim().is_empty() {
+        if !self.available || !self.allowed(input) || text.trim().is_empty() {
             return Err("The thread is not ready to send".into());
         }
         if draft
@@ -1482,7 +1570,18 @@ impl Threads {
                     )
                 }
             };
+            let agent = match &mutation {
+                Mutation::Start(start) => start.agent_id.clone(),
+                _ => self
+                    .summaries
+                    .get(&id)
+                    .ok_or("The thread recipient is unavailable")?
+                    .value
+                    .agent_id
+                    .clone(),
+            };
             Write {
+                agent,
                 key: new_key,
                 id,
                 host: host.into(),
@@ -1535,7 +1634,7 @@ impl Threads {
     }
 
     fn can_mark_read(&self, id: &str) -> bool {
-        self.read_enabled
+        self.access.mark_read
             && !self.has_edit(id)
             && self
                 .summary(id)
@@ -1580,6 +1679,7 @@ impl Threads {
                 ..Fence::default()
             },
             client: None,
+            agent: observed.value.agent_id.clone(),
             mutation: Mutation::MarkRead(ThreadReadParameters {
                 target_id: id.clone(),
                 through_message_id: Some(anchor),
@@ -1593,6 +1693,11 @@ impl Threads {
     }
 
     fn lifecycle(&mut self, host: &str, id: String, mutation: Mutation) {
+        if !matches!(mutation, Mutation::Close) && !self.access.reopen
+            || matches!(mutation, Mutation::Close) && !self.access.close
+        {
+            return;
+        }
         if self.has_edit(&id) {
             return;
         }
@@ -1607,6 +1712,7 @@ impl Threads {
             fence,
             mutation,
             client: None,
+            agent: self.summary(&id).unwrap().agent_id.clone(),
         };
         self.pending_actions
             .insert(id, Delivery::new(write.clone()));
@@ -1635,8 +1741,8 @@ impl Threads {
         }
     }
 
-    pub(super) fn bind(&mut self, write: &mut Write, client: Client) {
-        let client = write.client.get_or_insert(client).clone();
+    pub(super) fn bind(&mut self, write: &mut Write, client: Client) -> Result<(), ClientError> {
+        write.prepare(client)?;
         let retained = if let Some(key) = &write.input {
             self.drafts
                 .get_mut(key)
@@ -1645,8 +1751,9 @@ impl Threads {
             self.pending_actions.get_mut(&write.id)
         };
         if let Some(retained) = retained.filter(|retained| retained.write.key == write.key) {
-            retained.write.client = Some(client);
+            retained.write = write.clone();
         }
+        Ok(())
     }
 
     pub(super) fn writes(&mut self) -> Vec<Write> {
@@ -1673,7 +1780,8 @@ impl Threads {
         if !belongs {
             return None;
         }
-        if let Confirmation::Failed(error) = confirmation {
+        let not_sent = matches!(&confirmation, Confirmation::NotSent(_));
+        if let Confirmation::Failed(error) | Confirmation::NotSent(error) = confirmation {
             let delivery = if let Some(key) = &write.input {
                 self.drafts
                     .get_mut(key)
@@ -1684,7 +1792,13 @@ impl Threads {
             .unwrap();
             // Capture the original authenticated member even if a reconnect changes the active client.
             delivery.write = write.clone();
-            if !delivery.failed(&error) {
+            let keep = if not_sent {
+                delivery.pending = false;
+                delivery.unknown
+            } else {
+                delivery.failed(&error)
+            };
+            if !keep {
                 if matches!(write.mutation, Mutation::Start(_))
                     && let Some(item) = write.host.strip_prefix("home:")
                 {

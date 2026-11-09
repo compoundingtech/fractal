@@ -1,3 +1,15 @@
+fn enable_editing(threads: &mut Threads) {
+    threads.enable(true);
+    threads.set_access(ThreadAccess {
+        start: true,
+        reply: true,
+        rename: true,
+        close: true,
+        reopen: true,
+        mark_read: false,
+    });
+}
+
 use super::*;
 
 fn summary() -> ThreadSummary {
@@ -76,7 +88,7 @@ fn native_mounts_share_the_same_timeline_and_a_direct_reply() {
     };
     assert!(threads.interests(&agent).is_empty());
 
-    threads.enable(true);
+    enable_editing(&mut threads);
     threads.origins.insert(
         "attention/ask".into(),
         Origin {
@@ -296,7 +308,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     let mut world = super::super::demo::test_world();
     world.person = person.into();
     let mut ui = super::super::Ui::new(world);
-    ui.threads.enable(true); // The disposable member keeps public capability advertisement off.
+    enable_editing(&mut ui.threads); // The disposable member keeps public capability advertisement off.
     ui.threads.put_summary(client.thread_get(id).await.unwrap());
     apply_window(&mut ui, &mut stream, id).await;
 
@@ -327,7 +339,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
 
     ui.click(Hit::Thread(host.clone(), thread::Tap::Close(id.into())));
     let mut close = ui.threads.writes().pop().expect("native close action");
-    ui.threads.bind(&mut close, client.clone());
+    ui.threads.bind(&mut close, client.clone()).unwrap();
     let receipt = close.clone().perform(client.clone()).await;
     assert!(
         matches!(receipt.confirmation, Confirmation::Applied(_)),
@@ -440,7 +452,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
 #[test]
 fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     let mut threads = Threads::default();
-    threads.enable(true);
+    enable_editing(&mut threads);
     let world = super::super::demo::test_world();
     let cursor = edit::Cursor::default();
     let mut texts = HashMap::new();
@@ -563,7 +575,7 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
 #[test]
 fn mark_visible_read_fences_the_observed_incoming_messages() {
     let mut threads = Threads::default();
-    threads.enable(true);
+    enable_editing(&mut threads);
     let id = "thread/worker";
     let observed = snapshot();
     threads.put_summary(Envelope {
@@ -628,7 +640,7 @@ fn mark_visible_read_fences_the_observed_incoming_messages() {
 
 fn observed_threads(state: ThreadState) -> Threads {
     let mut threads = Threads::default();
-    threads.enable(true);
+    enable_editing(&mut threads);
     threads.put_summary(Envelope {
         value: ThreadSummary { state, ..summary() },
         snapshot: snapshot(),
@@ -727,7 +739,7 @@ fn original_close_retry_survives_changed_summary_collapse_and_later_refusal() {
         "a later403 cannot answer the lost original request"
     );
     threads.enable(false);
-    threads.enable(true);
+    enable_editing(&mut threads);
     assert!(
         threads.pending_actions[id].unknown,
         "reconnection must not discard the original action"
@@ -868,7 +880,7 @@ fn first_definitive_refusal_releases_the_intent_and_dispatch_stays_on_its_origin
     threads.lifecycle("thread:test", id.into(), Mutation::Close);
     let mut original = threads.writes().pop().unwrap();
     let client = Client::unix("/tmp/thread-original.sock");
-    threads.bind(&mut original, client.clone());
+    threads.bind(&mut original, client.clone()).unwrap();
     threads.complete(
         Receipt {
             write: original.clone(),
@@ -878,7 +890,9 @@ fn first_definitive_refusal_releases_the_intent_and_dispatch_stays_on_its_origin
     );
     threads.retry(&original.key);
     let mut retry = threads.writes().pop().unwrap();
-    threads.bind(&mut retry, Client::unix("/tmp/thread-other.sock"));
+    threads
+        .bind(&mut retry, Client::unix("/tmp/thread-other.sock"))
+        .unwrap();
     assert_eq!(
         format!("{:?}", retry.client.as_ref().unwrap()),
         format!("{client:?}")
@@ -1161,4 +1175,169 @@ fn unconfirmed_start_remains_in_its_agents_draft_surface_after_inbox_source_disa
     let retry = threads.writes().pop().unwrap();
     assert_eq!(retry.key, original.key);
     assert_eq!(retry.id, original.id);
+}
+
+#[test]
+fn read_only_thread_history_has_no_composer_or_new_mutations_but_keeps_original_retry() {
+    let mut threads = observed_threads(ThreadState::Open);
+    threads.lifecycle("thread:test", "thread/worker".into(), Mutation::Close);
+    let original = threads.writes().pop().unwrap();
+    threads.complete(
+        Receipt {
+            write: original.clone(),
+            confirmation: Confirmation::Failed(ClientError::Transport("lost".into())),
+        },
+        &mut HashMap::new(),
+    );
+    threads.set_access(ThreadAccess::default());
+    let pane = Pane::Thread("thread/worker".into());
+    let mut texts = HashMap::new();
+    threads.tap(
+        &pane.key(),
+        thread::Tap::Compose("thread/worker".into()),
+        &mut texts,
+    );
+    threads.tap(
+        &pane.key(),
+        thread::Tap::Rename("thread/worker".into()),
+        &mut texts,
+    );
+    threads.lifecycle(&pane.key(), "thread/worker".into(), Mutation::Reopen);
+    assert!(threads.writes().is_empty());
+    assert!(!threads.editing_in(&pane));
+    let doc = threads.mount(
+        &pane,
+        100,
+        &edit::Cursor::default(),
+        &super::super::demo::test_world(),
+        &texts,
+    );
+    assert!(!doc.targets.iter().any(|target| matches!(
+        target.hit,
+        Hit::Thread(
+            _,
+            thread::Tap::Compose(_)
+                | thread::Tap::Reply { .. }
+                | thread::Tap::Rename(_)
+                | thread::Tap::Close(_)
+                | thread::Tap::Reopen(_)
+        )
+    )));
+    assert!(doc.targets.iter().any(|target| matches!(&target.hit,Hit::Thread(_,thread::Tap::Retry(key)) if key == &original.key)));
+    threads.tap(
+        &pane.key(),
+        thread::Tap::Retry(original.key.clone()),
+        &mut texts,
+    );
+    assert_eq!(threads.writes().pop().unwrap().key, original.key);
+}
+
+#[tokio::test]
+async fn paired_native_transport_replays_the_frozen_signed_packet_byte_for_byte() {
+    use axum::{
+        Json, Router,
+        body::Bytes,
+        http::{HeaderMap, StatusCode},
+        response::IntoResponse,
+        routing::{get, post},
+    };
+    use fractal_client::device::{Device, KeyAlgorithm, SigningKey};
+    use std::sync::{Arc, Mutex};
+
+    // This is a transport/signature-retention receiver, not a fake authorization proof.
+    // Real enrollment and grant rejection are exercised by the daemon's paired router tests.
+    let requests = Arc::new(Mutex::new(Vec::<Vec<u8>>::new()));
+    let received = requests.clone();
+    let app = Router::new().route("/v1/client/actions",post(move |headers:HeaderMap, body:Bytes| {
+        let received = received.clone();
+        async move {
+            assert_eq!(headers["authorization"],"Bearer fixture-device-credential");
+            let value:serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let count = { let mut requests = received.lock().unwrap(); requests.push(body.to_vec()); requests.len() };
+            if count == 1 {
+                return (StatusCode::BAD_GATEWAY,Json(serde_json::json!({
+                    "api_version":fractal_client::API_VERSION,"error_version":"st3.client.error.v0",
+                    "request_id":"request/test","code":"internal","message":"The receipt was lost",
+                    "retryable":true,"details":{"applied":"unknown"}
+                }))).into_response();
+            }
+            Json(serde_json::json!({
+                "api_version":fractal_client::API_VERSION,"request_id":"request/test","snapshot":snapshot(),
+                "value":{"kind":"action-result","action_id":value["id"],"operation_id":"claim/operation",
+                    "status":"completed","snapshot_id":snapshot().id,
+                    "affected_ids":["thread/worker","message/captured"]}
+            })).into_response()
+        }
+    })).route("/v1/client/threads/{id}",get(|| async {
+        Json(serde_json::json!({"api_version":fractal_client::API_VERSION,"request_id":"request/test","snapshot":snapshot(),"value":summary()}))
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let session = serde_json::from_value(serde_json::json!({
+        "kind":"person-paired-session","device_id":"device/test","person_id":"person/operator",
+        "session_actor":"person/operator","credential":"fixture-device-credential",
+        "scopes":["read.projections","read.conversation","control.messages"],"expires_at":"2099-01-01T00:00:00Z",
+        "device_key_chain":["claim/device"]
+    })).unwrap();
+    let device = Device {
+        endpoint,
+        allow_public_http: false,
+        person_root_fingerprint: None,
+        session,
+        signing_key: Some(SigningKey::generate(KeyAlgorithm::Ed25519).unwrap()),
+    };
+    let client = device.client().unwrap();
+    let mut threads = observed_threads(ThreadState::Closed);
+    let pane = Pane::Thread("thread/worker".into());
+    let mut texts = HashMap::new();
+    threads.tap(
+        &pane.key(),
+        thread::Tap::Compose("thread/worker".into()),
+        &mut texts,
+    );
+    threads.paste(
+        &pane,
+        "Signed retained reply",
+        &edit::Cursor::default(),
+        &mut texts,
+    );
+    threads.submit(&pane.key(), Input::Reply("thread/worker".into()), &texts);
+    let mut write = threads.writes().pop().unwrap();
+    threads.bind(&mut write, client.clone()).unwrap();
+    let Mutation::Reply(prepared) = &write.mutation else {
+        panic!("reply")
+    };
+    assert!(
+        prepared.signature.is_some(),
+        "prepare must happen before the first POST"
+    );
+    let key = write.key.clone();
+    assert!(
+        threads
+            .complete(write.perform(client.clone()).await, &mut texts)
+            .is_some()
+    );
+    threads.retry(&key);
+    let mut retry = threads.writes().pop().unwrap();
+    threads.bind(&mut retry, client.clone()).unwrap();
+    assert_eq!(
+        threads.complete(retry.perform(client).await, &mut texts),
+        None
+    );
+    let packets = requests.lock().unwrap();
+    assert_eq!(packets.len(), 2);
+    assert_eq!(
+        packets[0], packets[1],
+        "including snapshot, subject intent, nonce and signature"
+    );
+    let payload: serde_json::Value = serde_json::from_slice(&packets[0]).unwrap();
+    assert!(
+        payload["parameters"]["signature"]["signature"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    server.abort();
 }

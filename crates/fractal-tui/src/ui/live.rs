@@ -744,9 +744,9 @@ pub fn run(context: Context) -> Result<()> {
                     body_requested.clear();
                     changed = true;
                 }
-                feed::Update::ThreadSupport { available, mark_read, upgrade_required } => {
+                feed::Update::ThreadSupport { available, access, upgrade_required } => {
                     ui.threads.enable(available);
-                    ui.threads.set_read_enabled(mark_read);
+                    ui.threads.set_access(access);
                     if upgrade_required {
                         ui.flash("Upgrade the connected Fractal to use threads. Your pairing is kept.");
                     }
@@ -1480,7 +1480,10 @@ pub fn run(context: Context) -> Result<()> {
                 continue;
             }
             let writer = client.clone();
-            ui.threads.bind(&mut write, writer.clone());
+            if let Err(error) = ui.threads.bind(&mut write, writer.clone()) {
+                if let Some(error) = ui.threads.complete(write.not_sent(error), &mut ui.conversation_state.drafts) { ui.flash(error); }
+                continue;
+            }
             let tx = fetched_tx.clone();
             let generation = resources_generation;
             runtime.spawn(async move {

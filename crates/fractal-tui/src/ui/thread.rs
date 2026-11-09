@@ -70,6 +70,10 @@ pub struct State<'a> {
     pub has_earlier: bool,
     pub loading_earlier: bool,
     pub can_mark_read: bool,
+    pub can_reply: bool,
+    pub can_rename: bool,
+    pub can_close: bool,
+    pub can_reopen: bool,
 }
 
 /// Adapt a real daemon window to the native component. Older metadata-only daemons omit the
@@ -246,7 +250,8 @@ pub fn panel(
                 ];
                 let column = header.iter().map(Span::width).sum::<usize>();
                 let reply = "  ↩ Reply";
-                if state.hovered_message == Some(id.as_str())
+                if state.can_reply
+                    && state.hovered_message == Some(id.as_str())
                     && column + text::width(reply) <= width
                 {
                     header.push(Span::styled(reply, theme::fg(theme::SAPPHIRE)));
@@ -297,7 +302,7 @@ pub fn panel(
             }
         }
     }
-    {
+    if state.can_reply {
         let focused = state.cursor.is_some();
         doc.line(composer::divider(width, focused));
         if let Some(quote) = state.reply_to {
@@ -350,15 +355,18 @@ pub fn panel(
     } else {
         ("Close thread", Tap::Close(summary.id.to_owned()))
     };
-    let mut actions = vec![
-        ("Z", label, lifecycle, theme::OVERLAY1),
-        (
+    let mut actions = Vec::new();
+    if summary.closed && state.can_reopen || !summary.closed && state.can_close {
+        actions.push(("Z", label, lifecycle, theme::OVERLAY1));
+    }
+    if state.can_rename {
+        actions.push((
             "N",
             "Rename",
             Tap::Rename(summary.id.to_owned()),
             theme::SAPPHIRE,
-        ),
-    ];
+        ));
+    }
     if !state.standalone {
         actions.push((
             "P",
@@ -407,6 +415,16 @@ fn event(doc: &mut Doc, actor: &str, action: &str, age: &str, width: usize) {
 mod tests {
     use super::*;
 
+    fn editable<'a>() -> State<'a> {
+        State {
+            can_reply: true,
+            can_rename: true,
+            can_close: true,
+            can_reopen: true,
+            ..State::default()
+        }
+    }
+
     #[test]
     fn canonical_window_renders_received_replies_in_server_order() {
         let summary: fractal_client::ThreadSummary = serde_json::from_value(serde_json::json!({
@@ -429,7 +447,7 @@ mod tests {
             &events,
             &State {
                 open: true,
-                ..State::default()
+                ..editable()
             },
             "person/operator",
             |id| (id == "agent/atlas").then(|| "Atlas Builder".to_owned()),
@@ -486,7 +504,7 @@ mod tests {
         }];
         let mut state = State {
             open: true,
-            ..State::default()
+            ..editable()
         };
         let rest = panel(&summary, &records, &state, 80);
         state.hovered_message = Some("message/1");
@@ -516,7 +534,7 @@ mod tests {
             &State {
                 open: true,
                 cursor: Some(0),
-                ..State::default()
+                ..editable()
             },
             80,
         );
@@ -562,7 +580,7 @@ mod tests {
             &State {
                 open: true,
                 hovered_message: Some("message/2"),
-                ..State::default()
+                ..editable()
             },
             80,
         );
