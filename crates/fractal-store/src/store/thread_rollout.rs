@@ -39,7 +39,7 @@ impl Store {
         );
         readers.remove(self.origin());
         let mut feature = connection
-            .prepare_cached(&canonical_sql(
+            .prepare_cached(/* sqlite-large-value: allow-for-now lv-had7a23ff1f42 owner=fractal_store::store::thread_rollout TODO=trace-statement-and-value-representation */ &canonical_sql(
                 "SELECT json_extract(body,'$.fields.features.thread_read_privacy') FROM claims
              WHERE subject=?1 AND kind='daemon.started' AND origin=?2
              ORDER BY CANONICAL_DESC(claims) LIMIT 1",
@@ -47,7 +47,7 @@ impl Store {
             .map_err(internal)?;
         for reader in readers {
             let privacy_version: Option<u32> = feature
-                .query_row(params![format!("daemon/{reader}"), reader], |row| {
+                .query_row(/* sqlite-large-value: allow-for-now lv-h9aa2a0e11df4 owner=fractal_store::store::thread_rollout TODO=trace-statement-and-value-representation */ params![format!("daemon/{reader}"), reader], |row| {
                     row.get(0)
                 })
                 .optional()

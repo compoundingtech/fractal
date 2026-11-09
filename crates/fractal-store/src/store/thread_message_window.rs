@@ -106,7 +106,7 @@ fn thread_message_activity<T>(
     ));
     connection
         .query_row(
-            &sql,
+            /* sqlite-large-value: allow-for-now lv-h772975c067c2 owner=fractal_store::store::thread_message_window TODO=trace-statement-and-value-representation */ &sql,
             params![thread, first, creation.batch_id, person, agent],
             decode,
         )
@@ -159,11 +159,11 @@ pub fn mark_read(
                AND {ACTIVE_MESSAGE} AND {UNREPAIRED_CLAIM}
              ORDER BY CANONICAL_DESC(claims) LIMIT 1"
         ));
-        let mut select = tx.prepare_cached(&sql).map_err(internal)?;
+        let mut select = tx.prepare_cached(/* sqlite-large-value: allow-for-now lv-h83e8088e51d8 owner=fractal_store::store::thread_message_window TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
         let mut newest = None;
         let mut incoming = Vec::new();
         for subject in seen {
-            let claim = select.query_row([subject], claim_from_row).optional().map_err(internal)?
+            let claim = select.query_row(/* sqlite-large-value: allow-for-now lv-h181b1773755f owner=fractal_store::store::thread_message_window TODO=trace-statement-and-value-representation */ [subject], claim_from_row).optional().map_err(internal)?
                 .filter(|claim| member(claim, thread, first, &creation.batch_id, through_index))
                 .ok_or_else(unavailable)?;
             let actor = message_actor(tx, &claim, &person, &agent)?;
@@ -184,7 +184,7 @@ pub fn mark_read(
         let mut batch = None;
         for subject in &incoming {
             let settled: bool = tx.query_row(
-                &format!("SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
+                /* sqlite-large-value: allow-for-now lv-hbc8c4357028b owner=fractal_store::store::thread_message_window TODO=trace-statement-and-value-representation */ &format!("SELECT EXISTS(SELECT 1 FROM claims INDEXED BY claims_subject_kind_index
                  WHERE claims.subject=?1
                    AND ((claims.kind='message.read' AND claims.actor=?2) OR claims.kind='message.closed')
                    AND {UNREPAIRED_CLAIM})"),
@@ -307,7 +307,7 @@ fn read(
          ORDER BY CANONICAL_DESC(claims) LIMIT ?7"
     ));
     let limit = limit.clamp(1, 50);
-    let mut statement = connection.prepare_cached(&sql).map_err(internal)?;
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-he5a2848d26a3 owner=fractal_store::store::thread_message_window TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
     let rows = statement
         .query_map(
             params![
@@ -395,7 +395,7 @@ pub fn mixed_message_content(
                       AND operations.canonical_claim_id=claims.id AND operations.state='active')"
                 ));
                 let claim = connection
-                    .query_row(&sql, [claim_id], claim_from_row)
+                    .query_row(/* sqlite-large-value: allow-for-now lv-h8da1ab4af0ab owner=fractal_store::store::thread_message_window TODO=trace-statement-and-value-representation */ &sql, [claim_id], claim_from_row)
                     .optional()
                     .map_err(internal)?
                     .filter(|claim| member(claim, thread, first, &creation.batch_id, index))
@@ -441,7 +441,7 @@ fn message_quote<'a>(
           ORDER BY CANONICAL_DESC(claims) LIMIT 1"
     ));
     let parent = connection
-        .query_row(&sql, [quoted], claim_from_row)
+        .query_row(/* sqlite-large-value: allow-for-now lv-h223e94a92d75 owner=fractal_store::store::thread_message_window TODO=trace-statement-and-value-representation */ &sql, [quoted], claim_from_row)
         .optional()
         .map_err(internal)?
         .filter(|parent| {
