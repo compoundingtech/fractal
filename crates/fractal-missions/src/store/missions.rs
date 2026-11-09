@@ -240,24 +240,29 @@ pub(crate) fn mission_step_timestamps_sql() -> String {
     )
 }
 
-/// The lifecycle claims of the runs in `?1`'s current-generation steps for the detail read's step
-/// history, in canonical order, seeking each step's claims by subject and kind like
-/// [`mission_step_timestamps_sql`]. Renewals and clockless progress notes are never read.
+/// Bounded per-kind suffixes for each selected step, including one boundary event. The inner
+/// index seek limits rows before reading bodies (including ordinary progress notes). Canonical
+/// sorting and folding therefore see at most `(CLAIMS_PER_KIND_LIMIT + 1) * kinds` rows per step.
 pub(crate) fn mission_step_history_sql() -> String {
+    let kinds = step_history::STEP_HISTORY_KINDS.split(',').map(|kind| format!("({kind})"))
+        .collect::<Vec<_>>().join(",");
     format!(
         "WITH steps AS MATERIALIZED (
              SELECT s.subject
              FROM mission_runs r JOIN step_runs s INDEXED BY step_runs_run_index
                ON s.run_id=r.id AND s.generation_id=r.current_generation_id
-             WHERE r.id IN (SELECT value FROM json_each(?1)))
+             WHERE r.id IN (SELECT value FROM json_each(?1))),
+         kinds(kind) AS (VALUES {kinds})
          SELECT claims.subject, claims.kind, claims.body, claims.accepted_at_unix_ms
-         FROM steps CROSS JOIN claims INDEXED BY claims_subject_kind_index
-           ON claims.subject=steps.subject
-          AND claims.kind IN ({kinds})
+         FROM steps CROSS JOIN kinds CROSS JOIN claims
+           ON claims.store_index IN (
+             SELECT recent.store_index FROM claims recent INDEXED BY claims_subject_kind_accepted_index
+             WHERE recent.subject=steps.subject AND recent.kind=kinds.kind
+             ORDER BY length(recent.accepted_at_unix_ms) DESC, recent.accepted_at_unix_ms DESC
+             LIMIT {limit})
          JOIN batches ON batches.id=claims.batch_id
-         WHERE claims.kind<>'work.progress' OR json_extract(claims.body, '$.fields.clock') IS NOT NULL
          ORDER BY claims.subject, {CANONICAL_ORDER}",
-        kinds = step_history::STEP_HISTORY_KINDS,
+        limit = step_history::CLAIMS_PER_KIND_LIMIT + 1,
     )
 }
 
@@ -2205,14 +2210,25 @@ impl MissionsStore for Store {
                 row.get::<_, String>(3)?))
         })?;
         let mut events = BTreeMap::<String, Vec<(String, Value, u128)>>::new();
+        let mut counts = BTreeMap::<(String, String), usize>::new();
         for row in rows {
             let (subject, kind, body, at) = row?;
-            events.entry(subject).or_default().push((kind, serde_json::from_str(&body)?, at.parse()?));
+            *counts.entry((subject.clone(), kind.clone())).or_default() += 1;
+            let body: Value = serde_json::from_str(&body)?;
+            // The bounded read also sees clockless notes, but they do not move the fold.
+            let relevant = kind != "work.progress" || body.pointer("/fields/clock").is_some();
+            let events = events.entry(subject).or_default();
+            if relevant {
+                events.push((kind, body, at.parse()?));
+            }
         }
         let holds = step_history::foreign_holds(&events);
         Ok(events.iter().map(|(subject, events)| {
             let holds = holds.get(subject).map_or(&[][..], Vec::as_slice);
-            (subject.clone(), step_history::fold_step_history(events, holds, at_unix_ms))
+            let mut history = step_history::fold_step_history(events, holds, at_unix_ms);
+            history.complete &= !counts.iter().any(|((step, _), count)|
+                step == subject && *count > step_history::CLAIMS_PER_KIND_LIMIT);
+            (subject.clone(), history)
         }).collect())
     }
 

@@ -271,7 +271,7 @@ fn mission_detail_folds_each_attempt_wait_and_transition_of_a_step() {
 
 #[test]
 fn person_responses_close_waits_and_emit_terminal_transitions() {
-    for (cancel, terminal) in [(false, "completed"), (true, "cancelled")] {
+    for (cancel_run, cancel, terminal) in [(false, false, "completed"), (false, true, "cancelled"), (true, true, "cancelled")] {
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
         let source = if cancel {
@@ -302,6 +302,9 @@ fn person_responses_close_waits_and_emit_terminal_transitions() {
         } else {
             origin.clone()
         };
+        if cancel_run {
+            state.store.request_mission_run_cancellation(&run.id, "cancel the parent").unwrap();
+        } else {
         state.store.finish_person_step(
             &PersonStepResponse {
                 delegation: None,
@@ -315,6 +318,7 @@ fn person_responses_close_waits_and_emit_terminal_transitions() {
             },
             cancel,
         ).unwrap();
+        }
         let mission = detail(&state, "mission/person-history", None);
         let shown = run_detail(&mission, &run.subject)["steps"].as_array().unwrap()
             .iter().find(|step| step["id"] == subject).unwrap();
@@ -324,6 +328,11 @@ fn person_responses_close_waits_and_emit_terminal_transitions() {
         let waits = shown["waits"].as_array().unwrap();
         assert!(waits.iter().any(|wait| wait["kind"] == if cancel { "you" } else { "queue" }));
         assert!(waits.iter().all(|wait| wait["end"].is_u64()), "{shown:#}");
+        if cancel_run {
+            let origin = step(run_detail(&mission, &run.subject), "decide");
+            assert!(origin["waits"].as_array().unwrap().iter().all(|wait| wait["end"].is_u64()), "{origin:#}");
+            assert_eq!(origin["history_complete"], true);
+        }
     }
 }
 

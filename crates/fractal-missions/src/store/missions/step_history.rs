@@ -1,11 +1,10 @@
 //! A step's attempts, waits and transitions, folded at read time from the durable lifecycle
 //! claims of its `step-run/...` subject for the mission detail read. Nothing is stored.
 //!
-//! The fold reads every lifecycle kind except `work.renewed` (lease renewals, the bulk of a long
-//! step's claims) and `work.progress` without a `clock` (ordinary progress notes): neither moves
-//! an attempt, a wait or a state. Its cost is therefore the step's lifecycle claims, not its
-//! renewals. Every kind it reads is `durable` in `retention.toml`, so a checkpoint never drops
-//! one; only the per-step caps below can shorten a history, and `complete` says when they did.
+//! The store bounds each lifecycle kind's input before reading bodies, retaining sparse boundary
+//! context independently of frequent progress notes. Lease renewals are excluded. Clockless
+//! progress notes do not move the fold. Every read kind is durable; the store marks incomplete
+//! input windows, and the fold also marks histories shortened by the output caps below.
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
@@ -17,6 +16,9 @@ pub const ATTEMPTS_LIMIT: usize = 20;
 pub const WAITS_LIMIT: usize = 40;
 /// The newest transitions a step's history keeps.
 pub const TRANSITIONS_LIMIT: usize = 60;
+/// Newest claims retained per lifecycle kind, plus one older boundary event. Keeping each kind's
+/// suffix independently retains sparse state/claim/ask context when progress notes are frequent.
+pub const CLAIMS_PER_KIND_LIMIT: usize = 128;
 
 /// The claim kinds the history fold reads. `work.progress` rows are read only with a `clock`.
 pub const STEP_HISTORY_KINDS: &str = "'step-run.state','step-run.carried','step-run.retried',\
@@ -552,8 +554,11 @@ pub fn foreign_holds(
             }
             let end = events[index + 1..]
                 .iter()
-                .find(|(kind, _, _)| {
+                .find(|(kind, body, _)| {
                     matches!(kind.as_str(), "work.person-done" | "work.person-cancelled")
+                        || (kind == "step-run.state"
+                            && body.pointer("/fields/status").and_then(Value::as_str)
+                                .and_then(outcome_of).is_some())
                 })
                 .map(|(_, _, at)| *at);
             holds

@@ -305,13 +305,17 @@ not proof of a single attempt or no waits.
   Terminal `work.person-done` and `work.person-cancelled` responses use `event: state` and close
   any remaining waits, just like terminal `step-run.state` claims.
 
-The fold reads the lifecycle claims of the enriched runs' current-generation steps in one batch,
-as step timing does. It never reads `work.renewed`, and a `work.progress` without a `clock` is
-filtered inside SQLite and never returned, so its cost follows a step's lifecycle and progress
-claims, not its lease renewals. It keeps the newest 20
-attempts, 40 waits and 60 transitions per step and sets `history_complete: false` when it dropped
-older ones; every kind it reads is `durable`, so checkpoints never shorten a history. A step
-carried from an earlier generation shows the history of its current `step-run` subject only.
+The fold seeks a bounded suffix of each lifecycle kind for every enriched current-generation step:
+128 claims plus one older boundary event per kind, at most 1,548 bodies per step. The accepted-time
+index limits input before bodies are read or sorted. Each kind retains its own boundary context,
+so frequent progress notes do not displace sparse state, claim or person-ask events. Equal-time
+claims at a truncated boundary may be omitted; retained events are folded in canonical order.
+Lease renewals are never read. Clockless progress notes count toward their input bound but do not
+move the fold. A truncated input sets `history_complete: false`; missing starts or intervals are
+not evidence of their absence. Output also keeps only the newest 20 attempts, 40 waits and 60
+transitions and marks incompleteness if those caps drop older entries. Terminal person-step
+states (including run cancellation) close foreign person holds. All read kinds are durable.
+A step carried from an earlier generation shows only its current `step-run` subject's history.
 
 A detail step of an open run may also carry `eta: {low_ms, high_ms, samples}`, its own p25/p75
 duration from the same completed-run samples as the run `eta`. It is present for each remaining
