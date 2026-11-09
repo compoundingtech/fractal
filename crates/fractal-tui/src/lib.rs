@@ -1161,7 +1161,7 @@ mod tests {
                     person_step_response(Some(&request), Some(id.into()), note).unwrap();
                 let parameters = PersonStepParameters {
                     target_id: "step-run/example".into(),
-                    episode: None,
+                    episode: "episode/example".into(),
                     summary,
                     evidence: vec![],
                     answer,
