@@ -68,6 +68,8 @@ pub enum Hit {
     Pane(fractal_conversation_ui::PaneIntent),
     JumpLatest,
     Composer,
+    ChatComposer,
+    ChatEnter,
     Help,
     Open(String),
     /// Show a popover card for a graph subject.

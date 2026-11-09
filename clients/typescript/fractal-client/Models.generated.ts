@@ -2932,6 +2932,7 @@ export type ParticipantRef = string;
 export type PersonAnswer = {
   id?: string;
   label?: string;
+  option_notes?: Array<PersonOptionNote>;
   outcome: 
   "accept"
   | "decline"
@@ -2948,6 +2949,7 @@ export type PersonAnswer = {
 
 export type PersonAnswerInput = {
   id?: string;
+  option_notes?: Array<PersonOptionNote>;
   text?: string;
 };
 
@@ -2979,6 +2981,11 @@ export type PersonAskParameters = {
 };
 
 export type PersonId = string;
+
+export type PersonOptionNote = {
+  id: string;
+  text: string;
+};
 
 export type PersonPairedSession = {
   credential: string;
