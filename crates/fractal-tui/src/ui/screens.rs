@@ -407,11 +407,6 @@ fn structured_request(
     drafts: &Drafts<'_>,
     inner: usize,
 ) {
-    card.line(Line::from(vec![
-        span("asks  ", theme::dim()),
-        span(from.to_owned(), theme::strong(theme::PERSON)),
-    ]));
-    card.blank();
     let label_of = |id: &str| {
         request
             .answers
@@ -903,6 +898,11 @@ pub(super) fn home_detail_with_threads(
             .unwrap_or_else(|| agent.trim_start_matches("agent/").to_owned());
         link(&mut card, "agent    ", &label, agent);
     }
+    if let AttentionKind::Request { from, from_id, .. } = &item.kind
+        && item.agent.as_deref() != Some(from_id.as_str())
+    {
+        card.field("from", from, inner, theme::soft());
+    }
     card.blank();
     match &item.kind {
         AttentionKind::Review {
@@ -1254,11 +1254,6 @@ pub(super) fn home_detail_with_threads(
         } => structured_request(&mut card, from, request, images, drafts, inner),
         AttentionKind::Request { from, question, .. } => {
             let custom = item.actions.iter().any(|action| action == "custom.reply");
-            card.line(Line::from(vec![
-                span("asks  ", theme::dim()),
-                span(from.clone(), theme::strong(theme::PERSON)),
-            ]));
-            card.blank();
             // A report pasted in as JSON shows its telling fields, not a wall of braces.
             match report(question, inner) {
                 Some(lines) => card.lines(lines),

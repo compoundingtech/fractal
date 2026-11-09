@@ -7506,6 +7506,7 @@ mod tests {
             .position(|id| id == "attention/garden")
             .unwrap();
         let rendered = frame(&ui, 120, 50).join("\n");
+        assert!(rendered.contains("from      Seed"), "{rendered}");
         assert!(rendered.contains("Reply with fields"));
         assert!(!rendered.contains("Dismiss: nothing to do"));
         ui.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
@@ -8378,7 +8379,10 @@ mod tests {
             .unwrap();
         ui.select(at);
         let screen = frame(&ui, 140, 50).join("\n");
+        assert!(!screen.contains("asks  Chief of Staff"), "{screen}");
+        assert!(!screen.contains("from      Chief of Staff"), "{screen}");
         for shown in [
+            "agent    ",
             "recommends  Tell me more",
             "All three machines run main.",
             "Seats start reliably (#1008).",
@@ -8401,6 +8405,22 @@ mod tests {
             "{:?}",
             ui.effects
         );
+
+        let Load::Ready(items) = &mut ui.world.attention else {
+            unreachable!("the fixture has loaded attention");
+        };
+        let item = items
+            .iter_mut()
+            .find(|item| item.id == "attention/shipped")
+            .unwrap();
+        let AttentionKind::Request { from, from_id, .. } = &mut item.kind else {
+            unreachable!("the fixture is a request");
+        };
+        *from = "Planner".into();
+        *from_id = "agent/example/planner".into();
+        let screen = frame(&ui, 140, 50).join("\n");
+        assert!(screen.contains("agent    Chief of Staff"), "{screen}");
+        assert!(screen.contains("from      Planner"), "{screen}");
     }
 
     #[test]
