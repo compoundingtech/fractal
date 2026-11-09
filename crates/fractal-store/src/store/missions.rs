@@ -299,11 +299,11 @@ impl Store {
                 .optional()
                 .map_err(internal)?
         {
-            let view = mission_run_view_tx(&transaction, &run).map_err(internal)?;
+            let view = mission_run_view_tx(transaction, &run).map_err(internal)?;
             return Ok(view);
         }
         stages.enter("idempotency");
-        smallclaims::store::idempotency::cached_response(&transaction, &request.idempotency_key)?;
+        smallclaims::store::idempotency::cached_response(transaction, &request.idempotency_key)?;
         if let Some((response, stored_hash)) = transaction
             .query_row(
                 "SELECT i.response, r.request_hash FROM idempotency i JOIN mission_run_requests r ON r.operation_id=i.operation_id WHERE i.operation_id=?1",
@@ -323,23 +323,23 @@ impl Store {
             return Ok(view);
         }
         stages.enter("admission");
-        owned_sets::guard_mission_start(&transaction, mission_id)?;
+        owned_sets::guard_mission_start(transaction, mission_id)?;
         // Recheck naming availability under the writer lock; a conflicting replicated
         // rename must not admit a new run between the read and transaction.
-        mission_storage_id(&transaction, mission_id)?;
+        mission_storage_id(transaction, mission_id)?;
         if let Some((resource, discovery)) = latest_ref
-            && let Some(reason) = stale_ref_request_tx(&transaction, resource, discovery).map_err(internal)? {
+            && let Some(reason) = stale_ref_request_tx(transaction, resource, discovery).map_err(internal)? {
             return Err(FractalError::new("stale-ref-head", reason));
         }
         stages.enter("inputs");
-        let inputs = resolve_mission_run_inputs(&transaction, &mission, &request.inputs)?;
+        let inputs = resolve_mission_run_inputs(transaction, &mission, &request.inputs)?;
         if let Some((resource, discovery)) = latest_ref {
-            if let Some(reason) = stale_pull_request_request_tx(&transaction, resource, discovery)
+            if let Some(reason) = stale_pull_request_request_tx(transaction, resource, discovery)
                 .map_err(internal)?
             {
                 return Err(FractalError::new("stale-pull-request", reason));
             }
-            let is_pull_request = claim_by_id_tx(&transaction, discovery)
+            let is_pull_request = claim_by_id_tx(transaction, discovery)
                 .map_err(internal)?
                 .map(|mut claim| { claim.body = fractal_schema::github_plugin::observed_body(&claim.kind, &claim.subject, &claim.body); claim })
                 .is_some_and(|claim| {
@@ -369,7 +369,7 @@ impl Store {
             }
         }
         stages.enter("capacity");
-        enforce_mission_run_capacity(&transaction, &mission)?;
+        enforce_mission_run_capacity(transaction, &mission)?;
         stages.enter("run-rows");
         let run_id = subject.trim_start_matches("mission-run/").to_owned();
         let generation_key = occurrence_subject.map_or_else(
@@ -436,7 +436,7 @@ impl Store {
             )
             .map_err(internal)?;
         let deadline_at_unix_ms =
-            insert_mission_deadline_tx(&transaction, &run_id, mission.timeout_ms, Some(now))?;
+            insert_mission_deadline_tx(transaction, &run_id, mission.timeout_ms, Some(now))?;
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h84ce21b8d58b owner=fractal_store::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO run_generations(id, run_id, revision, predecessor_id, status, actor, reason, created_at_unix_ms, updated_at_unix_ms)
@@ -450,7 +450,7 @@ impl Store {
         for (step, selector, constraints) in flat {
             let (assignee, available_to, agentless) = interpolate_selector(&selector, &variables)?;
             let storage_party = |party: String| {
-                identities::resolve_reference_conn(&transaction, &party)
+                identities::resolve_reference_conn(transaction, &party)
             };
             let assignee = assignee.map(storage_party).transpose()?;
             let available_to = available_to.into_iter().map(storage_party)
@@ -509,7 +509,7 @@ impl Store {
         let mut body = body;
         add_run_report_fields(&mut body, &mission, None, false);
         append_receipt_claim_tx(
-            &transaction,
+            transaction,
             &self.origin,
             &subject,
             "mission-run.created",
@@ -521,7 +521,7 @@ impl Store {
         )
         .map_err(internal)?;
         append_claim_tx(
-            &transaction,
+            transaction,
             &self.origin,
             &generation_subject,
             "run-generation.created",
@@ -537,7 +537,7 @@ impl Store {
         )
         .map_err(internal)?;
         stages.enter("view");
-        let view = created_mission_run_view_tx(&transaction, &run_id).map_err(internal)?;
+        let view = created_mission_run_view_tx(transaction, &run_id).map_err(internal)?;
         stages.enter("idempotency-record");
         transaction
             .execute(
@@ -704,7 +704,7 @@ impl Store {
             .optional()
             .map_err(anyhow::Error::from)?;
         if let Some(view) = &mut view {
-            enrich_step_queue(&connection, view)?;
+            enrich_step_queue(connection, view)?;
         }
         Ok(view)
     }

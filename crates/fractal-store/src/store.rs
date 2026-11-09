@@ -4903,7 +4903,7 @@ impl Store {
             });
         }
         let plan = filter_repair_plan(operational_repair_plan_with_legacy_starts_tx(
-            &transaction, now_ms(), &self.origin, native_evidence,
+            transaction, now_ms(), &self.origin, native_evidence,
         ).map_err(internal)?, &filter).map_err(internal)?;
         if plan.token != token {
             return Err(FractalError::new(
@@ -4938,7 +4938,7 @@ impl Store {
                     let operation_id = item.details["operation"]["id"].as_str()
                         .ok_or_else(|| FractalError::new("invalid-repair-plan", "missing runtime operation"))?;
                     runtime_starts::retain_runtime_start_producer_closed_tx(
-                        &transaction,
+                        transaction,
                         &self.origin,
                         operation_id,
                         item.details.get("native_evidence"),
@@ -4956,7 +4956,7 @@ impl Store {
                             )
                         })?;
                     claim_ids.extend(cancel_descendant_mission_runs_tx(
-                        &transaction,
+                        transaction,
                         &self.origin,
                         generation,
                         "daemon/runtime",
@@ -4966,7 +4966,7 @@ impl Store {
                 }
                 "orphaned-readiness" => {
                     if let Some(claim) = repair_step_state_tx(
-                        &transaction,
+                        transaction,
                         &self.origin,
                         &item.subject,
                         "cancelled",
@@ -4978,7 +4978,7 @@ impl Store {
                 }
                 "expired-claim" => {
                     if let Some(claim) = repair_step_state_tx(
-                        &transaction,
+                        transaction,
                         &self.origin,
                         &item.subject,
                         "ready",
@@ -5005,7 +5005,7 @@ impl Store {
                         .and_then(Value::as_u64)
                         .unwrap_or_default();
                     let claim = append_claim_tx(
-                        &transaction,
+                        transaction,
                         &self.origin,
                         &item.subject,
                         "harness.diagnostic",
@@ -5027,7 +5027,7 @@ impl Store {
                 }
                 "impossible-state" => {
                     claim_ids.extend(repair_impossible_run_tx(
-                        &transaction,
+                        transaction,
                         &self.origin,
                         &item.subject,
                         &item.reason,
@@ -5036,7 +5036,7 @@ impl Store {
                 }
                 "cancelled-final-stall" => {
                     claim_ids.extend(repair_impossible_run_tx(
-                        &transaction,
+                        transaction,
                         &self.origin,
                         &item.subject,
                         &item.reason,
@@ -5056,7 +5056,7 @@ impl Store {
                         })?;
                     for step_run in step_runs.iter().filter_map(Value::as_str) {
                         if let Some(claim) = repair_step_state_tx(
-                            &transaction,
+                            transaction,
                             &self.origin,
                             step_run,
                             "ready",
@@ -5099,7 +5099,7 @@ impl Store {
             reason.push_str(&serde_json::to_string(&closures).map_err(internal)?);
         }
         let receipt = append_claim_tx(
-            &transaction,
+            transaction,
             &self.origin,
             &repair_subject,
             "repair.applied",

@@ -47,15 +47,19 @@ fn warm(store: &Store) {
     refresh_until_published(store, |store| store.published_work_list(), fold_work);
 }
 
-fn assert_fresh(store: &Store, step: &str, cancelled: bool) {
+fn assert_fresh(store: &Store, step: &str, cancelled: bool, before: (u64, u64)) {
     // A stale fold must not be accepted merely because its cut still equals the target.
-    assert!(store.published_missions_list().base_and_pending().0.is_none());
-    assert!(store.published_work_list().base_and_pending().0.is_none());
+    // base_and_pending consumes the forget, so inspect generations and let warm take it first.
+    assert!(store.published_work_list().generation() > before.0, "drain must forget the work list");
+    assert!(store.published_missions_list().generation() > before.1, "drain must forget the missions list");
+    // Both folds stamp card as_of from the clock; compare them at one instant.
+    smallclaims::store::set_thread_clock(Some(now_ms() as u128));
     warm(store);
     let work = store.published_work_list().newest().unwrap();
     let missions = store.published_missions_list().newest().unwrap();
     let (fresh_work, _) = folded_at_once(fold_work(store, None, None));
     let (fresh_missions, _) = folded_at_once(fold_missions(store, None, None));
+    smallclaims::store::set_thread_clock(None);
     assert_eq!(work_window(&work.rows, None, 200), work_window(&fresh_work.rows, None, 200));
     assert_eq!(mission_window(&missions.rows, 200).unwrap(), mission_window(&fresh_missions.rows, 200).unwrap());
     if cancelled {
@@ -90,7 +94,7 @@ fn receive_final_drain_forgets_lists_cached_after_last_chunk_and_rejects_infligh
     assert!(!reader.run_projection_pending(&step).unwrap());
     assert!(reader.published_work_list().publish(work_fold, work_generation).is_none());
     assert!(reader.published_missions_list().publish(mission_fold, mission_generation).is_none());
-    assert_fresh(&reader, &step, false);
+    assert_fresh(&reader, &step, false, (work_generation, mission_generation));
 }
 
 #[test]
@@ -110,6 +114,7 @@ fn caller_drains_forget_both_lists_with_and_without_a_cancellation_claim() {
         assert!(reader.run_projection_pending(&step).unwrap());
         warm(&reader);
         assert_eq!(reader.published_work_list().newest().unwrap().rows.rows.get(&step).unwrap().view.status, "ready");
+        let before = (reader.published_work_list().generation(), reader.published_missions_list().generation());
         let cut = reader.index().unwrap();
         if cancel {
             assert!(reader.request_mission_run_cancellation(&run, "cancel while projection pending").unwrap());
@@ -124,6 +129,6 @@ fn caller_drains_forget_both_lists_with_and_without_a_cancellation_claim() {
             assert_eq!(reader.index().unwrap(), cut);
         }
         assert!(!reader.run_projection_pending(&step).unwrap());
-        assert_fresh(&reader, &step, cancel);
+        assert_fresh(&reader, &step, cancel, before);
     }
 }

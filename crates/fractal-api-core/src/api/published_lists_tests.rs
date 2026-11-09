@@ -1211,6 +1211,9 @@ fn an_incremental_fold_reads_only_the_seats_it_can_reorder() {
         seat_mission(&store, &name, &seat);
         runs.insert(n, ready_run(&store, &name, &format!("seat-{n}-1")));
     }
+    // Equal join times use run identity, not creation order. Make the second run
+    // join later so moving it to the top must change the queue.
+    _clock.set(now_ms() + 1);
     let second = ready_run(&store, "garden/seat-5", "seat-5-2");
     store.published_work_list().start();
     // From nothing: every shown seat once, charged as the cold fold.
