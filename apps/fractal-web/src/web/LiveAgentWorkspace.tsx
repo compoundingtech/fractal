@@ -298,6 +298,8 @@ const panelRatio = persistedAtom({ key: 'round2.panelRatio', schema: Schema.Numb
 const sidebarClosed = persistedAtom({ key: 'round2.sidebarClosed', schema: Schema.Boolean, defaultValue: false })
 const palette = persistedAtom({ key: 'round2.scheme', schema: Schema.Literals(['dark', 'light']), defaultValue: 'dark' })
 const workspacePanes = Atom.family((ref: string) => persistedAtom({ key: `round2.panes.${ref}`, schema: Schema.Array(Schema.Struct({ ref: Schema.String, presentation: Schema.optional(Schema.Literals(['detail', 'overview', 'resources'])) })), defaultValue: [] }))
+/** Fixture registries own their opened panes; switching fixtures never reads or writes browser workspace state. */
+const fixtureWorkspacePanes = Atom.family((_ref: string) => Atom.make<readonly { readonly ref: string; readonly presentation?: 'detail' | 'overview' | 'resources' }[]>([]).pipe(Atom.keepAlive))
 const selectedAgent = persistedAtom({ key: 'round2.agent', schema: Schema.String, defaultValue: '' })
 const phoneAgentTabs = persistedAtom({ key: 'round2.phoneAgentTabs', schema: Schema.Array(Schema.String), defaultValue: [] })
 const viewportWidth = () => window.innerWidth
@@ -468,7 +470,7 @@ function Workspace({ ux, onSelectConversation, dimensions, navigation = browserN
   const [paneHost, setPaneHost] = React.useState<HTMLDivElement | null>(null)
   const [resourcesHost, setResourcesHost] = React.useState<HTMLDivElement | null>(null)
   const [resourcesAgent, setResourcesAgent] = React.useState<string>()
-  const [panes, setPanes] = useAtom(workspacePanes(current))
+  const [panes, setPanes] = useAtom((terminalSource.mode === 'fixtures' ? fixtureWorkspacePanes : workspacePanes)(current))
   const query = new URLSearchParams(location.split('?')[1])
   const selectedPane = query.get('open') ?? 'thread'
   const [resourcePanel, setResourcePanel] = React.useState<ResourcePanelState>({ expanded: false, size: 288 })
