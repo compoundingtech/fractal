@@ -19,7 +19,7 @@
   },
   "downtime": {
     "status": "changed",
-    "detail": "No offline migration window is planned: startup work is bounded with an approximately two-second budget planned, and retained history is backfilled in the background. Startup and total backfill durations have not been measured. Assistant authorization is temporarily unavailable with retryable assistant-grant-authority-not-ready until the local projection is ready; this is an authorization interruption, not a requirement to stop the daemon for the entire backfill. Affected people also cannot authenticate with any external grant while a profile conflict remains visible; a partition can extend that interruption until revocations replicate."
+    "detail": "No offline migration window is planned: startup backfill has an approximately two-second budget, then continues in bounded background slices. A synthetic 3.73 GB store with one million claims and 1% grant-kind rows measured a 1.892-second startup slice and 1.919-second total backfill, with 54,940 KiB process peak RSS; linear same-mix throughput extrapolation to 50 GB is 25.750 seconds, not a production or cold-cache guarantee. The startup slice excludes Store::open and does not predict total daemon startup time. Assistant authorization is temporarily unavailable with retryable assistant-grant-authority-not-ready until the local projection is ready; this is an authorization interruption, not a requirement to stop the daemon for the entire backfill. Affected people also cannot authenticate with any external grant while a profile conflict remains visible; a partition can extend that interruption until revocations replicate."
   },
   "manual": {
     "status": "changed",
