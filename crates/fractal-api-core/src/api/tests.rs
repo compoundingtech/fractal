@@ -122,13 +122,13 @@ fn ancestry_records_environment_read_failure() {
             },
             |candidate| if candidate == pid { Ok(HarnessAncestry::Person) } else {
                 Err(AncestryUnavailableReason::ProcessReadFailed {
-                    operation: "proc-environ-read", error: "Permission denied".into(),
+                    operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
                 })
             }),
             |cause| recorded.push((cause.pid, cause.reason.clone())));
         assert_eq!(result, HarnessAncestry::Unavailable);
         assert_eq!(recorded, vec![(Some(ancestor), AncestryUnavailableReason::ProcessReadFailed {
-            operation: "proc-environ-read", error: "Permission denied".into(),
+            operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
         })]);
     });
 }
@@ -207,16 +207,20 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
         let socket = root.path().join("bound.sock");
         let reserved = reserve_unix_socket(&socket, None).await.unwrap();
         let (ready, waiting) = tokio::sync::oneshot::channel();
-        let lookup: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry = if ancestry == HarnessAncestry::Unavailable {
-            |_, _| HarnessAncestry::Unavailable
+        let lookup: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>)
+            -> Result<HarnessAncestry, AncestryUnavailableCause> = if ancestry == HarnessAncestry::Unavailable {
+            |pid, _| Err(AncestryUnavailableCause { pid: Some(pid + 1),
+                reason: AncestryUnavailableReason::ProcessReadFailed {
+                    operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied (os error 13)".into(),
+                } })
         } else {
-            |_, _| HarnessAncestry::Person
+            |_, _| Ok(HarnessAncestry::Person)
         };
         let app = Router::new().fallback(|| async { Json(json!({"ok": true})) });
         let authority: Option<WorkerAuthority> = worker.then(|| {
             Arc::new(|| Ok(std::process::id())) as WorkerAuthority
         });
-        let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
+        let server = tokio::spawn(serve_reserved_unix_with_lookup_ready(
             reserved, app, Some(state.store), authority, lookup,
             move || { let _ = ready.send(()); },
         ));
@@ -240,7 +244,8 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
             ("POST", "/v1/example", false, r#"{"actor":"person/operator"}"#, true),
             ("POST", "/v1/example", false, r#"{"requester":"agent/other"}"#, true),
         ] {
-            let mut request = Request::builder().method(method).uri(path).header("host", "local");
+            let mut request = Request::builder().method(method).uri(path).header("host", "local")
+                .header("x-verified-worker-fallback", "true");
             if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
             let response = sender.send_request(request.body(Body::from(body)).unwrap()).await.unwrap();
             let refused = sensitive && ancestry == HarnessAncestry::Unavailable && !worker;
@@ -270,7 +275,7 @@ async fn unreadable_same_uid_parent_admits_only_authenticated_worker_as_person()
             // Model a same-uid, non-dumpable service manager: metadata remains readable,
             // but its environment does not.
             Err(AncestryUnavailableReason::ProcessReadFailed {
-                operation: "proc-environ-read", error: "Permission denied".into(),
+                operation: "proc-environ-read", os_error: Some(libc::EACCES), error: "Permission denied".into(),
             })
         }), |_| {});
     assert_eq!(ancestry, HarnessAncestry::Unavailable);

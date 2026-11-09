@@ -7168,15 +7168,8 @@ pub async fn serve_unix_bound_with_ready(
     store: Arc<Store>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_unix_with_ancestor_ready(
-        socket,
-        Some(state_socket),
-        app,
-        Some(store),
-        harness_ancestor,
-        ready,
-    )
-    .await
+    let reserved = reserve_unix_socket(socket, Some(state_socket)).await?;
+    serve_reserved_unix_with_ready(reserved, app, Some(store), None, ready).await
 }
 
 /// Serve with injected ancestry lookup. `Some(store)` enables both binding and mandatory actor
@@ -7289,8 +7282,7 @@ pub async fn serve_reserved_unix_with_ready(
     worker: Option<WorkerAuthority>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, worker, harness_ancestor, ready)
-        .await
+    serve_reserved_unix_with_lookup_ready(reserved, app, bound_store, worker, observed_harness_ancestor, ready).await
 }
 
 async fn serve_reserved_unix_with_ancestor_ready(
@@ -7299,6 +7291,19 @@ async fn serve_reserved_unix_with_ancestor_ready(
     bound_store: Option<Arc<Store>>,
     worker: Option<WorkerAuthority>,
     ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
+    ready: impl FnOnce(),
+) -> anyhow::Result<()> {
+    serve_reserved_unix_with_lookup_ready(reserved, app, bound_store, worker,
+        move |pid, peer| Ok(ancestor(pid, peer)), ready).await
+}
+
+async fn serve_reserved_unix_with_lookup_ready(
+    reserved: ReservedUnixSocket,
+    app: Router,
+    bound_store: Option<Arc<Store>>,
+    worker: Option<WorkerAuthority>,
+    ancestor: impl Fn(u32, Option<&fractal_runtime::PeerProcessIdentity>)
+        -> Result<HarnessAncestry, AncestryUnavailableCause> + Copy + Send + Sync + 'static,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let ReservedUnixSocket {
@@ -7361,23 +7366,23 @@ async fn serve_reserved_unix_with_ancestor_ready(
                 connection.queued();
             }
             let ancestry_peer = peer_process.clone();
-            let (ancestry, caller, delivery_peer, diagnostic_connection) = match peer_pid {
+            let (ancestry_result, caller, delivery_peer, diagnostic_connection) = match peer_pid {
                 Some(pid) => crate::api::read_deadline::spawn_blocking(move || {
                     if let Some(connection) = &mut diagnostic_connection {
                         connection.started();
                     }
                     let ancestry = if !bind_ancestry {
-                        HarnessAncestry::Person
+                        Ok(HarnessAncestry::Person)
                     } else if ancestry_peer.is_none() {
-                        ancestry_or_record(Err(AncestryUnavailableCause { pid: Some(pid),
+                        Err(AncestryUnavailableCause { pid: Some(pid),
                             reason: peer_capture_error.map_or(AncestryUnavailableReason::WitnessMissing,
-                                AncestryUnavailableReason::WitnessCaptureFailed) }), AncestryUnavailableCause::record)
+                                AncestryUnavailableReason::WitnessCaptureFailed) })
                     } else {
                         ancestor(pid, ancestry_peer.as_ref())
                     };
                     let caller = Some(crate::profile::Caller::of_command(
                         local_process_arguments(pid).map(|(arguments, _)| arguments),
-                        ancestry.agent(),
+                        ancestry.as_ref().ok().and_then(HarnessAncestry::agent),
                     ));
                     let delivery_peer = bind_harness.then(|| native_delivery_peer(pid)).flatten();
                     if let Some(connection) = &mut diagnostic_connection {
@@ -7388,28 +7393,35 @@ async fn serve_reserved_unix_with_ancestor_ready(
                 .await
                 .unwrap_or_else(|error| {
                     let ancestry = if bind_ancestry {
-                        ancestry_or_record(Err(AncestryUnavailableCause { pid: Some(pid),
-                            reason: AncestryUnavailableReason::LookupTaskFailed(error.to_string()) }),
-                            AncestryUnavailableCause::record)
-                    } else { HarnessAncestry::Unavailable };
+                        Err(AncestryUnavailableCause { pid: Some(pid),
+                            reason: AncestryUnavailableReason::LookupTaskFailed(error.to_string()) })
+                    } else { Ok(HarnessAncestry::Unavailable) };
                     (ancestry, None, None, None)
                 }),
                 None => {
                     let ancestry = if bind_ancestry {
-                        ancestry_or_record(Err(AncestryUnavailableCause { pid: None,
-                            reason: AncestryUnavailableReason::PeerPidUnavailable }), AncestryUnavailableCause::record)
-                    } else { HarnessAncestry::Person };
+                        Err(AncestryUnavailableCause { pid: None,
+                            reason: AncestryUnavailableReason::PeerPidUnavailable })
+                    } else { Ok(HarnessAncestry::Person) };
                     (ancestry, None, None, diagnostic_connection)
                 }
+            };
+            let (ancestry, ancestry_cause) = match ancestry_result {
+                Ok(ancestry) => (ancestry, None),
+                Err(cause) => (HarnessAncestry::Unavailable, Some(Arc::new(cause))),
             };
             let service = hyper::service::service_fn(move |request: Request<Incoming>| {
                 let app = app.clone();
                 let ancestry = ancestry.clone();
+                let ancestry_cause = ancestry_cause.clone();
                 let caller = caller.clone();
                 let delivery_peer = delivery_peer.clone();
                 let peer_process = peer_process.clone();
                 async move {
                     let mut request = request.map(Body::new);
+                    if let Some(cause) = ancestry_cause {
+                        request.extensions_mut().insert(cause);
+                    }
                     if let Some(connection) = diagnostic_connection {
                         request.extensions_mut().insert(connection);
                     }
@@ -7513,21 +7525,28 @@ impl HarnessAncestry {
     }
 }
 
+mod ancestry_diagnostics;
+
+/// Preserve pending diagnostic counts before the daemon exits.
+pub fn flush_ancestry_diagnostics() {
+    ancestry_diagnostics::flush();
+}
+
 /// Diagnostic data is deliberately limited to operation names, PIDs and OS errors.
 /// In particular, identity parsing must never attach environment values.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct AncestryUnavailableCause {
     pid: Option<u32>,
     reason: AncestryUnavailableReason,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum AncestryUnavailableReason {
     PeerPidUnavailable,
     WitnessCaptureFailed(String),
     WitnessMissing,
     LookupTaskFailed(String),
-    ProcessReadFailed { operation: &'static str, error: String },
+    ProcessReadFailed { operation: &'static str, os_error: Option<i32>, error: String },
     ProcessMetadataInvalid(&'static str),
     ProcessTerminal,
     EmptyEnvironment,
@@ -7565,16 +7584,10 @@ impl AncestryUnavailableCause {
         }
     }
 
-    fn record(&self) {
-        use std::io::Write as _;
-        // The default daemon has no tracing subscriber without telemetry export.
-        // Diagnostic write failures must not interrupt the fail-closed response.
-        let _ = writeln!(std::io::stderr(),
-            "st3: local caller ancestry unavailable pid={:?} reason={} detail={:?}",
-            self.pid, self.reason_code(), self.reason);
-    }
 }
 
+
+#[cfg(test)]
 fn ancestry_or_record(
     result: Result<HarnessAncestry, AncestryUnavailableCause>,
     mut record: impl FnMut(&AncestryUnavailableCause),
@@ -7649,7 +7662,9 @@ fn walk_harness_ancestry(
 #[cfg(target_os = "linux")]
 fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailableReason> {
     let read = |file, operation| fs::read_to_string(format!("/proc/{pid}/{file}"))
-        .map_err(|error| AncestryUnavailableReason::ProcessReadFailed { operation, error: error.to_string() });
+        .map_err(|error| AncestryUnavailableReason::ProcessReadFailed {
+            operation, os_error: error.raw_os_error(), error: error.to_string(),
+        });
     let invalid = AncestryUnavailableReason::ProcessMetadataInvalid;
     let status = read("status", "proc-status-read")?;
     let uid = status.lines().find_map(|line| line.strip_prefix("Uid:"))
@@ -7677,7 +7692,7 @@ fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailable
     match fractal_runtime::macos_process_identity(pid) {
         Ok((parent, birth, uid)) => Ok(HarnessProcess { uid, generation: Some((parent, birth)), generation_error: None }),
         Err(error) => {
-            let failure = |operation, error: String| AncestryUnavailableReason::ProcessReadFailed { operation, error };
+            let failure = |operation, error: String| AncestryUnavailableReason::ProcessReadFailed { operation, os_error: None, error };
             let uid = fractal_runtime::macos_process_owner(pid)
                 .map_err(|error| failure("process-owner-read", error.to_string()))?;
             Ok(HarnessProcess { uid, generation: None,
@@ -7690,7 +7705,7 @@ fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailable
 fn local_harness_identity(pid: u32) -> Result<HarnessAncestry, AncestryUnavailableReason> {
     let environment = fs::read(format!("/proc/{pid}/environ"))
         .map_err(|error| AncestryUnavailableReason::ProcessReadFailed {
-            operation: "proc-environ-read", error: error.to_string(),
+            operation: "proc-environ-read", os_error: error.raw_os_error(), error: error.to_string(),
         })?;
     if environment.is_empty() { return Err(AncestryUnavailableReason::EmptyEnvironment); }
     if !environment.ends_with(&[0]) { return Err(AncestryUnavailableReason::TruncatedEnvironment); }
@@ -7714,16 +7729,23 @@ fn local_harness_identity(pid: u32) -> Result<HarnessAncestry, AncestryUnavailab
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn harness_ancestor(pid: u32, peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
-    ancestry_or_record(walk_harness_ancestry(pid, peer, local_harness_process, local_harness_identity),
-        AncestryUnavailableCause::record)
+    observed_harness_ancestor(pid, peer).unwrap_or(HarnessAncestry::Unavailable)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn observed_harness_ancestor(pid: u32, peer: Option<&fractal_runtime::PeerProcessIdentity>)
+    -> Result<HarnessAncestry, AncestryUnavailableCause>
+{
+    walk_harness_ancestry(pid, peer, local_harness_process, local_harness_identity)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn harness_ancestor(pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry {
-    ancestry_or_record(Err(AncestryUnavailableCause { pid: Some(pid),
-        reason: AncestryUnavailableReason::UnsupportedPlatform }), AncestryUnavailableCause::record)
+fn observed_harness_ancestor(pid: u32, _peer: Option<&fractal_runtime::PeerProcessIdentity>)
+    -> Result<HarnessAncestry, AncestryUnavailableCause>
+{
+    Err(AncestryUnavailableCause { pid: Some(pid),
+        reason: AncestryUnavailableReason::UnsupportedPlatform })
 }
 
 #[derive(Clone)]
@@ -7945,6 +7967,8 @@ async fn guard_bound_actor(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
+    request.extensions_mut().remove::<ancestry_diagnostics::VerifiedWorkerFallback>();
+    let ancestry_diagnostic = ancestry_diagnostics::RequestDiagnostic::capture(&request);
     let bound_agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.clone());
     let client_request = request.uri().path().starts_with("/v1/client/");
     // This guard is outside all router layers. Authenticate here, before ancestry admission,
@@ -7957,9 +7981,15 @@ async fn guard_bound_actor(
             // The supervised worker runs in no harness. Its live generation is stronger
             // evidence than an unreadable service-manager environment.
             request.extensions_mut().insert(HarnessAncestry::Person);
+            request.extensions_mut().insert(ancestry_diagnostics::VerifiedWorkerFallback);
         }
     }
-    match guard_bound_request(request, bound_agent.as_deref(), &store).await {
+    let verified_worker = request.extensions().get::<ancestry_diagnostics::VerifiedWorkerFallback>().is_some();
+    let result = guard_bound_request(request, bound_agent.as_deref(), &store).await;
+    if let Some(diagnostic) = ancestry_diagnostic {
+        diagnostic.record(result.as_ref().err().map(|error| error.status), verified_worker);
+    }
+    match result {
         Ok(request) => next.run(request).await,
         Err(error) if client_request => {
             let status = error.status;
