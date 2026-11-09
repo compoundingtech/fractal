@@ -41,6 +41,6 @@
   },
   "recovery": {
     "status": "changed",
-    "detail": "Version-20, version-21 and version-22 binaries refuse a version-23 database, and older peers quarantine signed marked thread messages. Recover using a compatible version-23 build while preserving history and pairings. Do not lower user_version. A rollback requires a coordinated stopped restore of a consistent pre-upgrade backup with its matching binary and existing runtime/authority recovery requirements; it cannot retain later thread writes. Preserve the upgraded history and pairing evidence."
+    "detail": "Version-20, version-21 and version-22 binaries refuse a version-23 database, and readers that do not understand the signed message marker quarantine those messages. Recover using a compatible version-23 build while preserving history and pairings. Do not lower user_version. A rollback requires a coordinated stopped restore of a consistent pre-upgrade backup with its matching binary and existing runtime/authority recovery requirements; it cannot retain later thread writes. Preserve the upgraded history and pairing evidence."
   }
 }
