@@ -33,6 +33,8 @@ fn execute_with_turn_hook<T: Send, E: From<FractalError> + Send>(
         if pending(transaction, fence).map_err(E::from)?.is_some() {
             return Ok(Attempt::NeedsDrain);
         }
+        #[cfg(any(test, feature = "test-support"))]
+        let _role = rebuild_observer::role("action");
         action.take().expect("fence action runs once")(transaction).map(Attempt::Complete)
     }).map_err(|error| E::from(internal(error)))??;
     if let Attempt::Complete(value) = attempt {
@@ -60,6 +62,8 @@ fn execute_with_turn_hook<T: Send, E: From<FractalError> + Send>(
             .map_err(|error| E::from(internal(error)))?;
         // Re-resolve the run/root on every turn, including the final action turn.
         if let Some(aggregate) = pending(&transaction, fence).map_err(E::from)? {
+            #[cfg(any(test, feature = "test-support"))]
+            let _role = rebuild_observer::role("fence-drain");
             rebuild_pending_run_tx(&transaction, &aggregate).map_err(E::from)?;
             let caught_up = !projection_work_pending_tx(&transaction).map_err(E::from)?
                 && !graph.replication_projection_deferred();
@@ -69,6 +73,8 @@ fn execute_with_turn_hook<T: Send, E: From<FractalError> + Send>(
             graph.runtime.projection_advanced(caught_up);
             after_turn();
         } else {
+            #[cfg(any(test, feature = "test-support"))]
+            let _role = rebuild_observer::role("action");
             let value = action.take().expect("fence action runs once")(&transaction)?;
             transaction.commit().map_err(|error| E::from(internal(error)))?;
             drop(writer);

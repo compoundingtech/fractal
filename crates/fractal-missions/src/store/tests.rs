@@ -3959,6 +3959,127 @@ fn a_run_tree_with_only_this_nodes_new_claims_is_not_rebuilt_by_a_projection_pas
     assert_eq!(incremental, graph_digest_of(&worker));
 }
 
+fn standalone_person_ask_fixture() -> (Store, Store, String) {
+    let (controller, worker, step) = replicated_step_pair();
+    let source = "version 2\nagent \"worker.one\" { workspace \"/tmp\"; command \"true\"; restart always; }\n";
+    let intent = crate::graph::parse_internal_intent(source, "controller").unwrap();
+    let planned = controller.mission(&intent, IntentInput {
+        kdl: source.into(),
+        source_name: None,
+    }).unwrap();
+    controller.apply(&intent, &planned.subject_tokens, "standalone-ask-agent").unwrap();
+    assert!(!projection_replayed(&worker, "controller", &controller));
+    (controller, worker, step)
+}
+
+fn standalone_person_ask(store: &Store) -> StepRunView {
+    use crate::store::person_work::PersonWorkStore;
+
+    store.ask_person(&crate::model::PersonAskRequest {
+        deadline_ms: None,
+        default_answer: None,
+        legacy_request: None,
+        person: "person/test".into(),
+        title: "Choose an independent answer".into(),
+        reason: "The requester needs a person outside its current work.".into(),
+        actor: "agent/worker.one".into(),
+        step: None,
+        new_run: None,
+        incarnation: None,
+        request: None,
+        idempotency_key: "standalone-person-ask".into(),
+    }).unwrap()
+}
+
+fn assert_local_standalone_person_ask_is_not_rebuilt(unrelated_future_claim: bool) {
+    let (controller, worker, unrelated_step) = standalone_person_ask_fixture();
+    let local_time = now_ms() + 10_000;
+    if unrelated_future_claim {
+        // Advance the global canonical frontier with another run part, not this ask's
+        // part. The subsequently written ask is globally old but new to its own run.
+        controller.set_write_clock_at(local_time + 600_000).unwrap();
+        controller.set_step_state(&unrelated_step, "blocked", Some("unrelated future work")).unwrap();
+        assert!(!projection_replayed(&worker, "controller", &controller));
+    }
+    worker.set_write_clock_at(local_time).unwrap();
+    let ask = standalone_person_ask(&worker);
+    let written = worker.step_run(&ask.subject).unwrap().unwrap();
+    assert_eq!(written.status, "ready");
+    assert!(worker.mission_run(&ask.run).unwrap().is_some(),
+        "work.person-asked atomically materializes its standalone runtime run");
+    let creation = worker.claims_for(&ask.subject, Some("work.person-asked")).unwrap();
+    assert_eq!(creation.len(), 1);
+    assert!(creation[0].body["fields"]["mission_spec"].is_object());
+    if unrelated_future_claim {
+        let future = controller.claims_for(&unrelated_step, Some("step-run.state")).unwrap();
+        assert!(future.iter().any(|claim|
+            claim.accepted_at_unix_ms > creation[0].accepted_at_unix_ms));
+    }
+
+    RUN_TREE_REBUILDS.with(|rebuilds| rebuilds.set(0));
+    FULL_REPLAYS.with(|replays| replays.set(0));
+    worker.project_replication_backlog().unwrap();
+    assert_eq!(RUN_TREE_REBUILDS.with(std::cell::Cell::get), 0,
+        "an already materialized local standalone ask needs no reconciliation");
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    let incremental = graph_digest_of(&worker);
+    worker.replay_replication_graph().unwrap();
+    assert_eq!(incremental, graph_digest_of(&worker));
+    let replayed = worker.step_run(&ask.subject).unwrap().unwrap();
+    assert_eq!((&written.run, &written.status, &written.assigned_to),
+        (&replayed.run, &replayed.status, &replayed.assigned_to));
+}
+
+#[test]
+fn a_locally_materialized_standalone_person_ask_is_not_rebuilt_by_projection() {
+    assert_local_standalone_person_ask_is_not_rebuilt(false);
+}
+
+#[test]
+fn a_local_standalone_person_ask_older_than_an_unrelated_part_is_not_rebuilt() {
+    assert_local_standalone_person_ask_is_not_rebuilt(true);
+}
+
+#[test]
+fn a_foreign_standalone_person_ask_still_rebuilds_its_run_part() {
+    let (controller, worker, _step) = standalone_person_ask_fixture();
+    let ask = standalone_person_ask(&worker);
+    assert!(controller.step_run(&ask.subject).unwrap().is_none());
+    RUN_TREE_REBUILDS.with(|rebuilds| rebuilds.set(0));
+    assert!(!projection_replayed(&controller, "worker", &worker));
+    assert!(RUN_TREE_REBUILDS.with(std::cell::Cell::get) >= 1,
+        "a foreign ask still needs its run part materialized");
+    assert_eq!(controller.step_run(&ask.subject).unwrap().unwrap().status, "ready");
+    let incremental = graph_digest_of(&controller);
+    controller.replay_replication_graph().unwrap();
+    assert_eq!(incremental, graph_digest_of(&controller));
+}
+
+#[test]
+fn a_local_standalone_person_ask_with_a_foreign_same_part_claim_still_rebuilds() {
+    let (controller, worker, _step) = standalone_person_ask_fixture();
+    let ask = standalone_person_ask(&worker);
+    assert!(!projection_replayed(&controller, "worker", &worker));
+    let accepted = worker.claims_for(&ask.subject, Some("work.person-asked")).unwrap()[0]
+        .accepted_at_unix_ms;
+    controller.set_write_clock_at(accepted + 600_000).unwrap();
+    controller.set_step_state(&ask.subject, "blocked", Some("a foreign update to this ask")).unwrap();
+
+    // The worker has not swept its atomically applied ask yet. Its pending local claim
+    // must not be exempted now that this very run part also contains foreign work.
+    RUN_TREE_REBUILDS.with(|rebuilds| rebuilds.set(0));
+    FULL_REPLAYS.with(|replays| replays.set(0));
+    assert!(!projection_replayed(&worker, "controller", &controller));
+    assert!(RUN_TREE_REBUILDS.with(std::cell::Cell::get) >= 1,
+        "foreign claims on the standalone ask prevent the local-only exemption");
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    let incremental = graph_digest_of(&worker);
+    let projected = worker.step_run(&ask.subject).unwrap().unwrap().status;
+    worker.replay_replication_graph().unwrap();
+    assert_eq!(incremental, graph_digest_of(&worker));
+    assert_eq!(projected, worker.step_run(&ask.subject).unwrap().unwrap().status);
+}
+
 #[test]
 fn a_local_claim_sorting_before_a_projected_peer_claim_still_rebuilds_its_run_tree() {
     let (controller, worker, step) = replicated_step_pair();

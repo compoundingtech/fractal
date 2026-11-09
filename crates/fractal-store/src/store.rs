@@ -252,6 +252,8 @@ pub const AGENTS_REQUEST_SLO_MISSED: &str = "fractal-agents-success-fast-slo-mis
 pub const API_READINESS_SLO_MISSED: &str = "fractal-api-readiness-slo-missed";
 pub mod person_rename;
 mod run_fence;
+#[cfg(any(test, feature = "test-support"))]
+pub mod rebuild_observer;
 pub mod revision_seats;
 pub mod delegation;
 pub mod limits;
@@ -16290,7 +16292,13 @@ pub enum Aggregate {
 /// Mark an aggregate to be rebuilt, and say why in the profile: which trigger rebuilds run trees
 /// on a busy node decides which of them is worth fixing. The reason is one of a fixed list of
 /// strings, so the profile gains at most that many counters; nothing is read to decide it.
-fn mark_dirty(dirty: &mut BTreeSet<Aggregate>, aggregate: Aggregate, reason: &str) {
+fn mark_dirty(dirty: &mut BTreeSet<Aggregate>, aggregate: Aggregate, reason: &'static str) {
+    #[cfg(any(test, feature = "test-support"))]
+    match &aggregate {
+        Aggregate::RunPart(id) => rebuild_observer::note_dirty("run-part", id, reason),
+        Aggregate::RunTree(id) => rebuild_observer::note_dirty("run-tree", id, reason),
+        _ => {}
+    }
     if matches!(aggregate, Aggregate::RunTree(_) | Aggregate::RunPart(_)) && crate::profile::enabled() {
         crate::profile::note(&format!("projection: run tree dirty: {reason}"));
     }
@@ -16613,6 +16621,8 @@ pub fn run_part_of_tx(
 /// the asks it owns, or a run started from the root, each with every run started from their steps
 /// and every ask they own, all the way down.
 pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(), FractalError> {
+    #[cfg(any(test, feature = "test-support"))]
+    let _rebuild = rebuild_observer::note_rebuild("run-part", top, false);
     struct RebuildTiming(std::time::Instant);
     impl Drop for RebuildTiming {
         fn drop(&mut self) {
@@ -16849,6 +16859,8 @@ fn claims_in_replay_order_tx(
 /// claims: forget its runs, generations, steps and proposals, then project its claims again in
 /// the replay's order and passes.
 pub fn rebuild_run_tree_tx(transaction: &Transaction<'_>, root: &str) -> Result<(), FractalError> {
+    #[cfg(any(test, feature = "test-support"))]
+    let _rebuild = rebuild_observer::note_rebuild("run-tree", root, false);
     #[cfg(any(test, feature = "test-support"))]
     RUN_TREE_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
     let _span = crate::profile::span("projection/run-tree");
@@ -17294,6 +17306,45 @@ pub fn try_project_simple_replication_tx(
     try_project_simple_replication_inner_tx(transaction, origin, through, false)
 }
 
+/// A standalone ask is projected atomically by its local writer. Unrelated claims'
+/// global canonical times cannot invalidate that independent run. Competing foreign
+/// history or descendants keep the ordinary canonical rebuild path.
+fn local_standalone_ask_applied_tx(
+    transaction: &Transaction<'_>,
+    claim: &ClaimRecord,
+    origin: &str,
+) -> Result<bool, FractalError> {
+    if claim.origin != origin || claim.kind != "work.person-asked" {
+        return Ok(false);
+    }
+    let fields = &claim.body["fields"];
+    if fields.get("origin_step").is_some_and(|value| !value.is_null())
+        || fields.get("mission_spec").is_none()
+    {
+        return Ok(false);
+    }
+    let Some(run_subject) = fields.get("run").and_then(Value::as_str) else { return Ok(false) };
+    let Some(run) = run_subject.strip_prefix("mission-run/") else { return Ok(false) };
+    let Some(generation_subject) = fields.get("generation").and_then(Value::as_str) else { return Ok(false) };
+    let Some(generation) = generation_subject.strip_prefix("run-generation/") else { return Ok(false) };
+    transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM step_runs AS step
+             JOIN run_generations AS generation ON generation.id=step.generation_id
+             JOIN mission_runs AS run ON run.id=step.run_id
+             WHERE step.subject=?1 AND step.run_id=?2 AND step.generation_id=?3
+               AND generation.run_id=?2 AND run.root_run_id=?2 AND step.definition_hash=?7
+         )
+         AND NOT EXISTS(SELECT 1 FROM mission_runs WHERE root_run_id=?2 AND id<>?2)
+         AND NOT EXISTS(
+             SELECT 1 FROM claims WHERE subject IN (?1,?5,?6) AND origin<>?4
+         )",
+        params![claim.subject, run, generation, origin, run_subject, generation_subject, claim.id],
+        |row| row.get(0),
+    ).map_err(internal)
+}
+
+
 fn try_project_simple_replication_inner_tx(
     transaction: &Transaction<'_>,
     origin: &str,
@@ -17431,6 +17482,16 @@ fn try_project_simple_replication_inner_tx(
         }
     }
     for claim in &claims {
+        let local_ask_applied = local_standalone_ask_applied_tx(transaction, claim, origin)
+            .map_err(|error| incremental_claim_error(error, claim, "local-ask-projection"))?;
+        #[cfg(any(test, feature = "test-support"))]
+        if local_ask_applied
+            && let Some(run) = claim.body["fields"]["run"].as_str()
+                .and_then(|run| run.strip_prefix("mission-run/"))
+        {
+            rebuild_observer::note_applied("run-part", run);
+            rebuild_observer::note_applied("run-tree", run);
+        }
         let has_operation = claim.body.get("_operation").is_some();
         // Supported work transitions already share canonical ordering and affected-tree
         // repair with replay. An operation identity alone changes neither the work fields
@@ -17500,10 +17561,14 @@ fn try_project_simple_replication_inner_tx(
         if matches!(
             claim.kind.as_str(),
             "work.person-asked" | "work.person-reassigned" | "work.person-done" | "work.person-cancelled"
-        ) && let Some(aggregate) = aggregate_of_tx(transaction, claim)
+        ) && !local_ask_applied && let Some(aggregate) = aggregate_of_tx(transaction, claim)
             .map_err(|error| incremental_claim_error(error, claim, "aggregate-owner"))?
         {
-            mark_dirty(&mut dirty, aggregate, "person ask, answer or cancel");
+            mark_dirty(&mut dirty, aggregate, if claim.origin == origin {
+                "person-guard"
+            } else {
+                "foreign-person-guard"
+            });
         }
         // A receipt chooses one destination for independent concurrent repairs. It can arrive
         // after either repair's work claims, so rebuild their trees when that choice changes.
@@ -17545,14 +17610,14 @@ fn try_project_simple_replication_inner_tx(
             // A document keeps the earliest binding of each version, whatever order the
             // bindings arrive in, so only a repair rebuilds one. Rebuilding every version of a
             // document that is republished all day costs more with each version.
-            if ((out_of_order && claim.kind != "doc.bound") || repaired)
+            if ((out_of_order && claim.kind != "doc.bound" && !local_ask_applied) || repaired)
                 && let Some(aggregate) = aggregate_of_tx(transaction, claim)
                     .map_err(|error| incremental_claim_error(error, claim, "aggregate-owner"))?
             {
                 let reason = if repaired {
                     "repaired claim"
                 } else {
-                    "structural claim sorting before projected ones"
+                    "global-out-of-order"
                 };
                 mark_dirty(&mut dirty, aggregate, reason);
             }

@@ -1128,6 +1128,21 @@ rebuilds from its complete canonical history; the chunk limit does not bound tha
 fallback replay. The regression interleaves local writes with committed prefixes and checks the
 final graph against canonical replay.
 
+The projection gate covers the complete catch-up pass, including its between-chunk writer
+returns and final drains. Fenced actions cannot drain its markers between successful chunks.
+A local standalone person ask has already atomically materialized its run, generation and step;
+an unrelated aggregate's later canonical time does not require rebuilding that independent run.
+The incremental sweep skips that ask's redundant person-guard and global-order dirtiness only when those
+rows bind to the local ask, the run has no descendants, and its step/run/generation have no
+foreign claims. Foreign asks, repair markers and competing same-part history retain their
+canonical rebuilds.
+
+The contended receive benchmark attributes rebuild identity, dirty cause and receive/fence/action
+role across threads. It fails on a page taking 15 seconds or more, more than two rebuilds covering
+the huge target part in a page, any redundant already-materialized local-ask rebuild, or a route
+with no successful mutations. Other aggregates' legitimate rebuilds are reported separately.
+Page output separates projection-gate wait, writer wait, chunk count and final-drain rebuild time.
+
 Run-part rebuilds queued by these chunks remain pending durably until their canonical tree is
 rebuilt. Reconciliation and dispatch skip a pending part. Mission/run mutations use
 `with_run_fence` for the named run or step's part and its ancestor root, or

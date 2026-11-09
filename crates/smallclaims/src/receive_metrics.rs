@@ -11,6 +11,10 @@ pub struct Counters {
     pub admit_time: Duration,
     pub project_time: Duration,
     pub projection_chunks: u64,
+    pub gate_wait: Duration,
+    pub writer_wait: Duration,
+    pub final_drain_count: u64,
+    pub final_drain_time: Duration,
     pub rebuild_part_count: u64,
     pub rebuild_part_time: Duration,
     /// Successfully committed managed writer transactions, excluding savepoints.
@@ -68,6 +72,21 @@ pub fn envelopes_admitted(count: usize) {
 
 pub fn projection_chunk() {
     record(|counters| counters.projection_chunks += 1);
+}
+
+pub fn projection_gate_wait(elapsed: Duration) {
+    record(|counters| counters.gate_wait += elapsed);
+}
+
+pub fn projection_writer_wait(elapsed: Duration) {
+    record(|counters| counters.writer_wait += elapsed);
+}
+
+pub fn final_drain(elapsed: Duration) {
+    record(|counters| {
+        counters.final_drain_count += 1;
+        counters.final_drain_time += elapsed;
+    });
 }
 
 /// Count attempted rebuilds, including work later rolled back, since it still costs time.
@@ -135,6 +154,9 @@ mod tests {
         {
             let _outer = outer.enter();
             commit();
+            projection_gate_wait(Duration::from_millis(2));
+            projection_writer_wait(Duration::from_millis(3));
+            final_drain(Duration::from_millis(5));
             std::thread::spawn(|| {
                 commit();
                 rebuild_part(Duration::from_secs(1));
@@ -152,10 +174,15 @@ mod tests {
         assert_eq!(outer.snapshot().rebuild_part_count, 1);
         assert_eq!(outer.snapshot().rebuild_part_time, Duration::from_millis(3));
         assert_eq!(outer.snapshot().projection_chunks, 0);
+        assert_eq!(outer.snapshot().gate_wait, Duration::from_millis(2));
+        assert_eq!(outer.snapshot().writer_wait, Duration::from_millis(3));
+        assert_eq!(outer.snapshot().final_drain_count, 1);
+        assert_eq!(outer.snapshot().final_drain_time, Duration::from_millis(5));
         assert!(!outer.snapshot().contended);
         assert_eq!(inner.snapshot().envelopes_admitted, 2);
         assert_eq!(inner.snapshot().projection_chunks, 1);
         assert!(inner.snapshot().contended);
         assert_eq!(inner.snapshot().commits, 0);
+        assert_eq!(inner.snapshot().final_drain_count, 0);
     }
 }

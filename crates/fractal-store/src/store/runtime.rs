@@ -533,6 +533,8 @@ impl Runtime for FractalRuntime {
         origin: &str,
         through: u64,
     ) -> Result<IncrementalProjection, FractalError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _role = rebuild_observer::role("receive-pass");
         try_project_simple_replication_inner_tx(transaction, origin, through, true)
     }
 
@@ -541,6 +543,8 @@ impl Runtime for FractalRuntime {
     }
 
     fn finish_projection_work(&self, transaction: &Transaction<'_>) -> Result<(), FractalError> {
+        #[cfg(any(test, feature = "test-support"))]
+        let _role = rebuild_observer::role("receive-pass");
         finish_projection_work_tx(transaction)
     }
 

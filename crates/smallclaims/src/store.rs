@@ -8892,7 +8892,9 @@ impl Store {
         mut log: impl FnMut(&str),
         mut progress: impl FnMut(ProjectionProgress),
     ) -> Result<bool> {
+        let gate_wait = std::time::Instant::now();
         let _projecting = self.projection.lock();
+        crate::receive_metrics::projection_gate_wait(gate_wait.elapsed());
         let _timing = time_stage(&self.replication_timers.projection);
         self.defer_replication_projection();
         self.last_replication_projection_unix_ms
@@ -8912,7 +8914,9 @@ impl Store {
             let mut progress_staged =
                 |update: ProjectionProgress| stages.during("callbacks", || progress(update));
             let mut log_staged = |line: &str| stages.during("callbacks", || log(line));
+            let writer_wait = std::time::Instant::now();
             let mut connection = self.connection.write();
+            crate::receive_metrics::projection_writer_wait(writer_wait.elapsed());
             stages.enter("begin");
             // Acquire SQLite's write lock before reading a snapshot. A deferred upgrade can
             // fail immediately when the independent WAL checkpoint connection holds that lock.
@@ -8986,7 +8990,10 @@ impl Store {
                 }
                 if final_drain {
                     stages.enter("finish-projection-work");
-                    self.runtime.finish_projection_work(&transaction)?;
+                    let started = std::time::Instant::now();
+                    let finished = self.runtime.finish_projection_work(&transaction);
+                    crate::receive_metrics::final_drain(started.elapsed());
+                    finished?;
                     self.runtime.after_projection(&transaction)?;
                     return Ok(false);
                 }

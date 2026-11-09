@@ -3,6 +3,36 @@
 // Apply this benchmark patch to both comparison revisions; contended mode needs bounded fences.
 use super::*;
 use super::coalesce_run_part_rebuild::write_coalesced_rebuild_backlog;
+use fractal_store::store::rebuild_observer::{Collector, Event};
+
+fn target_rebuild(event: &Event, part: &str, root: &str) -> bool {
+    (event.kind == "run-part" && event.id == part)
+        || (event.kind == "run-tree" && (event.id == root || event.id == part))
+}
+
+fn rebuild_breakdown(events: &[Event]) -> BTreeMap<String, (usize, f64)> {
+    let mut counts = BTreeMap::new();
+    for event in events {
+        let row = counts.entry(format!("{}/{}/{}", event.kind, event.role, event.cause))
+            .or_insert((0, 0.0));
+        row.0 += 1;
+        row.1 += event.elapsed_ms;
+    }
+    counts
+}
+
+fn target_page_max(events: &[Event], ends: &[(usize, std::time::Duration)], part: &str, root: &str) -> usize {
+    let mut previous = 0;
+    let mut maximum = 0;
+    for (index, (end, _)) in ends.iter().copied().enumerate() {
+        // Work completing after the final receive is part of that last page's budget.
+        let end = if index + 1 == ends.len() { events.len() } else { end };
+        maximum = maximum.max(events[previous..end].iter()
+            .filter(|event| target_rebuild(event, part, root)).count());
+        previous = end;
+    }
+    maximum
+}
 
 fn setting(name: &str, default: usize) -> usize {
     std::env::var(name).map_or(default, |value| {
@@ -25,12 +55,13 @@ fn request(key: String, revision: String) -> MissionRunRequest {
 fn measure(children: usize, steps_per_run: usize, extra_generations: usize, history: usize, contended: bool) {
     let controller = Store::open_memory("controller").unwrap();
     let mut revisions = Vec::new();
+    let mut claim_revisions = Vec::new();
     for generation in 0..=extra_generations {
         let mut source = format!(
             "version 2\nmission \"huge-part\" state=\"ready\" {{\n goal \"Keep revision {generation} live.\"\n concurrent-runs max=1000000\n"
         );
         if contended {
-            source.insert_str(0, "version 2\nagent \"bench\" { workspace \"/tmp\"; command \"true\" }\n");
+            source.insert_str(0, "version 2\nagent \"bench\" { workspace \"/tmp\"; command \"true\" }\nagent \"claim\" { workspace \"/tmp\"; command \"true\" }\n");
             // The publisher's fixture namespace is `node`, independently of store origin.
             source = source.replacen("version 2\nmission", "mission", 1);
         }
@@ -42,6 +73,17 @@ fn measure(children: usize, steps_per_run: usize, extra_generations: usize, hist
         }
         source.push_str("}\n");
         revisions.push(publish_mission(&controller, &source, &format!("huge-definition-{generation}")));
+        if contended {
+            // Pin only the contended run's work-0 to a seat with no other ready work.
+            let claim_source = source.replacen(
+                " step \"work-0\" { assigned-to \"agent/node.bench\";",
+                " step \"work-0\" { assigned-to \"agent/node.claim\";",
+                1,
+            );
+            claim_revisions.push(publish_mission(
+                &controller, &claim_source, &format!("huge-claim-definition-{generation}"),
+            ));
+        }
     }
 
     // Direct children of a never-ended root are DIFFERENT parts. Keep an outer root live,
@@ -54,15 +96,16 @@ fn measure(children: usize, steps_per_run: usize, extra_generations: usize, hist
     let mut subjects = BTreeSet::new();
     let mut total_steps = 0;
     for index in 0..=children {
+        let run_revisions = if contended && index == children { &claim_revisions } else { &revisions };
         let parent = if index == 0 { &root } else { &runs[0] };
         let mut run = controller.create_child_mission_run(
-            &request(format!("huge-part-run-{index}"), revisions[0].revision.clone()),
+            &request(format!("huge-part-run-{index}"), run_revisions[0].revision.clone()),
             parent, &parent.steps[index % steps_per_run].subject, None,
         ).unwrap();
         // Finish this run's revisions before attaching descendants: revision adoption
         // intentionally cancels descendants of the superseded generation.
         subjects.insert(run.subject.clone());
-        for (generation, revision) in revisions.iter().enumerate() {
+        for (generation, revision) in run_revisions.iter().enumerate() {
             if generation != 0 {
                 let previous = run.generation.clone();
                 run = controller.adopt_mission_revision(
@@ -203,10 +246,13 @@ fn measure(children: usize, steps_per_run: usize, extra_generations: usize, hist
         *ready = !*ready;
     }
 
+    let collector = Collector::new();
+    let _observer = collector.install();
+    let page_ends = std::sync::Mutex::new(Vec::new());
     // A scoped thread borrows the very same Sync Store: no second connection/store
     // changes the contention being measured. The stop channel wakes the 50 ms pause.
-    let ((mut probe_times, wall_times, received, total, longest_hold, rebuilds), mutation_hold, mutation_rebuilds) =
-        with_contended_mutations(contended, std::sync::Arc::clone(&worker), claim_subject, || std::thread::scope(|scope| {
+    let ((mut probe_times, wall_times, received, total, longest_hold, rebuilds), mutation_hold, mutation_rebuilds, route_pass) =
+        with_contended_mutations(contended, std::sync::Arc::clone(&worker), claim_subject, &collector, (&runs[0].id, &root.id), &page_ends, || std::thread::scope(|scope| {
             let (stop, stopped) = std::sync::mpsc::channel();
             let (ready, started) = std::sync::mpsc::sync_channel(0);
             let worker = &worker;
@@ -248,13 +294,25 @@ fn measure(children: usize, steps_per_run: usize, extra_generations: usize, hist
                         break;
                     }
                     let page_started = std::time::Instant::now();
+                    let page_metrics = smallclaims::receive_metrics::RequestMetrics::default();
+                    let _page_metrics = page_metrics.enter();
+                    let receive_started = std::time::Instant::now();
                     worker.receive_replication_exchange("controller", TEST_FLEET, &exchange).unwrap();
+                    let receive_time = receive_started.elapsed();
+                    let admission_started = std::time::Instant::now();
                     let admission = worker.validate_replication_backlog().unwrap();
+                    let admission_time = admission_started.elapsed();
                     assert_eq!(admission.invalid, 0);
                     assert_eq!(admission.unknown, 0);
+                    let projection_started = std::time::Instant::now();
                     let projected = worker.project_replication_backlog().unwrap();
+                    let projection_time = projection_started.elapsed();
                     assert!(projected || contended);
-                    wall_times.push((exchange.envelopes.len(), page_started.elapsed()));
+                    let end = collector.event_count();
+                    let page_elapsed = page_started.elapsed();
+                    page_ends.lock().unwrap().push((end, page_elapsed));
+                    wall_times.push((exchange.envelopes.len(), page_elapsed,
+                        page_metrics.snapshot(), end, (receive_time, admission_time, projection_time)));
                     received += exchange.envelopes.len();
                 }
                 // Concurrent local probe writes can advance the index past a finishing pass,
@@ -288,22 +346,47 @@ fn measure(children: usize, steps_per_run: usize, extra_generations: usize, hist
     let percentile = |percent: usize| {
         probe_times[(probe_times.len() * percent).div_ceil(100) - 1].as_millis()
     };
-    for (index, (envelopes, elapsed)) in wall_times.iter().enumerate() {
-        eprintln!("huge_receive_page index={index} envelopes={envelopes} wall_ms={}", elapsed.as_millis());
+    let events = collector.take();
+    let redundant = events.iter().filter(|event| event.local_redundant).count();
+    let target_total = events.iter().filter(|event| target_rebuild(event, &runs[0].id, &root.id)).count();
+    let other_rebuilds = events.len() - target_total;
+    let mut previous = 0;
+    let mut target_page_max = 0;
+    for (index, (envelopes, elapsed, metrics, end, (receive_time, admission_time, projection_time))) in wall_times.iter().enumerate() {
+        // Assign any action/drain completing after the last receive to that final page,
+        // rather than dropping in-flight mutation work from attribution.
+        let end = if index + 1 == wall_times.len() { events.len() } else { *end };
+        let page_events = &events[previous..end];
+        previous = end;
+        let target = page_events.iter().filter(|event| target_rebuild(event, &runs[0].id, &root.id)).count();
+        target_page_max = target_page_max.max(target);
+        let local = page_events.iter().filter(|event| event.local_redundant).count();
+        eprintln!("huge_receive_page index={index} envelopes={envelopes} wall_ms={} receive_ms={} admission_validation_ms={} projection_ms={} gate_wait_ms={} writer_wait_ms={} final_drain_ms={} final_drain_count={} projection_chunks={} target_rebuilds={target} target_limit=2 target_gate={} redundant_local_rebuilds={local} redundant_local_gate={} rebuild_causes={:?}",
+            elapsed.as_millis(), receive_time.as_millis(), admission_time.as_millis(), projection_time.as_millis(),
+            metrics.gate_wait.as_millis(), metrics.writer_wait.as_millis(),
+            metrics.final_drain_time.as_millis(), metrics.final_drain_count, metrics.projection_chunks,
+            if target <= 2 { "pass" } else { "fail" }, if local == 0 { "pass" } else { "fail" },
+            rebuild_breakdown(page_events));
     }
-    let max_page = wall_times.iter().map(|(_, elapsed)| *elapsed).max().unwrap();
+    let max_page = wall_times.iter().map(|(_, elapsed, _, _, _)| *elapsed).max().unwrap();
     let m1 = longest_hold < std::time::Duration::from_secs(15);
     let m2 = max_page < std::time::Duration::from_secs(15);
     let m3 = total < std::time::Duration::from_secs(60);
     let verdict = |pass| if pass { "pass" } else { "fail" };
     let rebuilds_per_page = rebuilds as f64 / wall_times.len() as f64;
     eprintln!(
-        "huge_receive backlog={backlog} page={page} pages={} open_ms={open_ms} total_ms={} max_page_ms={} rebuilds={rebuilds} rebuilds_per_page={rebuilds_per_page:.3} longest_hold_ms={} probe_n={} probe_p50_ms={} probe_p99_ms={} probe_max_ms={} m1_max_hold_ms={} m1_limit_ms=15000 m1_gate={} m2_max_page_ms={} m2_limit_ms=15000 m2_gate={} m3_component_ms={} m3_limit_ms=60000 m3_gate={} gate_15s={} gate={}",
+        "huge_receive backlog={backlog} page={page} pages={} open_ms={open_ms} total_ms={} max_page_ms={} rebuilds={rebuilds} rebuilds_per_page={rebuilds_per_page:.3} longest_hold_ms={} probe_n={} probe_p50_ms={} probe_p99_ms={} probe_max_ms={} m1_max_hold_ms={} m1_limit_ms=15000 m1_gate={} m2_max_page_ms={} m2_limit_ms=15000 m2_gate={} m3_component_ms={} m3_limit_ms=60000 m3_gate={} gate_15s={} gate={} target_rebuilds={target_total} other_rebuilds={other_rebuilds} target_page_max={target_page_max} target_limit=2 target_gate={} redundant_local_rebuilds={redundant} redundant_local_gate={} route_gate={} rebuild_causes={:?}",
         wall_times.len(), total.as_millis(), max_page.as_millis(), longest_hold.as_millis(),
         probe_times.len(), percentile(50), percentile(99), probe_times.last().unwrap().as_millis(),
         longest_hold.as_millis(), verdict(m1), max_page.as_millis(), verdict(m2),
-        total.as_millis(), verdict(m3), verdict(m1 && m2), verdict(m1 && m2 && m3),
+        total.as_millis(), verdict(m3), verdict(m1 && m2),
+        verdict(m1 && m2 && m3 && target_page_max <= 2 && redundant == 0 && route_pass),
+        verdict(target_page_max <= 2), verdict(redundant == 0), verdict(route_pass), rebuild_breakdown(&events),
     );
+    assert!(target_page_max <= 2, "target live part rebuilt more than twice in one page");
+    assert_eq!(redundant, 0, "origin-local already-applied work must not trigger rebuilds");
+    assert!(m2, "M2 receive page exceeded 15 seconds, including under contention");
+    assert!(route_pass, "at least one route made zero successes or failed bounded mutation progress");
     huge_part_digest::print_part_digest(&worker.connection.write(), &runs.iter().map(|run| run.id.clone()).collect(), &subjects);
     // Keep the replay oracle outside both the receive measurement and the probe window.
     let projected = graph_digest_of(&worker);
@@ -325,7 +408,7 @@ fn measure_single_huge_part_rebuild() {
         vec![setting("FRACTAL_HUGE_PART_CHILDREN", 64)]
     };
     for children in sizes {
-        // Gates are diagnostic only: print every point on both base and head.
+        // Every sweep point enforces the per-page rebuild and receive-wall gates.
         measure(children, steps, generations, history, false);
     }
 }
@@ -337,8 +420,11 @@ fn with_contended_mutations<T>(
     enabled: bool,
     worker: std::sync::Arc<Store>,
     claim_subject: String,
+    collector: &Collector,
+    target: (&str, &str),
+    page_ends: &std::sync::Mutex<Vec<(usize, std::time::Duration)>>,
     receive: impl FnOnce() -> T,
-) -> (T, std::time::Duration, usize) {
+) -> (T, std::time::Duration, usize, bool) {
     use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
     use fractal_secrets::client::{Client, Endpoint, set_mutation_observer};
     use crate::model::{PersonAskRequest, WorkRequest};
@@ -346,7 +432,7 @@ fn with_contended_mutations<T>(
     use axum::{Json, Router, extract::State, http::StatusCode, routing::post};
 
     if !enabled {
-        return (receive(), std::time::Duration::ZERO, 0);
+        return (receive(), std::time::Duration::ZERO, 0, true);
     }
     #[derive(Default)]
     struct RouteSamples {
@@ -354,6 +440,7 @@ fn with_contended_mutations<T>(
         successes: usize,
         not_ready: usize,
         errors: usize,
+        handler_error_logged: bool,
     }
     type Samples = Arc<Mutex<BTreeMap<String, RouteSamples>>>;
     type StateValue = (Arc<Store>, String, Samples, Arc<Mutex<(std::time::Duration, usize)>>);
@@ -374,9 +461,10 @@ fn with_contended_mutations<T>(
             let route = uri.path();
             RUN_TREE_REBUILDS.with(|count| count.set(0));
             let (result, held) = smallclaims::windows::holds::longest_during(|| {
-                if route == "/bench/work-claim" {
+                if matches!(route, "/bench/work-claim" | "/bench/work-release") {
                     let request: WorkRequest = serde_json::from_value(body).unwrap();
-                    worker.work_action(&subject, "claim", &request)
+                    let action = if route == "/bench/work-claim" { "claim" } else { "release" };
+                    worker.work_action(&subject, action, &request)
                 } else {
                     let request: PersonAskRequest = serde_json::from_value(body).unwrap();
                     worker.ask_person(&request)
@@ -392,8 +480,15 @@ fn with_contended_mutations<T>(
                 Err(error) => {
                     let not_ready = error.code == "database-busy"
                         && error.details.get("reason").and_then(serde_json::Value::as_str) == Some("run-projection-drain");
-                    if not_ready {
-                        samples.lock().unwrap().entry(route.into()).or_default().not_ready += 1;
+                    {
+                        let mut samples = samples.lock().unwrap();
+                        let row = samples.entry(route.into()).or_default();
+                        if not_ready {
+                            row.not_ready += 1;
+                        } else if !row.handler_error_logged {
+                            eprintln!("contended_mutation_first_422 route={route} code={} message={}", error.code, error.message);
+                            row.handler_error_logged = true;
+                        }
                     }
                     (if not_ready { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::UNPROCESSABLE_ENTITY },
                         Json(json!({"code": error.code, "message": error.message, "details": error.details})))
@@ -410,6 +505,7 @@ fn with_contended_mutations<T>(
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
             let router = Router::new()
                 .route("/bench/work-claim", post(mutate))
+                .route("/bench/work-release", post(mutate))
                 .route("/bench/person-ask", post(mutate))
                 .with_state(state);
             axum::serve(listener, router).with_graceful_shutdown(async { let _ = stopped.await; }).await.unwrap();
@@ -430,19 +526,45 @@ fn with_contended_mutations<T>(
                     let client = Client::new(Endpoint::Http(endpoint.clone()));
                     barrier.wait();
                     let mut index = 0;
+                    let mut error_logged = false;
+                    let mut release_error_logged = false;
                     // Always finish any in-flight logical mutation, even after receive ends.
                     loop {
                         let key = format!("huge-contended-{route}-{index}");
                         let body = if route == "/bench/work-claim" {
-                            json!({"actor": "agent/node.bench", "incarnation": "huge-bench", "idempotency_key": key})
+                            json!({"actor": "agent/node.claim", "incarnation": "huge-claim", "idempotency_key": key})
                         } else {
                             json!({"person": "person/test", "actor": "agent/node.bench", "title": "Huge-part contention", "reason": "Measure bounded mutation progress", "idempotency_key": key})
                         };
                         let response: anyhow::Result<serde_json::Value> = client.request("POST", route, Some(&body)).await;
-                        if response.is_err() {
+                        if let Err(error) = &response {
+                            if !error_logged {
+                                eprintln!("contended_mutation_first_error route={route} error={error:#}");
+                                error_logged = true;
+                            }
                             samples.lock().unwrap().entry(route.into()).or_default().errors += 1;
                         } else {
                             samples.lock().unwrap().entry(route.into()).or_default().successes += 1;
+                            if route == "/bench/work-claim" {
+                                // Release completes this logical pair even when receive has ended.
+                                let release_route = "/bench/work-release";
+                                let body = json!({
+                                    "actor": "agent/node.claim",
+                                    "incarnation": "huge-claim",
+                                    "idempotency_key": format!("huge-contended-{release_route}-{index}"),
+                                });
+                                let release: anyhow::Result<serde_json::Value> =
+                                    client.request("POST", release_route, Some(&body)).await;
+                                if let Err(error) = release {
+                                    if !release_error_logged {
+                                        eprintln!("contended_mutation_first_error route={release_route} error={error:#}");
+                                        release_error_logged = true;
+                                    }
+                                    samples.lock().unwrap().entry(release_route.into()).or_default().errors += 1;
+                                } else {
+                                    samples.lock().unwrap().entry(release_route.into()).or_default().successes += 1;
+                                }
+                            }
                         }
                         index += 1;
                         if done.load(Ordering::Acquire) { break; }
@@ -459,28 +581,42 @@ fn with_contended_mutations<T>(
     shutdown.send(()).unwrap();
     server.join().unwrap();
     let samples = samples.lock().unwrap();
-    for route in ["/bench/work-claim", "/bench/person-ask"] {
-        let row = samples.get(route).expect("mutation observer must report each route");
+    let rebuild_events = collector.snapshot();
+    let (part, root) = target;
+    let target_rebuilds = rebuild_events.iter().filter(|event| target_rebuild(event, part, root)).count();
+    let pages = page_ends.lock().unwrap();
+    let target_page_max = target_page_max(&rebuild_events, &pages, part, root);
+    let max_page = pages.iter().map(|(_, elapsed)| *elapsed).max().unwrap_or_default();
+    let m2 = max_page < std::time::Duration::from_secs(15);
+    let other_rebuilds = rebuild_events.len() - target_rebuilds;
+    let mut route_pass = true;
+    let redundant_local = rebuild_events.iter().filter(|event| event.local_redundant).count();
+    for route in ["/bench/work-claim", "/bench/work-release", "/bench/person-ask"] {
+        let empty = RouteSamples::default();
+        let row = samples.get(route).unwrap_or(&empty);
         let mut attempts: Vec<_> = row.calls.iter().map(|(attempts, _)| *attempts).collect();
         attempts.sort_unstable();
         let n = attempts.len();
-        assert!(n > 0, "each route must issue mutations during receive");
-        let attempts_max = attempts[n - 1];
-        let attempts_p50 = attempts[n.div_ceil(2) - 1];
+        let attempts_max = attempts.last().copied().unwrap_or_default();
+        let attempts_p50 = attempts.get(n.saturating_sub(1) / 2).copied().unwrap_or_default();
         // End-to-end logical mutation time including gate, writer and retry waits.
         let mut took: Vec<_> = row.calls.iter().map(|(_, took)| *took).collect();
         took.sort_unstable();
-        let took_max = took[n - 1];
-        let took_p50 = took[n.div_ceil(2) - 1];
-        let took_p99 = took[(n * 99).div_ceil(100) - 1];
+        let took_max = took.last().copied().unwrap_or_default();
+        let took_p50 = took.get(n.saturating_sub(1) / 2).copied().unwrap_or_default();
+        let took_p99 = took.get((n * 99).div_ceil(100).saturating_sub(1)).copied().unwrap_or_default();
         let m1_latency = took_max < std::time::Duration::from_secs(15);
         let pass = attempts_max <= 3 && took_max <= std::time::Duration::from_secs(60) && row.errors == 0 && row.successes > 0;
-        eprintln!("contended_mutations route={route} n={n} successes={} refusals={} errors={} attempts_max={attempts_max} attempts_p50={attempts_p50} total_ms_p50={} total_ms_p99={} total_ms_max={} total_vs_15s={} gate={}",
+        eprintln!("contended_mutations route={route} n={n} successes={} refusals={} errors={} attempts_max={attempts_max} attempts_p50={attempts_p50} total_ms_p50={} total_ms_p99={} total_ms_max={} total_vs_15s={} gate={} target_rebuilds={target_rebuilds} other_rebuilds={other_rebuilds} target_page_max={target_page_max} target_limit=2 target_gate={} redundant_local_rebuilds={redundant_local} redundant_local_gate={} m2_max_page_ms={} m2_limit_ms=15000 m2_gate={} rebuild_causes={:?}",
             row.successes, row.not_ready, row.errors, took_p50.as_millis(), took_p99.as_millis(), took_max.as_millis(),
-            if m1_latency { "pass" } else { "fail" }, if pass { "pass" } else { "fail" });
+            if m1_latency { "pass" } else { "fail" }, if pass && redundant_local == 0 && target_page_max <= 2 && m2 { "pass" } else { "fail" },
+            if target_page_max <= 2 { "pass" } else { "fail" },
+            if redundant_local == 0 { "pass" } else { "fail" }, max_page.as_millis(),
+            if m2 { "pass" } else { "fail" }, rebuild_breakdown(&rebuild_events));
+        route_pass &= pass;
     }
     let metrics = *holds.lock().unwrap();
-    (result, metrics.0, metrics.1)
+    (result, metrics.0, metrics.1, route_pass)
 }
 
 #[test]
