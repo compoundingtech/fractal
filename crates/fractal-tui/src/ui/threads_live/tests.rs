@@ -762,6 +762,55 @@ fn original_close_retry_survives_changed_summary_collapse_and_later_refusal() {
 }
 
 #[test]
+fn a_closed_summary_keeps_the_active_reply_focus_and_quote() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let id = "thread/worker";
+    let pane = Pane::Thread(id.into());
+    let mut texts = HashMap::new();
+    threads.tap(
+        &pane.key(),
+        thread::Tap::Reply {
+            thread: id.into(),
+            message: "message/question".into(),
+        },
+        &mut texts,
+    );
+    threads.paste(
+        &pane,
+        "Continue this discussion",
+        &edit::Cursor::default(),
+        &mut texts,
+    );
+    let input = Input::Reply(id.into());
+    threads.put_summary(Envelope {
+        value: ThreadSummary {
+            state: ThreadState::Closed,
+            revision: "claim/closed".into(),
+            ..summary()
+        },
+        snapshot: snapshot(),
+        request_id: "request/closed".into(),
+        api_version: fractal_client::API_VERSION.into(),
+    });
+    assert_eq!(threads.focused, Some((pane.key(), input.clone())));
+    assert_eq!(
+        threads.drafts[&input.key()].quote.as_deref(),
+        Some("message/question")
+    );
+    threads.submit(&pane.key(), input, &texts);
+    let write = threads.writes().pop().unwrap();
+    let Mutation::Reply(parameters) = write.mutation else {
+        panic!("reply")
+    };
+    assert_eq!(parameters.content, "Continue this discussion");
+    assert_eq!(
+        parameters.thread_quote_id.as_deref(),
+        Some("message/question")
+    );
+    assert_eq!(threads.summary(id).unwrap().state, ThreadState::Closed);
+}
+
+#[test]
 fn a_confirmed_reply_does_not_consume_a_concurrent_unknown_close() {
     let mut threads = observed_threads(ThreadState::Open);
     let mut texts = HashMap::new();

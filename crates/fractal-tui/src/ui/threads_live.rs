@@ -729,14 +729,6 @@ impl Threads {
             old.snapshot.host_id == summary.snapshot.host_id
                 && old.snapshot.store_index > summary.snapshot.store_index
         }) {
-            if summary.value.state == ThreadState::Closed
-                && self
-                    .focused
-                    .as_ref()
-                    .is_some_and(|(_, mode)| matches!(mode, Input::Reply(active) if active == id))
-            {
-                self.focused = None;
-            }
             self.summaries.insert(id.clone(), summary);
         }
     }
