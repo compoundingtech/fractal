@@ -978,7 +978,9 @@ mod tests {
         .await;
         let rename = &next["items"][0];
         assert_eq!(rename["kind"], "thread.renamed");
-        assert_eq!(rename["id"], renamed.id);
+        let operation = renamed.operation_id.as_deref().expect("the rename has a durable operation receipt");
+        assert_eq!(rename["id"], operation);
+        assert_ne!(operation, renamed.id, "timeline event identity is the operation, not its claim");
         assert_eq!(rename["actor_id"], person);
         assert_eq!(rename["previous_title"], "Review");
         assert_eq!(rename["title"], "New title");
@@ -1621,7 +1623,7 @@ agent "garden/other" { workspace "/work/garden"; harness "omp" {} }
     }
     #[tokio::test]
     async fn inbox_start_freezes_source_and_recipient_and_recovers_after_resolution() {
-        use crate::model::PersonAskRequest;
+        use crate::model::MissionRunRequest;
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::test_state_named(root.path(), "inbox-start");
         let person = "person/operator";
@@ -1632,21 +1634,28 @@ agent "garden/other" { workspace "/work/garden"; harness "omp" {} }
             r#"version 2
 agent "garden/a" { workspace "/work/garden"; harness "omp" {} }
 agent "garden/b" { workspace "/work/garden"; harness "omp" {} }
+mission "owner-decision" state="ready" {
+  goal "An owner decision";
+  step "review" { assigned-to "person/operator"; goal "private-source-context"; }
+}
 "#,
             state.store.origin(),
         ).unwrap();
         state.store.apply_internal(&intent, "declare-inbox-agents").unwrap();
         state.store.configure_thread_write_rollout([]);
         state.store.configure_inbox_fallback_agent(Some(agent_a)).unwrap();
-        let ask = state.store.ask_person(&PersonAskRequest {
-            person: person.into(), actor: "daemon/runtime".into(),
-            title: "An owner decision".into(), reason: "private-source-context".into(),
-            step: None, new_run: None, incarnation: None, legacy_request: None,
-            idempotency_key: "system-source".into(), deadline_ms: None, default_answer: None,
-            request: None,
+        // An authored human-only step is a real Inbox source with no originating agent.
+        // It uses configured discussion responsibility without manufacturing a daemon ask.
+        let run = state.store.create_mission_run(&MissionRunRequest {
+            mission:"owner-decision".into(),revision:None,workspace:"/work/garden".into(),
+            requester:Some(person.into()),mode:Some("run".into()),inputs:BTreeMap::new(),
+            idempotency_key:"human-owner-source".into(),
         }).unwrap();
-        let episode = state.store.newest_claim_for_subject_kind(&ask.subject, "work.person-asked")
-            .unwrap().unwrap().id;
+        let source = run.steps.into_iter().find(|step|step.step=="review").unwrap();
+        assert_eq!(source.assigned_to.as_deref(),Some(person));
+        let item = state.store.attention_items(Some(person)).unwrap().into_iter()
+            .find(|item|item.subject==source.subject).expect("the authored step is in the real Inbox");
+        let episode = item.episode;
         let app = crate::api::router(state.clone());
         let post = |actor: &'static str, kind: &'static str, key: &'static str, parameters: Value| {
             let app = app.clone();
@@ -1667,16 +1676,16 @@ agent "garden/b" { workspace "/work/garden"; harness "omp" {} }
         };
         let parameters = json!({
             "target_id":thread, "agent_id":agent_a,
-            "origin":{"source_id":ask.subject,"episode":episode},
+            "origin":{"source_id":source.subject,"episode":episode},
             "title":"Discuss the owner decision", "content":"Please explain the choices.",
         });
         let mut wrong = parameters.clone();
         wrong["agent_id"] = json!(agent_b);
-        assert_ne!(post(person, "thread.start", "wrong-agent", wrong).await.0, StatusCode::OK);
-        assert_ne!(post("person/other", "thread.start", "wrong-owner", parameters.clone()).await.0, StatusCode::OK);
+        assert_eq!(post(person, "thread.start", "wrong-agent-source", wrong).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(post("person/other", "thread.start", "wrong-owner-source", parameters.clone()).await.0, StatusCode::NOT_FOUND);
         let mut stale = parameters.clone();
         stale["origin"]["episode"] = json!("claim/other-episode");
-        assert_ne!(post(person, "thread.start", "stale-source", stale).await.0, StatusCode::OK);
+        assert_eq!(post(person, "thread.start", "stale-source-episode", stale).await.0, StatusCode::NOT_FOUND);
         assert!(state.store.claims_for(thread, None).unwrap().is_empty());
         state.store.connection.write().execute_batch(
             "CREATE TEMP TRIGGER refuse_inbox_first_message BEFORE INSERT ON claims
@@ -1693,15 +1702,15 @@ agent "garden/b" { workspace "/work/garden"; harness "omp" {} }
         let created = state.store.newest_claim_for_subject_kind(thread, "thread.created").unwrap().unwrap();
         let sent = state.store.newest_claim_for_subject_kind(message, "message.sent").unwrap().unwrap();
         assert_eq!(created.batch_id, sent.batch_id);
-        assert_eq!(created.body["fields"]["origin_source"], ask.subject);
+        assert_eq!(created.body["fields"]["origin_source"], source.subject);
         assert_eq!(created.body["fields"]["origin_episode"], episode);
         assert!(created.body["fields"].get("origin_ask").is_none());
         assert_eq!(created.body["fields"]["agent"], agent_a);
-        assert_eq!(sent.body["fields"]["thread_origin_source"], ask.subject);
+        assert_eq!(sent.body["fields"]["thread_origin_source"], source.subject);
         assert_eq!(sent.body["fields"]["thread_origin_episode"], episode);
         assert!(!serde_json::to_string(&created.body).unwrap().contains("private-source-context"));
         assert!(!serde_json::to_string(&sent.body).unwrap().contains("private-source-context"));
-        assert!(state.store.claims_for(&ask.subject, Some("work.person-done")).unwrap().is_empty());
+        assert!(state.store.claims_for(&source.subject, Some("work.person-done")).unwrap().is_empty());
 
         // A new configured fallback changes only future starts.
         state.store.configure_inbox_fallback_agent(Some(agent_b)).unwrap();
@@ -1717,15 +1726,15 @@ agent "garden/b" { workspace "/work/garden"; harness "omp" {} }
         let newer = state.store.newest_claim_for_subject_kind("thread/new-system-discussion", "thread.created").unwrap().unwrap();
         assert_eq!(newer.body["fields"]["agent"], agent_b);
 
-        let (status, settled) = post(person, "work.done", "settle-source", json!({
-            "target_id":ask.subject,"episode":episode,"summary":"Decided.",
+        let (status, settled) = post(person, "work.done", "settle-human-source", json!({
+            "target_id":source.subject,"episode":episode,"summary":"Decided.",
         })).await;
         assert_eq!(status, StatusCode::OK, "{settled}");
         let (status, recovered) = post(person, "thread.start", "start-system-source", parameters).await;
         assert_eq!(status, StatusCode::OK, "{recovered}");
         assert_eq!(recovered["value"]["operation_id"], started["value"]["operation_id"]);
         let history = thread_metadata::list_context(
-            &state.store, person, ThreadContext::Inbox { source:&ask.subject, episode:&episode }, None, 20,
+            &state.store, person, ThreadContext::Inbox { source:&source.subject, episode:&episode }, None, 20,
         ).unwrap();
         assert_eq!(history.items.len(), 2, "history survives source resolution");
         assert_eq!(state.store.claims_for(thread, Some("thread.created")).unwrap().len(), 1);

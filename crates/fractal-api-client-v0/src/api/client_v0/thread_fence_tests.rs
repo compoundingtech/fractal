@@ -94,7 +94,7 @@ async fn both_arrangement_actions_authorize_extra_thread_fences_before_the_write
                 "parameters":parameters,
             })).unwrap()
         };
-        action(State(state.clone()),Extension(new_client_snapshot(&state)),Extension(owner.clone()),
+        let _ = action(State(state.clone()),Extension(new_client_snapshot(&state)),Extension(owner.clone()),
             Json(request("create",None,true))).await.unwrap();
         let before = state.store.claims_for(arrangement,None).unwrap().len();
         let denied = action(State(state.clone()),Extension(new_client_snapshot(&state)),Extension(owner.clone()),
@@ -110,7 +110,7 @@ async fn both_arrangement_actions_authorize_extra_thread_fences_before_the_write
             Json(request("no-read",Some((own_thread,&own_revision)),false))).await.unwrap_err();
         assert_eq!(denied.status,StatusCode::FORBIDDEN,"{family}");
         assert_eq!(state.store.claims_for(arrangement,None).unwrap().len(),before);
-        action(State(state.clone()),Extension(new_client_snapshot(&state)),Extension(owner),
+        let _ = action(State(state.clone()),Extension(new_client_snapshot(&state)),Extension(owner),
             Json(request("owner-allowed",Some((own_thread,&own_revision)),false))).await.unwrap();
 
         let grant = "custom/client/pairing-arrangement-thread-fence";
@@ -123,7 +123,7 @@ async fn both_arrangement_actions_authorize_extra_thread_fences_before_the_write
         }).unwrap();
         let paired = paired_client_session(&state,&completed,"fabric-loopback",false).unwrap();
         let paired_request = request("paired-allowed",Some((own_thread,&own_revision)),false);
-        action(State(state.clone()),Extension(new_client_snapshot(&state)),Extension(paired.clone()),
+        let _ = action(State(state.clone()),Extension(new_client_snapshot(&state)),Extension(paired.clone()),
             Json(paired_request.clone())).await.unwrap();
         state.store.append_client_operation_claim(&ClaimInput {
             subject:grant.into(),kind:"custom.client.pairing-revoked".into(),actor:Some(person.into()),
