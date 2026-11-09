@@ -59,7 +59,7 @@ test('AllStates closes and returns focus while the closing animation frame is wi
       if (event.key === 'Escape' && event.target.closest('[data-details-all-state="partial"]')) closing = true
     }, { capture: true })
     window.requestAnimationFrame = callback => closing
-      ? frame(time => { window.__detailsHeldCloseFrame = true; setTimeout(() => callback(time), 1500) })
+      ? frame(time => { setTimeout(() => callback(time), 1500) })
       : frame(callback)
   })
   const guard = await strictStoryGuard(page, base)
