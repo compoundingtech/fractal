@@ -1,5 +1,5 @@
 import type { MembershipEffect, MembershipEvent, MembershipPage, MembershipToken } from './sidebarMemberships';
-import { applyWindow, isResourceCollectionFrame, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type FractalClient, type TerminalScreen, type TimelineEntry } from '../../clients/typescript/fractal-client';
+import { applyWindow, isResourceCollectionFrame, isTransientCode, plainError, plainMessage, type Agent, type Arrangement, type Attention, type CollectionFrame, type Glass, type CollectionName, type CollectionStream, type CollectionWindow, type Mission, type Snapshot, type FractalClient, type TerminalScreen, type TimelineEntry, type ThreadSummary, type ThreadTimelineEvent, type ThreadTimelineFrame, type ThreadSummaryFrame, type ThreadCollectionContext } from '../../clients/typescript/fractal-client';
 import type { InventoryName } from '@fractal/views';
 import { InventoryFeed, type InventoryHandlers } from './inventoryFeed';
 import type { SidebarArrangement } from './sidebarEdits';
@@ -84,6 +84,18 @@ export type ConversationHandlers = {
   onQualityError?: (code?: string) => void;
 };
 
+export const THREAD_WINDOW_SIZE = 25;
+export type ThreadWindowHandlers<T extends { id: string }> = {
+  onWindow: (window: CollectionWindow<T>) => void;
+  onIssue: (issue: string, refused: boolean) => void;
+};
+type ThreadFollow = {
+  subscribe: (stream: CollectionStream) => void;
+  reset: () => void;
+  frame: (frame: CollectionFrame) => void;
+};
+type ThreadFrame = ThreadSummaryFrame | ThreadTimelineFrame;
+
 type Client = Pick<FractalClient, 'collectionStream' | 'terminalScreen' | 'terminalAttach' | 'terminalDetach'>;
 // Three missed eight-second protocol heartbeats bound a blackholed connection.
 export const HEARTBEAT_WAIT_MS = 24_000;
@@ -138,6 +150,9 @@ export class Feed {
   private live = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stream: CollectionStream | undefined;
+  private nextThreadSubscription = 0;
+  private attentionThreadHints = false;
+  private readonly threadFollows = new Map<string, ThreadFollow>();
   private windows: Partial<Record<FeedWindow, CollectionWindow>> = {};
   private terminal: TerminalFollow | undefined;
   private conversation: { target: string; handlers: ConversationHandlers; failures: number; timer?: ReturnType<typeof setTimeout> } | undefined;
@@ -194,6 +209,7 @@ export class Feed {
     this.inventory.close();
     this.closed = true;
     this.suspend();
+    this.threadFollows.clear();
     this.unsubscribe();
   }
 
@@ -227,6 +243,83 @@ export class Feed {
     return { close: () => { if (this.conversation !== follow) return; clearTimeout(follow.timer); this.conversation = undefined; this.stream?.unsubscribe(CONVERSATION); } };
   }
 
+  /** A feed must belong to the client whose capability authorized a thread read. */
+  belongsTo(client: FractalClient): boolean { return !this.closed && this.client === client; }
+
+  followThreadSummaries(context: ThreadCollectionContext, handlers: ThreadWindowHandlers<ThreadSummary>): Follow {
+    return this.followThreadWindow(
+      (stream, id) => stream.subscribe(id, 'threads', THREAD_WINDOW_SIZE, { thread_context: context }),
+      (window, frame) => frame.collection === 'threads' ? applyWindow(window, frame) : undefined,
+      handlers,
+    );
+  }
+
+  followThreadSummary(subject: string, handlers: ThreadWindowHandlers<ThreadSummary>): Follow {
+    return this.followThreadWindow(
+      (stream, id) => stream.subscribe(id, 'threads', 1, { subject }),
+      (window, frame) => frame.collection === 'threads' ? applyWindow(window, frame) : undefined,
+      handlers,
+    );
+  }
+
+  followThreadTimeline(subject: string, handlers: ThreadWindowHandlers<ThreadTimelineEvent>): Follow {
+    return this.followThreadWindow(
+      (stream, id) => stream.subscribe(id, 'thread-timeline', THREAD_WINDOW_SIZE, { subject }),
+      (window, frame) => frame.collection === 'thread-timeline' ? applyWindow(window, frame) : undefined,
+      handlers,
+    );
+  }
+
+  private followThreadWindow<T extends { id: string }>(
+    subscribe: (stream: CollectionStream, id: string) => void,
+    apply: (window: CollectionWindow<T> | undefined, frame: ThreadFrame) => CollectionWindow<T> | undefined,
+    handlers: ThreadWindowHandlers<T>,
+  ): Follow {
+    const id = `thread-window-${++this.nextThreadSubscription}`;
+    let window: CollectionWindow<T> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let failures = 0;
+    const reset = () => { clearTimeout(timer); timer = undefined; window = undefined; failures = 0; };
+    const retry = () => {
+      if (timer !== undefined) return;
+      const delay = this.retryDelaysMs[Math.min(failures++, this.retryDelaysMs.length - 1)];
+      timer = setTimeout(() => {
+        timer = undefined;
+        if (this.stream) subscribe(this.stream, id);
+      }, delay);
+    };
+    const follow: ThreadFollow = {
+      reset,
+      subscribe: stream => subscribe(stream, id),
+      frame: frame => {
+        if (frame.kind === 'error' || frame.kind === 'resync') {
+          window = undefined;
+          const refused = frame.kind === 'error' && !frame.retryable && !transient(frame.code);
+          handlers.onIssue(plainMessage(frame.code, frame.message ?? 'Fractal could not update this thread window.'), refused);
+          if (!refused) retry();
+          return;
+        }
+        if ((frame.kind !== 'snapshot' && frame.kind !== 'changes') || (frame.collection !== 'threads' && frame.collection !== 'thread-timeline')) return;
+        const next = apply(window, frame);
+        if (!next) { window = undefined; retry(); return; }
+        clearTimeout(timer);
+        timer = undefined;
+        failures = 0;
+        window = next;
+        handlers.onWindow(next);
+      },
+    };
+    if (!this.closed) {
+      this.threadFollows.set(id, follow);
+      if (this.stream) follow.subscribe(this.stream);
+    }
+    return { close: () => {
+      if (!this.threadFollows.delete(id)) return;
+      follow.reset();
+      this.stream?.unsubscribe(id);
+    } };
+  }
+
   /** Follow the person's glasses (Fractal keeps at most 100 live); a second call replaces the first. */
   followGlasses(handlers: GlassesHandlers): Follow {
     const follow = { handlers };
@@ -249,6 +342,7 @@ export class Feed {
   }
 
   private suspend(unexpected = false): void {
+    this.attentionThreadHints = false;
     this.attempt++;
     clearTimeout(this.timer);
     this.timer = undefined;
@@ -256,6 +350,7 @@ export class Feed {
     this.stream = undefined;
     this.live = false;
     this.windows = {};
+    for (const follow of this.threadFollows.values()) follow.reset();
     clearTimeout(this.heartbeat);
     this.heartbeat = undefined;
     this.inventory.suspend();
@@ -275,6 +370,12 @@ export class Feed {
   }
 
   setInventoryGranted(granted: boolean): void { this.inventory.setGranted(granted); }
+
+  setAttentionThreadHints(granted: boolean): void {
+    if (!this.live || this.attentionThreadHints === granted) return;
+    this.attentionThreadHints = granted;
+    this.subscribeWindow('attention');
+  }
   watchInventory<K extends InventoryName>(name: K, handlers: InventoryHandlers<K>, hours?: 24 | 168 | 720): () => void {
     return this.inventory.watch(name, handlers, hours);
   }
@@ -332,6 +433,7 @@ export class Feed {
       this.heard();
       this.inventory.open(opened);
       for (const name of Object.keys(FEED_WINDOWS) as FeedWindow[]) if (name !== 'missions' || this.missions) this.subscribeWindow(name);
+      for (const follow of this.threadFollows.values()) follow.subscribe(opened);
       if (this.conversation) opened.subscribeConversation(CONVERSATION, this.conversation.target);
       if (this.glasses) { this.glasses.window = undefined; opened.subscribeGlasses(GLASSES); }
       if (this.terminal) void this.terminal.attach();
@@ -376,7 +478,11 @@ export class Feed {
   private subscribeWindow(name: FeedWindow): void {
     if (name === 'missions' && !this.missions) return;
     delete this.windows[name];
-    this.stream?.subscribe(name, FEED_WINDOWS[name].collection, FEED_WINDOWS[name].limit);
+    if (name === 'attention' && this.attentionThreadHints) {
+      this.stream?.subscribe(name, 'attention', FEED_WINDOWS.attention.limit, { attention_thread_hints: true });
+    } else {
+      this.stream?.subscribe(name, FEED_WINDOWS[name].collection, FEED_WINDOWS[name].limit);
+    }
   }
 
   private dropped(error: unknown): void {
@@ -392,6 +498,8 @@ export class Feed {
     // The app holds no ordered-membership window; its windows hold resources.
     if (this.inventory.frame(frame)) return;
     const id = 'id' in frame ? frame.id : undefined;
+    const thread = id ? this.threadFollows.get(id) : undefined;
+    if (thread) { thread.frame(frame); return; }
     if (!isResourceCollectionFrame(frame)) return;
     if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.id === ARRANGEMENTS) {
       const follow = this.arrangements;

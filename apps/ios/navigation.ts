@@ -21,6 +21,7 @@ export type StackParams = {
   /** One space's tabs, grouped by pane. */
   Space: { id: string; title?: string };
   Conversation: { target: string; sessionId?: string; title?: string; find?: string };
+  Thread: { id: string };
   Terminal: { terminalId: string; title?: string };
   /** One conversation entry's text, to select and copy any part of it. */
   Mission: { id: string; title?: string };
@@ -39,7 +40,7 @@ export type TabParams = { [K in Tab]: NavigatorScreenParams<StackParams> | undef
 
 export const ROOTS: Record<Tab, keyof StackParams> = { Now: 'NowRoot', Resources: 'ResourcesRoot', Fleet: 'FleetRoot', Spaces: 'SpacesRoot' };
 /** Details that take the whole screen: the tab bar hides while they are on top, as in Messages. */
-export const FULL_SCREEN: ReadonlyArray<keyof StackParams> = ['Conversation', 'Terminal'];
+export const FULL_SCREEN: ReadonlyArray<keyof StackParams> = ['Conversation', 'Thread', 'Terminal'];
 
 export type RootParams = StackParams;
 export type RootScreen<K extends keyof StackParams> = NativeStackScreenProps<StackParams, K>;
