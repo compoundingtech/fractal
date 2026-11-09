@@ -64,9 +64,9 @@ pub struct StepTransition {
     /// The step's state after this event, in the `MissionStep.state` vocabulary.
     pub status: String,
     pub attempt: u64,
-    /// The claim that moved it: `state`, `carried`, `retried`, `claimed`, `submitted`, `failed`,
-    /// `released`, or `nudged` (a stall marker that leaves the state as it was).
-    pub event: &'static str,
+    /// The event that moved it: `state` (including a terminal person response), `carried`,
+    /// `retried`, `claimed`, `submitted`, `failed`, `released`, or `nudged` (a stall marker
+    /// that leaves the state as it was).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// For `nudged`: since when the holder had been idle.
@@ -207,6 +207,14 @@ pub fn fold_step_history(
         let attempt = field_attempt.unwrap_or(current_attempt);
         let reason = text(fields, &["reason", "summary"]);
 
+        // A late reconciliation or claim must not extend the declared retry backoff.
+        if let Some(deadline) = retry_until
+            && at >= deadline
+        {
+            open.close("retry", deadline, &mut waits);
+            retry_until = None;
+        }
+
         // A declared pause ends on its own at its deadline.
         if let Some(deadline) = paused_until
             && at > deadline
@@ -338,13 +346,12 @@ pub fn fold_step_history(
                     open.close("you", at, &mut waits);
                 }
                 // A person step completes through its own answer.
-                if let Some(outcome) = fields
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .and_then(outcome_of)
+                if let Some(next) = fields.get("status").and_then(Value::as_str)
+                    && let Some(outcome) = outcome_of(next)
                 {
                     let entry = attempt_mut(&mut attempts, attempt);
                     end_attempt(entry, at, outcome, reason.clone());
+                    moved = Some((next.to_owned(), "state"));
                 }
             }
             "work.nudged" => {
@@ -724,6 +731,17 @@ mod tests {
                 .end,
             Some(100)
         );
+        for (kind, fields, at, expected_end) in [
+            ("step-run.state", json!({"status": "ready", "attempt": 2}), 110, 100),
+            ("work.claimed", json!({"attempt": 2, "claimant": "agent/two"}), 120, 100),
+            ("work.claimed", json!({"attempt": 2, "claimant": "agent/two"}), 90, 90),
+        ] {
+            let mut events = events.clone();
+            events.push(event(kind, fields, at));
+            let history = fold_step_history(&events, &[], 150);
+            let retry = history.waits.iter().find(|wait| wait.kind == "retry").unwrap();
+            assert_eq!(retry.end, Some(expected_end), "{kind} at {at}");
+        }
     }
 
     #[test]

@@ -302,6 +302,8 @@ not proof of a single attempt or no waits.
   attempt is listed once. `event: nudged` is a stall marker from `work.nudged`; its `status` repeats
   the state st found, and consecutive nudges at that state stand as one marker with the latest
   `at` and the earliest `idle_since`, since when the holder was idle.
+  Terminal `work.person-done` and `work.person-cancelled` responses use `event: state` and close
+  any remaining waits, just like terminal `step-run.state` claims.
 
 The fold reads the lifecycle claims of the enriched runs' current-generation steps in one batch,
 as step timing does. It never reads `work.renewed`, and a `work.progress` without a `clock` is

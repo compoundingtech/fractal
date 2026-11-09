@@ -244,6 +244,8 @@ fn mission_detail_folds_each_attempt_wait_and_transition_of_a_step() {
             .iter()
             .any(|wait| wait["kind"] == "you")
     );
+    assert_eq!(ask_step["transitions"].as_array().unwrap().last().unwrap()["status"], "completed");
+    assert!(ask_step["waits"].as_array().unwrap().iter().all(|wait| wait["end"].is_u64()));
 
     // Collection reads never carry the history.
     let index = state.store.index().unwrap();
@@ -264,6 +266,43 @@ fn mission_detail_folds_each_attempt_wait_and_transition_of_a_step() {
                 assert!(step.get(field).is_none(), "{field} on a list read");
             }
         }
+    }
+}
+
+#[test]
+fn authored_person_responses_close_queue_waits_and_emit_terminal_transitions() {
+    for (cancel, terminal) in [(false, "completed"), (true, "cancelled")] {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        publish(
+            &state,
+            "version 2\nmission \"person-history\" state=\"ready\" {\n goal \"Decide.\"\n step \"decide\" { assigned-to \"person/ada\" }\n}\n",
+            "publish-person-history",
+        );
+        let run = start(&state, "person-history", "person-history-1");
+        let subject = &run.steps.iter().find(|step| step.step == "decide").unwrap().subject;
+        state.store.set_step_state(subject, "ready", None).unwrap();
+        state.store.finish_person_step(
+            &PersonStepResponse {
+                delegation: None,
+                subject: subject.clone(),
+                actor: "person/ada".into(),
+                summary: "Decision recorded.".into(),
+                evidence: Vec::new(),
+                episode: None,
+                answer: None,
+                idempotency_key: "person-response".into(),
+            },
+            cancel,
+        ).unwrap();
+        let mission = detail(&state, "mission/person-history", None);
+        let shown = step(run_detail(&mission, &run.subject), "decide");
+        let transition = shown["transitions"].as_array().unwrap().last().unwrap();
+        assert_eq!(transition["status"], terminal);
+        assert_eq!(transition["event"], "state");
+        let waits = shown["waits"].as_array().unwrap();
+        assert!(waits.iter().any(|wait| wait["kind"] == "queue"));
+        assert!(waits.iter().all(|wait| wait["end"].is_u64()), "{shown:#}");
     }
 }
 
