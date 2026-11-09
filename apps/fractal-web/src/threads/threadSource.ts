@@ -32,6 +32,8 @@ export interface ThreadSource {
   readonly reply: (parameters: Omit<ThreadReplyParameters, 'signature'>) => Promise<ThreadSendResult>
   readonly rename: (thread: ThreadObservation, title: string, titleRevision: string) => Promise<string | undefined>
   readonly changeState: (thread: ThreadObservation, state: ThreadSummary['state']) => Promise<string | undefined>
+  readonly pendingChange?: (threadId: string) => Atom.Atom<string | undefined>
+  readonly retryChange?: (threadId: string) => Promise<string | undefined>
   readonly markRead?: (thread: ThreadObservation, through: string, seen: readonly string[]) => Promise<string | undefined>
 }
 
@@ -191,6 +193,8 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     readonly key: string
     readonly target: string
     readonly actor: string | undefined
+    readonly kind: string
+    run?: () => Promise<ThreadSendResult>
     retry?: BoundAction<Request>
     pending?: Promise<ThreadSendResult>
   }
@@ -216,8 +220,9 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       return Promise.resolve(reject('Fractal has not confirmed the previous action. Retry that action first.'))
     }
     if (!grant.actions.has(kind)) return Promise.resolve(reject('This connection cannot perform that thread action.'))
-    const attempt: Attempt = previous ?? { fingerprint, key: crypto.randomUUID(), target: target(), actor: grant.actor }
+    const attempt: Attempt = previous ?? { fingerprint, key: crypto.randomUUID(), target: target(), actor: grant.actor, kind }
     attempts.set(destination, attempt)
+    attempt.run = () => deliver(destination, fingerprint, kind, target, prepare)
     attempt.pending = (async () => {
       try {
         const prepared = prepare(attempt)
@@ -285,6 +290,17 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
   return {
     access,
     titles,
+    pendingChange: Atom.family((threadId: string) => Atom.make(get => {
+      get(revision)
+      const attempt = attempts.get(`edit/${threadId}`)
+      return attempt?.retry === undefined ? undefined : attempt.kind === 'thread.rename' ? 'rename' : attempt.kind === 'thread.close' ? 'close' : 'reopen'
+    })),
+    retryChange: async threadId => {
+      const attempt = attempts.get(`edit/${threadId}`)
+      if (attempt?.retry === undefined || attempt.run === undefined) return 'There is no unconfirmed thread change.'
+      const result = await attempt.run()
+      return result._tag === 'Sent' ? undefined : result.detail
+    },
     list: query => readList(JSON.stringify(query)),
     detail: readDetail,
     timeline: (threadId, cursor) => readTimeline(pageKey(threadId, cursor)),

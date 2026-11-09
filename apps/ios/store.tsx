@@ -139,6 +139,7 @@ export function threadDraftKey(thread: string): string {
 export function threadStartScope(origin: ThreadStartOrigin): string {
   return JSON.stringify([origin.ask, origin.episode]);
 }
+export function threadEditScope(thread: string): string { return `edit/${thread}`; }
 type ThreadDelivery = { target: string; retry?: () => Promise<ThreadEditResult> };
 type ThreadEdit = { kind: 'rename'; title: string } | { kind: 'close' | 'reopen' };
 export type ThreadEditResult =
@@ -1006,14 +1007,14 @@ function useAppStore(proof?: FabricProfile) {
   const actions = {
     editThread(thread: ThreadSummary, edit: ThreadEdit): Promise<ThreadEditResult> {
       const parameters = { target_id: thread.id };
-      return submitThreadAction(thread.id, edit.kind, { [thread.id]: thread.revision }, async member => ({ send: request => {
+      return trackThreadDelivery(threadEditScope(thread.id), thread.id, () => submitThreadAction(thread.id, edit.kind, { [thread.id]: thread.revision }, async member => ({ send: request => {
         if (edit.kind === 'rename') {
           return member.threadRename({ ...request, parameters: { ...parameters, title: edit.title, title_revision: thread.title_revision } });
         }
         return edit.kind === 'close'
           ? member.threadClose({ ...request, parameters })
           : member.threadReopen({ ...request, parameters });
-      } }));
+      } })));
     },
     markThreadRead(thread: ThreadSummary, visibleIds: readonly string[]): Promise<ThreadEditResult> {
       const [through] = visibleIds;

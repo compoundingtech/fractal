@@ -127,6 +127,7 @@ function ThreadById({ source, threadId, embedded = false, focusComposer = false,
   return <LiveThread source={source} thread={detail.value.summary} embedded={embedded} initiallyExpanded focusComposer={focusComposer} onOpenThread={onOpenThread} />
 }
 
+const noPendingChange = Atom.make<string | undefined>(undefined)
 const idleDetail = Atom.make<Feed<ThreadObservation>>(waiting)
 
 function LiveThread({ source, thread, embedded = true, initiallyExpanded = false, focusComposer = false, onOpenThread }: OpenThread & {
@@ -141,9 +142,13 @@ function LiveThread({ source, thread, embedded = true, initiallyExpanded = false
   const detail = useAtomValue(expanded ? source.detail(thread.id) : idleDetail)
   const observation = detail._tag === 'Observed' ? detail.value : undefined
   const summary = observation?.summary ?? thread
+  const retryChange = source.retryChange
+  const pendingChange = useAtomValue(source.pendingChange?.(thread.id) ?? noPendingChange)
   const markRead = summary.unread === true && actions.has('thread.read') ? source.markRead : undefined
   const viewport = useThreadViewport(expanded && markRead !== undefined)
-  return <ThreadPanel thread={summary} embedded={embedded} initiallyExpanded={initiallyExpanded} onExpansionChange={setExpanded}
+  return <ThreadPanel thread={summary} pendingChange={pendingChange}
+    {...(retryChange === undefined ? {} : { onRetryChange: () => retryChange(thread.id) })}
+    embedded={embedded} initiallyExpanded={initiallyExpanded} onExpansionChange={setExpanded}
     {...(summary.message_count === undefined ? {} : { messageCount: summary.message_count })}
     unread={summary.unread === true}
     {...(onOpenThread === undefined ? {} : { onOpenInTab: () => onOpenThread(thread.id) })}

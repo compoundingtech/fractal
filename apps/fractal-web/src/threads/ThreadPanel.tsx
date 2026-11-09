@@ -23,6 +23,8 @@ export interface ThreadPanelProps {
   readonly onOpenInTab?: () => void
   readonly onRename?: (title: string, titleRevision: string) => Promise<string | undefined>
   readonly onChangeState?: (state: ThreadPanelSummary['state']) => Promise<string | undefined>
+  readonly pendingChange?: string
+  readonly onRetryChange?: () => Promise<string | undefined>
   readonly onMarkRead?: () => Promise<string | undefined>
   readonly canMarkRead?: boolean
   /** Mount the timeline demand and composer only while this presentation is expanded. */
@@ -31,7 +33,7 @@ export interface ThreadPanelProps {
 
 /** The same conversation surface works inline in any context or as a standalone pane. */
 export function ThreadPanel({
-  thread, messageCount, unread = false, embedded = true, initiallyExpanded = false, onExpansionChange, onHideDraft, onOpenInTab, onRename, onChangeState, onMarkRead, canMarkRead = false, children,
+  thread, messageCount, unread = false, embedded = true, initiallyExpanded = false, onExpansionChange, onHideDraft, onOpenInTab, onRename, onChangeState, pendingChange, onRetryChange, onMarkRead, canMarkRead = false, children,
 }: ThreadPanelProps): React.ReactNode {
   const [expanded, setExpanded] = React.useState(initiallyExpanded)
   const contentId = React.useId()
@@ -83,20 +85,24 @@ export function ThreadPanel({
     {open ? <div id={contentId} {...stylex.props(styles.body)}>
       {children}
       <div {...stylex.props(styles.actions)}>
-        {onRename === undefined || titleRevision === undefined ? null : <Button isDisabled={pending} onPress={() => setRename({ title: thread.title, revision: titleRevision })}>Rename</Button>}
-        {onChangeState === undefined ? null : <Button isDisabled={pending} onPress={() => {
+        {onRename === undefined || titleRevision === undefined ? null : <Button isDisabled={pending || pendingChange !== undefined} onPress={() => setRename({ title: thread.title, revision: titleRevision })}>Rename</Button>}
+        {onChangeState === undefined ? null : <Button isDisabled={pending || pendingChange !== undefined} onPress={() => {
           void run(() => onChangeState(thread.state === 'open' ? 'closed' : 'open'))
         }}>{thread.state === 'open' ? 'Close thread' : 'Reopen thread'}</Button>}
         {onHideDraft === undefined ? null : <Button onPress={onHideDraft}>Hide draft</Button>}
         {embedded && onOpenInTab !== undefined ? <Button onPress={onOpenInTab}>Open in tab</Button> : null}
       </div>
+      {pendingChange === undefined || onRetryChange === undefined ? null : <div role="status">
+        Fractal has not confirmed the previous {pendingChange}.
+        <Button isDisabled={pending} onPress={() => { void run(onRetryChange, () => setRename(undefined)) }}>Retry {pendingChange}</Button>
+      </div>}
       {rename === undefined || onRename === undefined ? null : <form onSubmit={event => {
         event.preventDefault()
         const title = rename.title.trim()
-        if (title !== '' && title !== thread.title && !pending) void run(() => onRename(title, rename.revision), () => setRename(undefined))
+        if (title !== '' && title !== thread.title && !pending && pendingChange === undefined) void run(() => onRename(title, rename.revision), () => setRename(undefined))
       }} {...stylex.props(styles.actions)}>
         <label>Thread title <input autoFocus value={rename.title} onChange={event => setRename({ ...rename, title: event.target.value })} /></label>
-        <Button type="submit" isDisabled={pending || rename.title.trim() === '' || rename.title.trim() === thread.title}>Save</Button>
+        <Button type="submit" isDisabled={pending || pendingChange !== undefined || rename.title.trim() === '' || rename.title.trim() === thread.title}>Save</Button>
         <Button isDisabled={pending} onPress={() => setRename(undefined)}>Cancel</Button>
       </form>}
       {onMarkRead === undefined ? feedback : null}

@@ -12,7 +12,7 @@ import { rememberBounded } from '../boundedCache';
 import { agentName } from '../agentsView';
 import { ContextMenu } from '../menu';
 import type { RootScreen } from '../navigation';
-import { errorText, threadDraftKey, threadStartScope, useStore, type ThreadEditResult, type ThreadStartOrigin } from '../store';
+import { errorText, threadEditScope, threadDraftKey, threadStartScope, useStore, type ThreadEditResult, type ThreadStartOrigin } from '../store';
 import { visibleThreadMessages } from '../threadVisibility';
 import { measureThreadBounds, measureThreadViewport, ThreadViewport, useThreadViewports } from '../threadViewport';
 import { theme } from '../theme';
@@ -387,10 +387,13 @@ function ThreadBody({ client, thread, onOpen, revealComposer }: {
   };
   const [editing, setEditing] = useState(false);
   const [editResult, setEditResult] = useState<ThreadEditResult>();
-  const editable = status === 'online' && !editing && editResult?.how !== 'unconfirmed';
-  const runEdit = async (send: () => Promise<ThreadEditResult>) => {
+  const editDelivery = threadDeliveries?.get(threadEditScope(thread.id));
+  const editFeedback = editDelivery?.retry ? { how: 'unconfirmed' as const, retry: editDelivery.retry } : editResult;
+  const editable = status === 'online' && !editing && !editDelivery && editFeedback?.how !== 'unconfirmed';
+  const runEdit = async (send: () => Promise<ThreadEditResult>, retained = false) => {
     setEditing(true);
-    try { setEditResult(await send()); }
+    setEditResult(undefined);
+    try { const result = await send(); setEditResult(retained && result.how === 'unconfirmed' ? undefined : result); }
     finally { setEditing(false); }
   };
   const canMarkRead = thread.unread === true && !!actor && threadActions.has('thread.read');
@@ -409,7 +412,7 @@ function ThreadBody({ client, thread, onOpen, revealComposer }: {
   });
   const rename = () => Alert.prompt('Rename thread', undefined, title => {
     const trimmed = title.trim();
-    if (trimmed && trimmed !== thread.title) void runEdit(() => actions.editThread(thread, { kind: 'rename', title: trimmed }));
+    if (trimmed && trimmed !== thread.title) void runEdit(() => actions.editThread(thread, { kind: 'rename', title: trimmed }), true);
   }, 'plain-text', thread.title);
 
   return <View style={{ gap: 6, paddingBottom: 8 }}>
@@ -450,12 +453,12 @@ function ThreadBody({ client, thread, onOpen, revealComposer }: {
       selection={quote ? { id: quote.id, from: actorLabel(quote.actor_id), text: quote.content } : undefined} selectionVersion={quoteFocus} revealComposer={revealComposer}
     /> : null}
     {thread.state === 'closed' && threadActions.has('thread.reopen') ? <T dim>Reopen to reply.</T> : null}
-    <ThreadActionFeedback result={editResult} busy={editing || status !== 'online'} onRetry={() => {
-      if (editResult?.how === 'unconfirmed') void runEdit(editResult.retry);
+    <ThreadActionFeedback result={editFeedback} busy={editing || !!editDelivery && !editDelivery.retry || status !== 'online'} onRetry={() => {
+      if (editFeedback?.how === 'unconfirmed') void runEdit(editFeedback.retry, !!editDelivery);
     }} />
     <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
       {threadActions.has('thread.rename') ? <Button label="Rename" onPress={rename} disabled={!editable} /> : null}
-      {threadActions.has(thread.state === 'open' ? 'thread.close' : 'thread.reopen') ? <Button label={thread.state === 'open' ? 'Close thread' : 'Reopen thread'} disabled={!editable} onPress={() => void runEdit(() => actions.editThread(thread, { kind: thread.state === 'open' ? 'close' : 'reopen' }))} /> : null}
+      {threadActions.has(thread.state === 'open' ? 'thread.close' : 'thread.reopen') ? <Button label={thread.state === 'open' ? 'Close thread' : 'Reopen thread'} disabled={!editable} onPress={() => void runEdit(() => actions.editThread(thread, { kind: thread.state === 'open' ? 'close' : 'reopen' }), true)} /> : null}
       {onOpen ? <Button label="Open thread" onPress={onOpen} /> : null}
       <Button label="Refresh history" onPress={page.reload} disabled={page.loading || status !== 'online'} />
     </View>
