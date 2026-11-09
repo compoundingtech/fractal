@@ -25,8 +25,23 @@ pub fn append_operation_receipt_tx(tx: &Transaction<'_>, claim: &ClaimRecord) ->
         "record_hash":hash,
     });
     if claim.kind == "custom.client.pairing-revoked" {
-        let completion = latest_completion(tx, &claim.subject, Some(&claim.origin), smallclaims::store::now_ms())?
-            .ok_or_else(|| anyhow::anyhow!("an admitted completion from this issuer is required"))?;
+        // An exact retained completion can be withdrawn without admitting its bearer.
+        let completion = if let Some(id) = claim.body["fields"]["completion_id"].as_str() {
+            tx.query_row(
+                "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE id=?1 AND kind='custom.client.pairing-completed'",
+                [id], smallclaims::store::claim_from_row,
+            ).optional()?
+        } else {
+            latest_completion(tx, &claim.subject, Some(&claim.origin), smallclaims::store::now_ms())?
+        }.ok_or_else(|| anyhow::anyhow!("a completion from this issuer is required"))?;
+        anyhow::ensure!(completion.subject == claim.subject && completion.origin == claim.origin,
+            "revocation must name a completion from this issuer");
+        if !operation_is_trusted(tx, &completion.id, &completion.origin, completion.actor.as_deref(), &completion.body["fields"])? {
+            let person = completion.body["fields"]["person_id"].as_str();
+            anyhow::ensure!(person.is_some_and(|person| person.starts_with("person/")
+                && claim.actor.as_deref() == Some(person)),
+                "a legacy completion can only be withdrawn by its issuing person");
+        }
         fields["completion_id"] = serde_json::json!(completion.id);
     }
     let receipt = crate::store::append_claim_tx(tx, &claim.origin, &format!("custom/client/operation-{}", claim.id),

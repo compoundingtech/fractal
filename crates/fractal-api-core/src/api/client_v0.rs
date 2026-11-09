@@ -1849,6 +1849,7 @@ pub fn device_resources(
     claims.sort_by_key(|claim| claim.store_index);
     let mut paired = BTreeMap::<String, (&ClaimRecord, Option<&ClaimRecord>)>::new();
     let mut names = BTreeMap::<String, String>::new();
+    let mut unadmitted = BTreeSet::new();
     for claim in &claims {
         let fields = claim.body.get("fields").unwrap_or(&claim.body);
         if claim.kind == "custom.client.pairing-begun"
@@ -1857,7 +1858,7 @@ pub fn device_resources(
         }
         if claim.kind == "custom.client.pairing-completed"
             && !state.store.pairing_completion_is_admitted(claim, client_now_ms()).map_err(ApiError::internal)? {
-            continue;
+            unadmitted.insert(claim.id.clone());
         }
         if claim.kind == "custom.client.pairing-begun"
             && let Some(name) = fields.get("device_name").and_then(Value::as_str)
@@ -1882,6 +1883,8 @@ pub fn device_resources(
             _ => {}
         }
     }
+    // Retained legacy grants remain hidden until withdrawn; showing history grants no authority.
+    paired.retain(|_, (completed, revoked)| revoked.is_some() || !unadmitted.contains(&completed.id));
     // Pairing and revocation are fenced by the graph snapshot above. Expiration is
     // live state: its clock must advance even when no claim advances that snapshot.
     let at = client_now_ms();
