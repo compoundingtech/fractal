@@ -177,7 +177,7 @@ fn assistant_grant_authority_measure_realistic_backfill() {
              DELETE FROM assistant_grant_membership_windows;
              DELETE FROM meta WHERE key='assistant_grant_authority_version'
                 OR key LIKE 'assistant_grant_authority_cursor/%';
-             UPDATE assistant_grant_membership_state SET applied_revision=-1 WHERE id=1;",
+             UPDATE assistant_grant_membership_state SET applied_generation=-1 WHERE id=1;",
         ).unwrap();
         // Fixed small pool of representative unrelated JSON sizes, not a history.
         let unrelated_bodies = [

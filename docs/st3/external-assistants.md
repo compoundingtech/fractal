@@ -187,17 +187,24 @@ writer membership keys, looking up signatures by their full
 nonmember signatures. Durable record/key cursors continue across units so later
 eligible evidence is eventually checked. Only relevant member-key evidence or
 membership retries reset that progress. Fresh nonmember signatures neither
-reset cursors nor enqueue projection work or invalidate its membership snapshot.
-An identical signature is also a no-op.
+reset cursors nor enqueue projection work. They can invalidate the inherited
+fleet-generation cache: maintenance folds the authoritative sealed view on
+readers, compares windows, and observes an unchanged snapshot in memory without
+opening a writer transaction or resetting authentication work. No parallel
+membership-invalidation revision or trigger set is maintained. An identical
+signature is also a no-op.
 
 Global not-ready applies only during initial/version backfill. Thereafter dirty
 or pending authentication fences only that grant subject, including a pending
 revoke; established credentials for unrelated subjects remain usable. The last
 authenticated effective snapshot remains a conflict witness until an authenticated
 transition changes it: pending work cannot clear an existing opposite-profile
-conflict. The inherited fleet-generation cache may still invalidate and aggregate historical
-signature keys independently; that pre-existing fleet-fold amplification is
-separate from this projection's receipt path and is not claimed fixed here.
+conflict. The inherited fleet-generation fold can still aggregate historical
+signature keys on readers; that pre-existing amplification is tracked by #6124
+and is not claimed fixed here. Writer-time subject fences retain the generic
+authorization denial. Clean-grant inspection omits optional cleared-conflict
+explanations for other subjects whose authentication is pending, rather than
+denying inspection or weakening an established conflict witness.
 
 After the authority backfill completes, `fractal doctor` lists every pending
 unauthenticated, unmarked local grant claim ID under the claim-store check with

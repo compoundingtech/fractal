@@ -540,7 +540,6 @@ impl Store {
         transaction: &Transaction<'_>,
         prepared: &PreparedSeal,
     ) -> Result<bool> {
-        self.sync_assistant_grant_membership(transaction)?;
         if prepared.origin != self.origin {
             return Ok(false);
         }

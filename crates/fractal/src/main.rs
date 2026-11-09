@@ -20849,7 +20849,7 @@ impl AssistantGrantAuthorityMaintenance {
         self.changes.borrow_and_update();
         let worker = self.store.clone();
         tokio::task::spawn_blocking(move || {
-            if !smallclaims::store::assistant_grant_authority::maintenance_pending(&worker.readers.get())? {
+            if !worker.assistant_grant_authority_maintenance_pending()? {
                 return Ok(true);
             }
             worker.advance_assistant_grant_authority_backfill()

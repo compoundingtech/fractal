@@ -893,6 +893,9 @@ pub struct Store {
     /// Request-only sealed folds, which may omit local batches not yet sealed.
     /// Never used by the sealing path's `membership_cache` fast path.
     sealed_membership_cache: Mutex<Option<(i64, crate::fleet::Membership)>>,
+    /// Last inherited generation whose applied window snapshot was checked.
+    /// Equal snapshots advance only this memory cache, never the writer.
+    assistant_grant_membership_observed_generation: AtomicI64,
     /// Where the scan for signatures missing on admitted envelopes stands.
     signature_backfill: Mutex<signature_backfill::SignatureBackfill>,
     /// Read-only sealed view; never populated with the client's local-signer fallback.
@@ -1360,6 +1363,7 @@ impl Store {
             admission_schema_digest: std::sync::OnceLock::new(),
             membership_cache: Mutex::new(None),
             sealed_membership_cache: Mutex::new(None),
+            assistant_grant_membership_observed_generation: AtomicI64::new(i64::MIN),
             fleet_authority: std::sync::OnceLock::new(),
             admitted_fleet_generation: AtomicI64::new(i64::MIN),
             signature_backfill: Mutex::default(),
@@ -3749,8 +3753,6 @@ pub trait FleetAuthority: Send + Sync {
     fn fleet_id(&self) -> Result<Option<String>>;
     /// Advances whenever the default store's membership may have changed.
     fn fleet_generation(&self) -> Result<i64>;
-    /// Projection-relevant evidence only; unrelated signatures do not advance it.
-    fn assistant_grant_membership_revision(&self) -> Result<i64>;
     fn fleet_membership(&self) -> Result<crate::fleet::Membership>;
     fn fleet_membership_sealed(&self) -> Result<crate::fleet::Membership>;
     /// Whether this is a default store that takes its fleet from no other store.
@@ -3766,9 +3768,6 @@ impl FleetAuthority for Store {
         fleet_generation(&self.readers.get())
     }
 
-    fn assistant_grant_membership_revision(&self) -> Result<i64> {
-        Store::assistant_grant_membership_revision(self)
-    }
 
     fn fleet_membership(&self) -> Result<crate::fleet::Membership> {
         Store::fleet_membership(self)
@@ -7188,10 +7187,9 @@ impl Store {
         self.fleet_authority
             .set(authority)
             .map_err(|_| anyhow::anyhow!("this shard already has a fleet authority"))?;
-        let mut connection = self.connection.write_background();
-        let transaction = connection.transaction()?;
-        self.sync_assistant_grant_membership(&transaction)?;
-        transaction.commit()?;
+        // Generation numbers belong to their authority. Recheck the inherited
+        // snapshot even if it happens to equal the shard's former local number.
+        self.assistant_grant_membership_observed_generation.store(i64::MIN, Ordering::Release);
         Ok(())
     }
 
@@ -7982,7 +7980,6 @@ impl Store {
             let transaction = connection
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                 .map_err(internal)?;
-            self.sync_assistant_grant_membership(&transaction).map_err(internal)?;
             let counts = (|transaction: &Transaction<'_>| -> Result<(usize, usize, usize, u128), FractalError> {
                 let mut received = 0;
                 let mut duplicate = 0;
@@ -8505,7 +8502,6 @@ impl Store {
                     membership = None;
                     continue;
                 }
-                self.sync_assistant_grant_membership(&pass)?;
                 let started = std::time::Instant::now();
                 let end = (next + ADMISSION_CHUNK_ENVELOPES).min(pending.len());
                 let first = next;

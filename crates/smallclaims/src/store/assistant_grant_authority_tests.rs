@@ -465,7 +465,8 @@ fn reset_projection(connection: &Connection) {
          DELETE FROM assistant_grant_dirty;
          DELETE FROM assistant_grant_auth_cursor;
          DELETE FROM assistant_grant_membership_dirty;
-         UPDATE assistant_grant_membership_state SET applied_revision=-1 WHERE id=1;
+         UPDATE assistant_grant_membership_state SET applied_generation=-1 WHERE id=1;
+         UPDATE meta SET value=value WHERE key='fleet_anchor_key';
          DELETE FROM meta WHERE key='assistant_grant_authority_version'
             OR key LIKE 'assistant_grant_authority_cursor/%';"
     ).unwrap();
@@ -1010,9 +1011,16 @@ fn envelope_record_arriving_before_auth_cursor_restarts_preexisting_signature_se
          FROM replica_records WHERE claim_id=?1",
         params![grant.id,signature.hash]).unwrap();
     authority::refresh_envelope(&transaction,&signature.writer,signature.sequence,&signature.hash).unwrap();
-    assert!(authority::contains(&transaction,&grant.id).unwrap(),
-        "the earlier signed record was hidden behind the old position/key cursor");
+    let cursor_exists: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_auth_cursor WHERE claim_id=?1)",
+        [&grant.id], |row| row.get(0),
+    ).unwrap();
+    assert!(!cursor_exists, "new earlier evidence must restart its authentication cursor");
     transaction.commit().unwrap();
+    drop(connection);
+    drain_authority(&target);
+    assert!(authority::contains(&target.readers.get(),&grant.id).unwrap(),
+        "the earlier signed record was hidden behind the old position/key cursor");
 }
 
 fn independent_grant(store: &Store) -> ClaimRecord {
@@ -1098,3 +1106,6 @@ fn unsigned_pending_revoke_fences_only_its_established_subject_after_dirty_work_
 }
 
 include!("assistant_grant_receipt_cost_tests.rs");
+
+#[path = "assistant_grant_membership_property_tests.rs"]
+mod membership_property_tests;
