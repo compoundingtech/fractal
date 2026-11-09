@@ -131,22 +131,25 @@ export function FleetScreen() {
 function C6Section() {
   const { c6, client, feed, data, status } = useStore();
   const [target, setTarget] = useState('');
+  const [explicitId, setExplicitId] = useState('');
   const [shareIssue, setShareIssue] = useState('');
   const agent = data.agents.find(item => item.id === target);
+  const explicit = explicitId.trim();
+  const sendTarget = explicit ? (/^agent\/[A-Za-z0-9][A-Za-z0-9._-]*(?:\/[A-Za-z0-9][A-Za-z0-9._-]*)*$/.test(explicit) ? explicit : '') : agent?.id ?? '';
   useFocusEffect(useCallback(() => () => c6.cancel(), [c6]));
   const run = async (operation: 'status' | 'send-echo') => {
-    if (!client || c6.busy || (operation === 'send-echo' && (!agent || !feed))) return;
+    if (!client || c6.busy || (operation === 'send-echo' && (!sendTarget || !feed))) return;
     await c6.run(operation, async (nonce, hooks, sample) => {
       if (!sample.identity) throw new Error('C6 disconnected');
       if (operation === 'status') {
         const reply = await sample.identity.capabilities({ signal: hooks.signal });
         hooks.request(reply.request_id); hooks.ack();
-      } else if (agent && sample.feed) {
+      } else if (sendTarget && sample.feed) {
         const names = new Map<string, string>();
         if (sample.actor) names.set(sample.actor, 'you');
         const person = sessionPerson(sample.actor);
         if (person) names.set(person, 'you');
-        const follow = sample.feed.followConversation(target, {
+        const follow = sample.feed.followConversation(sendTarget, {
           onEntries: frame => {
             for (const entry of conversationEntries(frame.items, names)) {
               if (entry.body.kind === 'mail') c6.observe(entry.id, entry.body.text, entry.body.from === 'you');
@@ -156,7 +159,7 @@ function C6Section() {
           onReplaced: () => c6.cancel(),
         });
         hooks.cleanup(() => follow.close());
-        const sent = await sample.send(agent.id, `[C6:${nonce}] latency measurement`, agent.current_session_id ?? undefined, undefined, [], hooks);
+        const sent = await sample.send(sendTarget, `[C6:${nonce}] latency measurement`, explicit ? undefined : agent?.current_session_id ?? undefined, undefined, [], hooks);
         if (sent.how !== 'sent') throw new Error('C6 send failed');
       } else throw new Error('C6 conversation unavailable');
     });
@@ -166,10 +169,12 @@ function C6Section() {
     <View style={{ paddingHorizontal: 12, gap: 4 }}>
       <T dim>Opt-in: 10 sequential samples, 15s each; last 200 rows in memory on this phone. Choose a disposable conversation: real messages wake the agent. Leaving Fleet or backgrounding cancels remaining sends.</T>
       {data.agents.map(item => <Button key={item.id} label={`${target === item.id ? 'selected: ' : ''}${item.id}`} disabled={c6.busy} onPress={() => setTarget(item.id)} />)}
-      <T dim>Target: {target || 'none selected'}. ACK and stream echo are separate durations. Changed routes are invalid.</T>
+      <Field autoCapitalize="none" autoCorrect={false} editable={!c6.busy} placeholder="Explicit stopped agent ID: agent/probe/st-delegation/alpha" value={explicitId} onChangeText={setExplicitId} />
+      {explicit && !sendTarget ? <T color={theme.fault}>Enter a canonical agent/… ID with non-empty name segments.</T> : null}
+      <T dim>Target: {sendTarget || 'none selected'}{explicit ? ' · explicit ID, no session' : ''}. ACK and stream echo are separate durations. Changed routes are invalid.</T>
       <T dim>Observed Fabric paths are module-global hints, not per-request evidence. Changed/unknown hints are flagged and remain in route percentiles.</T>
       <Button label="10 status reads" disabled={c6.busy || status !== 'online'} onPress={() => void run('status')} />
-      <Button label="10 signed send+echo" disabled={c6.busy || status !== 'online' || !agent || !feed} onPress={() => void run('send-echo')} />
+      <Button label="10 signed send+echo" disabled={c6.busy || status !== 'online' || !sendTarget || !feed} onPress={() => void run('send-echo')} />
       <Button label="Share C6 results" disabled={c6.busy || !c6.rows.length} onPress={() => { setShareIssue(''); void Share.share({ message: c6.export() }).catch(() => setShareIssue('Could not share C6 results.')); }} />
       <Button label="Clear C6 results" disabled={c6.busy || !c6.rows.length} onPress={() => c6.clear()} />
       <T dim>{c6.busy ? 'Recording…' : 'Idle'} · {c6.rows.filter(row => row.status === 'ok').length} valid successes · {c6.rows.filter(row => row.status !== 'ok').length} failed, timed out or invalid</T>
