@@ -16,6 +16,11 @@ pkgs.stdenvNoCC.mkDerivation {
   nativeBuildInputs = [
     pkgs.esbuild
     pkgs.makeWrapper
+    pkgs.removeReferencesTo
+  ];
+  disallowedReferences = [
+    installation
+    pkgs.esbuild
   ];
   dontConfigure = true;
   buildPhase = ''
@@ -24,6 +29,8 @@ pkgs.stdenvNoCC.mkDerivation {
     NODE_PATH="${installation}/apps/fractal-web/node_modules:${installation}/node_modules" \
       esbuild apps/fractal-web/server/main.mts --bundle --platform=node --format=esm \
         --target=node24 --outfile=publisher.mjs
+    # Module-path comments must not retain the frozen installation in the runtime closure.
+    remove-references-to -t ${installation} publisher.mjs
     runHook postBuild
   '';
   installPhase = ''
