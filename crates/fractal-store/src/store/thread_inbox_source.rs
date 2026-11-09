@@ -17,6 +17,7 @@ pub(super) struct ResolvedSource {
 /// Reuse the same source reducers as the Inbox without taking a pooled reader,
 /// trusting a client-rendered row, or refolding another person's Inbox.
 pub(super) fn resolve(
+    store: &Store,
     connection: &Connection,
     person: &str,
     origin: &InboxOrigin,
@@ -34,6 +35,27 @@ pub(super) fn resolve(
         custom_item(connection, source).map_err(internal)?
     } else if source.starts_with("step-run/") {
         attention_snapshot::person_attention_item(connection, source, at).map_err(internal)?
+    } else if source.starts_with("agent/") {
+        let mut prompts = store.harness_prompt_items_for_seats_at(
+            connection, vec![source.into()], Some(&person), at,
+        ).map_err(internal)?;
+        let prompt = prompts.iter().position(|item| item.episode == origin.episode)
+            .map(|index| prompts.remove(index));
+        if prompt.is_some() {
+            prompt
+        } else if let Some(desired) = current_desired_row(connection, source).map_err(internal)? {
+            let host = desired.member.as_ref().map(|member| member.host.as_str()).unwrap_or("unknown");
+            let candidates = store.desired_harness_login_candidates_at(connection, Some(host)).map_err(internal)?;
+            store.harness_login_items_at(connection, candidates, Some(&person))
+                .map_err(internal)?.into_iter().find(|item| item.subject == source && item.episode == origin.episode)
+        } else {
+            None
+        }
+    } else if source.starts_with("planning-session/") {
+        attention::planning_attention_item_at(connection, source).map_err(internal)?
+    } else if source.starts_with("revision-proposal/") {
+        attention::revision_attention_items_at(connection, source, Some(&person))
+            .map_err(internal)?.into_iter().next()
     } else {
         None
     };
@@ -45,6 +67,12 @@ pub(super) fn resolve(
     {
         item = Some(attention::attention_item_from_review_at(connection, review).map_err(internal)?);
     }
+    if item.as_ref().is_none_or(|item| item.episode != origin.episode)
+        && let Some(opening) = claim_by_id_tx(connection, &origin.episode).map_err(internal)?
+        && let Some(failure) = attention_snapshot::operational_failure_at(connection, &opening).map_err(internal)?
+    {
+        item = store.broken_gate_item(connection, failure, Some(&person), at).map_err(internal)?;
+    }
     let item = item.filter(|item| item.subject == source && item.episode == origin.episode
         && item.requested_at_unix_ms <= at
         && identities::resolve_reference_conn(connection, &item.person)
@@ -55,13 +83,53 @@ pub(super) fn resolve(
     {
         return Err(unavailable());
     }
-    let agent = item.conversation.as_deref()
-        .map(|agent| identities::resolve_reference_conn(connection, agent))
-        .transpose()?;
-    let evidence = claim_by_id_tx(connection, &origin.episode).map_err(internal)?
-        .filter(|claim| claim.subject == source || claim.body["fields"]["owner"] == source)
-        .map(|claim| vec![claim.id]).unwrap_or_default();
+    let agent = store.inbox_responsible_agent_at(connection, &item).map_err(internal)?;
+    let evidence = source_evidence(store, connection, origin, &item).map_err(internal)?;
     Ok(ResolvedSource { item, agent, evidence })
+}
+
+fn source_evidence(
+    store: &Store,
+    connection: &Connection,
+    origin: &InboxOrigin,
+    item: &AttentionItemView,
+) -> anyhow::Result<Vec<String>> {
+    let mut evidence = BTreeSet::new();
+    if let Some(claim) = claim_by_id_tx(connection, &origin.episode)?
+        && (claim.subject == origin.source_id || claim.body["fields"]["owner"] == origin.source_id
+            || claim.body["fields"]["targets"].as_array().is_some_and(|targets| targets.iter().any(|target| target == &origin.source_id)))
+    {
+        evidence.insert(claim.id);
+    }
+    if item.kind.starts_with("custom.") {
+        let text: String = connection.query_row(
+            "SELECT body FROM custom_sources WHERE subject=?1", [&origin.source_id],
+            |row| row.get(0),
+        )?;
+        let body: Value = serde_json::from_str(&text)?;
+        for provenance in body["provenance"].as_object().into_iter().flat_map(|p| p.values()) {
+            if let Some(id) = provenance["claim_id"].as_str() {
+                evidence.insert(id.into());
+            }
+        }
+    } else if item.kind == "harness-login" {
+        if let Some(harness) = current_harness_fold_at(connection, &origin.source_id, None, true, true)? {
+            evidence.insert(harness.claim);
+            if let Some(claim) = store.harness_login_episode_key_at(
+                connection, &origin.source_id, &harness.incarnation_id,
+            )?.0 {
+                evidence.insert(claim.id);
+            }
+        }
+    } else if matches!(item.kind.as_str(), "launch-approval" | "revision-approval") {
+        let kind = if item.kind == "launch-approval" { "planning-session.previewed" } else { "revision-proposal.created" };
+        let id: Option<String> = connection.prepare_cached(&canonical_sql(
+            "SELECT id FROM claims WHERE subject=?1 AND kind=?2
+             ORDER BY CANONICAL_DESC(claims) LIMIT 1",
+        ))?.query_row(params![origin.source_id, kind], |row| row.get(0)).optional()?;
+        evidence.extend(id);
+    }
+    Ok(evidence.into_iter().collect())
 }
 
 fn custom_item(connection: &Connection, source: &str) -> anyhow::Result<Option<AttentionItemView>> {
@@ -120,12 +188,12 @@ mod tests {
         let origin = InboxOrigin { source_id: source.into(), episode: opening.id.clone() };
         // Actual source projection, examined on the same connection a writer admits against.
         store.connection.batched(|tx| -> anyhow::Result<()> {
-            let selected = resolve(tx, person, &origin, now_ms()).unwrap();
+            let selected = resolve(&store, tx, person, &origin, now_ms()).unwrap();
             assert_eq!(selected.agent.as_deref(), Some("agent/garden/seed"));
             assert_eq!(selected.evidence, [opening.id.clone()]);
-            assert!(resolve(tx, "person/other", &origin, now_ms()).is_err());
+            assert!(resolve(&store, tx, "person/other", &origin, now_ms()).is_err());
             let stale = InboxOrigin { episode: "claim/stale".into(), ..origin.clone() };
-            assert!(resolve(tx, person, &stale, now_ms()).is_err());
+            assert!(resolve(&store, tx, person, &stale, now_ms()).is_err());
             Ok(())
         }).unwrap().unwrap();
         store.append_claim(&ClaimInput {
@@ -137,7 +205,7 @@ mod tests {
             evidence: vec![], expected_subject: None, idempotency_key: Some("source-close".into()),
         }).unwrap();
         store.connection.batched(|tx| -> anyhow::Result<()> {
-            assert!(resolve(tx, person, &origin, now_ms()).is_err());
+            assert!(resolve(&store, tx, person, &origin, now_ms()).is_err());
             Ok(())
         }).unwrap().unwrap();
     }

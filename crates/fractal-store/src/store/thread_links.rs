@@ -123,9 +123,8 @@ pub fn attach_ask(
         }
         if let Some(history) = &decision {
             let created = creation(connection)?;
-            let is_origin = created.body["fields"]["origin_ask"].as_str()
-                == Some(history.predecessor)
-                && created.body["fields"]["origin_ask_episode"].as_str() == Some(history.episode);
+            let is_origin = thread_metadata::origin_pair(&created)
+                == Some((history.predecessor, history.episode));
             let predecessor_link = ask_link_subject(history.predecessor, history.episode)?;
             let is_linked =
                 latest_applied_claim(connection, &predecessor_link, "thread.ask-linked")?

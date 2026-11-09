@@ -11397,6 +11397,11 @@ fn check_device_signature(
 
 /// A plain inline message prepared for a typed thread transaction. The action supplies
 /// the authenticated sender; caller-supplied fields cannot select an actor.
+pub enum ThreadMessageOrigin<'a> {
+    Ask(&'a str, &'a str),
+    Inbox(&'a str, &'a str),
+}
+
 pub struct ThreadMessageDraft<'a> {
     pub key: &'a str,
     pub thread: &'a str,
@@ -11405,7 +11410,7 @@ pub struct ThreadMessageDraft<'a> {
     pub content: &'a str,
     pub title: Option<&'a str>,
     pub quote: Option<&'a str>,
-    pub origin: Option<(&'a str, &'a str)>,
+    pub origin: Option<ThreadMessageOrigin<'a>>,
 }
 
 pub fn prepare_inline_thread_message(
@@ -11438,8 +11443,12 @@ pub fn prepare_inline_thread_message(
     ]);
     if let Some(title) = draft.title { fields.insert("title".into(), json!(title)); }
     if let Some(quote) = draft.quote { fields.insert("thread_quote_id".into(), json!(quote)); }
-    if let Some((ask, episode)) = draft.origin {
-        fields.insert("thread_origin_ask".into(), json!(ask));
+    if let Some(origin) = draft.origin {
+        let (field, source, episode) = match origin {
+            ThreadMessageOrigin::Ask(source, episode) => ("thread_origin_ask", source, episode),
+            ThreadMessageOrigin::Inbox(source, episode) => ("thread_origin_source", source, episode),
+        };
+        fields.insert(field.into(), json!(source));
         fields.insert("thread_origin_episode".into(), json!(episode));
     }
     if let Some(signature) = signature {

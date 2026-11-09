@@ -8,8 +8,8 @@ type ReadResult<T> = Result<(Extension<ClientSnapshot>, Json<T>), ApiError>;
 #[serde(deny_unknown_fields)]
 pub(super) struct ListQuery {
     agent_id: Option<String>,
-    origin_ask: Option<String>,
-    origin_ask_episode: Option<String>,
+    origin_source: Option<String>,
+    origin_episode: Option<String>,
     mission_id: Option<String>,
     recently_closed: Option<bool>,
     cursor: Option<String>,
@@ -24,8 +24,8 @@ pub(super) async fn list(
     with_person(state, session, move |store, person, _| {
         let selection = ThreadCollectionContext {
             agent_id: query.agent_id,
-            origin_ask: query.origin_ask,
-            origin_ask_episode: query.origin_ask_episode,
+            origin_source: query.origin_source,
+            origin_episode: query.origin_episode,
             mission_id: query.mission_id,
             recently_closed: query.recently_closed,
         };
@@ -43,6 +43,24 @@ pub(super) async fn list(
 }
 
 fn resolve_context(selection: &ThreadCollectionContext) -> Result<ThreadContext<'_>, ApiError> {
+    if selection.origin_source.is_some() || selection.origin_episode.is_some() {
+        if selection.agent_id.is_some() || selection.mission_id.is_some()
+            || selection.recently_closed.is_some()
+        {
+            return Err(validation("thread discovery requires exactly one context"));
+        }
+        let (Some(source), Some(episode)) = (
+            selection.origin_source.as_deref(), selection.origin_episode.as_deref(),
+        ) else {
+            return Err(validation("an Inbox origin requires source and episode"));
+        };
+        if source.is_empty() || source.len() > 512 || episode.is_empty() || episode.len() > 512 {
+            return Err(validation("the Inbox origin is invalid"));
+        }
+        fractal_schema::registry().validate_subject(source)
+            .map_err(|error| validation(error.to_string()))?;
+        return Ok(ThreadContext::Inbox { source, episode });
+    }
     let family = |id: &str, expected| {
         fractal_schema::registry()
             .validate_subject(id)
@@ -50,23 +68,16 @@ fn resolve_context(selection: &ThreadCollectionContext) -> Result<ThreadContext<
     };
     match (
         selection.agent_id.as_deref(),
-        selection.origin_ask.as_deref(),
-        selection.origin_ask_episode.as_deref(),
         selection.mission_id.as_deref(),
         selection.recently_closed,
     ) {
-        (Some(agent), None, None, None, None) if family(agent, "agent") => {
+        (Some(agent), None, None) if family(agent, "agent") => {
             Ok(ThreadContext::Agent(agent))
         }
-        (None, Some(ask), Some(episode), None, None)
-            if family(ask, "step-run") && !episode.is_empty() && episode.len() <= 512 =>
-        {
-            Ok(ThreadContext::Ask { id: ask, episode })
-        }
-        (None, None, None, Some(mission), None) if family(mission, "mission") => {
+        (None, Some(mission), None) if family(mission, "mission") => {
             Ok(ThreadContext::Mission(mission))
         }
-        (None, None, None, None, Some(true)) => Ok(ThreadContext::RecentlyClosed),
+        (None, None, Some(true)) => Ok(ThreadContext::RecentlyClosed),
         _ => Err(validation(
             "thread discovery requires exactly one valid context",
         )),
@@ -112,7 +123,7 @@ pub(super) async fn timeline(
 fn store_error(error: FractalError) -> ApiError {
     match error.code {
         "thread-unavailable" => ApiError::not_found("the thread is unavailable"),
-        "stale-thread-cursor" | "stale-thread-title" | "stale-subject" | "thread-closed"
+        "stale-thread-cursor" | "stale-thread-title" | "stale-subject" | "thread-responsibility-unassigned"
         | "thread-state-unchanged" | "thread-ask-already-linked" => stale(&error.message),
         "thread-authority-expired" | "device-key-not-enrolled" => forbidden(&error.message),
         "thread-rollout-unavailable" => ApiError {
@@ -408,8 +419,7 @@ pub(super) async fn read_action(
 struct StartParameters {
     target_id: String,
     agent_id: String,
-    origin_ask: String,
-    origin_ask_episode: String,
+    origin: thread_metadata::InboxOrigin,
     title: String,
     content: String,
     signature: Option<smallclaims::principal::ClaimSignature>,
@@ -440,7 +450,7 @@ fn run_message(
     session: &ClientSession,
     request: &ActionRequest,
 ) -> Result<Json<Value>, ApiError> {
-    use crate::api::{ThreadMessageDraft, prepare_inline_thread_message};
+    use crate::api::{ThreadMessageDraft, ThreadMessageOrigin, prepare_inline_thread_message};
     let current = current_session(state, session)?;
     require_scope(&current, "control.messages")?;
     let person = &current.authority_actor;
@@ -473,19 +483,18 @@ fn run_message(
                 content: &p.content,
                 title: Some(&p.title),
                 quote: None,
-                origin: Some((&p.origin_ask, &p.origin_ask_episode)),
+                origin: Some(ThreadMessageOrigin::Inbox(&p.origin.source_id, &p.origin.episode)),
             },
             p.signature.as_ref(),
         )?;
         let key = format!("client-thread-start:{}", creation_key(&current, request));
-        let (claim, appended) = thread_metadata::start_from_ask_as(
+        let (claim, appended) = thread_metadata::start_from_inbox_as(
             &state.store,
-            thread_metadata::StartFromAsk {
+            thread_metadata::StartFromInbox {
                 thread: &p.target_id,
                 title: &p.title,
                 person,
-                ask: &p.origin_ask,
-                episode: &p.origin_ask_episode,
+                origin: &p.origin,
                 key: &key,
                 first_message: &message,
             },
@@ -1096,8 +1105,8 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         let episode = state.store.newest_claim_for_subject_kind(ask, "work.person-asked")
             .unwrap().unwrap();
         let parameters = json!({
-            "target_id": thread, "agent_id": agent, "origin_ask": ask,
-            "origin_ask_episode": episode.id, "title": "Review CI", "content": "Check worker tests.",
+            "target_id": thread, "agent_id": agent,
+            "origin": {"source_id": ask, "episode": episode.id}, "title": "Review CI", "content": "Check worker tests.",
         });
         let start = post(person, None, "thread.start", parameters.clone()).await;
         let retry = post(person, None, "thread.start", parameters).await;
@@ -1564,4 +1573,108 @@ agent "garden/other" { workspace "/work/garden"; harness "omp" {} }
                 .is_empty()
         );
     }
+    #[tokio::test]
+    async fn inbox_start_freezes_source_and_recipient_and_recovers_after_resolution() {
+        use crate::model::PersonAskRequest;
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "inbox-start");
+        let person = "person/operator";
+        let agent_a = "agent/garden/a";
+        let agent_b = "agent/garden/b";
+        let thread = "thread/system-discussion";
+        let intent = crate::graph::parse_intent(
+            r#"version 2
+agent "garden/a" { workspace "/work/garden"; harness "omp" {} }
+agent "garden/b" { workspace "/work/garden"; harness "omp" {} }
+"#,
+            state.store.origin(),
+        ).unwrap();
+        state.store.apply_internal(&intent, "declare-inbox-agents").unwrap();
+        state.store.configure_thread_write_rollout([]);
+        state.store.configure_inbox_fallback_agent(Some(agent_a)).unwrap();
+        let ask = state.store.ask_person(&PersonAskRequest {
+            person: person.into(), actor: "daemon/runtime".into(),
+            title: "An owner decision".into(), reason: "private-source-context".into(),
+            step: None, new_run: None, incarnation: None, legacy_request: None,
+            idempotency_key: "system-source".into(), deadline_ms: None, default_answer: None,
+            request: None,
+        }).unwrap();
+        let episode = state.store.newest_claim_for_subject_kind(&ask.subject, "work.person-asked")
+            .unwrap().unwrap().id;
+        let app = crate::api::router(state.clone());
+        let post = |actor: &'static str, kind: &'static str, key: &'static str, parameters: Value| {
+            let app = app.clone();
+            let snapshot = new_client_snapshot(&state).id;
+            async move {
+                let request = json!({
+                    "api_version": CLIENT_API_VERSION, "id": format!("action/{key}"), "type":kind,
+                    "idempotency_key": key, "fence":{"snapshot_id":snapshot}, "parameters":parameters,
+                });
+                let request = Request::builder().method("POST").uri("/v1/client/actions")
+                    .header(LOCAL_PERSON_HEADER, actor).header("Content-Type", "application/json")
+                    .body(Body::from(request.to_string())).unwrap();
+                let response = app.oneshot(request).await.unwrap();
+                let status = response.status();
+                let bytes = to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+                (status, serde_json::from_slice::<Value>(&bytes).unwrap())
+            }
+        };
+        let parameters = json!({
+            "target_id":thread, "agent_id":agent_a,
+            "origin":{"source_id":ask.subject,"episode":episode},
+            "title":"Discuss the owner decision", "content":"Please explain the choices.",
+        });
+        let mut wrong = parameters.clone();
+        wrong["agent_id"] = json!(agent_b);
+        assert_ne!(post(person, "thread.start", "wrong-agent", wrong).await.0, StatusCode::OK);
+        assert_ne!(post("person/other", "thread.start", "wrong-owner", parameters.clone()).await.0, StatusCode::OK);
+        let mut stale = parameters.clone();
+        stale["origin"]["episode"] = json!("claim/other-episode");
+        assert_ne!(post(person, "thread.start", "stale-source", stale).await.0, StatusCode::OK);
+        assert!(state.store.claims_for(thread, None).unwrap().is_empty());
+        let (status, started) = post(person, "thread.start", "start-system-source", parameters.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let message = started["value"]["affected_ids"][1].as_str().unwrap();
+        let created = state.store.newest_claim_for_subject_kind(thread, "thread.created").unwrap().unwrap();
+        let sent = state.store.newest_claim_for_subject_kind(message, "message.sent").unwrap().unwrap();
+        assert_eq!(created.batch_id, sent.batch_id);
+        assert_eq!(created.body["fields"]["origin_source"], ask.subject);
+        assert_eq!(created.body["fields"]["origin_episode"], episode);
+        assert!(created.body["fields"].get("origin_ask").is_none());
+        assert_eq!(created.body["fields"]["agent"], agent_a);
+        assert_eq!(sent.body["fields"]["thread_origin_source"], ask.subject);
+        assert_eq!(sent.body["fields"]["thread_origin_episode"], episode);
+        assert!(!serde_json::to_string(&created.body).unwrap().contains("private-source-context"));
+        assert!(!serde_json::to_string(&sent.body).unwrap().contains("private-source-context"));
+        assert!(state.store.claims_for(&ask.subject, Some("work.person-done")).unwrap().is_empty());
+
+        // A new configured fallback changes only future starts.
+        state.store.configure_inbox_fallback_agent(Some(agent_b)).unwrap();
+        assert_eq!(crate::store::thread_delivery::reply_recipient(&state.store, thread, person).unwrap(), agent_a);
+        let (status, retry) = post(person, "thread.start", "start-system-source", parameters.clone()).await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["value"]["operation_id"], started["value"]["operation_id"]);
+        let mut future = parameters.clone();
+        future["target_id"] = json!("thread/new-system-discussion");
+        future["agent_id"] = json!(agent_b);
+        let (status, newer) = post(person, "thread.start", "new-system-source", future).await;
+        assert_eq!(status, StatusCode::OK, "{newer}");
+        let newer = state.store.newest_claim_for_subject_kind("thread/new-system-discussion", "thread.created").unwrap().unwrap();
+        assert_eq!(newer.body["fields"]["agent"], agent_b);
+
+        let (status, settled) = post(person, "work.done", "settle-source", json!({
+            "target_id":ask.subject,"episode":episode,"summary":"Decided.",
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{settled}");
+        let (status, recovered) = post(person, "thread.start", "start-system-source", parameters).await;
+        assert_eq!(status, StatusCode::OK, "{recovered}");
+        assert_eq!(recovered["value"]["operation_id"], started["value"]["operation_id"]);
+        let history = thread_metadata::list_context(
+            &state.store, person, ThreadContext::Inbox { source:&ask.subject, episode:&episode }, None, 20,
+        ).unwrap();
+        assert_eq!(history.items.len(), 2, "history survives source resolution");
+        assert_eq!(state.store.claims_for(thread, Some("thread.created")).unwrap().len(), 1);
+        assert_eq!(state.store.claims_for(message, Some("message.sent")).unwrap().len(), 1);
+    }
+
 }

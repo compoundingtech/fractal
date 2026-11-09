@@ -1100,12 +1100,12 @@ fn overlay_attention_thread_unread(
 ) -> anyhow::Result<()> {
     let Ok(person) = thread_access::read_person(session) else { return Ok(()) };
     let (positions, asks): (Vec<_>, Vec<_>) = items.iter().enumerate().filter_map(|(position, item)| {
-        if item["attention_kind"] != "person-step" || item["person_id"] != person {
+        if item["kind"] != "attention" || item["person_id"] != person {
             return None;
         }
         Some((position, (item["source_id"].as_str()?, item["episode"].as_str()?)))
     }).unzip();
-    for position in crate::store::thread_metadata::unread_ask_positions(store, person, &asks)? {
+    for position in crate::store::thread_metadata::unread_inbox_positions(store, person, &asks)? {
         items[positions[position]]["thread_unread"] = json!(true);
     }
     Ok(())

@@ -63,8 +63,8 @@ pub const LOCAL_PERSON_HEADER: &str = "x-st3-person";
 #[serde(deny_unknown_fields)]
 pub struct ThreadCollectionContext {
     pub agent_id: Option<String>,
-    pub origin_ask: Option<String>,
-    pub origin_ask_episode: Option<String>,
+    pub origin_source: Option<String>,
+    pub origin_episode: Option<String>,
     pub mission_id: Option<String>,
     pub recently_closed: Option<bool>,
 }

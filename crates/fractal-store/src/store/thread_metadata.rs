@@ -14,9 +14,17 @@ CREATE INDEX IF NOT EXISTS claims_thread_origin_index
 ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.origin_ask'),
           json_extract(body, '$.fields.origin_ask_episode'), subject)
 WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_inbox_origin_index
+ON claims(json_extract(body, '$.fields.person'),
+          coalesce(json_extract(body, '$.fields.origin_source'),json_extract(body, '$.fields.origin_ask')),
+          coalesce(json_extract(body, '$.fields.origin_episode'),json_extract(body, '$.fields.origin_ask_episode')), subject)
+WHERE kind='thread.created';
 CREATE INDEX IF NOT EXISTS claims_thread_mission_index
 ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.mission'), subject)
 WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_operational_episode_index
+ON claims(json_extract(body,'$.fields.episode'))
+WHERE kind IN ('operational.failure','operational.recovered');
 CREATE INDEX IF NOT EXISTS claims_thread_closed_owner_index
 ON claims(actor, store_index DESC)
 WHERE kind='thread.state-set' AND json_extract(body, '$.fields.state')='closed';
@@ -595,6 +603,7 @@ pub struct SummaryPage {
 pub enum ThreadContext<'a> {
     Agent(&'a str),
     Ask { id: &'a str, episode: &'a str },
+    Inbox { source: &'a str, episode: &'a str },
     Mission(&'a str),
     RecentlyClosed,
 }
@@ -628,10 +637,10 @@ pub fn list_context(
                 identities::resolve_reference_conn(&connection, agent)?,
                 None,
             ),
-            ThreadContext::Ask { id, episode } => (
-                "claims_thread_origin_index",
-                "json_extract(claims.body, '$.fields.origin_ask')=?2 AND json_extract(claims.body, '$.fields.origin_ask_episode')=?5",
-                id.into(),
+            ThreadContext::Ask { id: source, episode } | ThreadContext::Inbox { source, episode } => (
+                "claims_thread_inbox_origin_index",
+                "coalesce(json_extract(claims.body,'$.fields.origin_source'),json_extract(claims.body,'$.fields.origin_ask'))=?2 AND coalesce(json_extract(claims.body,'$.fields.origin_episode'),json_extract(claims.body,'$.fields.origin_ask_episode'))=?5",
+                source.into(),
                 Some(episode),
             ),
             ThreadContext::Mission(mission) => (
@@ -706,8 +715,17 @@ pub fn attention_unread_changed(store: &Store, after: u64, through: u64) -> anyh
     )?.query_row( /* sqlite-large-value: allow-for-now lv-h9a5536c68ae8 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ params![after, through], |row| row.get(0))?)
 }
 
+/// Normalize legacy ask origins only at the stored-history boundary.
+pub(super) fn origin_pair(creation: &ClaimRecord) -> Option<(&str, &str)> {
+    let fields = &creation.body["fields"];
+    match (fields["origin_source"].as_str(), fields["origin_episode"].as_str()) {
+        (Some(source), Some(episode)) => Some((source, episode)),
+        _ => Some((fields["origin_ask"].as_str()?, fields["origin_ask_episode"].as_str()?)),
+    }
+}
+
 /// Unread incoming thread replies on the caller's already selected Inbox rows.
-pub fn unread_ask_positions(
+pub fn unread_inbox_positions(
     store: &Store,
     person: &str,
     asks: &[(&str, &str)],
@@ -728,10 +746,10 @@ pub fn unread_ask_positions(
             FROM json_each(?1)
          )
          SELECT inbox.position, claims.subject, false
-         FROM inbox CROSS JOIN claims INDEXED BY claims_thread_origin_index
+         FROM inbox CROSS JOIN claims INDEXED BY claims_thread_inbox_origin_index
          WHERE claims.kind='thread.created' AND json_extract(claims.body,'$.fields.person')=?2
-           AND json_extract(claims.body,'$.fields.origin_ask')=inbox.ask
-           AND json_extract(claims.body,'$.fields.origin_ask_episode')=inbox.episode
+           AND coalesce(json_extract(claims.body,'$.fields.origin_source'),json_extract(claims.body,'$.fields.origin_ask'))=inbox.ask
+           AND coalesce(json_extract(claims.body,'$.fields.origin_episode'),json_extract(claims.body,'$.fields.origin_ask_episode'))=inbox.episode
          UNION
          SELECT inbox.position, inbox.link, true
          FROM inbox WHERE EXISTS (
@@ -751,7 +769,13 @@ pub fn unread_ask_positions(
         }
         let qualified = match qualification {
             Some((previous, qualified)) if previous == position => qualified,
-            _ => owns_ask_episode(&conn, &person, ask, episode)?,
+            _ => match inbox_source::resolve(store, &conn, &person, &InboxOrigin {
+                source_id: ask.into(), episode: episode.into(),
+            }, now_ms()) {
+                Ok(_) => true,
+                Err(error) if error.code == "thread-unavailable" => false,
+                Err(error) => return Err(error),
+            },
         };
         qualification = Some((position, qualified));
         if !qualified {
@@ -783,9 +807,7 @@ pub fn unread_ask_positions(
             Err(error) if error.code == "thread-unavailable" => continue,
             Err(error) => return Err(error),
         };
-        let fields = &creation.body["fields"];
-        if !linked && (fields["origin_ask"].as_str() != Some(ask)
-            || fields["origin_ask_episode"].as_str() != Some(episode))
+        if !linked && origin_pair(&creation) != Some((ask, episode))
         {
             continue;
         }
@@ -1040,15 +1062,61 @@ pub fn start_from_ask_as(
     principal: PersonAuthority<'_>,
     signature: Option<&smallclaims::principal::ClaimSignature>,
 ) -> Result<(ClaimRecord, bool), FractalError> {
-    let StartFromAsk {
-        thread,
-        title,
-        person,
-        ask,
-        episode,
-        key,
-        first_message,
-    } = start;
+    start_thread_as(store, StartRequest {
+        thread: start.thread, title: start.title, person: start.person,
+        origin: StartOrigin::Ask { source: start.ask, episode: start.episode },
+        key: start.key, first_message: start.first_message,
+    }, principal, signature)
+}
+
+pub struct StartFromInbox<'a> {
+    pub thread: &'a str,
+    pub title: &'a str,
+    pub person: &'a str,
+    pub origin: &'a InboxOrigin,
+    pub key: &'a str,
+    pub first_message: &'a ClaimInput,
+}
+
+pub fn start_from_inbox_as(
+    store: &Store,
+    start: StartFromInbox<'_>,
+    principal: PersonAuthority<'_>,
+    signature: Option<&smallclaims::principal::ClaimSignature>,
+) -> Result<(ClaimRecord, bool), FractalError> {
+    start_thread_as(store, StartRequest {
+        thread: start.thread, title: start.title, person: start.person,
+        origin: StartOrigin::Inbox(start.origin),
+        key: start.key, first_message: start.first_message,
+    }, principal, signature)
+}
+
+enum StartOrigin<'a> {
+    Ask { source: &'a str, episode: &'a str },
+    Inbox(&'a InboxOrigin),
+}
+
+struct StartRequest<'a> {
+    thread: &'a str,
+    title: &'a str,
+    person: &'a str,
+    origin: StartOrigin<'a>,
+    key: &'a str,
+    first_message: &'a ClaimInput,
+}
+
+fn start_thread_as(
+    store: &Store,
+    start: StartRequest<'_>,
+    principal: PersonAuthority<'_>,
+    signature: Option<&smallclaims::principal::ClaimSignature>,
+) -> Result<(ClaimRecord, bool), FractalError> {
+    let StartRequest { thread, title, person, origin, key, first_message } = start;
+    let (source, episode) = match &origin {
+        StartOrigin::Ask { source, episode } => (*source, *episode),
+        StartOrigin::Inbox(origin) => (origin.source_id.as_str(), origin.episode.as_str()),
+    };
+    let inbox = matches!(origin, StartOrigin::Inbox(_));
     let agent = first_message
         .fields
         .get("to")
@@ -1081,24 +1149,22 @@ pub fn start_from_ask_as(
     {
         return Err(FractalError::new(
             "invalid-thread-start",
-            "thread start requires a plain inline first message to the asking agent",
+            "thread start requires a plain inline first message to the responsible agent",
         ));
     }
     let mut first_message = first_message.clone();
     thread_delivery::add_reader_marker(&mut first_message);
+    let source_field = if inbox { "thread_origin_source" } else { "thread_origin_ask" };
+    let excluded_field = if inbox { "thread_origin_ask" } else { "thread_origin_source" };
+    if first_message.fields.contains_key(excluded_field) {
+        return Err(FractalError::new("invalid-thread-start", "the first message has a different origin type"));
+    }
     for (name, value) in [
-        ("thread_id", thread),
-        ("thread_origin_ask", ask),
-        ("thread_origin_episode", episode),
+        ("thread_id", thread), (source_field, source), ("thread_origin_episode", episode),
     ] {
-        if first_message
-            .fields
-            .get(name)
-            .is_some_and(|current| current.as_str() != Some(value))
-        {
+        if first_message.fields.get(name).is_some_and(|current| current.as_str() != Some(value)) {
             return Err(FractalError::new(
-                "invalid-thread-start",
-                "the first message context differs from the thread origin",
+                "invalid-thread-start", "the first message context differs from the thread origin",
             ));
         }
         first_message.fields.insert(name.into(), json!(value));
@@ -1115,24 +1181,24 @@ pub fn start_from_ask_as(
         super::thread_delivery::verified_signature(&first_message, &principal, signature)?;
     let operation_id = operation_id_for_key(key);
     let digest = canonical_hash(&(
-        "thread.start.v1",
-        thread,
-        title,
-        person,
-        ask,
-        episode,
-        &first_message.subject,
-        &first_message.fields,
-    ))
-    .map_err(internal)?;
-    let creation_body = json!({
+        if inbox { "thread.start.inbox.v1" } else { "thread.start.v1" },
+        thread, title, person, source, episode, &first_message.subject, &first_message.fields,
+    )).map_err(internal)?;
+    let mut creation_body = json!({
         "fields": {
-            "person": person, "agent": agent, "title": title,
-            "origin_ask": ask, "origin_ask_episode": episode, "first_message": first_message.subject,
+            "person": person, "agent": agent, "title": title, "first_message": first_message.subject,
         },
-        "evidence": [episode],
+        "evidence": [],
         "_operation": {"id": operation_id, "request_digest": digest},
     });
+    if inbox {
+        creation_body["fields"]["origin_source"] = json!(source);
+        creation_body["fields"]["origin_episode"] = json!(episode);
+    } else {
+        creation_body["fields"]["origin_ask"] = json!(source);
+        creation_body["fields"]["origin_ask_episode"] = json!(episode);
+        creation_body["evidence"] = json!([episode]);
+    }
     let message_body = json!({"fields": first_message.fields, "evidence": []});
     store.graph.ensure_principal_key(person)?;
     store
@@ -1162,41 +1228,47 @@ pub fn start_from_ask_as(
                     "the thread already exists",
                 ));
             }
-            let ask_claim = person_work::request(tx, ask)
-                .map_err(internal)?
-                .ok_or_else(unavailable)?;
-            let ask_step = person_work::step(tx, ask)
-                .map_err(internal)?
-                .ok_or_else(unavailable)?;
-            let assigned = ask_step.assigned_to.as_deref().ok_or_else(unavailable)?;
-            if ask_claim.id != episode
-                || ask_claim.actor.as_deref() != Some(agent)
-                || identities::resolve_reference_conn(tx, assigned)?
-                    != identities::resolve_reference_conn(tx, person)?
-                || !person_work::current(tx, &ask_claim, now_ms()).map_err(internal)?
-            {
-                return Err(unavailable());
-            }
             let mut creation_body = creation_body.clone();
-            creation_body["fields"]["person"] =
-                json!(identities::resolve_reference_conn(tx, person)?);
-            creation_body["fields"]["agent"] =
-                json!(identities::resolve_reference_conn(tx, agent)?);
-            let mission = tx
-                .query_row(
-                    "SELECT mission_id FROM mission_runs WHERE id=?1",
-                    [ask_step.run.trim_start_matches("mission-run/")],
-                    |row| row.get::<_, String>(0),
-                )
-                .optional()
-                .map_err(internal)?;
+            creation_body["fields"]["person"] = json!(identities::resolve_reference_conn(tx, person)?);
+            creation_body["fields"]["agent"] = json!(identities::resolve_reference_conn(tx, agent)?);
+            let mission = match &origin {
+                StartOrigin::Inbox(origin) => {
+                    let selected = inbox_source::resolve(store, tx, person, origin, now_ms())?;
+                    selected.require_agent(tx, agent)?;
+                    creation_body["evidence"] = json!(selected.evidence);
+                    let item = selected.item;
+                    if let Some(mission) = item.mission {
+                        Some(mission)
+                    } else if let Some(run) = item.mission_run {
+                        mission_run_header_tx(tx, run.strip_prefix("mission-run/").unwrap_or(&run))
+                            .optional().map_err(internal)?.map(|run| run.mission)
+                    } else {
+                        None
+                    }
+                }
+                StartOrigin::Ask { source, episode } => {
+                    let ask_claim = person_work::request(tx, source).map_err(internal)?.ok_or_else(unavailable)?;
+                    let ask_step = person_work::step(tx, source).map_err(internal)?.ok_or_else(unavailable)?;
+                    let assigned = ask_step.assigned_to.as_deref().ok_or_else(unavailable)?;
+                    if ask_claim.id != *episode || ask_claim.actor.as_deref() != Some(agent)
+                        || identities::resolve_reference_conn(tx, assigned)? != identities::resolve_reference_conn(tx, person)?
+                        || !person_work::current(tx, &ask_claim, now_ms()).map_err(internal)?
+                    {
+                        return Err(unavailable());
+                    }
+                    tx.query_row(
+                        "SELECT mission_id FROM mission_runs WHERE id=?1",
+                        [ask_step.run.trim_start_matches("mission-run/")],
+                        |row| row.get::<_, String>(0),
+                    ).optional().map_err(internal)?
+                }
+            };
             if let Some(mission) = mission {
-                let mission = if mission.starts_with("mission/") {
+                creation_body["fields"]["mission"] = json!(if mission.starts_with("mission/") {
                     mission
                 } else {
                     format!("mission/{mission}")
-                };
-                creation_body["fields"]["mission"] = json!(mission);
+                });
             }
             let created = append_claim_tx(
                 tx,
@@ -1224,7 +1296,7 @@ pub fn start_from_ask_as(
                     params![first_message.subject, person, signature],
                 ).map_err(internal)?;
             }
-            // The typed transaction has already authorized this exact ask and sender.
+            // The typed transaction has already authorized this exact source and sender.
             // Retain the ordinary recipient and provenance checks before the admitted append.
             retirements::admit_recipient(tx, Some(agent))?;
             assistant_write::refuse_unverified(

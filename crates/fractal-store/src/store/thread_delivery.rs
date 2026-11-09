@@ -39,6 +39,7 @@ pub(super) fn verified_signature(
     let contextual = [
         "thread_quote_id",
         "thread_origin_ask",
+        "thread_origin_source",
         "thread_origin_episode",
         "title",
     ];
@@ -162,6 +163,7 @@ pub fn append_reply(
             .get("in_reply_to")
             .is_some_and(|value| !value.is_null())
         || input.fields.contains_key("thread_origin_ask")
+        || input.fields.contains_key("thread_origin_source")
         || input.fields.contains_key("thread_origin_episode")
     {
         return Err(invalid());
@@ -204,15 +206,6 @@ pub fn append_reply(
         Ok(())
     };
     let admission = |connection: &Connection| {
-        if person_sends
-            && latest_applied_claim(connection, thread, "thread.state-set")?
-                .is_some_and(|claim| claim.body["fields"]["state"] == "closed")
-        {
-            return Err(FractalError::new(
-                "thread-closed",
-                "reopen the thread before replying",
-            ));
-        }
         if let Some(quote) = quote {
             let target =
                 latest_applied_claim(connection, quote, "message.sent")?.ok_or_else(invalid)?;
@@ -334,13 +327,13 @@ mod tests {
             },
         )
         .unwrap();
-        let blocked = input("message/blocked", person, agent, Some("message/first"));
-        assert_eq!(
-            append_reply(&store, &blocked, PersonAuthority::TrustedLocal, None)
-                .unwrap_err()
-                .code,
-            "thread-closed"
-        );
+        let ordinary = input("message/closed-person-reply", person, agent, Some("message/first"));
+        let (posted, appended) = append_reply(&store, &ordinary, PersonAuthority::TrustedLocal, None).unwrap();
+        assert!(appended);
+        let (retried, appended) = append_reply(&store, &ordinary, PersonAuthority::TrustedLocal, None).unwrap();
+        assert!(!appended);
+        assert_eq!(retried.id, posted.id);
+        assert_eq!(latest_applied_claim(&store.readers.get(), thread, "thread.state-set").unwrap().unwrap().id, closed.id);
         assert_eq!(
             append_reply(&store, &first, PersonAuthority::TrustedLocal, None)
                 .unwrap()

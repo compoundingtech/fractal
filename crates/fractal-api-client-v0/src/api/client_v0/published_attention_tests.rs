@@ -594,8 +594,8 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     let episode = state.store.newest_claim_for_subject_kind(ask, "work.person-asked")
         .unwrap().unwrap().id;
     action(person, "thread.start", "start", json!({
-        "target_id": origin_thread, "agent_id": agent, "origin_ask": ask,
-        "origin_ask_episode": episode, "title": "Review CI", "content": "Check worker tests.",
+        "target_id": origin_thread, "agent_id": agent,
+        "origin": {"source_id": ask, "episode": episode}, "title": "Review CI", "content": "Check worker tests.",
     })).await;
     let reply = |thread, key| action(agent, "thread.reply", key,
         json!({"target_id":thread, "content":"Tests passed."}));

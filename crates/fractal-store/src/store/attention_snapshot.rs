@@ -17,6 +17,66 @@ pub(super) struct OperationalFault {
     pub(super) suppress_generic_delivery: bool,
 }
 
+fn fold_operational_failures(claims: impl IntoIterator<Item = ClaimRecord>) -> Vec<AttentionRequestView> {
+        let mut episodes: BTreeMap<String, AttentionRequestView> = BTreeMap::new();
+        for claim in claims {
+            let f = &claim.body["fields"];
+            let episode = f["episode"].as_str().unwrap_or_default();
+            if claim.kind == "operational.recovered" {
+                if let Some(kept) = episodes.get_mut(episode) {
+                    if f["failure"] == kept.request {
+                        kept.status = "resolved".into();
+                        kept.resolved_at_unix_ms = Some(claim.accepted_at_unix_ms);
+                    }
+                }
+                continue;
+            }
+            episodes.insert(
+                episode.into(),
+                AttentionRequestView {
+                    subject: episode.into(),
+                    request: claim.id.clone(),
+                    reviewer: f["reviewer"].as_str().unwrap_or("person/operator").into(),
+                    title: f["title"].as_str().unwrap_or_default().into(),
+                    reason: f["reason"].as_str().unwrap_or_default().into(),
+                    severity: f["severity"].as_str().unwrap_or("error").into(),
+                    targets: serde_json::from_value(f["targets"].clone())
+                        .unwrap_or_else(|_| vec![claim.subject.clone()]),
+                    actor: claim.actor.clone().unwrap_or_default(),
+                    status: "pending".into(),
+                    outcome: None,
+                    resolution_reason: None,
+                    requested_at_unix_ms: claim.accepted_at_unix_ms,
+                    resolved_at_unix_ms: None,
+                    until: None,
+                    step: None,
+                    step_attempt: None,
+                    closed_by: None,
+                },
+            );
+        }
+        episodes.into_values().collect()
+}
+
+pub(super) fn operational_failure_at(
+    connection: &Connection,
+    opening: &ClaimRecord,
+) -> Result<Option<AttentionRequestView>> {
+    if opening.kind != "operational.failure" {
+        return Ok(None);
+    }
+    let Some(episode) = opening.body["fields"]["episode"].as_str() else { return Ok(None) };
+    let mut query = connection.prepare_cached(&canonical_sql(
+        "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms
+         FROM claims INDEXED BY claims_operational_episode_index
+         WHERE kind IN ('operational.failure','operational.recovered')
+           AND json_extract(body,'$.fields.episode')=?1 ORDER BY CANONICAL_ASC(claims)",
+    ))?;
+    let claims = query.query_map([episode], claim_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(fold_operational_failures(claims).into_iter().next())
+}
+
 /// Phase routing is an origin-attested property of the canonical failure, not of
 /// the member which happens to project it or of an episode prefix alone.
 fn readiness_phase_delivery(
@@ -253,6 +313,16 @@ impl Store {
             .prepare_cached("SELECT subject FROM desired WHERE kind='agent' ORDER BY subject")?
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        self.harness_prompt_items_for_seats_at(&connection, seats, person, as_of)
+    }
+
+    pub(super) fn harness_prompt_items_for_seats_at(
+        &self,
+        connection: &Connection,
+        seats: Vec<String>,
+        person: Option<&str>,
+        as_of: u128,
+    ) -> Result<Vec<AttentionItemView>> {
         let newest = |subject: &str, kind: &str| -> Result<Option<(String, u128, Value)>> {
             let row = connection
                 .prepare_cached(/* sqlite-large-value: allow-for-now lv-hb4c401b40b08 owner=fractal_store::store::attention_snapshot TODO=trace-statement-and-value-representation */ &format!(
@@ -313,9 +383,9 @@ impl Store {
             }
             let ask = harness["ask"].as_str().unwrap_or("unknown");
             let owner = if ask == "question" {
-                self.question_principal(&seat)?
+                self.question_principal_at(connection, &seat)?
             } else {
-                self.agent_person(&seat)?
+                agent_person_at(connection, &seat)?
             };
             let missing_principal = ask == "question" && owner.is_none();
             let owner = match owner {
@@ -631,44 +701,7 @@ impl Store {
         let claims = query
             .query_map([], claim_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut episodes: BTreeMap<String, AttentionRequestView> = BTreeMap::new();
-        for claim in claims {
-            let f = &claim.body["fields"];
-            let episode = f["episode"].as_str().unwrap_or_default();
-            if claim.kind == "operational.recovered" {
-                if let Some(kept) = episodes.get_mut(episode) {
-                    if f["failure"] == kept.request {
-                        kept.status = "resolved".into();
-                        kept.resolved_at_unix_ms = Some(claim.accepted_at_unix_ms);
-                    }
-                }
-                continue;
-            }
-            episodes.insert(
-                episode.into(),
-                AttentionRequestView {
-                    subject: episode.into(),
-                    request: claim.id.clone(),
-                    reviewer: f["reviewer"].as_str().unwrap_or("person/operator").into(),
-                    title: f["title"].as_str().unwrap_or_default().into(),
-                    reason: f["reason"].as_str().unwrap_or_default().into(),
-                    severity: f["severity"].as_str().unwrap_or("error").into(),
-                    targets: serde_json::from_value(f["targets"].clone())
-                        .unwrap_or_else(|_| vec![claim.subject.clone()]),
-                    actor: claim.actor.clone().unwrap_or_default(),
-                    status: "pending".into(),
-                    outcome: None,
-                    resolution_reason: None,
-                    requested_at_unix_ms: claim.accepted_at_unix_ms,
-                    resolved_at_unix_ms: None,
-                    until: None,
-                    step: None,
-                    step_attempt: None,
-                    closed_by: None,
-                },
-            );
-        }
-        let episodes = episodes.into_values().collect::<Vec<_>>();
+        let episodes = fold_operational_failures(claims);
         *kept.0.lock().unwrap_or_else(PoisonError::into_inner) = Some((key, Arc::new(episodes.clone())));
         Ok(episodes)
     }
@@ -1280,7 +1313,7 @@ impl Store {
         {
             return Ok(None);
         }
-        let Some(claim) = person_work::claim_in_cut(connection, &failure.request, || self.claim_by_id(&failure.request))? else {
+        let Some(claim) = claim_by_id_tx(connection, &failure.request)? else {
             return Ok(None);
         };
         smallclaims::touched::note_read(|| claim.subject.clone());
@@ -2090,7 +2123,7 @@ impl Store {
         {
             return Ok(None);
         }
-        let Some(owner) = self.agent_person(seat)? else {
+        let Some(owner) = agent_person_at(connection, seat)? else {
             return Ok(None);
         };
         if person.is_some_and(|person| person != owner) {
@@ -2266,7 +2299,7 @@ impl Store {
         if denials.is_empty() || !person_work::declaration_live(connection, seat)? {
             return Ok(Vec::new());
         }
-        let Some(owner) = self.agent_person(seat)? else {
+        let Some(owner) = agent_person_at(connection, seat)? else {
             return Ok(Vec::new());
         };
         if person.is_some_and(|person| person != owner) {

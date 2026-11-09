@@ -21,6 +21,7 @@ pub const MESSAGE_RELATION_FIELDS: &[&str] = &[
     "thread_id",
     "thread_quote_id",
     "thread_origin_ask",
+    "thread_origin_source",
     "thread_origin_episode",
     MESSAGE_READER_VERSION_FIELD,
 ];

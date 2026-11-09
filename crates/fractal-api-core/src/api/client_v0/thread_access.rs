@@ -73,7 +73,7 @@ pub(super) fn capabilities(state: &AppState, session: &ClientSession) -> impl It
     let reply = edit || bound && session.allows("control.messages");
     let link = bound && session.allows("control.work");
     [
-        ("threads-v1", 1, read),
+        ("threads-v1", 2, read),
         ("thread-summary-feed", 1, read),
         ("thread-browser-send", 1, browser_send),
         ("thread.read", 0, read && edit),
