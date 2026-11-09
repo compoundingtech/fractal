@@ -25,15 +25,15 @@
   },
   "compatibility": {
     "status": "changed",
-    "detail": "Current clients require threads-v1 version 2 and the exact summary feed. Every Inbox source can start an atomic first-message thread with its server-resolved responsible agent; historical source discovery remains readable after resolution. Rename, Close, Reopen, closed-thread replies, message quotes and explicit read progress use scoped actions. The existing Inbox row gains an opt-in unread hint without a new alert or count. MCP reads and bound agent delivery retain their existing owner, session and revocation boundaries. Private thread contents stay out of ordinary conversations, generic graph/status/event reads and foreign-owner reads. Native sends require their enrolled signature; an approved browser can reuse its existing send grant only on its issuer, with writer-time revalidation."
+    "detail": "Current clients require threads-v1 version 2 and the exact summary feed. Every Inbox source can start an atomic first-message thread with its server-resolved responsible agent; historical source discovery remains readable after resolution. Rename, Close, Reopen, closed-thread replies, message quotes and explicit read progress use scoped actions. The existing Inbox row gains an opt-in unread hint without a new alert or count. MCP reads and bound agent delivery retain their existing owner, session and revocation boundaries. Private thread contents stay out of ordinary conversations, generic graph/status/event reads and foreign-owner reads. Device-authenticated sends require their enrolled signature; trusted-local sends retain their existing authority; an approved browser can reuse its existing send grant only on its issuer, with writer-time revalidation."
   },
   "downtime": {
     "status": "none",
-    "detail": "Normal startup advances the local floor and installs additive indexes on existing databases once. Use the existing rolling restart and reconnection path; no planned work interruption is required."
+    "detail": "Normal startup advances the local floor and installs additive indexes on existing databases once. Deploy through the existing rolling restart and reconnection path."
   },
   "manual": {
     "status": "changed",
-    "detail": "Deploy the complete reader build with thread_writes disabled, then verify all configured and active peers and upgrade TUI, web, iOS and MCP clients before separately enabling thread_writes. The default stays disabled. Where an Inbox source has no originating agent, configure an explicitly approved inbox_fallback_agent (Home Manager inboxFallbackAgent); the server never guesses a recipient."
+    "detail": "Deploy the complete reader build with thread_writes disabled, then verify all configured and active peers and upgrade TUI, web, iOS and MCP clients before separately enabling thread_writes. The default stays disabled. Where an Inbox source has no originating agent, use an explicitly configured inbox_fallback_agent (Home Manager inboxFallbackAgent); the server never guesses a recipient."
   },
   "recovery": {
     "status": "changed",
