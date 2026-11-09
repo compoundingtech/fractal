@@ -82,10 +82,15 @@ const tabsFitPlay = async ({ canvasElement }: { readonly canvasElement: HTMLElem
   const assertFits = async () => {
     await waitFor(() => expect(sidebar.scrollWidth).toBeLessThanOrEqual(sidebar.clientWidth))
     const bounds = sidebar.getBoundingClientRect()
-    // Check painted descendants, not intrinsic replicas or the row's intentionally clipped screen-reader description.
+    // Check painted descendants, not intrinsic replicas or React Aria's zero-paint screen-reader descriptions.
     for (const child of sidebar.querySelectorAll<HTMLElement>('*')) {
       const computed = getComputedStyle(child)
-      if (computed.visibility === 'hidden' || computed.display === 'none' || child.getClientRects().length === 0 || child.closest('[data-row-description]') !== null) continue
+      if (computed.visibility === 'hidden' || computed.display === 'none' || child.getClientRects().length === 0) continue
+      let visuallyHidden = false
+      for (let ancestor = child.parentElement; ancestor !== null && ancestor !== sidebar; ancestor = ancestor.parentElement) {
+        if (getComputedStyle(ancestor).clipPath === 'inset(50%)') { visuallyHidden = true; break }
+      }
+      if (visuallyHidden) continue
       const rect = child.getBoundingClientRect()
       await expect(rect.left).toBeGreaterThanOrEqual(bounds.left - 0.5)
       await expect(rect.right).toBeLessThanOrEqual(bounds.right + 0.5)
