@@ -1,4 +1,4 @@
-import { ClientError, type FractalClient, type ThreadListQuery, type ThreadReplyParameters, type ThreadStartParameters } from '@fractal/client'
+import { actionReceiptCheck, sendBoundAction, resendBoundAction, type BoundAction, type ActionReceiptExpectation, ClientError, type FractalClient, type ThreadListQuery, type ThreadReplyParameters, type ThreadStartParameters } from '@fractal/client'
 import * as Native from '@fractal/client/schema/read'
 import type { ThreadSummary, ThreadSummaryPage, ThreadTimelineEvent, ThreadTimelinePage } from '@fractal/client/schema/read'
 import type { FollowEvent, ThreadWindow } from '@fractal/sdk/read'
@@ -185,53 +185,69 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
   })
   const invalidate = () => registry.set(revision, registry.get(revision) + 1)
   const drafts = Atom.family((_destination: string) => Atom.keepAlive(Atom.make<ThreadDraft>({ content: '' })))
-  type Attempt = { readonly fingerprint: string; readonly key: string; readonly target: string; pending?: Promise<ThreadSendResult> }
+  type Request = { id: string; idempotency_key: string; fence: { snapshot_id: string; subject_revisions: Record<string, string> } }
+  type Attempt = {
+    readonly fingerprint: string
+    readonly key: string
+    readonly target: string
+    readonly actor: string | undefined
+    retry?: BoundAction<Request>
+    pending?: Promise<ThreadSendResult>
+  }
   const attempts = new Map<string, Attempt>()
-  const send = (destination: string, parameters: Omit<ThreadStartParameters, 'target_id' | 'signature'> | Omit<ThreadReplyParameters, 'signature'>): Promise<ThreadSendResult> => {
+  // Outbox identity is independent of presentation: all thread actions retain their original
+  // intent and transport after a lost receipt, just like ordinary conversation sends.
+  const deliver = (
+    destination: string,
+    fingerprint: string,
+    kind: string,
+    target: () => string,
+    prepare: (attempt: Attempt) => {
+      readonly expected: ActionReceiptExpectation
+      readonly send: (request: Request) => ReturnType<FractalClient['threadReply']>
+      readonly revisions?: Record<string, string>
+    },
+  ): Promise<ThreadSendResult> => {
     const reject = (detail: string): ThreadSendResult => ({ _tag: 'Refused', detail })
     const grant = registry.get(access)
-    const kind = 'target_id' in parameters ? 'thread.reply' : 'thread.start'
-    if (!grant.actions.has(kind)) return Promise.resolve(reject('This connection cannot send to threads.'))
     const previous = attempts.get(destination)
-    const fingerprint = JSON.stringify(parameters)
-    if (previous !== undefined && previous.fingerprint !== fingerprint) {
-      return Promise.resolve(reject('Fractal has not confirmed the previous send. Retry that message first.'))
-    }
     if (previous?.pending !== undefined) return previous.pending
-    const attempt: Attempt = previous ?? {
-      fingerprint,
-      key: crypto.randomUUID(),
-      target: 'target_id' in parameters ? parameters.target_id : `thread/${crypto.randomUUID()}`,
+    if (previous !== undefined && previous.fingerprint !== fingerprint) {
+      return Promise.resolve(reject('Fractal has not confirmed the previous action. Retry that action first.'))
     }
+    if (!grant.actions.has(kind)) return Promise.resolve(reject('This connection cannot perform that thread action.'))
+    const attempt: Attempt = previous ?? { fingerprint, key: crypto.randomUUID(), target: target(), actor: grant.actor }
     attempts.set(destination, attempt)
     attempt.pending = (async () => {
       try {
-        const { snapshot, value } = await client.capabilities()
-        if (value.session_actor !== grant.actor) {
-          attempts.delete(destination)
-          return reject('The connected account changed. Open the thread again.')
+        const prepared = prepare(attempt)
+        const fence = async (): Promise<Request['fence']> => {
+          const { snapshot, value } = await client.capabilities()
+          if (value.session_actor !== attempt.actor) throw new Error('The connected account changed. Return to the original account to retry this action.')
+          if (!value.capabilities.some(capability => capability.id === kind && capability.state === 'granted')
+            || ((kind === 'thread.start' || kind === 'thread.reply') && !canSendUnsignedThread(value))) {
+            throw new Error('This connection cannot perform that thread action.')
+          }
+          return { snapshot_id: snapshot.id, subject_revisions: prepared.revisions ?? {} }
         }
-        if (!canSendUnsignedThread(value) || !value.capabilities.some(capability => capability.id === kind && capability.state === 'granted')) {
-          if (previous === undefined) attempts.delete(destination)
-          return reject('This connection cannot send to threads.')
-        }
-        const request = { id: `action/${attempt.key}`, idempotency_key: attempt.key, fence: { snapshot_id: snapshot.id, subject_revisions: {} } }
-        const result = 'target_id' in parameters
-          ? await client.threadReply({ ...request, parameters })
-          : await client.threadStart({ ...request, parameters: { ...parameters, target_id: attempt.target } })
-        if (!accepted(result, request.id, attempt.target) || result.value.affected_ids.length !== 2
-          || !result.value.affected_ids.some(id => id.startsWith('message/'))) {
-          return reject('Fractal has not confirmed this send. Retry to check the same message.')
+        const confirm = actionReceiptCheck(prepared.expected)
+        const outcome = attempt.retry === undefined
+          ? await sendBoundAction(attempt.actor ?? 'local', {
+            build: async () => ({ id: `action/${attempt.key}`, idempotency_key: attempt.key, fence: await fence() }),
+            fence,
+            send: request => confirm(() => prepared.send(request)),
+            retry: false,
+            wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
+          })
+          : await resendBoundAction(attempt.retry)
+        if (outcome.how === 'unconfirmed') {
+          attempt.retry = outcome.request
+          return reject('Fractal has not confirmed this action. Retry to check the same action.')
         }
         attempts.delete(destination)
-        return { _tag: 'Sent', threadId: attempt.target }
-      } catch (cause) {
-        if (previous === undefined && cause instanceof ClientError && cause.status < 500
-          && cause.response.details?.applied !== 'unknown') {
-          attempts.delete(destination)
-          return reject(cause.response.message)
-        }
-        return reject('Fractal has not confirmed this send. Retry to check the same message.')
+        return outcome.how === 'sent'
+          ? { _tag: 'Sent', threadId: attempt.target }
+          : reject(outcome.error instanceof ClientError ? outcome.error.response.message : outcome.error instanceof Error ? outcome.error.message : 'Fractal could not perform this action.')
       } finally {
         delete attempt.pending
         invalidate()
@@ -239,36 +255,32 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     })()
     return attempt.pending
   }
+  const send = (destination: string, parameters: Omit<ThreadStartParameters, 'target_id' | 'signature'> | Omit<ThreadReplyParameters, 'signature'>): Promise<ThreadSendResult> => {
+    const intent = structuredClone(parameters)
+    const kind = 'target_id' in intent ? 'thread.reply' : 'thread.start'
+    return deliver(destination, JSON.stringify(intent), kind,
+      () => 'target_id' in intent ? intent.target_id : `thread/${crypto.randomUUID()}`,
+      attempt => ({
+        expected: { kind: 'message', actionId: `action/${attempt.key}`, targetId: attempt.target },
+        send: request => 'target_id' in intent
+          ? client.threadReply({ ...request, parameters: intent })
+          : client.threadStart({ ...request, parameters: { ...intent, target_id: attempt.target } }),
+      }),
+    )
+  }
   const pageKey = (subject: string, cursor?: string) => cursor === undefined ? subject : `${subject}\n${cursor}`
-  const lifecycle = async (thread: ThreadObservation, action: string, edit: (
-    request: {
-      id: string
-      idempotency_key: string
-      fence: { snapshot_id: string; subject_revisions: Record<string, string> }
-      parameters: { target_id: string }
-    },
+  const lifecycle = async (thread: ThreadObservation, action: string, parameters: object, edit: (
+    request: Request & { parameters: { target_id: string } },
   ) => ReturnType<FractalClient['threadClose']>): Promise<string | undefined> => {
-    if (!registry.get(access).actions.has(action)) return 'This connection cannot change threads.'
-    try {
-      const key = crypto.randomUUID()
-      const id = `action/${key}`
-      const response = await edit({
-        id,
-        idempotency_key: key,
-        fence: { snapshot_id: thread.snapshotId, subject_revisions: { [thread.summary.id]: thread.summary.revision } },
-        parameters: { target_id: thread.summary.id },
-      })
-      if (!accepted(response, id, thread.summary.id) || typeof response.value.metadata_revision !== 'string') {
-        return 'Fractal could not confirm this thread change.'
-      }
-      return undefined
-    } catch (cause) {
-      return cause instanceof ClientError
-        ? cause.response.message
-        : 'Fractal could not confirm this thread change.'
-    } finally {
-      invalidate()
-    }
+    const result = await deliver(`edit/${thread.summary.id}`, JSON.stringify({ action, parameters }), action,
+      () => thread.summary.id,
+      attempt => ({
+        expected: { kind: 'metadata', actionId: `action/${attempt.key}`, targetId: thread.summary.id },
+        revisions: { [thread.summary.id]: thread.summary.revision },
+        send: request => edit({ ...request, parameters: { target_id: thread.summary.id } }),
+      }),
+    )
+    return result._tag === 'Sent' ? undefined : result.detail
   }
   return {
     access,
@@ -279,10 +291,10 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     draft: drafts,
     start: (draftKey, parameters) => send(draftKey, parameters),
     reply: parameters => send(parameters.target_id, parameters),
-    rename: (thread, title, title_revision) => lifecycle(thread, 'thread.rename', request => client.threadRename({
+    rename: (thread, title, title_revision) => lifecycle(thread, 'thread.rename', { title, title_revision }, request => client.threadRename({
       ...request, parameters: { ...request.parameters, title, title_revision },
     })),
-    changeState: (thread, state) => lifecycle(thread, state === 'closed' ? 'thread.close' : 'thread.reopen', request => state === 'closed'
+    changeState: (thread, state) => lifecycle(thread, state === 'closed' ? 'thread.close' : 'thread.reopen', { state }, request => state === 'closed'
       ? client.threadClose(request)
       : client.threadReopen(request)),
     markRead: async (thread, through, seen) => {
@@ -290,35 +302,15 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       if (!grant.actions.has('thread.read') || seen.length === 0 || !seen.includes(through)) {
         return 'This connection cannot mark these replies read.'
       }
-      try {
-        const { snapshot, value } = await client.capabilities()
-        if (value.session_actor !== grant.actor) return 'The connected account changed. Open the thread again.'
-        if (!value.capabilities.some(capability => capability.id === 'thread.read' && capability.state === 'granted')) {
-          return 'This connection cannot mark these replies read.'
-        }
-        const key = crypto.randomUUID()
-        const id = `action/${key}`
-        const { value: receipt } = await client.threadRead({
-          id, idempotency_key: key, fence: { snapshot_id: snapshot.id, subject_revisions: {} },
-          parameters: { target_id: thread.summary.id, through_message_id: through, seen_message_ids: [...seen] },
-        })
-        if (receipt.kind !== 'action-result' || receipt.status !== 'completed' || receipt.action_id !== id
-          || receipt.affected_ids.some(message => !seen.includes(message))) {
-          return 'Fractal could not confirm that these replies were marked read.'
-        }
-        return undefined
-      } catch (cause) {
-        return cause instanceof ClientError
-          ? cause.response.message
-          : 'Fractal could not confirm that these replies were marked read.'
-      } finally {
-        invalidate()
-      }
+      const parameters = { target_id: thread.summary.id, through_message_id: through, seen_message_ids: [...seen] }
+      const result = await deliver(`read/${thread.summary.id}/${through}`, JSON.stringify(parameters), 'thread.read',
+        () => thread.summary.id,
+        attempt => ({
+          expected: { kind: 'read', actionId: `action/${attempt.key}`, readMessageIds: seen },
+          send: request => client.threadRead({ ...request, parameters }),
+        }),
+      )
+      return result._tag === 'Sent' ? undefined : result.detail
     },
   }
-}
-
-function accepted(response: Awaited<ReturnType<FractalClient['threadClose']>>, actionId: string, threadId: string): boolean {
-  return response.value.kind === 'action-result' && response.value.status === 'completed'
-    && response.value.action_id === actionId && response.value.affected_ids.includes(threadId)
 }

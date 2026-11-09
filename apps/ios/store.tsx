@@ -4,8 +4,8 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
-import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
-import { threadReceiptCheck } from './threadReceipt';
+import { resendBoundAction, sendBoundAction, type BoundAction, type DeliveryOutcome } from '../../clients/typescript/fractal-client';
+import { actionReceiptCheck } from '../../clients/typescript/fractal-client';
 import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type ThreadSummary, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, threadMessageSubject, type ThreadMessageFields, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
@@ -51,7 +51,7 @@ export type OnDemand = 'launches' | 'machines' | 'devices' | 'sessions';
 export type Status = 'setup' | 'connecting' | 'online' | 'offline';
 export type Planner = 'codex' | 'claude' | 'pi' | 'omp' | 'opencode';
 /** The exact request and its original member's transport; never rebound on failover. */
-export type MessageRequest = BoundMessage<Parameters<FractalClient['messageSend']>[0]>;
+export type MessageRequest = BoundAction<Parameters<FractalClient['messageSend']>[0]>;
 /** What became of a message: sent, unconfirmed (with the exact request to send again), or failed as a person reads it. */
 export type Sent = { how: 'sent' } | { how: 'unconfirmed'; request: MessageRequest } | { how: 'failed'; error: string };
 
@@ -147,7 +147,7 @@ export type ThreadEditResult =
   | { how: 'unconfirmed'; retry: () => Promise<ThreadEditResult> };
 
 function actionId() { return `action/ios-${Crypto.randomUUID()}`; }
-function sentAs(outcome: SendOutcome<MessageRequest>): Sent { return outcome.how === 'failed' ? { how: 'failed', error: sendRefusal(outcome.error) } : outcome; }
+function sentAs(outcome: DeliveryOutcome<MessageRequest>): Sent { return outcome.how === 'failed' ? { how: 'failed', error: sendRefusal(outcome.error) } : outcome; }
 
 /** Where a measurement was served from: the route it ran over and, for fabric, the path once measured. */
 function observedContext(route: Route, fabricPath: 'direct' | 'relay' | 'unknown'): Context {
@@ -942,24 +942,24 @@ function useAppStore(proof?: FabricProfile) {
     const readFence = async () => { ensureOriginalConnection(); return fence(revisions); };
     // Build signed fields once. Every retry retains the same key, signature and nonce.
     let submit: ((request: ThreadRequest) => Promise<void>) | undefined;
-    const finish = (result: SendOutcome<BoundMessage<ThreadRequest>>): ThreadEditResult => {
+    const finish = (result: DeliveryOutcome<BoundAction<ThreadRequest>>): ThreadEditResult => {
       if (result.how === 'unconfirmed') {
-        return { how: 'unconfirmed', retry: async () => finish(await resendBoundMessage(result.request)) };
+        return { how: 'unconfirmed', retry: async () => finish(await resendBoundAction(result.request)) };
       }
       if (result.how === 'sent' || (result.error instanceof ClientError && result.error.status === 409)) {
         setThreadRefresh(previous => previous + 1);
       }
       return result.how === 'sent' ? result : { how: 'failed', error: errorText(result.error) };
     };
-    return finish(await sendBoundMessage(member, {
+    return finish(await sendBoundAction(member, {
       build: async () => {
         ensureOriginalConnection();
         if (!submit) {
           const prepared = await prepare(threadClient, id);
-          const confirm = threadReceiptCheck(prepared.readMessageIds
-            ? { actionId: id, readMessageIds: prepared.readMessageIds }
-            : { actionId: id, targetId, messageId: prepared.messageId });
-          submit = request => confirm(() => prepared.send(request));
+          const confirm = actionReceiptCheck(prepared.readMessageIds
+            ? { kind: 'read', actionId: id, readMessageIds: prepared.readMessageIds }
+            : prepared.messageId ? { kind: 'message', actionId: id, targetId, messageId: prepared.messageId } : { kind: 'metadata', actionId: id, targetId });
+          submit = async request => { await confirm(() => prepared.send(request)); };
         }
         return { id, idempotency_key: id, fence: await readFence() };
       },
@@ -1323,7 +1323,7 @@ function useAppStore(proof?: FabricProfile) {
       // The first try goes on the snapshot a window frame already brought, with no capabilities read;
       // each try after Fractal said the last applied nothing reads a fresh one.
       const fences = sendFences(lastSnapshot.current, fence);
-      const outcome = await sendBoundMessage(selected.route.kind === 'fabric' && fabricMember ? fabricMember.name : url, {
+      const outcome = await sendBoundAction(selected.route.kind === 'fabric' && fabricMember ? fabricMember.name : url, {
         build: async () => {
           const id = actionId();
           const unsigned = { to, content, ...(sessionId ? { session_id: sessionId } : {}), ...(tags?.length ? { tags } : {}), ...(attachments.length ? { attachments } : {}) };
@@ -1331,7 +1331,11 @@ function useAppStore(proof?: FabricProfile) {
           return { id, idempotency_key: id, fence: await fences(), parameters };
         },
         fence: async () => { originalAvailable(); return fence(); },
-        send: request => { originalAvailable(); return client.messageSend(request); },
+        send: async request => {
+          originalAvailable();
+          const digest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, request.idempotency_key, { encoding: Crypto.CryptoEncoding.HEX });
+          await actionReceiptCheck({ kind: 'message', actionId: request.id, messageId: messageSubject(digest) })(() => client.messageSend(request));
+        },
         wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
       });
       if (outcome.how !== 'sent') { proof?.record(outcome.how === 'unconfirmed' ? 'message-unconfirmed' : 'message-failed', { elapsedMs: performance.now() - began }); return sentAs(outcome); }
@@ -1342,7 +1346,7 @@ function useAppStore(proof?: FabricProfile) {
     },
     /** Retry only through the transport captured by the original send. Fabric listeners are per-dial. */
     async resend(request: MessageRequest): Promise<Sent> {
-      return sentAs(await resendBoundMessage(request));
+      return sentAs(await resendBoundAction(request));
     },
     /** A plain shell, named as the Fractal terminal UI names one; its terminal id, or null with the reason shown. */
     async createTerminal(name: string): Promise<string | null> {

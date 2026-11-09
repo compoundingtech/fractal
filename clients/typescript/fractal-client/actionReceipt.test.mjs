@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { API_VERSION, ClientError, FractalClient, outcomeUnknown } from '../../clients/typescript/fractal-client/index.ts';
-import { resendBoundMessage, sendBoundMessage } from './messageSend.ts';
-import { threadReceiptCheck } from './threadReceipt.ts';
+import { API_VERSION, ClientError, FractalClient, ActionRejected, outcomeUnknown } from './index.ts';
+import { resendBoundAction, sendBoundAction } from './index.ts';
+import { actionReceiptCheck } from './index.ts';
 
 const actionId = 'action/ios-thread';
 const targetId = 'thread/review';
@@ -18,7 +18,7 @@ const refusalPayload = {
 };
 
 test('thread actions require a completed receipt for the exact action, thread and message', async () => {
-  const confirm = threadReceiptCheck({ actionId, targetId, messageId });
+  const confirm = actionReceiptCheck({ kind: 'message', actionId, targetId, messageId });
   await confirm(async () => result(value));
   for (const payload of [
     null,
@@ -31,12 +31,12 @@ test('thread actions require a completed receipt for the exact action, thread an
     await assert.rejects(confirm(async () => result(payload)), outcomeUnknown);
   }
   const lifecycle = { ...value, affected_ids: [targetId] };
-  await assert.rejects(threadReceiptCheck({ actionId, targetId })(async () => result(lifecycle)), outcomeUnknown);
-  await threadReceiptCheck({ actionId, targetId })(async () => result({ ...lifecycle, metadata_revision: 'claim/reopen' }));
+  await assert.rejects(actionReceiptCheck({ kind: 'metadata', actionId, targetId })(async () => result(lifecycle)), outcomeUnknown);
+  await actionReceiptCheck({ kind: 'metadata', actionId, targetId })(async () => result({ ...lifecycle, metadata_revision: 'claim/reopen' }));
 });
 
 test('thread read accepts only receipts for the exact action and a subset of visible replies', async () => {
-  const confirm = threadReceiptCheck({ actionId, readMessageIds: [messageId] });
+  const confirm = actionReceiptCheck({ kind: 'read', actionId, readMessageIds: [messageId] });
   await confirm(async () => result({ ...value, affected_ids: [] }));
   await confirm(async () => result({ ...value, affected_ids: [messageId] }));
   await assert.rejects(confirm(async () => result({ ...value, affected_ids: [targetId] })), outcomeUnknown);
@@ -60,17 +60,17 @@ test('an ambiguous reply keeps the signed action and key until its matching rece
     id: actionId, idempotency_key: actionId, fence: { snapshot_id: 'snapshot/old', subject_revisions: {} },
     parameters: { target_id: targetId, content: 'Hello', signature: { nonce: 'original' } },
   };
-  const confirm = threadReceiptCheck({ actionId, targetId, messageId });
+  const confirm = actionReceiptCheck({ kind: 'message', actionId, targetId, messageId });
   const ports = {
     build: async () => request,
     fence: async () => ({ snapshot_id: 'snapshot/new', subject_revisions: {} }),
     send: input => confirm(() => sdk.threadReply(input)),
     wait: async () => {},
   };
-  const initial = await sendBoundMessage('member/one', ports);
+  const initial = await sendBoundAction('member/one', ports);
   assert.equal(initial.how, 'unconfirmed');
   assert.deepEqual(received[0], received[1]);
-  const retried = await resendBoundMessage(initial.request);
+  const retried = await resendBoundAction(initial.request);
   assert.equal(retried.how, 'sent');
   assert.deepEqual(received[2], { ...received[0], fence: await ports.fence() });
   assert.deepEqual(received[3], received[2]);
@@ -78,6 +78,26 @@ test('an ambiguous reply keeps the signed action and key until its matching rece
 
 test('a definitive daemon refusal still reaches the caller', async () => {
   const refusal = new ClientError(refusalPayload, 403);
-  const confirm = threadReceiptCheck({ actionId, targetId, messageId });
+  const confirm = actionReceiptCheck({ kind: 'message', actionId, targetId, messageId });
   await assert.rejects(confirm(async () => { throw refusal; }), error => error === refusal);
+});
+
+test('ordinary sends and thread sends share strict receipt confirmation', async () => {
+  for (const expected of [{ kind: 'message', actionId }, { kind: 'message', actionId, targetId }]) {
+    for (const payload of [
+      { ...value, operation_id: '' },
+      { ...value, snapshot_id: '' },
+      { ...value, action_id: 'action/other' },
+      { ...value, affected_ids: [] },
+    ]) await assert.rejects(actionReceiptCheck(expected)(async () => result(payload)), outcomeUnknown);
+    await actionReceiptCheck(expected)(async () => result(value));
+  }
+  await assert.rejects(actionReceiptCheck({ kind: 'metadata', actionId, targetId })(async () => result({ ...value, metadata_revision: '' })), outcomeUnknown);
+});
+
+
+test('an exact terminal rejection resolves a previously lost receipt', async () => {
+  const confirm = actionReceiptCheck({ kind: 'message', actionId, targetId, messageId });
+  await assert.rejects(confirm(async () => result({ ...value, operation_id: '' })), outcomeUnknown);
+  await assert.rejects(confirm(async () => result({ ...value, status: 'rejected' })), ActionRejected);
 });

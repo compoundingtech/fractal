@@ -1,3 +1,4 @@
+import * as Native from '@fractal/client/schema/read'
 import { FractalClient } from '@fractal/client'
 import * as AtomRegistry from 'effect/reactivity/AtomRegistry'
 import { expect, it, vi } from 'vitest'
@@ -268,4 +269,36 @@ it('sends the same typed actions for approved browsers and blocks writes if the 
     stop()
     registry.dispose()
   }
+})
+
+it('retains the exact rename intent across malformed receipt, denial and a changed draft', async () => {
+  const writes: Array<Record<string, unknown>> = []
+  const client = new FractalClient({ baseUrl: 'http://example.test', fetchImpl: async (input, init) => {
+    if (String(input).endsWith('/capabilities')) return Response.json({ ...base, value: { ...base.value, capabilities: [
+      ...base.value.capabilities,
+      ...['threads-v1', 'thread-summary-feed', 'thread.rename'].map(id => ({ id, version: 1, state: 'granted' })),
+    ] } })
+    const action = JSON.parse(String(init?.body)) as Record<string, unknown>
+    writes.push(action)
+    if (writes.length === 2) return Response.json({ api_version: base.api_version, error_version: 'st3.client.error.v0', request_id: action.id,
+      code: 'forbidden', message: 'grant expired', retryable: false, details: {} }, { status: 403 })
+    return Response.json({ ...base, value: { kind: 'action-result', action_id: action.id, status: 'completed',
+      operation_id: 'operation/rename', snapshot_id: base.snapshot.id, affected_ids: [id], metadata_revision: writes.length === 1 ? '' : 'claim/new-title' } })
+  } })
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(client, registry)
+  const stop = registry.mount(source.access)
+  // Keep the observed old title revision: a retry cannot invent a new old/new rename pair.
+  const observation = { summary: Native.decodeUnknownSync(Native.ThreadSummary)(summary), snapshotId: base.snapshot.id }
+  try {
+    await vi.waitFor(() => expect(registry.get(source.access).actions.has('thread.rename')).toBe(true))
+    expect(await source.rename(observation, 'New title', 'claim/title')).toBeDefined()
+    expect(await source.rename(observation, 'Different title', 'claim/title')).toBeDefined()
+    expect(writes).toHaveLength(1)
+    expect(await source.rename(observation, 'New title', 'claim/title')).toBeDefined()
+    expect(await source.rename(observation, 'New title', 'claim/title')).toBeUndefined()
+    expect(writes).toHaveLength(3)
+    expect(writes[1]).toEqual(writes[0])
+    expect(writes[2]).toEqual(writes[0])
+  } finally { stop(); registry.dispose() }
 })
