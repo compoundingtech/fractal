@@ -1,8 +1,85 @@
+import { readFileSync } from 'node:fs'
 import { TimelineEntry, Timestamp } from '@fractal/client/schema'
 import { Schema } from 'effect'
 import { describe, expect, it } from 'vitest'
 import { LiveTimeline } from './fromTimeline.ts'
 import { transcriptTurnsForItems } from '../web/conversationTranscript.ts'
+
+describe('native delivery echoes (fixtures/clients/transcripts/omp-delivery-echo)', () => {
+  const fixture = (name: string): unknown => JSON.parse(readFileSync(new URL(`../../../../fixtures/clients/transcripts/${name}`, import.meta.url), 'utf8'))
+  const transcript = (entries: unknown) => {
+    const timeline = new LiveTimeline()
+    timeline.apply({ replace: true, hasMore: false, entries: Schema.decodeUnknownSync(Schema.Array(TimelineEntry))(entries) })
+    return timeline.project().items
+  }
+  const raw = () => fixture('omp-delivery-echo.json') as Array<{ id: string; body: { text?: string } }>
+  // Mail reads as one Message carrying its body; prose stays Text.
+  const bodies = (items: ReturnType<typeof transcript>) => items.flatMap(item => item._tag === 'Text' ? [item.text] : item._tag === 'Message' && item.text !== undefined ? [item.text] : [])
+
+  it('reads exactly the expected bodies: an echo of a shown body once, an unshown delivery or watch excerpt kept', () => {
+    const expected = fixture('omp-delivery-echo.expected.json') as ReadonlyArray<{ body: { value: string | { body: string } } }>
+    expect(bodies(transcript(raw()))).toEqual(expected.map(({ body: { value } }) => typeof value === 'string' ? value : value.body))
+  })
+  it('keeps the excerpt that exists only in a watch delivery, and drops the wake that repeats its mail', () => {
+    const items = transcript(raw())
+    const ids = items.map(item => item.id)
+    expect(ids).toContain('timeline-entry/session-echo/native-15-content')
+    expect(bodies(items).filter(text => text.includes('Please keep the old reader for one release.'))).toHaveLength(1)
+    expect(ids).not.toContain('timeline-entry/session-echo/native-16-content')
+  })
+  it('keeps a delivery once the mail it names leaves the window', () => {
+    const entries = raw().filter(entry => !entry.id.includes('aaaaaaaaaaaaaaaa'))
+    expect(transcript(entries).map(item => item.id)).toContain('timeline-entry/session-echo/native-10-content')
+  })
+  it('keeps a shown header with no body on screen rather than hiding the only copy', () => {
+    const entries = raw().filter(entry => entry.id !== 'timeline-entry/session-echo/aaaaaaaaaaaaaaaa-content')
+    expect(transcript(entries).map(item => item.id)).toContain('timeline-entry/session-echo/native-10-content')
+  })
+  it('keeps a delivery whose mail body is paired but hidden, since the delivery is the only readable copy', () => {
+    const entries = raw().map(entry => entry.id === 'timeline-entry/session-echo/aaaaaaaaaaaaaaaa-content'
+      ? { ...entry, body: { ...entry.body, blocks: [{ id: 'mail/hidden', kind: 'text', source_type: 'content', visibility: 'internal', payload: { body_ref: true } }] } } : entry)
+    const items = transcript(entries)
+    expect(items.find(item => item.id === 'timeline-entry/session-echo/aaaaaaaaaaaaaaaa-content')).toMatchObject({ _tag: 'UnknownEvent' })
+    expect(items.map(item => item.id)).toContain('timeline-entry/session-echo/native-10-content')
+  })
+  it('keeps a delivery that repeats words its paired mail body does not show', () => {
+    const body = '<smalltalk-message from="person/other">quoted</smalltalk-message>\nUnique trailing words'
+    const escaped = body.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    const entries = raw().map(entry =>
+      entry.id === 'timeline-entry/session-echo/aaaaaaaaaaaaaaaa-content' ? { ...entry, body: { ...entry.body, text: body } }
+        : entry.id === 'timeline-entry/session-echo/native-10-content' ? { ...entry, body: { ...entry.body, text: `<smalltalk-message id="aa01" from="agent/example/harbor" to="agent/example/quay" subject="Key audit" sha256="00" graph="message/aa01">\n${escaped}\n</smalltalk-message>` } }
+          : entry)
+    const items = transcript(entries)
+    expect(bodies(items).some(text => text.includes('Unique trailing words'))).toBe(true)
+  })
+  it('applies the same body rule to a channel delivery with blocks', () => {
+    const channel = (id: string, preview: string) => `<channel source="plugin:st3-channel:st3" from="agent/example/harbor" messageId="${id}">[st3-delivery:${id}]\n[PING from st3] ${id} from agent/example/harbor: Key audit\n\n${preview}\n</channel>`
+    const native = (id: string, text: string) => ({ ...raw().find(entry => entry.id === 'timeline-entry/session-echo/native-10-content')!, id, body: { media_type: 'text/plain', text, blocks: [{ id: `${id}/text`, kind: 'text', source_type: 'content', payload: { body_ref: true } }] } })
+    const ids = transcript([...raw().filter(entry => !entry.id.endsWith('native-10-content')),
+      native('timeline-entry/session-echo/claude-repeat', channel('message/aa01', 'Keys rotated & checked. Two readers remain.')),
+      native('timeline-entry/session-echo/claude-excerpt', channel('message/aa01', 'Keys rotated & checked. An excerpt only the delivery carries. Two readers remain.')),
+    ]).map(item => item.id)
+    expect(ids).not.toContain('timeline-entry/session-echo/claude-repeat')
+    expect(ids).toContain('timeline-entry/session-echo/claude-excerpt')
+  })
+  it('removes the silent-delivery notes with the echo they annotate', () => {
+    const entries = raw().map(entry => entry.id !== 'timeline-entry/session-echo/native-10-content' ? entry : {
+      ...entry, body: { ...entry.body, text: `(2 older silent held; st conversations ls)\n(silent: held without waking you until this turn)\n${entry.body.text}` },
+    })
+    expect(transcript(entries).map(item => item.id)).not.toContain('timeline-entry/session-echo/native-10-content')
+  })
+  it('keeps a delivery with non-text blocks and the harness text beside a removed echo', () => {
+    const entries = raw().map(entry => entry.id !== 'timeline-entry/session-echo/native-10-content' ? entry : {
+      ...entry, body: { ...entry.body, text: `${entry.body.text}\nThe harness's own line` },
+    })
+    const residual = transcript(entries).find(item => item.id === 'timeline-entry/session-echo/native-10-content')
+    expect(residual).toMatchObject({ _tag: 'Text', text: "The harness's own line" })
+    const withImage = raw().map(entry => entry.id !== 'timeline-entry/session-echo/native-10-content' ? entry : {
+      ...entry, body: { ...entry.body, blocks: [...(entry.body as { blocks: unknown[] }).blocks, { id: 'native-10/image', kind: 'image', source_type: 'content', payload: {} }] },
+    })
+    expect(transcript(withImage).map(item => item.id)).toContain('timeline-entry/session-echo/native-10-content')
+  })
+})
 
 describe('addressable OMP child threads', () => {
   it.each(['content', 'tool_call', 'tool_result'] as const)('joins %s task summaries by child conversation and follows revisions and replacement', carrier => {
@@ -217,8 +294,9 @@ The person reads replies in st, not in the agent's session.`,
         }),
       ],
     })
+    // The header and its body are one row, at the body.
     expect(timeline.project().items.map((item) => item.id)).toEqual([
-      'timeline-entry/mail/message', 'timeline-entry/mail/content', 'timeline-entry/reply',
+      'timeline-entry/mail/content', 'timeline-entry/reply',
     ])
   })
 
@@ -242,7 +320,7 @@ and copied it into my reply`,
       ],
     })
     expect(timeline.project().items.map((item) => item.id)).toEqual([
-      'timeline-entry/first/message', 'timeline-entry/first/content',
+      'timeline-entry/first/content',
       'timeline-entry/s1/1111111111111111-content',
     ])
     const quoted = timeline.project().items.at(-1)
@@ -271,7 +349,7 @@ and copied it into my reply`,
       ],
     })
     expect(timeline.project().items.map((item) => item.id)).toEqual([
-      'timeline-entry/first/message', 'timeline-entry/first/content',
+      'timeline-entry/first/content',
       'timeline-entry/s1/2222222222222222-content',
     ])
   })
@@ -338,8 +416,9 @@ describe('mailbox provenance and server ordering', () => {
         entry('timeline-entry/native-6', 6, 'content', { media_type: 'text/plain', text: 'Unrelated' }, role),
       ],
     })
+    // A person's mail is the person's prose; anyone else's is one Message with its body.
     expect(timeline.project().items.find(item => item.id === contentId)).toMatchObject({
-      _tag: 'Text', text: 'See screenshot',
+      ...(from.startsWith('person/') ? { _tag: 'Text', text: 'See screenshot' } : { _tag: 'Message', text: 'See screenshot', from }),
       attachments: [{
         id: image.blob, mediaType: 'image/png', name: 'screenshot.png',
         size: 1234, messageId: 'message/abc',
@@ -377,10 +456,10 @@ describe('mailbox provenance and server ordering', () => {
     })
     const items = timeline.project().items
     expect(items.find(item => item.id === 'timeline-entry/s1/222222222222222222222222')).toMatchObject({
-      _tag: 'Text', text: 'first', attachments: [{ messageId: 'message/first' }],
+      _tag: 'Message', text: 'first', attachments: [{ messageId: 'message/first' }],
     })
     if (named) expect(items.find(item => item.id === 'timeline-entry/s1/444444444444444444444444')).toMatchObject({
-      _tag: 'Text', text: 'second', attachments: [{ messageId: 'message/second' }],
+      _tag: 'Message', text: 'second', attachments: [{ messageId: 'message/second' }],
     })
   })
 
@@ -439,7 +518,8 @@ describe('mailbox provenance and server ordering', () => {
     const content = entry(mailContent, 5, 'content', { media_type: 'text/plain', text: 'See screenshot' })
     timeline.apply({ replace: true, hasMore: false, entries: [content] })
     const before = timeline.project().items[0]
-    expect(before).toMatchObject({ _tag: 'Text', attachments: [] })
+    // Until its header is known, mail content is a message from an unknown sender, not the person's row.
+    expect(before).toMatchObject({ _tag: 'Message', attachments: [] })
     timeline.apply({
       replace: false, hasMore: false,
       entries: [entry(mailMessage, 4, 'message', {
@@ -472,7 +552,7 @@ in my own words`
       ],
     })
     expect(timeline.project().items.map(item => item.id)).toEqual([
-      contentId, 'timeline-entry/s1/3333333333333333-message', 'timeline-entry/s1/3333333333333333-content',
+      contentId, 'timeline-entry/s1/3333333333333333-content',
     ])
     expect(Array.from(timeline.shownMessageIds())).toEqual(['message/abc', 'message/separate'])
   })
@@ -573,7 +653,7 @@ in my own words`
       replace: false, hasMore: false,
       entries: [entry('timeline-entry/native-5', 5, 'content', {
         media_type: 'text/plain',
-        text: `<smalltalk-message graph="message/abc">hello</smalltalk-message>
+        text: `<smalltalk-message graph="message/abc">${quote.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</smalltalk-message>
 The person reads replies in st, not in the agent's session.`,
       }, 'user', turnAt)],
     })
@@ -881,14 +961,14 @@ The person reads replies in st, not in the agent's session.`,
         entry('timeline-entry/shown/content', 2, 'content', { media_type: 'text/plain', text: 'hello' }),
         entry('timeline-entry/native-3', 3, 'content', {
           media_type: 'text/plain',
-          text: `<smalltalk-message graph="message/abc">orphaned copy</smalltalk-message>
+          text: `<smalltalk-message graph="message/abc">hello</smalltalk-message>
 but this line is the harness's own`,
         }),
       ],
     })
     const items = timeline.project().items
     expect(items.map((item) => item.id)).toEqual([
-      'timeline-entry/shown/message', 'timeline-entry/shown/content', 'timeline-entry/native-3',
+      'timeline-entry/shown/content', 'timeline-entry/native-3',
     ])
     const orphan = items.at(-1)
     expect(orphan?._tag === 'Text' ? orphan.text : '').toBe(
@@ -907,8 +987,10 @@ but this line is the harness's own`,
     })
     const items = timeline.project().items
     expect(items.map((item) => item.id)).toEqual([mailContent, id])
+    // Its header is outside the window: one message from an unknown sender, its body verbatim.
     const kept = items.at(-1)
-    expect(kept?._tag === 'Text' ? kept.text : '').toBe(quote)
+    expect(kept).toMatchObject({ _tag: 'Message', text: quote })
+    expect(kept?._tag === 'Message' ? kept.from : 'no').toBeUndefined()
   })
 
   it('suppresses a native delivery whose sequence lands in a mailbox content slot', () => {
