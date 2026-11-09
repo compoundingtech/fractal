@@ -13,6 +13,7 @@ import type { AlertAction, AlertActionResult } from '../conversation/alerts/aler
 import type { PromptAnswerResult } from '../conversation/alerts/prompt-answer-port.ts'
 import { useAttention, useAttentionDecode, useDataSource, useNow } from '../data/react.tsx'
 import { credentialExpiredMessage, decodedRoster, type Feed, type RosterDecode } from '../data/source.ts'
+import { LiveAskThreads, LiveRecentlyClosedThreads } from '../threads/LiveThreads.tsx'
 import { alertsTabRows, type AlertsTabRow } from './alertsTab.ts'
 import { DecodeNotice } from './LiveRoster.tsx'
 
@@ -34,6 +35,8 @@ export const AlertsTab = ({ onOpen }: { readonly onOpen: (ref: string) => void }
       decode={useAttentionDecode()}
       now={useNow()}
       onOpen={onOpen}
+      renderThreads={alert => <LiveAskThreads alert={alert} onOpenThread={onOpen} />}
+      footer={<LiveRecentlyClosedThreads onOpenThread={onOpen} />}
       onAct={actions === undefined ? undefined : (alert, action) => actions.act({ alert, action })}
       onAnswer={prompts === undefined ? undefined : (alert, _answer, sent) => {
         const prompt = promptAnswers(alert)
@@ -49,7 +52,7 @@ export const AlertsTab = ({ onOpen }: { readonly onOpen: (ref: string) => void }
  * The list itself, from a feed: waiting, unavailable, stale and empty each say so; unknown is never shown as none.
  * It is its own bounded scroll region, so it fills a `minHeight: 0` column and every row and expanded answer stays reachable.
  */
-export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, onAct, onAnswer }: {
+export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, onAct, onAnswer, renderThreads, footer }: {
   readonly feed: Feed<readonly Native.Attention[]>
   readonly decode?: RosterDecode
   readonly now: number
@@ -57,6 +60,8 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, onAct, o
   readonly onOpen: (ref: string) => void
   readonly onAct?: Act
   readonly onAnswer?: Answer
+  readonly renderThreads?: (alert: Native.Attention) => React.ReactNode
+  readonly footer?: React.ReactNode
 }): React.ReactNode => {
   const rows = React.useMemo(() => (feed._tag === 'Observed' ? alertsTabRows(feed.value, now) : []), [feed, now])
   const shownIds = React.useMemo(() => new Set(feed._tag === 'Observed' ? feed.value.map((row) => row.id) : []), [feed])
@@ -134,17 +139,19 @@ export const AlertsList = ({ feed, decode = decodedRoster, now, onOpen, onAct, o
                     onOpen={onOpen}
                     onAct={onAct}
                     onAnswer={onAnswer}
+                    threadPanel={expanded === row.id ? renderThreads?.(row.item) : undefined}
                   />
                 ))}
               </ul>
             )}
           </>
         )}
+      {footer}
     </div>
   )
 }
 
-const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAnswer }: {
+const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAnswer, threadPanel }: {
   readonly row: AlertsTabRow
   readonly expanded: boolean
   readonly onExpand: (open: boolean) => void
@@ -153,6 +160,7 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
   readonly onOpen: (ref: string) => void
   readonly onAct: Act | undefined
   readonly onAnswer: Answer | undefined
+  readonly threadPanel?: React.ReactNode
 }): React.ReactNode => {
   const touch = React.useContext(NarrowLayoutContext)
   const [menu, setMenu] = React.useState(false)
@@ -181,7 +189,7 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
           ref={trigger}
           aria-expanded={expanded}
           aria-controls={expanded ? panelId : undefined}
-          aria-label={`${row.title}, ${row.age}${row.line2 === '' ? '' : `, ${row.line2}`}, ${GLYPH_WORDS[row.glyph]}`}
+          aria-label={`${row.title}, ${row.age}${row.line2 === '' ? '' : `, ${row.line2}`}, ${GLYPH_WORDS[row.glyph]}${row.item.thread_unread === true ? ', unread thread replies' : ''}`}
           onPress={() => onExpand(!expanded)}
           onKeyDown={(event) => {
             if (event.key === 'ContextMenu' || (event.key === 'F10' && event.shiftKey)) setMenu(true)
@@ -192,6 +200,7 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
           <span {...stylex.props(styles.line)}>
             <span aria-hidden="true" data-alert-row-glyph={row.glyph} {...stylex.props(styles.glyph, row.glyph === '?' && styles.question, row.glyph === '!' && styles.fault)} />
             <span {...stylex.props(styles.title)}>{row.title}</span>{' '}
+            {row.item.thread_unread === true ? <span aria-hidden="true" title="Unread thread replies" {...stylex.props(styles.threadUnread)}>●</span> : null}
             <span {...stylex.props(styles.metric)}>{row.age}</span>
           </span>
           {row.line2 === '' ? null : <>{' '}<span {...stylex.props(styles.meta)}>{row.line2}</span></>}
@@ -215,6 +224,7 @@ const AlertRow = ({ row, expanded, onExpand, onFocusWithin, onOpen, onAct, onAns
       {expanded ? (
         <div ref={panel} id={panelId} role="region" tabIndex={-1} aria-label={`Answer ${row.title}`} {...stylex.props(styles.panel)}>
           <AgentAlerts alerts={[row.item]} onAct={onAct} onAnswer={onAnswer} />
+          {threadPanel}
         </div>
       ) : null}
     </li>
@@ -233,6 +243,7 @@ const styles = stylex.create({
   question: { color: c.primary },
   fault: { color: c.danger },
   title: { flexGrow: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  threadUnread: { flexShrink: 0, color: c.primary },
   metric: { flexShrink: 0, color: c.fgMuted, fontSize: t.metaSize, fontVariantNumeric: 'tabular-nums' },
   meta: { paddingInlineStart: `calc(${g.iconSm} + ${s.sm})`, color: c.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   more: { flexShrink: 0, width: 24, borderWidth: 0, borderRadius: 4, backgroundColor: 'transparent', color: c.fgMuted, cursor: 'pointer', ':hover': { color: c.fg }, ...focus },

@@ -13,6 +13,7 @@ import { nativeTurnFooter } from './NativeTurnFooter.tsx'
 import { transcriptImagesFor } from './transcriptImages.ts'
 import { spaceVars, geometryVars } from '../../../../packages/fractal-ui/src/assistant-ui/composition-tokens.stylex.ts'
 import { LastSeen, ThreadUnavailable } from './ConversationStates.tsx'
+import { LiveAgentThreads } from '../threads/LiveThreads.tsx'
 import { LiveAgentAlerts } from '../conversation/alerts/AgentAlerts.tsx'
 import { DOCUMENT_REF } from '../documents/document-port.ts'
 import { documentReferences } from '../documents/DocumentLink.tsx'
@@ -25,6 +26,8 @@ import { recordedToolDetail } from './semanticTool.tsx'
 import { ThreadHeaderSlotContext } from '../shell/threadHeaderSlot.tsx'
 import { AgentThreadTabs, type AgentThreadTabsHandle } from '../../../../packages/fractal-ui/src/assistant-ui/composition/AgentThreadTabs.tsx'
 import { subagentThreadFocus } from './subagentThreadFocus.ts'
+import { BrowserPairing } from './BrowserPairing.tsx'
+import { pairingSendRefusal, pairingStoreFor } from './browserPairingState.ts'
 
 export const ConversationPane = (props: React.ComponentProps<typeof ConversationThreadPane>) => {
   const feed = useConversation(props.agentRef)
@@ -55,6 +58,7 @@ const ConversationThreadPane = ({
   agentName,
   onOpenTool,
   onOpenDocument,
+  onOpenThread,
   ux,
   visible = true,
   interest: shellInterest,
@@ -67,6 +71,7 @@ const ConversationThreadPane = ({
   readonly onOpenTool: (call: WorkLogCall) => void
   /** Opens a `doc/…` named in the conversation; stable, so the memoized transcript keeps still. */
   readonly onOpenDocument?: (ref: string) => void
+  readonly onOpenThread?: ((ref: string) => void) | undefined
   readonly ux?: UxTelemetry
   /** A retained hidden pane keeps its DOM but releases visible follow demand (setVisible false). */
   readonly visible?: boolean
@@ -141,11 +146,11 @@ const ConversationThreadPane = ({
     onFocusCapture={event => { if (!visible) event.target.blur() }}
     onKeyDownCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}
     onClickCapture={event => { if (!visible) { event.preventDefault(); event.stopPropagation() } }}>
-    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} feed={feed} state={state} stale={stale} ux={ux} visible={visible} readOnly={readOnly} />
+    <ConversationContent agentRef={agentRef} agentName={agentName} onOpenTool={onOpenTool} onOpenDocument={onOpenDocument} onOpenThread={onOpenThread} feed={feed} state={state} stale={stale} ux={ux} visible={visible} readOnly={readOnly} />
   </div>
 }
 
-const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, onOpenDocument, feed, state, stale, ux, visible, readOnly }: {
+const ConversationContent = React.memo(function ConversationContent({ agentRef, agentName, onOpenTool, onOpenDocument, onOpenThread, feed, state, stale, ux, visible, readOnly }: {
   readonly stale: boolean
   readonly ux?: UxTelemetry
   readonly visible: boolean
@@ -154,6 +159,7 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
   readonly agentName: string
   readonly onOpenTool: (call: WorkLogCall) => void
   readonly onOpenDocument?: (ref: string) => void
+  readonly onOpenThread?: ((ref: string) => void) | undefined
   readonly feed: Feed<ConversationPage>
   readonly state: ConversationTranscriptState
 }) {
@@ -181,13 +187,16 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     })
   }, [agentRef])
   const [refusal, setRefusal] = React.useState<SendRefusal>()
+  // Absent outside the served page: fixtures, replays and hosts without pairing keep the composer as it was.
+  const pairing = source.pairing === undefined ? undefined : pairingStoreFor(source.pairing)
+  const onRefused = React.useMemo(() => pairingSendRefusal(pairing, setRefusal), [pairing])
   const upload = source.attachments?.upload
   const attachmentAdapter = React.useMemo(() => upload === undefined ? undefined : imageUploadAdapter(upload), [upload])
   const binding = composerSendBinding({
     source, agentRef, grants,
     readable: state._tag === 'Observed',
     items: state._tag === 'Observed' ? state.items : [],
-    refusal, onRefused: setRefusal, attachmentAdapter,
+    refusal, onRefused, attachmentAdapter,
   })
   // The composer's Stop (and Esc) interrupts the agent's turn, as Interrupt in its actions does.
   // A refusal belongs to the run it answered (the running turn's id): it shows beside Stop while that run
@@ -253,12 +262,14 @@ const ConversationContent = React.memo(function ConversationContent({ agentRef, 
     </div>
     {frozen === undefined ? null : <LastSeen agentRef={agentRef} lastSeen={frozen.lastSeen} />}
     {!readOnly && <LiveAgentAlerts agentRef={agentRef} ux={ux} />}
+    {!readOnly && visible ? <LiveAgentThreads agentId={agentRef} onOpenThread={onOpenThread} /> : null}
     {/* An unreadable conversation keeps its composer and draft; the binding names why sending waits. */}
     {!readOnly && <div ref={composer} data-testid="conversation-composer-dock" onInputCapture={(event) => {
       if (!(event.target instanceof HTMLTextAreaElement)) return
       markStart('keystroke_paint')
       measureEnd('keystroke_paint')
     }} style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', minHeight: `calc(${geometryVars.controlLg} + ${geometryVars.controlMd} + 3 * ${spaceVars.md} + 2 * ${geometryVars.hairline} + ${spaceVars.lg})`, paddingBottom: spaceVars.lg }}>
+      {pairing === undefined ? null : <BrowserPairing store={pairing} messageSend={grants.messageSend} />}
       <EmbraceComposer variant="C1" readingColumn conversationLabel={agentName} disabledReason={state._tag === 'Unavailable' && state.classification === 'not-found' ? 'Conversation not found' : binding.disabledReason} {...(binding.imageAttachments === undefined ? {} : { imageAttachments: binding.imageAttachments })} {...(stopRefusal === undefined ? {} : { stopRefusal: stopRefusal.detail })} />
     </div>}
   </EmbraceRuntimeProvider>
