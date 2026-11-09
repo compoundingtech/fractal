@@ -595,7 +595,7 @@ async fn thread_detail_requires_conversation_grant_and_owner_visible_thread() {
     ).unwrap();
     for operation in [foreign.operation_id.unwrap(), rename.operation_id.unwrap()] {
         allowed.state.store.connection.write().execute(
-            "UPDATE operations SET state='conflict' WHERE id=?1", [operation],
+            /* sqlite-large-value: allow-for-now lv-h6fa264134170 owner=fractal_api_client_v0::api::client_v0::assistant::authorization_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE operations SET state='conflict' WHERE id=?1", [operation],
         ).unwrap();
     }
     for (id, expected) in [

@@ -2,6 +2,29 @@
 
 use super::*;
 
+pub(super) fn install_indexes(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+         /* sqlite-large-value: allow-for-now lv-h5154252ff8aa owner=fractal_store::store::thread_metadata TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.agent'), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_message_accepted_index
+ON claims(json_extract(body, '$.fields.thread_id'), length(accepted_at_unix_ms), accepted_at_unix_ms)
+WHERE kind='message.sent' AND json_extract(body, '$.fields.thread_id') IS NOT NULL;
+CREATE INDEX IF NOT EXISTS claims_thread_origin_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.origin_ask'),
+          json_extract(body, '$.fields.origin_ask_episode'), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_mission_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.mission'), subject)
+WHERE kind='thread.created';
+CREATE INDEX IF NOT EXISTS claims_thread_closed_owner_index
+ON claims(actor, store_index DESC)
+WHERE kind='thread.state-set' AND json_extract(body, '$.fields.state')='closed';
+",
+    )
+}
+
+
 #[path = "thread_message_window.rs"]
 mod message_window;
 pub use message_window::{ThreadMessage, TimelineItem, TimelinePage, mark_read, mixed_message_content, mixed_timeline};
@@ -250,7 +273,7 @@ fn apply_inner(
         if let Some(requested) = input.fields.get("state").and_then(Value::as_str) {
             let current_revision: String = connection
                 .query_row(
-                    &canonical_sql(smallclaims::store::LATEST_CLAIM_QUERY),
+                     /* sqlite-large-value: allow-for-now lv-h7f574845282c owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &canonical_sql(smallclaims::store::LATEST_CLAIM_QUERY),
                     [subject],
                     |row| row.get(0),
                 )
@@ -440,7 +463,7 @@ pub(super) fn latest_applied_claim(
     kind: &str,
 ) -> Result<Option<ClaimRecord>, FractalError> {
     let selected = connection
-        .prepare_cached(&canonical_sql(&format!(
+        .prepare_cached( /* sqlite-large-value: allow-for-now lv-h4162c9a4ad90 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
             "SELECT {CLAIM_COLUMNS}, operations.state
              FROM claims INDEXED BY claims_subject_kind_accepted_index
              JOIN operations ON operations.id=json_extract(claims.body, '$._operation.id')
@@ -450,7 +473,7 @@ pub(super) fn latest_applied_claim(
              ORDER BY CANONICAL_DESC(claims) LIMIT 1"
         )))
         .map_err(internal)?
-        .query_row(params![subject, kind], |row| {
+        .query_row( /* sqlite-large-value: allow-for-now lv-hb2b23c870f68 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ params![subject, kind], |row| {
             Ok((claim_from_row(row)?, row.get::<_, String>(10)?))
         })
         .optional()
@@ -536,7 +559,7 @@ fn summary_conn(
         .unwrap_or_else(|| creation.clone());
     let revision = connection
         .query_row(
-            &canonical_sql(smallclaims::store::LATEST_CLAIM_QUERY),
+             /* sqlite-large-value: allow-for-now lv-h9d96c131cb28 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &canonical_sql(smallclaims::store::LATEST_CLAIM_QUERY),
             [subject],
             |row| row.get(0),
         )
@@ -634,7 +657,7 @@ pub fn list_context(
                AND NOT EXISTS (SELECT 1 FROM projection_digest_repaired_claims WHERE id=claims.id)
              ORDER BY claims.subject LIMIT ?4"
         );
-        let mut query = connection.prepare_cached(&sql).map_err(internal)?;
+        let mut query = connection.prepare_cached( /* sqlite-large-value: allow-for-now lv-h759e1f16c79a owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
         let args = [person.as_str(), key.as_str(), after];
         let read = |row: &rusqlite::Row<'_>| row.get::<_, String>(0);
         let mut subjects = match qualifier {
@@ -676,7 +699,7 @@ pub fn attention_unread_changed(store: &Store, after: u64, through: u64) -> anyh
                 ))
             )
         )"
-    )?.query_row(params![after, through], |row| row.get(0))?)
+    )?.query_row( /* sqlite-large-value: allow-for-now lv-h9a5536c68ae8 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ params![after, through], |row| row.get(0))?)
 }
 
 /// Unread incoming thread replies on the caller's already selected Inbox rows.
@@ -695,7 +718,7 @@ pub fn unread_ask_positions(
     }).collect::<Result<Vec<_>, FractalError>>()?;
     let keys = serde_json::to_string(&keys).map_err(internal)?;
     let mut query = conn.prepare_cached(
-        "WITH inbox AS (
+         /* sqlite-large-value: allow-for-now lv-haed978c23ed6 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ "WITH inbox AS (
             SELECT CAST(key AS INTEGER) AS position, json_extract(value,'$[0]') AS ask,
                    json_extract(value,'$[1]') AS episode, json_extract(value,'$[2]') AS link
             FROM json_each(?1)
@@ -961,7 +984,7 @@ pub fn history(
                AND {UNREPAIRED_CLAIM} {bound}
              ORDER BY CANONICAL_DESC(claims) LIMIT ?4"
         ));
-        let mut statement = connection.prepare_cached(&sql).map_err(internal)?;
+        let mut statement = connection.prepare_cached( /* sqlite-large-value: allow-for-now lv-h73dc5806dc06 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
         let rows = statement.query_map(params![subject, before, at, limit + 1], |row| {
             Ok((claim_from_row(row)?, row.get::<_, String>(10)?))
         }).map_err(internal)?;
@@ -1193,7 +1216,7 @@ pub fn start_from_ask_as(
             }
             if let Some(signature) = encoded_signature.as_deref() {
                 tx.execute(
-                    "INSERT OR REPLACE INTO expected_claim_signatures(subject,kind,actor,signature) VALUES (?1,'message.sent',?2,?3)",
+                     /* sqlite-large-value: allow-for-now lv-hd06b93ec0d26 owner=fractal_store::store::thread_metadata TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO expected_claim_signatures(subject,kind,actor,signature) VALUES (?1,'message.sent',?2,?3)",
                     params![first_message.subject, person, signature],
                 ).map_err(internal)?;
             }
@@ -1218,7 +1241,7 @@ pub fn start_from_ask_as(
             register_operation_tx(tx, &message).map_err(internal)?;
             if encoded_signature.is_some() {
                 tx.execute(
-                    "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind='message.sent' AND actor=?2",
+                     /* sqlite-large-value: allow-for-now lv-hf3b18f858b62 owner=fractal_store::store::thread_metadata TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM expected_claim_signatures WHERE subject=?1 AND kind='message.sent' AND actor=?2",
                     params![first_message.subject, person],
                 ).map_err(internal)?;
             }

@@ -96,7 +96,7 @@ pub fn latest_operation(
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| smallclaims::store::canonical_sql(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind=?2 ORDER BY CANONICAL_DESC(claims)",
     ));
-    let mut statement = connection.prepare_cached(&QUERY)?;
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h37e16ce1bdcb owner=fractal_store::pairing TODO=trace-statement-and-value-representation */ &QUERY)?;
     let mut rows = statement.query(params![subject, kind])?;
     while let Some(row) = rows.next()? {
         let claim = smallclaims::store::claim_from_row(row)?;
@@ -113,7 +113,7 @@ pub fn latest_completion(connection: &Connection, subject: &str, origin: Option<
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| smallclaims::store::canonical_sql(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND kind='custom.client.pairing-completed' ORDER BY CANONICAL_DESC(claims)",
     ));
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h37e16ce1bdcb owner=fractal_store::pairing TODO=trace-statement-and-value-representation */ &QUERY)?;
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc6841fe7d058 owner=fractal_store::pairing TODO=trace-statement-and-value-representation */ &QUERY)?;
     let mut rows = statement.query([subject])?;
     while let Some(row) = rows.next()? {
         let claim = smallclaims::store::claim_from_row(row)?;
@@ -131,7 +131,7 @@ pub fn terminal_head(connection: &Connection, subject: &str, origin: &str, actor
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| smallclaims::store::canonical_sql(
         "SELECT id,store_index,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms FROM claims WHERE subject=?1 AND origin=?2 AND actor IS ?3 AND kind IN ('custom.client.terminal-attached','custom.client.terminal-consumed','custom.client.terminal-detached') ORDER BY CANONICAL_DESC(claims)",
     ));
-    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc6841fe7d058 owner=fractal_store::pairing TODO=trace-statement-and-value-representation */ &QUERY)?;
+    let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-hc9e762bbf083 owner=fractal_store::pairing TODO=trace-statement-and-value-representation */ &QUERY)?;
     let mut rows = statement.query(params![subject, origin, actor])?;
     while let Some(row) = rows.next()? {
         let claim = smallclaims::store::claim_from_row(row)?;

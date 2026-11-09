@@ -754,6 +754,7 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
     if fresh {
         let transaction = connection.unchecked_transaction()?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h31d1ed089c5e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        thread_metadata::install_indexes(&transaction)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hf608c5e3b8c9 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-h0bcd52c3ca94 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         transaction.execute_batch(/* sqlite-large-value: allow-for-now lv-hee346414131e owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
@@ -761,6 +762,7 @@ fn install_initial_schema(connection: &Connection, fresh: bool) -> Result<()> {
         transaction.commit()?;
     } else {
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hd007d0e750d3 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ SCHEMA)?;
+        thread_metadata::install_indexes(connection)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h963a98823efd owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ &RUNTIME_ID_INDEX)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h89c02fb1894c owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ arrangements::SCHEMA)?;
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h889f0a93a292 owner=fractal_store::store::runtime TODO=trace-statement-and-value-representation */ retirements::SCHEMA)?;
@@ -844,6 +846,30 @@ impl FractalRuntime {
 #[cfg(test)]
 mod schema_install_tests {
     use super::*;
+
+    #[test]
+    fn thread_indexes_install_on_fresh_and_existing_schemas() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(smallclaims::store::SCHEMA).unwrap();
+        let indexes = [
+            "claims_thread_conversation_index", "claims_thread_message_accepted_index",
+            "claims_thread_origin_index", "claims_thread_mission_index", "claims_thread_closed_owner_index",
+        ];
+        let has_index = |name: &str| {
+            connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name=?1)",
+                [name], |row| row.get::<_, bool>(0),
+            ).unwrap()
+        };
+        install_initial_schema(&connection, true).unwrap();
+        assert!(indexes.iter().all(|name| has_index(name)));
+        for name in indexes {
+            connection.execute_batch(&format!("DROP INDEX {name}")).unwrap();
+        }
+        install_initial_schema(&connection, false).unwrap();
+        assert!(indexes.iter().all(|name| has_index(name)));
+
+    }
 
     #[test]
     fn complete_runtime_schema_does_not_take_a_held_writer_lock() {
