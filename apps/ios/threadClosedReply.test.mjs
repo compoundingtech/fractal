@@ -173,3 +173,29 @@ test('an origin-scoped first draft survives navigating away and starts without a
     assert.deepEqual(find(tree, 'ThreadGroup').props.context, { origin_source: origin.sourceId, origin_episode: origin.episode });
   }
 });
+
+test('collapsing the first draft preserves its origin composer for reopening and acceptance', () => {
+  const state = hooks();
+  const panel = compile('ThreadDetailContent', 'function threadSummaryLine', {
+    ...state, EmbeddedThreadHeader: 'EmbeddedThreadHeader', ThreadBody: 'ThreadBody',
+    ThreadActionFeedback: 'ThreadActionFeedback', T: 'T', Button: 'Button',
+    threadSummaryLine: thread => thread.state,
+  });
+  const start = { cacheKey: 'origin-draft', title: 'Notice', accepted: false };
+  const props = { client: {}, embedded: true, start };
+  let tree = panel(props);
+  assert.equal(find(tree, 'ThreadBody').props.start, start);
+  find(tree, 'EmbeddedThreadHeader').props.toggle();
+  state.reset();
+  tree = panel(props);
+  assert.equal(find(tree, 'ThreadBody'), undefined);
+  find(tree, 'EmbeddedThreadHeader').props.toggle();
+  state.reset();
+  tree = panel(props);
+  assert.equal(find(tree, 'ThreadBody').props.start.cacheKey, 'origin-draft');
+  const thread = { id: 'thread/accepted', title: 'Notice', state: 'open' };
+  state.reset();
+  tree = panel({ ...props, thread, start: { ...start, accepted: true, target: thread.id } });
+  assert.equal(find(tree, 'ThreadBody').props.thread, thread);
+  assert.equal(find(tree, 'ThreadBody').props.start.cacheKey, start.cacheKey);
+});
