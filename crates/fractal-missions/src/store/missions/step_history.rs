@@ -67,6 +67,7 @@ pub struct StepTransition {
     /// The event that moved it: `state` (including a terminal person response), `carried`,
     /// `retried`, `claimed`, `submitted`, `failed`, `released`, or `nudged` (a stall marker
     /// that leaves the state as it was).
+    pub event: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// For `nudged`: since when the holder had been idle.

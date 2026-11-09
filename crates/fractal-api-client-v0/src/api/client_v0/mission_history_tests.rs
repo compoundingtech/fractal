@@ -270,23 +270,43 @@ fn mission_detail_folds_each_attempt_wait_and_transition_of_a_step() {
 }
 
 #[test]
-fn authored_person_responses_close_queue_waits_and_emit_terminal_transitions() {
+fn person_responses_close_waits_and_emit_terminal_transitions() {
     for (cancel, terminal) in [(false, "completed"), (true, "cancelled")] {
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
-        publish(
-            &state,
-            "version 2\nmission \"person-history\" state=\"ready\" {\n goal \"Decide.\"\n step \"decide\" { assigned-to \"person/ada\" }\n}\n",
-            "publish-person-history",
-        );
+        let source = if cancel {
+            "version 2\nagent \"history.worker\" { workspace \"/tmp\"; command \"true\"; restart always; }\nmission \"person-history\" state=\"ready\" {\n goal \"Decide.\"\n step \"decide\" { assigned-to \"agent/history.worker\" }\n}\n"
+        } else {
+            "version 2\nmission \"person-history\" state=\"ready\" {\n goal \"Decide.\"\n step \"decide\" { assigned-to \"person/ada\" }\n}\n"
+        };
+        publish(&state, source, "publish-person-history");
         let run = start(&state, "person-history", "person-history-1");
-        let subject = &run.steps.iter().find(|step| step.step == "decide").unwrap().subject;
-        state.store.set_step_state(subject, "ready", None).unwrap();
+        let origin = &run.steps.iter().find(|step| step.step == "decide").unwrap().subject;
+        state.store.set_step_state(origin, "ready", None).unwrap();
+        let subject = if cancel {
+            act(&state, origin, "claim", None, "claim-before-ask");
+            state.store.ask_person(&PersonAskRequest {
+                legacy_request: None,
+                person: "person/ada".into(),
+                title: "Which target?".into(),
+                reason: "Two are named.".into(),
+                actor: AGENT.into(),
+                step: Some(origin.clone()),
+                new_run: None,
+                incarnation: Some(format!("{AGENT}-1")),
+                request: None,
+                deadline_ms: None,
+                default_answer: None,
+                idempotency_key: "ask-to-cancel".into(),
+            }).unwrap().subject
+        } else {
+            origin.clone()
+        };
         state.store.finish_person_step(
             &PersonStepResponse {
                 delegation: None,
                 subject: subject.clone(),
-                actor: "person/ada".into(),
+                actor: if cancel { AGENT } else { "person/ada" }.into(),
                 summary: "Decision recorded.".into(),
                 evidence: Vec::new(),
                 episode: None,
@@ -296,12 +316,13 @@ fn authored_person_responses_close_queue_waits_and_emit_terminal_transitions() {
             cancel,
         ).unwrap();
         let mission = detail(&state, "mission/person-history", None);
-        let shown = step(run_detail(&mission, &run.subject), "decide");
+        let shown = run_detail(&mission, &run.subject)["steps"].as_array().unwrap()
+            .iter().find(|step| step["id"] == subject).unwrap();
         let transition = shown["transitions"].as_array().unwrap().last().unwrap();
         assert_eq!(transition["status"], terminal);
         assert_eq!(transition["event"], "state");
         let waits = shown["waits"].as_array().unwrap();
-        assert!(waits.iter().any(|wait| wait["kind"] == "queue"));
+        assert!(waits.iter().any(|wait| wait["kind"] == if cancel { "you" } else { "queue" }));
         assert!(waits.iter().all(|wait| wait["end"].is_u64()), "{shown:#}");
     }
 }
