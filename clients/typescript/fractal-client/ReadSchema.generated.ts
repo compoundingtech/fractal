@@ -1558,6 +1558,38 @@ export const Attention = /*#__PURE__*/ (() => Schema.Struct({
 export type Attention = typeof Attention.Type
 export type AttentionEncoded = typeof Attention.Encoded
 
+export const AttentionBudgetDeclared = /*#__PURE__*/ (() => Schema.Union([
+  Schema.Struct({ "asks": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), "state": Schema.Literal("declared") }),
+  Schema.Struct({ "state": Schema.Literal("undeclared"), "asks": Schema.optionalKey(Schema.Never) })
+], { mode: "oneOf" }).pipe(Schema.toTaggedUnion("state")).annotate({ identifier: "AttentionBudgetDeclared" }))()
+export type AttentionBudgetDeclared = typeof AttentionBudgetDeclared.Type
+export type AttentionBudgetDeclaredEncoded = typeof AttentionBudgetDeclared.Encoded
+
+export const AttentionBudgetRequestRef = /*#__PURE__*/ (() => Schema.Struct({
+  "claim_id": Schema.String,
+  "subject": Schema.String
+}).annotate({ identifier: "AttentionBudgetRequestRef" }))()
+export type AttentionBudgetRequestRef = typeof AttentionBudgetRequestRef.Type
+export type AttentionBudgetRequestRefEncoded = typeof AttentionBudgetRequestRef.Encoded
+
+export const AttentionBudgetReport = /*#__PURE__*/ (() => Schema.Struct({
+  "charged": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "declared": AttentionBudgetDeclared,
+  "fleet_complete": Schema.Literal(false),
+  "inclusive": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "local_claim_index": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "mission": Schema.String,
+  "not_charged": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "person": Schema.String,
+  "request_refs": Schema.Array(AttentionBudgetRequestRef).check(Schema.isMaxLength(128)),
+  "request_refs_complete": Schema.Boolean,
+  "unattributed_for_person": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "window_end_inclusive_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  "window_start_exclusive_unix_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
+}).annotate({ identifier: "AttentionBudgetReport" }))()
+export type AttentionBudgetReport = typeof AttentionBudgetReport.Type
+export type AttentionBudgetReportEncoded = typeof AttentionBudgetReport.Encoded
+
 export const BlobChunk = /*#__PURE__*/ (() => Schema.Struct({
   /** Base64 of up to 512 KiB starting at offset. */
   "data": Schema.String.annotate({ description: "Base64 of up to 512 KiB starting at offset." }),

@@ -1071,6 +1071,34 @@ export type AttentionBlocked = {
   step_run_id: Id;
 };
 
+export type AttentionBudgetDeclared = ({
+  asks: number;
+  state: "declared";
+} | {
+  state: "undeclared";
+});
+
+export type AttentionBudgetReport = {
+  charged: number;
+  declared: AttentionBudgetDeclared;
+  fleet_complete: false;
+  inclusive: number;
+  local_claim_index: number;
+  mission: string;
+  not_charged: number;
+  person: string;
+  request_refs: Array<AttentionBudgetRequestRef>;
+  request_refs_complete: boolean;
+  unattributed_for_person: number;
+  window_end_inclusive_unix_ms: number;
+  window_start_exclusive_unix_ms: number;
+};
+
+export type AttentionBudgetRequestRef = {
+  claim_id: string;
+  subject: string;
+};
+
 export type AttentionLaunchAgent = {
   harness: string | null;
   host: string | null;
@@ -1810,7 +1838,7 @@ export type Envelope = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   request_id: RequestId;
   snapshot: Snapshot;
-  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | MailBacklog | SloList | SloHistory);
+  value: (DirectiveNotes | Capabilities | PrivateNotesSubject | DocumentContent | DocumentsPage | SchedulesPage | DocumentReferences | SubjectDefinition | PublicationDefinition | AttentionBudgetReport | MissionDeclaration | AgentWorkspace | Page | OrderedMembershipPage | ResourcesPage | Resource | TimelinePage | ConversationChanges | ConversationSearch | EventPage | ActionResult | ClientDiagnosticsAck | PairingChallenge | PairedSession | AssistantGrant | AssistantSummary | AssistantAttentionPage | AssistantMissionPage | AssistantAgentPage | AssistantContentPage | TerminalScreen | StatusHistory | AgentQueue | AgentRelatedRuns | UsagePeriod | MailBacklog | SloList | SloHistory);
 };
 
 export type ErrorCode = (
