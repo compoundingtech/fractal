@@ -99,7 +99,7 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
             counts: [1, 3, 1, 2, 0],
         },
     ]);
-    guard("fractal-store/store/run_fence.rs", include_str!("../../../../fractal-store/src/store/run_fence.rs"), &[
+    guard("fractal-store/store/run_fence.rs", /* sqlite-large-value: allow-for-now lv-h5e35c88c074a owner=fractal_missions::store::tests::run_mutation_writer_guard TODO=trace-statement-and-value-representation */ include_str!("../../../../fractal-store/src/store/run_fence.rs"), &[
         Exception {
             reason: "the central bounded fence executor probes in one batched job, then rebuilds one aggregate per standalone writer loan",
             counts: [1, 0, 1, 0, 0],

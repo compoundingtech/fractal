@@ -36,7 +36,7 @@ fn fixture(parts: usize) -> (Store, Vec<Aggregate>) {
 
 fn mark_pending(connection: &Connection, aggregate: &Aggregate) {
     connection.execute(
-        "INSERT INTO meta(key,value) VALUES(?1,?2)",
+        /* sqlite-large-value: allow-for-now lv-hf35e185e6103 owner=fractal_store::store::run_fence::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
         params![pending_run_rebuild_key(aggregate).unwrap(), serde_json::to_string(aggregate).unwrap()],
     ).unwrap();
 }
@@ -215,7 +215,7 @@ fn append_preparation_and_admission_read_the_rebuilt_projection() {
     let expected = phase(&store.readers.get());
     assert_ne!(expected, "revision-draining");
     store.connection.write().execute(
-        "UPDATE mission_runs SET phase='revision-draining' WHERE id=?1", [run],
+        /* sqlite-large-value: allow-for-now lv-h2cebc723b81a owner=fractal_store::store::run_fence::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET phase='revision-draining' WHERE id=?1", [run],
     ).unwrap();
     mark_all_pending(&store, &aggregates);
     assert_eq!(phase(&store.readers.get()), "revision-draining");
@@ -284,7 +284,7 @@ fn committed_drains_survive_a_later_action_refusal() {
             assert_eq!(pending_count(transaction), 0);
             actions.fetch_add(1, Ordering::SeqCst);
             transaction.execute(
-                "INSERT INTO meta(key,value) VALUES('fence-test-action','rolled-back')",
+                /* sqlite-large-value: allow-for-now lv-hfcad3b11e6e1 owner=fractal_store::store::run_fence::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES('fence-test-action','rolled-back')",
                 [],
             ).map_err(internal)?;
             Err(FractalError::new("stale-subject", "the fenced action's expected subject changed"))

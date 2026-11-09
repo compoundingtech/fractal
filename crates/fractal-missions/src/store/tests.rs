@@ -4516,7 +4516,7 @@ fn person_routing_repair_excludes_runs_completed_in_pending_projection() {
     worker.append_claim(&ClaimInput {
         subject: "custom/fixture/known-repaired-person".into(),
         kind: "custom.fixture.known-repaired-person".into(),
-        actor: Some("person/repaired".into()),
+        actor: Some("person/receiver".into()),
         fields: BTreeMap::new(),
         evidence: Vec::new(),
         expected_subject: None,
@@ -4527,7 +4527,7 @@ fn person_routing_repair_excludes_runs_completed_in_pending_projection() {
     assert!(worker.run_projection_pending(&child.subject).unwrap());
     let report = worker.rename_person(&fractal_kernel::model::PersonRenameRequest {
         old_person: "person/test".into(),
-        new_person: "person/repaired".into(),
+        new_person: "person/receiver".into(),
         actor: "person/test".into(),
         idempotency_key: "repair-after-pending-completion".into(),
     }, &[]).unwrap();
