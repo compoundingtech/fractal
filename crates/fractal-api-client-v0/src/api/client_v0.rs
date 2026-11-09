@@ -9525,6 +9525,15 @@ async fn action_inner(
         state.store.verify_helper_launcher_peer(&session.authority_actor, session.peer_process.as_ref())
             .map_err(|error| validation(error.to_string()))?;
     }
+    // Receipt recovery must not bypass current access to extra private thread fences.
+    // Compare versions later; an exact retry may legitimately carry an older observed version.
+    if matches!(request.action_type.as_str(), "arrangement.edit" | "arrangement.membership.edit") {
+        for subject in request.fence.subject_revisions.keys()
+            .filter(|subject| fractal_schema::threads::is_reserved_subject(subject))
+        {
+            threads::metadata_fence_revision(&state, &session, subject)?;
+        }
+    }
     let request_digest = action_request_digest(&request)?;
     let actor_key = fractal_schema::harness_questions::actor_key(&session.actor, &request.idempotency_key);
     let (receipt_subject, receipt) =

@@ -310,6 +310,22 @@ pub(super) fn metadata_fence_revision(
     Ok(thread_metadata::summary(&state.store, person, subject).map_err(store_error)?.revision)
 }
 
+/// Bind extra private-thread reads to a surrounding writer's normal authority callback.
+pub(super) fn with_metadata_fence_authority<T>(
+    store: &Store, session: &ClientSession, expected: &BTreeMap<String,String>,
+    write: impl FnOnce(Option<&crate::store::ClaimAdmission<'_>>) -> Result<T,FractalError>,
+) -> Result<T,ApiError> {
+    if !expected.keys().any(|subject| fractal_schema::threads::is_reserved_subject(subject)) {
+        return write(None).map_err(ApiError::bad);
+    }
+    let person = read_person(session)?;
+    let authority = edit_authority(session)?;
+    let check = |connection: &rusqlite::Connection| {
+        thread_metadata::authorize_read_fences(store, connection, person, &authority, expected)
+    };
+    write(Some(&check)).map_err(store_error)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LifecycleParameters {

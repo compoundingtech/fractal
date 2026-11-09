@@ -99,6 +99,12 @@ impl PersonAuthority<'_> {
     pub(super) fn check(
         &self, store: &Store, connection: &Connection, person: &str,
     ) -> Result<(), FractalError> {
+        self.check_scope(store, connection, person, "control.messages")
+    }
+
+    fn check_scope(
+        &self, store: &Store, connection: &Connection, person: &str, scope: &str,
+    ) -> Result<(), FractalError> {
         let forbidden = || {
             FractalError::new(
                 "thread-authority-expired",
@@ -127,7 +133,7 @@ impl PersonAuthority<'_> {
                         connection, &pair.id, &pair.origin, pair.actor.as_deref(), fields, now,
                     ).map_err(internal)?.is_none()
                     || !fields["scopes"].as_array().is_some_and(|scopes| {
-                        scopes.iter().any(|scope| scope == "control.messages")
+                        scopes.iter().any(|granted| granted == scope)
                     })
                     || crate::pairing::completion_is_revoked(
                         connection, grant, &pair.id, &pair.origin,
@@ -146,6 +152,22 @@ impl PersonAuthority<'_> {
             }
         }
     }
+}
+
+/// Recheck private thread-read authority on the writer's exact transaction before a
+/// surrounding operation may recover a receipt or inspect its extra thread fences.
+pub fn authorize_read_fences(
+    store: &Store, connection: &Connection, person: &str, authority: &PersonAuthority<'_>,
+    expected: &BTreeMap<String, String>,
+) -> Result<(), FractalError> {
+    if !expected.keys().any(|subject| fractal_schema::threads::is_reserved_subject(subject)) {
+        return Ok(());
+    }
+    authority.check_scope(store, connection, person, "read.projections")?;
+    for subject in expected.keys().filter(|subject| fractal_schema::threads::is_reserved_subject(subject)) {
+        owned_creation(connection, subject, person, false)?.ok_or_else(unavailable)?;
+    }
+    Ok(())
 }
 
 fn has_browser_pairing_provenance(
