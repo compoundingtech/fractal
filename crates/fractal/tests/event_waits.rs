@@ -44,6 +44,7 @@ impl Daemon {
             server: None,
         };
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             store: daemon.store.clone(),
             notify: Arc::new(Notify::new()),
