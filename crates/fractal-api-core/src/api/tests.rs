@@ -2445,7 +2445,7 @@ async fn agent_lane_names_the_slice_the_runtime_gives_the_seat() {
 #[test]
 fn doctor_unread_counts_exclude_historical_recipients_and_people() {
     let root = tempfile::tempdir().unwrap();
-    let app = AppState { store: Arc::new(Store::open_memory("amber").unwrap()), ..state(root.path()) };
+    let app = AppState { browser_pairing_login: None, store: Arc::new(Store::open_memory("amber").unwrap()), ..state(root.path()) };
     let store = app.store.clone();
     let send = |id: &str, from: &str, recipient: &str, tags: &[&str]| {
         store

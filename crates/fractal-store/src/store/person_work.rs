@@ -549,6 +549,12 @@ pub fn current(connection: &Connection, ask: &ClaimRecord, as_of: u128) -> Resul
         return Ok(false);
     }
     let fields = &ask.body["fields"];
+    // Pairing is a five-minute capability request even when ordinary ask deadlines are off.
+    if ask.actor.as_deref() == Some("daemon/browser-pairing")
+        && fields["deadline_unix_ms"].as_u64().is_none_or(|deadline| u128::from(deadline) <= as_of)
+    {
+        return Ok(false);
+    }
     let Some(view) = step(connection, &ask.subject)? else {
         return Ok(false);
     };

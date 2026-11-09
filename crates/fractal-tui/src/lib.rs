@@ -1212,7 +1212,7 @@ mod tests {
                     person_step_response(Some(&request), Some(id.into()), note, Vec::new()).unwrap();
                 let parameters = PersonStepParameters {
                     target_id: "step-run/example".into(),
-                    episode: None,
+                    episode: "episode/example".into(),
                     summary,
                     evidence: vec![],
                     answer,
@@ -1629,6 +1629,7 @@ mission "release" state="ready" {
                 })
                 .unwrap();
             let state = fractal_daemon::api::AppState {
+                browser_pairing_login: None,
                 seat_admission: Default::default(),
                 owning_person: None,
                 store: store.clone(),
