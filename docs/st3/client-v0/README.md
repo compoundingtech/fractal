@@ -2962,7 +2962,8 @@ Agent projections include optional `workspace` and `checkout {repository, base, 
 The agent resource exposes observed harness status as `harness_state`, `since` (RFC 3339),
 and `observation: current | stale | missing`. `since` is the start of that state in that
 runtime incarnation; repeated observations and changes to display details preserve it.
-`observation` becomes stale after 90 seconds without fresh evidence, and is missing when
+`observation` becomes stale after the shared `HARNESS_OBSERVATION_FRESHNESS` window
+(five-minute refresh plus thirty seconds) without fresh evidence, and is missing when
 this runtime has no observation. Stale idle is exposed as indeterminate, never proven idle.
 Desired runtime state and agent-declared work progress remain separate from harness evidence.
 

@@ -24693,14 +24693,14 @@ mission "example/zero-run" state="ready" {
 
     #[test]
     fn a_seat_that_reports_at_its_idle_heartbeat_is_never_called_down() {
-        // Two seats of the second audit (2026-10-14) had a driver and pty daemon a day old, a
-        // runtime row stuck pending and an idle report every five minutes: older than the 90 s
-        // freshness window nearly all the time, never older than a heartbeat.
+        // An idle report remains current through the shared freshness window; after that it
+        // still proves liveness until the separate heartbeat grace period expires.
         let started = 1_790_000_000_000_u64;
         for age in [91_000, 150_000, 299_000, 301_000, HEARTBEAT_MS] {
             let mut card = sessionless_card(json!("indeterminate"));
             overlay_down(&mut card, Some(started), Some(age), Some("idle"), started + 100 * LAUNCH_WINDOW_MS);
-            assert_eq!(card["state"], "waiting", "{age}");
+            let current = u128::from(age) <= fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis();
+            assert_eq!(card["state"], if current { "running" } else { "waiting" }, "{age}");
             assert!(card.get("down_since").is_none(), "{age}");
             assert!(card["current_work"][0].get("holder_down_since").is_none(), "{age}");
         }
@@ -24898,6 +24898,7 @@ mission "example/zero-run" state="ready" {
         let root = tempfile::tempdir().unwrap();
         let state = test_state_named(root.path(), "status-cache");
         let subject = "agent/cedar";
+        let stale_age = fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis() + 1_000;
         let append = |kind: &str, fields: Value| {
             state.store.append_claim(&ClaimInput {
                 subject: subject.into(), kind: kind.into(), actor: Some(subject.into()),
@@ -24906,7 +24907,7 @@ mission "example/zero-run" state="ready" {
             }).unwrap()
         };
         append("runtime.observed", json!({"status":"running", "runtime_id":"native", "incarnation_id":"one"}));
-        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one", "observed_at_ms":(client_now_ms() - 91_000) as u64}));
+        append("harness.observed", json!({"state":"idle", "driver":"codex", "incarnation_id":"one", "observed_at_ms":(client_now_ms() - stale_age) as u64}));
         let index = state.store.index().unwrap();
         let before = client_agent_resources(&state.store, false, "", index).unwrap();
         let before = before.iter().find(|item| item["id"] == subject).unwrap();
@@ -24921,7 +24922,7 @@ mission "example/zero-run" state="ready" {
         peer.store.import_replication("status-cache", &state.store.export_replication(0).unwrap()).unwrap();
         let mut aged = vec![before.clone()];
         let mut cached_harness = state.store.observed_harness_at(subject, index).unwrap().unwrap();
-        cached_harness.observed_at_unix_ms = client_now_ms() - 91_000;
+        cached_harness.observed_at_unix_ms = client_now_ms() - stale_age;
         aged[0]["_status_source"] = json!(cached_harness);
         let mut on_host = aged.clone();
         overlay_agent_resources(&peer.store, &mut aged, "").unwrap();
