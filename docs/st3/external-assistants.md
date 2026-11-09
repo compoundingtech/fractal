@@ -197,6 +197,11 @@ Approved reads disclose data to the external model provider. A compromised execu
 
 ### Authority and lifecycle
 
+Person-scoped commands and the local person header require a local terminal on the daemon
+host. SSH sessions have no verifiable caller ancestry, so the daemon cannot distinguish a
+person from an agent and refuses person requests, including grant management. Run these
+commands from a local terminal on the same host; SSH sessions are not supported.
+
 - Supported principals are `assistant/chatgpt` and `assistant/mcp`, both with trusted class `external-assistant` and never person authority. Each grant's request audit actor is `<principal>/session/<grant-id>`; authoritative message and answer claim actors, message senders, and answer respondents retain that exact principal, not the owning person. Message and answer evidence retain `assistant_owner`, `assistant_session_actor`, and `assistant_grant_id` as on-behalf-of provenance, separate from person-delegation authority. Historical stored grants without an explicit principal default only to `assistant/chatgpt`.
 - Only the daemon's configured owning person through the trusted-local CLI over the Unix API may begin, inspect, renew, revoke, or change a grant. Missing owner configuration fails closed; remote clients, agents, assistants, and other people cannot manage grants. Deployment owner identity is external configuration, not a hardcoded public identity. Public examples and tests use the fixture owner `person/operator`.
 - "Owner" authority here means same-UID trusted-local socket access: the daemon's configured owning person acts through the local Unix client, and any process already running as the daemon's UID is trusted the same way. The `/proc` ancestry check distinguishes local from remote callers; it is not a security boundary against a hostile same-UID process, and A does not claim it to be one. The host's UID isolation is the boundary.

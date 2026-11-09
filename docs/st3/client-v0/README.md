@@ -1846,6 +1846,13 @@ The coverage query reads interval bounds only; it does not materialize older tra
 
 ## Pairing and remote access
 
+Person-scoped commands, including `fractal devices ... --as person/<id>`, pairing begin,
+and Fabric enable, are supported only from a local terminal on the daemon host.
+SSH sessions have no verifiable caller ancestry, so the daemon cannot distinguish a person
+from an agent and refuses these requests with `foreign-agent-actor`. Run them from a local
+terminal on the same host, not through SSH. Paired remote device access described below is
+unchanged.
+
 Person pairing is device-to-person. Its begin request names the concrete initiating `person/*` identity and
 is accepted only on the trusted local Unix API; the daemon persists that person as the delegator.
 The response shows a short-lived single-use code and pairing ID. A remote device reaches the
