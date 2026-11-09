@@ -14,6 +14,82 @@ type FoldedFailures = ((u64, u64), Arc<Vec<AttentionRequestView>>);
 pub(super) struct OperationalFault {
     pub(super) item: AttentionItemView,
     pub(super) explicit_reviewer_only: bool,
+    pub(super) suppress_generic_delivery: bool,
+}
+
+/// Phase routing is an origin-attested property of the canonical failure, not of
+/// the member which happens to project it or of an episode prefix alone.
+fn readiness_phase_delivery(
+    kind: &str,
+    actor: Option<&str>,
+    source: &str,
+    origin: &str,
+    condition: Option<&str>,
+    reviewer: Option<&str>,
+    episode: &str,
+) -> bool {
+    if kind != "operational.failure"
+        || actor != Some("daemon/runtime")
+        || source.strip_prefix("daemon/") != Some(origin)
+        || condition != Some(API_READINESS_SLO_MISSED)
+        || !reviewer.is_some_and(readiness_phase_reviewer)
+    {
+        return false;
+    }
+    let mut segments = episode.split('/');
+    if segments.next() != Some("slo-objective")
+        || segments.next() != Some("readiness-case")
+        || segments.next() != Some(origin)
+        || segments.next() != Some("fractal-api-readiness")
+    {
+        return false;
+    }
+    let (Some(member), Some(cut), None) = (segments.next(), segments.next(), segments.next()) else {
+        return false;
+    };
+    !member.is_empty()
+        && member.len() <= 64
+        && member
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        && cut.parse::<u64>().is_ok_and(|minute| {
+            minute > 0 && minute % 60_000 == 0 && minute.to_string() == cut
+        })
+}
+
+fn readiness_phase_reviewer(reviewer: &str) -> bool {
+    reviewer.strip_prefix("agent/").is_some_and(|id| {
+        !id.is_empty() && id.len() <= 128 && id.split('/').all(|part| {
+            !part.is_empty() && part != "." && part != ".."
+                && part.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        })
+    })
+}
+
+fn valid_opening_claim_id(id: &str) -> bool {
+    id.len() == 64 && id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn linked_readiness_reviewer<'a>(
+    origin: &str,
+    episode: &str,
+    opening: &'a ClaimRecord,
+) -> Option<&'a str> {
+    let fields = &opening.body["fields"];
+    let reviewer = fields["reviewer"].as_str()?;
+    (opening.origin == origin
+        && fields["episode"].as_str() == Some(episode)
+        && opening.body["evidence"].as_array().is_some_and(Vec::is_empty)
+        && readiness_phase_delivery(
+            &opening.kind,
+            opening.actor.as_deref(),
+            &opening.subject,
+            &opening.origin,
+            fields["condition"].as_str(),
+            Some(reviewer),
+            episode,
+        ))
+    .then_some(reviewer)
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -391,7 +467,7 @@ impl Store {
         if owns(&fault.person)? {
             return Ok(Some(fault.person.clone()));
         }
-        // An explicitly owned API readiness fault keeps its recorded reviewer.
+        // An explicitly owned SLO fault keeps its recorded reviewer.
         // A stopped or retired declaration makes it undeliverable, not generic.
         if explicit_reviewer_only {
             return Ok(None);
@@ -516,6 +592,7 @@ impl Store {
             .map_err(internal)?
             .ok_or_else(|| FractalError::new("internal", "the failure was not recorded"))
     }
+
 
     pub fn operational_failure(
         &self,
@@ -1536,8 +1613,64 @@ impl Store {
         }
         let explicit_reviewer_only = source.starts_with("daemon/")
             && claim.kind == "operational.failure"
-            && f["condition"] == API_READINESS_SLO_MISSED;
-        Ok(Some(OperationalFault { item, explicit_reviewer_only }))
+            && (f["condition"] == API_READINESS_SLO_MISSED
+                || f["condition"] == AGENTS_REQUEST_SLO_MISSED);
+        let phase_case = readiness_phase_delivery(
+            &claim.kind,
+            claim.actor.as_deref(),
+            source,
+            &claim.origin,
+            f["condition"].as_str(),
+            f["reviewer"].as_str(),
+            &failure.subject,
+        );
+        let suppress_generic_delivery = if phase_case {
+            match claim.body["evidence"].as_array().map(Vec::as_slice) {
+                Some([]) => true,
+                Some([early]) => {
+                    if let Some(id) = early.as_str().filter(|id| valid_opening_claim_id(id)) {
+                        match person_work::claim_in_cut(connection, id, || self.claim_by_id(id))? {
+                            Some(opening) => {
+                                let reviewer = linked_readiness_reviewer(
+                                    &claim.origin, &failure.subject, &opening,
+                                );
+                                if reviewer != Some(failure.reviewer.as_str()) {
+                                    item.person = reviewer.unwrap_or("person/operator").to_owned();
+                                    item.detail.push_str(
+                                        "\nReadiness notice routing is blocked by a contradictory opening claim.",
+                                    );
+                                }
+                                // The case namespace owns routing even if linkage is wrong.
+                                // Never fall through to a wake for the escalation's reviewer.
+                                true
+                            }
+                            None => {
+                                // Sparse replication can expose a later envelope first. Its
+                                // opening shares the source dependency recorded above.
+                                item.person = "person/operator".into();
+                                item.detail.push_str(
+                                    "\nReadiness notice routing awaits the linked opening claim.",
+                                );
+                                true
+                            }
+                        }
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            }
+        } else {
+            false
+        };
+        if suppress_generic_delivery {
+            item.episode.clone_from(&failure.subject);
+        }
+        Ok(Some(OperationalFault {
+            item,
+            explicit_reviewer_only,
+            suppress_generic_delivery,
+        }))
     }
 
     fn current_exhausted_work_wake<const MINIMAL: bool>(
@@ -3271,3 +3404,7 @@ mod native_prompt_tests {
         assert_eq!(resolve(answered.store_index), expected);
     }
 }
+
+#[cfg(test)]
+#[path = "readiness_phase_tests.rs"]
+mod readiness_phase_tests;

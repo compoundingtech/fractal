@@ -88,43 +88,48 @@ fn declared_admission_publication_and_direct_claims_fail_closed_without_evidence
     }
 }
 
-fn assert_direct_claim_decoys_refused(subject: &str, kind: &str, payload: &Value) {
-    if kind == "intent.desired" {
-        assert_eq!(payload["kind"], "agent");
-    }
+fn decoy_bodies(payload: &Value) -> [Value; 5] {
     let mut empty_body = payload.clone();
     empty_body["body"] = json!({});
     let mut empty_fields = payload.clone();
     empty_fields["fields"] = json!({});
-    for body in [
+    [
         empty_body.clone(),
         empty_fields,
         json!({"fields": {"body": payload}, "body": {}}),
         json!({"body": payload, "fields": {}}),
         json!({"fields": empty_body}),
-    ] {
-        // Exercise the raw writer, not ClaimInput's additional `fields` wrapper.
-        // No schema is needed: the barrier must refuse before any database access.
-        let mut connection = Connection::open_in_memory().unwrap();
-        let transaction = connection.transaction().unwrap();
+    ]
+}
+
+fn assert_direct_claim_decoys_refused(subject: &str, kind: &str, payload: &Value) {
+    for body in decoy_bodies(payload) {
+        // Keep the public raw append path and exact envelopes, with schema for the real gate.
+        let store = Store::open_memory("alder").unwrap();
+        let connection = store.readers.get();
+        let transaction = connection.unchecked_transaction().unwrap();
         let error = append_claim_tx(
-            &transaction,
-            "alder",
-            subject,
-            kind,
-            Some("person/avery"),
-            &body,
-            &[],
-            None,
-        )
-        .unwrap_err();
+            &transaction, "alder", subject, kind, Some("person/avery"), &body, &[], None,
+        ).unwrap_err();
         let refusal = error.downcast_ref::<FractalError>().unwrap_or_else(|| {
             panic!("expected the declared-admission barrier for {kind} {body}, got {error}")
         });
+        assert_eq!(refusal.code, "declared-admission-feature-barrier", "{subject} {kind} {body}");
+    }
+}
+
+fn assert_barrier_decoys_refused(subject: &str, kind: &str, payload: &Value) {
+    for body in decoy_bodies(payload) {
+        // Exercise envelope detection directly: typed validation can independently reject
+        // member/canonical drift, and the evidence gate requires an initialized store.
+        let store = Store::open_memory("alder").unwrap();
+        let before = store.index().unwrap();
+        let refusal = validate_claim(&store.readers.get(), "alder", kind, &body).unwrap_err();
         assert_eq!(
             refusal.code, "declared-admission-feature-barrier",
-            "{kind} {body}"
+            "{subject} {kind} {body}"
         );
+        assert_eq!(store.index().unwrap(), before, "decoy refusal must not write");
     }
 }
 
@@ -174,8 +179,8 @@ fn desired_claim_decoys_cannot_hide_member_or_desired_children() {
         member_only["desired"] = plain["desired"].clone();
         let mut children_only = desired;
         children_only["member"] = plain["member"].clone();
-        assert_direct_claim_decoys_refused("agent/alder.new", "intent.desired", &member_only);
-        assert_direct_claim_decoys_refused("agent/alder.new", "intent.desired", &children_only);
+        assert_barrier_decoys_refused("agent/alder.new", "intent.desired", &member_only);
+        assert_barrier_decoys_refused("agent/alder.new", "intent.desired", &children_only);
     }
 }
 
@@ -195,6 +200,38 @@ fn non_agent_desired_children_are_not_declared_admission() {
             ] {
                 validate_claim(&connection, "alder", "intent.desired", &body).unwrap();
             }
+        }
+    }
+}
+
+#[test]
+fn direct_claim_semantics_precede_the_publication_barrier() {
+    for (priority, expected) in [
+        ("urgent", "invalid-declared-admission"),
+        ("normal", "declared-admission-feature-barrier"),
+    ] {
+        for (subject, kind, fields) in [
+            ("agent/alder.new", "intent.desired", json!({
+                "kind": "agent",
+                "desired": {"children": [{"name": "declared-priority", "arguments": [priority]}]}
+            })),
+            ("mission/new", "mission.published", json!({
+                "body": {"subject": "mission/new", "declared_priority": priority}
+            })),
+        ] {
+            let store = Store::open_memory("alder").unwrap();
+            let before = store.index().unwrap();
+            let error = store.append_claim(&ClaimInput {
+                subject: subject.into(),
+                kind: kind.into(),
+                actor: Some("person/avery".into()),
+                fields: serde_json::from_value(fields).unwrap(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }).unwrap_err();
+            assert_eq!(error.code, expected, "{kind} {priority}");
+            assert_eq!(store.index().unwrap(), before);
         }
     }
 }

@@ -53,6 +53,17 @@ const sharedDocument = () => {
 const panes = (layout: Layout) => tabsOf(layout).map(tab => tab.pane)
 
 describe('workspace store', () => {
+  it('does not persist an untouched empty workspace', () => {
+    const shared = sharedDocument()
+    const store = createWorkspaceStore(shared.window())
+    try {
+      store.flush()
+      expect(shared.writes()).toBe(0)
+    } finally {
+      store.dispose()
+    }
+  })
+
   it('survives a reload: splits, each group\'s tab, focus, view state and the panel', () => {
     const { layer } = lasting()
     const first = createWorkspaceStore(layer, { debounceMs: 1 })

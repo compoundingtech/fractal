@@ -103,6 +103,12 @@ pub trait Runtime: Send + Sync {
         BTreeMap::new()
     }
 
+    /// Kinds whose authority requires a keyed writer's signed envelope on every import,
+    /// including source-admitted backup history. Local operation writes are unaffected.
+    fn requires_keyed_envelope(&self, _kind: &str) -> bool {
+        false
+    }
+
     /// Check a replicated claim's kind and fields once the graph has verified its hash and batch.
     fn classify_replicated_claim(
         &self,

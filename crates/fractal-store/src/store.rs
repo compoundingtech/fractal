@@ -17,6 +17,7 @@ macro_rules! message_desired_recipient_match {
 pub mod attention;
 pub mod delivery;
 pub mod deploy;
+mod device_renewal;
 pub mod evidence;
 pub mod agents_publication;
 pub mod missions;
@@ -130,6 +131,8 @@ pub mod projectors;
 pub mod projectors_tests;
 #[cfg(test)]
 mod mission_start_production_copy_tests;
+#[cfg(test)]
+mod declared_admission_compatibility_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -243,6 +246,8 @@ pub mod checkpoint_status;
 pub mod human_review_reassignment;
 pub mod mission_eligibility;
 pub use mission_eligibility::MISSING_AGENT_CONDITION;
+/// The explicitly owned weekly agent-list performance fault.
+pub const AGENTS_REQUEST_SLO_MISSED: &str = "fractal-agents-success-fast-slo-missed";
 /// The explicitly owned weekly API readiness fault.
 pub const API_READINESS_SLO_MISSED: &str = "fractal-api-readiness-slo-missed";
 pub mod person_rename;
@@ -3339,6 +3344,8 @@ impl Store {
         local_receipt: Option<(&str, &Value)>,
         checks: publication::CommitChecks<'_>,
     ) -> Result<ApplyResponse, FractalError> {
+        fractal_missions_base::declared_admission::validate_publication(intent)?;
+        crate::graph::validate_mission_runtimes(intent, &self.origin)?;
         let publication::CommitChecks { owned, guard } = checks;
         self.connection
             .batched(|transaction| -> Result<ApplyResponse, FractalError> {
@@ -4742,6 +4749,36 @@ impl Store {
             (None, Some(shard)) => messages_shard::stream_operations::operation_claim(&shard, &operation_id),
             (graph, _) => Ok(graph),
         }
+    }
+
+    /// Native occupants of an operation key, including divergent replicated requests.
+    /// Unlike `operation_claim`, this does not interpret a conflicted registry entry as
+    /// absence. Returns at most 16 occupants plus an explicit overflow flag.
+    /// Uses only the existing operation-ID index, with no full-history sort or
+    /// receipt ranking. Replaced repair claims do not participate in ownership.
+    pub fn operation_claims(&self, key: &str) -> Result<(Vec<ClaimRecord>, bool)> {
+        let connection = self.readers.get();
+        let operation_id = operation_id_for_key(key);
+        let mut statement = connection.prepare_cached(
+            "SELECT claims.id, claims.store_index, claims.batch_id, claims.subject, claims.kind,
+                    claims.origin, claims.actor, claims.body, claims.predecessors, claims.accepted_at_unix_ms
+             FROM claims INDEXED BY claims_operation_index
+             WHERE json_extract(body, '$._operation.id')=?1
+               AND NOT EXISTS(SELECT 1 FROM projection_digest_repaired_claims
+                              WHERE projection_digest_repaired_claims.id=claims.id)
+             LIMIT 17",
+        )?;
+        let mut claims = statement.query_map([&operation_id], claim_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if let Some(shard) = messages_shard::shard(self)
+            && let Some(claim) = messages_shard::stream_operations::operation_claim(&shard, &operation_id)? {
+            claims.push(claim);
+        }
+        claims.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+        claims.dedup_by(|left, right| left.id == right.id);
+        let overflow = claims.len() > 16;
+        claims.truncate(16);
+        Ok((claims, overflow))
     }
 
     /// Daemon-only evidence captured while holding the runtime spawn locks.
@@ -6420,16 +6457,24 @@ impl Store {
     pub fn fault_snapshot(&self, as_of: u128) -> Result<Vec<FaultView>> {
         // One read cut for every family, so a run, step, declaration or failure that many
         // faults share is read once.
-        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of)))
+        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of, false)))
     }
 
-    fn fault_snapshot_in_cut(&self, as_of: u128) -> Result<Vec<FaultView>> {
+    /// The faults whose notices the generic reconciler owns.
+    pub fn fault_delivery_snapshot(&self, as_of: u128) -> Result<Vec<FaultView>> {
+        self.read_snapshot_unindexed(|| person_work::with_cut_memo(|| self.fault_snapshot_in_cut(as_of, true)))
+    }
+
+    fn fault_snapshot_in_cut(&self, as_of: u128, generic_delivery_only: bool) -> Result<Vec<FaultView>> {
         let mut items = self.subscription_fault_items(as_of)?;
         items.extend(self.operational_fault_families(None, as_of)?);
         // Failure episodes come from the fault cache, read again only where something changed.
         let (operational, gates) = self.cached_failure_faults(as_of)?;
         let mut explicit_reviewers = BTreeSet::new();
         for fault in operational {
+            if generic_delivery_only && fault.suppress_generic_delivery {
+                continue;
+            }
             if fault.explicit_reviewer_only {
                 explicit_reviewers.insert(fault.item.episode.clone());
             }
@@ -11384,6 +11429,19 @@ pub fn append_claim_tx(
     predecessors: &[String],
     forced_batch: Option<&str>,
 ) -> Result<ClaimRecord> {
+    fn sorted(value: &Value) -> bool {
+        match value {
+            Value::Object(fields) => fields.keys().is_sorted() && fields.values().all(sorted),
+            Value::Array(values) => values.iter().all(sorted),
+            _ => true,
+        }
+    }
+    let canonical;
+    let body = if (kind.starts_with("custom.client.pairing") || kind.starts_with("custom.client.terminal"))
+        && !sorted(body) {
+        canonical = smallclaims::hash::canonical_json_value(body);
+        &canonical
+    } else { body };
     append_claim_tx_with_assistant_answer(transaction, origin, subject, kind, actor, body, predecessors, forced_batch, None)
 }
 
@@ -11470,6 +11528,7 @@ pub fn append_claim_tx_with_assistant_answer(
     predecessors: &[String],
     forced_batch: Option<&str>,
 ) -> Result<ClaimRecord> {
+    fractal_missions_base::declared_admission::validate_claim(kind, subject, body).map_err(anyhow::Error::new)?;
     declared_admission::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
     if matches!(kind, "intent.desired" | "mission.published") {
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
@@ -22694,6 +22753,8 @@ pub struct ClaimCommitContext<'a> {
     pub thread_delivery: bool,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
+    /// Dedicated client operations publish a native receipt in the same transaction.
+    pub client_operation: bool,
     /// Write the claim as a build from before its kind became a local observation did: a
     /// replicated claim. Tests use it for the claims older members still replicate.
     #[cfg(any(test, feature = "test-support"))]
@@ -23103,6 +23164,9 @@ pub fn append_claim_with_commit_context(
             }
             Ok((record, true))
             })()?;
+            if context.client_operation && outcome.1 {
+                crate::pairing::append_operation_receipt_tx(transaction, &outcome.0).map_err(internal)?;
+            }
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;
             }

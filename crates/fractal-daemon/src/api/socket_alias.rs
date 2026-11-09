@@ -126,15 +126,16 @@ pub async fn serve_reserved_unix_with_ready(
     reserved: ReservedUnixSocket,
     app: Router,
     bound_store: Option<Arc<crate::store::Store>>,
+    worker: Option<core::WorkerAuthority>,
     ready: impl FnOnce(),
 ) -> Result<()> {
     let ReservedUnixSocket { reserved, aliases: _aliases } = reserved;
-    core::serve_reserved_unix_with_ready(reserved, app, bound_store, ready).await
+    core::serve_reserved_unix_with_ready(reserved, app, bound_store, worker, ready).await
 }
 
 pub async fn serve_unix_with_ready(socket: &Path, app: Router, ready: impl FnOnce()) -> Result<()> {
     let reserved = reserve_unix_socket(socket, None).await?;
-    serve_reserved_unix_with_ready(reserved, app, None, ready).await
+    serve_reserved_unix_with_ready(reserved, app, None, None, ready).await
 }
 
 pub async fn serve_unix(socket: &Path, app: Router) -> Result<()> {
@@ -146,7 +147,8 @@ pub async fn serve_unix_bound_with_ready(
     store: Arc<crate::store::Store>, ready: impl FnOnce(),
 ) -> Result<()> {
     let reserved = reserve_unix_socket(socket, Some(state_socket)).await?;
-    serve_reserved_unix_with_ready(reserved, app, Some(store), ready).await
+    let worker = super::worker_observer(None)?;
+    serve_reserved_unix_with_ready(reserved, app, Some(store), Some(worker), ready).await
 }
 
 pub async fn serve_unix_bound(
