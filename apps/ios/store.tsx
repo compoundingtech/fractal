@@ -1295,10 +1295,11 @@ function useAppStore(proof?: FabricProfile) {
   const c6SampleRef = useRef<C6AppSample>({ identity: client, context: { route: 'none', path: 'unknown' }, feed, actor: caps?.session_actor, send: actions.send });
   c6SampleRef.current = {
     identity: client, feed: feedClient.current?.client === client && feedClient.current?.feed === feed ? feed : null, actor: caps?.session_actor, send: actions.send,
-    context: { route: selected.route.kind === 'tailnet' ? 'tailscale' : selected.route.kind, path: selected.route.kind === 'fabric' ? fabricPath : 'unknown' },
+    context: { route: selected.route.kind === 'tailnet' ? 'tailscale' : selected.route.kind, path: 'unknown' },
   };
   if (!c6Ref.current) c6Ref.current = new C6Recorder({
     now: () => performance.now(), id: () => Crypto.randomUUID(), snapshot: () => c6SampleRef.current,
+    readFabricPath: fabricPathInUse,
     version: `${app.expo.version}/${process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD ?? 'development'}`,
     changed: () => c6Changed(value => value + 1),
   });

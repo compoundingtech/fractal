@@ -7,7 +7,7 @@ const fixture = (timeoutMs = 20) => {
   let time = 0, id = 0;
   const context = { route: 'tailscale', path: 'unknown' };
   const sample = { identity: {}, context };
-  const recorder = new C6Recorder({ now: () => time, id: () => `nonce-${++id}`, snapshot: () => sample, version: '1.0/source-sha', changed: () => {}, timeoutMs });
+  const recorder = new C6Recorder({ now: () => time, id: () => `nonce-${++id}`, snapshot: () => sample, readFabricPath: async () => sample.context.path, version: '1.0/source-sha', changed: () => {}, timeoutMs });
   return { recorder, context, sample, advance: ms => { time += ms; } };
 };
 
@@ -28,7 +28,7 @@ test('freezes start context, invalidates a changed route, and does not refill fa
   const pathOnly = fixture();
   pathOnly.context.route = 'fabric'; pathOnly.context.path = 'direct';
   await pathOnly.recorder.run('status', async () => { pathOnly.context.path = 'relay'; });
-  assert.equal(pathOnly.recorder.rows[0].errorCode, 'route-changed');
+  assert.equal(pathOnly.recorder.rows[0].errorCode, 'path-changed');
 });
 
 test('correlates own nonce only, including echo before ACK, and records separate durations', async () => {
@@ -159,4 +159,47 @@ test('the app foreground gate cancels a running recorder on background', async (
   unsubscribe();
   assert.equal(sends, 1);
   assert(recorder.rows.every(row => row.errorCode === 'cancelled'));
+});
+
+test('Fabric reads fresh paths twice per sample, ignores cached paths, and excludes reader time', async () => {
+  let time = 0, id = 0, reads = 0;
+  const sample = { identity: {}, context: { route: 'fabric', path: 'direct' } };
+  const recorder = new C6Recorder({
+    now: () => time, id: () => `${++id}`, snapshot: () => sample, version: 'source', changed: () => {},
+    readFabricPath: async () => { reads++; time += 100; return reads % 2 === 1 ? 'relay' : 'direct'; },
+  });
+  await recorder.run('send-echo', async (nonce, hooks) => {
+    time += 3; hooks.ack();
+    time += 4; recorder.observe('message/exact', `[C6:${nonce}]`, true);
+  });
+  assert.equal(reads, 20, 'two uncached native path reads for each of ten samples');
+  for (const row of recorder.rows) {
+    assert.equal(row.start.path, 'relay', 'cached direct path must not label this sample');
+    assert.equal(row.end.path, 'direct');
+    assert.equal(row.status, 'invalid'); assert.equal(row.errorCode, 'path-changed');
+    assert.equal(row.ackMs, 3); assert.equal(row.echoMs, 7);
+  }
+});
+
+test('unknown at either Fabric boundary invalidates the row; Tailscale never reads Fabric paths', async () => {
+  for (const unknownAt of ['start', 'end']) {
+    let id = 0, reads = 0;
+    const recorder = new C6Recorder({
+      now: () => 0, id: () => `${++id}`, version: 'source', changed: () => {},
+      snapshot: () => ({ identity: null, context: { route: 'fabric', path: 'direct' } }),
+      readFabricPath: async () => { reads++; return (reads % 2 === 1) === (unknownAt === 'start') ? 'unknown' : 'direct'; },
+    });
+    await recorder.run('status', async (_, hooks) => hooks.ack());
+    assert.equal(reads, 20);
+    assert(recorder.rows.every(row => row.status === 'invalid' && row.errorCode === 'path-unknown'));
+  }
+  let reads = 0, id = 0;
+  const recorder = new C6Recorder({
+    now: () => 0, id: () => `${++id}`, version: 'source', changed: () => {},
+    snapshot: () => ({ identity: null, context: { route: 'tailscale', path: 'unknown' } }),
+    readFabricPath: async () => { reads++; return 'direct'; },
+  });
+  await recorder.run('status', async (_, hooks) => hooks.ack());
+  assert.equal(reads, 0);
+  assert(recorder.rows.every(row => row.status === 'ok' && row.start.path === 'unknown' && row.end.path === 'unknown'));
 });

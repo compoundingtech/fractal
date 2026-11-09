@@ -5,7 +5,7 @@ export type C6Row = {
   runId: string; blockId: string; index: number; operation: 'status' | 'send-echo';
   version: string; start: C6Context; end: C6Context; requestId: string | null; messageId: string | null;
   ackMs: number | null; echoMs: number | null; status: 'ok' | 'failed' | 'timeout' | 'invalid' | 'cancelled';
-  errorCode: 'request-failed' | 'timeout' | 'route-changed' | 'cancelled' | null;
+  errorCode: 'request-failed' | 'timeout' | 'route-changed' | 'path-changed' | 'path-unknown' | 'cancelled' | null;
 };
 export type C6Send = { signal: AbortSignal; request: (id: string) => void; ack: () => void; cleanup: (close: () => void) => void };
 export const C6_LIMIT = 200;
@@ -21,7 +21,7 @@ export class C6Recorder<TSample extends C6Snapshot = C6Snapshot> {
   private cancelled = false;
   private controller?: AbortController;
   private pending?: { nonce: string; observed: (id: string) => void };
-  constructor(private ports: { now: () => number; id: () => string; snapshot: () => TSample; version: string; changed: () => void; timeoutMs?: number }) {}
+  constructor(private ports: { now: () => number; id: () => string; snapshot: () => TSample; readFabricPath: () => Promise<C6Context['path']>; version: string; changed: () => void; timeoutMs?: number }) {}
   clear(): void { if (!this.busy) { this.rows = []; this.ports.changed(); } }
   cancel(): void { if (this.busy) { this.cancelled = true; this.controller?.abort(); } }
   observe(id: string, text: string, own: boolean): void {
@@ -38,7 +38,10 @@ export class C6Recorder<TSample extends C6Snapshot = C6Snapshot> {
     try {
       for (let index = 1; index <= 10; index++) {
         // Capture transport and its label together; execute receives this exact snapshot.
-        const sample = { ...this.ports.snapshot() }, start = { ...sample.context }, began = this.ports.now();
+        const sample = { ...this.ports.snapshot() }, start = { ...sample.context };
+        if (start.route === 'fabric' && !this.cancelled) start.path = await this.ports.readFabricPath();
+        const startRead = this.ports.snapshot();
+        const began = this.ports.now();
         const row: C6Row = { runId, blockId, index, operation, version: this.ports.version, start, end: start, requestId: null, messageId: null, ackMs: null, echoMs: null, status: 'ok', errorCode: null };
         if (this.cancelled) {
           row.status = 'cancelled'; row.errorCode = 'cancelled';
@@ -81,7 +84,17 @@ export class C6Recorder<TSample extends C6Snapshot = C6Snapshot> {
           }
           const end = this.ports.snapshot();
           row.end = { ...end.context };
-          if (!this.cancelled && (sample.identity !== end.identity || row.start.route !== row.end.route || row.start.path !== row.end.path)) { row.status = 'invalid'; row.errorCode = 'route-changed'; }
+          if (row.end.route === 'fabric') row.end.path = await this.ports.readFabricPath();
+          const endRead = this.ports.snapshot();
+          if (this.cancelled) { row.status = 'cancelled'; row.errorCode = 'cancelled'; } else {
+            if (sample.identity !== startRead.identity || sample.identity !== end.identity || sample.identity !== endRead.identity || row.start.route !== startRead.context.route || row.start.route !== row.end.route || row.end.route !== endRead.context.route) {
+              row.status = 'invalid'; row.errorCode = 'route-changed';
+            } else if (row.start.route === 'fabric' && (row.start.path === 'unknown' || row.end.path === 'unknown')) {
+              row.status = 'invalid'; row.errorCode = 'path-unknown';
+            } else if (row.start.route === 'fabric' && row.start.path !== row.end.path) {
+              row.status = 'invalid'; row.errorCode = 'path-changed';
+            }
+          }
         }
         this.rows = [...this.rows.slice(-(C6_LIMIT - 1)), row];
         this.ports.changed();
