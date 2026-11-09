@@ -49,6 +49,14 @@ The app holds one WebSocket to the gateway, the collections socket (`docs/st3/cl
 
 Observation reporting holds one send slot during both batch preparation and transport. Closing a measured minute can synchronously notify the reporter; that notification cannot prepare a second batch while the first is being formed. A null or empty batch releases the slot without delaying the next measurement.
 
+## C6 latency diagnostics
+
+Fleet's **C6 diagnostics** is opt-in and uses the selected app client, normal signing/send path, and decoded conversation stream, not the Debug Fabric proof. Choose an agent conversation explicitly in this panel; send samples bind that agent's current session at block start. Each button records exactly ten sequential operations with a 15-second deadline per sample and no replacement of failures. **10 status reads** calls fresh `capabilities()` requests with identical arguments. **10 signed send+echo** posts real nonce-labelled measurement messages. ACK ends at successful `messageSend`; echo ends on decoded own-mail arrival carrying that sample's unique nonce, even if it precedes ACK. Both start before signing.
+
+The last 200 raw rows remain in device memory until cleared or the app exits; they are not observation reports or automatically uploaded. **Share C6 results** is the only export, as `ios-c6.v1` JSON. It contains run/block/index, operation, app/build version, monotonic ACK/echo durations, request/message IDs, start/end route and Fabric path, and fixed status/error codes. It contains no target, message text, endpoint, raw error or credential. Route/path changes between start and completion invalidate a row. Timeouts abort transport and prevent subsequent signing/send retries from starting, but an already accepted message cannot be recalled. A missing stream echo remains a timeout even when ACK succeeded. Keep Fleet visible and the phone foregrounded during a block.
+
+The panel shows nearest-rank p50/p95 for each operation's ACK and echo columns over retained successful, route-valid rows only; failed, timed-out and invalid rows remain in the raw export.
+
 ## Layout
 
 The chrome uses native tabs and stacks. Now and alert detail use system typography, device light/dark appearance and wrapping, inset grouped rows. Alert rows label kind, requester and waiting context; opening an alert never acknowledges it. Updates require explicit Mark read, and closed alerts remain until cleared. Conversation keeps the Fractal terminal UI-style IBM Plex Mono presentation but follows the device appearance: Mocha when dark, and the light palette in `theme.ts` when light, whose text and accent colours read at WCAG AA (at least 4.5:1) on every conversation fill. Both switch live, without a relaunch, from the single `useScheme` subscription in `ui.tsx`. Other tabs retain the Fractal terminal UI-style IBM Plex Mono and Mocha presentation. Terminal cells, code and identifiers remain monospace.

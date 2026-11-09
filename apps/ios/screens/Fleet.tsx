@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useFocusEffect } from '@react-navigation/native';
 import { plainError, type ClientConnection } from '../../../clients/typescript/fractal-client';
-import { ActionSheetIOS, Alert, ScrollView, Switch, Text, View } from 'react-native';
+import { ActionSheetIOS, Alert, ScrollView, Share, Switch, Text, View } from 'react-native';
 import { Banners, StatusLine, useDebugScroll, useListsOnFocus, useRefresh } from '../chrome';
 import { gatewayTransport, LAN_HTTP_WARNING } from '../gatewayUrl';
 import { clientDetail, clientTitle, deviceDetail, deviceTitle, olderThanMember } from '../presentation';
-import { isUnmanaged, isUnresolved } from '@fractal/views';
+import { conversationEntries, isUnmanaged, isUnresolved, sessionPerson } from '@fractal/views';
 import { useStore } from '../store';
 import { TABS } from '../tabs';
 import { theme } from '../theme';
@@ -17,6 +17,7 @@ import { fabricTargetLabel } from '../fabricTarget';
 import { parsePairingQr } from '../pairingQr';
 import { CAMERA_DENIED, SCAN_FAILED, scanOutcome } from '../pairingScan';
 import { scanPairingQrNative, isPairingQrPermissionDenied } from '../modules/fractal-pairing-scanner';
+import { nearestRank } from '../c6Recorder';
 
 function machineGlyph(state: string): { glyph: string; color: string } {
   if (state === 'local' || state === 'reachable' || state === 'dial-out') return { glyph: '●', color: theme.idle };
@@ -67,6 +68,7 @@ export function FleetScreen() {
       {inventoryGranted === false ? <Note>This member’s inventories are read, not followed.</Note> : null}
       <UsageCard />
       <QualitySection />
+      <C6Section />
       <SectionHeader title="machines" count={data.machines.length} />
       {data.machines.map(machine => <View key={machine.id}>
         <ListRow
@@ -123,6 +125,62 @@ export function FleetScreen() {
       )} />)}
     </ScrollView>
   </Screen>;
+}
+
+// Uses the same selected Feed and signed actions as Conversation, including its decoded mail view.
+function C6Section() {
+  const { c6, client, feed, actions, data, caps, status } = useStore();
+  const [target, setTarget] = useState('');
+  const [shareIssue, setShareIssue] = useState('');
+  const agent = data.agents.find(item => item.id === target);
+  const run = async (operation: 'status' | 'send-echo') => {
+    if (!client || c6.busy || (operation === 'send-echo' && (!agent || !feed))) return;
+    const names = new Map<string, string>();
+    if (caps?.session_actor) names.set(caps.session_actor, 'you');
+    const person = sessionPerson(caps?.session_actor);
+    if (person) names.set(person, 'you');
+    const follow = operation === 'send-echo' ? feed?.followConversation(target, {
+      onEntries: frame => {
+        for (const entry of conversationEntries(frame.items, names)) {
+          if (entry.body.kind === 'mail') c6.observe(entry.id, entry.body.text, entry.body.from === 'you');
+        }
+      },
+      onIssue: issue => { if (issue) setShareIssue('Conversation stream unavailable; missing echoes will time out.'); },
+    }) : undefined;
+    try {
+      await c6.run(operation, async (nonce, hooks) => {
+        if (operation === 'status') {
+          const reply = await client.capabilities({ signal: hooks.signal });
+          hooks.request(reply.request_id); hooks.ack();
+        } else if (agent) {
+          const sent = await actions.send(agent.id, `[C6:${nonce}] latency measurement`, agent.current_session_id ?? undefined, undefined, [], hooks);
+          if (sent.how !== 'sent') throw new Error('C6 send failed');
+        }
+      });
+    } finally { follow?.close(); }
+  };
+  return <>
+    <SectionHeader title="C6 diagnostics" count={c6.rows.length} />
+    <View style={{ paddingHorizontal: 12, gap: 4 }}>
+      <T dim>Opt-in: 10 sequential samples, 15s each; last 200 rows in memory on this phone. Sending posts real messages. Select the target conversation explicitly below.</T>
+      {data.agents.map(item => <Button key={item.id} label={`${target === item.id ? 'selected: ' : ''}${item.id}`} disabled={c6.busy} onPress={() => setTarget(item.id)} />)}
+      <T dim>Target: {target || 'none selected'}. ACK and stream echo are separate durations. Changed routes are invalid.</T>
+      <Button label="10 status reads" disabled={c6.busy || status !== 'online'} onPress={() => void run('status')} />
+      <Button label="10 signed send+echo" disabled={c6.busy || status !== 'online' || !agent || !feed} onPress={() => void run('send-echo')} />
+      <Button label="Share C6 results" disabled={c6.busy || !c6.rows.length} onPress={() => { setShareIssue(''); void Share.share({ message: c6.export() }).catch(() => setShareIssue('Could not share C6 results.')); }} />
+      <Button label="Clear C6 results" disabled={c6.busy || !c6.rows.length} onPress={() => c6.clear()} />
+      <T dim>{c6.busy ? 'Recording…' : 'Idle'} · {c6.rows.filter(row => row.status === 'ok').length} valid successes · {c6.rows.filter(row => row.status !== 'ok').length} failed, timed out or invalid</T>
+      {(['status', 'send-echo'] as const).map(operation => {
+        const rows = c6.rows.filter(row => row.operation === operation && row.status === 'ok');
+        const summary = (field: 'ackMs' | 'echoMs') => {
+          const values = rows.flatMap(row => row[field] === null ? [] : [row[field]]);
+          return `${nearestRank(values, 0.5)?.toFixed(1) ?? '—'}/${nearestRank(values, 0.95)?.toFixed(1) ?? '—'}`;
+        };
+        return <T key={operation} dim>{operation} p50/p95 ms · ACK {summary('ackMs')} · echo {summary('echoMs')}</T>;
+      })}
+      {shareIssue ? <T color={theme.fault}>{shareIssue}</T> : null}
+    </View>
+  </>;
 }
 
 function NotificationsSetting() {

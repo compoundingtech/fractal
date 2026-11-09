@@ -4,6 +4,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as SecureStore from 'expo-secure-store';
 import * as Crypto from 'expo-crypto';
 import { submitAnswer } from './answer';
+import { C6Recorder, type C6Send } from './c6Recorder';
 import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutcome } from './messageSend';
 import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
@@ -253,6 +254,15 @@ function useAppStore(proof?: FabricProfile) {
   // waits, kept on the device, and reported to the member by the reporter.
   const fabricPathRef = useRef<'direct' | 'relay' | 'unknown'>('unknown');
   fabricPathRef.current = selected.route.kind === 'fabric' ? fabricPath : 'unknown';
+  const [, c6Changed] = useState(0);
+  const c6Ref = useRef<C6Recorder | null>(null);
+  if (!c6Ref.current) c6Ref.current = new C6Recorder({
+    now: () => performance.now(), id: () => Crypto.randomUUID(),
+    context: () => ({ route: routeRef.current.kind === 'tailnet' ? 'tailscale' : routeRef.current.kind, path: fabricPathRef.current }),
+    version: `${app.expo.version}/${process.env.EXPO_PUBLIC_FRACTAL_BUILD ?? process.env.EXPO_PUBLIC_ST3_BUILD ?? 'development'}`,
+    changed: () => c6Changed(value => value + 1),
+  });
+  const c6 = c6Ref.current;
   const observationsRef = useRef<Observations | null>(null);
   if (!observationsRef.current) {
     observationsRef.current = new Observations(
@@ -1105,7 +1115,7 @@ function useAppStore(proof?: FabricProfile) {
       return { text: answer.text, complete: answer.complete };
     },
     /** Send Fractal to an agent, as the Fractal terminal UI does: fenced to a fresh snapshot, once more if it moved. */
-    async send(to: string, content: string, sessionId?: string, tags?: string[], images: Picked[] = []): Promise<Sent> {
+    async send(to: string, content: string, sessionId?: string, tags?: string[], images: Picked[] = [], c6Send?: C6Send): Promise<Sent> {
       if (!client || !uploader) return { how: 'failed', error: 'not connected' };
       if (status !== 'online' || (proof && !proof.ready)) return { how: 'failed', error: 'offline' };
       const signingProfile = signingKeyRef.current;
@@ -1133,13 +1143,20 @@ function useAppStore(proof?: FabricProfile) {
       const fences = sendFences(lastSnapshot.current, fence);
       const outcome = await sendBoundMessage(selected.route.kind === 'fabric' && fabricMember ? fabricMember.name : url, {
         build: async () => {
+          c6Send?.signal.throwIfAborted();
           const id = actionId();
+          c6Send?.request(id);
           const unsigned = { to, content, ...(sessionId ? { session_id: sessionId } : {}), ...(tags?.length ? { tags } : {}), ...(attachments.length ? { attachments } : {}) };
           const parameters = proof ? unsigned : await signMessage(id, unsigned, signingProfile);
           return { id, idempotency_key: id, fence: await fences(), parameters };
         },
-        fence: async () => { originalAvailable(); return fence(); },
-        send: request => { originalAvailable(); return client.messageSend(request); },
+        fence: async () => { c6Send?.signal.throwIfAborted(); originalAvailable(); return fence(); },
+        send: async request => {
+          originalAvailable(); c6Send?.signal.throwIfAborted();
+          const result = await client.messageSend(request, { signal: c6Send?.signal });
+          c6Send?.ack();
+          return result;
+        },
         wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
       });
       if (outcome.how !== 'sent') { proof?.record(outcome.how === 'unconfirmed' ? 'message-unconfirmed' : 'message-failed', { elapsedMs: performance.now() - began }); return sentAs(outcome); }
@@ -1278,6 +1295,7 @@ function useAppStore(proof?: FabricProfile) {
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
+    c6,
     renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
     gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
