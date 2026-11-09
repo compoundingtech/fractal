@@ -60,7 +60,7 @@ impl Ui {
             Hit::Message | Hit::Subject | Hit::InlineImage(_) => String::new(),
             Hit::Resize => "drag resize; double-click equalize".into(),
             Hit::SidebarResize => "drag resize sidebar; double-click reset".into(),
-            Hit::Key(_) | Hit::Enter | Hit::Escape | Hit::Menu(_) => label,
+            Hit::Key(_) | Hit::Enter | Hit::ChatEnter | Hit::Escape | Hit::Menu(_) => label,
             Hit::ToggleTool(_) | Hit::Pane(PaneIntent::Expand(_)) => "expand/collapse".into(),
             Hit::Pane(PaneIntent::Open(_)) | Hit::Open(_) => "open subject".into(),
             Hit::Pane(PaneIntent::Image(_)) => "open image".into(),
@@ -69,7 +69,7 @@ impl Ui {
             Hit::Pane(PaneIntent::Send(_)) => "send message".into(),
             Hit::Pane(PaneIntent::LoadOlder) => "load older messages".into(),
             Hit::JumpLatest => "jump to latest [End]".into(),
-            Hit::Composer => "edit message [c]".into(),
+            Hit::Composer | Hit::ChatComposer => "edit message [c]".into(),
             Hit::Help => "show/hide help [F1]".into(),
             Hit::Peek(id) if self.popover.as_deref() == Some(id) && rect.height > 1 => {
                 "card already open".into()
@@ -107,7 +107,7 @@ impl Ui {
             && self.context.is_none()
             && !self.home_open()
             && !self.palette_open()
-            && !matches!(hit, Hit::Composer | Hit::Resize | Hit::SidebarResize)
+            && !matches!(hit, Hit::Composer | Hit::ChatComposer | Hit::Resize | Hit::SidebarResize)
             && self.click_focuses_split(point.0, point.1)
         {
             left = "focus split; click again to act".into();
