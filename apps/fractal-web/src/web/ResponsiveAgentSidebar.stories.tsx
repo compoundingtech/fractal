@@ -82,10 +82,10 @@ const tabsFitPlay = async ({ canvasElement }: { readonly canvasElement: HTMLElem
   const assertFits = async () => {
     await waitFor(() => expect(sidebar.scrollWidth).toBeLessThanOrEqual(sidebar.clientWidth))
     const bounds = sidebar.getBoundingClientRect()
-    // Hidden intrinsic replicas deliberately have wider geometry, but must never enlarge the scroll area.
+    // Check painted descendants, not intrinsic replicas or the row's intentionally clipped screen-reader description.
     for (const child of sidebar.querySelectorAll<HTMLElement>('*')) {
       const computed = getComputedStyle(child)
-      if (computed.visibility === 'hidden' || computed.display === 'none' || child.getClientRects().length === 0) continue
+      if (computed.visibility === 'hidden' || computed.display === 'none' || child.getClientRects().length === 0 || child.closest('[data-row-description]') !== null) continue
       const rect = child.getBoundingClientRect()
       await expect(rect.left).toBeGreaterThanOrEqual(bounds.left - 0.5)
       await expect(rect.right).toBeLessThanOrEqual(bounds.right + 0.5)
