@@ -278,13 +278,13 @@ function ThreadConversation({ source, thread, editable, focusComposer, timelineR
   }, [focusComposer])
   const agent = useAgent(thread.agent_id)
   const agentName = agent._tag === 'Observed' ? agent.value?.name : undefined
-  const quote = editable && thread.state === 'open' ? (event: ThreadMessageEvent, sender: string) => {
+  const quote = editable ? (event: ThreadMessageEvent, sender: string) => {
     setDraft(draft => ({ ...draft, quote: { id: event.id, sender, excerpt: event.content } }))
     input.current?.focus()
   } : undefined
   return <>
     <div ref={timelineRef}><ThreadTimeline source={source} threadId={thread.id} agentId={thread.agent_id} agentName={agentName} onQuote={quote} /></div>
-    {thread.state === 'closed' ? <p {...stylex.props(styles.note)}>Reopen this thread to send a message.</p> : !editable ? null
+    {!editable ? null
       : <ThreadEditor source={source} destination={thread.id} label={thread.title} inputRef={attachInput}
         send={(content, quoteId) => source.reply({ target_id: thread.id, content, ...(quoteId === undefined ? {} : { thread_quote_id: quoteId }) })} />}
   </>
