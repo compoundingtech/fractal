@@ -1258,14 +1258,12 @@ pub fn run(context: Context) -> Result<()> {
                 Fetched::ReadPositions { generation, outcome } => {
                     if generation == resources_generation && ui.reads.listed(outcome, Instant::now()) {
                         ui.refresh_tab_statuses();
-                        changed = true;
                     }
                 }
                 Fetched::ReadPositionAdvanced { generation, conversation, at_ms, outcome } => {
                     if generation != resources_generation { continue; }
                     if ui.reads.sent(&conversation, at_ms, outcome, Instant::now()) {
                         ui.refresh_tab_statuses();
-                        changed = true;
                     }
                 }
                 Fetched::TerminalStarted(id) => ui.terminal_started(id),
