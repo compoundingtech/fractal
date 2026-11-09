@@ -231,6 +231,13 @@ fn assistant_grant_authority_measure_realistic_backfill() {
                         claim.execute(/* sqlite-large-value: allow-for-now lv-hb16dbad8dff5 owner=smallclaims::store::assistant_grant_authority_bench TODO=trace-statement-and-value-representation */ params![id, format!("batch/{writer}/{sequence:064x}"),
                             format!("custom/client/assistant-v1-{group:024x}"), kind, writer,
                             "person/perf-operator", body]).unwrap();
+                        if writer == LOCAL {
+                            // Model a genuine local append, not origin-based trust
+                            // during upgrade of ambiguous historical raw rows.
+                            transaction.execute(
+                                "INSERT INTO assistant_grant_local_appends(claim_id) VALUES(?1)", [&id],
+                            ).unwrap();
+                        }
                     } else {
                         let bucket = match row % 100 { 0..=69 => 0, 70..=94 => 1, _ => 2 };
                         let body = &unrelated_bodies[bucket];
@@ -293,6 +300,10 @@ fn assistant_grant_authority_measure_realistic_backfill() {
     let revoked: u64 = connection.query_row("SELECT COUNT(*) FROM assistant_grant_effective WHERE revoked=1", [], |row| row.get(0)).unwrap();
     let authority: u64 = connection.query_row("SELECT COUNT(*) FROM assistant_grant_authority", [], |row| row.get(0)).unwrap();
     let unauthenticated: u64 = connection.query_row("SELECT COUNT(*) FROM assistant_grant_pending WHERE authenticated=0", [], |row| row.get(0)).unwrap();
+    let pending_unauthenticated_grants: u64 = connection.query_row(
+        "SELECT COUNT(*) FROM assistant_grant_pending WHERE authenticated=0 AND kind=?1",
+        [assistant_grant_authority::GRANTED], |row| row.get(0),
+    ).unwrap();
     assert_eq!(effective, expected_effective);
     assert!(effective > 0, "sample must include authenticated valid groups");
     assert_eq!(revoked, expected_revoked);
@@ -306,6 +317,7 @@ fn assistant_grant_authority_measure_realistic_backfill() {
     transaction.commit().unwrap();
     assert_eq!(connection.query_row("SELECT COUNT(*) FROM assistant_grant_authority", [], |row| row.get::<_, u64>(0)).unwrap(), authority);
 
+    println!("authority_backfill_compatibility pending_unauthenticated_grant_claims={pending_unauthenticated_grants}");
     let scale = config.target_bytes as f64 / fixture_db_bytes as f64;
     println!("authority_backfill_fixture raw_claims={raw_rows} grant_kind_claims={raw_authority_rows} granted={} policies={} revocations={raw_revocations} malformed_rows={expected_malformed_rows} unauthenticated_rows={expected_unauthenticated_rows} effective_grants={effective} authority_rows={authority} authority_bps={} malformed_group_bps={} unauthenticated_group_bps={} revoked_group_bps={} unrelated_json_bytes={unrelated_body_bytes} authority_json_bytes={authority_body_bytes} fixture_db_bytes={fixture_db_bytes} fixture_wal_bytes={fixture_wal_bytes} final_db_bytes={final_db_bytes} final_wal_bytes={final_wal_bytes} transaction_rows={}",
         raw_authority_rows / EVENTS, raw_authority_rows - raw_authority_rows / EVENTS - raw_revocations,

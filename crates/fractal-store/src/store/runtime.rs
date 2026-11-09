@@ -937,6 +937,13 @@ mod schema_install_tests {
                 append(&connection, "revoke", 3, authority::REVOKED, "assistant/chatgpt", 200);
                 append(&connection, "mcp", 4, authority::GRANTED, "assistant/mcp", 200);
                 append(&connection, "unrelated", 5, "custom.test.recorded", "assistant/chatgpt", 200);
+                // These fixture rows model durable local appends. Truly old,
+                // unmarked raw evidence is ambiguous and must remain pending.
+                for id in ["active", "extended", "expired", "revoked", "revoke", "mcp"] {
+                    connection.execute(
+                        "INSERT INTO assistant_grant_local_appends(claim_id) VALUES(?1)", [id],
+                    ).unwrap();
+                }
                 let before = snapshot(&connection);
                 let indexes_before = claims_indexes(&connection);
                 drop(connection);
@@ -977,12 +984,15 @@ mod schema_install_tests {
                     && step.contains("principal=? AND owner=? AND revoked=? AND expires_at>?")), "{plan:?}");
                 assert!(plan.iter().all(|step| !step.contains("SCAN claims") && !step.contains("SEARCH claims")), "{plan:?}");
 
-                // An older build can append raw evidence after backfill. The additive
-                // trigger closes admission until that evidence has been projected.
+                // An older build can append raw evidence after backfill. The
+                // trigger closes admission until reconciliation, but origin
+                // text alone cannot authenticate this unmarked late revoke.
                 append(&connection, "late-revoke", 1, authority::REVOKED, "assistant/chatgpt", 200);
                 assert!(authority::candidates(&connection, "assistant/chatgpt", "person/owner", Some(100), None, None).is_err());
                 while !authority::backfill_slice(&connection, Duration::from_secs(1)).unwrap() {}
-                assert!(authority::candidates(&connection, "assistant/chatgpt", "person/owner", Some(100), None, None).unwrap().is_empty());
+                assert_eq!(authority::candidates(&connection, "assistant/chatgpt", "person/owner", Some(100), None, None)
+                    .unwrap().iter().map(|claim| claim.id.as_str()).collect::<Vec<_>>(), vec!["active"]);
+                assert!(!authority::contains(&connection, "late-revoke").unwrap());
                 let after = snapshot(&connection);
                 let cookie: u32 = connection.pragma_query_value(None, "schema_version", |row| row.get(0)).unwrap();
                 drop(connection);

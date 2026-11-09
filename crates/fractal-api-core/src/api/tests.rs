@@ -1045,6 +1045,45 @@ async fn native_session_reports_cannot_replace_a_successor_binding() {
 }
 
 #[test]
+fn doctor_lists_unmarked_pending_grants_without_dating_remote_history() {
+    let store = Store::open_memory("amber").unwrap();
+    let connection = store.connection.lock().expect("fixture writer");
+    for (id, kind, origin, authenticated) in [
+        ("claim/local-a", "custom.client.assistant.v1.granted", "amber", 0),
+        ("claim/local-b", "custom.client.assistant.v1.granted", "amber", 0),
+        ("claim/remote", "custom.client.assistant.v1.granted", "birch", 0),
+        ("claim/verified", "custom.client.assistant.v1.granted", "amber", 1),
+        ("claim/marked", "custom.client.assistant.v1.granted", "amber", 0),
+        ("claim/policy", "custom.client.assistant.v1.policy", "amber", 0),
+        ("claim/revoked", "custom.client.assistant.v1.revoked", "amber", 0),
+    ] {
+        connection.execute(
+            "INSERT INTO assistant_grant_pending
+             (claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record)
+             VALUES(?1,?1,?2,?3,'person/operator',1,?4,'{}')",
+            rusqlite::params![id, kind, origin, authenticated],
+        ).unwrap();
+    }
+    connection.execute(
+        "INSERT INTO assistant_grant_local_appends(claim_id) VALUES('claim/marked')", [],
+    ).unwrap();
+    let checks = pending_assistant_grant_checks(&connection, "amber").unwrap();
+    assert_eq!(checks.len(), 3);
+    for (check, id) in checks[..2].iter().zip(["claim/local-a", "claim/local-b"]) {
+        assert_eq!(check.name, "assistant-grant-provenance");
+        assert_eq!(check.status, "warn");
+        assert_eq!(check.message, format!(
+            "{id}: grant predates local-append provenance; re-issue; kind=custom.client.assistant.v1.granted; origin=amber; actor=person/operator"
+        ));
+    }
+    assert!(checks[2].message.starts_with("claim/remote: grant lacks local-append provenance"));
+    assert!(checks[2].message.contains("issuance age unknown"));
+    assert!(!checks[2].message.contains("predates"));
+    connection.execute("UPDATE assistant_grant_pending SET authenticated=1", []).unwrap();
+    assert!(pending_assistant_grant_checks(&connection, "amber").unwrap().is_empty());
+}
+
+#[test]
 fn doctor_flags_low_descriptor_limits_and_high_usage() {
     let low = descriptor_usage_check(256, 8192, Some(92));
     assert_eq!(low.status, "warn");

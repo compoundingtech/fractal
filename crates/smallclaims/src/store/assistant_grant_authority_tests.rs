@@ -460,6 +460,128 @@ fn reset_projection(connection: &Connection) {
     ).unwrap();
 }
 
+fn drain_authority(store: &Store) {
+    while !store.advance_assistant_grant_authority_backfill().unwrap() {}
+}
+
+fn assert_bearer_rejected(store: &Store, grant: &ClaimRecord) {
+    let digest = grant.body["fields"]["credential_hash"].as_str().unwrap();
+    assert!(!authority::contains(&store.readers.get(), &grant.id).unwrap());
+    assert!(authority::by_credential(&store.readers.get(), digest).unwrap().is_none());
+    assert!(!decisions(store, 0).contains(&grant.id));
+}
+
+fn attacker_fork() -> (Store, ClaimRecord) {
+    // An admitted Legacy sender invents a fork of the victim's writer history.
+    // No member key or signature authenticates the claimed local origin.
+    let sender = node("victim", None);
+    let mut forged = fields();
+    forged["credential_hash"] = json!("b".repeat(64));
+    let grant = append(&sender, SUBJECT, GRANTED, forged);
+    (sender, grant)
+}
+
+#[test]
+fn unsigned_victim_origin_legacy_fork_is_rejected_on_receive_and_upgrade_backfill() {
+    let (sender, grant) = attacker_fork();
+    let victim = node("victim", None);
+    receive(&victim, &unsigned(&export(&sender, &victim)));
+    assert!(victim.claim_by_id(&grant.id).unwrap().is_some(), "Legacy evidence was admitted");
+    assert_bearer_rejected(&victim, &grant);
+    reset_projection(&victim.connection.write());
+    drain_authority(&victim);
+    assert_bearer_rejected(&victim, &grant);
+}
+
+#[test]
+fn victim_origin_legacy_fork_injected_after_partial_cursor_cannot_authenticate() {
+    let victim = node("victim", None);
+    let local = append(&victim, SUBJECT, GRANTED, fields());
+    {
+        let mut connection = victim.connection.write();
+        reset_projection(&connection);
+        let transaction = connection.transaction().unwrap();
+        assert!(!authority::backfill_slice(&transaction, Duration::ZERO).unwrap());
+        transaction.commit().unwrap();
+    }
+    let (sender, grant) = attacker_fork();
+    receive(&victim, &unsigned(&export(&sender, &victim)));
+    drain_authority(&victim);
+    assert_bearer_rejected(&victim, &grant);
+    assert!(authority::contains(&victim.readers.get(), &local.id).unwrap());
+}
+
+#[test]
+fn older_build_raw_legacy_replication_cannot_authenticate_on_new_build_reopen() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("victim.sqlite3");
+    let (sender, grant) = attacker_fork();
+    {
+        let victim = Store::open(&path, "victim", Arc::new(Plain)).unwrap();
+        drain_authority(&victim);
+        // The pre-envelope import path wrote raw batches and claims without
+        // receipt records. Reproduce that older-build transaction, deliberately
+        // bypassing all new admission hooks and the local append marker.
+        let (sequence, previous, hash): (u64, Option<String>, String) = sender.readers.get()
+            .query_row("SELECT replica_sequence,previous_hash,hash FROM batches WHERE id=?1",
+                [&grant.batch_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        let mut connection = victim.connection.write();
+        let transaction = connection.transaction().unwrap();
+        transaction.execute(
+            "INSERT INTO batches(id,origin,replica_sequence,previous_hash,hash,accepted_at_unix_ms)
+             VALUES(?1,?2,?3,?4,?5,?6)",
+            params![grant.batch_id,grant.origin,sequence,previous,hash,grant.accepted_at_unix_ms.to_string()],
+        ).unwrap();
+        transaction.execute(
+            "INSERT INTO claims(id,batch_id,subject,kind,origin,actor,body,predecessors,accepted_at_unix_ms)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![grant.id,grant.batch_id,grant.subject,grant.kind,grant.origin,grant.actor,
+                canonical_json_text(&grant.body).unwrap(),serde_json::to_string(&grant.predecessors).unwrap(),
+                grant.accepted_at_unix_ms.to_string()],
+        ).unwrap();
+        transaction.commit().unwrap();
+        assert!(authority::ready(&connection).is_err());
+    }
+    let reopened = Store::open(&path, "victim", Arc::new(Plain)).unwrap();
+    drain_authority(&reopened);
+    assert_bearer_rejected(&reopened, &grant);
+}
+
+#[test]
+fn local_append_authenticates_immediately_and_local_unsealed_and_signed_history_survive_backfill() {
+    let (store, _) = source();
+    let sealed = append(&store, SUBJECT, GRANTED, fields());
+    store.seal_local_batches().unwrap();
+    // A pre-marker sealed claim must stand on its real signature, not its
+    // origin. A post-upgrade unsealed claim stands on durable local admission.
+    store.connection.write().execute(
+        "DELETE FROM assistant_grant_local_appends WHERE claim_id=?1", [&sealed.id],
+    ).unwrap();
+    let mut changed = fields();
+    changed["credential_hash"] = json!("c".repeat(64));
+    let unsealed = append(&store, SUBJECT, GRANTED, changed);
+    assert!(authority::by_credential(&store.readers.get(), &"c".repeat(64)).unwrap().is_some());
+    let has_envelope: bool = store.readers.get().query_row(
+        "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1)",
+        [&unsealed.id], |row| row.get(0),
+    ).unwrap();
+    assert!(!has_envelope, "local authority has no signature/sealing delay");
+    reset_projection(&store.connection.write());
+    drain_authority(&store);
+    assert!(authority::contains(&store.readers.get(), &sealed.id).unwrap());
+    assert!(authority::contains(&store.readers.get(), &unsealed.id).unwrap());
+}
+
+#[test]
+fn ambiguous_pre_marker_local_unsealed_history_fails_closed() {
+    let store = node("victim", None);
+    let grant = append(&store, SUBJECT, GRANTED, fields());
+    store.connection.write().execute("DELETE FROM assistant_grant_local_appends", []).unwrap();
+    reset_projection(&store.connection.write());
+    drain_authority(&store);
+    assert_bearer_rejected(&store, &grant);
+}
+
 #[test]
 fn committed_backfill_slice_resumes_after_reopen_and_is_idempotent() {
     let directory = tempfile::tempdir().unwrap();

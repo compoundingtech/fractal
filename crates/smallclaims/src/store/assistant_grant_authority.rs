@@ -112,6 +112,7 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
          CREATE INDEX IF NOT EXISTS assistant_grant_pending_writer_index
             ON assistant_grant_pending(origin,authenticated,sequence,claim_id);
          CREATE TABLE IF NOT EXISTS assistant_grant_dirty (claim_id TEXT PRIMARY KEY);
+         CREATE TABLE IF NOT EXISTS assistant_grant_local_appends (claim_id TEXT PRIMARY KEY);
          CREATE TRIGGER IF NOT EXISTS assistant_grant_dirty_insert AFTER INSERT ON claims
          WHEN NEW.kind IN ('custom.client.assistant.v1.granted','custom.client.assistant.v1.policy','custom.client.assistant.v1.revoked')
          BEGIN INSERT OR IGNORE INTO assistant_grant_dirty VALUES(NEW.id); END;
@@ -271,7 +272,7 @@ fn local_origin(connection: &Connection) -> Result<String> {
 }
 /// Admission pays structural/authentication cost once. Invalid rows never enter
 /// the authority or the pending-authentication writer/window index.
-pub fn refresh_claim(connection: &Connection, id: &str, trusted_local: bool) -> Result<()> {
+pub fn refresh_claim(connection: &Connection, id: &str) -> Result<()> {
     static QUERY: std::sync::LazyLock<String> = std::sync::LazyLock::new(||
         format!("SELECT {CLAIM_COLUMNS} FROM claims WHERE id=?1"));
     let claim = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h1665a4a8cfdf owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ &QUERY)?.query_row(/* sqlite-large-value: allow-for-now lv-h5520ddeb5d20 owner=smallclaims::store::assistant_grant_authority TODO=trace-statement-and-value-representation */ [id], claim_from_row).optional()?;
@@ -281,7 +282,14 @@ pub fn refresh_claim(connection: &Connection, id: &str, trusted_local: bool) -> 
         else if claim.kind==POLICY { policy_fields(&claim) } else { identity(&claim) };
     if valid {
         let sequence: u64 = connection.query_row("SELECT replica_sequence FROM batches WHERE id=?1", [&claim.batch_id], |row| row.get(0))?;
-        let authenticated = (trusted_local && claim.origin == local_origin(connection)?)
+        // Only the local append transaction can create this durable admission
+        // fact. Origin text and the absence of a receipt prove nothing: legacy
+        // imports can also have neither envelopes nor replica records.
+        let local_append: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assistant_grant_local_appends WHERE claim_id=?1)",
+            [&claim.id], |row| row.get(0),
+        )?;
+        let authenticated = (local_append && claim.origin == local_origin(connection)?)
             || authenticated_claim(connection,&claim.id)?;
         let changed = connection.execute(/* sqlite-large-value: allow-for-now lv-h9cf86ad98d1e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO assistant_grant_pending(claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record)
             VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(claim_id) DO UPDATE SET authenticated=excluded.authenticated
@@ -323,7 +331,7 @@ pub fn refresh_envelope(connection: &Connection, writer: &str, sequence: u64, ha
         statement.query_map(params![writer,sequence,hash], |row| row.get::<_,String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?
     };
     // A replicated same-origin claim does NOT acquire the local-write exception.
-    for id in ids { refresh_claim(connection,&id,false)?; }
+    for id in ids { refresh_claim(connection,&id)?; }
     Ok(())
 }
 /// Membership changes promote pending rows only in newly changed keyed windows.
@@ -379,7 +387,7 @@ fn refresh_membership_from(connection: &Connection, membership: &crate::fleet::M
             };
             if ids.is_empty() { break; }
             for (sequence,id) in ids {
-                refresh_claim(connection,&id,false)?;
+                refresh_claim(connection,&id)?;
                 cursor = (sequence,id);
             }
         }
@@ -392,7 +400,6 @@ fn refresh_membership_from(connection: &Connection, membership: &crate::fleet::M
 /// arrivals are captured by persistent dirty triggers even after completion.
 pub fn backfill_slice(connection: &Connection, budget: Duration) -> Result<bool> {
     let started = Instant::now();
-    let origin = local_origin(connection)?;
     refresh_membership(connection)?;
     // A completed version only drains the old-build dirty queue. Readiness also
     // includes that queue, but must never cause a completed history rescan.
@@ -402,12 +409,12 @@ pub fn backfill_slice(connection: &Connection, budget: Duration) -> Result<bool>
             loop {
                 let cursor: u64 = connection.query_row("SELECT CAST(value AS INTEGER) FROM meta WHERE key=?1",[&key],|row|row.get(0)).optional()?.unwrap_or(0);
                 let rows = {
-                    let mut statement = connection.prepare_cached("SELECT id,store_index,origin FROM claims INDEXED BY claims_kind_index WHERE kind=?1 AND store_index>?2 ORDER BY store_index LIMIT 64")?;
-                    statement.query_map(params![kind,cursor],|row|Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?,row.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
+                    let mut statement = connection.prepare_cached("SELECT id,store_index FROM claims INDEXED BY claims_kind_index WHERE kind=?1 AND store_index>?2 ORDER BY store_index LIMIT 64")?;
+                    statement.query_map(params![kind,cursor],|row|Ok((row.get::<_,String>(0)?,row.get::<_,u64>(1)?)))?.collect::<rusqlite::Result<Vec<_>>>()?
                 };
                 if rows.is_empty() { break; }
-                for (id,index,writer) in rows {
-                    refresh_claim(connection,&id,writer==origin)?;
+                for (id,index) in rows {
+                    refresh_claim(connection,&id)?;
                     connection.execute(/* sqlite-large-value: allow-for-now lv-h3f49c0e579cd owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES(?1,?2)",params![key,index.to_string()])?;
                     if started.elapsed()>=budget { return Ok(false); }
                 }
@@ -421,8 +428,7 @@ pub fn backfill_slice(connection: &Connection, budget: Duration) -> Result<bool>
         };
         if rows.is_empty() { break; }
         for id in rows {
-            let writer: Option<String> = connection.query_row("SELECT origin FROM claims WHERE id=?1",[&id],|row|row.get(0)).optional()?;
-            refresh_claim(connection,&id,writer.as_deref()==Some(origin.as_str()))?;
+            refresh_claim(connection,&id)?;
             connection.execute(/* sqlite-large-value: allow-for-now lv-hd91341d01a91 owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM assistant_grant_dirty WHERE claim_id=?1",[&id])?;
             if started.elapsed()>=budget { return Ok(false); }
         }

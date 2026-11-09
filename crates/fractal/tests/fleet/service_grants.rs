@@ -380,8 +380,8 @@ async fn authority_projection_resumes_after_daemon_is_killed_with_committed_part
         if done { break; }
     }
     let expected = authority_projection_snapshot(&reference);
-    assert_eq!(expected.0.len(), 5);
-    assert_eq!(expected.1.len(), 2);
+    assert!(expected.0.is_empty(), "pre-marker Legacy grants lack authenticated writer provenance");
+    assert!(expected.1.is_empty());
     drop(reference);
 
     // Commit one real backfill step rather than making the fixture's size depend on
@@ -393,7 +393,8 @@ async fn authority_projection_resumes_after_daemon_is_killed_with_committed_part
     let partial = authority_backfill_progress(&connection);
     assert!(partial.0 > 0, "must kill with durable forward progress");
     assert!(!partial.1, "the committed projection must still be incomplete");
-    assert_eq!(authority_projection_snapshot(&connection).0.len(), 1);
+    assert!(authority_projection_snapshot(&connection).0.is_empty(),
+        "a partial cursor must not turn ambiguous Legacy evidence into authority");
     let blocker = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
     node.binary = PathBuf::from(st3());
     let pty = node.root.join("bin/pty");
@@ -433,7 +434,7 @@ async fn authority_projection_resumes_after_daemon_is_killed_with_committed_part
     ).unwrap();
     assert_eq!(authority_projection_snapshot(&reader), expected,
         "restart must converge exactly to uninterrupted authority and effective rows");
-    assert_auth(&node, &active, true).await;
+    assert_auth(&node, &active, false).await;
     assert_auth(&node, &revoked, false).await;
     assert_eq!(authority_history(&node), history, "restart must preserve every raw claim body");
 }
@@ -470,7 +471,9 @@ async fn previous_release_authorizes_and_revokes_after_authority_projection_roll
     node.start().await;
     assert_eq!(node.state_dir(), state);
     assert_authority_projection_ready(&node);
-    assert_auth(&node, &active, true).await;
+    // The old standalone issuer had no member signature or local-append marker.
+    // The upgrade preserves evidence but requires its owner to re-issue.
+    assert_auth(&node, &active, false).await;
     assert_auth(&node, &revoked, false).await;
     assert_eq!(authority_history(&node), history, "backfill must not rewrite raw evidence");
 

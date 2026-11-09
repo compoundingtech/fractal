@@ -2194,7 +2194,12 @@ pub /* sqlite-large-value-flow: allow-for-now flow-h8ff255a3c271 owner=smallclai
         ])?;
     let store_index = transaction.last_insert_rowid() as u64;
     if matches!(kind, assistant_grant_authority::GRANTED | assistant_grant_authority::POLICY | assistant_grant_authority::REVOKED) {
-        assistant_grant_authority::refresh_claim(transaction, id, true)?;
+        // This function is the local append boundary; replicated admission uses
+        // its own insert path and must never write this marker.
+        transaction.execute(
+            "INSERT INTO assistant_grant_local_appends(claim_id) VALUES(?1)", [id],
+        )?;
+        assistant_grant_authority::refresh_claim(transaction, id)?;
     }
     Ok(store_index)
 }

@@ -9482,6 +9482,38 @@ pub(crate) fn fleet_admission_check(
     }
 }
 
+fn pending_assistant_grant_checks(
+    connection: &rusqlite::Connection,
+    local_origin: &str,
+) -> anyhow::Result<Vec<DoctorCheck>> {
+    let mut statement = connection.prepare_cached(
+        "SELECT pending.claim_id,pending.kind,pending.origin,pending.actor
+         FROM assistant_grant_pending pending
+         WHERE pending.authenticated=0
+           AND pending.kind='custom.client.assistant.v1.granted'
+           AND NOT EXISTS(SELECT 1 FROM assistant_grant_local_appends local
+                          WHERE local.claim_id=pending.claim_id)
+         ORDER BY pending.claim_id",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+    })?;
+    rows.map(|row| {
+        let (id, kind, origin, actor) = row?;
+        let reason = if origin == local_origin {
+            "grant predates local-append provenance; re-issue"
+        } else {
+            "grant lacks local-append provenance and verified member signature/membership; issuance age unknown"
+        };
+        Ok(DoctorCheck {
+            name: "assistant-grant-provenance".into(),
+            status: "warn".into(),
+            message: format!("{id}: {reason}; kind={kind}; origin={origin}; actor={actor}"),
+        })
+    }).collect()
+}
+
 fn doctor_report_within(
     state: &AppState,
     clock: &DoctorClock,
@@ -9525,6 +9557,9 @@ fn doctor_report_within(
                 message: error.to_string(),
             }),
         }
+        checks.extend(pending_assistant_grant_checks(
+            &state.store.readers.get(), state.store.origin(),
+        ).map_err(ApiError::internal)?);
         Ok(checks)
     });
     checks.check("claim-signatures", || {

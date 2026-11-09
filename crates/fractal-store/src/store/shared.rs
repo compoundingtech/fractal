@@ -265,7 +265,7 @@ impl Store {
                         | smallclaims::store::assistant_grant_authority::REVOKED)
                     {
                         smallclaims::store::assistant_grant_authority::refresh_claim(
-                            &transaction, &claim.id, false,
+                            &transaction, &claim.id,
                         ).map_err(internal)?;
                     }
                     let effective = register_operation_tx(&transaction, claim).map_err(internal)?;

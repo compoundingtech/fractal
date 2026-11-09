@@ -157,6 +157,44 @@ requests still require independent owning-person confirmation. Older daemons
 reject the new principal rather than accepting it as ChatGPT or a person; do not
 work around rejection by switching credentials.
 
+### Upgrade: reissue grants without authenticated historical provenance
+
+The authority projection remains version 1 (unreleased). A durable local-append
+marker is written only when this member appends a new grant, policy, or revocation
+claim locally. Upgrade does not manufacture markers for existing claims. An
+unmarked historical claim needs a verified member envelope signature and matching
+admitted membership window, even when its origin names this member. Unsigned or
+unsealed Legacy history fails closed; merely retaining the old bearer is not
+sufficient. Grants issued before upgrade without a verifiable member signature
+stay unusable and the configured owner must reissue them.
+
+After the authority backfill completes, `fractal doctor` lists every pending
+unauthenticated, unmarked local grant claim ID under the claim-store check with
+reason `grant predates local-append provenance; re-issue`. It also lists remote
+unmarked grants, but reports missing verified provenance and unknown issuance age:
+the absence of this member's local marker does not prove remote history predates
+upgrade. A verified historical signature removes the unauthenticated warning.
+These diagnostics do not change generic bearer authorization error messages.
+
+Reissue means **a new explicit pairing**, not renewal of the old grant or a SQL
+edit. On the daemon host, use the configured owner and original assistant
+principal with only explicitly approved scopes and recorded disclosure consent:
+
+```sh
+fractal devices --as person/OWNER pair --assistant assistant/mcp \
+  --scope read.assistant.summary \
+  --disclose-to-openai --consent-evidence '<recorded owner consent reference>'
+fractal devices complete MEMBER_URL PAIRING_ID --assistant \
+  --profile /absolute/path/to/new-profile.json
+```
+
+Use `assistant/chatgpt` instead when replacing a ChatGPT grant; never switch
+principals to work around rejection. Complete the printed challenge using stdin,
+then provision the newly issued credential in a protected token file as described
+above and remove the old adapter credential. Service-profile issuance remains
+disabled; this procedure does not enable it. Do not insert provenance markers,
+rewrite signed history, or delete claims to make old grants authenticate.
+
 ## Adapter call diagnostics
 
 `fractal-chatgpt` emits one structured `tracing` completion event per dispatched tool
