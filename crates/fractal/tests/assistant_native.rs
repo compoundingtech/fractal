@@ -755,7 +755,7 @@ async fn mcp_grant_reads_sends_and_answers_with_its_own_principal_then_revokes()
     let notification = fractal_drivers::ding::fractal_notification_with_metadata(
         &stored.subject, &stored.from, &stored.to, stored.title.as_deref(), &stored.content,
         &"0".repeat(64), fractal_drivers::ding::NotificationMetadata {
-            attachments: &[], assistant: Some(&metadata),
+            attachments: &[], assistant: Some(&metadata), delivery_thread: None,
         },
     );
     assert!(notification.contains("from=\"assistant/mcp\""));

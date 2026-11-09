@@ -650,7 +650,7 @@ mod tests {
         // The local serving boundary permits these generic reads for a bound agent.
         // They must hide private message bodies in addition to routing metadata.
         let bound_app = app.clone()
-            .layer(from_fn_with_state(state.store.clone(), guard_bound_actor))
+            .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor))
             .layer(Extension(BoundAgent("agent/example/outsider".into())));
         let (status, events) = client_json(bound_app.clone(),
             "/v1/events/page?after=0&subject=message/visible-thread-message").await;
