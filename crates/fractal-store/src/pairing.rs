@@ -256,7 +256,7 @@ impl Store {
         let authority = |connection: &Connection| {
             let now = smallclaims::store::now_ms();
             let begun = latest_operation(connection, &input.subject, "custom.client.pairing-begun")
-                .map_err(crate::store::internal)?.ok_or_else(refused)?;
+                .map_err(|error| crate::FractalError::new("internal", error.to_string()))?.ok_or_else(refused)?;
             let fields = &begun.body["fields"];
             if begun.id != begun_id || begun.origin != self.origin()
                 || input.actor != begun.actor
@@ -265,7 +265,7 @@ impl Store {
                 || fields["scopes"] != input.fields.get("scopes").cloned().unwrap_or_default()
                 || fields["expires_at_unix_ms"].as_u64().is_none_or(|expiry| u128::from(expiry) <= now)
                 || latest_completion(connection, &input.subject, None, now)
-                    .map_err(crate::store::internal)?.is_some()
+                    .map_err(|error| crate::FractalError::new("internal", error.to_string()))?.is_some()
             {
                 return Err(refused());
             }

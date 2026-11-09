@@ -231,7 +231,20 @@ async fn browser_pairing_requires_operation_provenance_for_request_and_approver(
     }).unwrap();
     assert!(!state.store.client_operation_is_trusted(&retained).unwrap());
     answer(&state, &owner, &started, "approve").unwrap();
-    assert!(poll(&state, &owner, &started, &key).await.unwrap().0["bearer"].is_string());
+    state.store.graph.append_claim(&ClaimInput {
+        subject: begun(&state, &started).subject, kind: "custom.client.pairing-completed".into(),
+        actor: Some(owner.authority_actor.clone()), fields: serde_json::from_value(json!({
+            "person_id": owner.authority_actor, "session_actor": "person/operator/session/retained-browser",
+            "scopes": SCOPES, "expires_at_unix_ms": client_now_ms() as u64 + 60_000,
+        })).unwrap(), evidence: vec![], expected_subject: None, idempotency_key: None,
+    }).unwrap();
+    let (first, second) = tokio::join!(
+        poll(&state, &owner, &started, &key),
+        poll(&state, &owner, &started, &key),
+    );
+    assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    assert!(first.or(second).unwrap().0["bearer"].is_string());
+    assert!(poll(&state, &owner, &started, &key).await.is_err());
 }
 
 #[tokio::test]
