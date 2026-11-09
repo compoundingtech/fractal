@@ -179,6 +179,9 @@ mod tests {
         // Model retained/out-of-order graph state below normal admission: C -> X -> T,
         // with X excluded and T not present yet. No live writer can manufacture this path.
         store.connection.batched(|tx| -> anyhow::Result<()> {
+            // Withhold the claim's derived operation row too, preserving the real FK
+            // invariant while modeling this out-of-order retained graph state.
+            tx.execute("DELETE FROM operations WHERE canonical_claim_id=?1", [&title.id])?;
             tx.execute("DELETE FROM claims WHERE id=?1", [&title.id])?;
             assert!(MetadataSnapshot::read(tx, THREAD).is_err());
             Ok(())
@@ -191,6 +194,7 @@ mod tests {
                 params![title.id, title.store_index, title.batch_id, title.subject, title.kind,
                     title.origin, title.actor, serde_json::to_string(&title.body)?,
                     serde_json::to_string(&title.predecessors)?, title.accepted_at_unix_ms.to_string()])?;
+            register_operation_tx(tx, &title)?;
             Ok(())
         }).unwrap().unwrap();
         let restored = summary(&store, PERSON, THREAD).unwrap();

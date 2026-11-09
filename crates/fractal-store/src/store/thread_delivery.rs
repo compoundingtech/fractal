@@ -346,7 +346,7 @@ mod tests {
             super::super::messages_shard::validate_input(&inbound)
                 .unwrap_err()
                 .code,
-            "shard-kind-refused",
+            "thread-delivery-required",
         );
         let (reply, _) =
             append_reply(&store, &inbound, PersonAuthority::TrustedLocal, None).unwrap();

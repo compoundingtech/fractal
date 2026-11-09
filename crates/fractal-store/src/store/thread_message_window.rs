@@ -539,9 +539,10 @@ mod read_progress_tests {
         std::thread::sleep(std::time::Duration::from_millis(3));
         let anchor = message(&left, "message/shown-anchor");
         assert!(late.accepted_at_unix_ms < anchor.accepted_at_unix_ms);
-        let (closed, _) = apply(&left, owner, thread, "close-read-test", Edit::Close {
+        let (_closed, _) = apply(&left, owner, thread, "close-read-test", Edit::Close {
             revision: &crate::store::thread_metadata::summary(&left, owner, thread).unwrap().revision,
         }).unwrap();
+        let closed_revision = summary(&left, owner, thread).unwrap().revision;
         let seen = vec![anchor.subject.clone()];
         assert_eq!(mark_read(&left, PersonAuthority::TrustedLocal, owner, thread, None, &[]).unwrap(), (vec![], false));
         assert_eq!(mark_read(&left, PersonAuthority::TrustedLocal, "person/other", thread, None, &[]).unwrap_err().code, "thread-unavailable");
@@ -557,7 +558,7 @@ mod read_progress_tests {
             let summary = summary(store, owner, thread).unwrap();
             assert!(summary.unread);
             assert_eq!(summary.state, "closed");
-            assert_eq!(summary.revision, closed.id);
+            assert_eq!(summary.revision, closed_revision);
             assert_eq!(store.claims_for(&anchor.subject, Some("message.read")).unwrap().len(), 1);
             assert!(store.claims_for(&late.subject, Some("message.read")).unwrap().is_empty());
         }

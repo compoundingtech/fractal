@@ -201,15 +201,17 @@ mod tests {
         let item = store.attention_items(Some("person/avery")).unwrap().into_iter()
             .find(|item| item.subject == "agent/node.login" && item.kind == "harness-login").unwrap();
         let origin = InboxOrigin { source_id: item.subject, episode: item.episode };
-        let (_, reads) = smallclaims::touched::record(|| {
-            store.connection.batched(|tx| -> anyhow::Result<()> {
-                let selected = resolve(&store, tx, "person/avery", &origin, now_ms()).unwrap();
-                assert_eq!(selected.item.targets, ["agent/node.login"]);
-                Ok(())
-            }).unwrap().unwrap();
-        });
-        assert!(reads.contains("actor:agent/node.login"));
-        assert!(!reads.contains("actor:agent/other.login"), "exact source admission must not fold another host's login");
+        store.connection.batched(|tx| -> anyhow::Result<()> {
+            // Dependency recording is thread-local: capture on the writer that executes
+            // source resolution, rather than the caller waiting for its batched result.
+            let (selected, reads) = smallclaims::touched::record(|| {
+                resolve(&store, tx, "person/avery", &origin, now_ms()).unwrap()
+            });
+            assert_eq!(selected.item.targets, ["agent/node.login"]);
+            assert!(reads.contains("actor:agent/node.login"));
+            assert!(!reads.contains("actor:agent/other.login"), "exact source admission must not fold another host's login");
+            Ok(())
+        }).unwrap().unwrap();
     }
 
     #[test]

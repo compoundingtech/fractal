@@ -13359,20 +13359,22 @@ fn thread_pairing_revocation_precedes_receipt_recovery() {
     let store = Store::open_memory("thread-paired").unwrap();
         store.configure_thread_write_rollout([]);
     let person = "person/example";
-    let actor = "client/paired/example";
+    let actor = "person/example/session/paired";
     let thread = "thread/approval";
     let grant = "custom/client/pairing-thread-fixture";
     let (_created, _) = apply(
         &store, person, thread, "create",
         Edit::Create { agent: "agent/example", title: "Review" },
     ).unwrap();
-    let paired = store.append_claim(&ClaimInput {
+    let paired = store.append_client_operation_claim(&ClaimInput {
         subject: grant.into(),
         kind: "custom.client.pairing-completed".into(),
-        actor: None,
+        actor: Some(person.into()),
         fields: BTreeMap::from([
             ("person_id".into(), json!(person)),
             ("session_actor".into(), json!(actor)),
+            ("device_id".into(), json!("device/paired-example")),
+            ("credential_hash".into(), json!("test-not-a-secret")),
             ("expires_at_unix_ms".into(), json!(now_ms() as u64 + 60_000)),
             ("scopes".into(), json!(["control.messages"])),
         ]),
@@ -13380,21 +13382,23 @@ fn thread_pairing_revocation_precedes_receipt_recovery() {
         expected_subject: None,
         idempotency_key: None,
     }).unwrap();
+    assert!(store.client_operation_is_trusted(&paired).unwrap());
     let created_revision = thread_metadata::summary(&store, person, thread).unwrap().revision;
     let close = || Edit::Close { revision: &created_revision };
     let authority = || PersonAuthority::Paired { grant, completion: &paired.id, actor };
     let (_, appended) = apply_as(&store, person, thread, "close", close(), authority()).unwrap();
     assert!(appended);
     assert!(!apply_as(&store, person, thread, "close", close(), authority()).unwrap().1);
-    store.append_claim(&ClaimInput {
+    store.append_client_operation_claim(&ClaimInput {
         subject: grant.into(),
         kind: "custom.client.pairing-revoked".into(),
-        actor: None,
+        actor: Some(person.into()),
         fields: BTreeMap::new(),
         evidence: Vec::new(),
         expected_subject: None,
         idempotency_key: None,
     }).unwrap();
+    assert!(store.pairing_completion_is_revoked(&paired).unwrap());
     assert_eq!(
         apply_as(&store, person, thread, "close", close(), authority()).unwrap_err().code,
         "thread-authority-expired",
