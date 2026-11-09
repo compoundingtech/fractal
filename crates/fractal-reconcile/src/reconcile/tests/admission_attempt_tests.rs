@@ -5,11 +5,13 @@ const SEAT: &str = "agent/node.fixture";
 
 #[test]
 fn restart_diagnostic_distinguishes_verified_start_then_exit_from_interrupted_attempt() {
-    for (diagnostic_incarnation, receipt_operation, expect_detail, expect_started) in [
-        ("new", None, true, false),
-        ("old", None, false, false),
-        ("old", Some("attempt-operation"), false, true),
-        ("old", Some("unrelated-operation"), false, false),
+    for (diagnostic_incarnation, receipt_operation, ended_incarnation, expect_detail, expect_started) in [
+        ("new", None, None, true, false),
+        ("old", None, None, false, false),
+        ("old", Some("attempt-operation"), Some("new"), false, true),
+        ("old", Some("attempt-operation"), None, false, true),
+        ("old", Some("attempt-operation"), Some("old"), false, true),
+        ("old", Some("unrelated-operation"), Some("new"), false, false),
     ] {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(
@@ -84,19 +86,21 @@ fn restart_diagnostic_distinguishes_verified_start_then_exit_from_interrupted_at
                 store.observations_for(SEAT, "runtime.action.succeeded").unwrap().len(),
                 1
             );
-            append(
-                "harness.observed",
-                Some(SEAT),
-                BTreeMap::from([
-                    ("state".into(), json!("ended")),
-                    ("driver".into(), json!("omp")),
-                    ("incarnation_id".into(), json!("new")),
-                    ("reason".into(), json!("driver-stopped")),
-                    ("exit".into(), json!("exit 143")),
-                ]),
-                vec![],
-                None,
-            );
+            if let Some(incarnation) = ended_incarnation {
+                append(
+                    "harness.observed",
+                    Some(SEAT),
+                    BTreeMap::from([
+                        ("state".into(), json!("ended")),
+                        ("driver".into(), json!("omp")),
+                        ("incarnation_id".into(), json!(incarnation)),
+                        ("reason".into(), json!("driver-stopped")),
+                        ("exit".into(), json!("exit 143")),
+                    ]),
+                    vec![],
+                    None,
+                );
+            }
         }
         assert_eq!(
             reconciler.verified_restart_exit(SEAT, &attempt).unwrap().is_some(),
@@ -138,12 +142,21 @@ fn restart_diagnostic_distinguishes_verified_start_then_exit_from_interrupted_at
                 .is_some(),
             expect_detail
         );
+        if expect_started {
+            assert!(store.current_harness(SEAT).unwrap().is_none(),
+                "the live harness view cannot supply terminal evidence");
+        }
         let error = reconciler
             .reconcile_requested_restart(&desired, desired.member.as_ref().unwrap(), None, None)
             .unwrap_err()
             .to_string();
         if expect_started {
-            assert!(error.contains("the replacement started and then exited: driver-stopped"), "{error}");
+            let detail = if ended_incarnation == Some("new") {
+                "the replacement started and then exited: driver-stopped"
+            } else {
+                "the replacement started successfully but is no longer observable"
+            };
+            assert!(error.contains(detail), "{error}");
             assert!(!error.contains("interrupted before"), "{error}");
         } else if expect_detail {
             assert!(error.contains("phase=version outcome=timeout"), "{error}");

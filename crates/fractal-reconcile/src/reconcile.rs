@@ -9296,10 +9296,15 @@ impl<R: RuntimeControl> Reconciler<R> {
         else {
             return Ok(None);
         };
-        let harness = self.store.current_harness(subject)?;
-        let reason = harness
-            .filter(|harness| harness.incarnation_id == incarnation && harness.state == "ended")
-            .and_then(|harness| harness.reason);
+        // The live harness projection excludes exited runtimes. Read the retained
+        // driver report for this receipt's incarnation, not a live/work overlay.
+        let reports = self.store.observations_for(subject, "harness.observed")?;
+        let reason = reports
+            .iter()
+            .rev()
+            .find(|report| report.body["fields"]["incarnation_id"] == incarnation)
+            .filter(|report| report.body["fields"]["state"] == "ended")
+            .and_then(|report| report.body["fields"]["reason"].as_str());
         Ok(Some(reason.map_or_else(
             || "the replacement started successfully but is no longer observable".into(),
             |reason| format!("the replacement started and then exited: {reason}"),
