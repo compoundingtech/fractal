@@ -127,10 +127,16 @@ fn reference(store: &Store) -> Vec<(String, String, bool)> {
             && f["credential_hash"].as_str().is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
     };
     let mut expected = Vec::new();
-    for grant in claims.iter().filter(|claim| claim.kind == GRANTED && trusted(claim) && policy(claim)) {
+    let base = |claim: &ClaimRecord| {
+        let f = &claim.body["fields"];
+        identity(claim) && f.get("credential").is_none() && f.get("code").is_none()
+            && f["credential_hash"].as_str().is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
+    for grant in claims.iter().filter(|claim| claim.kind == GRANTED && trusted(claim) && base(claim)) {
         let selected = claims.iter().rev().find(|claim| {
             claim.kind == POLICY && claim.origin == grant.origin && trusted(claim) && policy(claim)
         }).unwrap_or(grant);
+        if !policy(selected) { continue; }
         let revoked = claims.iter().any(|claim| {
             claim.kind == REVOKED && claim.origin == grant.origin && trusted(claim) && identity(claim)
         });
@@ -189,7 +195,6 @@ fn malformed_base_cannot_mask_a_valid_credential_but_valid_policy_can_repair_it(
 fn late_envelope_signature_promotes_previously_admitted_grant() {
     let (source, key) = source();
     let target = node("reader", Some(key.public()));
-    receive(&target, &export(&source, &target));
     let grant = append(&source, SUBJECT, GRANTED, fields());
     let exchange = export(&source, &target);
     receive(&target, &unsigned(&exchange));
