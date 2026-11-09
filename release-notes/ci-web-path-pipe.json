@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "summary": "Prevent browser-check startup from blocking on small Darwin pipes",
+  "replay": {
+    "status": "none",
+    "detail": "No durable data or replay behavior changes."
+  },
+  "schema": {
+    "status": "none",
+    "detail": "No storage or wire version changes."
+  },
+  "rules": {
+    "status": "none",
+    "detail": "No checkpoint or replication rule changes."
+  },
+  "compatibility": {
+    "status": "changed",
+    "detail": "The browser-check launcher preserves PATH filtering while streaming its input from a concurrent producer instead of synchronously filling a pipe before a reader starts."
+  },
+  "downtime": {
+    "status": "none",
+    "detail": "Only the verification launcher changes; running applications are unaffected."
+  },
+  "manual": {
+    "status": "none",
+    "detail": "No operator action is required."
+  },
+  "recovery": {
+    "status": "none",
+    "detail": "Revert the launcher change to restore its previous implementation; stored data is unaffected."
+  }
+}

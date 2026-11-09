@@ -44,7 +44,7 @@ done < <(env -0)
 st_state=${XDG_STATE_HOME:-$HOME/.local/state}/st3
 account_bin=$HOME/.local/bin
 kept=()
-IFS=':' read -r -a entries <<< "$PATH"
+IFS=':' read -r -a entries < <(printf '%s\n' "$PATH")
 for entry in "${entries[@]}"; do
   case "$entry" in "$st_state"|"$st_state"/*|"$account_bin"|"$account_bin"/) ;; *) kept+=("$entry") ;; esac
 done
