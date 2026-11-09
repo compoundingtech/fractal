@@ -142,9 +142,10 @@ with tempfile.TemporaryDirectory() as temporary:
     for name in ('release-fractal-edge', 'release-fractal-manifest.py', 'release_gh.py'):
         shutil.copy(repo / 'scripts' / name, checkout / 'scripts' / name)
     sh('git', 'init', '-q', '-b', 'main', cwd=checkout)
-    # Fixture history must not depend on the account's interactive signing agent.
+    # Fixture history must not depend on account signing or identity hooks.
     sh('git', 'config', '--local', 'commit.gpgsign', 'false', cwd=checkout)
     sh('git', 'config', '--local', 'tag.gpgsign', 'false', cwd=checkout)
+    sh('git', 'config', '--local', 'core.hooksPath', '/dev/null', cwd=checkout)
     sh('git', 'config', 'user.name', 'Fixture', cwd=checkout)
     sh('git', 'config', 'user.email', 'fixture@example.invalid', cwd=checkout)
     commits = []
@@ -210,7 +211,7 @@ with tempfile.TemporaryDirectory() as temporary:
     # Rerunning the same commit is harmless; a run for an older commit changes nothing at all.
     checkout_tags()
     assert publish(commits[2], 'three-again').returncode == 0
-    assert sum(call[:2] == ['git', 'push'] for call in current()['calls']) == 1, 'same source skips push'
+    assert sum(call[:2] == ['git', 'push'] for call in current()['calls']) == len(pushes), 'same source skips push'
     before = current()
     checkout_tags()
     done = publish(commits[1], 'two')
