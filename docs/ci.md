@@ -1063,8 +1063,11 @@ with its own `/tmp`, and nothing the job started outlives it. The runner names a
 cache, use that Cargo home, and Cargo keeps its intermediate build files in a per-runner build
 directory, while sccache shares compiled crates between all runners and the Nix store is the
 machine's own. The machine's configuration lives in the private network repository.
-In GitHub Actions, both Rust dev shells use `scripts/ci-rustc-wrapper`: sccache's response-I/O
-fallback is enabled. A separate read-only `sccache --dist-status` preflight is bounded
+In GitHub Actions, both Rust dev shells default to `scripts/ci-rustc-wrapper`
+when `RUSTC_WRAPPER` is unset and neither `SCCACHE_CLIENT_SIDE` nor
+`SCCACHE_SERVER_UDS` names a host cache setup. Inherited wrappers (including an
+empty cache opt-out) and host cache settings are preserved. The CI wrapper enables
+sccache's response-I/O fallback. A separate read-only `sccache --dist-status` preflight is bounded
 to 15 seconds (five seconds to finish terminating it). A recognized preflight startup
 error or timeout disables caching for the rest of that job with a warning, before any
 compiler request is submitted. Signal statuses are preserved. Once compilation starts,

@@ -33,11 +33,39 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
+        # Client-side compilation needs sccache >= 0.18; the root pin has 0.16.
+        # Keep the rest of the toolchain pinned and use the upstream nixpkgs 0.19 hashes.
+        sccache = pkgs.sccache.overrideAttrs (old: {
+          version = "0.19.0";
+          src = pkgs.fetchFromGitHub {
+            owner = "mozilla";
+            repo = "sccache";
+            rev = "v0.19.0";
+            hash = "sha256-iq9/SOS13z8hyt4x03azms+J19jtfYEr7ly4VIENi9s=";
+          };
+          cargoHash = "sha256-V8WH8QFBpOOP3QV/B+mvqBuSt12VD4sB89gJw86igAE=";
+          buildInputs = old.buildInputs ++ [ pkgs.zstd ];
+        });
+
+        sccacheShellHook = ''
+          source ${./scripts/sccache-read-cache-env} || exit $?
+          # Preserve even an explicitly empty wrapper (Cargo's cache opt-out).
+          # The host owns SCCACHE_CLIENT_SIDE, SCCACHE_SERVER_UDS and cache settings.
+          if [ -z "''${RUSTC_WRAPPER+x}" ]; then
+            if [ "''${GITHUB_ACTIONS:-}" = true ] &&
+                [ -z "''${SCCACHE_SERVER_UDS:-}''${SCCACHE_CLIENT_SIDE:-}" ]; then
+              export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
+            else
+              export RUSTC_WRAPPER=${sccache}/bin/sccache
+            fi
+          fi
+        '';
+
         ciRustcWrapper = pkgs.writeShellApplication {
           name = "ci-rustc-wrapper";
           runtimeInputs = [ pkgs.coreutils pkgs.gnugrep ];
           text = ''
-            export SCCACHE_BIN=${pkgs.sccache}/bin/sccache
+            export SCCACHE_BIN=${sccache}/bin/sccache
             ${builtins.readFile ./scripts/ci-rustc-wrapper}
           '';
         };
@@ -2137,7 +2165,7 @@
             # Git evidence fixtures sign observations and serve API responses with Python.
             pkgs.openssh
             pkgs.python3
-            pkgs.sccache
+            sccache
             pkgs.cargo-nextest
             pkgs.pkg-config
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ] ++ [
@@ -2159,12 +2187,10 @@
           # arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
           FRACTAL_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
           ST3_OTELITE_BIN = "${effect-utils.packages.${system}.otelite}/bin/otelite";
-          RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
-          shellHook = ''
-            source ${./scripts/sccache-read-cache-env} || exit $?
+          shellHook = sccacheShellHook + ''
             if [ "''${GITHUB_ACTIONS:-}" = true ]; then
               source ${./scripts/ci-cargo-tools-env} || exit $?
-              export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
+              # The wrapper is selected above only when no host wrapper is inherited.
             fi
             # Pushing a branch signs its checks first when they have no evidence yet (scripts/evidence-prepush).
             if [ -z "''${GITHUB_ACTIONS:-}" ] && [ -z "''${CI:-}" ] && [ -x ./scripts/install-git-hooks ]; then
@@ -2178,19 +2204,14 @@
             pkgs.cargo
             pkgs.rustc
             pkgs.git
-            pkgs.sccache
+            sccache
             pkgs.pkg-config
             pkgs.jq
             libghosttyVT
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [ pkgs.mold ];
-          RUSTC_WRAPPER = "${pkgs.sccache}/bin/sccache";
           # build.rs embeds the fixture PATH. Runner-specific directories would invalidate
           # st3's compiler cache even when its sources have not changed.
-          shellHook = ''
-            source ${./scripts/sccache-read-cache-env} || exit $?
-            if [ "''${GITHUB_ACTIONS:-}" = true ]; then
-              export RUSTC_WRAPPER=${ciRustcWrapper}/bin/ci-rustc-wrapper
-            fi
+          shellHook = sccacheShellHook + ''
             export PATH="$(printf '%s' "$PATH" | tr ':' '\n' | sed -n '\|^/nix/store/|p' | paste -sd:):/usr/bin:/bin"
           '';
         };
