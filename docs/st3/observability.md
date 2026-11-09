@@ -1077,10 +1077,10 @@ bands at the next successful refresh, normally at most about 30 seconds late
 reclassify cached messages, so a recent-band age can briefly exceed one day.
 Failed refreshes retain the last complete summary and log a warning.
 
-For a live-latency alert unmasked by stale backlog, use:
+For an unread-latency alert across all ages, including stale pending mail, use:
 
 ```promql
-max by (st_agent) (st_mailbox_oldest_unread_age{st_mailbox_age_band="recent",st_mailbox_state=~"pending|delivered"}) > 1800
+max by (st_agent) (st_mailbox_oldest_unread_age{st_mailbox_state=~"pending|delivered"}) > 1800
 ```
 
 For a weekly stale-backlog list, use
