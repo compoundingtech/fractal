@@ -3781,9 +3781,9 @@ fn a_late_claim_in_a_standing_tree_rebuilds_only_its_own_child() {
     );
 }
 
-/// The projection lend that rebuilds a late claim's part names the rebuild as its own stage,
-/// apart from `incremental`, and counts the part and the claims it replayed. The staged
-/// lends are kept process-wide; CI runs each test in its own process (nextest).
+/// The final projection lend rebuilds a late claim's part as its own stage, apart from the
+/// incremental chunks, and counts the part and claims replayed. Staged lends are kept
+/// process-wide; CI runs each test in its own process (nextest).
 #[test]
 fn a_late_claim_rebuild_is_its_own_stage_of_the_projection_lend() {
     let (controller, worker, _root, children) = replicated_run_tree(8);
@@ -3814,7 +3814,7 @@ fn a_late_claim_rebuild_is_its_own_stage_of_the_projection_lend() {
             .iter()
             .find(|(stage, _)| *stage == "rebuild-part")
             .map(|(_, rebuilt)| *rebuilt)?;
-        (named("incremental") && named("rebuild-part")).then_some(counted)
+        (named("finish-projection-work") && named("rebuild-part")).then_some(counted)
     });
     let rebuild =
         rebuild.unwrap_or_else(|| panic!("no staged lend rebuilt a part: {staged:?}"));
@@ -3824,6 +3824,156 @@ fn a_late_claim_rebuild_is_its_own_stage_of_the_projection_lend() {
         "the part's claims are counted: {rebuild:?}"
     );
 }
+
+mod coalesce_run_part_rebuild;
+use coalesce_run_part_rebuild::{coalesced_rebuild_fixture, write_coalesced_rebuild_backlog};
+
+/// A large live part is touched in every chunk. An interruption after committed chunks
+/// must preserve its pending rebuild, without depending on another peer receive to resume.
+#[test]
+fn receive_coalesces_run_part_rebuilds_and_resumes_after_interruption() {
+    let (controller, uninterrupted, interrupted, directory, step) = coalesced_rebuild_fixture();
+    write_coalesced_rebuild_backlog(&controller, &step, 1_536);
+    let exchange = exchange_from(&controller, &uninterrupted.replication_inventory().unwrap());
+    assert!(exchange.envelopes.len() >= 1_536);
+    for worker in [&uninterrupted, &interrupted] {
+        worker.receive_replication_exchange("controller", TEST_FLEET, &exchange).unwrap();
+        let admission = worker.validate_replication_backlog().unwrap();
+        assert_eq!(admission.invalid, 0);
+        assert_eq!(admission.unknown, 0);
+    }
+    RUN_TREE_REBUILDS.with(|count| count.set(0));
+    FULL_REPLAYS.with(|count| count.set(0));
+    let started = std::time::Instant::now();
+    assert!(uninterrupted.project_replication_backlog().unwrap());
+    let elapsed = started.elapsed();
+    let rebuilds = RUN_TREE_REBUILDS.with(std::cell::Cell::get);
+    eprintln!("coalesce uninterrupted: envelopes={} chunks>={} rebuilds={rebuilds} projection_wall_ms={}",
+        exchange.envelopes.len(), exchange.envelopes.len() / 128, elapsed.as_millis());
+    assert_eq!(rebuilds, 1);
+    assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
+    let expected = graph_digest_of(&uninterrupted);
+    uninterrupted.replay_replication_graph().unwrap();
+    assert_eq!(expected, graph_digest_of(&uninterrupted));
+
+    RUN_TREE_REBUILDS.with(|count| count.set(0));
+    let mut chunks = 0;
+    let interrupted_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        interrupted.project_replication_backlog_with_yield(|| {
+            chunks += 1;
+            if chunks == 3 {
+                panic!("interrupt after the third committed chunk");
+            }
+        }).unwrap();
+    }));
+    assert!(interrupted_result.is_err());
+    assert_eq!(chunks, 3);
+    assert_eq!(RUN_TREE_REBUILDS.with(std::cell::Cell::get), 0);
+    assert!(interrupted.replication_projection_needs_recovery().unwrap());
+    drop(interrupted);
+    let resumed = Store::open(&directory.path().join("worker.sqlite"), "worker").unwrap();
+    assert!(resumed.replication_projection_deferred());
+    assert!(resumed.replication_projection_needs_recovery().unwrap());
+    assert!(resumed.project_replication_backlog().unwrap());
+    assert_eq!(RUN_TREE_REBUILDS.with(std::cell::Cell::get), 1);
+    assert!(!resumed.replication_projection_needs_recovery().unwrap());
+    assert_eq!(expected, graph_digest_of(&resumed));
+    resumed.replay_replication_graph().unwrap();
+    assert_eq!(expected, graph_digest_of(&resumed));
+}
+
+#[test]
+fn pending_run_part_drain_is_idempotent() {
+    let (controller, worker, _unused, _directory, step) = coalesced_rebuild_fixture();
+    write_coalesced_rebuild_backlog(&controller, &step, 384);
+    let exchange = exchange_from(&controller, &worker.replication_inventory().unwrap());
+    worker.receive_replication_exchange("controller", TEST_FLEET, &exchange).unwrap();
+    worker.validate_replication_backlog().unwrap();
+    let mut chunks = 0;
+    let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        worker.project_replication_backlog_with_yield(|| {
+            chunks += 1;
+            if chunks == 3 {
+                panic!("interrupt before draining committed chunks");
+            }
+        }).unwrap();
+    }));
+    assert!(interrupted.is_err());
+    RUN_TREE_REBUILDS.with(|count| count.set(0));
+    {
+        let mut connection = worker.connection.lock().unwrap();
+        let transaction = connection.transaction().unwrap();
+        assert!(fractal_store::store::run_projection_pending_tx(&transaction, &step).unwrap());
+        assert!(fractal_store::store::finish_run_projection_tx(&transaction, &step).unwrap());
+        let drained = graph_digest(&transaction).unwrap();
+        assert!(!fractal_store::store::finish_run_projection_tx(&transaction, &step).unwrap());
+        assert_eq!(drained, graph_digest(&transaction).unwrap());
+        transaction.commit().unwrap();
+    }
+    assert_eq!(RUN_TREE_REBUILDS.with(std::cell::Cell::get), 1);
+    assert!(worker.project_replication_backlog().unwrap());
+    assert_eq!(RUN_TREE_REBUILDS.with(std::cell::Cell::get), 1);
+    let projected = graph_digest_of(&worker);
+    worker.replay_replication_graph().unwrap();
+    assert_eq!(projected, graph_digest_of(&worker));
+}
+
+#[test]
+fn receive_requeues_a_run_part_after_an_intervening_external_drain() {
+    let (controller, worker, _unused, _directory, step) = coalesced_rebuild_fixture();
+    write_coalesced_rebuild_backlog(&controller, &step, 1_536);
+    let exchange = exchange_from(&controller, &worker.replication_inventory().unwrap());
+    worker.receive_replication_exchange("controller", TEST_FLEET, &exchange).unwrap();
+    worker.validate_replication_backlog().unwrap();
+    RUN_TREE_REBUILDS.with(|count| count.set(0));
+    let mut external_drains = 0;
+    assert!(worker.project_replication_backlog_with_yield(|| {
+        if external_drains != 0 {
+            return;
+        }
+        {
+            let mut connection = worker.connection.lock().unwrap();
+            let transaction = connection.transaction().unwrap();
+            assert!(fractal_store::store::finish_run_projection_tx(&transaction, &step).unwrap());
+            transaction.commit().unwrap();
+        }
+        worker.run_projection_finished();
+        external_drains += 1;
+        worker.set_step_state(&step, "blocked", Some("local write between chunks")).unwrap();
+    }).unwrap());
+    assert_eq!(external_drains, 1);
+    assert_eq!(RUN_TREE_REBUILDS.with(std::cell::Cell::get), 1 + external_drains);
+    let projected = graph_digest_of(&worker);
+    worker.replay_replication_graph().unwrap();
+    assert_eq!(projected, graph_digest_of(&worker));
+}
+
+#[test]
+fn receive_returns_with_no_pending_run_parts() {
+    let (controller, worker, _unused, _directory, step) = coalesced_rebuild_fixture();
+    let run = worker.step_run(&step).unwrap().unwrap().run;
+    write_coalesced_rebuild_backlog(&controller, &step, 1_536);
+    let exchange = exchange_from(&controller, &worker.replication_inventory().unwrap());
+    // This helper uses the daemon's receipt, admission, repair and projection sequence.
+    // Its return, rather than a later startup/periodic recovery, must expose the drained tree.
+    let admission = receive_and_project(&worker, "controller", &exchange);
+    assert_eq!(admission.invalid, 0);
+    let pending: u64 = worker.readers.get().query_row(
+        "SELECT COUNT(*) FROM meta WHERE key GLOB 'projection-run-rebuild:*'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(pending, 0);
+    assert!(!worker.run_projection_pending(&run).unwrap());
+    let projected_tree = worker.mission_run(&run).unwrap().unwrap();
+    assert_eq!(projected_tree.steps.len(), 256);
+    let projected_tree = serde_json::to_value(projected_tree).unwrap();
+    let projected_graph = graph_digest_of(&worker);
+    worker.replay_replication_graph().unwrap();
+    let replayed_tree = serde_json::to_value(worker.mission_run(&run).unwrap().unwrap()).unwrap();
+    assert_eq!(projected_tree, replayed_tree);
+    assert_eq!(projected_graph, graph_digest_of(&worker));
+}
+
 
 /// Once a claim ends the root, its children are no longer independent of it: a late claim
 /// rebuilds the whole tree, as a replay orders the root's end among them.

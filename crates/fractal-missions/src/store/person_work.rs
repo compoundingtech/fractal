@@ -427,7 +427,8 @@ impl PersonWorkStore for Store {
             return self.ask_person_in_new_run(input);
         }
         let now = now_ms();
-        self.connection.batched(|tx| {
+        let subject = normalize_step_run(input.step.as_deref().expect("existing-run ask has a step"));
+        adhoc_work::with_run_projection(self, &subject, |tx| {
             let mut stable_input;
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
             let input = if actor == input.actor { input } else {
@@ -496,7 +497,7 @@ impl PersonWorkStore for Store {
                 &json!({"fields": {"status": "waiting-person", "reason": subject, "attempt": origin.attempt}}), &[claim.id], None).map_err(claim_append_error)?;
             project_mission_run_update(tx, &pause)?;
             step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask could not be projected"))
-        }).map_err(internal)?
+        })
     }
 
     fn finish_person_step(
@@ -538,7 +539,8 @@ impl PersonWorkStore for Store {
             None => None,
         };
         let deadlines = self.ask_deadlines();
-        self.connection.batched(|tx| {
+        let subject = normalize_step_run(&input.subject);
+        adhoc_work::with_run_projection(self, &subject, |tx| {
             let mut stable_input;
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
             let input = if actor == input.actor { input } else {
@@ -548,7 +550,6 @@ impl PersonWorkStore for Store {
             };
             let assistant_grant_id = authorization.map(|authorization|
                 super::assistant_write::authorize_grant(tx, &self.origin, authorization)).transpose()?;
-            let subject = normalize_step_run(&input.subject);
             let mut view = step(tx, &subject).map_err(internal)?
                 .ok_or_else(|| FractalError::new("missing-step-run", "the person step does not exist"))?;
             let ask = request(tx, &subject).map_err(internal)?;
@@ -663,7 +664,7 @@ impl PersonWorkStore for Store {
                 }
             }
             step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the person step disappeared"))
-        }).map_err(internal)?
+        })
     }
 
     fn ask_images(&self, step_subject: &str) -> Result<Option<AskImages>> {
@@ -726,6 +727,9 @@ impl PersonWorkStore for Store {
             let mut pass = PersonAskPass { changed: overridden, ..PersonAskPass::default() };
             let mut ended = 0;
             for ask in asks {
+                if fractal_store::store::run_projection_pending_tx(tx, &ask.subject)? {
+                    continue;
+                }
                 // Each ending writes a cancellation, a message and an update while holding the
                 // single writer; the rest end on the next pass, which this one's commit wakes.
                 if ended == ENDED_ASKS_PER_PASS {

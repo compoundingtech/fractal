@@ -2724,6 +2724,25 @@ pub fn runtime() -> Arc<dyn smallclaims::Runtime> {
 pub type HumanAttention = (BTreeSet<String>, Vec<fractal_ui_model::missions::Gate>);
 
 impl Store {
+    /// Decision reads must wait for the run's committed pending projection work.
+    pub fn run_projection_pending(&self, subject: &str) -> Result<bool> {
+        smallclaims::touched::note_read(|| subject.to_owned());
+        let connection = self.readers.get();
+        if connection.is_autocommit() {
+            let transaction = connection.unchecked_transaction()?;
+            run_projection_pending_tx(&transaction, subject).map_err(anyhow::Error::new)
+        } else {
+            pending_run_for_subject_tx(&connection, subject)
+                .map(|pending| pending.is_some()).map_err(anyhow::Error::new)
+        }
+    }
+
+    /// Publish a committed caller-driven drain, even when it appended no replicated claim.
+    /// Call only after the transaction containing `finish_run_projection_tx` committed.
+    pub fn run_projection_finished(&self) {
+        self.fractal.projection_advanced(true);
+    }
+
     /// The explicitly registered keyed views for this graph. This getter performs no reads
     /// or installation; availability and source coverage must be checked in a snapshot.
     pub fn ivm_views(&self) -> Option<Arc<smallclaims::ivm::Views>> {
@@ -16203,7 +16222,7 @@ fn replay_projects_kind(kind: &str) -> bool {
 /// tree whose root never ended (see `run_part_of_tx`), or the desired subject, document or
 /// mission one claim is about. Rebuilding one costs what its own history costs, not what the
 /// store's does.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum Aggregate {
     RunTree(String),
     RunPart(String),
@@ -16247,7 +16266,7 @@ fn aggregate_of_tx(
 /// The run a generation belongs to: from the graph, or from the claims that create it when the
 /// generation is not projected yet.
 fn generation_run_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     generation: &str,
 ) -> Result<Option<String>, FractalError> {
     if let Some(run) = transaction
@@ -16308,7 +16327,7 @@ fn generation_run_tx(
 /// The root run of the mission run tree `subject` belongs to: a run, a generation, a step run
 /// or a revision proposal.
 pub fn run_tree_of_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<Option<String>, FractalError> {
     match run_of_subject_tx(transaction, subject)? {
@@ -16320,7 +16339,7 @@ pub fn run_tree_of_tx(
 /// The run a run-tree subject belongs to: the run itself, a generation's or step's run, or a
 /// proposal's run.
 fn run_of_subject_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<Option<String>, FractalError> {
     Ok(if let Some(run) = subject.strip_prefix("mission-run/") {
@@ -16361,7 +16380,7 @@ fn run_of_subject_tx(
 }
 
 /// The root a run names, or the owner of an ask run, or the run itself.
-fn run_root_tx(transaction: &Transaction<'_>, run: &str) -> Result<String, FractalError> {
+fn run_root_tx(transaction: &Connection, run: &str) -> Result<String, FractalError> {
     if let Some(root) = transaction
         .query_row(
             "SELECT root_run_id FROM mission_runs WHERE id=?1",
@@ -16421,7 +16440,7 @@ fn string_column_tx(
 /// schedule or subscription that delivers a run is named the same way, as `step-run/` and its
 /// subject.
 fn parent_step_of_run_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     run: &str,
 ) -> Result<Option<String>, FractalError> {
     if let Some(parent) = transaction
@@ -16456,7 +16475,7 @@ fn step_generation(parent: &str) -> Option<&str> {
 }
 
 /// Whether a root run has ended, or any claim ends it: projected so, or claimed so in any order.
-fn run_ever_ended_tx(transaction: &Transaction<'_>, run: &str) -> Result<bool, FractalError> {
+fn run_ever_ended_tx(transaction: &Connection, run: &str) -> Result<bool, FractalError> {
     transaction
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM mission_runs WHERE id=?1
@@ -16486,7 +16505,7 @@ fn run_ever_ended_tx(transaction: &Transaction<'_>, run: &str) -> Result<bool, F
 ///
 /// A tree whose root has ended, or whose links have not all arrived, rebuilds whole.
 pub fn run_part_of_tx(
-    transaction: &Transaction<'_>,
+    transaction: &Connection,
     subject: &str,
 ) -> Result<Option<Aggregate>, FractalError> {
     let Some(tree) = run_tree_of_tx(transaction, subject)? else {
@@ -16538,6 +16557,13 @@ pub fn run_part_of_tx(
 /// the asks it owns, or a run started from the root, each with every run started from their steps
 /// and every ask they own, all the way down.
 pub fn rebuild_run_part_tx(transaction: &Transaction<'_>, top: &str) -> Result<(), FractalError> {
+    struct RebuildTiming(std::time::Instant);
+    impl Drop for RebuildTiming {
+        fn drop(&mut self) {
+            smallclaims::receive_metrics::rebuild_part(self.0.elapsed());
+        }
+    }
+    let _timing = RebuildTiming(std::time::Instant::now());
     #[cfg(any(test, feature = "test-support"))]
     RUN_TREE_REBUILDS.with(|rebuilds| rebuilds.set(rebuilds.get() + 1));
     let _span = crate::profile::span("projection/run-tree");
@@ -16894,7 +16920,25 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
             })?;
         }
     }
-    reapply_local_work_lease_renewals_tx(transaction)
+    reapply_local_work_lease_renewals_tx(transaction)?;
+    if projection_work_pending_tx(transaction)? {
+        // Claims already advanced their cursor in earlier chunks. Publish a durable local
+        // change for every rebuilt run so incremental decision readers revisit skipped work.
+        for run in runs {
+            let subject = format!("mission-run/{run}");
+            smallclaims::touched::note_wrote(|| subject.clone());
+            insert_local_observation_tx(transaction, "projection", &ClaimInput {
+                subject,
+                kind: "run-projection.finished".into(),
+                actor: None,
+                fields: BTreeMap::new(),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            }, now_ms())?;
+        }
+    }
+    Ok(())
 }
 
 /// Rebuild one desired subject, document or mission from its own claims in the replay's order.
@@ -16992,23 +17036,172 @@ pub fn try_project_all_simple_replication_tx(
     .map(|decision| decision == IncrementalProjection::Projected)
 }
 
+// Pending rebuilds are projection state, committed with the chunk that skips their claims.
+// A restart resumes them even if the claim frontier has already reached the admitted index.
+const PENDING_RUN_REBUILD: &str = "projection-run-rebuild:*";
+
+fn pending_run_rebuilds_tx(connection: &Connection) -> Result<BTreeSet<Aggregate>, FractalError> {
+    let mut statement = connection
+        .prepare("SELECT value FROM meta WHERE key GLOB ?1 ORDER BY key")
+        .map_err(internal)?;
+    let values = statement.query_map([PENDING_RUN_REBUILD], |row| row.get::<_, String>(0))
+        .map_err(internal)?;
+    values.map(|value| {
+        serde_json::from_str(&value.map_err(internal)?).map_err(internal)
+    }).collect()
+}
+
+fn pending_run_rebuild_key(aggregate: &Aggregate) -> Result<String, FractalError> {
+    Ok(format!("projection-run-rebuild:{}", serde_json::to_string(aggregate).map_err(internal)?))
+}
+
+fn projection_work_pending_tx(connection: &Connection) -> Result<bool, FractalError> {
+    connection.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key GLOB ?1)",
+        [PENDING_RUN_REBUILD], |row| row.get(0)).map_err(internal)
+}
+
+fn finish_projection_work_tx(transaction: &Transaction<'_>) -> Result<(), FractalError> {
+    let Some(aggregate) = pending_run_rebuilds_tx(transaction)?.into_iter().next() else {
+        return Ok(());
+    };
+    rebuild_pending_run_tx(transaction, &aggregate)
+}
+
+fn normalize_pending_run_tx(transaction: &Transaction<'_>, aggregate: Aggregate) -> Result<Aggregate, FractalError> {
+    let Aggregate::RunPart(top) = &aggregate else {
+        return Ok(aggregate);
+    };
+    let subject = format!("mission-run/{top}");
+    match run_part_of_tx(transaction, &subject)? {
+        Some(current) if current == aggregate => Ok(aggregate),
+        // A changed partition can only widen pending work, never discard part of it.
+        _ => Ok(Aggregate::RunTree(run_tree_of_tx(transaction, &subject)?.unwrap_or_else(|| top.clone()))),
+    }
+}
+
+fn rebuild_pending_run_tx(transaction: &Transaction<'_>, aggregate: &Aggregate) -> Result<(), FractalError> {
+    let effective = normalize_pending_run_tx(transaction, aggregate.clone())?;
+    match &effective {
+        Aggregate::RunTree(root) => holds::stage("rebuild-tree", || rebuild_run_tree_tx(transaction, root))?,
+        Aggregate::RunPart(top) => holds::stage("rebuild-part", || rebuild_run_part_tx(transaction, top))?,
+        _ => return Err(FractalError::new("invalid-pending-rebuild", "pending rebuild is not a run aggregate")),
+    }
+    transaction.execute("DELETE FROM meta WHERE key=?1", [pending_run_rebuild_key(aggregate)?])
+        .map_err(internal)?;
+    if let Aggregate::RunTree(root) = &effective {
+        for pending in pending_run_rebuilds_tx(transaction)? {
+            let top = match &pending {
+                Aggregate::RunTree(top) | Aggregate::RunPart(top) => top,
+                _ => continue,
+            };
+            if run_tree_of_tx(transaction, &format!("mission-run/{top}"))?.as_ref() == Some(root) {
+                transaction.execute("DELETE FROM meta WHERE key=?1", [pending_run_rebuild_key(&pending)?])
+                    .map_err(internal)?;
+            }
+        }
+    }
+    if !projection_work_pending_tx(transaction)? {
+        transaction.execute(
+            "UPDATE projection_health SET status='healthy',error_code=NULL,error_message=NULL
+             WHERE aggregate='graph' AND error_code='pending-projection-work'",
+            [],
+        ).map_err(internal)?;
+    }
+    Ok(())
+}
+
+fn pending_run_for_subject_tx(
+    transaction: &Connection,
+    subject: &str,
+) -> Result<Option<Aggregate>, FractalError> {
+    if !projection_work_pending_tx(transaction)? {
+        return Ok(None);
+    }
+    let part = run_part_of_tx(transaction, subject)?;
+    let tree = run_tree_of_tx(transaction, subject)?;
+    for candidate in part.iter().cloned().chain(tree.as_ref().map(|root| Aggregate::RunTree(root.clone()))) {
+        let pending: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)",
+            [pending_run_rebuild_key(&candidate)?], |row| row.get(0),
+        ).map_err(internal)?;
+        if pending {
+            return Ok(Some(candidate));
+        }
+    }
+    if !matches!(part, Some(Aggregate::RunTree(_))) {
+        return Ok(None);
+    }
+    // A terminal root can merge parts after their markers committed. Only that exceptional
+    // whole-tree lookup needs to inspect the old partition's markers.
+    // These markers cover only the serialized projection pass (or its interrupted prefix),
+    // not historical rebuilds; each successful drain deletes its marker.
+    for pending in pending_run_rebuilds_tx(transaction)? {
+        if Some(&pending) == part.as_ref()
+            || matches!(&pending, Aggregate::RunTree(root) if Some(root) == tree.as_ref())
+        {
+            return Ok(Some(pending));
+        }
+        let top = match &pending {
+            Aggregate::RunTree(top) | Aggregate::RunPart(top) => top,
+            _ => continue,
+        };
+        if run_part_of_tx(transaction, &format!("mission-run/{top}"))? == part && part.is_some() {
+            return Ok(Some(pending));
+        }
+    }
+    Ok(None)
+}
+
+/// Decision paths must not act on a run whose committed claims await a tree rebuild.
+/// Read-only views may continue serving the previously published tree while it is pending.
+pub fn run_projection_pending_tx(
+    transaction: &Transaction<'_>,
+    subject: &str,
+) -> Result<bool, FractalError> {
+    Ok(pending_run_for_subject_tx(transaction, subject)?.is_some())
+}
+
+/// A local writer drains its run's pending part before making a decision from projected rows.
+pub fn finish_run_projection_tx(
+    transaction: &Transaction<'_>,
+    subject: &str,
+) -> Result<bool, FractalError> {
+    let Some(pending) = pending_run_for_subject_tx(transaction, subject)? else {
+        return Ok(false);
+    };
+    rebuild_pending_run_tx(transaction, &pending)?;
+    Ok(true)
+}
+
 pub fn try_project_simple_replication_tx(
     transaction: &Transaction<'_>,
     origin: &str,
     through: u64,
 ) -> Result<IncrementalProjection, FractalError> {
-    let health: Option<(String, u64)> = transaction
+    try_project_simple_replication_inner_tx(transaction, origin, through, false)
+}
+
+fn try_project_simple_replication_inner_tx(
+    transaction: &Transaction<'_>,
+    origin: &str,
+    through: u64,
+    defer_runs: bool,
+) -> Result<IncrementalProjection, FractalError> {
+    let health: Option<(String, u64, Option<String>)> = transaction
         .query_row(
-            "SELECT status, last_good_store_index FROM projection_health WHERE aggregate='graph'",
+            "SELECT status, last_good_store_index, error_code FROM projection_health WHERE aggregate='graph'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(internal)?;
-    let Some((status, frontier)) = health else {
+    let Some((status, frontier, error_code)) = health else {
         return Ok(replay_needed("missing-health"));
     };
-    if status != "healthy" {
+    if status != "healthy"
+        && !(status == "stale" && error_code.as_deref() == Some("pending-projection-work")
+            && projection_work_pending_tx(transaction)?)
+    {
         return Ok(replay_needed("unhealthy-projection"));
     }
     if frontier > current_index_tx(transaction).map_err(internal)? {
@@ -17066,6 +17259,9 @@ pub fn try_project_simple_replication_tx(
     // A claim that reaches a part of the graph out of the replay's order marks that part to be
     // rebuilt from its own claims; everything else extends the graph as it arrives.
     let mut dirty = BTreeSet::<Aggregate>::new();
+    for pending in pending_run_rebuilds_tx(transaction)? {
+        dirty.insert(normalize_pending_run_tx(transaction, pending)?);
+    }
     // The planning sessions this range's claims are about, or `None` when one names no session
     // and only the whole planning projection can say where it belongs.
     let mut planning_sessions = Some(BTreeSet::<&str>::new());
@@ -17438,6 +17634,18 @@ pub fn try_project_simple_replication_tx(
         }
         latest_work_by_subject.insert(&claim.subject, claim.accepted_at_unix_ms);
     }
+    let mut covered_parts = Vec::new();
+    for aggregate in &dirty {
+        if let Aggregate::RunPart(top) = aggregate
+            && let Some(root) = run_tree_of_tx(transaction, &format!("mission-run/{top}"))?
+            && dirty.contains(&Aggregate::RunTree(root))
+        {
+            covered_parts.push(aggregate.clone());
+        }
+    }
+    for part in covered_parts {
+        dirty.remove(&part);
+    }
     for claim in &claims {
         insert_event(
             transaction,
@@ -17472,7 +17680,10 @@ pub fn try_project_simple_replication_tx(
             }
         };
         Ok(match aggregate {
-            Some(aggregate) => dirty.contains(&aggregate),
+            Some(aggregate) => dirty.contains(&aggregate)
+                || (matches!(aggregate, Aggregate::RunPart(_))
+                    && run_tree_of_tx(transaction, &claim.subject)?
+                        .is_some_and(|root| dirty.contains(&Aggregate::RunTree(root)))),
             None => claim.kind != "mission-run.created" && run_tree_kind(&claim.kind),
         })
     };
@@ -17561,7 +17772,17 @@ pub fn try_project_simple_replication_tx(
                 .with_detail("projection_subject", subject)
         })?;
     }
+    if defer_runs {
+        transaction.execute("DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
+            .map_err(internal)?;
+    }
     for aggregate in trees {
+        if defer_runs {
+            let value = serde_json::to_string(aggregate).map_err(internal)?;
+            transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2)",
+                params![pending_run_rebuild_key(aggregate)?, value]).map_err(internal)?;
+            continue;
+        }
         let (rebuilt, root) = match aggregate {
             Aggregate::RunTree(root) => (
                 holds::stage("rebuild-tree", || rebuild_run_tree_tx(transaction, root)),
@@ -17578,6 +17799,10 @@ pub fn try_project_simple_replication_tx(
                 .with_detail("projection_stage", "run-tree-rebuild")
                 .with_detail("projection_subject", format!("mission-run/{root}"))
         })?;
+    }
+    if !defer_runs {
+        transaction.execute("DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
+            .map_err(internal)?;
     }
     match planning_sessions {
         Some(sessions) => {
@@ -17627,6 +17852,8 @@ fn replay_graph_from_nothing_with_progress_tx(
     transaction: &Transaction<'_>,
     progress: &mut dyn FnMut(ReplayProgress),
 ) -> Result<(), FractalError> {
+    transaction.execute("DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
+        .map_err(internal)?;
     let mut stage = |phase| {
         progress(ReplayProgress {
             phase,

@@ -5907,9 +5907,10 @@ impl MissionsStore for Store {
             })?;
         let now = now_ms();
         // One work action in a savepoint of the writer's next batch, answered once that batch commits.
-        let committed = self
-            .connection
-            .batched(|transaction| -> Result<(StepRunView, Option<u128>), FractalError> {
+        let committed = adhoc_work::with_run_projection(
+            self,
+            &subject,
+            |transaction| -> Result<(StepRunView, Option<u128>), FractalError> {
                 let actor = physical_actor(transaction, &actor)?;
                 #[cfg(any(test, feature = "test-support"))]
                 let _writer_work = WorkActionWriterProbe::start(&request.idempotency_key);
@@ -5953,7 +5954,7 @@ impl MissionsStore for Store {
                     .flatten()
                 {
                     Some(successor) => (successor.subject.clone(), successor),
-                    None => (subject, current),
+                    None => (subject.clone(), current),
                 };
                 if handoff.is_some() {
                     enrich_step_summaries_at(transaction, &mut current, now).map_err(internal)?;
@@ -6396,8 +6397,8 @@ impl MissionsStore for Store {
                     mark_replay_safe_receipt_tx(transaction, &request.idempotency_key).map_err(internal)?;
                 }
                 Ok((view, snapshot))
-            })
-            .map_err(|error| FractalError::new("internal", error))?;
+            },
+        );
         let (mut view, snapshot) = committed?;
         // An exact retry also replays a view cached without these fields.
         let filled = if action == "renew" {

@@ -1299,6 +1299,7 @@ impl Store {
             [index.to_string()],
         )?;
         let committed_index = Arc::new(AtomicU64::new(index));
+        let projection_pending = runtime.projection_work_pending(&connection)?;
         let connection = if let Some(admitted) = readers.admitted_handle() {
             WriterConnection::new_admitted(
                 connection, committed_index.clone(), runtime.writer_observer(), admitted,
@@ -1351,7 +1352,7 @@ impl Store {
             projection: Mutex::new(()),
             replication_timers: ReplicationTimers::default(),
             replication_listing_turn: Default::default(),
-            replication_projection_state: AtomicU64::new(0),
+            replication_projection_state: AtomicU64::new(u64::from(projection_pending)),
             projection_diagnostics: Mutex::new(ProjectionDiagnosticState::default()),
             projection_contention_generation: AtomicU64::new(0),
             last_replication_projection_unix_ms: AtomicU64::new(0),
@@ -8358,6 +8359,7 @@ impl Store {
                 let started = std::time::Instant::now();
                 let end = (next + ADMISSION_CHUNK_ENVELOPES).min(pending.len());
                 let first = next;
+                let mut admitted_envelopes = 0;
                 while next < end {
                     if next != first && started.elapsed() >= ADMISSION_WRITER_BUDGET {
                         break;
@@ -8443,6 +8445,7 @@ impl Store {
                                 envelope_carries_fleet_claims(&savepoint, envelope)?;
                             membership_changed |= changes_membership;
                             savepoint.commit()?;
+                            admitted_envelopes += 1;
                             if changes_membership {
                                 // Re-fold off the writer before any later envelope uses the
                                 // authority introduced or removed by this admitted claim.
@@ -8466,6 +8469,7 @@ impl Store {
                         [current_index_tx(&pass)?.to_string()])?;
                 }
                 pass.commit()?;
+                crate::receive_metrics::envelopes_admitted(admitted_envelopes);
                 crate::windows::holds::covered("admitted envelopes", next - first);
                 #[cfg(any(test, feature = "test-support"))]
                 ADMISSION_TRANSACTIONS.with(|count| count.set(count.get() + 1));
@@ -8544,7 +8548,9 @@ impl Store {
             [],
             |row| row.get(0),
         )?;
-        if self.replication_projection_deferred() || snapshot.unsealed || waiting {
+        if self.replication_projection_deferred() || snapshot.unsealed || waiting
+            || self.runtime.projection_work_pending(&self.readers.get())?
+        {
             return Ok((String::new(), BTreeMap::new()));
         }
         Ok((
@@ -8559,6 +8565,7 @@ impl Store {
 
     fn note_projection_contention(&self) {
         self.projection_contention_generation.fetch_add(1, Ordering::AcqRel);
+        crate::receive_metrics::contended();
     }
 
     fn defer_replication_projection(&self) {
@@ -8738,6 +8745,7 @@ impl Store {
         target: u64,
         log: &mut impl FnMut(&str),
     ) {
+        crate::receive_metrics::projection_error(error.code);
         let stage = error
             .details
             .get("projection_stage")
@@ -8837,7 +8845,8 @@ impl Store {
             // A healthy, already-projected source needs no projection transaction.
             // In particular, an empty peer wake must not spend another runtime's
             // deferred maintenance allowance. Missing/stale health still retries.
-            let source_empty = count == 0 && frontier == target
+            let rebuild_pending = self.runtime.projection_work_pending(&transaction)?;
+            let source_empty = count == 0 && frontier == target && !rebuild_pending
                 && !self.verdicts_due.load(Ordering::Acquire)
                 && health.as_ref().is_some_and(|(frontier, status)| frontier.is_some() && status == "healthy");
             progress_staged(ProjectionProgress {
@@ -8851,6 +8860,12 @@ impl Store {
                 if source_empty {
                     return Ok(false);
                 }
+                if count == 0 && rebuild_pending {
+                    stages.enter("finish-projection-work");
+                    self.runtime.finish_projection_work(&transaction)?;
+                    self.runtime.after_projection(&transaction)?;
+                    return Ok(false);
+                }
                 // Non-contention incremental failures retain the full replay fallback,
                 // which quarantines claims it cannot project. SQLite contention defers below.
                 stages.enter("incremental");
@@ -8861,7 +8876,7 @@ impl Store {
                 let fallback_reason =
                     match self
                         .runtime
-                        .project_incremental(&transaction, &self.origin, through)
+                        .project_incremental_chunk(&transaction, &self.origin, through)
                     {
                         Ok(projected) => {
                             transaction
@@ -8945,6 +8960,7 @@ impl Store {
             })();
             match result {
                 Ok(replayed) => {
+                    let rebuild_pending = self.runtime.projection_work_pending(&transaction)?;
                     stages.enter("health");
                     // A fallback replay folds the whole log, including anything admitted after
                     // this pass started. An incremental chunk advances only its bounded frontier.
@@ -8957,14 +8973,17 @@ impl Store {
                         transaction.rollback()?;
                     } else {
                         transaction.execute(
-                            /* sqlite-large-value: allow-for-now lv-h50cb263d1821 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
-                             VALUES ('graph', 'healthy', ?1, ?2)
-                             ON CONFLICT(aggregate) DO UPDATE SET status='healthy', last_good_store_index=excluded.last_good_store_index,
-                                error_code=NULL, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
-                            params![through, now_ms().to_string()],
+                            /* sqlite-large-value: allow-for-now lv-h50cb263d1821 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms, error_code)
+                             VALUES ('graph', ?3, ?1, ?2, ?4)
+                             ON CONFLICT(aggregate) DO UPDATE SET status=excluded.status, last_good_store_index=excluded.last_good_store_index,
+                                error_code=?4, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
+                            params![through, now_ms().to_string(),
+                                if rebuild_pending { "stale" } else { "healthy" },
+                                rebuild_pending.then_some("pending-projection-work")],
                         )?;
                         stages.enter("commit");
                         transaction.commit_with_deferred_runtime()?;
+                        crate::receive_metrics::projection_chunk();
                         // A fallback replay folds the whole log in this one hold.
                         crate::windows::holds::covered(
                             "projected claims",
@@ -8991,15 +9010,15 @@ impl Store {
                     drop(stages);
                     // Readers may have cached the preceding prefix at the same admitted store
                     // index. Its projection changed even when no additional claim arrived.
-                    chunked |= through < target;
+                    chunked |= through < target || rebuild_pending;
                     if replayed {
                         self.runtime.forget_views();
                     } else if chunked {
                         // Only more of the admitted claims projected: published lists keep
                         // serving what readers had until they refold once the backlog is in.
-                        self.runtime.projection_advanced(through >= target);
+                        self.runtime.projection_advanced(through >= target && !rebuild_pending);
                     }
-                    if through < target {
+                    if through < target || rebuild_pending {
                         between();
                         continue;
                     }
@@ -9068,7 +9087,8 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(status.as_deref() != Some("healthy"))
+        Ok(status.as_deref() != Some("healthy")
+            || self.runtime.projection_work_pending(&connection)?)
     }
 
     /// Apply each recorded repair on its own. A repair that cannot be applied is recorded as an

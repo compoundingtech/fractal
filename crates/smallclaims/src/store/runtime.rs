@@ -169,6 +169,27 @@ pub trait Runtime: Send + Sync {
         through: u64,
     ) -> Result<IncrementalProjection, Error>;
 
+    /// Defer expensive aggregate rebuilds across bounded replication chunks. Implementations
+    /// must persist their pending work in this transaction and suppress updates to that work.
+    fn project_incremental_chunk(
+        &self,
+        transaction: &Transaction<'_>,
+        origin: &str,
+        through: u64,
+    ) -> Result<IncrementalProjection, Error> {
+        self.project_incremental(transaction, origin, through)
+    }
+
+    /// Whether committed chunks still have aggregate work, including after a restart.
+    fn projection_work_pending(&self, _connection: &Connection) -> Result<bool, Error> {
+        Ok(false)
+    }
+
+    /// Finish at most one pending aggregate, deleting its marker atomically with its rebuild.
+    fn finish_projection_work(&self, _transaction: &Transaction<'_>) -> Result<(), Error> {
+        Ok(())
+    }
+
     /// Clear every shared projection and fold the claims into it again in canonical order.
     fn replay_from_nothing(&self, transaction: &Transaction<'_>) -> Result<(), Error>;
 

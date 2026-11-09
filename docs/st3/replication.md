@@ -1128,6 +1128,14 @@ rebuilds from its complete canonical history; the chunk limit does not bound tha
 fallback replay. The regression interleaves local writes with committed prefixes and checks the
 final graph against canonical replay.
 
+Run-part rebuilds queued by these chunks remain pending durably until their canonical tree is
+rebuilt. Reconciliation and dispatch skip a pending part; the committed drain records a local
+`run-projection.finished` observation for each rebuilt run so its readers re-evaluate on the normal
+change notification, without a retry timer. External work actions drain their part inside their
+own writer transaction before reading its tree, then invalidate published views after commit.
+Later receive chunks can queue that part again. Read APIs retain their existing catch-up behavior;
+this fence does not introduce a new response field or change the client wire format.
+
 The first start of a build with this rule replays from nothing once. A run that this node created
 could show as over in its old graph while its claims say it runs. Starting that work again long
 after anyone expected it would surprise people, so the node writes the claims that end the run as
