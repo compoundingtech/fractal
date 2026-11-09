@@ -108,7 +108,7 @@ async fn exact_thread_message_http_reads_require_the_participant_or_bound_recipi
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains(secret));
     for (identity, bound) in [
-        (Some("person/foreign"), None), (Some(agent), None), (None, Some("agent/foreign")),
+        (Some("person/blair"), None), (Some(agent), None), (None, Some("agent/foreign")),
     ] {
         let (status, body) = read(route.clone(), identity, bound).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
@@ -128,8 +128,8 @@ async fn exact_thread_message_http_reads_require_the_participant_or_bound_recipi
     }
     let references = "/v1/client/document-references?subject=message%2Fprivate-body";
     assert_eq!(read(references.into(), Some(person), None).await.0, StatusCode::OK);
-    assert_eq!(read(references.into(), Some("person/foreign"), None).await.0, StatusCode::NOT_FOUND);
-    let (status, body) = read(format!("/v1/client/message-bodies/{ordinary}"), Some("person/foreign"), None).await;
+    assert_eq!(read(references.into(), Some("person/blair"), None).await.0, StatusCode::NOT_FOUND);
+    let (status, body) = read(format!("/v1/client/message-bodies/{ordinary}"), Some("person/blair"), None).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert!(body.contains("ordinary mail remains available"));
 }

@@ -710,7 +710,7 @@ mod tests {
 
         const FLEET: &str = "af599eec-4f67-43b7-82c9-13f042f7d77c";
         const THREAD: &str = "thread/reader-floor";
-        const PERSON: &str = "person/reader-floor";
+        const PERSON: &str = "person/avery";
         const AGENT: &str = "agent/reader-floor";
         let source_root = tempfile::tempdir().unwrap();
         let receiver_root = tempfile::tempdir().unwrap();

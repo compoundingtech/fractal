@@ -13338,7 +13338,7 @@ fn thread_mixed_timeline_preserves_the_selected_lifecycle_conflict() {
     assert_eq!(history(&left, owner, thread, None, 20).err().unwrap().code, "idempotency-conflict");
     assert_eq!(mixed_timeline(&left, owner, thread, None, 20).err().unwrap().code, "idempotency-conflict");
     assert_eq!(
-        mixed_timeline(&left, "person/outsider", thread, None, 20).err().unwrap().code,
+        mixed_timeline(&left, "person/blair", thread, None, 20).err().unwrap().code,
         "thread-unavailable",
     );
 }

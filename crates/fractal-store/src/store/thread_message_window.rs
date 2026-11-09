@@ -179,7 +179,7 @@ pub fn mark_read(
             return Err(invalid());
         }
 
-        // Every member was authorized above. A fixed per-person/per-message operation key
+        // Every member was authorized above. A fixed person-and-message operation key
         // makes a retried or concurrent acknowledgement converge across serving members.
         let mut batch = None;
         for subject in &incoming {
