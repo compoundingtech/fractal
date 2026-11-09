@@ -20,6 +20,7 @@
   "assistant_grant_authority_contract": {
     "projection_version": 1,
     "backfill": "resumable-background",
+    "compatibility_reconciliation": "commit-notification-driven-background-dirty-drain",
     "authorization_during_backfill": "fail-closed",
     "not_ready_error": {
       "code": "assistant-grant-authority-not-ready",
