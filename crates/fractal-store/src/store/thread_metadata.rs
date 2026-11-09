@@ -2,6 +2,14 @@
 
 use super::*;
 
+pub(super) fn install_conversation_index(connection: &Connection) -> rusqlite::Result<()> {
+    connection.execute_batch(
+        /* sqlite-large-value: allow-for-now lv-hf45475f305d8 owner=fractal_store::store::thread_metadata TODO=chunk-or-reference-variable-columns */ "CREATE INDEX IF NOT EXISTS claims_thread_conversation_index
+ON claims(json_extract(body, '$.fields.person'), json_extract(body, '$.fields.agent'), subject)
+WHERE kind='thread.created';",
+    )
+}
+
 pub enum Edit<'a> {
     Create {
         agent: &'a str,
@@ -53,7 +61,7 @@ impl PersonAuthority<'_> {
                 let find = |kind| {
                     connection
                         .query_row(
-                            &latest_claim_of_kind_query(),
+                            /* sqlite-large-value: allow-for-now lv-h514e6c503fb8 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &latest_claim_of_kind_query(),
                             params![grant, kind],
                             claim_from_row,
                         )
@@ -180,7 +188,7 @@ pub fn apply_as(
         if let Some(requested) = input.fields.get("state").and_then(Value::as_str) {
             let current_revision: String = connection
                 .query_row(
-                    &canonical_sql(smallclaims::store::LATEST_CLAIM_QUERY),
+                    /* sqlite-large-value: allow-for-now lv-h7f574845282c owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &canonical_sql(smallclaims::store::LATEST_CLAIM_QUERY),
                     [subject],
                     |row| row.get(0),
                 )
@@ -228,7 +236,15 @@ fn owned_creation(
     person: &str,
     creating: bool,
 ) -> Result<Option<ClaimRecord>, FractalError> {
-    let Some(creator) = latest_applied_claim(connection, subject, "thread.created")? else {
+    // A conflicting creation does not establish ownership.
+    let creation = latest_applied_claim(connection, subject, "thread.created").map_err(|error| {
+        if error.code == "idempotency-conflict" {
+            unavailable()
+        } else {
+            error
+        }
+    })?;
+    let Some(creator) = creation else {
         return if creating {
             Ok(None)
         } else {
@@ -355,7 +371,7 @@ fn latest_applied_claim(
     kind: &str,
 ) -> Result<Option<ClaimRecord>, FractalError> {
     let selected = connection
-        .prepare_cached(&canonical_sql(&format!(
+        .prepare_cached(/* sqlite-large-value: allow-for-now lv-h4162c9a4ad90 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &canonical_sql(&format!(
             "SELECT {CLAIM_COLUMNS}, operations.state
              FROM claims INDEXED BY claims_subject_kind_accepted_index
              JOIN operations ON operations.id=json_extract(claims.body, '$._operation.id')
@@ -365,7 +381,7 @@ fn latest_applied_claim(
              ORDER BY CANONICAL_DESC(claims) LIMIT 1"
         )))
         .map_err(internal)?
-        .query_row(params![subject, kind], |row| {
+        .query_row(/* sqlite-large-value: allow-for-now lv-hb2b23c870f68 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ params![subject, kind], |row| {
             Ok((claim_from_row(row)?, row.get::<_, String>(10)?))
         })
         .optional()
@@ -423,7 +439,7 @@ fn summary_conn(
         .unwrap_or_else(|| creation.clone());
     let revision = connection
         .query_row(
-            &canonical_sql(smallclaims::store::LATEST_CLAIM_QUERY),
+            /* sqlite-large-value: allow-for-now lv-h9d96c131cb28 owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &canonical_sql(smallclaims::store::LATEST_CLAIM_QUERY),
             [subject],
             |row| row.get(0),
         )
@@ -550,7 +566,7 @@ pub fn history(
                AND {UNREPAIRED_CLAIM} {bound}
              ORDER BY CANONICAL_DESC(claims) LIMIT ?4"
         ));
-        let mut statement = connection.prepare_cached(&sql).map_err(internal)?;
+        let mut statement = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h759e1f16c79a owner=fractal_store::store::thread_metadata TODO=trace-statement-and-value-representation */ &sql).map_err(internal)?;
         let rows = statement.query_map(params![subject, before, at, limit + 1], |row| {
             Ok((claim_from_row(row)?, row.get::<_, String>(10)?))
         }).map_err(internal)?;

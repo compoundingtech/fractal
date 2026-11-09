@@ -288,6 +288,67 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn conflicting_creation_is_unavailable_on_every_exact_thread_route() {
+        let root = tempfile::tempdir().unwrap();
+        let state = super::super::tests::test_state_named(root.path(), "thread-conflict");
+        let person = "person/operator";
+        let subject = "thread/fixture";
+        let (original, _) = thread_metadata::apply(
+            &state.store,
+            person,
+            subject,
+            "create",
+            thread_metadata::Edit::Create {
+                agent: "agent/example",
+                title: "Private title",
+            },
+        )
+        .unwrap();
+        state
+            .store
+            .connection
+            .write()
+            .execute(
+                "UPDATE operations SET state='conflict' WHERE id=?1",
+                [&original.operation_id],
+            )
+            .unwrap();
+        let snapshot = new_client_snapshot(&state);
+        let app = crate::api::router(state);
+        let action = json!({
+            "api_version": CLIENT_API_VERSION,
+            "id": "action/thread-close",
+            "type": "thread.close",
+            "idempotency_key": "thread-close-request",
+            "fence": {"snapshot_id": snapshot.id, "subject_revisions": {(subject): original.id}},
+            "parameters": {"target_id": subject}
+        });
+
+        for reader in [person, "person/other"] {
+            for (method, path, body) in [
+                ("GET", "/v1/client/threads/fixture", Body::empty()),
+                ("GET", "/v1/client/threads/fixture/timeline", Body::empty()),
+                ("POST", "/v1/client/actions", Body::from(action.to_string())),
+            ] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(path)
+                            .header(LOCAL_PERSON_HEADER, reader)
+                            .header("Content-Type", "application/json")
+                            .body(body)
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::NOT_FOUND, "{reader} {path}");
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn owner_timeline_paginates_exact_rename_and_close_events() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::test_state_named(root.path(), "thread-timeline");

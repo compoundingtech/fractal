@@ -235,3 +235,9 @@ The first characterization run failed only the four stale v14 trim expectations.
 `claims-v16.json` adds `runtime.refresh` and optional receipt `launch_contract` fields; v1–v15 stay frozen.
 Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v16.json`.
 Shared RNG draws shift: all 32 fixed seeds converge; 30 trim, exactly `[2, 34]` never trim (27 now trims). Refresh claims stay whole.
+
+`claims-v17.json` adds `thread.created`, `thread.state-set`, and `thread.title-set`.
+Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v17.json`.
+Versions 1 through 16 stay frozen. The generic generator excludes thread metadata because its
+writer needs established ownership and lifecycle revisions. The thread metadata store tests cover
+typed admission and replication.
