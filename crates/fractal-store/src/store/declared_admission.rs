@@ -189,8 +189,8 @@ fn validate_fleet(connection: &Connection, origin: &str) -> Result<(), FractalEr
         }
         // Select the latest advertisement first; an unsigned or false replacement must not
         // fall back to an older positive advertisement, nor one from a previous incarnation.
-        let supported: Option<bool> = connection.query_row(/* sqlite-large-value: allow-for-now lv-h9a25f3df63fd owner=fractal_store::store::declared_admission TODO=trace-statement-and-value-representation */ &canonical_sql(
-            "SELECT json_extract(claims.body,'$.fields.features.declared_admission')=1
+        let supported: Option<bool> = connection.query_row(/* sqlite-large-value: allow-for-now lv-h5faf7bb79c94 owner=fractal_store::store::declared_admission TODO=trace-statement-and-value-representation */ &canonical_sql(
+            "SELECT json_extract(claims.body,'$.fields.features.declared_admission')=2
                  AND EXISTS(SELECT 1 FROM replica_envelopes e JOIN replica_envelope_signatures s
                      ON s.writer=e.writer AND s.sequence=e.sequence AND s.envelope_hash=e.envelope_hash
                      WHERE e.batch_id=batches.id AND s.member_key=?4)
@@ -201,7 +201,7 @@ fn validate_fleet(connection: &Connection, origin: &str) -> Result<(), FractalEr
             .optional().map_err(internal)?.flatten();
         if supported != Some(true) {
             return Err(refused(format!(
-                "host/{} has not advertised anchored features.declared_admission=1 for its active incarnation; upgrade or fence it before publishing declared admission",
+                "host/{} has not advertised anchored features.declared_admission=2 for its active incarnation; upgrade or fence it before publishing declared admission",
                 member.name
             )));
         }

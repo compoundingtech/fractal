@@ -109,7 +109,7 @@ details in #4002. A local timeout alone is not authority to remove a member.
 
 Publishing `declared-priority`, `declared-lane`, or `declared-budgets` (including an
 empty budgets block) requires every active fleet incarnation to advertise
-`features.declared_admission=1` in its latest own-origin, authenticated
+`features.declared_admission=2` (including mission attention declarations) in its latest own-origin, authenticated
 `daemon.started` claim anchored to the admitted incarnation. The publication gate
 requires signed, current, unambiguous membership and fails closed on missing,
 false, conflicted, unsigned, or unanchored capability evidence and unfenced legacy

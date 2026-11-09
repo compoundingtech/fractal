@@ -30,7 +30,7 @@ fn started(store: &Store, feature: Value) {
 fn enabled() -> (Store, Arc<MemberKey>) {
     let store = Store::open_memory("alder").unwrap();
     let key = enable(&store);
-    started(&store, json!({"declared_admission":1}));
+    started(&store, json!({"declared_admission":2}));
     store.replication_snapshot().unwrap();
     (store, key)
 }
@@ -94,7 +94,7 @@ fn every_new_child_including_empty_budgets_requires_anchored_local_evidence() {
                 publish(&store, &declaration, "false").unwrap_err().code,
                 ERROR
             );
-            started(&store, json!({"declared_admission":1}));
+            started(&store, json!({"declared_admission":2}));
             // A positive but unsealed advertisement is not anchored evidence.
             assert_eq!(
                 publish(&store, &declaration, "unsealed").unwrap_err().code,
@@ -110,11 +110,11 @@ fn every_new_child_including_empty_budgets_requires_anchored_local_evidence() {
 fn old_member_never_receives_any_part_of_a_new_child_publication() {
     let (store, anchor) = enabled();
     let (peer, _) = peer(&store, &anchor);
-    for advertisement in [json!({}), json!({"declared_admission":0})] {
+    for advertisement in [json!({}), json!({"declared_admission":0}), json!({"declared_admission":1})] {
         started(&peer, advertisement);
         sync(&peer, &store);
         let source = format!(
-            "{PLAIN}mission \"new\" state=\"ready\" {{ goal \"Work.\"; declared-priority \"normal\"; step \"work\" {{ assigned-to \"agent/example/worker\"; goal \"Work.\"; }} }}\n"
+            "{PLAIN}mission \"new\" state=\"ready\" {{ goal \"Work.\"; declared-priority \"normal\"; declared-budgets {{ attention \"person/reviewer\" asks=3; }}; step \"work\" {{ assigned-to \"agent/example/worker\"; goal \"Work.\"; }} }}\n"
         );
         let before = store.index().unwrap();
         assert_eq!(publish(&store, &source, "mixed").unwrap_err().code, ERROR);
@@ -140,12 +140,12 @@ fn old_member_never_receives_any_part_of_a_new_child_publication() {
         "daemon/birch",
         "daemon.started",
         None,
-        json!({"status":"running","features":{"declared_admission":1}}),
+        json!({"status":"running","features":{"declared_admission":2}}),
     );
     store.replication_snapshot().unwrap();
     let source = "version 2\nagent \"new\" { command \"true\"; declared-lane \"check\"; }\n";
     assert_eq!(publish(&store, source, "spoofed").unwrap_err().code, ERROR);
-    started(&peer, json!({"declared_admission":1}));
+    started(&peer, json!({"declared_admission":2}));
     sync(&peer, &store);
     publish(&store, source, "upgraded").unwrap();
     // The latest false advertisement supersedes the positive one.
@@ -187,7 +187,7 @@ fn direct_claim_publication_cannot_bypass_the_barrier() {
 fn direct_declaration_claims_persist_metadata_with_complete_fleet_evidence() {
     let (store, anchor) = enabled();
     let (peer, _) = peer(&store, &anchor);
-    started(&peer, json!({"declared_admission":1}));
+    started(&peer, json!({"declared_admission":2}));
     sync(&peer, &store);
     let intent = crate::graph::parse_intent(
         "version 2\nagent \"example/new\" { command \"true\"; declared-lane \"check\"; }\nmission \"new\" state=\"ready\" { goal \"Work.\"; declared-priority \"normal\"; step \"work\" { assigned-to \"agent/example/worker\"; goal \"Work.\"; } }\n",
@@ -232,7 +232,7 @@ fn malformed_advertisement_signatures_refuse_like_unsigned_advertisements() {
     for malformed in [false, true] {
         let (store, anchor) = enabled();
         let (peer, _) = peer(&store, &anchor);
-        started(&peer, json!({"declared_admission":1}));
+        started(&peer, json!({"declared_admission":2}));
         let mut exchange = peer.export_replication_exchange(
             FLEET, &store.replication_inventory().unwrap(),
         ).unwrap();
@@ -287,7 +287,7 @@ fn pending_membership_and_unfenced_legacy_writers_fail_closed() {
     let (store, _) = enabled();
     let legacy = Store::open_memory("legacy").unwrap();
     legacy.bind_fleet(FLEET).unwrap();
-    started(&legacy, json!({"declared_admission":1}));
+    started(&legacy, json!({"declared_admission":2}));
     sync(&legacy, &store);
     let error = publish(&store, source, "legacy").unwrap_err();
     assert_eq!(error.code, ERROR);
@@ -298,7 +298,7 @@ fn pending_membership_and_unfenced_legacy_writers_fail_closed() {
 fn previous_incarnation_advertisements_do_not_enable_a_replacement() {
     let (store, anchor) = enabled();
     let (peer, key) = peer(&store, &anchor);
-    started(&peer, json!({"declared_admission":1}));
+    started(&peer, json!({"declared_admission":2}));
     sync(&peer, &store);
     let high_water = writer_high_water(&peer.readers.get(), "birch")
         .unwrap()
@@ -333,7 +333,7 @@ fn previous_incarnation_advertisements_do_not_enable_a_replacement() {
 fn conflicted_membership_refuses_declared_admission() {
     let (store, anchor) = enabled();
     let (peer, _) = peer(&store, &anchor);
-    started(&peer, json!({"declared_admission":1}));
+    started(&peer, json!({"declared_admission":2}));
     sync(&peer, &store);
     let conflicting = MemberKey::generate().unwrap().0;
     claim(

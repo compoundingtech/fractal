@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Declare mission-only per-person attention budgets as ordered data, without budget counting, comparison, admission or enforcement",
+  "replay": {"status": "none", "detail": "No receipt, replay or historical interpretation changes; declarations extend existing mission data only."},
+  "schema": {"status": "none", "detail": "No database tables, indexes, migrations or claim kinds change. Empty attention arrays are omitted, preserving old declarations' canonical bytes and hashes."},
+  "rules": {"status": "none", "detail": "No checkpoint rules change. Attention declarations describe a rolling seven-day, per-person contract including delegated descendants and every declaring ancestor; no counting, comparison, admission or enforcement is added, and existing local attention reporting is unchanged."},
+  "compatibility": {"status": "changed", "detail": "KDL and typed mission budgets gain strict ordered attention entries with person and asks; unknown budget members still refuse. All new declared-admission publication, not only attention, now requires anchored features.declared_admission=2 from every active incarnation, including the local daemon. Version-1-only or missing support refuses before writes with declared-admission-feature-barrier. Semantic validation retains invalid-declared-admission. Mixed-version execution was not exercised for this change."},
+  "downtime": {"status": "none", "detail": "No migration or additional downtime mechanism; daemon upgrades require the usual restart. Restart duration was not measured."},
+  "manual": {"status": "changed", "detail": "Before publishing any declared-admission metadata, upgrade every active member to advertise version 2 or fence old peers, and wait for authenticated anchored advertisements. Keep supporting readers while attention metadata is active."},
+  "recovery": {"status": "changed", "detail": "Remove attention metadata using supporting binaries before rolling back to readers that reject it. Version-1 and version-2 capability gates are not interchangeable: a mixed fleet may refuse declared-admission publication. Upgrade or fence incompatible members to resume; no database rollback or replay is required."}
+}
