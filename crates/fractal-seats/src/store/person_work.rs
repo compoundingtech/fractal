@@ -2666,6 +2666,27 @@ stop "agent/alder.asker""#, "alder").unwrap();
     }
 
     #[test]
+    fn configured_inbox_fallback_is_diagnosed_independently_of_current_items() {
+        let (store, _origin, input) = fixture();
+        let ask = store.ask_person(&input).unwrap();
+        let item = store.attention_items(Some("person/avery")).unwrap().into_iter()
+            .find(|item| item.subject == ask.subject).unwrap();
+        for fallback in ["agent/example/not-declared", "agent/alder.asker"] {
+            if fallback == "agent/alder.asker" {
+                let stop = crate::graph::parse_internal_intent(r#"version 2
+stop "agent/alder.asker""#, "alder").unwrap();
+                store.apply_internal(&stop, "stop-inbox-fallback").unwrap();
+            }
+            store.configure_inbox_fallback_agent(Some(fallback)).unwrap();
+            for items in [Vec::new(), vec![item.clone()]] {
+                let check = store.inbox_responsibility_check(&items).unwrap();
+                assert_eq!(check.status, "warn");
+                assert!(check.message.contains("configured fallback unavailable: true"));
+            }
+        }
+    }
+
+    #[test]
     fn unavailable_fallback_does_not_hide_an_ordinary_person_ask() {
         let (store, _origin, input) = fixture();
         let ask = store.ask_person(&input).unwrap();

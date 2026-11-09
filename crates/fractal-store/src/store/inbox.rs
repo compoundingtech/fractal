@@ -41,7 +41,11 @@ fn discussion_unavailable_at(connection: &Connection, item: &AttentionItemView) 
     let Some(agent) = candidate_agent_at(connection, item)? else {
         return Ok(Some("inbox-agent-not-configured".into()));
     };
-    let (agent, unavailable) = presentation_identity_at(connection, &agent)?;
+    agent_unavailable_at(connection, &agent)
+}
+
+fn agent_unavailable_at(connection: &Connection, agent: &str) -> Result<Option<String>> {
+    let (agent, unavailable) = presentation_identity_at(connection, agent)?;
     if unavailable.is_some() { return Ok(unavailable) }
     match person_work::declaration_live(connection, &agent) {
         Ok(true) => Ok(None),
@@ -116,13 +120,13 @@ impl Store {
             }
         }
         let configured_unavailable = match configured {
-            Some(agent) => presentation_identity_at(&connection, &agent)?.1.is_some(),
+            Some(agent) => agent_unavailable_at(&connection, &agent)?.is_some(),
             None => false,
         };
         Ok(DoctorCheck {
             name: "inbox-responsibility".into(),
             status: if missing + unavailable == 0 && !needs_configuration && !configured_unavailable { "pass" } else { "warn" }.into(),
-            message: format!("Inbox fallback configuration required: {needs_configuration}. {missing} Inbox sources need an explicit inbox_fallback_agent; {unavailable} discussion recipients are unavailable; configured fallback lifecycle unavailable: {configured_unavailable}. Initial setup and person-only approvals remain available; discussion requires a declared recipient."),
+            message: format!("Inbox fallback configuration required: {needs_configuration}. {missing} Inbox sources need an explicit inbox_fallback_agent; {unavailable} discussion recipients are unavailable; configured fallback unavailable: {configured_unavailable}. Initial setup and person-only approvals remain available; discussion requires a declared recipient."),
         })
     }
 }
