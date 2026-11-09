@@ -22,6 +22,9 @@ use crate::ArrangementsStore;
 use super::*;
 use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
+
+mod coalesce_run_part_rebuild;
+mod huge_part_rebuild_bench;
 use fractal_delivery::store::shared_missions::*;
 use fractal_delivery::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
 use fractal_delivery::store::shared_seats_shared_missions::*;
