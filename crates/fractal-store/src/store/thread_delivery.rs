@@ -374,13 +374,16 @@ mod tests {
         input
             .fields
             .insert("thread_quote_id".into(), json!("message/quoted"));
+        input.fields.insert("thread_origin_source".into(), json!("agent/reviewer"));
+        input.fields.insert("thread_origin_episode".into(), json!("native-prompt-episode"));
         add_reader_marker(&mut input);
         let actor = input.actor.as_deref().unwrap();
         let (key, _) = smallclaims::fleet::MemberKey::generate().unwrap();
         let mut signature = ClaimSignature::sign(&key, "", actor, None, vec![], now_ms() as u64);
         signature.format = Some(FIELDS_FORMAT.into());
         signature.signed_fields = [
-            "content", "from", "thread_id", "thread_quote_id", MESSAGE_READER_VERSION_FIELD, "to",
+            "content", "from", "thread_id", "thread_quote_id", "thread_origin_source",
+            "thread_origin_episode", MESSAGE_READER_VERSION_FIELD, "to",
         ].into_iter().map(str::to_owned).collect();
         signature.signature = key.sign(&fields_signing_bytes(
             &input.subject,
@@ -403,6 +406,8 @@ mod tests {
         for (field, replacement) in [
             ("thread_id", "thread/other"),
             ("thread_quote_id", "message/other"),
+            ("thread_origin_source", "agent/other"),
+            ("thread_origin_episode", "other-prompt-episode"),
         ] {
             let mut changed = input.clone();
             changed.fields.insert(field.into(), json!(replacement));

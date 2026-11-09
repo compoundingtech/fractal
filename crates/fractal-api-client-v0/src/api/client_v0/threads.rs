@@ -1632,6 +1632,15 @@ agent "garden/b" { workspace "/work/garden"; harness "omp" {} }
         stale["origin"]["episode"] = json!("claim/other-episode");
         assert_ne!(post(person, "thread.start", "stale-source", stale).await.0, StatusCode::OK);
         assert!(state.store.claims_for(thread, None).unwrap().is_empty());
+        state.store.connection.write().execute_batch(
+            "CREATE TEMP TRIGGER refuse_inbox_first_message BEFORE INSERT ON claims
+             WHEN NEW.kind='message.sent' AND json_extract(NEW.body,'$.fields.thread_id')='thread/system-discussion'
+             BEGIN SELECT RAISE(ABORT,'first message write refused'); END;",
+        ).unwrap();
+        let (status, _) = post(person, "thread.start", "start-system-source", parameters.clone()).await;
+        assert_ne!(status, StatusCode::OK);
+        assert!(state.store.claims_for(thread, None).unwrap().is_empty(), "metadata rolls back with first message");
+        state.store.connection.write().execute_batch("DROP TRIGGER refuse_inbox_first_message").unwrap();
         let (status, started) = post(person, "thread.start", "start-system-source", parameters.clone()).await;
         assert_eq!(status, StatusCode::OK, "{started}");
         let message = started["value"]["affected_ids"][1].as_str().unwrap();
