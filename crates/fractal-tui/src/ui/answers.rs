@@ -224,6 +224,80 @@ mod tests {
         }] if answer == "yes" && text == "N"));
     }
 
+    #[test]
+    fn unstructured_requests_keep_the_reply_editor_and_field_reply_action() {
+        for action in ["work.done", "custom.reply"] {
+            for mouse in [false, true] {
+                let mut ui = requests();
+                if let Load::Ready(items) = &mut ui.world.attention {
+                    for item in items {
+                        if let AttentionKind::Request { structured, .. } = &mut item.kind {
+                            *structured = None;
+                            item.actions = vec![action.into()];
+                        }
+                    }
+                }
+                if mouse { ui.click(Hit::Key('c')) } else { press(&mut ui, KeyCode::Char('c')) }
+                assert!(ui.editing);
+                for letter in "field=value".chars() {
+                    press(&mut ui, KeyCode::Char(letter));
+                }
+                ui.click(Hit::Enter);
+                assert!(matches!(&ui.effects[..], [Effect::Attention {
+                    action: sent_action, reason: Some(text), answer: None, ..
+                }] if sent_action == action && text == "field=value"));
+            }
+        }
+    }
+
+    #[test]
+    fn visible_send_submits_a_note_after_escape_or_a_refused_answer() {
+        for restored in [false, true] {
+            let mut ui = note_request(Some("accept"), false);
+            ui.click(Hit::Answer(0));
+            press(&mut ui, KeyCode::Char('c'));
+            for letter in "keep this note".chars() {
+                press(&mut ui, KeyCode::Char(letter));
+            }
+            if restored {
+                ui.click(Hit::Enter);
+                let effect = ui.effects.pop().unwrap();
+                ui.note_acted(&effect);
+                ui.finish_answer("attention/first", false);
+                let first = ui.listing_for(0, 40).ids.iter()
+                    .position(|id| id == "attention/first").unwrap();
+                ui.select(first);
+            } else {
+                press(&mut ui, KeyCode::Esc);
+            }
+            ui.editing = false;
+            ui.answering = None;
+            ui.click(Hit::Enter);
+            assert!(matches!(&ui.effects[..], [Effect::Attention {
+                id, answer: Some(answer), reason: Some(note), ..
+            }] if id == "attention/first" && answer == "yes" && note == "keep this note"));
+        }
+    }
+
+    #[test]
+    fn named_answer_without_a_note_passes_the_work_done_transport_boundary() {
+        for outcome in [None, Some("accept"), Some("decline")] {
+            let mut ui = note_request(outcome, false);
+            let (_, request) = ui.structured_request().unwrap();
+            ui.click(Hit::Answer(0));
+            ui.click(Hit::Enter);
+            let Effect::Attention { answer, reason, .. } = ui.effects.pop().unwrap() else {
+                panic!("expected answer effect");
+            };
+            let (summary, answer) =
+                crate::person_step_response(Some(&request), answer, reason).unwrap();
+            assert_eq!(summary, "Yes");
+            let answer = answer.unwrap();
+            assert_eq!(answer.id.as_deref(), Some("yes"));
+            assert_eq!(answer.text, None);
+        }
+    }
+
     fn requests() -> Ui {
         let mut world = demo::test_world();
         let kind = AttentionKind::Request {
