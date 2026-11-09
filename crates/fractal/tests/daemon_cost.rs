@@ -142,6 +142,10 @@ const KNOWN_GROWTH: &[(&str, f64)] = &[
 /// the store unnoticed.
 const NOT_MEASURED: &[(&str, &str)] = &[
     (
+        "GET /v1/custom/decision-inputs",
+        "returns and validates complete canonical effective decision-tree history with its atomic basis; streaming preflight stops above 10,000 effective claims, 32 MiB of stored bodies, or 20,000 scanned rows including repaired history; custom::tests::decision_inputs_claim_preflight_stops_sqlite_before_oversized_tail, decision_inputs_byte_preflight_stops_sqlite_before_oversized_tail, and decision_inputs_preflight_bounds_repaired_history_work bound refusal SQLite VM steps as tails grow; admitted work and response size intentionally grow with that tree's history, not a constant latest-state page; action_coverage::decision_reads_converge_across_opposite_arrival_orders, decision_reader_excludes_repaired_originals, and decision_reader_rejects_unregistered_or_unauthorized_approval exercise the real endpoint contract",
+    ),
+    (
         "POST /v1/client/pairing/browser-requests",
         "interactive configured-owner pairing requires an authenticated publisher device and native person decision ask, absent from generated cost stores; browser_pairing_tests covers admission and pending limits; the pending count scans browser request history, whose growth is not measured here",
     ),
