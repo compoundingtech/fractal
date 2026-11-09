@@ -125,9 +125,9 @@ const rowFixture = (row: Row, attachment: { readonly name: string; readonly medi
       const body = 'timeline-entry/s1/2222222222222222-content'
       return {
         prompt: { _tag: 'Text', id: 'timeline-entry/transcript-images/prompt', role: 'user', text: 'Ask the reviewer for their layout.', attachments: [], streaming: false, at: at(11) },
+        // The projection joins agent mail into one Message at its body's entry.
         items: [
-          { _tag: 'Message', id: 'timeline-entry/s1/2222222222222222-message', messageId: MAILBOX_MESSAGE_ID, from: 'agent/reviewer', to: 'agent/example', title: 'Layout screenshot', at: at(14), sender: reviewer },
-          { _tag: 'Text', id: body, role: 'assistant', text: 'This is the layout I meant.', attachments: [{ ...image, messageId: MAILBOX_MESSAGE_ID }], streaming: false, at: at(14), sender: reviewer },
+          { _tag: 'Message', id: body, messageId: MAILBOX_MESSAGE_ID, author: 'agent/reviewer', from: 'agent/reviewer', to: 'agent/example', title: 'Layout screenshot', text: 'This is the layout I meant.', attachments: [{ ...image, messageId: MAILBOX_MESSAGE_ID }], at: at(14), sender: reviewer },
         ],
         imageRow: body, carrier: MAILBOX_MESSAGE_ID,
       }
@@ -275,22 +275,19 @@ const showLoaded = async (root: HTMLElement) => {
   await fitsColumn(root)
 }
 /**
- * A received row (an assistant answer, or the paired body of agent mail under its header row) shows the same deferred
- * card inside the agent's prose row, reads only on request for the row's carrier, and opens the same viewer.
+ * A received row (an assistant answer, or agent mail as one object) shows the same deferred card inside its row,
+ * reads only on request for the row's carrier, and opens the same viewer.
  */
 const showReceived = async (root: HTMLElement) => {
   const section = fixtureSection(root)
-  const owner = card(root).closest<HTMLElement>('[data-testid="agent-message"]')
+  // Agent mail is one object: its header and body, the image under the body, in one row.
+  const mailbox = section.dataset.row === 'mailbox'
+  const owner = card(root).closest<HTMLElement>(mailbox ? '[data-testid="mail-message"]' : '[data-testid="agent-message"]')
   await expect(owner).not.toBeNull()
   await expect(owner).toHaveAttribute('data-item-id', section.dataset.imageRow)
-  await expect(owner).toHaveAttribute('data-item-kind', 'Text')
+  await expect(owner).toHaveAttribute('data-item-kind', mailbox ? 'Message' : 'Text')
   await expect(within(section).getAllByTestId('transcript-attachments')).toHaveLength(1)
-  if (section.dataset.row === 'mailbox') {
-    const header = section.querySelector<HTMLElement>('[data-testid="agent-message"][data-item-kind="Message"]')
-    await expect(header).not.toBeNull()
-    await expect(within(header!).getByTestId('message-sender')).toHaveTextContent('reviewer')
-    await expect(header!.compareDocumentPosition(owner!) & Node.DOCUMENT_POSITION_FOLLOWING).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
-  }
+  if (mailbox) await expect(within(owner!).getByTestId('mail-header')).toHaveTextContent('reviewer')
   await showLoaded(root)
   await expect(within(owner!).getByRole('button', { name: `Open ${NAME}` })).toHaveFocus()
   await openAndCloseViewer(root)
