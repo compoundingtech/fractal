@@ -151,23 +151,6 @@ def main():
     notes_file.write_text(body)
     files = [str(dist / n) for n in names]
     title = f'Fractal edge ({args.source[:9]})'
-    existing = release_assets(repository)
-    if existing is None:
-        # A create that timed out may still have made the release, with some of its assets.
-        gh('release', 'create', TAG, '--repo', repository, '--target', args.source, '--prerelease',
-           '--latest=false', '--title', title, '--notes-file', str(notes_file), *files,
-           done=lambda: release_assets(repository) is not None)
-        say(f'created the {TAG} pre-release')
-        present = release_assets(repository) or set()
-        lacking = [str(dist / n) for n in names if n not in present]
-        if lacking:
-            gh('release', 'upload', TAG, '--repo', repository, '--clobber', *lacking)
-    else:
-        # Same names replace in place; anything else is a leftover of an older build.
-        gh('release', 'upload', TAG, '--repo', repository, '--clobber', *files)
-        for stale in sorted(existing - set(names)):
-            gh('release', 'delete-asset', TAG, stale, '--repo', repository, '--yes',
-               done=lambda stale=stale: stale not in (release_assets(repository) or set()))
     observed, commit = tag_target(repository)
     if commit != args.source:
         # Checkout does not persist credentials. Pass the job token only through
@@ -184,6 +167,23 @@ def main():
         run('git', 'push', f'--force-with-lease=refs/tags/{TAG}:{observed or ""}',
             f'https://github.com/{repository}.git', f'{args.source}:refs/tags/{TAG}',
             cwd=repo, env=push_env)
+    existing = release_assets(repository)
+    if existing is None:
+        # A create that timed out may still have made the release, with some of its assets.
+        gh('release', 'create', TAG, '--repo', repository, '--verify-tag', '--target', args.source, '--prerelease',
+           '--latest=false', '--title', title, '--notes-file', str(notes_file), *files,
+           done=lambda: release_assets(repository) is not None)
+        say(f'created the {TAG} pre-release')
+        present = release_assets(repository) or set()
+        lacking = [str(dist / n) for n in names if n not in present]
+        if lacking:
+            gh('release', 'upload', TAG, '--repo', repository, '--clobber', *lacking)
+    else:
+        # Same names replace in place; anything else is a leftover of an older build.
+        gh('release', 'upload', TAG, '--repo', repository, '--clobber', *files)
+        for stale in sorted(existing - set(names)):
+            gh('release', 'delete-asset', TAG, stale, '--repo', repository, '--yes',
+               done=lambda stale=stale: stale not in (release_assets(repository) or set()))
     gh('release', 'edit', TAG, '--repo', repository, '--prerelease', '--latest=false', '--title', title,
        '--notes-file', str(notes_file))
 
