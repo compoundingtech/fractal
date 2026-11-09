@@ -51,7 +51,7 @@ const textGates = (value: TextInput) => [
   gate.exec({
     name: 'env',
     command: t`check ${value}`,
-    host: 'dev3',
+    host: 'example-host',
     workspace: '/work',
     env: { CHECK: value },
   }),
@@ -108,11 +108,11 @@ const isolatedGateTexts: readonly [
       }),
   ],
   ['exec host', (v) => gate.exec({ command: 'true', host: t`${v}`, workspace: '/work' })],
-  ['exec workspace', (v) => gate.exec({ command: 'true', host: 'dev3', workspace: t`/work/${v}` })],
-  ['exec command', (v) => gate.exec({ command: t`check ${v}`, host: 'dev3', workspace: '/work' })],
+  ['exec workspace', (v) => gate.exec({ command: 'true', host: 'example-host', workspace: t`/work/${v}` })],
+  ['exec command', (v) => gate.exec({ command: t`check ${v}`, host: 'example-host', workspace: '/work' })],
   [
     'exec env',
-    (v) => gate.exec({ command: 'true', host: 'dev3', workspace: '/work', env: { CHECK: v } }),
+    (v) => gate.exec({ command: 'true', host: 'example-host', workspace: '/work', env: { CHECK: v } }),
   ],
   ['merged host', (v) => gate.merged({ target: t`example/repo#7`, host: t`${v}` })],
   ['merged workspace', (v) => gate.merged({ target: t`example/repo#7`, workspace: t`/work/${v}` })],

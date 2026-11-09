@@ -57,7 +57,7 @@ import { prLanding, prLandingFragment } from './pr-landing.fixture.ts'
 import { ScratchDaemon, scratchDaemonLayer, type ScratchCommandResult } from './testing.ts'
 import { upstreamRepin, upstreamRepinKdl } from './upstream-repin.fixture.ts'
 
-const operator = person('person/schickling')
+const operator = person('person/ada')
 const owner = { id: 'example/owner' } satisfies typeof AgentSchema.Encoded
 const worker = { id: 'example/worker' } satisfies typeof AgentSchema.Encoded
 const humanReviewGate = {
@@ -336,7 +336,7 @@ agent "example/worker" {
     'person/../operator',
     'agent/operator',
     'operator',
-    'person/with spaces',
+    'person/ada lovelace',
   ])('rejects malformed principal person subject %s', (subject) => {
     expect(() =>
       Schema.decodeSync(AgentSchema)({
@@ -426,7 +426,7 @@ describe('attributed human gates', () => {
     'person/../operator',
     'agent/operator',
     'operator',
-    'person/with spaces',
+    'person/ada lovelace',
   ])('rejects invalid person subjects %s', (subject) => {
     expect(() => Schema.decodeSync(PersonReferenceSchema)({ kind: 'person', subject })).toThrow()
   })
@@ -470,7 +470,7 @@ mission "home/berlin/cutover" report-to="agent/example/owner" state="ready" {
   step "approve-cutover" timeout="1d" {
     agentless
     gate "Approve the bounded Berlin cutover" mode="approve" type="human" {
-      reviewer "person/schickling"
+      reviewer "person/ada"
       question "Apply the reviewed configuration and rollback plan?"
       review "doc/berlin-cutover@${'a'.repeat(64)}"
       review "resource/example/rollback-plan"
@@ -500,7 +500,7 @@ mission "home/berlin/cutover" report-to="agent/example/owner" state="ready" {
 step "draft" {
   assigned-to "agent/example/worker"
   gate "Approve the bounded Berlin cutover" mode="feedback" type="human" {
-    reviewer "person/schickling"
+    reviewer "person/ada"
   }
 }
 `)
@@ -519,7 +519,7 @@ step "draft" {
       { mode: 'consultative' },
       { review: [Review.subject('doc/plan'), Review.subject('doc/plan')] },
       { question: '' },
-      { reviewer: 'person/schickling' },
+      { reviewer: 'person/ada' },
     ]) {
       expect(() =>
         step({
@@ -542,7 +542,7 @@ step "draft" {
 
   it('lowers distinct person assignments and retains native field gate syntax', () => {
     expect(emit([step({ id: 'inspect', assignedTo: operator, goal: ['Inspect the plan.'] })])).toBe(
-      'version 2\nstep "inspect" {\n  assigned-to "person/schickling"\n  goal "Inspect the plan."\n}\n',
+      'version 2\nstep "inspect" {\n  assigned-to "person/ada"\n  goal "Inspect the plan."\n}\n',
     )
     expect(
       emit([
@@ -644,7 +644,7 @@ step "check" {
     restart "never"
   }
   gate "review" mode="approve" type="human" {
-    reviewer "person/schickling"
+    reviewer "person/ada"
     review "file/local:/work/example/plan.md"
     review "doc/example/plan@${hash}"
   }
@@ -2445,7 +2445,7 @@ const stFixtureBin = process.env.ST_FIXTURE_BIN
 const testWithStFixture = stFixtureBin !== undefined && stFixtureBin !== '' ? it : it.skip
 
 // This person exists only in each private scratch daemon's config, never in a live fleet.
-const gateReviewer = 'person/genie-human-gate-test'
+const gateReviewer = 'person/step-reviewer'
 
 type IsolatedSt = {
   dir: string
@@ -3402,8 +3402,8 @@ testWithStFixture(
       expect(nativeStep(nativeRun(st, run.subject), 'risky').status).toBe('pending')
       expect(await nativeResults(st, review)).toEqual([])
       expectRefused(
-        st.command('alerts', 'approve', card.id, '--as', 'person/genie-human-gate-other-test'),
-        /wrong-reviewer|requires `person\/genie-human-gate-test`/u,
+        st.command('alerts', 'approve', card.id, '--as', 'person/someone-else'),
+        /wrong-reviewer|requires `person\/step-reviewer`/u,
       )
       expect(await nativeResults(st, review)).toEqual([])
       const result = stJson<NativeClaim>(st, 'alerts', 'approve', card.id, '--as', gateReviewer)
