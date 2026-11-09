@@ -25,6 +25,10 @@ WHERE kind='thread.state-set' AND json_extract(body, '$.fields.state')='closed';
 }
 
 
+#[path = "thread_inbox_source.rs"]
+mod inbox_source;
+pub use inbox_source::InboxOrigin;
+
 #[path = "thread_message_window.rs"]
 mod message_window;
 pub use message_window::{ThreadMessage, TimelineItem, TimelinePage, mark_read, mixed_message_content, mixed_timeline};

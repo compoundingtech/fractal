@@ -397,26 +397,7 @@ impl Store {
         {
             let connection = self.readers.get();
             for review in reviews {
-                // The gate's owner is the step whose work it reviews, a loop whose step runs
-                // it, or its run.
-                let step = if review.owner.starts_with("step-run/") {
-                    Some(review.owner.clone())
-                } else if review.owner.starts_with("loop-run/") {
-                    loop_step_tx(&connection, &review.owner)?.map(|step| step.subject)
-                } else {
-                    None
-                };
-                let conversation = attention_snapshot::conversation_agent(
-                    &connection,
-                    step.as_deref(),
-                    Some(&review.mission_run),
-                )?;
-                items.push(AttentionItemView {
-                    deadline_unix_ms: None,
-                    default_answer: None,
-                    conversation,
-                    ..attention_item_from_review(review)
-                });
+                items.push(attention_item_from_review_at(&connection, review)?);
             }
         }
 
@@ -1240,6 +1221,26 @@ pub(crate) fn attention_target_state_tx(connection: &Connection, target: &str) -
         });
     }
     Ok(pull_request_state_tx(connection, target)?.map(|(state, since)| (state, Some(since))))
+}
+
+pub(super) fn attention_item_from_review_at(
+    connection: &Connection,
+    review: HumanReviewView,
+) -> Result<AttentionItemView> {
+    let step = if review.owner.starts_with("step-run/") {
+        Some(review.owner.clone())
+    } else if review.owner.starts_with("loop-run/") {
+        loop_step_tx(connection, &review.owner)?.map(|step| step.subject)
+    } else {
+        None
+    };
+    let conversation = attention_snapshot::conversation_agent(
+        connection, step.as_deref(), Some(&review.mission_run),
+    )?;
+    Ok(AttentionItemView {
+        conversation,
+        ..attention_item_from_review(review)
+    })
 }
 
 fn attention_item_from_review(review: HumanReviewView) -> AttentionItemView {
