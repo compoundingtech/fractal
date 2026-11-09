@@ -97,8 +97,14 @@ nix profile install .
 For local development, enter `nix develop`. The shell provides Rust, sccache,
 cargo-nextest, and mold on Linux. Cargo uses mold for Linux links and the system
 linker on macOS; dev and test builds keep line tables for workspace crates and
-omit dependency debug info. On both platforms the shell sets `RUSTC_WRAPPER` to
-sccache. Run tests with `cargo nextest run --workspace --locked`.
+omit dependency debug info. Both Rust shells provide sccache 0.19.0 (including
+client-side compilation) and default `RUSTC_WRAPPER` only when it is unset.
+An inherited wrapper, including an explicitly empty value, is preserved.
+`SCCACHE_CLIENT_SIDE`, `SCCACHE_SERVER_UDS`, and host cache settings pass through
+unchanged. GitHub Actions still defaults to the CI wrapper, except when a host
+client-side configuration is inherited. Run tests with
+`cargo nextest run --workspace --locked`. The shell's environment contract can
+be checked without building it: `python3 scripts/sccache-shell-env-test`.
 The default and perf shells can opt into an owner-provisioned read-only WebDAV
 cache with `ST_SCCACHE_READ_ENDPOINT` and `ST_SCCACHE_READ_SERVER_PORT`. Leave
 both unset for the existing cache behavior. The port must be separate from the
