@@ -89,7 +89,8 @@ fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
 fn every_registry_kind_has_a_corpus_or_typed_thread_coverage() {
     for kind in fractal_schema::registry().claims.keys() {
         assert!(
-            corpus().contains_key(kind) || fractal_schema::threads::is_reserved_kind(kind),
+            corpus().contains_key(kind) || matches!(kind.as_str(),
+                "thread.created" | "thread.title-set" | "thread.state-set" | "thread.ask-linked"),
             "add {kind} to a versioned corpus or its dedicated typed-admission coverage"
         );
     }
@@ -985,11 +986,7 @@ impl World {
             // optional candidate revision stops the store's projection, so a restart fails;
             // only the planner writes those, always with one.
             .filter(|spec| {
-                !spec.kind.starts_with("checkpoint.")
-                    && !spec.kind.starts_with("planning-session.")
-                    // Thread metadata needs the typed owner/revision admission. Dedicated
-                    // store tests cover its real replicated lifecycle and historical origins.
-                    && !fractal_schema::threads::is_reserved_kind(&spec.kind)
+                !spec.kind.starts_with("checkpoint.") && !spec.kind.starts_with("planning-session.")
             })
             .collect::<Vec<_>>();
         let spec = *self.rng.pick(&kinds);
