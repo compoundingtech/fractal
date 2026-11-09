@@ -59,14 +59,24 @@ impl RequestDiagnostic {
     }
 
     pub(super) fn record(self, status: Option<StatusCode>, worker: bool) {
-        use std::io::Write as _;
         static LIMITER: LazyLock<Mutex<Limiter>> = LazyLock::new(|| Mutex::new(Limiter::default()));
+        self.record_to(status, worker, Instant::now(), &LIMITER, &mut std::io::stderr());
+    }
+
+    fn record_to(
+        &self,
+        status: Option<StatusCode>,
+        worker: bool,
+        now: Instant,
+        limiter: &Mutex<Limiter>,
+        output: &mut impl std::io::Write,
+    ) {
         let decision = Decision::of(status, worker, &self.method);
         // Poisoning must not hide the first refusal or affect the authorization result.
-        let suppressed = LIMITER.lock().map_or(Some(0), |mut limiter|
-            limiter.observe((*self.cause).clone(), decision, Instant::now()));
+        let suppressed = limiter.lock().map_or(Some(0), |mut limiter|
+            limiter.observe((*self.cause).clone(), decision, now));
         if let Some(suppressed) = suppressed {
-            let _ = writeln!(std::io::stderr(), "{}", self.line(decision, suppressed));
+            let _ = writeln!(output, "{}", self.line(decision, suppressed));
         }
     }
 }
@@ -89,9 +99,15 @@ impl Limiter {
             *suppressed = 0;
             return Some(count);
         }
-        // Never evict another cause's pending count or suppress an unseen refusal.
-        // At capacity, new keys remain visible rather than growing memory without bound.
-        if self.windows.len() < 1024 { self.windows.insert(key, (now, 0)); }
+        // Reclaim expired windows before admitting a new cause/decision pair.
+        // Look up the requested key first so its next report retains its count.
+        self.windows.retain(|_, (last, _)| now.duration_since(*last) < Duration::from_secs(60));
+        if self.windows.len() >= 1024 {
+            let oldest = self.windows.iter().min_by_key(|(_, (last, _))| *last)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest { self.windows.remove(&oldest); }
+        }
+        self.windows.insert(key, (now, 0));
         Some(0)
     }
 }
@@ -117,6 +133,64 @@ mod tests {
         assert_eq!(limiter.observe(other, Decision::ReadOnly, now), Some(0));
         assert_eq!(limiter.observe(first.clone(), Decision::Refused(400), now), Some(0));
         assert_eq!(limiter.observe(first, Decision::ReadOnly, now + Duration::from_secs(60)), Some(2));
+    }
+
+    #[test]
+    fn saturation_evicts_oldest_and_still_suppresses_new_keys() {
+        let now = Instant::now();
+        let mut limiter = Limiter::default();
+        for pid in 0..1024 {
+            let cause = AncestryUnavailableCause { pid: Some(pid), reason: AncestryUnavailableReason::WitnessMissing };
+            assert_eq!(limiter.observe(cause, Decision::Refused(400),
+                now + Duration::from_millis(u64::from(pid))), Some(0));
+        }
+        let newest = AncestryUnavailableCause { pid: Some(1024), reason: AncestryUnavailableReason::WitnessMissing };
+        let later = now + Duration::from_secs(2);
+        assert_eq!(limiter.observe(newest.clone(), Decision::Refused(400), later), Some(0));
+        assert_eq!(limiter.observe(newest.clone(), Decision::Refused(400), later), None);
+        assert_eq!(limiter.windows.len(), 1024);
+        assert!(!limiter.windows.contains_key(&(AncestryUnavailableCause {
+            pid: Some(0), reason: AncestryUnavailableReason::WitnessMissing,
+        }, Decision::Refused(400))));
+        assert!(limiter.windows.contains_key(&(newest, Decision::Refused(400))));
+    }
+
+    #[test]
+    fn inserting_new_key_reclaims_expired_windows() {
+        let now = Instant::now();
+        let mut limiter = Limiter::default();
+        for pid in 0..1024 {
+            let cause = AncestryUnavailableCause { pid: Some(pid), reason: AncestryUnavailableReason::WitnessMissing };
+            assert_eq!(limiter.observe(cause, Decision::ReadOnly, now), Some(0));
+        }
+        let next = cause(AncestryUnavailableReason::AncestorGenerationChanged);
+        let later = now + Duration::from_secs(60);
+        assert_eq!(limiter.observe(next.clone(), Decision::ReadOnly, later), Some(0));
+        assert_eq!(limiter.windows.len(), 1);
+        assert_eq!(limiter.observe(next, Decision::ReadOnly, later), None);
+    }
+
+    #[test]
+    fn real_emit_path_writes_one_line_for_identical_requests_then_reports_count() {
+        let now = Instant::now();
+        let limiter = Mutex::new(Limiter::default());
+        let record = RequestDiagnostic {
+            cause: Arc::new(cause(AncestryUnavailableReason::WitnessMissing)),
+            connector_pid: Some(7), connector_generation: Some(123),
+            method: Method::POST, route: "/v1/intent/apply".into(),
+        };
+        let mut output = Vec::new();
+        for _ in 0..100 {
+            record.record_to(Some(StatusCode::BAD_REQUEST), false, now, &limiter, &mut output);
+        }
+        let first = String::from_utf8(output.clone()).unwrap();
+        assert_eq!(first.lines().count(), 1);
+        assert!(first.contains("level=warn"));
+        record.record_to(Some(StatusCode::BAD_REQUEST), false,
+            now + Duration::from_secs(60), &limiter, &mut output);
+        let all = String::from_utf8(output).unwrap();
+        assert_eq!(all.lines().count(), 2);
+        assert!(all.lines().nth(1).unwrap().contains("suppressed=99"));
     }
 
     #[test]
