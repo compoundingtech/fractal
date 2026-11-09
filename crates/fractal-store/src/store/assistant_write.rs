@@ -28,7 +28,7 @@ pub fn authorize_grant(connection: &Connection, origin: &str, authorization: &As
 pub fn authorized_grant(connection: &Connection, origin: &str, authorization: &AssistantWriteAuthorization) -> Result<ClaimRecord, FractalError> {
     let denied = || FractalError::new("forbidden", "assistant write authorization changed or expired before commit");
     let authority_error = |error: FractalError| {
-        if matches!(error.code.as_str(), "assistant-grant-authority-not-ready" | "assistant-grant-subject-not-ready") {
+        if matches!(error.code, "assistant-grant-authority-not-ready" | "assistant-grant-subject-not-ready") {
             denied()
         } else { error }
     };
