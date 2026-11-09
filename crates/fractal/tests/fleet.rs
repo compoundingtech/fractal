@@ -22,6 +22,7 @@ fn st3() -> &'static str {
 mod process;
 use process::DaemonProcess;
 mod service_grants;
+mod thread_storage_floor;
 
 const PERSON: &str = "person/fleet-tester";
 const NOTE: &str = "custom.fleet-test.note";

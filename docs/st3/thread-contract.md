@@ -218,4 +218,15 @@ version 2 protects message content but cannot enable current writes. The signed 
 marker remains `thread_reader_version: 2`: this rollout changes metadata semantics, not that format.
 A legacy member that receives a signed thread-bearing message retains the envelope in quarantine.
 After upgrade, normal startup retries admission and restores the original timeline entry once.
-The SQLite storage floor keeps pre-privacy binaries from reopening upgraded state.
+This release advances published main's storage version 20 to 23. Private reader-pilot stores
+at versions 21 and 22 use the same normal upgrade path; no extra compatibility writer is added.
+Version 23 keeps older binaries, including timestamp-only version-22 readers, from reopening
+this upgraded store.
+The normal open path preserves stored claims, history, pairings, and operation receipts; it does
+not rewrite claim formats. Do not lower `user_version` to run an old binary against this state.
+
+That local floor does not protect a fresh old network member. Before activating writes, directly
+verify the current build and reader-readiness v3 on every serving/configured member; historical
+startup advertisements alone are insufficient deployment evidence. Keep old fresh rejoins out
+of the serving fleet. The transaction's existing peer-readiness gate remains fail-closed when
+a known configured/active member advertises an older reader.

@@ -121,6 +121,46 @@ mod tests {
     }
 
     #[test]
+    fn storage_23_upgrade_preserves_existing_history_and_pairing_admission() {
+        for previous in [20_u32, 21, 22] {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("claims.sqlite3");
+        let store = Store::open(&path, "upgrade").unwrap();
+        let person = "person/owner";
+        let message = store.append_claim(&ClaimInput {
+            subject:"message/before-upgrade".into(),kind:"message.sent".into(),actor:Some(person.into()),
+            fields:serde_json::from_value(json!({"from":person,"to":"agent/reviewer",
+                "content":"Retained history","status":"sent"})).unwrap(),
+            evidence:vec![],expected_subject:None,idempotency_key:Some("retained-message".into()),
+        }).unwrap();
+        let paired = store.append_client_operation_claim(&ClaimInput {
+            subject:"custom/client/pairing-before-upgrade".into(),kind:"custom.client.pairing-completed".into(),
+            actor:Some(person.into()),fields:serde_json::from_value(json!({
+                "person_id":person,"session_actor":"person/owner/session/phone","device_id":"device/phone",
+                "credential_hash":"test-not-a-secret","expires_at_unix_ms":now_ms()+60_000,
+                "scopes":["read.projections"],
+            })).unwrap(),evidence:vec![],expected_subject:None,idempotency_key:None,
+        }).unwrap();
+        assert!(store.pairing_completion_is_trusted(&paired, now_ms()).unwrap());
+        drop(store);
+        // The logical schema and stored claim formats are unchanged by this release.
+        // Exercise the normal accepted open range, including published main's version 20.
+        // This does not manufacture trust for an ambiguous old pairing record.
+        Connection::open(&path).unwrap().pragma_update(None,"user_version",previous).unwrap();
+        let upgraded = Store::open(&path,"upgrade").unwrap();
+        assert_eq!(upgraded.readers.get().pragma_query_value(None,"user_version",|row|row.get::<_,u32>(0)).unwrap(),23);
+        for original in [&message, &paired] {
+            let retained = upgraded.graph.claim_by_id(&original.id).unwrap().unwrap();
+            assert_eq!(retained.body, original.body);
+            assert_eq!(retained.predecessors, original.predecessors);
+        }
+        assert_eq!(upgraded.operation_claim("retained-message").unwrap().unwrap().id,message.id);
+        assert!(upgraded.pairing_completion_is_trusted(&paired,now_ms()).unwrap());
+        assert!(!upgraded.pairing_completion_is_revoked(&paired).unwrap());
+        }
+    }
+
+    #[test]
     fn generic_read_privacy_does_not_unlock_thread_writes() {
         let writer = Store::open_memory("writer").unwrap();
         let reader = Store::open_memory("legacy-reader").unwrap();
