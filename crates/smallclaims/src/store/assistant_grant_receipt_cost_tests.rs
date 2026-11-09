@@ -174,7 +174,9 @@ fn membership_window_changes_share_the_fixed_transaction_budget_without_replacin
         [key.public()], |row| row.get(0),
     ).unwrap();
     assert_eq!(unchanged_rowid, stable_rowid, "unchanged windows are never deleted and reinserted");
-    assert!(authority::maintenance_pending(&store.readers.get()).unwrap());
+    // Membership-only work is tracked by the Store's observed generation, not
+    // the connection-level claim/signature dirty queues.
+    assert!(store.assistant_grant_authority_maintenance_pending().unwrap());
     drain_authority(&store);
     let remaining: usize = store.readers.get().query_row(
         "SELECT COUNT(*) FROM assistant_grant_membership_windows WHERE writer='obsolete'",

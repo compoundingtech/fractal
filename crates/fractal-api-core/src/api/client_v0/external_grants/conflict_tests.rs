@@ -391,6 +391,8 @@ fn unauthenticated_legacy_transitions_preserve_authenticated_lifecycle_history()
         if let Some(revoke) = &authentic_revoke {
             assert!(a.store.claim_has_authenticated_member_writer(&revoke.id).unwrap());
         }
+        assert_eq!(effective(&a, &foreign).unwrap().id, live.id);
+        assert_eq!(revoked(&a, &foreign).unwrap(), scenario == "revocation");
 
         // A different incarnation of the same writer sends a signed envelope
         // below the admission floor. It is visible Legacy data, not authority,
@@ -419,8 +421,18 @@ fn unauthenticated_legacy_transitions_preserve_authenticated_lifecycle_history()
         assert_eq!(tests::reference_transition(&a, &foreign, POLICY).unwrap().unwrap().id, live.id);
         assert_eq!(tests::reference_transition(&a, &foreign, REVOKED).unwrap().map(|claim| claim.id),
             authentic_revoke.as_ref().map(|claim| claim.id.clone()));
-        assert_eq!(effective(&a, &foreign).unwrap().id, live.id);
-        assert_eq!(revoked(&a, &foreign).unwrap(), scenario == "revocation");
+        // Maintenance has finished, but this below-floor incarnation cannot
+        // authenticate. Its retained transition still fences its own subject;
+        // it must neither grant bearer access nor replace the last authenticated
+        // snapshot used for cross-subject conflict admission.
+        assert!(authenticate_id(&a, SERVICE_ID).unwrap().is_none());
+        for error in [
+            effective(&a, &foreign).unwrap_err(),
+            revoked(&a, &foreign).unwrap_err(),
+        ] {
+            assert_eq!(error.code, "forbidden");
+            assert_eq!(error.details["reason"], "credential-rejected");
+        }
         let candidate = json!({"profile":"assistant","principal":PRINCIPAL});
         let reference = tests::rust_only_admission(&a, &candidate).map_err(|error| error.code);
         let production = admit_profile(&a, &candidate).map_err(|error| error.code);
