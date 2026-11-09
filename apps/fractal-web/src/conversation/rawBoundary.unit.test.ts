@@ -234,7 +234,7 @@ describe('native closed transcript boundary', () => {
     })
     it.each([
       [{ injectedRules: ['no-force-push'] }, 'Rule applied: no-force-push'],
-      [{ injectedRules: ['/home/example/.omp/rules/no-force-push.md'] }, 'Rule applied: no-force-push'],
+      [{ injectedRules: ['/opt/example/.omp/rules/no-force-push.md'] }, 'Rule applied: no-force-push'],
       [{ injectedRules: [{ name: 'first' }, 'second'] }, 'Rules applied: first, second'],
       [{ injectedRules: ['one', 'two', 'three', 'four'] }, 'Rules applied: one, two, three +1'],
       [{ injectedRules: ['Never force push.\nThe whole rule text, not a name.'] }, 'Rule applied'],
