@@ -235,15 +235,15 @@ pub struct HandoffReturnRequest {
 }
 
 /// External work actions drain before reading, then invalidate publications only after commit.
-pub(super) fn with_run_projection<T: Send>(
+pub(super) fn with_run_projection<T: Send, E: From<FractalError> + Send>(
     store: &Store,
     subject: &str,
-    action: impl FnOnce(&Transaction<'_>) -> Result<T, FractalError> + Send,
-) -> Result<T, FractalError> {
+    action: impl FnOnce(&Transaction<'_>) -> Result<T, E> + Send,
+) -> Result<T, E> {
     let (value, drained) = store.connection.batched(|tx| {
-        let drained = fractal_store::store::finish_run_projection_tx(tx, subject)?;
+        let drained = fractal_store::store::finish_run_projection_tx(tx, subject).map_err(E::from)?;
         action(tx).map(|value| (value, drained))
-    }).map_err(internal)??;
+    }).map_err(|error| E::from(internal(error)))??;
     if drained {
         store.run_projection_finished();
     }

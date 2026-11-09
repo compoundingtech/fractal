@@ -22,6 +22,7 @@ use crate::ArrangementsStore;
 use super::*;
 use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
+mod huge_part_rebuild_bench;
 use fractal_delivery::store::shared_missions::*;
 use fractal_delivery::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
 use fractal_delivery::store::shared_seats_shared_missions::*;
@@ -29,6 +30,213 @@ use fractal_delivery::store::shared_seats_shared_missions::{DEFINITIONS_PARSED, 
 use fractal_store::store::tests_shared_missions::*;
 use fractal_store::store::tests_shared_missions::{CARRY_SOURCE, carry_request, listed, misproject_a_step, publish_carry, request_fault};
 
+
+#[test]
+fn uncached_failed_step_retry_uses_its_existing_writer_with_and_without_pending_projection() {
+    for pending in [false, true] {
+        let store = Store::open_memory("node").unwrap();
+        publish_carry(
+            &store,
+            "version 2\nmission \"carry\" state=\"ready\" { goal \"Retry failed work.\"; step \"work\" { goal \"Work.\" } }",
+            "retry-writer-definition",
+        );
+        let run = store.create_mission_run(&MissionRunRequest {
+            mission: "carry".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/requester".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: "retry-writer-run".into(),
+        }).unwrap();
+        let step = &run.steps[0];
+        store.set_step_state(&step.subject, "failed", Some("retryable failure")).unwrap();
+        if pending {
+            restore_pending_generation(&store, &run);
+        }
+        let retried = store.retry_failed_step(
+            &step.subject, "person/requester", "retry failed work", "uncached-retry",
+        ).unwrap();
+        assert_eq!(retried.generation, run.generation);
+        assert_eq!(retried.steps[0].status, "pending");
+        assert_eq!(retried.steps[0].attempt, step.attempt + 1);
+        assert!(!store.run_projection_pending(&run.subject).unwrap());
+        assert!(store.set_step_state(&step.subject, "ready", None).unwrap());
+    }
+}
+
+#[test]
+fn operational_repair_rejects_expired_lease_token_after_pending_renewal() {
+    let store = Store::open_memory("node").unwrap();
+    publish_mission(
+        &store,
+        "version 2\nagent \"worker\" { workspace \"/tmp\"; command \"true\" }\nmission \"pending-repair\" state=\"ready\" { goal \"Keep renewed work.\"; step \"work\" { assigned-to \"agent/node.worker\" } }",
+        "pending-repair-definition",
+    );
+    let run = store.create_mission_run(&MissionRunRequest {
+        mission: "pending-repair".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/requester".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "pending-repair-run".into(),
+    }).unwrap();
+    let subject = &run.steps[0].subject;
+    store.set_step_state(subject, "ready", None).unwrap();
+    let claimed = store.work_action(subject, "claim", &carry_request("one", "pending-repair-claim")).unwrap();
+    expire_work_lease_by_claim(&store, subject, "agent/node.worker", "one");
+    let plan = store.operational_repair_plan_with_legacy_starts_and_filter(
+        &[], std::slice::from_ref(subject), &["expired-claim".to_owned()],
+    ).unwrap();
+    assert_eq!(plan.items.len(), 1);
+    let expiry = now_ms() + 600_000;
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        append_claim_tx(
+            &transaction, "node", subject, "work.renewed", Some("agent/node.worker"),
+            &json!({"fields": {
+                "status": "claimed", "attempt": claimed.attempt, "claimant": "agent/node.worker",
+                "claim_incarnation": "one", "claim_expires_at_unix_ms": expiry,
+                "readiness_epoch": claimed.readiness_epoch,
+            }}), &[], None,
+        ).unwrap();
+        let aggregate = serde_json::to_string(&Aggregate::RunPart(run.id.clone())).unwrap();
+        transaction.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            params![format!("projection-run-rebuild:{aggregate}"), aggregate],
+        ).unwrap();
+        transaction.commit().unwrap();
+    }
+    let before = store.index().unwrap();
+    let error = store.apply_operational_repair(&plan.token).unwrap_err();
+    assert_eq!(error.code, "stale-repair-plan");
+    assert_eq!(store.index().unwrap(), before, "stale repair writes no release claim");
+    assert!(store.run_projection_pending(&run.subject).unwrap(), "refusal rolls back its speculative drain");
+    let renewed = store.step_run(subject).unwrap().unwrap();
+    assert_eq!(renewed.claimant.as_deref(), Some("agent/node.worker"));
+    assert_eq!(renewed.claim_incarnation.as_deref(), Some("one"));
+    assert_eq!(renewed.claim_expires_at_unix_ms, Some(expiry));
+    assert!(store.operational_repair_plan_with_legacy_starts_and_filter(
+        &[], std::slice::from_ref(subject), &["expired-claim".to_owned()],
+    ).unwrap().items.is_empty());
+}
+
+fn pending_revision_fixture(protected: bool) -> (Store, MissionRunView, MissionRunView, MissionSpec, Option<RevisionProposalView>) {
+    let store = Store::open_memory("node").unwrap();
+    let source = |goal: &str| format!(
+        "version 2\nmission \"carry\" state=\"ready\" {} {{ goal \"Exercise pending revisions.\"; step \"work\" {{ goal {goal:?}; }} }}",
+        if protected { "revisions=\"human-only\" revision-reviewer=\"person/reviewer\"" } else { "" },
+    );
+    publish_carry(&store, &source("First goal."), "pending-revision-first");
+    let first = store.create_mission_run(&MissionRunRequest {
+        mission: "carry".into(), revision: None, workspace: "/tmp".into(),
+        requester: Some("person/requester".into()), mode: Some("run".into()),
+        inputs: BTreeMap::new(), idempotency_key: "pending-revision-run".into(),
+    }).unwrap();
+    let second_spec = publish_carry(&store, &source("Second goal."), "pending-revision-second");
+    let candidate = publish_carry(&store, &source("Third goal."), "pending-revision-third");
+    let proposal = protected.then(|| store.create_revision_proposal(
+        &first.subject, &candidate, "person/requester", "review current work", "pending-proposal",
+    ).unwrap());
+    let second = store.adopt_mission_revision_inner(
+        &first.subject, &second_spec, "person/requester", "independent cutover",
+        "pending-revision-cutover", Some(&first.generation), true, None, false,
+    ).unwrap();
+    (store, first, second, candidate, proposal)
+}
+
+fn restore_pending_generation(store: &Store, first: &MissionRunView) {
+    let pending = serde_json::to_string(&Aggregate::RunTree(first.id.clone())).unwrap();
+    let mut connection = store.connection.write();
+    let transaction = connection.transaction().unwrap();
+    transaction.execute(
+        "UPDATE mission_runs SET current_generation_id=?2 WHERE id=?1",
+        params![first.id, generation_id_from_subject(&first.generation)],
+    ).unwrap();
+    transaction.execute(
+        "INSERT INTO meta(key,value) VALUES(?1,?2)",
+        params![format!("projection-run-rebuild:{pending}"), pending],
+    ).unwrap();
+    transaction.commit().unwrap();
+}
+
+#[test]
+fn cancellation_drains_current_generation_and_unprojected_descendants() {
+    let (store, first, second, _, _) = pending_revision_fixture(false);
+    let source = "version 2\nmission \"pending-child\" state=\"ready\" { goal \"Keep child work open.\"; step \"work\" { goal \"Child work.\" } }";
+    publish_mission(&store, source, "pending-child-definition");
+    let child = store.create_child_mission_run(
+        &MissionRunRequest {
+            mission: "pending-child".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/requester".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: "pending-cancel-child".into(),
+        },
+        &second, &second.steps[0].subject, None,
+    ).unwrap();
+    {
+        let mut connection = store.connection.write();
+        let transaction = connection.transaction().unwrap();
+        transaction.execute("DELETE FROM step_runs WHERE run_id=?1", [&child.id]).unwrap();
+        transaction.execute("DELETE FROM run_generations WHERE run_id=?1", [&child.id]).unwrap();
+        transaction.execute("DELETE FROM mission_runs WHERE id=?1", [&child.id]).unwrap();
+        transaction.commit().unwrap();
+    }
+    restore_pending_generation(&store, &first);
+    let stale = store.request_mission_run_cancellation_at_generation(
+        &first.subject, "cancel current tree", Some(&first.generation),
+    ).unwrap_err();
+    assert_eq!(stale.code, "stale-fence");
+    assert!(store.run_projection_pending(&first.subject).unwrap());
+    assert!(store.request_mission_run_cancellation_at_generation(
+        &first.subject, "cancel current tree", Some(&second.generation),
+    ).unwrap());
+    assert!(!store.run_projection_pending(&first.subject).unwrap());
+    let current = store.mission_run(&first.subject).unwrap().unwrap();
+    assert_eq!(current.generation, second.generation);
+    let restored_child = store.mission_run(&child.subject).unwrap().unwrap();
+    for run in [&current, &restored_child] {
+        assert!(run.steps.iter().all(|step| matches!(step.status.as_str(), "completed" | "failed" | "cancelled")));
+    }
+    assert!(store.work(None, false).unwrap().is_empty());
+}
+
+#[test]
+fn revision_adoption_revalidates_generation_after_pending_drain() {
+    let (store, first, second, candidate, _) = pending_revision_fixture(false);
+    restore_pending_generation(&store, &first);
+    let stale = store.adopt_mission_revision_inner(
+        &first.subject, &candidate, "person/requester", "replace current work",
+        "pending-adopt", Some(&first.generation), true, None, false,
+    ).unwrap_err();
+    assert_eq!(stale.code, "stale-revision-proposal");
+    assert!(store.run_projection_pending(&first.subject).unwrap());
+    let adopted = store.adopt_mission_revision_inner(
+        &first.subject, &candidate, "person/requester", "replace current work",
+        "pending-adopt", Some(&second.generation), true, None, false,
+    ).unwrap();
+    assert_eq!(adopted.revision, candidate.revision);
+    assert_ne!(adopted.generation, second.generation);
+    assert!(!store.run_projection_pending(&first.subject).unwrap());
+}
+
+#[test]
+fn revision_proposal_and_approval_use_the_drained_generation() {
+    let (store, first, second, candidate, stale_proposal) = pending_revision_fixture(true);
+    let stale_proposal = stale_proposal.unwrap();
+    restore_pending_generation(&store, &first);
+    let stale = store.approve_revision_proposal(
+        &stale_proposal.id, "person/reviewer", stale_proposal.preview_hash.as_deref().unwrap(), "pending-approval",
+    ).unwrap_err();
+    assert_eq!(stale.code, "stale-revision-proposal");
+    store.cancel_revision_proposal(
+        &stale_proposal.id, "person/requester", Some("superseded generation"), "pending-proposal-cancel",
+    ).unwrap();
+    restore_pending_generation(&store, &first);
+    let proposal = store.create_revision_proposal(
+        &first.subject, &candidate, "person/requester", "review current work", "pending-current-proposal",
+    ).unwrap();
+    assert_eq!(proposal.source_generation, second.generation);
+    assert!(!store.run_projection_pending(&first.subject).unwrap());
+    let approved = store.approve_revision_proposal(
+        &proposal.id, "person/reviewer", proposal.preview_hash.as_deref().unwrap(), "pending-current-approval",
+    ).unwrap();
+    assert_eq!(approved.status, "applied");
+    assert_eq!(approved.mission_run.revision, candidate.revision);
+}
 
 #[test]
 fn pending_request_queries_return_only_unstarted_history() {
@@ -3834,7 +4042,10 @@ use coalesce_run_part_rebuild::{coalesced_rebuild_fixture, write_coalesced_rebui
 fn receive_coalesces_run_part_rebuilds_and_resumes_after_interruption() {
     let (controller, uninterrupted, interrupted, directory, step) = coalesced_rebuild_fixture();
     write_coalesced_rebuild_backlog(&controller, &step, 1_536);
-    let exchange = exchange_from(&controller, &uninterrupted.replication_inventory().unwrap());
+    let mut inventory = uninterrupted.replication_inventory().unwrap();
+    // A bare public inventory has no accepts hint and otherwise gets the legacy 512 page.
+    inventory.accepts = Some(4_096);
+    let exchange = exchange_from(&controller, &inventory);
     assert!(exchange.envelopes.len() >= 1_536);
     for worker in [&uninterrupted, &interrupted] {
         worker.receive_replication_exchange("controller", TEST_FLEET, &exchange).unwrap();
@@ -3964,14 +4175,159 @@ fn receive_returns_with_no_pending_run_parts() {
     ).unwrap();
     assert_eq!(pending, 0);
     assert!(!worker.run_projection_pending(&run).unwrap());
-    let projected_tree = worker.mission_run(&run).unwrap().unwrap();
+    let mut projected_tree = worker.mission_run(&run).unwrap().unwrap();
     assert_eq!(projected_tree.steps.len(), 256);
+    // Ready age is elapsed wall time, not a projected row. Compare every persisted field
+    // unchanged while excluding only the clock-dependent presentation field.
+    for step in &mut projected_tree.steps {
+        step.ready_age_ms = None;
+    }
     let projected_tree = serde_json::to_value(projected_tree).unwrap();
     let projected_graph = graph_digest_of(&worker);
     worker.replay_replication_graph().unwrap();
-    let replayed_tree = serde_json::to_value(worker.mission_run(&run).unwrap().unwrap()).unwrap();
+    let mut replayed_tree = worker.mission_run(&run).unwrap().unwrap();
+    for step in &mut replayed_tree.steps {
+        step.ready_age_ms = None;
+    }
+    let replayed_tree = serde_json::to_value(replayed_tree).unwrap();
     assert_eq!(projected_tree, replayed_tree);
     assert_eq!(projected_graph, graph_digest_of(&worker));
+}
+
+fn receive_until_run_projection_is_pending(controller: &Store, worker: &Store) {
+    // Make the incoming structural claim sort before an already projected event, so this
+    // exercises the real dirty-chunk marker rather than manufacturing pending metadata.
+    worker.set_write_clock_at(now_ms() + 1_000_000).unwrap();
+    worker.append_claim(&ClaimInput {
+        subject: "custom/pending-attention/order".into(),
+        kind: "custom.pending-attention.order".into(),
+        actor: None,
+        fields: BTreeMap::new(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    worker.project_replication_backlog().unwrap();
+    let exchange = exchange_from(controller, &worker.replication_inventory().unwrap());
+    worker.receive_replication_exchange("controller", TEST_FLEET, &exchange).unwrap();
+    worker.validate_replication_backlog().unwrap();
+    let interrupted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        worker.project_replication_backlog_with_yield(|| {
+            panic!("interrupt after dirty marker commit, before drain");
+        }).unwrap();
+    }));
+    assert!(interrupted.is_err());
+}
+
+#[test]
+fn full_replay_wakes_runs_skipped_while_projection_was_pending() {
+    let (controller, worker, _root, children) = replicated_run_tree(1);
+    let child = &children[0];
+    controller.set_step_state(&child.steps[0].subject, "blocked", None).unwrap();
+    receive_until_run_projection_is_pending(&controller, &worker);
+    // This is the decision fence: a reconciler skips this run until a completion wake.
+    assert!(worker.run_projection_pending(&child.subject).unwrap());
+    let observations = || {
+        worker.connection.lock().unwrap().query_row(
+            "SELECT COUNT(*) FROM local_observations WHERE subject=?1 AND kind='run-projection.finished'",
+            [&child.subject], |row| row.get::<_, u64>(0),
+        ).unwrap()
+    };
+    let before = observations();
+    worker.replay_replication_graph().unwrap();
+    assert!(!worker.run_projection_pending(&child.subject).unwrap());
+    assert_eq!(observations(), before + 1, "replay must wake the skipped run without another receive");
+    assert_eq!(worker.step_run(&child.steps[0].subject).unwrap().unwrap().status, "blocked");
+    let replayed = graph_digest_of(&worker);
+    worker.replay_replication_graph().unwrap();
+    assert_eq!(observations(), before + 1, "a replay without pending parts adds no completion wake");
+    assert_eq!(replayed, graph_digest_of(&worker));
+}
+
+#[test]
+fn attention_explicit_step_revalidates_after_pending_completion() {
+    let (controller, worker, _root, children) = replicated_run_tree(1);
+    let step = &children[0].steps[0].subject;
+    controller.set_step_state(step, "completed", None).unwrap();
+    receive_until_run_projection_is_pending(&controller, &worker);
+    assert!(worker.run_projection_pending(step).unwrap());
+    let error = worker.request_attention_closing(
+        "attention/pending-ended-step",
+        &AttentionRequest {
+            reviewer: "person/test".into(),
+            title: "Check the step".into(),
+            reason: "Wait for its end".into(),
+            severity: "warning".into(),
+            targets: Vec::new(),
+            actor: "agent/worker.one".into(),
+            idempotency_key: "pending-ended-step-attention".into(),
+        },
+        &AttentionClosing { step: Some(step.clone()), ..Default::default() },
+    ).unwrap_err();
+    assert_eq!(error.code, "attention-step-ended");
+    assert!(worker.attention_request("attention/pending-ended-step").unwrap().is_none());
+    // Failed action admission rolls back its attempted drain as well as the new request.
+    assert!(worker.run_projection_pending(step).unwrap());
+    worker.project_replication_backlog().unwrap();
+    assert_eq!(worker.step_run(step).unwrap().unwrap().status, "completed");
+}
+
+#[test]
+fn attention_implicit_step_selects_from_the_drained_projection() {
+    let (controller, worker, _root, children) = replicated_run_tree(1);
+    let step = &children[0].steps[0].subject;
+    worker_work(&controller, step, "claim", None, "pending-attention-claim");
+    controller.set_step_state(step, "working", None).unwrap();
+    receive_until_run_projection_is_pending(&controller, &worker);
+    assert!(worker.run_projection_pending(step).unwrap());
+    let request = AttentionRequest {
+        reviewer: "person/test".into(),
+        title: "Need a decision".into(),
+        reason: "The current claimed step should close this".into(),
+        severity: "warning".into(),
+        targets: Vec::new(),
+        actor: "agent/worker.one".into(),
+        idempotency_key: "pending-inferred-step-attention".into(),
+    };
+    let attention = worker.request_attention_closing(
+        "attention/pending-inferred-step", &request, &AttentionClosing::default(),
+    ).unwrap();
+    assert_eq!(attention.step.as_deref(), Some(step.as_str()));
+    assert_eq!(attention.step_attempt, Some(1));
+    assert!(!worker.run_projection_pending(step).unwrap());
+    worker.set_step_state(step, "completed", None).unwrap();
+    let replayed = worker.request_attention_closing(
+        "attention/pending-inferred-step", &request, &AttentionClosing::default(),
+    ).unwrap();
+    assert_eq!(attention.request, replayed.request, "operation replay precedes new admission");
+}
+
+#[test]
+fn person_routing_repair_excludes_runs_completed_in_pending_projection() {
+    let (controller, worker, _root, children) = replicated_run_tree(1);
+    let child = &children[0];
+    worker.append_claim(&ClaimInput {
+        subject: "custom/known-repaired-person".into(),
+        kind: "custom.known-repaired-person".into(),
+        actor: Some("person/repaired".into()),
+        fields: BTreeMap::new(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+    controller.set_mission_run_state(&child.id, "completed", "terminal", None).unwrap();
+    receive_until_run_projection_is_pending(&controller, &worker);
+    assert!(worker.run_projection_pending(&child.subject).unwrap());
+    let report = worker.rename_person(&fractal_kernel::model::PersonRenameRequest {
+        old_person: "person/test".into(),
+        new_person: "person/repaired".into(),
+        actor: "person/test".into(),
+        idempotency_key: "repair-after-pending-completion".into(),
+    }, &[]).unwrap();
+    assert!(!report.run_requesters.contains(&child.subject));
+    assert!(!report.live_run_references.contains_key(&child.subject));
+    assert!(!worker.run_projection_pending(&child.subject).unwrap());
+    assert_eq!(worker.mission_run(&child.id).unwrap().unwrap().status, "completed");
 }
 
 

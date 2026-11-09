@@ -389,20 +389,7 @@ impl LanesStore for Store {
                 }
                 lane::MARKED_CLAIM
             }
-            "approve" => {
-                if view.approver.as_deref() != Some(actor) {
-                    return Err(FractalError::new(
-                        "lane-approval-denied",
-                        match view.approver.as_deref() {
-                            Some(approver) => {
-                                format!("only {approver} approves entries in `{lane_subject}`")
-                            }
-                            None => format!("`{lane_subject}` declares no approver"),
-                        },
-                    ));
-                }
-                lane::APPROVED_CLAIM
-            }
+            "approve" => lane::APPROVED_CLAIM,
             other => {
                 return Err(FractalError::new(
                     "invalid-lane-change",
@@ -421,40 +408,55 @@ impl LanesStore for Store {
             expected_subject: None,
             idempotency_key: Some(request.idempotency_key.clone()),
         };
-        // A retry names the earlier operation even after the lane moved on. Reappend to verify
-        // the full request digest before returning its canonical claim.
-        if self
-            .operation_claim(&request.idempotency_key)
-            .map_err(internal)?
-            .is_some()
+        // A duplicate join is a read-only no-op. Every appended change rechecks the
+        // live declaration and membership after draining its owner in the same writer.
+        if kind == lane::JOINED_CLAIM && view.open
+            && view.entries.iter().any(|queued| queued.entry == entry)
+            && self.operation_claim(&request.idempotency_key).map_err(internal)?.is_none()
         {
-            let claim = self.append_claim(&input)?;
-            return self.lane_change_response(&lane_subject, Some(claim));
+            return self.lane_change_response(&lane_subject, None);
         }
-        if !view.open {
-            return Err(FractalError::new(
-                "lane-closed",
-                format!("`{lane_subject}` is closed: its run ended or a revision dropped it"),
-            ));
-        }
-        let queued = |subject: &str| view.entries.iter().any(|queued| queued.entry == subject);
-        if kind == lane::JOINED_CLAIM {
-            if queued(&entry) {
-                return self.lane_change_response(&lane_subject, None);
+        let subjects = view.run.iter().cloned().collect::<Vec<_>>();
+        let claim = self.append_claim_with_run_projection(&input, &subjects, &|connection| {
+            let declaration = connection.query_row(
+                "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
+                 FROM desired WHERE subject=?1 AND kind='lane'",
+                [&lane_subject],
+                desired_from_row,
+            ).optional().map_err(internal)?.ok_or_else(|| lane_not_found(&lane_subject))?;
+            let current = lane_view_tx(connection, &declaration).map_err(internal)?;
+            if !current.open {
+                return Err(FractalError::new(
+                    "lane-closed",
+                    format!("`{lane_subject}` is closed: its run ended or a revision dropped it"),
+                ));
             }
-        } else {
-            for named in std::iter::once(&entry).chain(anchor.as_ref()) {
-                if !queued(named) {
-                    return Err(FractalError::new(
-                        "entry-not-in-lane",
-                        format!("`{named}` is not in `{lane_subject}`"),
-                    )
-                    .with_detail("lane", lane_subject.clone())
-                    .with_detail("entry", named.clone()));
+            // A revision may change the entry prefix or the named approver.
+            lane_entry(&current, &entry)?;
+            if kind == lane::APPROVED_CLAIM && current.approver.as_deref() != Some(actor) {
+                return Err(FractalError::new(
+                    "lane-approval-denied",
+                    match current.approver.as_deref() {
+                        Some(approver) => format!("only {approver} approves entries in `{lane_subject}`"),
+                        None => format!("`{lane_subject}` declares no approver"),
+                    },
+                ));
+            }
+            if kind != lane::JOINED_CLAIM {
+                for named in std::iter::once(&entry).chain(anchor.as_ref()) {
+                    lane_entry(&current, named)?;
+                    if !current.entries.iter().any(|queued| queued.entry == *named) {
+                        return Err(FractalError::new(
+                            "entry-not-in-lane",
+                            format!("`{named}` is not in `{lane_subject}`"),
+                        )
+                        .with_detail("lane", lane_subject.clone())
+                        .with_detail("entry", named.clone()));
+                    }
                 }
             }
-        }
-        let claim = self.append_claim(&input)?;
+            Ok(())
+        })?;
         self.lane_change_response(&lane_subject, Some(claim))
     }
 

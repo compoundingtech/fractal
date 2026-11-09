@@ -8745,7 +8745,9 @@ impl Store {
         target: u64,
         log: &mut impl FnMut(&str),
     ) {
-        crate::receive_metrics::projection_error(error.code);
+        crate::receive_metrics::projection_error(
+            error.code, error.details.get("projection_stage").and_then(Value::as_str),
+        );
         let stage = error
             .details
             .get("projection_stage")
@@ -8856,11 +8858,27 @@ impl Store {
                 processed: None,
                 total: None,
             });
+            let final_drain = count == 0 && rebuild_pending;
+            // Preserve typed failures even when the chunk deliberately returns Ok(false).
+            // This also covers errors after rebuilding, while recording health or committing.
+            let record_error = |error: FractalError| {
+                let error = if final_drain {
+                    error.with_detail("projection_stage", "final-drain")
+                } else if !error.details.contains_key("projection_stage") {
+                    error.with_detail("projection_stage", "chunk")
+                } else {
+                    error
+                };
+                crate::receive_metrics::projection_error(
+                    error.code, error.details.get("projection_stage").and_then(Value::as_str),
+                );
+                error
+            };
             let result = (|| -> Result<bool, FractalError> {
                 if source_empty {
                     return Ok(false);
                 }
-                if count == 0 && rebuild_pending {
+                if final_drain {
                     stages.enter("finish-projection-work");
                     self.runtime.finish_projection_work(&transaction)?;
                     self.runtime.after_projection(&transaction)?;
@@ -8960,7 +8978,8 @@ impl Store {
             })();
             match result {
                 Ok(replayed) => {
-                    let rebuild_pending = self.runtime.projection_work_pending(&transaction)?;
+                    let rebuild_pending = self.runtime.projection_work_pending(&transaction)
+                        .map_err(record_error)?;
                     stages.enter("health");
                     // A fallback replay folds the whole log, including anything admitted after
                     // this pass started. An incremental chunk advances only its bounded frontier.
@@ -8980,9 +8999,10 @@ impl Store {
                             params![through, now_ms().to_string(),
                                 if rebuild_pending { "stale" } else { "healthy" },
                                 rebuild_pending.then_some("pending-projection-work")],
-                        )?;
+                        ).map_err(internal).map_err(record_error)?;
                         stages.enter("commit");
-                        transaction.commit_with_deferred_runtime()?;
+                        transaction.commit_with_deferred_runtime()
+                            .map_err(internal).map_err(record_error)?;
                         crate::receive_metrics::projection_chunk();
                         // A fallback replay folds the whole log in this one hold.
                         crate::windows::holds::covered(
@@ -9050,6 +9070,8 @@ impl Store {
                     return Ok(true);
                 }
                 Err(error) => {
+                    let error = record_error(error);
+                    self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
                     stages.enter("rollback");
                     transaction.rollback()?;
                     if error.is_sqlite_contention() {

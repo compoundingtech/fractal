@@ -306,6 +306,7 @@ pub async fn replication_checkpoint_adopt(
 /// Admission time covers validation and repairs; projection time includes its lock waits.
 /// Counts include backlog work done by this request, not only envelopes it offered.
 /// Commits count successful managed transactions, not savepoints or implicit autocommit.
+/// `projection_stage` identifies failed final drains or other projection failure boundaries.
 pub async fn replication_receive(
     State(state): State<AppState>,
     headers: axum::http::HeaderMap,
@@ -340,6 +341,7 @@ pub async fn replication_receive(
         commits = counters.commits,
         total_ms = started.elapsed().as_secs_f64() * 1000.0,
         outcome = %outcome,
+        projection_stage = %counters.projection_stage.as_deref().unwrap_or("-"),
         "replication receive summary",
     );
     result

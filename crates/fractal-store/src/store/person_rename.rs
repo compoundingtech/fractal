@@ -20,7 +20,7 @@ impl Store {
             return Err(FractalError::new("invalid-person-rename", "a rename needs distinct people and a nonempty idempotency key"));
         }
         validate_claim_subject(&input.actor)?;
-        self.connection.batched(|tx| {
+        let report = self.connection.batched(|tx| {
             identities::check_fleet_registry_conn(
                 tx, &self.origin, configured_peers, &self.fractal.schema_digest(),
             )?;
@@ -55,6 +55,11 @@ impl Store {
                 params![input.old_person, input.new_person], |row| row.get(0)).map_err(internal)?;
             if competing {
                 return Err(FractalError::new("person-rename-conflict", "OLD already has a completed repair to another person"));
+            }
+            // A global routing repair must see current run generations and work assignments.
+            // There is no single run to fence: drain the pending set before selecting any.
+            while projection_work_pending_tx(tx)? {
+                finish_projection_work_tx(tx)?;
             }
             if !known_person_tx(tx, &input.new_person).map_err(internal)? {
                 return Err(FractalError::new("unknown-person", "NEW must already be known from stored person identity or routing evidence"));
@@ -148,7 +153,9 @@ impl Store {
                 &json!({"fields": {"old_person": input.old_person, "new_person": input.new_person, "report": report},
                     "idempotency_key": input.idempotency_key}), &[], None).map_err(claim_append_error)?;
             Ok(report)
-        }).map_err(internal)?
+        }).map_err(internal)??;
+        self.run_projection_finished();
+        Ok(report)
     }
 }
 

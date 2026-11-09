@@ -4253,6 +4253,26 @@ impl Store {
         self.append_claim_outcome(input).map(|(claim, _)| claim)
     }
 
+    /// Revalidate a run action after draining its pending projection, in the claim's own
+    /// transaction. Operation replays and mismatches retain ordinary append precedence.
+    pub fn append_claim_with_run_projection(
+        &self,
+        input: &ClaimInput,
+        subjects: &[String],
+        admission: &ClaimAdmission<'_>,
+    ) -> Result<ClaimRecord, FractalError> {
+        let (claim, _) = append_claim_with_commit_context(
+            &self.graph, input, None, None, None, None,
+            ClaimCommitContext {
+                admission: Some(admission),
+                run_projection_subjects: subjects,
+                ..Default::default()
+            },
+        )?;
+        self.run_projection_finished();
+        Ok(claim)
+    }
+
     /// Append a scheduler failure receipt only while its operation and desired revision remain current.
     pub fn append_observer_state(
         &self,
@@ -4853,6 +4873,12 @@ impl Store {
                 receipt_claim_id: Some(receipt.0),
             });
         }
+        // The approval token binds projected evidence. Recompute it only after committed
+        // run claims are reflected in the same writer snapshot used by the repair.
+        let drained = projection_work_pending_tx(&transaction)?;
+        while projection_work_pending_tx(&transaction)? {
+            finish_projection_work_tx(&transaction)?;
+        }
 
         let plan = filter_repair_plan(operational_repair_plan_with_legacy_starts_tx(
             &transaction, now_ms(), &self.origin, native_evidence,
@@ -4870,6 +4896,8 @@ impl Store {
         }
         if plan.items.is_empty() {
             transaction.commit().map_err(internal)?;
+            drop(connection);
+            if drained { self.run_projection_finished(); }
             return Ok(OperationalRepairResult {
                 api_version: plan.api_version,
                 token: token.into(),
@@ -5068,6 +5096,8 @@ impl Store {
         )
         .map_err(internal)?;
         transaction.commit().map_err(internal)?;
+        drop(connection);
+        if drained { self.run_projection_finished(); }
         Ok(OperationalRepairResult {
             api_version: plan.api_version,
             token: token.into(),
@@ -16924,19 +16954,27 @@ fn rebuild_runs_tx(transaction: &Transaction<'_>, runs: &BTreeSet<String>) -> Re
     if projection_work_pending_tx(transaction)? {
         // Claims already advanced their cursor in earlier chunks. Publish a durable local
         // change for every rebuilt run so incremental decision readers revisit skipped work.
-        for run in runs {
-            let subject = format!("mission-run/{run}");
-            smallclaims::touched::note_wrote(|| subject.clone());
-            insert_local_observation_tx(transaction, "projection", &ClaimInput {
-                subject,
-                kind: "run-projection.finished".into(),
-                actor: None,
-                fields: BTreeMap::new(),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: None,
-            }, now_ms())?;
-        }
+        note_run_projection_finished_tx(transaction, runs)?;
+    }
+    Ok(())
+}
+
+fn note_run_projection_finished_tx(
+    transaction: &Transaction<'_>,
+    runs: &BTreeSet<String>,
+) -> Result<(), FractalError> {
+    for run in runs {
+        let subject = format!("mission-run/{run}");
+        smallclaims::touched::note_wrote(|| subject.clone());
+        insert_local_observation_tx(transaction, "projection", &ClaimInput {
+            subject,
+            kind: "run-projection.finished".into(),
+            actor: None,
+            fields: BTreeMap::new(),
+            evidence: Vec::new(),
+            expected_subject: None,
+            idempotency_key: None,
+        }, now_ms())?;
     }
     Ok(())
 }
@@ -17852,8 +17890,7 @@ fn replay_graph_from_nothing_with_progress_tx(
     transaction: &Transaction<'_>,
     progress: &mut dyn FnMut(ReplayProgress),
 ) -> Result<(), FractalError> {
-    transaction.execute("DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
-        .map_err(internal)?;
+    let pending = pending_run_rebuilds_tx(transaction)?;
     let mut stage = |phase| {
         progress(ReplayProgress {
             phase,
@@ -17884,6 +17921,27 @@ fn replay_graph_from_nothing_with_progress_tx(
     for replay in projectors::GRAPH_REPLAY {
         stage(replay.phase);
         (replay.run)(transaction).map_err(internal)?;
+    }
+    if !pending.is_empty() {
+        // Replay also finishes deferred parts. Keep their fences until all rebuilt rows
+        // and completion observations commit together, including wakes for skipped runs.
+        let mut finished = pending.iter().filter_map(|aggregate| match aggregate {
+            Aggregate::RunTree(root) | Aggregate::RunPart(root) => Some(root.clone()),
+            _ => None,
+        }).collect::<BTreeSet<_>>();
+        let runs = {
+            let mut statement = transaction.prepare("SELECT id FROM mission_runs").map_err(internal)?;
+            statement.query_map([], |row| row.get::<_, String>(0)).map_err(internal)?
+                .collect::<rusqlite::Result<Vec<_>>>().map_err(internal)?
+        };
+        for run in runs {
+            if pending_run_for_subject_tx(transaction, &format!("mission-run/{run}"))?.is_some() {
+                finished.insert(run);
+            }
+        }
+        note_run_projection_finished_tx(transaction, &finished)?;
+        transaction.execute("DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
+            .map_err(internal)?;
     }
     Ok(())
 }
@@ -22888,6 +22946,8 @@ pub fn append_claim_with_subject_fences(
 }
 
 pub type ClaimAdmission<'a> = dyn Fn(&Connection) -> Result<(), FractalError> + Sync + 'a;
+pub type ClaimFieldPreparation<'a> = dyn Fn(&Connection, &ClaimInput)
+    -> Result<BTreeMap<String, Value>, FractalError> + Sync + 'a;
 
 #[derive(Default)]
 pub struct ClaimCommitContext<'a> {
@@ -22897,6 +22957,12 @@ pub struct ClaimCommitContext<'a> {
     /// Only rename_identity supplies naming CAS, owner and fleet registry admission.
     pub identity_writer: bool,
     pub admission: Option<&'a ClaimAdmission<'a>>,
+    /// Run subjects whose pending parts must drain before a new operation is admitted.
+    pub run_projection_subjects: &'a [String],
+    /// Implicit cross-run selection needs the entire pending set, not an optimistic candidate.
+    pub all_run_projections: bool,
+    /// Derive persisted fields from the admitted projection, retaining the request's identity.
+    pub prepare_fields: Option<&'a ClaimFieldPreparation<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
     /// Dedicated client operations publish a native receipt in the same transaction.
@@ -23066,6 +23132,15 @@ pub fn append_claim_with_commit_context(
             }
             // Replays and key/body mismatches settle before lifecycle admission. A new send
             // and retirement serialize here, in the same savepoint as their durable claims.
+            if context.all_run_projections {
+                while projection_work_pending_tx(transaction)? {
+                    finish_projection_work_tx(transaction)?;
+                }
+            } else {
+                for subject in context.run_projection_subjects {
+                    finish_run_projection_tx(transaction, subject)?;
+                }
+            }
             admission(transaction)?;
             if let Some(expected_subjects) = expected_subjects {
                 for (subject, expected) in expected_subjects {
@@ -23177,6 +23252,9 @@ pub fn append_claim_with_commit_context(
                 return Ok((existing, false));
             }
             let mut stored_fields = custom::prepare(transaction, input)?;
+            if let Some(prepare) = context.prepare_fields {
+                stored_fields = Some(prepare(transaction, input)?);
+            }
             if let Some(fields) = normalize_resource_observation(transaction, input)? {
                 stored_fields = Some(fields);
             }

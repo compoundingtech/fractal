@@ -1716,6 +1716,12 @@ pub trait MissionsStore {
             id: &str,
         ) -> Result<(MissionRunView, Option<MissionSpec>)>;
     fn next_active_mission_deadline(&self, origin: &str) -> Result<Option<u128>>;
+    fn request_mission_run_cancellation_at_generation(
+        &self,
+        run: &str,
+        reason: &str,
+        expected_generation: Option<&str>,
+    ) -> Result<bool, FractalError>;
     fn request_mission_run_cancellation(
             &self,
             run: &str,
@@ -2075,8 +2081,7 @@ fn set_step_state_guarded(
     reject_terminal: bool,
 ) -> Result<bool> {
     let subject = normalize_step_run(subject);
-    store.connection
-        .batched(|transaction| -> Result<bool> {
+    adhoc_work::with_run_projection(store, &subject, |transaction| -> Result<bool> {
             let current: Option<StepStateRow> = transaction
                 .query_row(
                     "SELECT step_runs.status,
@@ -2154,7 +2159,6 @@ fn set_step_state_guarded(
             }
             Ok(true)
         })
-        .map_err(anyhow::Error::msg)?
 }
 
 impl MissionsStore for Store {
@@ -2851,8 +2855,7 @@ impl MissionsStore for Store {
         let subject = normalize_step_run(subject);
         let actor = normalize_actor(actor, "agent");
         let now = now_ms();
-        self.connection
-            .batched(|transaction| -> Result<MissionOutputView, FractalError> {
+        adhoc_work::with_run_projection(self, &subject, |transaction| -> Result<MissionOutputView, FractalError> {
                 let actor = physical_actor(transaction, &actor)?;
                 if let Some(response) = smallclaims::store::idempotency::cached_response(transaction, idempotency_key)?
                 {
@@ -2936,7 +2939,7 @@ impl MissionsStore for Store {
                 )
                 .map_err(internal)?;
                 let output = MissionOutputView {
-                    step: subject,
+                    step: subject.clone(),
                     mission: format!("mission/{}", mission.id),
                     revision: mission.revision.clone(),
                     claim_id: claim.id,
@@ -2952,7 +2955,6 @@ impl MissionsStore for Store {
                     .map_err(internal)?;
                 Ok(output)
             })
-            .map_err(|error| FractalError::new("internal", error))?
     }
 
     fn mission_output_authorized(
@@ -3153,12 +3155,11 @@ impl MissionsStore for Store {
             return Ok(response);
         }
         let run_id = run.strip_prefix("mission-run/").unwrap_or(run);
-        let current = self.mission_run(run_id).map_err(internal)?.ok_or_else(|| {
-            FractalError::new(
-                "missing-mission-run",
-                format!("mission run `{run}` does not exist"),
-            )
-        })?;
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction().map_err(internal)?;
+        let drained = fractal_store::store::finish_run_projection_tx(&transaction, &format!("mission-run/{run_id}"))?;
+        let current = mission_run_view_tx(&transaction, run_id).optional().map_err(internal)?
+            .ok_or_else(|| FractalError::new("missing-mission-run", format!("mission run `{run}` does not exist")))?;
         let reopening = is_failed_terminal(&current.status, &current.phase);
         if reopening {
             failed_run_reopen_blocker(&current).map_err(|reason| not_reopenable(run, &reason))?;
@@ -3198,7 +3199,7 @@ impl MissionsStore for Store {
                 "a run revision cannot change its input declarations",
             ));
         }
-        let actor = physical_actor(&self.readers.get(), actor)?;
+        let actor = physical_actor(&transaction, actor)?;
         let old = crate::mission::run_mission(old, current.after.as_deref())?;
         let mission = &crate::mission::run_mission(mission.clone(), current.after.as_deref())?;
         let (compatible, reviewers) = analyze_mission_revision(&old, mission, &current.requester)?;
@@ -3231,13 +3232,12 @@ impl MissionsStore for Store {
             .map_err(internal)?,
         ));
         let now = now_ms();
-        let mut connection = self.connection.write();
         if let Some(response) =
-            smallclaims::store::idempotency::cached_response(&connection, idempotency_key)?
+            smallclaims::store::idempotency::cached_response(&transaction, idempotency_key)?
         {
             return serde_json::from_str(&response).map_err(internal);
         }
-        if connection
+        if transaction
             .query_row(
                 "SELECT 1 FROM revision_proposals WHERE run_id=?1 AND status IN ('pending-approval','draining')",
                 [run_id],
@@ -3252,7 +3252,6 @@ impl MissionsStore for Store {
                 "the mission run already has one pending revision proposal",
             ));
         }
-        let transaction = connection.transaction().map_err(internal)?;
         transaction
             .execute(
                 /* sqlite-large-value: allow-for-now lv-h51c83d4fee33 owner=fractal_missions::store::missions TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO revision_proposals(id, run_id, source_generation_id, candidate_revision, actor, reason, status, cutover, compatible_steps, reviewers, approvals, preview_hash, created_at_unix_ms, updated_at_unix_ms)
@@ -3324,6 +3323,8 @@ impl MissionsStore for Store {
             )
             .map_err(internal)?;
         transaction.commit().map_err(internal)?;
+        drop(connection);
+        if drained { self.run_projection_finished(); }
         Ok(view)
     }
 
@@ -3345,8 +3346,23 @@ impl MissionsStore for Store {
             return serde_json::from_str(&response).map_err(internal);
         }
         let transaction = connection.transaction().map_err(internal)?;
-        let mut proposal =
+        let proposal =
             revision_proposal_view_tx(&transaction, proposal_id).map_err(internal)?;
+        let drained = fractal_store::store::finish_run_projection_tx(&transaction, &proposal.run)?;
+        let mut proposal = revision_proposal_view_tx(&transaction, proposal_id).map_err(internal)?;
+        if proposal.status != "applied" {
+            let generation: String = transaction.query_row(
+                "SELECT current_generation_id FROM mission_runs WHERE id=?1",
+                [proposal.run.trim_start_matches("mission-run/")],
+                |row| row.get(0),
+            ).map_err(internal)?;
+            if generation_id_from_subject(&proposal.source_generation) != generation {
+                return Err(FractalError::new(
+                    "stale-revision-proposal",
+                    "the revision proposal does not target the current generation",
+                ));
+            }
+        }
         if proposal.status == "applied"
             && proposal.preview_hash.as_deref() == Some(preview_hash)
             && proposal.approvals.contains(&actor)
@@ -3381,6 +3397,8 @@ impl MissionsStore for Store {
                 .map_err(internal)?;
             mark_replay_safe_receipt_tx(&transaction, idempotency_key).map_err(internal)?;
             transaction.commit().map_err(internal)?;
+            drop(connection);
+            if drained { self.run_projection_finished(); }
             return Ok(response);
         }
         if proposal.status != "pending-approval" {
@@ -3479,6 +3497,7 @@ impl MissionsStore for Store {
         mark_replay_safe_receipt_tx(&transaction, idempotency_key).map_err(internal)?;
         transaction.commit().map_err(internal)?;
         drop(connection);
+        if drained { self.run_projection_finished(); }
 
         if all_approved && (reopening || matches!(proposal.cutover, RevisionCutover::RestartActive))
         {
@@ -3563,6 +3582,8 @@ impl MissionsStore for Store {
         }
         let transaction = connection.transaction().map_err(internal)?;
         let current = revision_proposal_view_tx(&transaction, proposal_id).map_err(internal)?;
+        let drained = fractal_store::store::finish_run_projection_tx(&transaction, &current.run)?;
+        let current = revision_proposal_view_tx(&transaction, proposal_id).map_err(internal)?;
         let run_id = current
             .run
             .strip_prefix("mission-run/")
@@ -3631,6 +3652,8 @@ impl MissionsStore for Store {
             )
             .map_err(internal)?;
         transaction.commit().map_err(internal)?;
+        drop(connection);
+        if drained { self.run_projection_finished(); }
         Ok(view)
     }
 
@@ -3806,21 +3829,18 @@ impl MissionsStore for Store {
             return serde_json::from_str(&response).map_err(internal);
         }
         let subject = normalize_step_run(subject);
-        let step = self.step_run(&subject).map_err(internal)?.ok_or_else(|| {
+        let transaction = connection.transaction().map_err(internal)?;
+        let drained = fractal_store::store::finish_run_projection_tx(&transaction, &subject)?;
+        let step = person_work::step(&transaction, &subject).map_err(internal)?.ok_or_else(|| {
             FractalError::new(
                 "missing-step-run",
                 format!("step run `{subject}` does not exist"),
             )
         })?;
-        let current = self
-            .mission_run(&step.run)
-            .map_err(internal)?
-            .ok_or_else(|| {
-                FractalError::new(
-                    "missing-mission-run",
-                    format!("mission run `{}` does not exist", step.run),
-                )
-            })?;
+        let current = mission_run_view_tx(
+            &transaction,
+            step.run.trim_start_matches("mission-run/"),
+        ).map_err(internal)?;
         if generation_id_from_subject(&step.generation)
             != generation_id_from_subject(&current.generation)
         {
@@ -3859,7 +3879,9 @@ impl MissionsStore for Store {
                     ),
                 ));
             }
+            transaction.commit().map_err(internal)?;
             drop(connection);
+            if drained { self.run_projection_finished(); }
             return self.adopt_mission_revision_inner(
                 &current.id,
                 &mission,
@@ -3891,7 +3913,6 @@ impl MissionsStore for Store {
                 ),
             ));
         }
-        let transaction = connection.transaction().map_err(internal)?;
         if !retry_step_tx(
             &transaction,
             &self.origin,
@@ -3919,6 +3940,8 @@ impl MissionsStore for Store {
             )
             .map_err(internal)?;
         transaction.commit().map_err(internal)?;
+        drop(connection);
+        if drained { self.run_projection_finished(); }
         Ok(view)
     }
 
@@ -3956,6 +3979,7 @@ impl MissionsStore for Store {
         if let Some(response) = smallclaims::store::idempotency::cached_response(&transaction,idempotency_key)? {
             return serde_json::from_str(&response).map_err(internal);
         }
+        let drained = fractal_store::store::finish_run_projection_tx(&transaction, &format!("mission-run/{run_id}"))?;
         let current = mission_run_header_tx(&transaction, run_id)
             .optional()
             .map_err(internal)?
@@ -4053,6 +4077,8 @@ impl MissionsStore for Store {
             )
             .map_err(internal)?;
         transaction.commit().map_err(internal)?;
+        drop(connection);
+        if drained { self.run_projection_finished(); }
         Ok(view)
     }
 
@@ -4098,6 +4124,7 @@ impl MissionsStore for Store {
         {
             return serde_json::from_str(&response).map_err(internal);
         }
+        let drained = fractal_store::store::finish_run_projection_tx(&transaction, &format!("mission-run/{run_id}"))?;
         let current = mission_run_header_tx(&transaction, run_id)
             .optional()
             .map_err(internal)?
@@ -4199,6 +4226,8 @@ impl MissionsStore for Store {
             )
             .map_err(internal)?;
         transaction.commit().map_err(internal)?;
+        drop(connection);
+        if drained { self.run_projection_finished(); }
         Ok(view)
     }
 
@@ -4320,13 +4349,12 @@ impl MissionsStore for Store {
             return Ok(response);
         }
         let run_id = run.strip_prefix("mission-run/").unwrap_or(run);
-        let actor = physical_actor(&self.readers.get(), actor)?;
-        let current = self.mission_run(run_id).map_err(internal)?.ok_or_else(|| {
-            FractalError::new(
-                "missing-mission-run",
-                format!("mission run `{run}` does not exist"),
-            )
-        })?;
+        let mut connection = self.connection.write();
+        let transaction = connection.transaction().map_err(internal)?;
+        let drained = fractal_store::store::finish_run_projection_tx(&transaction, &format!("mission-run/{run_id}"))?;
+        let actor = physical_actor(&transaction, actor)?;
+        let current = mission_run_view_tx(&transaction, run_id).optional().map_err(internal)?
+            .ok_or_else(|| FractalError::new("missing-mission-run", format!("mission run `{run}` does not exist")))?;
         if expected_generation.is_some_and(|expected| {
             generation_id_from_subject(expected) != generation_id_from_subject(&current.generation)
         }) {
@@ -4422,13 +4450,11 @@ impl MissionsStore for Store {
         let mut new_steps = Vec::new();
         flatten_steps(mission, None, &[], &mut new_steps);
 
-        let mut connection = self.connection.write();
         if let Some(response) =
-            smallclaims::store::idempotency::cached_response(&connection, idempotency_key)?
+            smallclaims::store::idempotency::cached_response(&transaction, idempotency_key)?
         {
             return serde_json::from_str(&response).map_err(internal);
         }
-        let transaction = connection.transaction().map_err(internal)?;
         if reopening {
             enforce_mission_run_capacity(&transaction, mission)?;
         }
@@ -4657,6 +4683,8 @@ impl MissionsStore for Store {
             )
             .map_err(internal)?;
         transaction.commit().map_err(internal)?;
+        drop(connection);
+        if drained { self.run_projection_finished(); }
         Ok(view)
     }
 
@@ -4930,24 +4958,40 @@ impl MissionsStore for Store {
             run: &str,
             reason: &str,
         ) -> Result<bool, FractalError> {
+        self.request_mission_run_cancellation_at_generation(run, reason, None)
+    }
+
+    fn request_mission_run_cancellation_at_generation(
+        &self,
+        run: &str,
+        reason: &str,
+        expected_generation: Option<&str>,
+    ) -> Result<bool, FractalError> {
         let run = if run.starts_with("mission-run/") {
             run.to_owned()
         } else {
             format!("mission-run/{run}")
         };
-        self.connection
-            .batched(|transaction| -> Result<bool, FractalError> {
+        adhoc_work::with_run_projection(self, &run, |transaction| {
+                if let Some(expected) = expected_generation {
+                    let generation: String = transaction.query_row(
+                        "SELECT current_generation_id FROM mission_runs WHERE id=?1",
+                        [run.trim_start_matches("mission-run/")],
+                        |row| row.get(0),
+                    ).map_err(internal)?;
+                    if generation_id_from_subject(expected) != generation {
+                        return Err(FractalError::new("stale-fence", "the mission generation fence is stale"));
+                    }
+                }
                 let claim_ids =
                     cancel_mission_run_tx(transaction, &self.origin, &run, reason, None, now_ms())?;
                 Ok(!claim_ids.is_empty())
             })
-            .map_err(|error| FractalError::new("internal", error))?
     }
 
     fn terminate_mission_run_descendants(&self, run: &str, reason: &str) -> Result<bool> {
         let run = run.strip_prefix("mission-run/").unwrap_or(run);
-        self.connection
-            .batched(|transaction| -> Result<bool> {
+        adhoc_work::with_run_projection(self, &format!("mission-run/{run}"), |transaction| -> Result<bool> {
                 let generation: Option<String> = transaction
                     .query_row(
                         "SELECT current_generation_id FROM mission_runs WHERE id=?1",
@@ -4968,7 +5012,6 @@ impl MissionsStore for Store {
                 )?;
                 Ok(!claim_ids.is_empty())
             })
-            .map_err(anyhow::Error::msg)?
     }
 
     fn mission_run_origin(&self, run: &str) -> Result<Option<String>> {
@@ -5268,27 +5311,24 @@ impl MissionsStore for Store {
             expected_subject: None,
             idempotency_key: Some(request.idempotency_key.clone()),
         };
-        // A completed run leaves the queue, but a retry still names the earlier operation.
-        // Reappend to verify the full request digest before returning its canonical claim.
-        if self
-            .operation_claim(&request.idempotency_key)
-            .map_err(internal)?
-            .is_some()
-        {
-            return self.append_claim(&input);
-        }
-        let order = self.seat_run_order(&agent).map_err(internal)?;
-        for queued in std::iter::once(&run).chain(anchor.as_ref()) {
-            if !order.contains(queued) {
-                return Err(FractalError::new(
-                    "run-not-queued",
-                    format!("`{queued}` is not queued for `{agent}`"),
-                )
-                .with_detail("agent", agent.clone())
-                .with_detail("run", queued.clone()));
+        // Drain both named runs before testing queue membership in the append's writer.
+        // The append helper still resolves idempotent retries before this admission.
+        let subjects = std::iter::once(run.clone()).chain(anchor.iter().cloned()).collect::<Vec<_>>();
+        self.append_claim_with_run_projection(&input, &subjects, &|connection| {
+            let order = seat_run_orders_tx(connection, Some(&agent)).map_err(internal)?
+                .remove(&agent).unwrap_or_default();
+            for queued in std::iter::once(&run).chain(anchor.as_ref()) {
+                if !order.contains(queued) {
+                    return Err(FractalError::new(
+                        "run-not-queued",
+                        format!("`{queued}` is not queued for `{agent}`"),
+                    )
+                    .with_detail("agent", agent.clone())
+                    .with_detail("run", queued.clone()));
+                }
             }
-        }
-        self.append_claim(&input)
+            Ok(())
+        })
     }
 
     fn work_at_snapshot_internal(
@@ -6445,8 +6485,7 @@ impl MissionsStore for Store {
             backoff_ms: u64,
         ) -> Result<bool> {
         let subject = normalize_step_run(subject);
-        self.connection
-            .batched(|transaction| {
+        adhoc_work::with_run_projection(self, &subject, |transaction| {
                 retry_step_tx(
                     transaction,
                     &self.origin,
@@ -6457,7 +6496,6 @@ impl MissionsStore for Store {
                     None,
                 )
             })
-            .map_err(anyhow::Error::msg)?
     }
 
     fn retry_step_for_feedback(
@@ -6468,8 +6506,7 @@ impl MissionsStore for Store {
             reviewer: &str,
         ) -> Result<bool> {
         let subject = normalize_step_run(subject);
-        self.connection
-            .batched(|transaction| -> Result<bool> {
+        adhoc_work::with_run_projection(self, &subject, |transaction| -> Result<bool> {
                 let current: Option<(String, u32, String)> = transaction
                     .query_row(
                         "SELECT status, attempt, goals FROM step_runs WHERE subject=?1",
@@ -6519,7 +6556,6 @@ impl MissionsStore for Store {
                 )?;
                 Ok(true)
             })
-            .map_err(anyhow::Error::msg)?
     }
 
     fn set_mission_run_state(
@@ -6529,8 +6565,8 @@ impl MissionsStore for Store {
             phase: &str,
             reason: Option<&str>,
         ) -> Result<bool> {
-        self.connection
-            .batched(|transaction| -> Result<bool> {
+        let subject = format!("mission-run/{}", run.trim_start_matches("mission-run/"));
+        adhoc_work::with_run_projection(self, &subject, |transaction| -> Result<bool> {
                 let changed = set_mission_run_state_tx(
                     transaction,
                     &self.origin,
@@ -6541,7 +6577,6 @@ impl MissionsStore for Store {
                 )?;
                 Ok(changed)
             })
-            .map_err(anyhow::Error::msg)?
     }
 
     fn operational_repair_plan(&self) -> Result<OperationalRepairPlan> {

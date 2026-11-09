@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Counters {
     pub envelopes_admitted: usize,
     pub admit_time: Duration,
@@ -17,6 +17,7 @@ pub struct Counters {
     pub commits: u64,
     pub contended: bool,
     pub projection_error: Option<&'static str>,
+    pub projection_stage: Option<String>,
     pub deferred: bool,
 }
 
@@ -36,7 +37,7 @@ impl RequestMetrics {
     }
 
     pub fn snapshot(&self) -> Counters {
-        *self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.0.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 }
 
@@ -85,8 +86,11 @@ pub fn contended() {
     record(|counters| counters.contended = true);
 }
 
-pub fn projection_error(code: &'static str) {
-    record(|counters| counters.projection_error = Some(code));
+pub fn projection_error(code: &'static str, stage: Option<&str>) {
+    record(|counters| {
+        counters.projection_error = Some(code);
+        counters.projection_stage = stage.map(str::to_owned);
+    });
 }
 
 pub fn deferred() {

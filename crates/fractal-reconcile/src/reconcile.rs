@@ -23165,8 +23165,10 @@ mission "orchid/replay" state="ready" {
             "version 2\nagent \"worker\" { workspace \"/tmp\"; command \"true\"; restart \"never\" }",
             "work-start-seat",
         );
+        let actor = store.desired_subjects().unwrap().into_iter()
+            .find(|declaration| declaration.kind == "agent").unwrap().subject;
         let request = crate::model::WorkStartRequest {
-            actor: "agent/worker".into(),
+            actor,
             title: "The committed title".into(),
             idempotency_key: "pending-work-start".into(),
         };
