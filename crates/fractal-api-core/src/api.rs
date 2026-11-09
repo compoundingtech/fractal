@@ -245,6 +245,8 @@ pub fn claude_channel_attachment(
 pub struct AppState {
     /// Configured owning person for trusted-local assistant grant administration.
     pub owning_person: Option<String>,
+    /// Tailnet login admitted for browser pairing; absent disables browser pairing.
+    pub browser_pairing_login: Option<String>,
     pub store: Arc<Store>,
     /// Process-local seat admission observations, never replicated as graph claims.
     pub seat_admission: Arc<fractal_runtime::seat_admission_status::Status>,

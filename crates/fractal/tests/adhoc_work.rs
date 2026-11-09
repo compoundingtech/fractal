@@ -79,6 +79,7 @@ impl Daemon {
     }
     async fn start(&mut self) {
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: self.store.clone(),

@@ -37,6 +37,21 @@ pub fn edit_authority(
     )
 }
 
+pub fn browser_message_authority<'a>(
+    state: &AppState,
+    session: &'a ClientSession,
+) -> Option<PersonAuthority<'a>> {
+    let PersonAuthority::Paired { grant, completion, actor } = edit_authority(session).ok()? else {
+        return None;
+    };
+    if !session.allows("control.messages") {
+        return None;
+    }
+    crate::store::thread_metadata::browser_send_authority(
+        &state.store, &session.authority_actor, grant, completion, actor,
+    ).ok()
+}
+
 pub fn bound_agent(session: &ClientSession) -> Option<&str> {
     session.bound_agent.as_deref().filter(|bound| {
         session.transport == "unix"
@@ -53,12 +68,14 @@ pub(super) fn capabilities(state: &AppState, session: &ClientSession) -> impl It
     }).unwrap_or(false);
     let read = read_person(session).is_ok();
     let edit = session.allows("control.messages") && edit_authority(session).is_ok();
+    let browser_send = read && edit && browser_message_authority(state, session).is_some();
     let bound = bound_agent(session).is_some();
     let reply = edit || bound && session.allows("control.messages");
     let link = bound && session.allows("control.work");
     [
         ("threads-v1", 1, read),
         ("thread-summary-feed", 1, read),
+        ("thread-browser-send", 1, browser_send),
         ("thread.read", 0, read && edit),
         ("thread.start", 0, edit),
         ("thread.reply", 0, reply),

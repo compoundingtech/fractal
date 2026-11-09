@@ -4,7 +4,7 @@ use super::*;
 
 #[path = "thread_message_window.rs"]
 mod message_window;
-pub use message_window::{ThreadMessage, TimelineItem, TimelinePage, mark_read, mixed_timeline};
+pub use message_window::{ThreadMessage, TimelineItem, TimelinePage, mark_read, mixed_message_content, mixed_timeline};
 
 pub enum Edit<'a> {
     Create {
@@ -38,10 +38,32 @@ pub enum PersonAuthority<'a> {
         completion: &'a str,
         actor: &'a str,
     },
+    PairedBrowser(BrowserSendAuthority<'a>),
+}
+
+/// A device credential with a trusted browser request as its exact completion predecessor.
+pub struct BrowserSendAuthority<'a> {
+    grant: &'a str,
+    completion: &'a str,
+    actor: &'a str,
+}
+
+pub fn browser_send_authority<'a>(
+    store: &Store,
+    person: &str,
+    grant: &'a str,
+    completion: &'a str,
+    actor: &'a str,
+) -> Result<PersonAuthority<'a>, FractalError> {
+    let authority = PersonAuthority::PairedBrowser(BrowserSendAuthority { grant, completion, actor });
+    authority.check(store, &store.readers.get(), person)?;
+    Ok(authority)
 }
 
 impl PersonAuthority<'_> {
-    pub(super) fn check(&self, connection: &Connection, person: &str) -> Result<(), FractalError> {
+    pub(super) fn check(
+        &self, store: &Store, connection: &Connection, person: &str,
+    ) -> Result<(), FractalError> {
         let forbidden = || {
             FractalError::new(
                 "thread-authority-expired",
@@ -57,29 +79,31 @@ impl PersonAuthority<'_> {
                 grant,
                 completion,
                 actor,
-            } => {
-                let find = |kind| {
-                    connection
-                        .query_row(
-                            &latest_claim_of_kind_query(),
-                            params![grant, kind],
-                            claim_from_row,
-                        )
-                        .optional()
-                        .map_err(internal)
-                };
-                let pair = find("custom.client.pairing-completed")?.ok_or_else(forbidden)?;
+            }
+            | Self::PairedBrowser(BrowserSendAuthority { grant, completion, actor }) => {
+                let now = now_ms();
+                let pair = crate::pairing::latest_completion(connection, grant, None, now)
+                    .map_err(internal)?.ok_or_else(forbidden)?;
                 let fields = &pair.body["fields"];
                 if pair.id != *completion
                     || fields["person_id"].as_str() != Some(person)
                     || fields["session_actor"].as_str() != Some(actor)
-                    || !fields["expires_at_unix_ms"]
-                        .as_u64()
-                        .is_some_and(|expiry| u128::from(expiry) > now_ms())
+                    || crate::pairing::completion_deadline(
+                        connection, &pair.id, &pair.origin, pair.actor.as_deref(), fields, now,
+                    ).map_err(internal)?.is_none()
                     || !fields["scopes"].as_array().is_some_and(|scopes| {
                         scopes.iter().any(|scope| scope == "control.messages")
                     })
-                    || find("custom.client.pairing-revoked")?.is_some()
+                    || crate::pairing::completion_is_revoked(
+                        connection, grant, &pair.id, &pair.origin,
+                    ).map_err(internal)?
+                {
+                    return Err(forbidden());
+                }
+                if matches!(self, Self::PairedBrowser(_))
+                    && (pair.origin != store.origin()
+                        || !store.graph.has_local_claim_signer()
+                        || !has_browser_pairing_provenance(connection, &pair, person)?)
                 {
                     return Err(forbidden());
                 }
@@ -87,6 +111,36 @@ impl PersonAuthority<'_> {
             }
         }
     }
+}
+
+fn has_browser_pairing_provenance(
+    connection: &Connection,
+    pair: &ClaimRecord,
+    person: &str,
+) -> Result<bool, FractalError> {
+    let fields = &pair.body["fields"];
+    if !crate::pairing::operation_is_trusted(
+        connection, &pair.id, &pair.origin, pair.actor.as_deref(), fields,
+    ).map_err(internal)? {
+        return Ok(false);
+    }
+    let Some([evidence]) = pair.body["evidence"].as_array().map(Vec::as_slice) else {
+        return Ok(false);
+    };
+    let Some(id) = evidence.as_str() else { return Ok(false) };
+    let Some(begun) = claim_by_id_tx(connection, id).map_err(internal)? else { return Ok(false) };
+    let request = &begun.body["fields"];
+    Ok(begun.kind == "custom.client.pairing-begun"
+        && begun.subject == pair.subject
+        && begun.origin == pair.origin
+        && begun.actor.as_deref() == Some(person)
+        && crate::pairing::operation_is_trusted(
+            connection, &begun.id, &begun.origin, begun.actor.as_deref(), request,
+        ).map_err(internal)?
+        && request["pairing_id"].as_str().is_some()
+        && request["pairing_id"] == fields["pairing_id"]
+        && request["browser_request"] == true
+        && request["browser_ask"].as_str().is_some())
 }
 
 /// Admit an edit as the authenticated person and return the original receipt on retry.
@@ -178,7 +232,7 @@ fn apply_inner(
         if require_rollout {
             store.thread_write_rollout(connection)?;
         }
-        principal.check(connection, person)?;
+        principal.check(store, connection, person)?;
         owned_creation(connection, subject, person, revision.is_none()).map(|_| ())
     };
 
@@ -293,7 +347,7 @@ fn rename_snapshot(
     principal: &PersonAuthority<'_>,
 ) -> Result<String, FractalError> {
     let connection = store.readers.get();
-    principal.check(&connection, person)?;
+    principal.check(store, &connection, person)?;
     owned_creation(&connection, subject, person, false)?;
     if let Some(claim) = claim_by_id_tx(&connection, observed).map_err(internal)?
         && claim.subject == subject
@@ -429,16 +483,42 @@ pub struct Summary {
 pub fn summary(store: &Store, person: &str, subject: &str) -> Result<Summary, FractalError> {
     store
         .graph
-        .read_snapshot_unindexed(|| Ok(summary_conn(&store.readers.get(), person, subject)))
+        .read_snapshot_unindexed(|| Ok(summary_conn(&store.readers.get(), person, subject, None)))
         .map_err(internal)?
+}
+
+/// Select an exact conversation before evaluating lifecycle claims. An ambiguous
+/// creation cannot establish membership in that conversation.
+pub fn summary_for_conversation(
+    store: &Store,
+    person: &str,
+    agent: &str,
+    subject: &str,
+) -> Result<Summary, FractalError> {
+    store.graph.read_snapshot_unindexed(|| {
+        Ok(summary_conn(&store.readers.get(), person, subject, Some(agent)))
+    }).map_err(internal)?
 }
 
 fn summary_conn(
     connection: &Connection,
     person: &str,
     subject: &str,
+    selected_agent: Option<&str>,
 ) -> Result<Summary, FractalError> {
-    let creation = owned_creation(connection, subject, person, false)?.ok_or_else(unavailable)?;
+    let creation = owned_creation(connection, subject, person, false)
+        .map_err(|error| {
+            if selected_agent.is_some() && error.code == "idempotency-conflict" {
+                unavailable()
+            } else {
+                error
+            }
+        })?
+        .ok_or_else(unavailable)?;
+    let agent = creation.body["fields"]["agent"].as_str().ok_or_else(unavailable)?;
+    if selected_agent.is_some_and(|selected| selected != agent) {
+        return Err(unavailable());
+    }
     let state = match latest_applied_claim(connection, subject, "thread.state-set")?
         .as_ref()
         .and_then(|claim| claim.body["fields"]["state"].as_str())
@@ -461,7 +541,6 @@ fn summary_conn(
             |row| row.get(0),
         )
         .map_err(internal)?;
-    let agent = creation.body["fields"]["agent"].as_str().ok_or_else(unavailable)?;
     let (message_count, unread) = message_window::message_summary(
         connection, person, agent, subject, &creation,
     )?;
@@ -572,8 +651,10 @@ pub fn list_context(
         let has_more = subjects.len() > limit;
         subjects.truncate(limit);
         let next_cursor = subjects.last().filter(|_| has_more).map(|subject| format!("{scope}:{subject}"));
-        let items = subjects.into_iter().map(|subject| summary_conn(&connection, &person, &subject))
-            .collect::<Result<Vec<_>, FractalError>>()?;
+        let selected_agent = matches!(context, ThreadContext::Agent(_)).then_some(key.as_str());
+        let items = subjects.into_iter().map(|subject| {
+            summary_conn(&connection, &person, &subject, selected_agent)
+        }).collect::<Result<Vec<_>, FractalError>>()?;
         Ok(SummaryPage { items, next_cursor })
     })())).map_err(internal)?
 }
@@ -817,7 +898,7 @@ fn recently_closed(
         }
         let state = latest_applied_claim(connection, &subject, "thread.state-set")?;
         if state.is_some_and(|current| current.id == id) {
-            items.push(summary_conn(connection, person, &subject)?);
+            items.push(summary_conn(connection, person, &subject, None)?);
         }
     }
     Ok(SummaryPage {
@@ -1031,7 +1112,7 @@ pub fn start_from_ask_as(
         .connection
         .batched(|tx| {
             store.thread_write_rollout(tx)?;
-            principal.check(tx, person)?;
+            principal.check(store, tx, person)?;
             super::thread_delivery::check_enrollment(tx, &principal, person, signature)?;
             if let Some((saved_digest, canonical, state)) =
                 operation_tx(tx, &operation_id).map_err(internal)?

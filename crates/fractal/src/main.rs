@@ -7533,6 +7533,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     }
     let state = AppState {
         owning_person: config.person.clone(),
+        browser_pairing_login: config.browser_pairing_login.clone(),
         store: store.clone(),
         seat_admission: Arc::default(),
         notify: notify.clone(),

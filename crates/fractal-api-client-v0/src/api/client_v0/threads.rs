@@ -1,5 +1,5 @@
 use super::*;
-use thread_access::{bound_agent, edit_authority, read_person};
+use thread_access::{bound_agent, browser_message_authority, edit_authority, read_person};
 use crate::store::thread_metadata::{self, Summary, SummaryPage, ThreadContext, TimelinePage};
 
 type ReadResult<T> = Result<(Extension<ClientSnapshot>, Json<T>), ApiError>;
@@ -448,6 +448,8 @@ fn run_message(
         && let Some(bound) = bound_agent(&current)
     {
         thread_metadata::PersonAuthority::BoundAgent { actor: bound }
+    } else if let Some(browser) = browser_message_authority(state, &current) {
+        browser
     } else {
         edit_authority(&current)?
     };
@@ -1323,10 +1325,10 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
             .unwrap();
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: pair_subject.into(),
                 kind: "custom.client.pairing-completed".into(),
-                actor: None,
+                actor: Some(person.into()),
                 fields: BTreeMap::from([
                     ("person_id".into(), json!(person)),
                     ("session_actor".into(), json!("client/paired/thread-device")),

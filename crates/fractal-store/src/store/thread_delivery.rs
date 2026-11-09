@@ -27,6 +27,10 @@ pub(super) fn verified_signature(
             Ok(None)
         };
     };
+    // Browser sends are bearer-authorized and are signed by the daemon's claim path.
+    if matches!(principal, PersonAuthority::PairedBrowser(_)) {
+        return Err(invalid());
+    }
     let Some(actor) = input.actor.as_deref() else {
         return Err(invalid());
     };
@@ -194,7 +198,7 @@ pub fn append_reply(
                 return Err(unavailable());
             }
         } else {
-            principal.check(connection, person)?;
+            principal.check(store, connection, person)?;
             check_enrollment(connection, &principal, person, signature)?;
         }
         Ok(())

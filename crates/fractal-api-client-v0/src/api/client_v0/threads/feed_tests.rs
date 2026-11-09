@@ -203,19 +203,30 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     assert_eq!(list["upserts"][0]["message_count"], 1);
     assert_eq!(history["upserts"][0]["id"], reply, "{history}");
 
-    let grant = "custom/client/pairing-thread-summary-reader";
-    let credential = "fixture-thread-summary-reader";
-    state.store.append_claim(&ClaimInput {
-        subject: grant.into(), kind: "custom.client.pairing-completed".into(), actor: None,
-        fields: BTreeMap::from([
-            ("person_id".into(), json!(person)),
-            ("session_actor".into(), json!("client/paired/thread-summary-reader")),
-            ("credential_hash".into(), json!(credential_digest(credential))),
-            ("expires_at_unix_ms".into(), json!(client_now_ms() as u64 + 60_000)),
-            ("scopes".into(), json!(["read.projections"])),
-        ]),
-        evidence: vec![], expected_subject: None, idempotency_key: None,
-    }).unwrap();
+    let pairing_http = reqwest::Client::builder().unix_socket(path.clone()).build().unwrap();
+    let owner_post = |route: String, body: Value| {
+        let request = pairing_http
+            .post(format!("http://localhost/v1/client/{route}"))
+            .header(LOCAL_PERSON_HEADER, person)
+            .json(&body);
+        async move {
+            let response = request.send().await.unwrap();
+            let status = response.status();
+            let payload: Value = response.json().await.unwrap();
+            assert_eq!(status, StatusCode::OK, "{payload}");
+            payload["value"].clone()
+        }
+    };
+    let challenge = owner_post("pairings".into(), json!({
+        "api_version": CLIENT_API_VERSION, "person_id": person,
+        "device_name": "Thread summary reader", "scopes": ["read.projections"],
+    })).await;
+    let pairing = challenge["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
+    let paired = owner_post(format!("pairings/{pairing}/complete"), json!({
+        "api_version": CLIENT_API_VERSION, "code": challenge["code"],
+        "device_public_key": "opaque-thread-summary-reader-without-signing-key",
+    })).await;
+    let credential = paired["credential"].as_str().unwrap();
     let mut exact = connect_with_header(&path, "authorization", &format!("Bearer {credential}")).await;
     subscribe(&mut exact, "summary", "threads", ("subject", json!(thread))).await;
     let initial = frame(&mut exact).await;
@@ -250,11 +261,12 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     assert!(tokio::time::timeout(std::time::Duration::from_millis(120), frame(&mut owner)).await.is_err(),
         "a read-only change must not produce a timeline patch");
 
-    state.store.append_claim(&ClaimInput {
-        subject: grant.into(), kind: "custom.client.pairing-revoked".into(), actor: None,
-        fields: BTreeMap::new(), evidence: vec![], expected_subject: None, idempotency_key: None,
-    }).unwrap();
-    crate::api::signal_visible_change(&state);
+    owner_post("actions".into(), json!({
+        "api_version": CLIENT_API_VERSION, "id": "action/revoke-thread-summary-reader",
+        "type": "pairing.revoke", "idempotency_key": "revoke-thread-summary-reader",
+        "fence": {"snapshot_id": new_client_snapshot(&state).id},
+        "parameters": {"target_id": paired["device_id"]},
+    })).await;
     let refusal = frame(&mut exact).await;
     assert_eq!(refusal["kind"], "error", "{refusal}");
     assert_eq!(refusal["id"], "summary");

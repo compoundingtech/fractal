@@ -37,6 +37,9 @@ pub use fractal_api_core::api::client_v0::{authenticate, bound_mission_cards, ca
 pub use fractal_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
 pub mod arrangements;
 pub mod assistant;
+pub mod browser_pairing;
+#[cfg(test)]
+mod browser_pairing_tests;
 pub mod device_renewal;
 pub mod pairing_verifier;
 pub mod collection_ivm;
@@ -200,6 +203,9 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/missions-rich", get(assistant::read_projection))
         .route("/v1/client/assistant/agents-rich", get(assistant::read_projection))
         .route("/v1/client/pairings", post(pairing_begin))
+        .route("/v1/client/pairing/browser-requests", post(browser_pairing::begin))
+        .route("/v1/client/pairing/browser-requests/{id}/redeem", post(browser_pairing::redeem))
+        .route("/v1/client/pairing/browser-requests/revoke-current", post(browser_pairing::revoke_current))
         .route("/v1/client/pairings/renewals/stage", post(device_renewal::stage))
         .route("/v1/client/pairings/renewals/pending", post(device_renewal::pending))
         .route("/v1/client/pairings/renewals/complete", post(device_renewal::complete))
@@ -219,6 +225,9 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/conversation-timeline", get(assistant::read_projection))
         .route("/v1/client/assistant/conversation-search", get(assistant::read_projection))
         .route("/v1/client/assistant/conversation-content", get(assistant::read_projection))
+        .route("/v1/client/assistant/threads", get(assistant::read_projection))
+        .route("/v1/client/assistant/thread-detail", get(assistant::read_projection))
+        .route("/v1/client/assistant/thread-timeline", get(assistant::read_projection))
         .route("/v1/client/assistant/terminal-content", get(assistant::read_projection))
         .route("/v1/client/assistant/grants/{id}/policy", post(assistant::update_policy))
         .route(
@@ -5919,6 +5928,13 @@ pub async fn pairing_complete(
                 == Some(pairing_id.as_str())
         })
         .ok_or_else(|| ApiError::not_found(format!("pairing `{pairing_id}` does not exist")))?;
+    if begun.body["fields"]["browser_request"] == true
+        && (browser_pairing::approval(&state, &begun)? != "approved"
+            || request.device_public_key != format!("browser:{id}")
+            || request.fabric_node_id.is_some())
+    {
+        return Err(forbidden("browser pairing requires its owner's approved request"));
+    }
     if begun.origin != state.store.origin() {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
@@ -8289,7 +8305,7 @@ async fn dispatch_action(
             let target = parameter_string(p, "target_id")?;
             let result = state
                 .store
-                .finish_person_step_authorized(
+                .finish_person_step_kind(
                     &PersonStepResponse {
                         delegation: None,
                         subject: target,
@@ -8323,6 +8339,8 @@ async fn dispatch_action(
                     },
                     action == "work.cancel-ask",
                     session.assistant_write.as_ref(),
+                    false,
+                    session.pairing_grant.as_deref().filter(|_| !session.local_peer).map(|grant| (grant, session.actor.as_str())),
                 )
                 .map_err(|error| {
                     if error.code == "forbidden" {
@@ -13889,6 +13907,7 @@ mission "differential" state="ready" {
         AppState {
             seat_admission: Default::default(),
             owning_person: Some("person/operator".into()),
+            browser_pairing_login: None,
             store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,
@@ -16370,7 +16389,7 @@ subscription "watch/source" {
     fn temporary_pairing_allowance_preserves_scope_expiry_and_revocation() {
         let root = tempfile::tempdir().unwrap();
         let state = test_state(root.path());
-        let cap = fractal_store::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS;
+        let cap = crate::pairing::LEGACY_ALLOWANCE_CAP_UNIX_MS;
         let now = cap - 60_000;
         let claim = state.store.append_claim(&ClaimInput {
             subject:"custom/client/pairing-existing".into(), kind:"custom.client.pairing-completed".into(),
@@ -16385,7 +16404,7 @@ subscription "watch/source" {
         assert!(paired_client_session_at(&state, &claim, "fabric-loopback", false, now).is_err());
         state.store.configure_pairing_legacy_allowances(&[crate::config::LegacyPairingAllowance {
             completion_id:claim.id.clone(),
-            record_hash:fractal_store::pairing::record_hash(
+            record_hash:crate::pairing::record_hash(
                 &claim.origin, claim.actor.as_deref(), &claim.body["fields"],
             ).unwrap(),
             until_unix_ms:(cap + 60_000) as u64,
