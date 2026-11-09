@@ -109,19 +109,25 @@ details in #4002. A local timeout alone is not authority to remove a member.
 
 Publishing `declared-priority`, `declared-lane`, or `declared-budgets` (including an
 empty budgets block) requires every active fleet incarnation to advertise
-`features.declared_admission=1` in its latest own-origin, authenticated
-`daemon.started` claim anchored to the admitted incarnation. The publication gate
-requires signed, current, unambiguous membership and fails closed on missing,
+`features.declared_admission=1` in its latest own-origin, authenticated, signed
+`daemon.started` claim anchored to the admitted incarnation. Publications containing
+attention additionally require `features.declared_attention=1` from every active
+incarnation, including the local daemon, in that same advertisement. The publication
+gate requires signed, current, unambiguous membership and fails closed on missing,
 false, conflicted, unsigned, or unanchored capability evidence and unfenced legacy
-writers. A refusal rejects the full publication before any declaration is written;
-an old member never receives a new-child publication through a refused write.
-Upgrade all active members or fence legacy peers before publishing the metadata.
+writers with `declared-admission-feature-barrier`. A refusal rejects the full
+publication before any declaration is written; an old member never receives a
+new-child publication through a refused write. Attention-free declarations continue
+publishing in mixed fleets with version-1 declared-admission support. Upgrade all
+active members or fence legacy peers before publishing attention.
 Keep every member on a supporting binary while populated metadata exists.
 This is an ongoing requirement. The gate checks support only at write time.
 It does not prevent a member from starting an old binary later.
 It does not prevent an old member from joining later.
 An old member drops agent metadata and fails mission revision validation.
-Remove the metadata with upgraded readers before a rollback.
+Remove attention with supporting readers before a mixed-version rollback; remove
+all declared-admission metadata before rolling back to readers that lack version-1
+declared-admission support.
 
 New agent authoring accepts only peak `memory-max` and `disk-max` budgets.
 `cpu-seconds` and `token-budget` are mission-run totals, including all retries,

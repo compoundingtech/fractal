@@ -1,5 +1,5 @@
 //! Local, read-only report of native person asks by mission × person over a rolling 7 days.
-//! This is not a budget window, admission or enforcement, and is not fleet-complete.
+//! It measures the attention budget window (docs/st3/priority.md); it is a report, not admission or enforcement, and is not fleet-complete.
 use super::*;
 
 const WEEK_MS: u128 = 7 * 24 * 60 * 60 * 1000;

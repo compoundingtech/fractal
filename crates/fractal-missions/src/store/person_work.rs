@@ -418,9 +418,7 @@ pub trait PersonWorkStore {
 impl PersonWorkStore for Store {
 
     fn ask_person(&self, input: &PersonAskRequest) -> Result<StepRunView, FractalError> {
-        if !input.person.starts_with("person/")
-            || input.person.matches('/').count() != 1
-            || input.person == "person/"
+        if !crate::model::person_subject(&input.person)
             || !(input.actor.starts_with("agent/") || input.actor == "daemon/browser-pairing")
             || input.title.trim().is_empty()
             || input.reason.trim().is_empty()

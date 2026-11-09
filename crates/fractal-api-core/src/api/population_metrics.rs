@@ -201,7 +201,7 @@ fn classification_deadline(store: &Store, cards: &[Value], now: u128) -> anyhow:
             let harness: crate::model::CurrentHarnessView = serde_json::from_value(source.clone())?;
             let heard_at = heard.heard_at(store, card["id"].as_str().unwrap_or_default(), &harness);
             if matches!(harness.state.as_str(), "idle" | "ready") {
-                candidates[0] = Some(heard_at.saturating_add(90_001));
+                candidates[0] = Some(heard_at.saturating_add(fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis() + 1));
             }
             if matches!(card["state"].as_str(), Some("desired" | "starting")) {
                 candidates[1] = Some(heard_at.saturating_add(u128::from(super::HEARTBEAT_MS) + 1));
@@ -596,9 +596,10 @@ mod tests {
         let card = json!({"id":"agent/example.worker", "state":"starting", "_launch_since_ms":1000,
             "_status_source":{"state":"idle", "incarnation_id":"one", "claim":"claim/example",
                 "since_unix_ms":1000, "observed_at_unix_ms":2000}});
-        assert_eq!(classification_deadline(&store, std::slice::from_ref(&card), 2000).unwrap(), Some(92_001));
-        assert_eq!(classification_deadline(&store, std::slice::from_ref(&card), 92_001).unwrap(), Some(121_001));
-        assert_eq!(classification_deadline(&store, &[card], 121_001).unwrap(), Some(663_001));
+        let freshness = fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS.as_millis();
+        assert_eq!(classification_deadline(&store, std::slice::from_ref(&card), 2000).unwrap(), Some(121_001));
+        assert_eq!(classification_deadline(&store, std::slice::from_ref(&card), 121_001).unwrap(), Some(2000 + freshness + 1));
+        assert_eq!(classification_deadline(&store, &[card], 2000 + freshness + 1).unwrap(), Some(663_001));
         let working = json!({"id":"agent/example.worker", "state":"running",
             "_status_source":{"state":"working", "incarnation_id":"one", "claim":"claim/example",
                 "since_unix_ms":1000, "observed_at_unix_ms":2000}});

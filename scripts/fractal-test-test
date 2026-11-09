@@ -4893,14 +4893,30 @@ class PoolQueue(unittest.TestCase):
         holder = open(self.root / 'tree-1.lock', 'w')
         fcntl.flock(holder, fcntl.LOCK_EX)                                     # tree-1 in use: tree-0 is the only free one of two
         got = []
+        waiting, resume = threading.Event(), threading.Event()
+        passes = 0
+
+        def size():
+            nonlocal passes
+            passes += 1
+            if passes == 2:
+                # The next pass starts after the first probe released tree-0. Park here so
+                # our free-tree assertion cannot race the waiter's next temporary flock.
+                waiting.set()
+                resume.wait()
+            return 2
+
         with contextlib.redirect_stderr(io.StringIO()) as told:
-            last = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, 2, rank=st_test.POOL_LAST_RANK)))
+            last = threading.Thread(target=lambda: got.append(st_test.acquire_tree(self.root, size, rank=st_test.POOL_LAST_RANK)))
             last.start()
-            time.sleep(0.5)
-            self.assertEqual(got, [])
-            self.assertTrue(st_test.another_tree_free(self.root, 2, 1))         # the waiter's probe let tree-0 go again
-            holder.close()                                                      # two free now
-            last.join(5)
+            try:
+                self.assertTrue(waiting.wait(5), 'the last waiter did not finish its first probe')
+                self.assertEqual(got, [])
+                self.assertTrue(st_test.another_tree_free(self.root, 2, 1))
+            finally:
+                holder.close()                                                  # two free now
+                resume.set()
+                last.join(5)
         self.assertIn('leaves it to a seat', told.getvalue())
         self.assertIn(got[0][0], (0, 1))
         got[0][1].close()
