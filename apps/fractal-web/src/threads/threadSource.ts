@@ -215,10 +215,10 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     const reject = (detail: string): ThreadSendResult => ({ _tag: 'Refused', detail })
     const grant = registry.get(access)
     const previous = attempts.get(destination)
-    if (previous?.pending !== undefined) return previous.pending
     if (previous !== undefined && previous.fingerprint !== fingerprint) {
       return Promise.resolve(reject('Fractal has not confirmed the previous action. Retry that action first.'))
     }
+    if (previous?.pending !== undefined) return previous.pending
     if (!grant.actions.has(kind)) return Promise.resolve(reject('This connection cannot perform that thread action.'))
     const attempt: Attempt = previous ?? { fingerprint, key: crypto.randomUUID(), target: target(), actor: grant.actor, kind }
     attempts.set(destination, attempt)

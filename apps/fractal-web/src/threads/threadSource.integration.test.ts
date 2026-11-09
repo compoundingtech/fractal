@@ -273,6 +273,8 @@ it('sends the same typed actions for approved browsers and blocks writes if the 
 
 it('retains the exact rename intent across malformed receipt, denial and a changed draft', async () => {
   const writes: Array<Record<string, unknown>> = []
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
   const client = new FractalClient({ baseUrl: 'http://example.test', fetchImpl: async (input, init) => {
     if (String(input).endsWith('/capabilities')) return Response.json({ ...base, value: { ...base.value, capabilities: [
       ...base.value.capabilities,
@@ -280,6 +282,7 @@ it('retains the exact rename intent across malformed receipt, denial and a chang
     ] } })
     const action = JSON.parse(String(init?.body)) as Record<string, unknown>
     writes.push(action)
+    if (writes.length === 1) await held
     if (writes.length === 2) return Response.json({ api_version: base.api_version, error_version: 'st3.client.error.v0', request_id: action.id,
       code: 'forbidden', message: 'grant expired', retryable: false, details: {} }, { status: 403 })
     return Response.json({ ...base, value: { kind: 'action-result', action_id: action.id, status: 'completed',
@@ -292,7 +295,11 @@ it('retains the exact rename intent across malformed receipt, denial and a chang
   const observation = { summary: Native.decodeUnknownSync(Native.ThreadSummary)(summary), snapshotId: base.snapshot.id }
   try {
     await vi.waitFor(() => expect(registry.get(source.access).actions.has('thread.rename')).toBe(true))
-    expect(await source.rename(observation, 'New title', 'claim/title')).toBeDefined()
+    const initial = source.rename(observation, 'New title', 'claim/title')
+    await vi.waitFor(() => expect(writes).toHaveLength(1))
+    expect(await source.rename(observation, 'Different title', 'claim/title')).toBeDefined()
+    release()
+    expect(await initial).toBeDefined()
     expect(await source.rename(observation, 'Different title', 'claim/title')).toBeDefined()
     expect(writes).toHaveLength(1)
     if (!source.pendingChange || !source.retryChange) throw new Error('Expected retained metadata actions')

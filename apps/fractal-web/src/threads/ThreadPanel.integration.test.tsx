@@ -87,7 +87,7 @@ it('keeps the title revision that the person began editing after a concurrent re
   }
 })
 
-it('keeps the original close reachable after the feed closes the thread and the view remounts', async () => {
+it.each(['close', 'rename'] as const)('keeps the original %s reachable after its summary changes and the view remounts', async kind => {
   const { FractalClient } = await import('@fractal/client')
   const { RegistryContext, useAtomValue } = await import('@effect/atom-react')
   const AtomRegistry = await import('effect/reactivity/AtomRegistry')
@@ -98,7 +98,7 @@ it('keeps the original close reachable after the feed closes the thread and the 
   const writes: Array<{ id: string; parameters: { target_id: string } }> = []
   const client = new FractalClient({ baseUrl: 'http://example.test', fetchImpl: async (input, init) => {
     if (String(input).endsWith('/capabilities')) return Response.json({ ...base, value: { ...base.value, capabilities: [
-      ...base.value.capabilities, ...['threads-v1', 'thread-summary-feed', 'thread.close', 'thread.reopen'].map(id => ({ id, version: 1, state: 'granted' })),
+      ...base.value.capabilities, ...['threads-v1', 'thread-summary-feed', 'thread.close', 'thread.reopen', 'thread.rename'].map(id => ({ id, version: 1, state: 'granted' })),
     ] } })
     const action = JSON.parse(String(init?.body)) as typeof writes[number]
     writes.push(action)
@@ -115,13 +115,16 @@ it('keeps the original close reachable after the feed closes the thread and the 
   const host = document.createElement('div')
   document.body.append(host)
   const root = createRoot(host)
-  const View = ({ state }: { state: 'open' | 'closed' }) => {
+  const View = ({ updated }: { updated: boolean }) => {
+    const state = updated && kind === 'close' ? 'closed' : 'open'
+    const title = updated && kind === 'rename' ? 'New title' : 'PR #42'
     const pending = useAtomValue(pendingChange(id))
-    const thread = Native.decodeUnknownSync(Native.ThreadSummary)({ id, agent_id: 'agent/atlas', title: 'PR #42', title_revision: 'claim/title', revision: state === 'open' ? 'claim/open' : 'claim/closed', state })
+    const thread = Native.decodeUnknownSync(Native.ThreadSummary)({ id, agent_id: 'agent/atlas', title, title_revision: updated && kind === 'rename' ? 'claim/new-title' : 'claim/title', revision: updated ? 'claim/updated' : 'claim/open', state })
     return <ThreadPanel thread={thread} embedded={false} pendingChange={pending} onRetryChange={() => retryChange(id)}
+      onRename={(title, revision) => source.rename({ summary: thread, snapshotId: base.snapshot.id }, title, revision)}
       onChangeState={state => source.changeState({ summary: thread, snapshotId: base.snapshot.id }, state)}>History</ThreadPanel>
   }
-  const render = (state: 'open' | 'closed') => act(async () => root.render(<RegistryContext.Provider value={registry}><View state={state} /></RegistryContext.Provider>))
+  const render = (updated: boolean) => act(async () => root.render(<RegistryContext.Provider value={registry}><View updated={updated} /></RegistryContext.Provider>))
   const press = async (label: string) => {
     const button = [...host.querySelectorAll('button')].find(button => button.textContent === label)
     expect(button).toBeDefined()
@@ -131,16 +134,33 @@ it('keeps the original close reachable after the feed closes the thread and the 
   const stop = registry.mount(source.access)
   try {
     await vi.waitFor(() => expect(registry.get(source.access).actions.has('thread.close')).toBe(true))
-    await render('open')
-    await press('Close thread')
-    await render('closed')
-    expect([...host.querySelectorAll('button')].find(button => button.textContent === 'Reopen thread')?.disabled).toBe(true)
+    await render(false)
+    if (kind === 'close') await press('Close thread')
+    else {
+      await press('Rename')
+      const input = host.querySelector('input')
+      if (!input) throw new Error('Expected the rename input')
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, 'New title')
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+      })
+      await press('Save')
+    }
+    await render(true)
+    if (kind === 'close') expect([...host.querySelectorAll('button')].find(button => button.textContent === 'Reopen thread')?.disabled).toBe(true)
+    else {
+      expect(host.querySelector('h2')?.textContent).toContain('New title')
+      expect([...host.querySelectorAll('button')].find(button => button.textContent === 'Save')?.disabled).toBe(true)
+      await press('Cancel')
+      expect(host.querySelector('input')).toBeNull()
+    }
     await act(async () => root.render(<RegistryContext.Provider value={registry}>Another view</RegistryContext.Provider>))
-    await render('closed')
-    await press('Retry close')
+    await render(true)
+    await press(`Retry ${kind}`)
     expect(writes).toHaveLength(2)
     expect(writes[1]).toEqual(writes[0])
-    expect(host.textContent).not.toContain('Retry close')
-    expect([...host.querySelectorAll('button')].find(button => button.textContent === 'Reopen thread')?.disabled).toBe(false)
+    expect(host.textContent).not.toContain(`Retry ${kind}`)
+    const nextAction = kind === 'close' ? 'Reopen thread' : 'Rename'
+    expect([...host.querySelectorAll('button')].find(button => button.textContent === nextAction)?.disabled).toBe(false)
   } finally { stop(); await act(async () => root.unmount()); registry.dispose(); host.remove() }
 })
