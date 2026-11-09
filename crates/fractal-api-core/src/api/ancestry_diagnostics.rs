@@ -97,10 +97,12 @@ impl RequestDiagnostic {
     ) {
         let decision = Decision::of(status, worker, &self.method);
         // A poisoned diagnostic lock cannot change authorization or hide a refusal.
-        match limiter.lock() {
-            Ok(mut limiter) => limiter.emit(self, decision, now, output),
-            Err(_) => { let _ = writeln!(output, "{} dropped=0", self.line(decision, 0)); }
-        }
+        let lines = match limiter.lock() {
+            Ok(mut limiter) => limiter.decide(self, decision, now),
+            Err(_) => vec![format!("{} dropped=0", self.line(decision, 0))],
+        };
+        // The guard is gone before any potentially blocking sink operation.
+        write_lines(lines, output);
     }
 }
 
@@ -120,42 +122,41 @@ struct Limiter {
 }
 
 impl Limiter {
-    fn summary(key: &Key, entry: &Entry, output: &mut impl std::io::Write) {
+    fn summary(key: &Key, entry: &Entry, lines: &mut Vec<String>) {
         if entry.suppressed != 0 {
-            let _ = writeln!(output, "{} event=suppression-summary dropped=0",
-                entry.sample.line(key.1, entry.suppressed));
+            lines.push(format!("{} event=suppression-summary dropped=0",
+                entry.sample.line(key.1, entry.suppressed)));
         }
     }
 
-    fn flush_dropped(&mut self, output: &mut impl std::io::Write) {
+    fn flush_dropped(&mut self, lines: &mut Vec<String>) {
         if self.dropped != 0 {
-            let _ = writeln!(output,
-                "st3: local caller ancestry unavailable level=warn event=global-cap-summary dropped={}", self.dropped);
+            lines.push(format!(
+                "st3: local caller ancestry unavailable level=warn event=global-cap-summary dropped={}", self.dropped));
             self.dropped = 0;
         }
     }
 
-    fn emit(&mut self, record: &RequestDiagnostic, decision: Decision, now: Instant,
-        output: &mut impl std::io::Write,
-    ) {
+    fn decide(&mut self, record: &RequestDiagnostic, decision: Decision, now: Instant) -> Vec<String> {
+        let mut lines = Vec::new();
         let key = (CauseKind::of(&record.cause), decision);
         // Flush every expired key on the next event, even if that event has a
         // different cause. The current key carries its count on its next record.
         self.windows.retain(|other, entry| {
             if *other != key && now.duration_since(entry.started) >= WINDOW {
-                Self::summary(other, entry, output);
+                Self::summary(other, entry, &mut lines);
                 false
             } else { true }
         });
         if self.global_started.is_none_or(|start| now.duration_since(start) >= WINDOW) {
-            self.flush_dropped(output);
+            self.flush_dropped(&mut lines);
             self.global_started = Some(now);
             self.lines = 0;
         }
         let suppressed = if let Some(entry) = self.windows.get_mut(&key) {
             if now.duration_since(entry.started) < WINDOW {
                 entry.suppressed = entry.suppressed.saturating_add(1);
-                return;
+                return lines;
             }
             let count = entry.suppressed;
             entry.started = now;
@@ -168,7 +169,7 @@ impl Limiter {
                     .map(|(oldest, _)| *oldest);
                 if let Some(oldest) = oldest
                     && let Some(entry) = self.windows.remove(&oldest) {
-                    Self::summary(&oldest, &entry, output);
+                    Self::summary(&oldest, &entry, &mut lines);
                 }
             }
             self.windows.insert(key, Entry { started: now, suppressed: 0, sample: record.clone() });
@@ -178,24 +179,51 @@ impl Limiter {
         // Only non-refusal event records are capped; their loss is counted.
         if self.lines >= MAX_LINES && !matches!(decision, Decision::Refused(_)) {
             if suppressed != 0 {
-                let _ = writeln!(output, "{} event=suppression-summary dropped=0", record.line(decision, suppressed));
+                lines.push(format!("{} event=suppression-summary dropped=0", record.line(decision, suppressed)));
             }
             self.dropped = self.dropped.saturating_add(1);
-            return;
+            return lines;
         }
-        let _ = writeln!(output, "{} dropped={}", record.line(decision, suppressed), self.dropped);
+        lines.push(format!("{} dropped={}", record.line(decision, suppressed), self.dropped));
         self.dropped = 0;
         self.lines = self.lines.saturating_add(1);
+        lines
     }
 
+    fn flush_pending(&mut self) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (key, entry) in self.windows.drain() { Self::summary(&key, &entry, &mut lines); }
+        self.flush_dropped(&mut lines);
+        lines
+    }
+
+    #[cfg(test)]
+    fn emit(&mut self, record: &RequestDiagnostic, decision: Decision, now: Instant,
+        output: &mut impl std::io::Write,
+    ) {
+        write_lines(self.decide(record, decision, now), output);
+    }
+
+    #[cfg(test)]
     fn flush(&mut self, output: &mut impl std::io::Write) {
-        for (key, entry) in self.windows.drain() { Self::summary(&key, &entry, output); }
-        self.flush_dropped(output);
+        write_lines(self.flush_pending(), output);
     }
 }
 
+fn write_lines(lines: Vec<String>, output: &mut impl std::io::Write) {
+    for line in lines { let _ = writeln!(output, "{line}"); }
+}
+
+fn flush_to(limiter: &Mutex<Limiter>, output: &mut impl std::io::Write) {
+    let lines = match limiter.lock() {
+        Ok(mut limiter) => limiter.flush_pending(),
+        Err(_) => Vec::new(),
+    };
+    write_lines(lines, output);
+}
+
 pub(super) fn flush() {
-    if let Ok(mut limiter) = LIMITER.lock() { limiter.flush(&mut std::io::stderr()); }
+    flush_to(&LIMITER, &mut std::io::stderr());
 }
 
 #[cfg(test)]
@@ -206,6 +234,36 @@ mod tests {
         RequestDiagnostic { cause: Arc::new(AncestryUnavailableCause { pid: Some(42), reason }),
             connector_pid: Some(7), connector_generation: Some(123),
             method: Method::POST, route: "/v1/intent/apply".into() }
+    }
+
+    struct LockCheckingWriter<'a> {
+        limiter: &'a Mutex<Limiter>,
+        output: Vec<u8>,
+    }
+
+    impl std::io::Write for LockCheckingWriter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            assert!(self.limiter.try_lock().is_ok(), "output must never hold the limiter lock");
+            self.output.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+
+    #[test]
+    fn request_and_shutdown_output_run_without_the_limiter_lock() {
+        let now = Instant::now();
+        let limiter = Mutex::new(Limiter::default());
+        let record = record(AncestryUnavailableReason::WitnessMissing);
+        let mut writer = LockCheckingWriter { limiter: &limiter, output: Vec::new() };
+        for _ in 0..3 {
+            record.record_to(Some(StatusCode::BAD_REQUEST), false, now, &limiter, &mut writer);
+        }
+        flush_to(&limiter, &mut writer);
+        let text = String::from_utf8(writer.output).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        assert!(text.contains("suppressed=2 event=suppression-summary"));
     }
 
     fn read_failure(pid: u32, errno: i32, text: &str) -> RequestDiagnostic {
