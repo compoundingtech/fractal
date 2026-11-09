@@ -1614,7 +1614,13 @@ export type DeclaredAdmission = {
   priority?: DeclaredPriority;
 };
 
+export type DeclaredAttentionBudget = {
+  asks: number;
+  person: string;
+};
+
 export type DeclaredBudgets = {
+  attention?: Array<DeclaredAttentionBudget>;
   cpu_seconds?: number;
   disk_max?: string;
   memory_max?: string;
