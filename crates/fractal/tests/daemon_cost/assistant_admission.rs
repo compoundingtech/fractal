@@ -93,7 +93,6 @@ const NODE: &str = "benchmark-member";
 const GRANTED: &str = "custom.client.assistant.v1.granted";
 const POLICY: &str = "custom.client.assistant.v1.policy";
 const REVOKED: &str = "custom.client.assistant.v1.revoked";
-const POLICY_RENEWALS: usize = 3;
 const INDEX: &str = "claims_assistant_v1_principal_expiry_index";
 const CREATE_INDEX: &str = "CREATE INDEX claims_assistant_v1_principal_expiry_index ON claims(kind,COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'),json_extract(body,'$.fields.expires_at_unix_ms'))";
 const A_QUERY: &str = "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2";
@@ -322,6 +321,8 @@ async fn authenticated_get_during_pairing() {
     assert!(smallclaims::profile::enabled(), "profiling must initialize before Store::open");
     let indexed = variant == "indexed";
     let history = number("ST_ADMISSION_HISTORY", 10_000);
+    let policy_renewals = count("ST_ADMISSION_RENEWALS", 3);
+    let invalid_history_ids = std::env::var_os("ST_ADMISSION_INVALID_HISTORY_IDS").is_some();
     let samples = if counts_only { 0 } else { number("ST_ADMISSION_SAMPLES", 200) };
     let foreign_active = count("ST_ADMISSION_FOREIGN_ACTIVE", 0);
     let overlays = count("ST_ADMISSION_WRONG_ORIGIN_OVERLAYS", 1000);
@@ -409,7 +410,11 @@ async fn authenticated_get_during_pairing() {
     tokio::task::spawn_blocking(move || {
         for principal in ["assistant/chatgpt", "assistant/mcp"] {
             for row in 0..history {
-                let id = format!("history-{}-{row}", principal.trim_start_matches("assistant/"));
+                let id = if invalid_history_ids {
+                    format!("history-{}-{row}", principal.trim_start_matches("assistant/"))
+                } else {
+                    format!("{:024x}", row * 2 + usize::from(principal == "assistant/mcp"))
+                };
                 let mut fields = template.body["fields"].clone();
                 fields["principal"] = json!(principal);
                 fields["grant_id"] = json!(format!("assistant-grant/{id}"));
@@ -419,7 +424,7 @@ async fn authenticated_get_during_pairing() {
                 let subject = format!("custom/client/assistant-v1-{id}");
                 fixture_store.append_claim(&ClaimInput { subject:subject.clone(), kind:GRANTED.into(),
                     actor:Some(OWNER.into()), fields:serde_json::from_value(fields.clone()).unwrap(), evidence:vec![], expected_subject:None, idempotency_key:None }).unwrap();
-                for revision in 0..POLICY_RENEWALS {
+                for revision in 0..policy_renewals {
                     fields["policy_revision"] = json!(revision + 2);
                     fields["expires_at_unix_ms"] = json!(revision + 2);
                     fixture_store.append_claim(&ClaimInput { subject:subject.clone(), kind:POLICY.into(),
@@ -587,7 +592,8 @@ async fn authenticated_get_during_pairing() {
         "host_description":"Observed local benchmark host; no prescribed hardware identity",
         "fixture_person_ids":[OWNER],"verified_foreign_same_profile_active_grants":foreign_active,
         "history_grants_per_principal":history,"initial_total_claim_rows":total_rows,"initial_granted_rows_by_principal":principal_rows,
-        "policy_renewals_per_expired_grant":POLICY_RENEWALS,
+        "policy_renewals_per_expired_grant":policy_renewals,
+        "invalid_expired_history_ids":invalid_history_ids,
         "wrong_origin_overlays_per_active_grant":overlays,
         "wrong_origin_overlay_active_grants":active.len(),
         "sql_work_scope":{"authentication":"current-thread completed traced SQL statements",
