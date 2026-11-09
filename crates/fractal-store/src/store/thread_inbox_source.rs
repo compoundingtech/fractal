@@ -10,7 +10,6 @@ pub struct InboxOrigin {
 
 pub(super) struct ResolvedSource {
     pub item: AttentionItemView,
-    pub agent: Option<String>,
     pub evidence: Vec<String>,
 }
 
@@ -83,9 +82,8 @@ pub(super) fn resolve(
     {
         return Err(unavailable());
     }
-    let agent = store.inbox_responsible_agent_at(connection, &item).map_err(internal)?;
     let evidence = source_evidence(store, connection, origin, &item).map_err(internal)?;
-    Ok(ResolvedSource { item, agent, evidence })
+    Ok(ResolvedSource { item, evidence })
 }
 
 fn source_evidence(
@@ -149,10 +147,12 @@ fn custom_item(connection: &Connection, source: &str) -> anyhow::Result<Option<A
 impl ResolvedSource {
     pub(super) fn require_agent(
         &self,
+        store: &Store,
         connection: &Connection,
         selected: &str,
     ) -> Result<String, FractalError> {
-        let canonical = self.agent.as_deref().ok_or_else(|| FractalError::new(
+        let canonical = store.inbox_responsible_agent_at(connection, &self.item).map_err(internal)?
+            .ok_or_else(|| FractalError::new(
             "thread-responsibility-unassigned",
             "this Inbox source has no configured responsible agent",
         ))?;
@@ -189,7 +189,7 @@ mod tests {
         // Actual source projection, examined on the same connection a writer admits against.
         store.connection.batched(|tx| -> anyhow::Result<()> {
             let selected = resolve(&store, tx, person, &origin, now_ms()).unwrap();
-            assert_eq!(selected.agent.as_deref(), Some("agent/garden/seed"));
+            assert_eq!(selected.item.conversation.as_deref(), Some("agent/garden/seed"));
             assert_eq!(selected.evidence, [opening.id.clone()]);
             assert!(resolve(&store, tx, "person/other", &origin, now_ms()).is_err());
             let stale = InboxOrigin { episode: "claim/stale".into(), ..origin.clone() };

@@ -1234,7 +1234,7 @@ fn start_thread_as(
             let mission = match &origin {
                 StartOrigin::Inbox(origin) => {
                     let selected = inbox_source::resolve(store, tx, person, origin, now_ms())?;
-                    selected.require_agent(tx, agent)?;
+                    selected.require_agent(store, tx, agent)?;
                     creation_body["evidence"] = json!(selected.evidence);
                     let item = selected.item;
                     if let Some(mission) = item.mission {
