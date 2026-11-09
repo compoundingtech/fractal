@@ -15122,7 +15122,8 @@ person an image with the request (up to 4), as `fractal conversations send --att
 
 The person answers with `fractal work done STEP --answer ID [--text TEXT]`; requesting changes,
 feedback and a custom choice need text. The resumed step's `person_answers` carries the answer
-as {"type", "outcome", "id", "label", "text"}: read it with `fractal work show STEP --json` and
+as {"type", "outcome", "id", "label", "text", "option_notes"}; option_notes contains {id, text}
+notes on options not selected. Read it with `fractal work show STEP --json` and
 act on `id` and `outcome`, not on the words."##;
 
 fn render_client_work_detail(work: &fractal_client::Work, driver_held: Option<bool>) -> String {

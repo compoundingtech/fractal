@@ -2,7 +2,7 @@
 #![allow(unused_imports)]  // the imports serve the modules below through `use super::*`
 use super::*;
 use crate::model::{MessageAttachment, PersonAskRequest, PersonStepResponse};
-use crate::person_request::{StructuredRequest, answer_summary, deadline_summary};
+use crate::person_request::{StructuredRequest, answer_summary, append_option_notes_summary, deadline_summary};
 pub use fractal_delivery::store::person_work::*;
 pub use fractal_delivery::store::person_work::{current, declaration_live, enrich_responses, is_update, project, project_minimal_run, request, run_live, run_liveness, step, validate_delegated_answer};
 #[cfg(test)]
@@ -158,7 +158,7 @@ fn resolve_answer(
         let Some(answer) = &input.answer else {
             return Ok((None, input.summary.clone()));
         };
-        if cancel || answer.id.is_some() {
+        if cancel || answer.id.is_some() || !answer.option_notes.is_empty() {
             return Err(FractalError::new(
                 "invalid-person-answer",
                 if cancel {
@@ -181,7 +181,9 @@ fn resolve_answer(
     let summary = if input.summary.trim().is_empty() {
         answer_summary(&answer)
     } else {
-        input.summary.clone()
+        let mut summary = input.summary.clone();
+        append_option_notes_summary(&mut summary, &answer);
+        summary
     };
     Ok((Some(answer), summary))
 }
@@ -297,6 +299,15 @@ fn send_response_tx(
             }
         }
         None => content.push_str(summary),
+    }
+    if let Some(notes) = answer.and_then(|answer| answer["option_notes"].as_array()) {
+        for note in notes {
+            content.push_str(&format!(
+                "\n\nNote on {} (not selected):\n{}",
+                note["id"].as_str().unwrap_or_default(),
+                note["text"].as_str().unwrap_or_default()
+            ));
+        }
     }
     content.push_str(&format!(
         "\n\nThe answer as data: `st work show {} --json` (person_answers).",

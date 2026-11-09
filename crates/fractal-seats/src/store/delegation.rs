@@ -393,14 +393,14 @@ agent "alder.independent" { workspace "/tmp"; command "true"; restart always; }
             evidence: vec![],
             episode: Some(episode),
             delegation: Some(proof),
-            answer: Some(crate::person_request::AnswerInput {
-                id: Some("not-offered".into()),
-                text: None,
-            }),
+            answer: Some(crate::person_request::AnswerInput { id: Some("not-offered".into()), text: None, option_notes: Vec::new() }),
             idempotency_key: "choice".into(),
         };
         assert!(store.finish_person_step(&response, false).is_err());
         response.answer.as_mut().unwrap().id = Some("friday".into());
+        response.answer.as_mut().unwrap().option_notes = vec![crate::person_request::OptionNote {
+            id: "monday".into(), text: "Monday is the fallback.".into(),
+        }];
         store.finish_person_step(&response, false).unwrap();
         let done = store.step_run(&ask.subject).unwrap().unwrap();
         assert_eq!(
@@ -411,6 +411,12 @@ agent "alder.independent" { workspace "/tmp"; command "true"; restart always; }
             done.person_answers[0].acted_for.as_deref(),
             Some("person/avery")
         );
+        assert_eq!(done.person_answers[0].answer.as_ref().unwrap()["option_notes"],
+            json!([{"id": "monday", "text": "Monday is the fallback."}]));
+        store.replay_replication_graph().unwrap();
+        let done = store.step_run(&ask.subject).unwrap().unwrap();
+        assert_eq!(done.person_answers[0].answer.as_ref().unwrap()["option_notes"],
+            json!([{"id": "monday", "text": "Monday is the fallback."}]));
     }
 
     #[test]

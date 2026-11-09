@@ -264,9 +264,7 @@ pub mod tests {
                 delegation: None, subject: ask.subject.clone(), actor: input.person.clone(),
                 summary: String::new(), evidence: vec![], episode: Some(item.episode.clone()),
                 idempotency_key: "refresh-answer".into(),
-                answer: Some(crate::person_request::AnswerInput {
-                    id: Some("land".into()), text: None,
-                }),
+                answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None, option_notes: Vec::new() }),
             };
             store.append_claim(&ClaimInput {
                 subject: input.actor.clone(), kind: "runtime.observed".into(), actor: None,
@@ -1004,7 +1002,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             delegation: None, subject: ask.subject.clone(), actor: "person/avery".into(),
             summary: String::new(), evidence: vec![], episode: Some(item.episode),
             idempotency_key: "assistant-projection-answer".into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None, option_notes: Vec::new() }),
         };
         store.finish_person_step_authorized(&response, false, Some(&authorization)).unwrap();
         // The answer is stored under the assistant principal, so a retry with the same key must
@@ -1044,7 +1042,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             delegation: None, subject: standalone.subject, actor: "person/avery".into(),
             summary: String::new(), evidence: vec![], episode: Some(item.episode),
             idempotency_key: "standalone-notification-answer".into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None, option_notes: Vec::new() }),
         }, false, Some(&authorization)).unwrap();
         let notification = store.messages(Some("agent/alder.asker"), true).unwrap().into_iter()
             .find(|message| message.assistant_grant_id.as_deref() == Some(grant_id)).unwrap();
@@ -1110,6 +1108,9 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
         response.answer = Some(crate::person_request::AnswerInput {
             id: Some("revise-auth".into()),
             text: Some("Pair browsers like the native clients.".into()),
+            option_notes: vec![crate::person_request::OptionNote {
+                id: "land".into(), text: " Keep the current gateway as a fallback. ".into(),
+            }],
         });
         assert_eq!(
             store.finish_person_step(&response, false).unwrap().status,
@@ -1120,7 +1121,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             "completed"
         );
         let mut other = response.clone();
-        other.answer.as_mut().unwrap().id = Some("land".into());
+        other.answer.as_mut().unwrap().id = Some("keep-open".into());
         other.answer.as_mut().unwrap().text = None;
         assert_eq!(
             store.finish_person_step(&other, false).unwrap_err().code,
@@ -1128,7 +1129,8 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
         );
         let expected = json!({
             "type": "decision", "outcome": "request_changes", "id": "revise-auth",
-            "label": "Revise auth and review", "text": "Pair browsers like the native clients."
+            "label": "Revise auth and review", "text": "Pair browsers like the native clients.",
+            "option_notes": [{"id": "land", "text": "Keep the current gateway as a fallback."}]
         });
         let check = |store: &Store| {
             let resumed = store.step_run(&origin.subject).unwrap().unwrap();
@@ -1140,13 +1142,20 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             assert_eq!(answer.answer.as_ref(), Some(&expected));
             assert_eq!(
                 answer.summary,
-                "Revise auth and review: Pair browsers like the native clients."
+                "Revise auth and review: Pair browsers like the native clients.\nNote on land (not selected): Keep the current gateway as a fallback."
             );
             assert!(resumed.constraints.iter().any(|constraint| constraint
-                == "Person response: Revise auth and review: Pair browsers like the native clients."));
+                == "Person response: Revise auth and review: Pair browsers like the native clients.\nNote on land (not selected): Keep the current gateway as a fallback."));
             let own = store.step_run(&ask.subject).unwrap().unwrap();
             assert_eq!(own.person_answers.len(), 1);
             assert_eq!(own.person_answers[0].answer.as_ref(), Some(&expected));
+            let done: Value = serde_json::from_str(&store.readers.get().query_row(
+                "SELECT body FROM claims WHERE subject=?1 AND kind='work.person-done'",
+                [&ask.subject], |row| row.get::<_, String>(0),
+            ).unwrap()).unwrap();
+            assert_eq!(done["fields"]["answer"], expected);
+            assert!(done["fields"].get("option_notes").is_none(),
+                "notes belong inside the typed answer, not on the record");
         };
         check(&store);
         store.replay_replication_graph().unwrap();
@@ -1298,7 +1307,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             evidence: vec![],
             episode: Some(item.episode),
             idempotency_key: "gateway-late".into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None, option_notes: Vec::new() }),
         };
         assert_eq!(store.finish_person_step(&late, false).unwrap_err().code, "stale-fence");
     }
@@ -1361,7 +1370,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             evidence: vec![],
             episode: Some(episode.clone()),
             idempotency_key: key.into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some(id.into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput { id: Some(id.into()), text: None, option_notes: Vec::new() }),
         };
         // The person answers on the other member before the deadline; the owner, not holding
         // that answer, applies the default at the deadline.
@@ -1428,7 +1437,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             evidence: vec![],
             episode: Some(episode),
             idempotency_key: "land-late".into(),
-            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None }),
+            answer: Some(crate::person_request::AnswerInput { id: Some("land".into()), text: None, option_notes: Vec::new() }),
         };
         assert_eq!(other.finish_person_step(&late, false).unwrap_err().code, "stale-fence");
         assert_eq!(other.step_run(&ask.subject).unwrap().unwrap().status, "ready");
@@ -1550,13 +1559,16 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
                     delegation: None,
                     subject: ask.subject.clone(),
                     actor: "person/avery".into(),
-                    summary: String::new(),
+                    summary: "Review auth first.".into(),
                     evidence: vec![],
                     episode: None,
                     idempotency_key: "gateway-answer".into(),
                     answer: Some(crate::person_request::AnswerInput {
                         id: Some("revise-auth".into()),
                         text: Some("Pair browsers like the native clients.".into()),
+                        option_notes: vec![crate::person_request::OptionNote {
+                            id: "land".into(), text: "Keep the current gateway as a fallback.".into(),
+                        }],
                     }),
                 },
                 false,
@@ -1567,6 +1579,15 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
         assert!(messages[0].content.contains(
             "Answer: Revise auth and review (revise-auth)\nPair browsers like the native clients."
         ));
+        assert!(messages[0].content.contains(
+            "\n\nNote on land (not selected):\nKeep the current gateway as a fallback."
+        ));
+        store.replay_replication_graph().unwrap();
+        let answer = store.step_run(&ask.subject).unwrap().unwrap().person_answers.remove(0);
+        assert_eq!(answer.answer.as_ref().unwrap()["option_notes"],
+            json!([{"id": "land", "text": "Keep the current gateway as a fallback."}]));
+        assert_eq!(answer.summary,
+            "Review auth first.\nNote on land (not selected): Keep the current gateway as a fallback.");
     }
 
     /// An update brings the person what they asked for: the poster keeps working, the update
@@ -1659,10 +1680,7 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
                     episode: None,
                     idempotency_key: format!("read:{subject}:{answer:?}:{text:?}"),
                     answer: (answer.is_some() || text.is_some()).then(|| {
-                        crate::person_request::AnswerInput {
-                            id: answer.map(str::to_owned),
-                            text: text.map(str::to_owned),
-                        }
+                        crate::person_request::AnswerInput { id: answer.map(str::to_owned), text: text.map(str::to_owned), option_notes: Vec::new() }
                     }),
                 },
                 false,
@@ -1721,11 +1739,19 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             evidence: vec![],
             episode: Some(item.episode),
             idempotency_key: "free-text".into(),
-            answer: Some(crate::person_request::AnswerInput {
-                id: Some("friday".into()),
-                text: None,
-            }),
+            answer: Some(crate::person_request::AnswerInput { id: Some("friday".into()), text: None, option_notes: Vec::new() }),
         };
+        assert_eq!(
+            store.finish_person_step(&response, false).unwrap_err().code,
+            "invalid-person-answer"
+        );
+        response.answer = Some(crate::person_request::AnswerInput {
+            id: None,
+            text: Some("Friday".into()),
+            option_notes: vec![crate::person_request::OptionNote {
+                id: "friday".into(), text: "No named options exist.".into(),
+            }],
+        });
         assert_eq!(
             store.finish_person_step(&response, false).unwrap_err().code,
             "invalid-person-answer"

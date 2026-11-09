@@ -207,6 +207,15 @@ pub fn validate_delegated_answer(
                 .get("text")
                 .and_then(Value::as_str)
                 .map(str::to_owned),
+            option_notes: submitted
+                .get("option_notes")
+                .map(|notes| serde_json::from_value(notes.clone()))
+                .transpose()
+                .map_err(|_| FractalError::new(
+                    "delegation-refused",
+                    "the answer contains invalid option notes",
+                ))?
+                .unwrap_or_default(),
         };
         if request.answer(Some(&input), fields["summary"].as_str().unwrap())? != *submitted {
             return Err(FractalError::new(
