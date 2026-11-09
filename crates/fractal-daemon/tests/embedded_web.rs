@@ -17,6 +17,12 @@ async fn browser_admission_matrix() {
     }
     let mut state = api::tests_shared::state(root.path());
     state.owning_person = Some("person/robin".into());
+    let source = "version 2\nmission \"example/budget\" state=\"ready\" { goal \"Check the report.\"; }";
+    let intent = fractal_daemon::parse_intent(source, "node").unwrap();
+    let preview = state.store.mission(&intent, fractal_daemon::model::IntentInput {
+        kdl: source.into(), source_name: None,
+    }).unwrap();
+    state.store.apply_as(&intent, &preview.subject_tokens, "web-budget-fixture", Some("person/robin")).unwrap();
     let server = tokio::spawn(prepared.serve(state, Default::default()));
     let client = Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
     let url = format!("http://{address}");
@@ -35,6 +41,20 @@ async fn browser_admission_matrix() {
     let page = get("/").send().await.unwrap();
     assert_eq!(page.status(), StatusCode::OK);
     assert!(page.headers()["content-security-policy"].to_str().unwrap().contains("frame-ancestors 'none'"));
+    let budget = "/v1/client/attention-budget?mission=mission%2Fexample%2Fbudget&person=person%2Frobin";
+    assert_eq!(client.get(format!("{url}{budget}")).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+    let response = get(budget).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = response.json::<serde_json::Value>().await.unwrap();
+    let report = &response["value"];
+    assert_eq!(report["person"], "person/robin");
+    assert_eq!(report["inclusive"], 0);
+    assert_eq!(report["declared"], serde_json::json!({"state":"undeclared"}));
+    assert_eq!(
+        get(&budget.replace("person%2Frobin", "person%2Fother"))
+            .header("x-st3-person", "person/other").send().await.unwrap().status(),
+        StatusCode::FORBIDDEN,
+    );
     // A missing client route remains an API error, never the SPA or a privileged route.
     assert_eq!(get("/v1/client/not-a-route").send().await.unwrap().status(), StatusCode::NOT_FOUND);
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;

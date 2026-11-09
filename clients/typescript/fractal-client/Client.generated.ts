@@ -10,6 +10,7 @@ import type {
     Arrangement, ArrangementId, ArrangementPage, OrderedMembership, OrderedMembershipPage, OrderedMembershipState,
     HarnessInventory, HarnessInventoryQuery,
     PublicationDefinition, SubjectDefinition, AgentWorkspace, UsagePeriod, MailBacklog, SloList, SloHistory, ClientConnections, CollectionName, CollectionFrame, HostRepositories,
+    AttentionBudgetReport,
     MissionDeclaration,
     ConversationContentChunk, ConversationChanges, ConversationSearch, ErrorEnvelope, EventPage, Page, PairingBegin, PairingChallenge,
     PairingComplete, PairedSession, PrivateNotesSubject, AssistantGrant, AssistantGrantPolicy, AssistantReadTrustRequest, Resource, Snapshot, TerminalScreen, TimelinePage,
@@ -698,6 +699,7 @@ export class FractalClient {
     async machinesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/machines' + query(options), undefined, requestOptions); }
     async devicesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/devices' + query(options), undefined, requestOptions); }
     async attentionList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/attention' + query(options), undefined, requestOptions); }
+    async attentionBudget(mission: string, person?: string, at?: number, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<AttentionBudgetReport>> { return this.get('/v1/client/attention-budget' + query({ mission, person, at }), undefined, requestOptions); }
     async attentionGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/attention/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }
     async messagesList(options: ListOptions = {}, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Page>> { return this.get('/v1/client/messages' + query(options), undefined, requestOptions); }
     async messagesGet(id: string, requestOptions: RequestOptions = {}): Promise<EnvelopeOf<Resource>> { return this.get(`/v1/client/messages/${encodeURIComponent(routedId(id))}`, undefined, requestOptions); }

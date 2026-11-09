@@ -90,6 +90,7 @@ pub const READ_OPERATIONS: &[(&str, &str)] = &[
     ("machines.list", "/v1/client/machines"),
     ("devices.list", "/v1/client/devices"),
     ("attention.list", "/v1/client/attention"),
+    ("attention-budget", "/v1/client/attention-budget"),
     ("attention.get", "/v1/client/attention/{id}"),
     ("messages.list", "/v1/client/messages"),
     ("messages.get", "/v1/client/messages/{id}"),
