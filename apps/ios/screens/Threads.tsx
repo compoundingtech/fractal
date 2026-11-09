@@ -380,7 +380,7 @@ function ThreadBody({ client, thread, onOpen, revealComposer }: {
     return agent ? agentName(agent) : id;
   };
   const messages = new Map(page.items.flatMap(event => event.kind === 'message' ? [[event.id, event] as const] : []));
-  const canReply = thread.state === 'open' && threadActions.has('thread.reply');
+  const canReply = threadActions.has('thread.reply');
   const chooseQuote = (message: ThreadMessage) => {
     setQuote(message);
     setQuoteFocus(previous => previous + 1);
@@ -452,7 +452,6 @@ function ThreadBody({ client, thread, onOpen, revealComposer }: {
     {canReply || threadDeliveries?.has(thread.id) ? <ThreadComposer key={thread.id} thread={thread} canReply={canReply}
       selection={quote ? { id: quote.id, from: actorLabel(quote.actor_id), text: quote.content } : undefined} selectionVersion={quoteFocus} revealComposer={revealComposer}
     /> : null}
-    {thread.state === 'closed' && threadActions.has('thread.reopen') ? <T dim>Reopen to reply.</T> : null}
     <ThreadActionFeedback result={editFeedback} busy={editing || !!editDelivery && !editDelivery.retry || status !== 'online'} onRetry={() => {
       if (editFeedback?.how === 'unconfirmed') void runEdit(editFeedback.retry, !!editDelivery);
     }} />
