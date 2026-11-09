@@ -5914,19 +5914,10 @@ pub async fn pairing_complete(
     let _completion = PAIRING_COMPLETIONS.lock().await;
     let pairing_id = client_detail_id("pairing", &id);
     let subject = format!("custom/client/pairing-{id}");
-    let begun = state
-        .store
-        .claims_for_subject_kind_at(&subject, "custom.client.pairing-begun", None, true, 1)
-        .map_err(ApiError::internal)?
-        .claims
-        .into_iter()
-        .find(|claim| {
-            claim
-                .body
-                .pointer("/fields/pairing_id")
-                .and_then(Value::as_str)
-                == Some(pairing_id.as_str())
-        })
+    let begun = state.store.newest_admitted_client_operation(
+        &subject, "custom.client.pairing-begun",
+    ).map_err(ApiError::internal)?
+        .filter(|claim| claim.body["fields"]["pairing_id"] == pairing_id)
         .ok_or_else(|| ApiError::not_found(format!("pairing `{pairing_id}` does not exist")))?;
     if begun.body["fields"]["browser_request"] == true
         && (browser_pairing::approval(&state, &begun)? != "approved"
@@ -5946,12 +5937,8 @@ pub async fn pairing_complete(
     if !state.store.client_operation_is_trusted(&begun).map_err(ApiError::internal)? {
         return Err(forbidden("the pairing challenge requires a new pairing"));
     }
-    let used = !state
-        .store
-        .claims_for_subject_kind_at(&subject, "custom.client.pairing-completed", None, true, 1)
-        .map_err(ApiError::internal)?
-        .claims
-        .is_empty();
+    let used = state.store.newest_admitted_pairing_completion(&subject, client_now_ms())
+        .map_err(ApiError::internal)?.is_some();
     let restart = pairing_verifier::restart;
     let expires = begun
         .body
@@ -6099,15 +6086,15 @@ pub async fn pairing_complete(
     if let Some(node) = request.fabric_node_id.as_ref().filter(|_| fabric_wanted) {
         fields.insert("fabric_node_id".into(), Value::String(node.clone()));
     }
-    let completed = state.store.append_client_operation_claim(&ClaimInput {
+    let completed = state.store.complete_client_pairing(&ClaimInput {
         subject: begun.subject.clone(),
         kind: "custom.client.pairing-completed".into(),
         actor: Some(person_id.clone()),
         fields,
         evidence: vec![begun.id.clone()],
-        expected_subject: Some(Some(begun.id.clone())),
+        expected_subject: None,
         idempotency_key: None,
-    });
+    }, &begun.id);
     if let Err(error) = completed {
         if error.code == "stale-subject" {
             return Err(forbidden(

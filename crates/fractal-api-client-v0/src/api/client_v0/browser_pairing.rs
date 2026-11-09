@@ -50,9 +50,28 @@ pub async fn begin(State(state): State<AppState>, Extension(session): Extension<
     }
     let _guard = REQUESTS.lock().await;
     let now = client_now_ms();
-    let pending: i64 = state.store.readers.get().query_row(
-        "SELECT count(*) FROM claims AS begun WHERE kind='custom.client.pairing-begun' AND origin=?1 AND json_extract(body,'$.fields.browser_request')=1 AND json_extract(body,'$.fields.tailnet_login')=?2 AND json_extract(body,'$.fields.expires_at_unix_ms')>?3 AND NOT EXISTS(SELECT 1 FROM claims AS done WHERE done.subject=begun.subject AND done.kind='custom.client.pairing-completed') AND NOT EXISTS(SELECT 1 FROM claims AS answered WHERE answered.subject=json_extract(begun.body,'$.fields.browser_ask') AND answered.kind IN ('work.person-done','work.person-cancelled'))",
-        rusqlite::params![state.store.origin(), body.tailnet_login, now as u64], |r| r.get(0)).map_err(ApiError::internal)?;
+    let pending = {
+        let connection = state.store.readers.get();
+        let mut subjects = connection.prepare_cached(
+            "SELECT DISTINCT subject FROM claims WHERE kind='custom.client.pairing-begun' AND origin=?1 AND json_extract(body,'$.fields.browser_request')=1 AND json_extract(body,'$.fields.tailnet_login')=?2 AND json_extract(body,'$.fields.expires_at_unix_ms')>?3",
+        ).map_err(ApiError::internal)?;
+        let mut rows = subjects.query(rusqlite::params![state.store.origin(), body.tailnet_login, now as u64])
+            .map_err(ApiError::internal)?;
+        let mut pending = 0;
+        while let Some(row) = rows.next().map_err(ApiError::internal)? {
+            let subject: String = row.get(0).map_err(ApiError::internal)?;
+            let Some(begun) = state.store.newest_admitted_client_operation(
+                &subject, "custom.client.pairing-begun",
+            ).map_err(ApiError::internal)? else { continue };
+            if state.store.newest_admitted_pairing_completion(&subject, now)
+                .map_err(ApiError::internal)?.is_none() && approval(&state, &begun)? == "pending"
+            {
+                pending += 1;
+                if pending == 3 { break; }
+            }
+        }
+        pending
+    };
     if pending >= 3 { return Err(forbidden("at most three browser pairing requests may be pending")); }
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(ApiError::internal)?;

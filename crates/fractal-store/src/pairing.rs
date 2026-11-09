@@ -242,6 +242,41 @@ fn legacy_allowance_deadline(
 }
 
 impl Store {
+    /// Consume the exact admitted challenge once, ignoring unadmitted retained subject rows.
+    pub fn complete_client_pairing(
+        &self, input: &ClaimInput, begun_id: &str,
+    ) -> Result<ClaimRecord, crate::FractalError> {
+        let refused = || crate::FractalError::new("stale-subject", "the pairing challenge changed or was already consumed");
+        if input.kind != "custom.client.pairing-completed"
+            || input.expected_subject.is_some()
+            || input.evidence != [begun_id]
+        {
+            return Err(refused());
+        }
+        let authority = |connection: &Connection| {
+            let now = smallclaims::store::now_ms();
+            let begun = latest_operation(connection, &input.subject, "custom.client.pairing-begun")
+                .map_err(|error| crate::FractalError::new("internal", error.to_string()))?.ok_or_else(refused)?;
+            let fields = &begun.body["fields"];
+            if begun.id != begun_id || begun.origin != self.origin()
+                || input.actor != begun.actor
+                || fields["person_id"] != input.fields.get("person_id").cloned().unwrap_or_default()
+                || fields["pairing_id"] != input.fields.get("pairing_id").cloned().unwrap_or_default()
+                || fields["scopes"] != input.fields.get("scopes").cloned().unwrap_or_default()
+                || fields["expires_at_unix_ms"].as_u64().is_none_or(|expiry| u128::from(expiry) <= now)
+                || latest_completion(connection, &input.subject, None, now)
+                    .map_err(|error| crate::FractalError::new("internal", error.to_string()))?.is_some()
+            {
+                return Err(refused());
+            }
+            Ok(())
+        };
+        crate::store::append_claim_with_commit_context(self, input, None, None, None, None,
+            crate::store::ClaimCommitContext {
+                client_operation: true, authority: Some(&authority), ..Default::default()
+            }).map(|(claim, _)| claim)
+    }
+
     pub fn append_client_operation_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, crate::FractalError> {
         if !input.kind.starts_with("custom.client.pairing") && !input.kind.starts_with("custom.client.terminal") {
             return Err(crate::FractalError::new("claim-write-forbidden", "a dedicated client operation record is required"));
