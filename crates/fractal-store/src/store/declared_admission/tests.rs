@@ -409,8 +409,8 @@ fn attention_capability_is_additive_and_anchored() {
     let (peer, _) = peer(&store, &anchor);
     started(&peer, json!({"declared_admission":1}));
     sync(&peer, &store);
-    publish(&store, "version 2\nmission \"memory\" { goal \"Work.\"; declared-budgets { memory-max \"8G\"; } }\n", "memory").unwrap();
-    let attention = "version 2\nmission \"attention\" { goal \"Work.\"; declared-budgets { attention \"person/reviewer\" asks=3; } }\n";
+    publish(&store, "version 2\nmission \"memory\" state=\"ready\" { goal \"Work.\"; declared-budgets { memory-max \"8G\"; } }\n", "memory").unwrap();
+    let attention = "version 2\nmission \"attention\" state=\"ready\" { goal \"Work.\"; declared-budgets { attention \"person/reviewer\" asks=3; } }\n";
     let before = store.index().unwrap();
     let error = publish(&store, attention, "attention").unwrap_err();
     assert_eq!(error.code, ERROR);

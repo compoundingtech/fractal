@@ -6483,9 +6483,9 @@ mission "example/work" state="ready" { goal "Work."; declared-budgets { cpu-seco
     fn attention_refuses_agents_steps_and_deferred_agents() {
         let fields = r#"declared-budgets { attention "person/reviewer" asks=3; }"#;
         for declaration in [
-            format!(r#"agent "worker" {{ command "true"; {fields}; }}"#),
-            format!(r#"mission "work" {{ goal "Work."; step "one" {{ {fields}; }} }}"#),
-            format!(r#"mission "work" {{ goal "Work."; agent "worker" {{ {fields}; }} }}"#),
+            format!(r#"agent "example/worker" {{ command "true"; {fields}; }}"#),
+            format!(r#"mission "example/work" state="ready" {{ goal "Work."; step "one" {{ goal "Work."; {fields}; }} }}"#),
+            format!(r#"mission "example/work" state="ready" {{ goal "Work."; agent "worker" {{ command "true"; {fields}; }}; step "work" {{ goal "Work."; }} }}"#),
         ] {
             let error = parse_intent(&format!("version 2\n{declaration}"), "node")
                 .and_then(|intent| fractal_missions_base::declared_admission::validate_publication(&intent).map(|()| intent))
