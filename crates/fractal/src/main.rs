@@ -5117,7 +5117,7 @@ pub fn main(cli_build_stamp: Option<&'static str>, local_build_stamp: Option<&'s
         std::env::args_os().next().as_deref(),
         std::env::var_os("FRACTAL_SUPPRESS_DEPRECATION").as_deref(),
     ) {
-        eprintln!("warning: '{name}' is deprecated; use 'fractal' instead. '{name}' will be removed on 2026-11-16.");
+        eprintln!("warning: '{name}' is deprecated; use 'fractal' instead. '{name}' will be removed once every host and caller uses 'fractal'.");
     }
     fractal_drivers::version::set_build_stamps(cli_build_stamp, local_build_stamp);
     fractal_tui::set_build_stamps(cli_build_stamp, local_build_stamp);

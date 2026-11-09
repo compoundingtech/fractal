@@ -234,6 +234,7 @@ pub fn parse_intent_with_owner(
         .map_err(|error| FractalError::new("unsupported-kdl-version", error.to_string()))?;
     let mut deprecated_syntax = BTreeSet::new();
     canonicalize_terminal_declarations(&mut document, &mut deprecated_syntax);
+    lower_context_references(&mut document);
     let canonical_document = document.clone();
     lower_terminal_declarations(&mut document);
     let declarations = document
@@ -5786,6 +5787,51 @@ version 2
         assert_eq!(pty.normalized, terminal.normalized);
         assert!(pty.deprecated_syntax.contains("pty"));
         assert!(terminal.deprecated_syntax.is_empty());
+    }
+
+    #[test]
+    fn fractal_context_references_publish_the_same_mission_as_st_references() {
+        let source = |run: &str, workspace: &str, step: &str| {
+            format!(
+                r#"version 2
+agent "helper" {{ workspace "/tmp"; command "echo ${{FRACTAL_MISSION_RUN}}"; }}
+mission "spelling" state="ready" {{
+  goal "Work in {workspace}; keep $${{FRACTAL_MISSION_RUN}} literal."
+  agent "builder" {{ workspace "{workspace}/builder"; command "true"; }}
+  step "build" {{
+    assigned-to "agent/{run}/builder"
+    goal "Build {step} of {run}."
+    gate "prepared" {{ field "exit_code" "exec/{run}/prepare" is 0; }}
+  }}
+}}
+"#
+            )
+        };
+        let st = parse_test_intent(
+            &source("${ST_MISSION_RUN}", "${ST_WORKSPACE}", "${ST_STEP}"),
+            "node",
+        )
+        .unwrap();
+        let fractal = parse_test_intent(
+            &source("${FRACTAL_MISSION_RUN}", "${FRACTAL_WORKSPACE}", "${FRACTAL_STEP}"),
+            "node",
+        )
+        .unwrap();
+        assert_eq!(fractal.missions, st.missions);
+        assert_eq!(fractal.missions["spelling"].revision, st.missions["spelling"].revision);
+        assert_eq!(fractal.source_hash, st.source_hash);
+        assert_eq!(fractal.normalized, st.normalized);
+        assert!(fractal.missions["spelling"].goals[0].contains("$${FRACTAL_MISSION_RUN}"));
+        // Outside a mission `${…}` is shell text, not a context reference.
+        assert!(serde_json::to_string(&fractal.subjects["agent/node.helper"].desired)
+            .unwrap()
+            .contains("${FRACTAL_MISSION_RUN}"));
+        let unknown = parse_test_intent(
+            "version 2\nmission \"unknown\" state=\"ready\" { goal \"Use ${FRACTAL_UNKNOWN}.\"; step \"work\" { agentless; goal \"Work.\"; } }\n",
+            "node",
+        )
+        .unwrap_err();
+        assert_eq!(unknown.code, "unknown-variable");
     }
 
     #[test]
