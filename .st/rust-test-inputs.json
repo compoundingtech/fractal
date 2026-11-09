@@ -348,6 +348,7 @@
     "crates/fractal-daemon/fixtures/omp-resume/managed-stop-cancelled.jsonl",
     "crates/fractal-daemon/fixtures/omp-tool-results.jsonl",
     "crates/fractal-daemon/tests/fixtures/harness-access-previous-build.json",
+    "crates/fractal-missions/src/store/tests/huge_part_digest.rs",
     "crates/fractal-store/src/store/notice_authority.rs",
     "crates/fractal-store/src/store/notice_authority_tests.rs",
     "crates/fractal-store/src/store/transaction_work.rs",
