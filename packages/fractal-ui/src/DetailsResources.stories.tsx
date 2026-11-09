@@ -399,7 +399,7 @@ export const ResourceGeometry: Story = { parameters: { scenario: { _tag: 'contra
   if (fitted) assertCraft(pane, item)
   if (fitted && item.state === 'busy') assertChevron(pane)
   if (item.name === 'busy/320') {
-    const row = [...pane.querySelectorAll<HTMLElement>('[data-thing-openable]')].find(row => [...row.querySelectorAll<HTMLElement>('[data-thing-meta-item]')].some(meta => meta.getBoundingClientRect().width > 0 && meta.getBoundingClientRect().top < meta.parentElement!.getBoundingClientRect().bottom - 0.5))
+    const row = [...pane.querySelectorAll<HTMLElement>('[data-thing-openable]')].find(row => row.querySelector('[data-thing-title]')?.children.length === 0 && [...row.querySelectorAll<HTMLElement>('[data-thing-meta-item]')].some(meta => meta.getBoundingClientRect().width > 0 && meta.getBoundingClientRect().top < meta.parentElement!.getBoundingClientRect().bottom - 0.5))
     requireContract(row, 'Row negative controls have no row with shown metadata')
     const title = row.querySelector<HTMLElement>('[data-thing-title]')!, maxWidth = title.style.maxWidth
     try { title.style.maxWidth = '8px'; await rejectsControl('Title truncates beside shown metadata', () => assertRows(pane)) } finally { title.style.maxWidth = maxWidth }
