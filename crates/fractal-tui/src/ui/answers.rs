@@ -5,6 +5,7 @@ pub(super) struct PendingAnswer {
     item: Attention,
     position: usize,
     words: Option<String>,
+    answer: Option<String>,
 }
 
 impl Ui {
@@ -16,16 +17,12 @@ impl Ui {
         }
         let Some((position, item)) = self.world.attention.items().iter().enumerate()
             .find(|(_, item)| &item.id == id) else { return };
-        let AttentionKind::Request { structured, .. } = &item.kind else { return };
-        // A named option's label is not a draft; custom answers and requested changes are.
-        let needs_words = answer.is_none() || structured.as_ref().is_some_and(|request| {
-            request.answers.iter().any(|option| Some(&option.id) == answer.as_ref()
-                && option.outcome.as_deref() == Some("request_changes"))
-        });
+        let AttentionKind::Request { .. } = &item.kind else { return };
         self.pending_answers.insert(id.clone(), PendingAnswer {
             item: item.clone(),
             position,
-            words: needs_words.then(|| reason.clone()).flatten(),
+            words: reason.clone(),
+            answer: answer.clone(),
         });
         self.hide_pending_answers();
         self.refresh_tab_statuses();
@@ -49,9 +46,17 @@ impl Ui {
             return;
         }
         self.acted.remove(id);
-        if let Some(words) = pending.words {
-            self.conversation_state.drafts.entry(id.to_owned()).or_insert(words);
+        if let Some(answer) = pending.answer {
+            self.note_answers.insert(id.to_owned(), answer);
+        } else {
+            self.note_answers.remove(id);
         }
+        if let Some(words) = pending.words {
+            let key = self.answer_draft_key(id);
+            self.conversation_state.drafts.entry(key).or_insert(words);
+        }
+        self.answer_errors.insert(id.to_owned(),
+            "Could not confirm answer · request restored; check before sending again".into());
         let chosen = self.list_selection(0);
         match &mut self.world.attention {
             Load::Ready(items) => {
@@ -68,7 +73,7 @@ impl Ui {
             self.selected[0] = position;
         }
         self.focus_seen = self.focus();
-        self.flash("Could not confirm answer · request restored; check before sending again");
+        // The refusal belongs to this card until the person acts, not to the flash timer.
     }
 }
 
@@ -76,6 +81,222 @@ impl Ui {
 mod tests {
     use super::*;
     use crate::ui::{demo, doc::Hit, view::Tier};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn press(ui: &mut Ui, code: KeyCode) {
+        ui.key(KeyEvent::new(code, KeyModifiers::NONE));
+    }
+
+    fn note_request(outcome: Option<&str>, custom: bool) -> Ui {
+        let mut ui = requests();
+        if let Load::Ready(items) = &mut ui.world.attention {
+            for item in items {
+                if let AttentionKind::Request { structured: Some(request), .. } = &mut item.kind {
+                    request.custom = custom;
+                    request.entry_type = if outcome.is_some() { "decision" } else { "choice" }.into();
+                    request.answers[0].outcome = outcome.map(str::to_owned);
+                    let mut second = request.answers[0].clone();
+                    second.id = "other".into();
+                    second.label = "Other".into();
+                    request.answers.push(second);
+                }
+            }
+        }
+        ui
+    }
+
+    #[test]
+    fn every_named_outcome_sends_its_note_with_keyboard_and_mouse() {
+        for outcome in [Some("accept"), Some("decline"), Some("request_changes"), None] {
+            for mouse in [false, true] {
+                let mut ui = note_request(outcome, false);
+                ui.click(Hit::Answer(0));
+                if !ui.editing {
+                    press(&mut ui, KeyCode::Char('c'));
+                }
+                for letter in "with this note".chars() {
+                    press(&mut ui, KeyCode::Char(letter));
+                }
+                ui.answering = Some(1);
+                if mouse { ui.click(Hit::Enter) } else { press(&mut ui, KeyCode::Enter) }
+                assert!(matches!(&ui.effects[..], [Effect::Attention {
+                    id, answer: Some(answer), reason: Some(text), ..
+                }] if id == "attention/first" && answer == "yes" && text == "with this note"));
+            }
+        }
+    }
+
+    #[test]
+    fn notes_survive_highlight_changes_and_send_only_the_bound_options_note() {
+        let mut ui = note_request(None, false);
+        ui.click(Hit::Answer(0));
+        press(&mut ui, KeyCode::Char('c'));
+        press(&mut ui, KeyCode::Char('A'));
+        ui.click(Hit::Answer(1));
+        assert_eq!(ui.note_answers["attention/first"], "yes");
+        ui.click(Hit::Key('c'));
+        press(&mut ui, KeyCode::Char('B'));
+        assert_eq!(ui.conversation_state.drafts["answer:attention/first:yes"], "A");
+        assert_eq!(ui.conversation_state.drafts["answer:attention/first:other"], "B");
+        ui.click(Hit::Enter);
+        assert!(matches!(&ui.effects[..], [Effect::Attention {
+            answer: Some(answer), reason: Some(text), ..
+        }] if answer == "other" && text == "B"));
+    }
+
+    #[test]
+    fn custom_disabled_without_a_highlight_does_not_open_an_editor() {
+        let mut ui = note_request(None, false);
+        press(&mut ui, KeyCode::Char('c'));
+        assert!(!ui.editing);
+        assert!(ui.note_answers.is_empty());
+        assert!(ui.effects.is_empty());
+        ui.click(Hit::Key('c'));
+        assert!(!ui.editing);
+    }
+
+    #[test]
+    fn custom_answer_requires_its_distinct_entry() {
+        let mut ui = note_request(None, true);
+        press(&mut ui, KeyCode::Char('c'));
+        assert!(!ui.editing);
+        ui.click(Hit::Answer(2));
+        press(&mut ui, KeyCode::Enter);
+        assert!(ui.editing);
+        press(&mut ui, KeyCode::Char('X'));
+        ui.click(Hit::Enter);
+        assert!(matches!(&ui.effects[..], [Effect::Attention {
+            answer: None, reason: Some(text), ..
+        }] if text == "X"));
+    }
+
+    #[test]
+    fn required_note_refusal_stays_inline_until_the_person_acts() {
+        let mut ui = note_request(Some("request_changes"), false);
+        ui.click(Hit::Answer(0));
+        ui.click(Hit::Enter);
+        assert!(ui.effects.is_empty());
+        let error = ui.answer_errors["attention/first"].clone();
+        ui.flash = None;
+        ui.set_world(ui.world.clone());
+        assert_eq!(ui.answer_errors["attention/first"], error);
+        assert!(ui.editing);
+        press(&mut ui, KeyCode::Char('x'));
+        ui.click(Hit::Enter);
+        assert!(!ui.answer_errors.contains_key("attention/first"));
+        assert_eq!(ui.effects.len(), 1);
+    }
+
+    #[test]
+    fn refused_named_note_is_restored_to_its_option_and_error_is_durable() {
+        let mut ui = note_request(Some("accept"), false);
+        let effect = Effect::Attention {
+            id: "attention/first".into(), action: "work.done".into(),
+            answer: Some("yes".into()), reason: Some("retain this".into()),
+        };
+        ui.note_acted(&effect);
+        ui.finish_answer("attention/first", false);
+        ui.flash = None;
+        assert_eq!(ui.note_answers["attention/first"], "yes");
+        assert_eq!(ui.conversation_state.drafts["answer:attention/first:yes"], "retain this");
+        assert!(ui.answer_errors["attention/first"].contains("Could not confirm answer"));
+        ui.set_world(ui.world.clone());
+        assert!(ui.answer_errors.contains_key("attention/first"));
+    }
+
+    #[test]
+    fn request_composer_and_send_ignore_an_inactive_chat() {
+        let mut ui = note_request(None, false);
+        ui.chat = Some(super::super::ChatState {
+            item: "attention/first".into(),
+            to: "agent/example/asker".into(),
+            to_name: "Asker".into(),
+            editing: false,
+        });
+        ui.click(Hit::Answer(0));
+        ui.click(Hit::Composer);
+        assert!(ui.editing);
+        assert!(!ui.chat.as_ref().unwrap().editing);
+        press(&mut ui, KeyCode::Char('N'));
+        ui.click(Hit::Enter);
+        assert!(matches!(&ui.effects[..], [Effect::Attention {
+            answer: Some(answer), reason: Some(text), ..
+        }] if answer == "yes" && text == "N"));
+    }
+
+    #[test]
+    fn unstructured_requests_keep_the_reply_editor_and_field_reply_action() {
+        for action in ["work.done", "custom.reply"] {
+            for mouse in [false, true] {
+                let mut ui = requests();
+                if let Load::Ready(items) = &mut ui.world.attention {
+                    for item in items {
+                        if let AttentionKind::Request { structured, .. } = &mut item.kind {
+                            *structured = None;
+                            item.actions = vec![action.into()];
+                        }
+                    }
+                }
+                if mouse { ui.click(Hit::Key('c')) } else { press(&mut ui, KeyCode::Char('c')) }
+                assert!(ui.editing);
+                for letter in "field=value".chars() {
+                    press(&mut ui, KeyCode::Char(letter));
+                }
+                ui.click(Hit::Enter);
+                assert!(matches!(&ui.effects[..], [Effect::Attention {
+                    action: sent_action, reason: Some(text), answer: None, ..
+                }] if sent_action == action && text == "field=value"));
+            }
+        }
+    }
+
+    #[test]
+    fn visible_send_submits_a_note_after_escape_or_a_refused_answer() {
+        for restored in [false, true] {
+            let mut ui = note_request(Some("accept"), false);
+            ui.click(Hit::Answer(0));
+            press(&mut ui, KeyCode::Char('c'));
+            for letter in "keep this note".chars() {
+                press(&mut ui, KeyCode::Char(letter));
+            }
+            if restored {
+                ui.click(Hit::Enter);
+                let effect = ui.effects.pop().unwrap();
+                ui.note_acted(&effect);
+                ui.finish_answer("attention/first", false);
+                let first = ui.listing_for(0, 40).ids.iter()
+                    .position(|id| id == "attention/first").unwrap();
+                ui.select(first);
+            } else {
+                press(&mut ui, KeyCode::Esc);
+            }
+            ui.editing = false;
+            ui.answering = None;
+            ui.click(Hit::Enter);
+            assert!(matches!(&ui.effects[..], [Effect::Attention {
+                id, answer: Some(answer), reason: Some(note), ..
+            }] if id == "attention/first" && answer == "yes" && note == "keep this note"));
+        }
+    }
+
+    #[test]
+    fn named_answer_without_a_note_passes_the_work_done_transport_boundary() {
+        for outcome in [None, Some("accept"), Some("decline")] {
+            let mut ui = note_request(outcome, false);
+            let (_, request) = ui.structured_request().unwrap();
+            ui.click(Hit::Answer(0));
+            ui.click(Hit::Enter);
+            let Effect::Attention { answer, reason, .. } = ui.effects.pop().unwrap() else {
+                panic!("expected answer effect");
+            };
+            let (summary, answer) =
+                crate::person_step_response(Some(&request), answer, reason).unwrap();
+            assert_eq!(summary, "Yes");
+            let answer = answer.unwrap();
+            assert_eq!(answer.id.as_deref(), Some("yes"));
+            assert_eq!(answer.text, None);
+        }
+    }
 
     fn requests() -> Ui {
         let mut world = demo::test_world();
@@ -142,7 +363,7 @@ mod tests {
         assert_eq!(ui.conversation_state.drafts["attention/next"], "new draft");
         assert!(ui.pending_answers.is_empty());
         assert!(!ui.acted.contains("attention/first"));
-        assert!(ui.flash.as_ref().unwrap().0.contains("Could not confirm answer"));
+        assert!(ui.answer_errors["attention/first"].contains("Could not confirm answer"));
     }
 
     #[test]
