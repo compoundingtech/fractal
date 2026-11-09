@@ -317,6 +317,14 @@ const NOT_MEASURED: &[(&str, &str)] = &[
     ("GET /v1/client/assistant/conversations", "requires a paired assistant bearer and per-read grant approval, absent from the person-client cost fixture; assistant API tests cover exact-envelope byte budgets and keyset progress, not populated cost"),
     ("GET /v1/client/assistant/conversation-detail", "requires a grant-bound handle returned by assistant discovery and per-read approval, absent from the static cost fixture; assistant API tests cover detail-to-timeline continuation, not populated cost"),
     ("GET /v1/client/assistant/conversation-timeline", "requires a grant-bound discovery handle and per-read approval, absent from the person-client cost fixture; the real assistant_native MCP ACK chain covers list-to-timeline-to-read and wrong-grant denial, not populated cost"),
+    // Thread authorization coverage lives in assistant/authorization_tests.rs:
+    // thread_detail_requires_conversation_grant_and_owner_visible_thread and
+    // thread_timeline_cursors_cannot_cross_threads_sessions_or_grant_revisions.
+    // The shared receipt-slot path is covered by
+    // assistant_caller_bound_rechecks_authorization_after_queue_backpressure.
+    ("GET /v1/client/assistant/threads", "requires a paired assistant, a grant-bound conversation/session and per-read approval, absent from the person-client cost fixture; assistant authorization tests cover scoped discovery pagination and revocation, not populated SQLite cost"),
+    ("GET /v1/client/assistant/thread-detail", "requires a paired assistant and an owner-visible thread in its granted conversation/session, absent from the person-client cost fixture; assistant authorization tests cover exact ownership, grant denial and response byte budgets, not populated SQLite cost"),
+    ("GET /v1/client/assistant/thread-timeline", "requires a paired assistant and grant/session/thread-bound continuation, absent from the person-client cost fixture; assistant tests cover cursor isolation, bounded content chunks and shared receipt-slot authorization under backpressure, not populated SQLite cost"),
     ("GET /v1/client/assistant/conversation-search", "requires a grant-bound discovery handle and per-read approval, absent from the static cost fixture; assistant API tests cover bounded search and foreign-grant rejection, not populated cost"),
     ("GET /v1/client/assistant/terminal-content", "requires a paired assistant and a single-use content-reference approval; assistant projection tests cover disclosure and byte budgets"),
     ("POST /v1/internal/fleet/invites", "fleet membership"),
