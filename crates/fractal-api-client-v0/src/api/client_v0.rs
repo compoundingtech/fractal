@@ -9192,16 +9192,21 @@ async fn dispatch_action(
                 .map_err(ApiError::internal)?;
             let mut paired = None;
             let mut legacy = None;
+            let mut legacy_revoked = None;
             for claim in &claims.claims {
                 if claim.body.pointer("/fields/device_id").and_then(Value::as_str) == Some(device.as_str()) {
                     if state.store.pairing_completion_is_admitted(claim, client_now_ms()).map_err(ApiError::internal)? {
                         paired = Some(claim);
                         break;
                     }
-                    legacy.get_or_insert(claim);
+                    if state.store.pairing_completion_is_revoked(claim).map_err(ApiError::internal)? {
+                        legacy_revoked.get_or_insert(claim);
+                    } else {
+                        legacy.get_or_insert(claim);
+                    }
                 }
             }
-            let paired = paired.or(legacy).ok_or_else(|| {
+            let paired = paired.or(legacy_revoked).or(legacy).ok_or_else(|| {
                 ApiError::not_found(format!("paired device `{device}` does not exist"))
             })?;
             if paired.origin != state.node {
@@ -16475,6 +16480,8 @@ subscription "watch/source" {
                 shadow.subject = "custom/client/unrevoked-legacy-shadow".into();
                 state.store.append_claim(&shadow).unwrap();
             }
+            assert!(dispatch_action(&state, &snapshot, &owner, &request).await.unwrap_err()
+                .message.contains("already revoked"));
             let devices = device_resources(&state, &new_client_snapshot(&state), "person/alex").unwrap();
             assert_eq!(devices.len(), 1);
             assert_eq!(devices[0]["state"], "revoked");
