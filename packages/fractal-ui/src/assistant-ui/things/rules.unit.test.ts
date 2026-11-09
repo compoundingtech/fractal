@@ -22,6 +22,10 @@ describe('thing rules', () => {
     expect(rowAge(known(pr, { freshness: 'stale', observedAt: now - 25 * minute }), now)).toBe('seen 25m')
   })
 
+  it('does not invent a last-seen age when the observation time was not reported', () => {
+    expect(rowAge({ _tag: 'Known', value: pr, freshness: 'stale' }, now)).toBeUndefined()
+  })
+
   it('keeps amber for asks you can act on: read-only asks lose colour, failures and stale rows keep it', () => {
     const ask: ThingFace = { ...pr, act: { tone: 'act', label: 'changes requested' } }
     const failed: ThingFace = { ...pr, act: { tone: 'failed', label: 'checks failing' } }

@@ -19,7 +19,7 @@ export const AgentMissions = ({ agentRef, onOpen, section }: { readonly agentRef
   const feeds = useAtomValue(React.useMemo(() => sidebarMissionFeedsAtom(source), [source]))
   const connection = useConnection()
   const now = useNowSnapshot()
-  const { rows } = useMissionRows()
+  const { missions, rows } = useMissionRows()
   const agent = feed._tag === 'Observed' ? feed.value : undefined
   const frozen = feed._tag === 'Observed' && (feed.freshness === 'stale' || connection._tag !== 'Live')
   const ids = agent === undefined ? [] : agentMissionIds(sidebarRow({ agent, stale: frozen, ...feeds }).missionContext)
@@ -31,7 +31,7 @@ export const AgentMissions = ({ agentRef, onOpen, section }: { readonly agentRef
       : data.tone === 'failed' ? { tone: 'failed' as const, label: failed?.note ?? failed?.title ?? data.stateLabel } : undefined
     return {
       key: row.mission.id,
-      observed: { _tag: 'Known', value: missionFace({ title: data.title, state: row.presentation.word === 'working' ? 'active' : row.presentation.word, updatedAt: data.updatedAt }, act), observedAt: data.updatedAt, freshness: frozen ? 'stale' : 'live' },
+      observed: { _tag: 'Known', value: missionFace({ title: data.title, state: row.presentation.word === 'working' ? 'active' : row.presentation.word, updatedAt: data.updatedAt }, act), ...(missions._tag !== 'Observed' || missions.readAt === undefined ? {} : { observedAt: missions.readAt }), freshness: frozen || (missions._tag === 'Observed' && missions.freshness === 'stale') ? 'stale' : 'live' },
       ref: row.mission.id,
       hoverCard: <MissionEntityCard mission={missionChildOf(row)} now={now} />,
     }

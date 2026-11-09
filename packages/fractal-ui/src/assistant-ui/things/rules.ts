@@ -12,7 +12,7 @@ export const bareAge = (at: number, now: number): string => formatRelative(at, n
 
 /** A row's age: the kind's own moment, bare; a stale observation says when it was last seen instead. */
 export const rowAge = (observed: KnownFace, now: number): string | undefined => {
-  if (observed.freshness === 'stale') return `seen ${bareAge(observed.observedAt, now)}`
+  if (observed.freshness === 'stale') return observed.observedAt === undefined ? undefined : `seen ${bareAge(observed.observedAt, now)}`
   return observed.value.at === undefined ? undefined : bareAge(observed.value.at.at, now)
 }
 
@@ -22,7 +22,7 @@ export const rowAge = (observed: KnownFace, now: number): string | undefined => 
  */
 export const nextAgeChange = (observed: Observed<ThingFace>, now: number): number | undefined => {
   if (observed._tag !== 'Known') return undefined
-  if (observed.freshness === 'stale') return nextRelativeChange(observed.observedAt, now)
+  if (observed.freshness === 'stale') return observed.observedAt === undefined ? undefined : nextRelativeChange(observed.observedAt, now)
   return observed.value.at === undefined ? undefined : nextRelativeChange(observed.value.at.at, now)
 }
 

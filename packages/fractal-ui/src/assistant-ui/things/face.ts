@@ -71,7 +71,7 @@ export type Observed<A> =
    * `stale`: the last observation may be out of date; the age reads `seen 25m` and every colour stays.
    * `readOnly`: you can see it but not act on it, so an amber ask is drawn without colour.
    */
-  | { readonly _tag: 'Known'; readonly value: A; readonly observedAt: number; readonly freshness: 'live' | 'stale'; readonly readOnly?: boolean }
+  | { readonly _tag: 'Known'; readonly value: A; readonly observedAt?: number; readonly freshness: 'live' | 'stale'; readonly readOnly?: boolean }
   | { readonly _tag: 'Unavailable'; readonly hint: ThingHint; readonly reason: string }
   /** The record arrived but did not decode: the hint is shown with the issue. */
   | { readonly _tag: 'Invalid'; readonly hint: ThingHint; readonly issue: string }

@@ -50,7 +50,7 @@ export const ResourceRow = ({ resource, onOpen }: { readonly resource: ResourceO
 const nativeItem = (resource: DetailsResource, native: NativeDetailsObservation): PanelItem => ({
   key: resource.uri,
   ...(/^(details:|session:)/.test(resource.uri) ? {} : { ref: resource.uri }),
-  observed: { _tag: 'Known', value: resource.face ?? { kind: 'Resource', icon: 'info', title: resource.card.label, mark: { shape: 'none', word: '' }, summary: resource.card.detail }, observedAt: native.observedAt ?? 0, freshness: native.stale ? 'stale' : 'live' },
+  observed: { _tag: 'Known', value: resource.face ?? { kind: 'Resource', icon: 'info', title: resource.card.label, mark: { shape: 'none', word: '' }, summary: resource.card.detail }, ...(native.observedAt === undefined ? {} : { observedAt: native.observedAt }), freshness: native.stale ? 'stale' : 'live' },
 })
 const notices = (label: string, feed: Exclude<Feed<unknown>, { readonly _tag: 'Observed' }>): string =>
   credentialNotice(feed) ?? (feed._tag === 'Waiting' ? `Loading ${label.toLowerCase()}…`
