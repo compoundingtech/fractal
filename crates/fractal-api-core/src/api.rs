@@ -7959,13 +7959,14 @@ async fn guard_bound_actor(
     let client_request = request.uri().path().starts_with("/v1/client/");
     // This guard is outside all router layers. Authenticate here, before ancestry admission,
     // independently of the ingress observe/enforce rollout.
-    if worker_route(request.uri().path())
-        && matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable))
+    if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable))
         && let Some(worker) = worker
     {
         let peer = request.extensions().get::<LocalPeer>().cloned();
         if matches!(tokio::task::spawn_blocking(move || authorize_worker(peer.as_ref(), &*worker)).await, Ok(Ok(()))) {
-            request.extensions_mut().insert(AuthenticatedWorker);
+            // The supervised worker runs in no harness. Its live generation is stronger
+            // evidence than an unreadable service-manager environment.
+            request.extensions_mut().insert(HarnessAncestry::Person);
         }
     }
     match guard_bound_request(request, bound_agent.as_deref(), &store).await {
@@ -8036,12 +8037,11 @@ pub async fn guard_bound_request(
     )?.identity;
     // Free mode lets an agent do what its person may do, but always as itself: a harness never
     // names a person, or another agent, as the local client-v0 actor.
-    if let Some(person) = request
-        .headers()
-        .get(client_v0::LOCAL_PERSON_HEADER)
-        .and_then(|value| value.to_str().ok())
-        && !is_bound_actor(store, person, &bound_identity)?
+    for person in [client_v0::LOCAL_PERSON_HEADER, wire_names::LOCAL_PERSON_HEADER_ALIAS]
+        .into_iter().flat_map(|name| request.headers().get_all(name))
+        .filter_map(|value| value.to_str().ok())
     {
+        if is_bound_actor(store, person, &bound_identity)? { continue; }
         return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}` and cannot act as `{person}`"),
@@ -8131,23 +8131,17 @@ pub async fn guard_bound_request(
     Ok(Request::from_parts(parts, Body::from(bytes)))
 }
 
-#[derive(Clone)]
-struct AuthenticatedWorker;
-
 async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Body>, ApiError> {
     let refuse = || ApiError::bad(FractalError::new(
         "foreign-agent-actor", "local caller ancestry could not be verified",
     ));
     let path = request.uri().path();
     if matches!(path, "/v1/backup" | "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
-        || (path.starts_with(INTERNAL_ROUTE_PREFIX)
-            && !(worker_route(path) && request.extensions().get::<AuthenticatedWorker>().is_some()))
+        || path.starts_with(INTERNAL_ROUTE_PREFIX)
         || request.headers().contains_key(client_v0::LOCAL_PERSON_HEADER)
+        || request.headers().contains_key(wire_names::LOCAL_PERSON_HEADER_ALIAS)
     {
         return Err(refuse());
-    }
-    if worker_route(path) && request.extensions().get::<AuthenticatedWorker>().is_some() {
-        return Ok(request);
     }
     if matches!(*request.method(), axum::http::Method::GET | axum::http::Method::HEAD) {
         return Ok(request);

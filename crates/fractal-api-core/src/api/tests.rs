@@ -231,16 +231,19 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
             ("GET", "/v1/agents/rename-id/proof/export", false, "{}", true),
             ("GET", "/v1/missions/rename-id/proof/export", false, "{}", true),
             ("GET", "/v1/internal/example", false, "{}", true),
-            ("POST", "/v1/internal/replication/receive", false, "{}", !worker),
+            ("POST", "/v1/internal/replication/receive", false, "{}", true),
             ("POST", "/v1/internal/replication/receive", true, "{}", true),
             ("GET", "/v1/client/session", true, "{}", true),
+            ("POST", "/v1/internal/replication-wake", false, "{}", true),
+            ("GET", "/v1/internal/fleet/membership", false, "{}", true),
+            ("GET", "/v1/client/capabilities", true, "{}", true),
             ("POST", "/v1/example", false, r#"{"actor":"person/operator"}"#, true),
             ("POST", "/v1/example", false, r#"{"requester":"agent/other"}"#, true),
         ] {
             let mut request = Request::builder().method(method).uri(path).header("host", "local");
             if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
             let response = sender.send_request(request.body(Body::from(body)).unwrap()).await.unwrap();
-            let refused = sensitive && ancestry == HarnessAncestry::Unavailable;
+            let refused = sensitive && ancestry == HarnessAncestry::Unavailable && !worker;
             assert_eq!(response.status(), if refused { StatusCode::UNPROCESSABLE_ENTITY } else { StatusCode::OK }, "{ancestry:?} {path} {body}");
             response.into_body().collect().await.unwrap();
         }
@@ -250,7 +253,7 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[tokio::test]
-async fn unreadable_same_uid_parent_admits_only_authenticated_worker_routes() {
+async fn unreadable_same_uid_parent_admits_only_authenticated_worker_as_person() {
     use tower::ServiceExt as _;
     let mut child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
     let pid = child.id();
@@ -277,24 +280,29 @@ async fn unreadable_same_uid_parent_admits_only_authenticated_worker_routes() {
         let authority: WorkerAuthority = Arc::new(move || Ok(if verified { pid } else { 0 }));
         let app = Router::new().fallback(|| async { "accepted" })
             .layer(from_fn_with_state((store.clone(), Some(authority)), guard_bound_actor));
-        for (path, person, worker_route) in [
-            ("/v1/internal/replication/receive", false, true),
-            ("/v1/internal/seat-freshness", false, true),
-            ("/v1/internal/seat-freshness/reads", false, true),
-            ("/v1/internal/seat-snapshot", false, true),
-            (crate::peer::CLIENT_READ_FORWARD_PATH, false, true),
-            ("/v1/internal/fleet/invites", false, false),
-            ("/v1/internal/replication/receive", true, true),
+        for (method, path, header) in [
+            ("POST", "/v1/internal/replication/receive", None),
+            ("POST", "/v1/internal/seat-freshness", None),
+            ("POST", "/v1/internal/seat-freshness/reads", None),
+            ("POST", "/v1/internal/seat-snapshot", None),
+            ("POST", crate::peer::CLIENT_READ_FORWARD_PATH, None),
+            ("POST", "/v1/internal/replication-wake", None),
+            ("GET", "/v1/internal/fleet/membership", None),
+            ("POST", "/v1/internal/fleet/endpoints", None),
+            ("POST", "/v1/internal/fleet/redeem", None),
+            ("POST", "/v1/internal/fleet/invites", None),
+            ("GET", "/v1/client/capabilities", Some(client_v0::LOCAL_PERSON_HEADER)),
+            ("GET", "/v1/client/capabilities", Some(wire_names::LOCAL_PERSON_HEADER_ALIAS)),
         ] {
-            let mut request = Request::post(path);
-            if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
+            let mut request = Request::builder().method(method).uri(path);
+            if let Some(header) = header { request = request.header(header, "person/operator"); }
             let mut request = request.body(Body::from(r#"{"actor":"person/operator"}"#)).unwrap();
             request.extensions_mut().insert(ancestry.clone());
             request.extensions_mut().insert(LocalPeer { pid, ancestor: None, peer_process: Some(peer.clone()) });
             let response = app.clone().oneshot(request).await.unwrap();
-            assert_eq!(response.status(), if verified && worker_route && !person {
+            assert_eq!(response.status(), if verified {
                 StatusCode::OK
-            } else { StatusCode::UNPROCESSABLE_ENTITY }, "{verified} {path} {person}");
+            } else { StatusCode::UNPROCESSABLE_ENTITY }, "{verified} {method} {path} {header:?}");
         }
     }
     child.kill().unwrap();
@@ -4125,7 +4133,7 @@ async fn main_performance_failures_registration_public_preview_and_apply() {
 async fn a_bound_harness_cannot_record_seat_freshness() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let received = crate::peer::ReceivedSeatFreshness {
         from: "another-member".into(),
         seats: vec![crate::peer::SeatHeard {
@@ -4218,7 +4226,7 @@ async fn internal_routes_refuse_seat_callers() {
 async fn a_seat_reads_fleet_views_through_public_routes_only() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let call = |method: &str, route: &str, bound: bool| {
         let mut request = Request::builder().method(method).uri(route).header("content-type", "application/json");
         if bound {
@@ -4245,7 +4253,7 @@ async fn main_performance_failures_registration_rejects_foreign_bound_actor() {
     let declarations = crate::graph::parse_internal_intent(PERFORMANCE_DECLARATIONS, &state.node).unwrap();
     state.store.apply_internal(&declarations, "workflow-registration-fixture").unwrap();
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let request = apply_request(&state, PERFORMANCE_REGISTRATION, "agent/foreign", "forged-workflow-register");
     let response = app.oneshot(Request::builder().method("POST").uri("/v1/intent/apply")
         .header("content-type", "application/json").extension(BoundAgent("agent/own".into()))
@@ -4282,7 +4290,7 @@ async fn repair_actor_bound_router_refuses_foreign_agent_and_person_before_token
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for actor in ["agent/foreign", "person/operator"] {
         let before = state.store.index().unwrap();
         let (status, refusal) = repair_actor_apply_request(
@@ -4301,7 +4309,7 @@ async fn repair_actor_bound_router_requires_present_nonempty_actor() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for body in [
         json!({"token":"not-a-repair-token"}),
         json!({"token":"not-a-repair-token","actor":null}),
@@ -4322,7 +4330,7 @@ async fn repair_actor_bound_router_own_actor_reaches_token_validation_and_daemon
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let before = state.store.index().unwrap();
     let (status, refusal) = repair_actor_apply_request(
         app.clone(),
@@ -4353,7 +4361,7 @@ async fn repair_actor_unbound_router_supports_legacy_token_only_apply() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let before = state.store.index().unwrap();
     let (status, plan) = get_request(app.clone(), "/v1/repair").await;
     assert_eq!(status, StatusCode::OK, "{plan}");
@@ -4377,7 +4385,7 @@ async fn repair_actor_bound_router_refuses_legacy_apply_with_or_without_actor() 
     // Both the handler and the daemon's outer binding guard must close the legacy path.
     for app in [
         app.clone(),
-        app.layer(from_fn_with_state(state.store.clone(), guard_bound_actor)),
+        app.layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor)),
     ] {
         for body in [
             json!({"token":token}),
@@ -4405,7 +4413,7 @@ async fn repair_actor_unbound_router_refuses_supplied_actor_without_daemon_bindi
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for actor in ["agent/own", "person/operator", ""] {
         let before = state.store.index().unwrap();
         let (status, refusal) = repair_actor_apply_request(
@@ -4422,7 +4430,7 @@ async fn repair_actor_unbound_router_refuses_attributed_token_only_apply() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
     let app = router(state.clone())
-        .layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let before = state.store.index().unwrap();
     let (status, plan) = get_request(app.clone(), "/v1/repair").await;
     assert_eq!(status, StatusCode::OK, "{plan}");
@@ -14551,7 +14559,7 @@ async fn a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_
     let preview = state.store.mission(&intent, crate::model::IntentInput { kdl: source.into(), source_name: None }).unwrap();
     state.store.apply(&intent, &preview.subject_tokens, "signature-resume-owner").unwrap();
     let fault_agent = state.store.fleet_fault_agent().unwrap().unwrap();
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let fault = || state.store.signature_migration().unwrap().fault;
 
     state.store.fail_signature_migration("fixture stopped page").unwrap();
@@ -14587,7 +14595,7 @@ async fn a_person_or_the_fault_agent_resumes_a_persisted_signature_fault_and_no_
 async fn a_bound_harness_dismisses_a_fault_only_as_itself() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let dismiss = |bound: Option<&'static str>, actor: &'static str| {
         let mut request = Request::builder()
             .method("POST")
@@ -14644,7 +14652,7 @@ async fn checkpoint_actor_request(
 async fn checkpoint_mutations_bind_body_actors_without_an_identity_header() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     for path in ["/v1/checkpoint/resume", "/v1/checkpoint/excuse"] {
         for actor in ["person/operator", "agent/other"] {
             let before = state.store.index().unwrap();
@@ -14681,7 +14689,7 @@ async fn checkpoint_resume_accepts_the_bound_local_trim_owner() {
     state.store.trim_locally(true).unwrap();
     *state.store.extension::<crate::store::answers_check::TrimSettings>()
         .notify.lock().unwrap() = Some("agent/helper".into());
-    let app = router(state.clone()).layer(from_fn_with_state(state.store.clone(), guard_bound_actor));
+    let app = router(state.clone()).layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
     let (status, resumed) = checkpoint_actor_request(
         app, "/v1/checkpoint/resume", Some("agent/helper"), "agent/helper",
     ).await;
