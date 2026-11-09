@@ -94,6 +94,7 @@ mod pairing_qr;
 // Command families: each file holds one command's implementation; main.rs dispatches to it.
 mod agents_cli;
 mod attention_cli;
+mod claims_cli;
 mod conversations_cli;
 mod driver_cli;
 mod fleet_cli;
@@ -109,6 +110,7 @@ mod work_cli;
 mod waiting_on_cli;
 use agents_cli::{run_agents, run_persons};
 use attention_cli::run_attention;
+use claims_cli::{ClaimsCommand, run_claims};
 use conversations_cli::{run_message, upload_attachments};
 use driver_cli::{run_driver, run_driver_hook};
 use fleet_cli::run_fleet;
@@ -469,6 +471,11 @@ enum Command {
     },
     /// Publish one registered typed observation.
     Claim(ClaimArgs),
+    /// List claims by kind, subject or subject prefix.
+    Claims {
+        #[command(subcommand)]
+        command: ClaimsCommand,
+    },
     /// Report a harness failure as this agent through the authorized diagnostic path.
     Diagnostic(HarnessDiagnosticArgs),
     /// Trace bounded graph history or wait on a graph condition.
@@ -6152,6 +6159,7 @@ async fn run(cli: Cli) -> Result<()> {
             run_harness_questions(&endpoint, command, cli.json).await
         }
         Command::Claim(args) => run_claim(&client, args, cli.json).await,
+        Command::Claims { command } => run_claims(&client, command, cli.json).await,
         Command::Diagnostic(args) => run_harness_diagnostic(&client, args, cli.json).await,
         Command::Trace { command } => run_trace_command(&client, command, cli.json).await,
         Command::Schema { command } => run_schema(&client, command, cli.json).await,

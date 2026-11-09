@@ -1616,7 +1616,7 @@ pub async fn client_history(
     };
     let store = state.store.clone();
     let page =
-        blocking_store(move || records::generic_claims_page(&store, None, None, 0, Some(before_index), true, limit))
+        blocking_store(move || records::generic_claims_page(&store, Default::default(), None, 0, Some(before_index), true, limit))
             .await?;
     let has_more = page.next_cursor.is_some();
     let items = page
