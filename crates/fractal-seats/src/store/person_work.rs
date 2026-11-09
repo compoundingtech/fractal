@@ -340,8 +340,8 @@ pub mod tests {
         store.set_node_key(std::sync::Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
         let (device, _) = smallclaims::fleet::MemberKey::generate().unwrap();
         let chain = store.enroll_device_key(person, device.public(), "thread phone").unwrap();
-        let pairing = store.append_claim(&ClaimInput {
-            subject: grant.into(), kind: "custom.client.pairing-completed".into(), actor: None,
+        let pairing = store.append_client_operation_claim(&ClaimInput {
+            subject: grant.into(), kind: "custom.client.pairing-completed".into(), actor: Some(person.into()),
             fields: BTreeMap::from([
                 ("person_id".into(), json!(person)),
                 ("session_actor".into(), json!(actor)),

@@ -1325,10 +1325,10 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
             .unwrap();
         state
             .store
-            .append_claim(&ClaimInput {
+            .append_client_operation_claim(&ClaimInput {
                 subject: pair_subject.into(),
                 kind: "custom.client.pairing-completed".into(),
-                actor: None,
+                actor: Some(person.into()),
                 fields: BTreeMap::from([
                     ("person_id".into(), json!(person)),
                     ("session_actor".into(), json!("client/paired/thread-device")),
