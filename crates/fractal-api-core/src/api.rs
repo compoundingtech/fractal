@@ -10253,6 +10253,7 @@ fn doctor_report_within(
                 .map_err(ApiError::internal)?,
         );
         checks.push(stale_attention_check(&attention, attention_now));
+        checks.push(state.store.inbox_responsibility_check(&attention).map_err(ApiError::internal)?);
         Ok(checks)
     });
     let checks = checks.run(clock, &state.store.readers, doctor_workers(smallclaims::sqlite::max_read_workers()));

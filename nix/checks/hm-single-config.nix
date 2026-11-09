@@ -47,6 +47,7 @@ let
           config.services.smalltalk = {
             enable = true;
             person = "person/ada";
+            inboxFallbackAgent = "agent/example/inbox";
             binary.path = "/opt/fractal/bin/fractal";
             ptyPackage = null;
             fractalMigration.phase = "completed";
@@ -76,6 +77,8 @@ let
       "${name}: expected exactly one config option";
     assert lib.assertMsg (lib.hasInfix expected command)
       "${name}: expected caller config or default in emitted daemon command";
+    assert lib.assertMsg (lib.hasInfix "inbox_fallback_agent = \"agent/example/inbox\"" config.xdg.configFile."st3/config.toml".text)
+      "${name}: missing explicit Inbox fallback in managed configuration";
     { inherit command; config = case.expected; };
 in
 {

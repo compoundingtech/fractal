@@ -91,6 +91,7 @@ let
   configFence = "${config.xdg.configHome}/fractal/${configFenceName}";
   configText =
     "person = ${builtins.toJSON cfg.person}\n"
+    + lib.optionalString (cfg.inboxFallbackAgent != null) "inbox_fallback_agent = ${builtins.toJSON cfg.inboxFallbackAgent}\n"
     + lib.optionalString (cfg.accessMode != null) "access_mode = ${builtins.toJSON cfg.accessMode}\n"
     + lib.optionalString (cfg.seatPriority != null) "seat_priority = ${builtins.toJSON cfg.seatPriority}\n"
     + lib.optionalString (cfg.node != null) "node = ${builtins.toJSON cfg.node}\n"
@@ -243,6 +244,11 @@ in
     person = mkOption {
       type = types.str;
       description = "The person identity used by st3 commands, for example person/ada.";
+    };
+    inboxFallbackAgent = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "Explicit existing agent responsible for Inbox sources without an originating or assigned agent. Null leaves setup and approvals available but requires configuration before discussing those items.";
     };
     accessMode = mkOption {
       type = types.nullOr (types.enum [ "auto" "bypass" ]);

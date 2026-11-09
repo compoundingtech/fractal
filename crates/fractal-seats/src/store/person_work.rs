@@ -2631,6 +2631,41 @@ mission "writer-load" state="ready" {
     }
 
     #[test]
+    fn explicit_inbox_fallback_changes_current_sources_but_preserves_originating_agents() {
+        let (store, _origin, input) = fixture();
+        let ask = store.ask_person(&input).unwrap();
+        let update = store.connection.batched(|tx| {
+            store.append_update_tx(tx, "daemon/runtime", "person/avery", "Runtime notice", "A system notice.",
+                "fallback-notice", &json!({"version": 1, "type": "update", "about": ask.subject}))
+        }).unwrap().unwrap();
+        let item = |store: &Store, subject: &str| store.attention_items(Some("person/avery")).unwrap()
+            .into_iter().find(|item| item.subject == subject).unwrap();
+        assert!(item(&store, &update.subject).conversation.is_none());
+        assert_eq!(store.inbox_responsibility_check(&[item(&store, &update.subject)]).unwrap().status, "warn");
+        assert!(store.configure_inbox_fallback_agent(Some("person/avery")).is_err());
+        for recipient in ["agent/alder.fallback-a", "agent/alder.fallback-b"] {
+            store.configure_inbox_fallback_agent(Some(recipient)).unwrap();
+            let current = item(&store, &update.subject);
+            assert_eq!(current.conversation.as_deref(), Some(recipient));
+            assert_eq!(current.requester_id.as_deref(), Some("daemon/runtime"));
+            let (indexed, _) = store.attention_collection_snapshot(Some("person/avery"), now_ms()).unwrap();
+            assert_eq!(indexed.iter().find(|item| item.subject == update.subject).unwrap().conversation, current.conversation);
+            assert_eq!(item(&store, &ask.subject).conversation.as_deref(), Some("agent/alder.asker"));
+            // A configured name is distinct from a declared, send-admissible agent.
+            assert_eq!(store.inbox_responsibility_check(&[current]).unwrap().status, "warn");
+        }
+        let stop = crate::graph::parse_internal_intent(r#"version 2
+stop "agent/alder.asker""#, "alder").unwrap();
+        store.apply_internal(&stop, "stop-fallback-origin").unwrap();
+        store.reconcile_person_asks().unwrap();
+        let cancelled = store.attention_items(Some("person/avery")).unwrap().into_iter()
+            .find(|item| item.title == "Cancelled: Choose a release date").unwrap();
+        assert_eq!(cancelled.conversation.as_deref(), Some("agent/alder.asker"));
+        store.configure_inbox_fallback_agent(None).unwrap();
+        assert!(item(&store, &update.subject).conversation.is_none());
+    }
+
+    #[test]
     fn an_updates_about_link_alone_does_not_choose_its_conversation() {
         let (store, _origin, input) = fixture();
         let ask = store.ask_person(&input).unwrap();

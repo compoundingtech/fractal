@@ -73,7 +73,7 @@ impl View for Family {
     fn definition(&self) -> Definition {
         Definition {
             name: self.view(),
-            fingerprint: "projected-source.v1;canonical-person-fences.v4.cancelled-ask-context;custom-source.v1;u128-time.v1;public-row.v3.notice-isolation",
+            fingerprint: "projected-source.v1;canonical-person-fences.v4.cancelled-ask-context;custom-source.v1;u128-time.v1;public-row.v4.inbox-responsibility",
             kinds: &[],
             local_kinds: match self {
                 Self::Person => &[PERSON_CHANGE, PERSON_CLOCK],
@@ -227,7 +227,8 @@ fn custom_row(
     };
     let source: Value = serde_json::from_str(&text)?;
     let at = at.parse().unwrap_or(0);
-    let item = custom::attention_item(&source, at)?;
+    let mut item = custom::attention_item(&source, at)?;
+    item.conversation = inbox::responsible_agent_at(tx, &item)?;
     let mut row = resource(&item)?;
     row["source_kind"] = json!("custom");
     row["revision"] = source["revision"].clone();
@@ -282,9 +283,10 @@ fn person_row(
             }
         }
     }
-    let Some(item) = attention_snapshot::person_attention_item(tx, source, u128::MAX)? else {
+    let Some(mut item) = attention_snapshot::person_attention_item(tx, source, u128::MAX)? else {
         return Ok(None);
     };
+    item.conversation = inbox::responsible_agent_at(tx, &item)?;
     let eligible = ask.as_ref().map_or(item.requested_at_unix_ms, |a| {
         item.requested_at_unix_ms.max(a.accepted_at_unix_ms)
     });

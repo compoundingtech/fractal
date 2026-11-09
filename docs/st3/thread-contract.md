@@ -87,6 +87,20 @@ ordinary read actions. It does not reopen a thread, resolve an ask, or change th
 
 ## Daemon boundary
 
+Inbox discussion responsibility is separate from the item's publisher and its human approval
+recipient. Resolve the originating/assigned agent first, preserving historical associations even
+when that agent has stopped. For a system or person-owned source with no such agent, configure
+`inbox_fallback_agent = "agent/your-existing-agent"` in the daemon's TOML configuration and
+restart the daemon. Home Manager exposes the same setting as
+`services.smalltalk.inboxFallbackAgent`. This is an explicit agent identity, never an inferred company role or the
+fault handler. Missing configuration and undeclared fallback agents appear in the
+`inbox-responsibility` doctor diagnostic. Setup and person-only security approvals remain
+available before an agent is configured; creating a discussion requires an admitted recipient.
+The fallback is daemon-local routing policy, not replicated history. Changing it updates current
+Inbox associations and invalidates their derived caches. A thread freezes its responsible agent
+when created: configuration changes do not retarget existing threads, change their audience or
+rewrite their history. Discussing a security request does not authorize or settle its approval.
+
 Each thread belongs to one existing person and agent conversation. Reuse that conversation's
 principal identities, reader authorization, sender attribution and grant enforcement. The
 person can manage the thread's title and lifecycle. The agent can send replies and attach an

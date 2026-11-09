@@ -41,3 +41,30 @@ fn notice_legacy_cached_attention_does_not_hide_unrelated_items() {
         Ok(())
     }).unwrap().unwrap();
 }
+
+#[test]
+fn inbox_fallback_changes_invalidate_materialized_associations() {
+    use super::*;
+    let store = Store::open_memory("example").unwrap();
+    custom(&store, "custom/garden/review/v1/agent-origin", "person/example");
+    let subject = "custom/garden/review/v1/person-origin";
+    store.append_claim(&input(subject, "custom.garden.review.v1.requested", "person/example",
+        json!({"title":"Review my work","detail":"A person-owned review","recipient":"person/example"}))).unwrap();
+    let views = Views::new(definitions()).unwrap();
+    views.create_schema(&store.connection.write()).unwrap();
+    install(&store, &views);
+    for fallback in [Some("agent/example/first"), Some("agent/example/second"), None] {
+        store.configure_inbox_fallback_agent(fallback).unwrap();
+        store.connection.batched(|tx| -> Result<()> {
+            while !flush(tx, &views, now_ms(), 2)? {}
+            let rows = window(tx, &views, CUSTOM_VIEW, "person/example", u128::MAX, 10)?;
+            let cached = rows.iter().find(|row| row["source_id"] == subject).unwrap();
+            assert_eq!(cached["conversation_id"].as_str(), fallback);
+            assert_eq!(rows.iter().find(|row| row["source_id"] == "custom/garden/review/v1/agent-origin").unwrap()["conversation_id"], "agent/garden/seed");
+            Ok(())
+        }).unwrap().unwrap();
+        let direct = store.attention_items(Some("person/example")).unwrap().into_iter()
+            .find(|item| item.subject == subject).unwrap();
+        assert_eq!(direct.conversation.as_deref(), fallback);
+    }
+}

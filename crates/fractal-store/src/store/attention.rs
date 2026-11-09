@@ -686,6 +686,7 @@ impl Store {
                     .optional()?
                     .unwrap_or_else(|| item.subject.clone());
             }
+            item.conversation = inbox::responsible_agent_at(&connection, &item)?;
             live.push(item);
         }
         let priority = |item: &AttentionItemView| match item.priority.as_str() {

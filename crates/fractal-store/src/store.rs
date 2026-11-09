@@ -232,6 +232,7 @@ pub use attention_snapshot::{
     plan_approval, screen_prompt_delivered_key, screen_prompt_gone_key,
     screen_prompt_undelivered_key,
 };
+pub mod inbox;
 pub mod attention_list;
 pub mod owner_lists;
 pub mod summary_list;
