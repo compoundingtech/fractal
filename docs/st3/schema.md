@@ -4,7 +4,7 @@ This file is generated from `fractal-schema`.
 
 Schema: `st3.v1`
 Storage version: `22`
-Storage digest: `8eb8283f193489e337dd6abf40ba6bbd17b97213ee8ad4830d864bf58faeed0a`
+Storage digest: `87061a9be91ee6d6007367294c3afc2be879cda75363d1784492686956fc095d`
 
 ## Subject families
 
@@ -238,7 +238,7 @@ Custom subjects use `custom/NAMESPACE/NAME`. Custom claims use `custom.NAMESPACE
 | `terminal.input.result` | `agent`, `pty` | `system-only` | `append` | `durable` | `incarnation_id:string`, `reason:string`, `result!:string`, `runtime_id:string`, `sequence:integer` |  |
 | `terminal.launch-geometry` | `person` | `same-subject-actor` | `append` | `durable` | `columns!:integer`, `rows!:integer` |  |
 | `thread.ask-linked` | `thread` | `system-only` | `once` | `durable` | `ask!:subject-reference(step-run)`, `ask_episode!:string`, `decision_predecessor:subject-reference(step-run)`, `decision_predecessor_episode:string`, `decision_reason:string`, `thread_id!:subject-reference(thread)` |  |
-| `thread.created` | `thread` | `system-only` | `once` | `durable` | `agent!:subject-reference(agent)`, `first_message:subject-reference(message)`, `origin_ask:subject-reference(step-run)`, `origin_ask_episode:string`, `person!:subject-reference(person)`, `title!:string` | `thread` |
+| `thread.created` | `thread` | `system-only` | `once` | `durable` | `agent!:subject-reference(agent)`, `first_message:subject-reference(message)`, `mission:subject-reference(mission)`, `origin_ask:subject-reference(step-run)`, `origin_ask_episode:string`, `person!:subject-reference(person)`, `title!:string` | `thread` |
 | `thread.state-set` | `thread` | `system-only` | `append` | `durable` | `state!:string` |  |
 | `thread.title-set` | `thread` | `system-only` | `append` | `durable` | `previous_title!:string`, `title!:string`, `title_revision!:string` |  |
 | `transport.observed` | `host` | `system-only` | `append` | `durable` | `last_success_at:integer`, `protocol:string`, `reason:string`, `remote_heads:object`, `status!:string` |  |
@@ -356,7 +356,7 @@ OMP's native `abandoned` tasks are omitted from phase tasks rather than relabele
 
 ## Local checkpoint capture storage
 
-SQLite `user_version` is 20. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
+SQLite compatibility uses the shared storage version reported above. The local checkpoint guard uses trigger version 3, independently of the unchanged claim/wire registry digest. Initialization adds the singleton, any missing guard columns, and its mutation triggers; it does not scan history, rewrite claim bodies, rebuild projections, or force replay.
 
 ```sql
 CREATE TABLE IF NOT EXISTS checkpoint_capture_epoch (
