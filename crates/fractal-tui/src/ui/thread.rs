@@ -14,6 +14,7 @@ pub enum Tap {
     Toggle(String),
     Compose(String),
     Send(String),
+    Retry(String),
     LeaveComposer(String),
     Reply { thread: String, message: String },
     Rename(String),
@@ -245,8 +246,7 @@ pub fn panel(
                 ];
                 let column = header.iter().map(Span::width).sum::<usize>();
                 let reply = "  ↩ Reply";
-                if !summary.closed
-                    && state.hovered_message == Some(id.as_str())
+                if state.hovered_message == Some(id.as_str())
                     && column + text::width(reply) <= width
                 {
                     header.push(Span::styled(reply, theme::fg(theme::SAPPHIRE)));
@@ -297,7 +297,7 @@ pub fn panel(
             }
         }
     }
-    if !summary.closed {
+    {
         let focused = state.cursor.is_some();
         doc.line(composer::divider(width, focused));
         if let Some(quote) = state.reply_to {
@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn closed_thread_keeps_its_history_and_reopens_without_a_composer() {
+    fn closed_thread_keeps_history_composer_and_quote_without_reopening() {
         let summary = Summary {
             id: "thread/1",
             title: "Worker test",
@@ -576,7 +576,12 @@ mod tests {
         assert!(
             doc.targets
                 .iter()
-                .all(|target| !matches!(target.hit, Tap::Compose(_) | Tap::Reply { .. }))
+                .any(|target| matches!(target.hit, Tap::Compose(_)))
+        );
+        assert!(
+            doc.targets
+                .iter()
+                .any(|target| matches!(target.hit, Tap::Reply { .. }))
         );
     }
 }

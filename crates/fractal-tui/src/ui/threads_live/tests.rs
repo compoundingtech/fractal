@@ -133,7 +133,9 @@ fn native_mounts_share_the_same_timeline_and_a_direct_reply() {
                 .is_none()
         );
         assert!(
-            threads.interests(pane).contains(&ThreadInterest::Summary(thread.into()))
+            threads
+                .interests(pane)
+                .contains(&ThreadInterest::Summary(thread.into()))
         );
         assert!(
             threads
@@ -307,7 +309,8 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     let write = ui.threads.writes().pop().expect("native reply action");
     let receipt = write.perform(client.clone()).await;
     assert_eq!(
-        ui.threads.complete(receipt, &mut ui.conversation_state.drafts),
+        ui.threads
+            .complete(receipt, &mut ui.conversation_state.drafts),
         None,
     );
     apply_window(&mut ui, &mut stream, id).await;
@@ -326,7 +329,8 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     let close = ui.threads.writes().pop().expect("native close action");
     let receipt = close.perform(client.clone()).await;
     assert_eq!(
-        ui.threads.complete(receipt, &mut ui.conversation_state.drafts),
+        ui.threads
+            .complete(receipt, &mut ui.conversation_state.drafts),
         None,
     );
     apply_window(&mut ui, &mut stream, id).await;
@@ -342,7 +346,7 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
         "{visible}"
     );
     assert!(visible.contains("Reopen thread"), "{visible}");
-    assert!(!visible.contains("Message thread"), "{visible}");
+    assert!(visible.contains("Message thread"), "{visible}");
     server.abort();
 }
 
@@ -377,19 +381,42 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
         vec![older.id.clone()],
         false,
     );
-    threads.tap(&inbox.key(), thread::Tap::Start("attention/ask".into()), &mut texts);
+    threads.tap(
+        &inbox.key(),
+        thread::Tap::Start("attention/ask".into()),
+        &mut texts,
+    );
     assert!(threads.paste(&inbox, "First message", &cursor, &mut texts));
     let lines = |threads: &Threads, texts: &HashMap<String, String>| {
-        threads.mount(&inbox, 100, &cursor, &world, texts)
-            .lines.iter().map(ToString::to_string).collect::<Vec<_>>()
+        threads
+            .mount(&inbox, 100, &cursor, &world, texts)
+            .lines
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
     };
     let draft = lines(&threads, &texts);
-    let slot = draft.iter().position(|line| line == "▾ Worker test · Draft").unwrap();
-    assert!(draft[slot + 1..].iter().any(|line| line.starts_with("▸ Worker test")));
-    assert!(threads.key(&inbox, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &cursor, &mut texts));
+    let slot = draft
+        .iter()
+        .position(|line| line == "▾ Worker test · Draft")
+        .unwrap();
+    assert!(
+        draft[slot + 1..]
+            .iter()
+            .any(|line| line.starts_with("▸ Worker test"))
+    );
+    assert!(threads.key(
+        &inbox,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &cursor,
+        &mut texts
+    ));
     let write = threads.writes().pop().unwrap();
     assert_ne!(write.id, older.id);
-    let new = ThreadSummary { id: write.id.clone(), ..older.clone() };
+    let new = ThreadSummary {
+        id: write.id.clone(),
+        ..older.clone()
+    };
     threads.window(
         context.clone(),
         snapshot(),
@@ -412,7 +439,7 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     threads.complete(
         Receipt {
             write,
-            result: Ok(Some(Envelope {
+            confirmation: Confirmation::Applied(Some(Envelope {
                 value: new.clone(),
                 snapshot: snapshot(),
                 request_id: String::new(),
@@ -424,7 +451,11 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     threads.histories.insert(new.id.clone(), History::default());
     let accepted = lines(&threads, &texts);
     assert_eq!(accepted[slot], "▾ Worker test · 1 message · unread");
-    assert!(accepted[slot + 1..].iter().any(|line| line.starts_with("▸ Worker test")));
+    assert!(
+        accepted[slot + 1..]
+            .iter()
+            .any(|line| line.starts_with("▸ Worker test"))
+    );
 
     threads.window(
         context.clone(),
@@ -458,29 +489,329 @@ fn mark_visible_read_fences_the_observed_incoming_messages() {
         serde_json::from_value::<ThreadTimelineEvent>(serde_json::json!({
             "id": id, "actor_id": actor, "accepted_at_unix_ms": 1_000,
             "kind": "message", "content": id, "thread_quote_id": null
-        })).unwrap()
+        }))
+        .unwrap()
     };
-    threads.histories.insert(id.into(), History {
-        head: vec![
-            message("message/offscreen", "agent/atlas"),
-            message("message/own", "person/operator"),
-            message("message/shown", "agent/atlas"),
-        ],
-        earlier: vec![message("message/older", "agent/atlas")],
-        ..History::default()
-    });
-    let visible = ["message/own", "message/shown", "message/older", "message/other-thread"]
-        .into_iter().map(str::to_owned).collect();
+    threads.histories.insert(
+        id.into(),
+        History {
+            head: vec![
+                message("message/offscreen", "agent/atlas"),
+                message("message/own", "person/operator"),
+                message("message/shown", "agent/atlas"),
+            ],
+            earlier: vec![message("message/older", "agent/atlas")],
+            ..History::default()
+        },
+    );
+    let visible = [
+        "message/own",
+        "message/shown",
+        "message/older",
+        "message/other-thread",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
     assert!(!threads.mark_visible_read("home:ask", id.into(), &visible));
     threads.set_read_enabled(true);
     assert!(!threads.mark_visible_read("home:ask", id.into(), &HashSet::new()));
     assert!(threads.mark_visible_read("home:ask", id.into(), &visible));
     assert!(!threads.mark_visible_read("home:ask", id.into(), &visible));
-    let [write]: [Write; 1] = threads.writes().try_into().ok().expect("one explicit write");
-    let Mutation::MarkRead(parameters) = write.mutation else { panic!("expected thread.read") };
+    let [write]: [Write; 1] = threads
+        .writes()
+        .try_into()
+        .ok()
+        .expect("one explicit write");
+    let Mutation::MarkRead(parameters) = write.mutation else {
+        panic!("expected thread.read")
+    };
     assert_eq!(parameters.target_id, id);
-    assert_eq!(parameters.through_message_id.as_deref(), Some("message/shown"));
-    assert_eq!(parameters.seen_message_ids, ["message/shown", "message/older"]);
+    assert_eq!(
+        parameters.through_message_id.as_deref(),
+        Some("message/shown")
+    );
+    assert_eq!(
+        parameters.seen_message_ids,
+        ["message/shown", "message/older"]
+    );
     assert_eq!(write.fence.snapshot_id, observed.id);
     assert!(write.fence.subject_revisions.is_empty());
+}
+
+fn observed_threads(state: ThreadState) -> Threads {
+    let mut threads = Threads::default();
+    threads.enable(true);
+    threads.put_summary(Envelope {
+        value: ThreadSummary { state, ..summary() },
+        snapshot: snapshot(),
+        request_id: "request/test".into(),
+        api_version: fractal_client::API_VERSION.into(),
+    });
+    threads
+        .histories
+        .insert("thread/worker".into(), History::default());
+    threads
+}
+
+fn forbidden() -> ClientError {
+    let envelope = serde_json::from_value(serde_json::json!({
+        "api_version":fractal_client::API_VERSION,"error_version":"st3.client.error.v0",
+        "request_id":"request/test","code":"forbidden","message":"Grant was revoked",
+        "retryable":false,"details":{}
+    }))
+    .unwrap();
+    ClientError::Api(
+        fractal_client::ErrorCode::Forbidden,
+        "Grant was revoked".into(),
+        Box::new(envelope),
+    )
+}
+
+#[test]
+fn original_close_retry_survives_changed_summary_collapse_and_later_refusal() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let mut texts = HashMap::new();
+    let id = "thread/worker";
+    let pane = Pane::Thread(id.into());
+    threads.lifecycle(&pane.key(), id.into(), Mutation::Close);
+    let original = threads.writes().pop().unwrap();
+    assert!(
+        threads
+            .complete(
+                Receipt {
+                    write: original.clone(),
+                    confirmation: Confirmation::Failed(ClientError::Transport(
+                        "lost acknowledgement".into()
+                    ))
+                },
+                &mut texts
+            )
+            .is_some()
+    );
+    threads.put_summary(Envelope {
+        value: ThreadSummary {
+            state: ThreadState::Closed,
+            revision: "claim/new".into(),
+            ..summary()
+        },
+        snapshot: snapshot(),
+        request_id: "request/new".into(),
+        api_version: fractal_client::API_VERSION.into(),
+    });
+    threads.lifecycle(&pane.key(), id.into(), Mutation::Reopen);
+    assert!(
+        threads.writes().is_empty(),
+        "a new action cannot replace an unconfirmed Close"
+    );
+    threads.tap(&pane.key(), thread::Tap::Toggle(id.into()), &mut texts);
+    threads.tap(&pane.key(), thread::Tap::Toggle(id.into()), &mut texts);
+    let doc = threads.mount(
+        &pane,
+        100,
+        &edit::Cursor::default(),
+        &super::super::demo::test_world(),
+        &texts,
+    );
+    assert!(
+        doc.lines
+            .iter()
+            .any(|line| line.to_string().contains("Retry Close thread"))
+    );
+    assert!(doc.targets.iter().any(|target| matches!(&target.hit, Hit::Thread(_, thread::Tap::Retry(key)) if key == &original.key)));
+    threads.tap(
+        &pane.key(),
+        thread::Tap::Retry(original.key.clone()),
+        &mut texts,
+    );
+    let retried = threads.writes().pop().unwrap();
+    assert_eq!(retried.key, original.key);
+    assert_eq!(retried.fence, original.fence);
+    assert!(matches!(retried.mutation, Mutation::Close));
+    threads.complete(
+        Receipt {
+            write: retried,
+            confirmation: Confirmation::Failed(forbidden()),
+        },
+        &mut texts,
+    );
+    assert!(
+        threads.pending_actions[id].unknown,
+        "a later403 cannot answer the lost original request"
+    );
+    threads.enable(false);
+    threads.enable(true);
+    assert!(
+        threads.pending_actions[id].unknown,
+        "reconnection must not discard the original action"
+    );
+    threads.tap(
+        &pane.key(),
+        thread::Tap::Retry(original.key.clone()),
+        &mut texts,
+    );
+    let retried = threads.writes().pop().unwrap();
+    assert_eq!(retried.key, original.key);
+    threads.complete(
+        Receipt {
+            write: retried,
+            confirmation: Confirmation::Applied(None),
+        },
+        &mut texts,
+    );
+    assert!(!threads.pending_actions.contains_key(id));
+}
+
+#[test]
+fn read_retry_keeps_the_original_shown_ids_even_after_the_view_moves() {
+    let mut threads = observed_threads(ThreadState::Open);
+    threads.set_read_enabled(true);
+    let id = "thread/worker";
+    let event = |id: &str| {
+        serde_json::from_value::<ThreadTimelineEvent>(serde_json::json!({
+            "kind":"message","id":id,"actor_id":"agent/atlas","accepted_at_unix_ms":1,
+            "content":"Reply","thread_quote_id":null
+        }))
+        .unwrap()
+    };
+    threads.histories.get_mut(id).unwrap().head = vec![event("message/first")];
+    let visible = ["message/first".into()].into();
+    assert!(threads.mark_visible_read("thread:test", id.into(), &visible));
+    let original = threads.writes().pop().unwrap();
+    threads.complete(
+        Receipt {
+            write: original.clone(),
+            confirmation: Confirmation::Failed(ClientError::Transport("lost".into())),
+        },
+        &mut HashMap::new(),
+    );
+    threads
+        .histories
+        .get_mut(id)
+        .unwrap()
+        .head
+        .insert(0, event("message/later"));
+    assert!(!threads.mark_visible_read("thread:test", id.into(), &["message/later".into()].into()));
+    threads.retry(&original.key);
+    let retry = threads.writes().pop().unwrap();
+    let Mutation::MarkRead(request) = retry.mutation else {
+        panic!("read must remain read")
+    };
+    assert_eq!(request.seen_message_ids, ["message/first"]);
+    assert_eq!(request.through_message_id.as_deref(), Some("message/first"));
+    assert_eq!(retry.fence, original.fence);
+}
+
+#[test]
+fn closed_person_composer_keeps_original_quote_and_payload_until_settled() {
+    let mut threads = observed_threads(ThreadState::Closed);
+    let id = "thread/worker";
+    let pane = Pane::Thread(id.into());
+    let mut texts = HashMap::new();
+    let cursor = edit::Cursor::default();
+    threads.tap(
+        &pane.key(),
+        thread::Tap::Reply {
+            thread: id.into(),
+            message: "message/quoted".into(),
+        },
+        &mut texts,
+    );
+    assert!(threads.paste(&pane, "Closed reply", &cursor, &mut texts));
+    assert!(threads.key(
+        &pane,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &cursor,
+        &mut texts
+    ));
+    let original = threads
+        .writes()
+        .pop()
+        .expect("a closed thread accepts an ordinary person reply");
+    threads.complete(
+        Receipt {
+            write: original.clone(),
+            confirmation: Confirmation::Failed(ClientError::Protocol(
+                "truncated acknowledgement".into(),
+            )),
+        },
+        &mut texts,
+    );
+    threads.tap(
+        &pane.key(),
+        thread::Tap::Reply {
+            thread: id.into(),
+            message: "message/different".into(),
+        },
+        &mut texts,
+    );
+    threads.paste(&pane, "changed", &cursor, &mut texts);
+    threads.submit(&pane.key(), Input::Reply(id.into()), &texts);
+    let retry = threads.writes().pop().unwrap();
+    assert_eq!(retry.key, original.key);
+    let Mutation::Reply(reply) = retry.mutation else {
+        panic!("reply")
+    };
+    assert_eq!(reply.content, "Closed reply");
+    assert_eq!(reply.thread_quote_id.as_deref(), Some("message/quoted"));
+    assert_eq!(threads.summary(id).unwrap().state, ThreadState::Closed);
+    threads.complete(
+        Receipt {
+            write: original.clone(),
+            confirmation: Confirmation::Failed(forbidden()),
+        },
+        &mut texts,
+    );
+    assert!(threads.drafts[&Input::Reply(id.into()).key()].locked());
+    // An authoritative rejection settles the old intent; the draft remains editable.
+    threads.complete(
+        Receipt {
+            write: original,
+            confirmation: Confirmation::Rejected,
+        },
+        &mut texts,
+    );
+    assert!(!threads.drafts[&Input::Reply(id.into()).key()].locked());
+}
+
+#[test]
+fn first_definitive_refusal_releases_the_intent_and_dispatch_stays_on_its_original_client() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let id = "thread/worker";
+    threads.lifecycle("thread:test", id.into(), Mutation::Close);
+    let mut original = threads.writes().pop().unwrap();
+    let client = Client::unix("/tmp/thread-original.sock");
+    threads.bind(&mut original, client.clone());
+    threads.complete(
+        Receipt {
+            write: original.clone(),
+            confirmation: Confirmation::Failed(ClientError::Transport("lost".into())),
+        },
+        &mut HashMap::new(),
+    );
+    threads.retry(&original.key);
+    let mut retry = threads.writes().pop().unwrap();
+    threads.bind(&mut retry, Client::unix("/tmp/thread-other.sock"));
+    assert_eq!(
+        format!("{:?}", retry.client.as_ref().unwrap()),
+        format!("{client:?}")
+    );
+    threads.complete(
+        Receipt {
+            write: retry,
+            confirmation: Confirmation::Applied(None),
+        },
+        &mut HashMap::new(),
+    );
+    threads.lifecycle("thread:test", id.into(), Mutation::Close);
+    let next = threads.writes().pop().unwrap();
+    assert_ne!(next.key, original.key);
+    threads.complete(
+        Receipt {
+            write: next,
+            confirmation: Confirmation::Failed(forbidden()),
+        },
+        &mut HashMap::new(),
+    );
+    assert!(threads.pending_actions.is_empty());
 }

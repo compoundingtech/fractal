@@ -1474,12 +1474,13 @@ pub fn run(context: Context) -> Result<()> {
                 let _ = tx.send(Fetched::ThreadEarlier(generation, earlier.id, result));
             });
         }
-        for write in ui.threads.writes() {
+        for mut write in ui.threads.writes() {
             if !extras.live {
                 if let Some(error) = ui.threads.complete(write.offline(), &mut ui.conversation_state.drafts) { ui.flash(error); }
                 continue;
             }
             let writer = client.clone();
+            ui.threads.bind(&mut write, writer.clone());
             let tx = fetched_tx.clone();
             let generation = resources_generation;
             runtime.spawn(async move {
