@@ -11483,6 +11483,26 @@ pub fn accept_message_receipt_with_upload_owner(
         .transpose()
         .map_err(ApiError::internal)?
         .flatten();
+    // Refuse stale recipient custody before recording its reply. Settlement checks again
+    // with the accepted reply's evidence, since retirement may change during the send.
+    if let Some(parent) = parent.as_ref()
+        && parent.to == from && parent.from == to && parent.status != "closed"
+    {
+        crate::store::retirements::admit_mail_claim_to(
+            &state.store.readers.get(),
+            &ClaimInput {
+                subject: parent.subject.clone(),
+                kind: "message.closed".into(),
+                actor: Some(from.clone()),
+                fields: BTreeMap::from([("status".into(), json!("closed"))]),
+                evidence: Vec::new(),
+                expected_subject: None,
+                idempotency_key: None,
+            },
+            parent,
+        )
+        .map_err(ApiError::bad)?;
+    }
     // A signed message stores exactly the tags its device signed; only a person signs, and a
     // person's message always wakes.
     let tags = if let Some(previous) = previous
@@ -11770,16 +11790,34 @@ fn settle_answered_message(
         if !needed {
             continue;
         }
+        let input = ClaimInput {
+            subject: parent.clone(),
+            kind: format!("message.{lifecycle}"),
+            actor: Some(from.into()),
+            fields: BTreeMap::from([("status".into(), Value::String(lifecycle.into()))]),
+            evidence: vec![reply_claim.into()],
+            expected_subject: None,
+            idempotency_key: Some(format!("reply-settled:{reply}:{lifecycle}")),
+        };
+        if current.created_index >= crate::store::messages_shard::STREAM_INDEX_BASE {
+            // The parent lives in the stream even though its reply cites a graph claim.
+            // The shard writer validates the step and makes a concurrent/repeated step a no-op.
+            crate::store::retirements::admit_mail_claim_to(
+                &store.readers.get(), &input, &current,
+            )
+            .map_err(ApiError::bad)?;
+            crate::store::messages_shard::record_lifecycle(
+                store,
+                &input.subject,
+                &input.kind,
+                input.actor.as_deref(),
+                &input.fields,
+            )
+            .map_err(ApiError::bad)?;
+            continue;
+        }
         store
-            .append_claim(&ClaimInput {
-                subject: parent.clone(),
-                kind: format!("message.{lifecycle}"),
-                actor: Some(from.into()),
-                fields: BTreeMap::from([("status".into(), Value::String(lifecycle.into()))]),
-                evidence: vec![reply_claim.into()],
-                expected_subject: None,
-                idempotency_key: Some(format!("reply-settled:{reply}:{lifecycle}")),
-            })
+            .append_claim(&input)
             .map_err(ApiError::bad)?;
     }
     Ok(())
