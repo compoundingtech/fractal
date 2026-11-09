@@ -177,7 +177,7 @@ describe('the Resources tab', () => {
   it('opens the whole row by its ref, naming kinds in words and never as raw types', async () => {
     await render('resources')
     await settle()
-    expect(rows().map(each => each.getAttribute('aria-label'))).toEqual([expect.stringMatching(/^Pull request /), expect.stringMatching(/^Resource /)])
+    expect(rows().map(each => each.getAttribute('aria-description'))).toEqual([expect.stringMatching(/^Pull request /), expect.stringMatching(/^Resource /)])
     expect(rows()[0]!.textContent).toContain('Wait for exec')
     expect(rows()[0]!.textContent).toContain('in progress')
     expect(rows()[1]!.textContent).toContain('Resource')

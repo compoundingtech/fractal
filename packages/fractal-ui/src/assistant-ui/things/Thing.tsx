@@ -186,7 +186,7 @@ export function ThingCard({ observed, now }: { readonly observed: Observed<Thing
     {face.progress !== undefined && <Progress {...face.progress} />}
     {face.summary !== undefined && <span {...stylex.props(styles.cardSummary)}>{face.summary}</span>}
     {face.facts !== undefined && face.facts.length > 0 && <ThingFacts facts={face.facts.slice(0, 4)} />}
-    {observed.freshness === 'stale' && <span {...stylex.props(styles.muted)}>Last seen {formatRelative(observed.observedAt, now)}; it may have changed.</span>}
+    {observed.freshness === 'stale' && observed.observedAt !== undefined && <span {...stylex.props(styles.muted)}>Last seen {formatRelative(observed.observedAt, now)}; it may have changed.</span>}
     {observed.readOnly === true && <span {...stylex.props(styles.muted)}>Read-only: you can see this but not act on it.</span>}
   </span>
 }

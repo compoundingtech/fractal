@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Shared resource faces and agent panel sections",
+  "summary": "Shared resource faces and agent panel sections; omit last-seen ages when no receipt time is reported",
   "replay": {"status": "none", "detail": "This change affects web presentation only and does not trigger replay."},
   "schema": {"status": "none", "detail": "No database schema or stored data changes."},
   "rules": {"status": "none", "detail": "No checkpoint rule or digest changes."},
