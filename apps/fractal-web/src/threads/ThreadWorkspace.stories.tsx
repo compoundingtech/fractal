@@ -27,7 +27,7 @@ type Scenario = 'existing' | 'empty' | 'closed' | 'multiple' | 'custom-source' |
 function createThreadStory(readOnly: boolean, scenario: Scenario, ordering: 'timestamp' | 'action' = 'timestamp') {
   const agentRef = 'agent/build-host-a/worker-tests'
   const registry = AtomRegistry.make()
-  const now = Date.parse('2026-11-09T13:00:00Z')
+  const now = scenario === 'clock-skew' ? Date.parse('2026-11-09T13:00:00Z') : Date.now()
   const agent = Native.decodeUnknownSync(Native.Agent)({
     kind: 'agent', id: agentRef, name: 'Worker tests', host_id: 'host/build-host-a', driver: 'omp',
     state: 'waiting', blocked_on: 'human', fault: null, reason: 'Worker report ready; waiting for follow-up checks.',
