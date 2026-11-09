@@ -130,10 +130,13 @@ export const gatewayMessageSend = (client: FractalClient) => {
           },
           fence: async () => ({ ...request.fence, snapshot_id: (await current()).snapshot.id }),
           send: async input => {
-            const response = await confirm(() => client.messageSend({ ...input, parameters: {
-              ...input.parameters, tags: [...input.parameters.tags], attachments: [...attachments],
-            } })).catch(cause => { if (cause instanceof ClientError) attempt.error = cause; throw cause })
-            attempt.receipt = Native.decodeUnknownSync(schema.ActionResult)(response.value)
+            await confirm(async () => {
+              const response = await client.messageSend({ ...input, parameters: {
+                ...input.parameters, tags: [...input.parameters.tags], attachments: [...attachments],
+              } })
+              attempt.receipt = Native.decodeUnknownSync(schema.ActionResult)(response.value)
+              return response
+            }).catch(cause => { if (cause instanceof ClientError) attempt.error = cause; throw cause })
           },
           retry: false,
           wait: ms => new Promise(resolve => setTimeout(resolve, ms)),
