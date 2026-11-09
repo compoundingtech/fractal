@@ -168,13 +168,35 @@ unsealed Legacy history fails closed; merely retaining the old bearer is not
 sufficient. Grants issued before upgrade without a verifiable member signature
 stay unusable and the configured owner must reissue them.
 
+A logical backup restore assigns a new writer and does not carry this member's
+local-append markers. Unsigned pre-restore grants therefore fail closed, even if
+they authenticated before backup. The same configured-owner reissue procedure
+below applies; a restore is not a way to manufacture historical provenance.
+
+Authority maintenance is lifecycle-owned. While work remains, pages execute
+back-to-back as bounded transactions, releasing the writer between pages and
+yielding to the runtime rather than using sleep-based pacing.
+Each transaction shares a 64-unit budget across history, dirty-signature claims,
+and membership retries; empty membership-writer tasks also consume one unit.
+Each authentication refresh visits one indexed replica record and at most 16
+writer membership keys, looking up signatures by their full
+`(writer, sequence, envelope_hash, member_key)` key rather than enumerating
+nonmember signatures. Durable record/key cursors continue across units so later
+eligible evidence is eventually checked; new signature or membership retries
+reset that progress. Membership promotion is queued for maintenance, and
+authorization readiness fails closed while it is queued. Storing an identical
+signature again is a no-op: it neither refreshes authority nor dirties a claim.
+
 After the authority backfill completes, `fractal doctor` lists every pending
 unauthenticated, unmarked local grant claim ID under the claim-store check with
 reason `grant predates local-append provenance; re-issue`. It also lists remote
 unmarked grants, but reports missing verified provenance and unknown issuance age:
 the absence of this member's local marker does not prove remote history predates
 upgrade. A verified historical signature removes the unauthenticated warning.
-These diagnostics do not change generic bearer authorization error messages.
+These details remain on trusted-local doctor only: paired clients with
+`read.projections` cannot retrieve the provenance check through either the
+operations collection or operation detail. Generic bearer authorization error
+messages are unchanged.
 
 Reissue means **a new explicit pairing**, not renewal of the old grant or a SQL
 edit. On the daemon host, use the configured owner and original assistant
