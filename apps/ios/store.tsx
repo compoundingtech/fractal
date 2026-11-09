@@ -8,7 +8,7 @@ import { resendBoundMessage, sendBoundMessage, type BoundMessage, type SendOutco
 import { API_VERSION, ClientError, FractalClient, isTransient, notApplied, plainError, promptGone, retryTransient, type Arrangement, type ArrangementOperation, type Runtime, type Attention, type AttachmentInput, type Capabilities, type ConversationSearch, type Glass, type Launch, type LaunchVariant, type Mission, type Resource, type ResourceObservation, type Snapshot, type TimelineEntry } from '../../clients/typescript/fractal-client';
 import { keepClosed, personAnswer, promptAnswers, clientName, isSnapshotChurn, listSessionPages, OLDER_PAGE, readOlder, type Conversation, type Older, type SessionView, base64url, messageSubject, signatureParameter, signatureRefusal, signedBytes, signedMessageFields, isLongMessage, type DeviceKey, type Unsigned } from '@fractal/views';
 import app from './app.json';
-import { canVerifyPairing, createDeviceKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/fractal-device-key';
+import { approveWithDeviceKey, canVerifyPairing, createDeviceKey, createRenewalKey, removeDeviceKey, signWithDeviceKey, verifyGrantSignature } from './modules/fractal-device-key';
 import { REPAIR_WARNING, fabricGrantProblem, pairingFabricNode, validatePairingTrust, verifyPairing } from './pairingProof';
 import { emptyData, encodeProjectionCache, hydrateProjectionForPairedDevice, PROJECTION_CACHE_KEY, type Data } from './projectionCache';
 import { listCollectionPages, mergedRows } from './collectionPages';
@@ -40,6 +40,7 @@ import { recordDiagnosticCapabilities } from './diagnostics';
 import { PushRegistrationLifecycle, type PushRemote } from './pushRegistration';
 import { nativePushPorts, pushWrite } from './pushNative';
 import { pairingCommitRouting, pairingTrustAllowed, type PairingRouting } from './pairingSecurity';
+import { approveRenewal, pendingRenewals, watchRenewalForeground, type RenewalOffer, type RenewalPorts } from './deviceRenewal';
 
 // Everything the screens share: the paired gateway, the one collections socket, the lists it keeps
 // current, the lists a screen loads when it opens, and the actions. Screens follow a conversation
@@ -154,6 +155,10 @@ function useAppStore(proof?: FabricProfile) {
   // Whether the missions window (followed only while a missions screen shows) has delivered its rows.
   const [missionsLoaded, setMissionsLoaded] = useState(false);
   const [error, setError] = useState(''), [pairingIssue, setPairingIssue] = useState(''), [busy, setBusy] = useState(false);
+  const [renewals, setRenewals] = useState<Array<{ profileKey: string; profile: PhoneProfile; offer: RenewalOffer }>>([]);
+  const [renewalIssue, setRenewalIssue] = useState('');
+  const [renewalBusy, setRenewalBusy] = useState(false);
+  const renewalWorking = useRef(false);
   const [historicalSessions, setHistoricalSessions] = useState<SessionView[]>([]);
   // The Agents list shows a list or a tree, as the Fractal terminal UI's `t` toggles.
   const [treeView, setTreeView] = useState(false);
@@ -406,6 +411,62 @@ function useAppStore(proof?: FabricProfile) {
     })).then(found => { if (live) setOwnProfiles(new Map(found.filter(entry => entry !== null))); });
     return () => { live = false; };
   }, [proof, fabricMemberList]);
+
+  const renewalPorts: RenewalPorts = {
+    now: Date.now,
+    crypto: { hash: async bytes => new Uint8Array(await Crypto.digest(Crypto.CryptoDigestAlgorithm.SHA256, new Uint8Array(bytes))), verify: verifyGrantSignature },
+    sign: signWithDeviceKey, create: createRenewalKey, approve: approveWithDeviceKey, remove: removeDeviceKey,
+    read: async key => { const raw = await SecureStore.getItemAsync(key); return raw ? JSON.parse(raw) : undefined; },
+    save: (key, profile) => SecureStore.setItemAsync(key, JSON.stringify(profile), { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY }),
+    post: async (base, path, body) => {
+      const response = await gatewayFetch()(`${base}${path}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const text = await response.text();
+      if (!response.ok || text.length > 256 * 1024) throw new Error('Could not contact the renewal member. Your previous pairing was kept.');
+      const envelope: unknown = JSON.parse(text);
+      if (!envelope || typeof envelope !== 'object' || !('api_version' in envelope) || envelope.api_version !== API_VERSION || !('value' in envelope)) throw new Error('Invalid renewal response');
+      return envelope.value;
+    },
+  };
+  const renewalRoute = (profile: PhoneProfile): string | undefined => {
+    if (!isFabricGatewayId(profile.url)) return profile.url;
+    return fabricSnapshot.phase === 'ready' && fabricMember && fabricGatewayId(fabricMember) === profile.url ? fabricSnapshot.bridgeUrl : undefined;
+  };
+  const renewalRouteRef = useRef(renewalRoute);
+  renewalRouteRef.current = renewalRoute;
+  const currentRenewalRoute = async (profile: PhoneProfile, expires: number): Promise<string> => {
+    const until = Math.min(expires, Date.now() + 15_000);
+    do {
+      const route = renewalRouteRef.current(profile);
+      if (route) return route;
+      const { promise, resolve } = Promise.withResolvers<void>();
+      setTimeout(resolve, 100);
+      await promise;
+    } while (Date.now() < until);
+    throw new Error('The paired member is not connected.');
+  };
+  const pollRenewals = async () => {
+    if (proof || renewalWorking.current || !foreground.current.active) return;
+    renewalWorking.current = true;
+    try {
+      const keys = [PROFILE_KEY, ...fabricMemberList.filter(member => !member.device).map(memberProfileKey)];
+      const found: typeof renewals = [];
+      for (const profileKey of keys) {
+        const profile = await renewalPorts.read(profileKey).catch(() => undefined) as PhoneProfile | undefined;
+        if (!profile) continue;
+        const route = renewalRoute(profile);
+        if (!route) continue;
+        try {
+          for (const offer of await pendingRenewals(profile, route, API_VERSION, renewalPorts)) found.push({ profileKey, profile, offer });
+        } catch { /* An unavailable member must not hide another member's verified offer. */ }
+      }
+      setRenewals(found);
+    } finally { renewalWorking.current = false; }
+  };
+  const renewalPoll = useRef(pollRenewals); renewalPoll.current = pollRenewals;
+  useEffect(() => {
+    if (proof) return;
+    return watchRenewalForeground(foreground.current, () => renewalPoll.current());
+  }, [proof, fabricMemberList, fabricSnapshot.phase, fabricSnapshot.member, url]);
 
   useEffect(() => { if (proof) return; Promise.allSettled([AsyncStorage.getItem(URL_KEY), AsyncStorage.getItem(ORDER_KEY), SecureStore.getItemAsync(CREDENTIAL_KEY), AsyncStorage.getItem(PROJECTION_CACHE_KEY), SecureStore.getItemAsync(PROFILE_KEY)]).then(([u, o, c, p, saved]) => {
     let paired: PhoneProfile | undefined;
@@ -816,6 +877,23 @@ function useAppStore(proof?: FabricProfile) {
       if (saved) await SecureStore.setItemAsync(PROFILE_KEY, JSON.stringify({ ...JSON.parse(saved), url: normalized }), { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY });
       await AsyncStorage.setItem(URL_KEY, normalized); setUrl(normalized); setError('');
     },
+    async approveRenewal(): Promise<void> {
+      const renewal = renewals[0];
+      if (!renewal || renewalWorking.current) return;
+      const route = renewalRoute(renewal.profile);
+      if (!route) { setRenewalIssue('Reconnect to this member to approve renewal.'); return; }
+      renewalWorking.current = true; setRenewalBusy(true); setRenewalIssue('');
+      try {
+        if (!await push.forgetIssuer(renewal.profileKey)) throw new Error('Notification cleanup is incomplete.');
+        const next = await approveRenewal(renewal.profileKey, renewal.profile, () => currentRenewalRoute(renewal.profile, renewal.offer.expires_at_unix_ms), renewal.offer, API_VERSION, renewalPorts) as PhoneProfile;
+        if (renewal.profileKey === PROFILE_KEY) {
+          setCredential(next.credential); setCaps(null); setPairDraft(null); setPairingIssue('');
+        } else setOwnProfiles(held => new Map(held).set(renewal.profileKey, next));
+        setRenewals(held => held.filter(item => item.profileKey !== renewal.profileKey));
+        push.resume();
+      } catch { setRenewalIssue('Renewal was not saved. Your previous profile was kept. Reopen the app to refresh; if no request remains, ask the operator to stage a new replacement.'); }
+      finally { push.releaseIssuer(renewal.profileKey); renewalWorking.current = false; setRenewalBusy(false); }
+    },
     async pair(id: string, code: string, fingerprint: string, unpinned = false): Promise<boolean> {
       if (!pairingTrustAllowed(!!pairDraft?.scanned, unpinned)) {
         setError('A scanned pairing requires a separately verified fingerprint.');
@@ -1200,6 +1278,7 @@ function useAppStore(proof?: FabricProfile) {
   return {
     actor: caps?.session_actor ?? cachedActor.current, cachedAt: cacheSavedAt.current, order, url, urlDraft, setUrlDraft, credential, data, truncated, loadErrors, feed, connectionIssue, caps, snapshot, status, hasSynced, sync, syncStale, missionsLoaded,
     error, setError, pairingIssue, setPairingIssue, pairDraft, busy, historicalSessions, conversationCache, draftCache, draftsReady, client,
+    renewal: renewals[0]?.offer, renewalIssue, renewalBusy,
     gatewayMachineId, gatewayHost, canControlTerminal, loadLists, watchLists, inventoryGranted, actions,
     saveDrafts: () => { if (!proof) void localDrafts.save(draftsOwner.current, draftCache.current); },
     treeView, setTreeView, scrollRequest, requestScroll: (y: number) => setScrollRequest({ y, at: Date.now() }),

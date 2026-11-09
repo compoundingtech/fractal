@@ -250,6 +250,15 @@ omit their stored principal remain ChatGPT grants. MCP pairing is an explicit
 choice, not a reinterpretation of a ChatGPT profile. Older servers that do not
 recognize `assistant/mcp` reject it; clients must not retry as a person or ChatGPT.
 
+Assistant challenge storage uses the member-local keyed verifier, bound to the
+stored full `assistant-grant/<hex>` grant ID. Request/response shapes and bearer
+credential digests are unchanged. Unknown verifier markers or key replacement
+require HTTP 403 `pairing-restart-required` (`start pairing again`), without
+changing BEGUN or writing GRANTED, credentials, or completion state; the denied
+completion audit is retained. Unmarked legacy challenges have a bounded
+five-minute lifetime. See [assistant verifier recovery](../external-assistants.md#pairing-verifier-and-recovery)
+for secret storage, logical-backup exclusions, and restart/downgrade guidance.
+
 ### Mission run timing
 
 `GET /v1/client/missions/{id}` requires `read.projections`, like other projection reads.
