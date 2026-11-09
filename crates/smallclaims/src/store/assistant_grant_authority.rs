@@ -619,9 +619,11 @@ impl Store {
             self.assistant_grant_membership_observed_generation.load(Ordering::Acquire))
     }
 
-    // Reuse the inherited sealed-view invalidation contract, including bootstrap
-    // proofs and every fold-input mutation. Its reader-fold amplification is
-    // tracked by #6124; never mirror those inputs in another trigger/revision.
+    // Reuse the inherited sealed-view invalidation contract for changes to the
+    // projected writer/key/start/end windows, including delayed bootstrap proofs.
+    // Shard bounds do not affect those tuples (their generation triggers cover
+    // INSERT/DELETE, not UPDATE). Reader-fold amplification remains #6124; do
+    // not mirror membership invalidation in another trigger/revision.
     // Only actual changed windows acquire the writer; equal snapshots update an
     // in-memory observation, without SQL writes or authentication cursor resets.
     fn prepare_assistant_grant_membership(&self) -> Result<Option<MembershipUpdate>> {
