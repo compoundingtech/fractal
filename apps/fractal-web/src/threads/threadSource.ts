@@ -19,6 +19,18 @@ export type ThreadSendResult =
   | { readonly _tag: 'Sent'; readonly threadId: string }
   | { readonly _tag: 'Refused'; readonly detail: string }
 
+type ThreadStartIntent = Readonly<Omit<ThreadStartParameters, 'target_id' | 'signature' | 'origin'>> & {
+  readonly origin: Readonly<ThreadStartParameters['origin']>
+}
+
+/** Discover the original first send even when the current source has moved to another episode. */
+export interface RetainedThreadStart {
+  readonly draftKey: string
+  readonly targetId: string
+  readonly state: 'sending' | 'unconfirmed'
+  readonly parameters: ThreadStartIntent
+}
+
 type ThreadAccess = { readonly read: boolean; readonly inboxOrigins?: boolean; readonly upgradeRequired?: boolean; readonly actions: ReadonlySet<string>; readonly actor?: string }
 
 export interface ThreadSource {
@@ -29,6 +41,8 @@ export interface ThreadSource {
   readonly timeline: (threadId: string, cursor?: string) => Atom.Atom<Feed<ThreadTimelinePage>>
   readonly draft: (destination: string) => Atom.Writable<ThreadDraft>
   readonly start: (draftKey: string, parameters: Omit<ThreadStartParameters, 'target_id' | 'signature'>) => Promise<ThreadSendResult>
+  readonly pendingStarts?: (sourceId?: string) => Atom.Atom<readonly RetainedThreadStart[]>
+  readonly retryStart?: (draftKey: string) => Promise<ThreadSendResult>
   readonly reply: (parameters: Omit<ThreadReplyParameters, 'signature'>) => Promise<ThreadSendResult>
   readonly rename: (thread: ThreadObservation, title: string, titleRevision: string) => Promise<string | undefined>
   readonly changeState: (thread: ThreadObservation, state: ThreadSummary['state']) => Promise<string | undefined>
@@ -186,7 +200,12 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       return Native.decodeUnknownSync(Native.ThreadTimelinePage)(value)
     }, follow === undefined ? undefined : { follow })
   })
-  const invalidate = () => registry.set(revision, registry.get(revision) + 1)
+  const deliveryRevision = Atom.make(0)
+  const deliveryChanged = () => registry.set(deliveryRevision, registry.get(deliveryRevision) + 1)
+  const invalidate = () => {
+    registry.set(revision, registry.get(revision) + 1)
+    deliveryChanged()
+  }
   const drafts = Atom.family((_destination: string) => Atom.keepAlive(Atom.make<ThreadDraft>({ content: '' })))
   type Request = { id: string; idempotency_key: string; fence: { snapshot_id: string; subject_revisions: Record<string, string> } }
   type Attempt = {
@@ -195,6 +214,8 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     readonly target: string
     readonly actor: string | undefined
     readonly kind: string
+    readonly start?: ThreadStartIntent
+    readonly startDraft?: ThreadDraft
     run?: () => Promise<ThreadSendResult>
     retry?: BoundAction<Request>
     pending?: Promise<ThreadSendResult>
@@ -212,6 +233,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
       readonly send: (request: Request) => ReturnType<FractalClient['threadReply']>
       readonly revisions?: Record<string, string>
     },
+    start?: ThreadStartIntent,
   ): Promise<ThreadSendResult> => {
     const reject = (detail: string): ThreadSendResult => ({ _tag: 'Refused', detail })
     const grant = registry.get(access)
@@ -221,9 +243,13 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     }
     if (previous?.pending !== undefined) return previous.pending
     if (!grant.actions.has(kind)) return Promise.resolve(reject('This connection cannot perform that thread action.'))
-    const attempt: Attempt = previous ?? { fingerprint, key: crypto.randomUUID(), target: target(), actor: grant.actor, kind }
+    const draft = start === undefined ? undefined : registry.get(drafts(destination))
+    const attempt: Attempt = previous ?? { fingerprint, key: crypto.randomUUID(), target: target(), actor: grant.actor, kind,
+      ...(start === undefined ? {} : { start }),
+      ...(draft !== undefined && draft.content.trim() === start?.content && draft.quote === undefined ? { startDraft: draft } : {}),
+    }
     attempts.set(destination, attempt)
-    attempt.run = () => deliver(destination, fingerprint, kind, target, prepare)
+    attempt.run = () => deliver(destination, fingerprint, kind, target, prepare, start)
     attempt.pending = (async () => {
       try {
         const prepared = prepare(attempt)
@@ -259,6 +285,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
         invalidate()
       }
     })()
+    deliveryChanged()
     return attempt.pending
   }
   const send = (destination: string, parameters: Omit<ThreadStartParameters, 'target_id' | 'signature'> | Omit<ThreadReplyParameters, 'signature'>): Promise<ThreadSendResult> => {
@@ -272,6 +299,7 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
           ? client.threadReply({ ...request, parameters: intent })
           : client.threadStart({ ...request, parameters: { ...intent, target_id: attempt.target } }),
       }),
+      'target_id' in intent ? undefined : intent,
     )
   }
   const pageKey = (subject: string, cursor?: string) => cursor === undefined ? subject : `${subject}\n${cursor}`
@@ -291,8 +319,30 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
   return {
     access,
     titles,
+    pendingStarts: Atom.family((sourceId?: string) => Atom.make(get => {
+      get(deliveryRevision)
+      const grant = get(access)
+      if (!grant.read) return []
+      return [...attempts].flatMap(([draftKey, attempt]): RetainedThreadStart[] => {
+        if (attempt.start === undefined || (sourceId !== undefined && attempt.start.origin.source_id !== sourceId) || attempt.actor !== grant.actor) return []
+        return [{ draftKey, targetId: attempt.target, state: attempt.pending === undefined ? 'unconfirmed' : 'sending',
+          parameters: structuredClone(attempt.start) }]
+      })
+    })),
+    retryStart: async draftKey => {
+      const attempt = attempts.get(draftKey)
+      if (attempt?.start === undefined || attempt.run === undefined) {
+        return { _tag: 'Refused', detail: 'There is no retained first send for this draft.' }
+      }
+      const result = await attempt.run()
+      // A remounted recovery control cannot acknowledge a newer draft, even one with identical text.
+      if (result._tag === 'Sent' && attempt.startDraft !== undefined && registry.get(drafts(draftKey)) === attempt.startDraft) {
+        registry.set(drafts(draftKey), { content: '' })
+      }
+      return result
+    },
     pendingChange: Atom.family((threadId: string) => Atom.make(get => {
-      get(revision)
+      get(deliveryRevision)
       const attempt = attempts.get(`edit/${threadId}`)
       return attempt?.retry === undefined ? undefined : attempt.kind === 'thread.rename' ? 'rename' : attempt.kind === 'thread.close' ? 'close' : 'reopen'
     })),

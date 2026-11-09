@@ -332,3 +332,84 @@ it('requires the current Inbox origin version before reading or sending', async 
     expect(fetchImpl).toHaveBeenCalledTimes(1)
   } finally { stop(); registry.dispose() }
 })
+
+it('discovers original first sends by source across changed episodes and retries only their bound intent', async () => {
+  const writes: Array<{ id: string; idempotency_key: string; parameters: { target_id: string; origin: { source_id: string; episode: string } } }> = []
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  const attempts = new Map<string, number>()
+  let actor = base.value.session_actor
+  const client = new FractalClient({ baseUrl: 'http://example.test', fetchImpl: async (input, init) => {
+    if (String(input).endsWith('/capabilities')) return Response.json({ ...base, value: { ...base.value, session_actor: actor, transport: 'local-web', capabilities: [
+      ...base.value.capabilities,
+      ...['threads-v1', 'thread-summary-feed', 'thread.start'].map(id => ({ id, version: 2, state: 'granted' })),
+    ] } })
+    const action = JSON.parse(String(init?.body)) as typeof writes[number]
+    writes.push(action)
+    const count = (attempts.get(action.idempotency_key) ?? 0) + 1
+    attempts.set(action.idempotency_key, count)
+    if (writes.length === 1) await held
+    if (count === 1) throw new TypeError('The thread committed but its receipt was lost')
+    return Response.json({ ...base, value: { kind: 'action-result', status: 'completed', action_id: action.id,
+      operation_id: `operation/${action.idempotency_key}`, snapshot_id: base.snapshot.id,
+      affected_ids: [action.parameters.target_id, 'message/first'],
+    } })
+  } })
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(client, registry)
+  const pendingStarts = source.pendingStarts
+  const retryStart = source.retryStart
+  if (!pendingStarts || !retryStart) throw new Error('Expected retained first-send support')
+  const sourceId = 'custom/garden/review/origin'
+  const retained = pendingStarts(sourceId)
+  const stopAccess = registry.mount(source.access)
+  let stop = registry.mount(retained)
+  const original = { agent_id: agent, origin: { source_id: sourceId, episode: 'claim/old' }, title: 'Original title', content: 'Original question' }
+  try {
+    await vi.waitFor(() => expect(registry.get(source.access).actions.has('thread.start')).toBe(true))
+    expect(registry.get(retained)).toEqual([])
+    registry.set(source.draft('draft/old'), { content: original.content })
+    const first = source.start('draft/old', original)
+    await vi.waitFor(() => expect(writes).toHaveLength(1))
+    expect(registry.get(retained)).toMatchObject([{ draftKey: 'draft/old', state: 'sending', parameters: original }])
+    expect((await source.start('draft/old', { ...original, agent_id: 'agent/other', title: 'Changed title' }))._tag).toBe('Refused')
+    expect(writes).toHaveLength(1)
+    release()
+    expect((await first)._tag).toBe('Refused')
+    stop()
+    stop = registry.mount(pendingStarts(sourceId))
+    expect(registry.get(retained)).toMatchObject([{ draftKey: 'draft/old', state: 'unconfirmed', parameters: original }])
+    // Another signed-in actor cannot discover or rebind this person's pending content.
+    actor = 'person/another'
+    registry.refresh(source.access)
+    await vi.waitFor(() => expect(registry.get(source.access).actor).toBe(actor))
+    expect(registry.get(retained)).toEqual([])
+    expect(registry.get(pendingStarts())).toEqual([])
+    expect((await retryStart('draft/old'))._tag).toBe('Refused')
+    expect(writes).toHaveLength(1)
+    actor = base.value.session_actor
+    registry.refresh(source.access)
+    await vi.waitFor(() => expect(registry.get(source.access).actor).toBe(actor))
+    expect(registry.get(pendingStarts())).toMatchObject([{ draftKey: 'draft/old', state: 'unconfirmed' }])
+    // A later episode has its own attempt; neither needs the current row's episode to be found.
+    registry.set(source.draft('draft/new'), { content: original.content })
+    expect((await source.start('draft/new', { ...original, origin: { source_id: sourceId, episode: 'claim/new' } }))._tag).toBe('Refused')
+    expect(registry.get(retained).map(start => start.draftKey)).toEqual(['draft/old', 'draft/new'])
+    expect(registry.get(pendingStarts()).map(start => start.draftKey)).toEqual(['draft/old', 'draft/new'])
+    expect(registry.get(pendingStarts('custom/another/source'))).toEqual([])
+    const old = registry.get(retained)[0]!
+    // The preview is detached from the private prepared request, including its nested origin.
+    Reflect.set(old.parameters.origin, 'episode', 'changed-preview')
+    const newerDraft = { content: original.content }
+    registry.set(source.draft(old.draftKey), newerDraft)
+    const retry = await retryStart(old.draftKey)
+    expect(retry).toEqual({ _tag: 'Sent', threadId: old.targetId })
+    expect(writes[2]).toEqual(writes[0])
+    expect(registry.get(source.draft(old.draftKey))).toBe(newerDraft)
+    expect(registry.get(retained).map(start => start.draftKey)).toEqual(['draft/new'])
+    expect((await retryStart('draft/new'))._tag).toBe('Sent')
+    expect(writes[3]).toEqual(writes[1])
+    expect(registry.get(source.draft('draft/new'))).toEqual({ content: '' })
+    expect(registry.get(pendingStarts())).toEqual([])
+  } finally { release(); stop(); stopAccess(); registry.dispose() }
+})
