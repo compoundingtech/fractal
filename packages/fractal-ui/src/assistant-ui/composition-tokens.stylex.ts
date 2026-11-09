@@ -133,7 +133,7 @@ export const geometryVars = stylex.defineVars({
   heroSize: '30px', heroLeading: '36px',
   tabMax: '144px', crumbMax: '160px',
   editorMin: '78px', editorMax: '208px', userClamp: '176px', previewMax: '256px',
-  gutter40: '40px', icon: '16px', status: '14px', statusPip: '6px', stop: '12px', glyphRing: '11px',
+  gutter40: '40px', icon: '16px', status: '14px', statusSm: '12px', statusPip: '6px', stop: '12px', glyphRing: '11px',
   sidebarRow: `${sidebarRowSize}px`, sidebarNested: '32px', resourceCard: '40px', hairline: '1px', focusRing: '2px', blur: '16px',
   sidebarMetric: '5ch',
   /** Work rows: disclosure slot · glyph slot · title · one right-aligned metadata column (status word, duration). */

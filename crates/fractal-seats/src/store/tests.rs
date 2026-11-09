@@ -1451,6 +1451,14 @@ fn a_late_claim_about_a_delivered_run_rebuilds_its_part_and_matches_a_replay() {
 fn late_claims_about_asks_owned_by_the_root_and_by_a_child_match_a_replay() {
     for owned_by_root in [true, false] {
         let shapes = tree_shapes();
+        for store in [&shapes.controller, &shapes.worker] {
+            let budget = store
+                .attention_request_count("front-desk", "person/test", now_ms())
+                .unwrap();
+            assert_eq!(budget.requests, 2);
+            assert_eq!(budget.requests_by_originating_run.get(&shapes.root.subject), Some(&1));
+            assert_eq!(budget.requests_by_originating_run.get(&shapes.children[0].subject), Some(&1));
+        }
         let ask = if owned_by_root { &shapes.root_ask } else { &shapes.child_ask };
         let ask = ask.subject.clone();
         let parts = late_claim_matches_a_replay(&shapes, |controller| {

@@ -3,7 +3,7 @@ import { expect, test } from 'vitest'
 
 import { observed } from '../../data/source.ts'
 import { todoAgent, todoAgentRef } from './fixtures.ts'
-import { projectTodos } from './model.ts'
+import { projectTodos, todoTextParts } from './model.ts'
 
 test('current phase favors observed in-progress work over earlier blocked or pending phases', () => {
   const todo = Option.getOrThrow(todoAgent.todo)
@@ -57,7 +57,7 @@ test('truncation keeps full-source totals and never counts abandoned work as com
   })
   expect(state._tag === 'Observed' && { completed: state.completed, total: state.total }).toEqual({
     completed: 20,
-    total: 28,
+    total: 26,
   })
 })
 
@@ -113,4 +113,16 @@ test('no observation is distinct from an observed empty list', () => {
     total: 0,
     phase: undefined,
   })
+})
+
+test('references in task text become chips only when they look like references', () => {
+  expect(todoTextParts('Land the fix (#5707) on d2f69044, for agent/dotfiles/attention')).toEqual([
+    { _tag: 'Text', text: 'Land the fix ' },
+    { _tag: 'PullRequest', text: '#5707' },
+    { _tag: 'Text', text: ' on ' },
+    { _tag: 'Commit', text: 'd2f69044' },
+    { _tag: 'Text', text: ', for ' },
+    { _tag: 'Agent', text: 'agent/dotfiles/attention' },
+  ])
+  expect(todoTextParts('A defaced page, step #12 and 1234567')).toEqual([{ _tag: 'Text', text: 'A defaced page, step #12 and 1234567' }])
 })

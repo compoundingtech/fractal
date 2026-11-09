@@ -185,6 +185,8 @@ pub mod launches;
 pub mod messages;
 pub mod operations;
 pub mod records;
+mod write_principal;
+mod native_delivery;
 pub mod replication;
 mod runs;
 pub mod sessions;
@@ -1318,6 +1320,17 @@ async fn response_envelope_unbounded(
         roster: request_route == "/v1/client/agents",
     };
     request.extensions_mut().insert(envelope_context.clone());
+    let (request, write_error) = if fabric_boundary_error.is_none() && client_authentication.is_ok() {
+        match write_principal::bind_request(&state, request).await {
+            Ok(request) => (Some(request), None),
+            Err(error) => (None, Some(error)),
+        }
+    } else {
+        (Some(request), None)
+    };
+    let fabric_boundary_error = fabric_boundary_error.or(write_error);
+    // A refused request never reaches a handler; retain an empty body for response dispatch.
+    let request = request.unwrap_or_else(|| Request::new(Body::empty()));
     let response = match (fabric_boundary_error, client_authentication) {
         (Some(error), _) | (None, Err(error)) => error.into_response(),
         // Most handlers use synchronous SQLite and filesystem APIs. Run the whole
@@ -4255,7 +4268,7 @@ mod declared_admission_tests {
     async fn declared_admission_refusal_keeps_stable_envelope_fields() {
         let error = ApiError::bad(FractalError::new(
             "invalid-declared-admission",
-            "agent 'agent/example' declared_budgets.cpu_seconds must be an integer from 1 to 9007199254740991",
+            "agent 'agent/example' declared_budgets.cpu_seconds cpu-seconds is allowed on missions only",
         ).with_detail("subject", "agent/example")
             .with_detail("field", "declared_budgets.cpu_seconds"));
         assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -4276,6 +4289,8 @@ mod declared_admission_tests {
         assert!(client_declared_admission(&json!({"children": [
             {"name": "declared-budgets", "children": []}
         ]})).is_none());
+        // Read projection must retain historical agent numeric budgets, even though
+        // new agent declarations can no longer author these mission-only fields.
         let desired = json!({"children": [
             {"name": "declared-priority", "arguments": ["future-level"]},
             {"name": "declared-lane", "arguments": ["future-lane"]},
@@ -7729,34 +7744,7 @@ fn native_delivery_identity(
     args: &[String],
     env: &[String],
 ) -> Option<NativeDeliveryPeer> {
-    let (transport, archives_inbox) = args.windows(2).find_map(|pair| {
-        if pair[0] != "driver" {
-            return None;
-        }
-        match pair[1].as_str() {
-            "omp-channel" | "omp" => Some(("omp-channel", false)),
-            "pi-channel" | "pi" => Some(("pi-channel", false)),
-            "claude-mcp" => Some(("claude-channel", false)),
-            "claude" => Some(("claude-channel", true)),
-            "codex" => Some(("app-server", true)),
-            "opencode" => Some(("opencode-server", true)),
-            _ => None,
-        }
-    })?;
-    // LIVE-MIGRATION BRIDGE arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read — DELETE at contraction — https://github.com/compoundingtech/fractal/issues/3032
-    let agent = fractal_drivers::contracts::env_with("ST_AGENT", &|name| {
-        env.iter().find_map(|entry| {
-            let (key, value) = entry.split_once('=')?;
-            (key == name).then(|| value.to_owned())
-        })
-    }).filter(|agent| agent.starts_with("agent/"))?;
-    // LIVE-MIGRATION END arn:lmig:smalltalk:2026-10-16-env-fractal-dual-read
-    Some(NativeDeliveryPeer {
-        agent,
-        transport,
-        pid,
-        archives_inbox,
-    })
+    native_delivery::identity(pid, args, env)
 }
 /// Capture the kernel connector generation, independently of generic local auth.
 pub fn local_peer_process(stream: &tokio::net::UnixStream) -> anyhow::Result<fractal_runtime::PeerProcessIdentity> {

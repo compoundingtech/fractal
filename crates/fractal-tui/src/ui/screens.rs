@@ -4391,8 +4391,8 @@ mod request_notes {
             .iter()
             .map(|line| text::plain(line).trim_end().to_owned())
             .filter(|line| {
-                line.starts_with(" ○")
-                    || line.starts_with(" ◉")
+                line.starts_with("○")
+                    || line.starts_with("◉")
                     || line.starts_with("✕")
                     || line.starts_with(" enter")
             })
@@ -4400,10 +4400,10 @@ mod request_notes {
         assert_eq!(
             shown,
             [
-                " ○ Ship it  ✎ note  then Ship it",
-                " ◉ Hold it  ✎ note  then Hold it",
-                " ○ Revise first  needs your words  then Revise first",
-                " ○ Custom answer  write your own answer instead of these",
+                "○ Ship it  ✎ note  then Ship it",
+                "◉ Hold it  ✎ note  then Hold it",
+                "○ Revise first  needs your words  then Revise first",
+                "○ Custom answer  write your own answer instead of these",
                 "✕ Not sent  the asker already closed this request",
                 " enter  Send this answer    c  Add note    ↑↓  Another    esc  Not now",
             ]
