@@ -9211,7 +9211,10 @@ impl<R: RuntimeControl> Reconciler<R> {
             );
         }
         if let Some(attempt) = attempted.as_ref() {
-            let diagnostic = self.restart_admission_error(&subject.subject, attempt, previous)?;
+            let diagnostic = match self.verified_restart_exit(&subject.subject, attempt)? {
+                Some(detail) => Some(detail),
+                None => self.restart_admission_error(&subject.subject, attempt, previous)?,
+            };
             return self.fail_requested_restart(
                 subject,
                 member,
@@ -9267,6 +9270,38 @@ impl<R: RuntimeControl> Reconciler<R> {
         // that exit at startup after the physical launcher accepted the attempt.
         self.signal_changed();
         Ok(true)
+    }
+
+    /// A verified launch receipt belongs to its exact attempt, even if the PTY
+    /// disappears before the next reconciliation observation.
+    fn verified_restart_exit(
+        &self,
+        subject: &str,
+        attempt: &crate::model::ClaimRecord,
+    ) -> Result<Option<String>> {
+        let Some(operation) = attempt.body["fields"]["operation"].as_str() else {
+            return Ok(None);
+        };
+        let receipts = self.store.claims_for(subject, Some("runtime.action.succeeded"))?;
+        let receipt = receipts.iter().rev().find(|claim| {
+            claim.body["fields"]["action"] == "start"
+                && claim.body["fields"]["operation_status"] == "verified"
+                && claim.body["fields"]["operation"] == operation
+                && crate::store::claim_log_order(claim) > crate::store::claim_log_order(attempt)
+        });
+        let Some(incarnation) = receipt
+            .and_then(|claim| claim.body["fields"]["incarnation_id"].as_str())
+        else {
+            return Ok(None);
+        };
+        let harness = self.store.current_harness(subject)?;
+        let reason = harness
+            .filter(|harness| harness.incarnation_id == incarnation && harness.state == "ended")
+            .and_then(|harness| harness.reason);
+        Ok(Some(reason.map_or_else(
+            || "the replacement started successfully but is no longer observable".into(),
+            |reason| format!("the replacement started and then exited: {reason}"),
+        )))
     }
 
     /// A driver may publish its refusal and exit before the physical observation arrives.

@@ -4,8 +4,13 @@ use serde_json::json;
 const SEAT: &str = "agent/node.fixture";
 
 #[test]
-fn driver_refusal_supplies_restart_error_without_physical_observation_and_is_incarnation_fenced() {
-    for (diagnostic_incarnation, expect_detail) in [("new", true), ("old", false)] {
+fn restart_diagnostic_distinguishes_verified_start_then_exit_from_interrupted_attempt() {
+    for (diagnostic_incarnation, receipt_operation, expect_detail, expect_started) in [
+        ("new", None, true, false),
+        ("old", None, false, false),
+        ("old", Some("attempt-operation"), false, true),
+        ("old", Some("unrelated-operation"), false, false),
+    ] {
         let store = Arc::new(Store::open_memory("node").unwrap());
         apply_source(
             &store,
@@ -50,10 +55,40 @@ fn driver_refusal_supplies_restart_error_without_physical_observation_and_is_inc
         let attempt = append(
             "runtime.action.requested",
             request.actor.as_deref(),
-            BTreeMap::from([("action".into(), json!("start"))]),
+            BTreeMap::from([
+                ("action".into(), json!("start")),
+                ("operation".into(), json!("attempt-operation")),
+            ]),
             vec![request.id.clone()],
             Some(format!("agent-restart-attempt:{}", request.id)),
         );
+        if let Some(operation) = receipt_operation {
+            append(
+                "runtime.action.succeeded",
+                None,
+                BTreeMap::from([
+                    ("action".into(), json!("start")),
+                    ("operation".into(), json!(operation)),
+                    ("operation_status".into(), json!("verified")),
+                    ("incarnation_id".into(), json!("new")),
+                ]),
+                vec![attempt.id.clone()],
+                None,
+            );
+            append(
+                "harness.observed",
+                Some(SEAT),
+                BTreeMap::from([
+                    ("state".into(), json!("ended")),
+                    ("driver".into(), json!("omp")),
+                    ("incarnation_id".into(), json!("new")),
+                    ("reason".into(), json!("driver-stopped")),
+                    ("exit".into(), json!("exit 143")),
+                ]),
+                vec![],
+                None,
+            );
+        }
         append(
             "harness.diagnostic",
             Some(SEAT),
@@ -93,7 +128,10 @@ fn driver_refusal_supplies_restart_error_without_physical_observation_and_is_inc
             .reconcile_requested_restart(&desired, desired.member.as_ref().unwrap(), None, None)
             .unwrap_err()
             .to_string();
-        if expect_detail {
+        if expect_started {
+            assert!(error.contains("the replacement started and then exited: driver-stopped"), "{error}");
+            assert!(!error.contains("interrupted before"), "{error}");
+        } else if expect_detail {
             assert!(error.contains("phase=version outcome=timeout"), "{error}");
             assert!(!error.contains("interrupted before"), "{error}");
         } else {
