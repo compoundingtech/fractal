@@ -2012,6 +2012,16 @@ Read-only scope permits snapshots, details, timelines, and event feeds. `termina
 terminal input and resize; other control scopes are action-family-specific. A capabilities response
 must distinguish unavailable, ungranted, and unsupported features.
 
+Native claim writes derive attribution from the connected agent, native writer, or paired
+person authority. Supplied actor, requester, and message sender values must agree with that
+attribution. An omitted claim actor uses the derived identity; ordinary local writes without
+such an identity retain their nullable actor. Native drivers and active Claude hooks retain
+seat attribution, including initial-message, seed, and subagent receipts. Paired native claim
+writes require the claim family's control scope (`control.work` for other generic kinds);
+message claims use `control.messages`. Legacy ask completion (`/v1/work/done`) and custom
+replies (`/v1/custom/reply`) use the same `control.attention` scope as their client actions.
+Session credential IDs are not claim authors.
+
 ## Conversation stream
 
 `GET /v1/client/conversations/{id}/stream` opens one authenticated WebSocket

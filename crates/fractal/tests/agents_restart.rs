@@ -282,6 +282,7 @@ impl Fixture {
         reconciler.reconcile_once().unwrap();
         reconciler.reconcile_once().unwrap();
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),

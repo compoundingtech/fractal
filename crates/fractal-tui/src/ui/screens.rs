@@ -407,11 +407,6 @@ fn structured_request(
     drafts: &Drafts<'_>,
     inner: usize,
 ) {
-    card.line(Line::from(vec![
-        span("asks  ", theme::dim()),
-        span(from.to_owned(), theme::strong(theme::PERSON)),
-    ]));
-    card.blank();
     let label_of = |id: &str| {
         request
             .answers
@@ -652,13 +647,14 @@ fn structured_request(
         if request.custom {
             buttons.push(("c", "Answer in words", Hit::Key('c'), theme::ACCENT));
         }
-        card.buttons(&buttons);
-        // A person can always set a request aside, whatever its answers: the asker is told it
-        // was dismissed (Nathan, 2026-10-11). It asks first.
-        card.blank();
-        let label = format!("Dismiss this: tell {from} you set it aside without answering");
-        if !confirm_row(card, drafts, &label) {
-            card.buttons(&[("x", "Dismiss without answering", Hit::Key('x'), theme::OVERLAY1)]);
+        if drafts.confirm.is_some() {
+            card.buttons_fit(&buttons, inner);
+            card.blank();
+            let label = format!("Dismiss this: tell {from} you set it aside without answering");
+            confirm_row(card, drafts, &label);
+        } else {
+            buttons.push(("x", "Dismiss without answering", Hit::Key('x'), theme::OVERLAY1));
+            card.buttons_fit(&buttons, inner);
         }
     }
     if !request.why_person.is_empty() {
@@ -896,6 +892,11 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             .map(|candidate| candidate.name.clone())
             .unwrap_or_else(|| agent.trim_start_matches("agent/").to_owned());
         link(&mut card, "agent    ", &label, agent);
+    }
+    if let AttentionKind::Request { from, from_id, .. } = &item.kind
+        && item.agent.as_deref() != Some(from_id.as_str())
+    {
+        card.field("from", from, inner, theme::soft());
     }
     card.blank();
     match &item.kind {
@@ -1248,11 +1249,6 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
         } => structured_request(&mut card, from, request, images, drafts, inner),
         AttentionKind::Request { from, question, .. } => {
             let custom = item.actions.iter().any(|action| action == "custom.reply");
-            card.line(Line::from(vec![
-                span("asks  ", theme::dim()),
-                span(from.clone(), theme::strong(theme::PERSON)),
-            ]));
-            card.blank();
             // A report pasted in as JSON shows its telling fields, not a wall of braces.
             match report(question, inner) {
                 Some(lines) => card.lines(lines),

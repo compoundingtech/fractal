@@ -27,10 +27,17 @@ describe('agent status glyph vocabulary', () => {
     expect(html.includes('data-frozen="true"')).toBe(freshness !== 'live')
     expect(html).not.toContain('<svg')
   })
-  it.each(['SG-1', 'SG-2', 'SG-3'] as const)('preserves the existing %s SVG presentation', variant => {
+  it.each(['SG-1', 'SG-2'] as const)('preserves the existing %s SVG presentation', variant => {
     const html = renderToStaticMarkup(createElement(SidebarStatus, { status: 'working', variant, freshness: 'live', iconOnly: true }))
     expect(html).toContain('<svg')
     expect(html).not.toContain('data-agent-glyph')
+    expect(html).not.toContain('data-live-ring')
+  })
+  it('draws working in the stroke-only SG-3 set as the shared ring, labelled on its slot', () => {
+    const html = renderToStaticMarkup(createElement(SidebarStatus, { status: 'working', variant: 'SG-3', freshness: 'live', iconOnly: true }))
+    expect(html).toContain('data-live-ring')
+    expect(html).toMatch(/role="img" aria-label="[^"]*live observation/)
+    expect(html).not.toContain('<svg')
   })
 })
 describe('mission feed evidence', () => {

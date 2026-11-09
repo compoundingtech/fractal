@@ -4598,6 +4598,107 @@ fn each_part_of_a_standing_tree_rebuilt_alone_matches_a_replay() {
 }
 
 #[test]
+fn run_part_rebuild_matches_incremental_projection_and_preserves_quarantine() {
+    use crate::store::person_work::PersonWorkStore;
+
+    let (store, _worker, root, children) = replicated_run_tree(2);
+    // As in tree_shapes, asking from live work requires a declared claimant, not
+    // merely the assigned-to reference supplied by replicated_run_tree.
+    let agents_source = "version 2\nagent \"worker.one\" { workspace \"/tmp\"; command \"true\"; restart always; }\n";
+    let agents = crate::graph::parse_internal_intent(agents_source, "controller").unwrap();
+    let planned = store.mission(&agents, IntentInput {
+        kdl: agents_source.into(),
+        source_name: None,
+    }).unwrap();
+    store.apply(&agents, &planned.subject_tokens, "part-ask-agent").unwrap();
+    let child = &children[0];
+    let revised = publish_mission(
+        &store,
+        "version 2\nmission \"request\" state=\"ready\" { goal \"Answer the revised request.\"; concurrent-runs; step \"answer\" { assigned-to \"agent/worker.one\" } }",
+        "part-revision",
+    );
+    store
+        .adopt_mission_revision(&child.id, &revised, "person/test", "new generation", "part-adopt")
+        .unwrap();
+    let current = store.mission_run(&child.id).unwrap().unwrap();
+    assert_ne!(current.generation, child.generation, "fixture has two generations");
+    let step = &current.steps[0].subject;
+    store.set_step_state(step, "ready", None).unwrap();
+    store.work_action(step, "claim", &WorkRequest {
+        wait_ms: None,
+        actor: Some("agent/worker.one".into()),
+        incarnation: Some("part-incarnation".into()),
+        summary: None,
+        reason: None,
+        evidence: Vec::new(),
+        idempotency_key: "part-work-claim".into(),
+    }).unwrap();
+    let ask = store.ask_person(&crate::model::PersonAskRequest {
+        deadline_ms: None,
+        default_answer: None,
+        legacy_request: None,
+        person: "person/test".into(),
+        title: "Choose an answer".into(),
+        reason: "The requester must choose.".into(),
+        actor: "agent/worker.one".into(),
+        step: Some(step.clone()),
+        new_run: None,
+        incarnation: Some("part-incarnation".into()),
+        request: None,
+        idempotency_key: "part-person-ask".into(),
+    }).unwrap();
+    assert!(store.step_run(&ask.subject).unwrap().is_some());
+
+    let mut connection = store.connection.lock().unwrap();
+    let tx = connection.transaction().unwrap();
+    // Inject historical malformed creation claims below Fractal's schema admission.
+    // Unlike bare-row insert_raw_claims, this primitive also creates the batches that
+    // claims_in_replay_order_tx joins. Creation on a step fails before changing rows.
+    let mut failures = BTreeSet::new();
+    for subject in [step, &children[1].steps[0].subject] {
+        let claim = smallclaims::store::append_claim_record_tx(
+            &tx, &store.origin, subject, "mission-run.created", None,
+            &json!({"fields": {}}), &[], None,
+        ).unwrap();
+        project_claim_isolated_tx(&tx, "projection:runs", &claim, || {
+            project_mission_run_created(&tx, &claim)
+        }).unwrap();
+        failures.insert(format!("projection:runs:{}", claim.id));
+    }
+    // Quarantine timestamps use the projection wall clock, unlike claim-derived row times.
+    // Compare the failure identity/status/error rather than that replay timestamp.
+    let quarantine = || {
+        tx.prepare(
+            "SELECT aggregate, status, error_code, error_message FROM projection_health
+             WHERE aggregate LIKE 'projection:runs:%' ORDER BY aggregate",
+        ).unwrap().query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?, row.get::<_, String>(3)?))
+        }).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    };
+    let quarantined = quarantine();
+    assert_eq!(quarantined.iter().map(|row| row.0.clone()).collect::<BTreeSet<_>>(), failures);
+    assert!(quarantined.iter().all(|row| row.1 == "stale" && row.2 == "invalid-mission-run-claim"));
+    let incremental = projection_digest::oracle(&tx).unwrap();
+    assert_eq!(
+        run_part_of_tx(&tx, step).unwrap(),
+        Some(Aggregate::RunPart(child.id.clone())),
+        "the receive path selects the child, not its standing root or sibling",
+    );
+    assert_ne!(root.id, child.id);
+    for _ in 0..2 {
+        rebuild_run_part_tx(&tx, &child.id).unwrap();
+        assert_eq!(projection_digest::oracle(&tx).unwrap(), incremental,
+            "part replay preserves all incrementally projected rows, including generations, steps and asks");
+        assert_eq!(projection_digest::tables(&tx).unwrap(), incremental,
+            "cached projection digests still describe the actual rows");
+        assert_eq!(quarantine(), quarantined,
+            "only the failing claims are quarantined; the unrelated child's quarantine is untouched");
+    }
+    tx.rollback().unwrap();
+}
+
+#[test]
 fn a_running_runs_reporter_changes_by_its_own_claim_and_leaves_creation_alone() {
     let store = Store::open_memory("node").unwrap();
     let workspace = tempfile::tempdir().unwrap();

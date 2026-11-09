@@ -74,6 +74,7 @@ impl Daemon {
 
     fn state(&self) -> AppState {
         AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: self.store.clone(),

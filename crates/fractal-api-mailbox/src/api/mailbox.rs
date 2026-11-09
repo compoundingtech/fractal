@@ -69,12 +69,26 @@ pub fn synthetic_mailbox_protocol_router(state: AppState, subject: &str) -> Rout
 #[cfg(feature = "test-support")]
 pub fn synthetic_mailbox_protocol_router_with(state: AppState, subject: &str, families: &[RouteFamily]) -> Router {
     assert!(subject.starts_with("agent/example/"));
-    admitted_mailbox_protocol_router_with(state, families).layer(Extension(NativeDeliveryPeer {
+    let peer = NativeDeliveryPeer {
         agent: subject.into(),
         transport: "omp-channel",
         pid: std::process::id(),
         archives_inbox: false,
-    }))
+    };
+    admitted_mailbox_protocol_router_with(state, families).layer(axum::middleware::from_fn(
+        move |mut request: axum::extract::Request, next: axum::middleware::Next| {
+            let peer = peer.clone();
+            async move {
+                if request.uri().path() == "/v1/mailbox"
+                    || request.uri().path().starts_with("/v1/mailbox/")
+                    || request.uri().path() == "/v1/harness-questions/native"
+                {
+                    request.extensions_mut().insert(peer);
+                }
+                next.run(request).await
+            }
+        },
+    ))
 }
 /// Resolve only the requested address. The transport peer remains the immutable
 /// physical principal: a public rename must never create new mailbox custody.
