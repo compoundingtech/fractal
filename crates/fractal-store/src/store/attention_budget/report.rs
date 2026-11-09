@@ -92,10 +92,14 @@ const PINNED_REVISIONS: &str = "WITH RECURSIVE ancestry(id, mission_id, initial_
  SELECT r.id, r.mission_id, r.initial_revision, r.root_run_id, r.parent_step_run, a.depth+1
  FROM ancestry a JOIN step_runs s ON s.subject=a.parent_step_run
  JOIN mission_runs r ON r.id=s.run_id AND r.root_run_id=a.root_run_id WHERE a.depth<63
-) SELECT mission_id, initial_revision FROM ancestry ORDER BY depth";
+) SELECT mission_id, initial_revision,
+         EXISTS(SELECT 1 FROM ancestry a JOIN step_runs s ON s.subject=a.parent_step_run
+                JOIN mission_runs r ON r.id=s.run_id AND r.root_run_id=a.root_run_id
+                WHERE a.depth=63)
+  FROM ancestry ORDER BY depth";
 
 /// Charging policy: every declaring ancestor, pinned to that run's initial revision.
-fn run_charges_mission(
+pub(super) fn run_charges_mission(
     connection: &Connection,
     run: &str,
     mission: &str,
@@ -104,9 +108,10 @@ fn run_charges_mission(
 ) -> Result<bool> {
     let mut ancestry = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h48f56e683553 owner=fractal_store::store::attention_budget::report TODO=trace-statement-and-value-representation */ PINNED_REVISIONS)?;
     for ancestor in ancestry.query_map([run], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, bool>(2)?))
     })? {
-        let (ancestor, revision) = ancestor?;
+        let (ancestor, revision, overflow) = ancestor?;
+        anyhow::ensure!(!overflow, "attention ancestry limit of 64 vertices exceeded");
         if ancestor != mission {
             continue;
         }

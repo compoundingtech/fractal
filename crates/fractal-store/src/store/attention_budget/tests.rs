@@ -3,10 +3,11 @@ use super::*;
 fn fixture() -> Connection {
     let db = Connection::open_in_memory().unwrap();
     db.execute_batch(
-        /* sqlite-large-value: allow-for-now lv-h7ec275a9f1a2 owner=fractal_store::store::attention_budget::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims (id TEXT, store_index INTEGER PRIMARY KEY, batch_id TEXT, subject TEXT,
+        /* sqlite-large-value: allow-for-now lv-h976b4bd6803a owner=fractal_store::store::attention_budget::tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE claims (id TEXT, store_index INTEGER PRIMARY KEY, batch_id TEXT, subject TEXT,
            kind TEXT, origin TEXT, actor TEXT, body TEXT, predecessors TEXT, accepted_at_unix_ms TEXT);
          CREATE INDEX claims_accepted_order_index ON claims(length(accepted_at_unix_ms), accepted_at_unix_ms, store_index);
          CREATE INDEX claims_subject_kind_index ON claims(subject,kind,store_index);
+         CREATE INDEX claims_person_ask_recipient_index ON claims(json_extract(body, '$.fields.person')) WHERE kind='work.person-asked';
          CREATE TABLE batches (id TEXT, origin TEXT, replica_sequence INTEGER);
          CREATE TABLE claim_positions (claim_id TEXT, position INTEGER);
          CREATE TABLE replica_records (claim_id TEXT, position INTEGER);
@@ -99,19 +100,23 @@ fn an_older_canonical_request_cannot_be_charged_again_inside_the_window() {
 }
 
 #[test]
-fn the_window_seeks_the_accepted_time_index() {
+fn candidates_seek_only_the_recipient_index_without_sorting() {
     let db = fixture();
     let plan = db
         .query_row(
             format!("EXPLAIN QUERY PLAN {SUBJECTS}").as_str(),
-            params![3, "100", "999", "person/operator", 100],
+            params!["person/operator", MAX_SUBJECTS + 1],
             |row| row.get::<_, String>(3),
         )
         .unwrap();
     assert!(
-        plan.contains("SEARCH claims USING INDEX claims_accepted_order_index"),
+        plan.contains("SEARCH claims USING INDEX claims_person_ask_recipient_index"),
         "{plan}"
     );
+    let mut plan = db.prepare(format!("EXPLAIN QUERY PLAN {SUBJECTS}").as_str()).unwrap();
+    for detail in plan.query_map(params!["person/operator", MAX_SUBJECTS + 1], |row| row.get::<_, String>(3)).unwrap() {
+        assert!(!detail.unwrap().contains("TEMP B-TREE"));
+    }
 }
 
 #[test]
@@ -217,12 +222,19 @@ fn candidate_and_canonical_history_limits_refuse_incomplete_counts() {
         insert(&db, "old-original", at - offset as u128, linked("first"));
     }
     assert!(count(&db, "livestore/cycle", "person/operator", at).unwrap_err().to_string().contains("canonical-history limit"));
+    let db = fixture();
+    for offset in 0..=MAX_SUBJECTS {
+        insert(&db, "all-expired", 1 + offset as u128, linked("first"));
+    }
+    assert!(count(&db, "livestore/cycle", "person/operator", at).unwrap_err().to_string().contains("lifetime request-claim limit"));
 }
 
 #[test]
 fn ancestry_is_bounded_at_64_vertices() {
     for length in [64, 65] {
         let db = fixture();
+        budget(&db, "target", "old", None);
+        budget(&db, "child", "old", Some(1));
         for index in 0..length {
             let run = format!("chain-{index}");
             let parent = (index > 0).then(|| format!("step-run/chain-{}/work", index - 1));
@@ -232,7 +244,37 @@ fn ancestry_is_bounded_at_64_vertices() {
         }
         let at = WEEK_MS + 100;
         insert(&db, "deep", at, linked(&format!("chain-{}",length - 1)));
-        let report = count(&db, "target", "person/operator", at).unwrap();
-        assert_eq!((report.requests, report.unattributed_for_person), if length == 64 { (1,0) } else { (0,1) });
+        for mission in ["target", "child"] {
+            let counted = count(&db, mission, "person/operator", at);
+            let reported = report::report(&db, mission, &format!("mission/{mission}"), "person/operator", at);
+            let charged = report::run_charges_mission(&db, &format!("chain-{}", length - 1), mission, "person/operator", &mut BTreeMap::new());
+            if length == 64 {
+                assert_eq!(counted.unwrap().requests, 1);
+                assert_eq!(reported.unwrap().inclusive, 1);
+                assert_eq!(charged.unwrap(), mission == "child");
+            } else {
+                for error in [counted.unwrap_err(), reported.unwrap_err(), charged.unwrap_err()] {
+                    assert!(error.to_string().contains("ancestry limit of 64 vertices"), "{error:#}");
+                }
+            }
+        }
     }
+}
+
+#[test]
+fn unrelated_claim_volume_does_not_consume_recipient_candidate_work() {
+    let db = fixture();
+    let tx = db.unchecked_transaction().unwrap();
+    let at = WEEK_MS + 100;
+    let mut unrelated = linked("first");
+    unrelated["person"] = json!("person/other");
+    for offset in 0..=MAX_SUBJECTS {
+        insert(&tx, "unrelated-recipient", at - offset as u128, unrelated.clone());
+    }
+    insert(&tx, "selected-recipient", at, linked("first"));
+    let mut query = tx.prepare(/* sqlite-large-value: allow-for-now lv-hedfb698e9105 owner=fractal_store::store::attention_budget::tests TODO=trace-statement-and-value-representation */ SUBJECTS).unwrap();
+    let examined = query.query_map(params!["person/operator", MAX_SUBJECTS + 1], |_| Ok(())).unwrap().count();
+    assert_eq!(examined, 1, "recipient index excludes all unrelated rows before LIMIT");
+    assert_eq!(count(&tx, "livestore/cycle", "person/operator", at).unwrap().requests, 1);
+    assert!(count(&tx, "livestore/cycle", "person/other", at).unwrap_err().to_string().contains("lifetime request-claim limit"));
 }

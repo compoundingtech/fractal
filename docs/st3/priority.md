@@ -206,6 +206,16 @@ does not charge older runs. Every declaring ancestor is charged independently.
 IDs and subjects, never request text; `request_refs_complete` states whether all fit.
 This is data only: no limit enforcement, delivery decision, write, or fleet-complete promise.
 
+Reads examine at most 10,001 retained lifetime native ask claim rows for the
+recipient through the existing recipient index, newest local admission first;
+more than 10,000 refuses the whole report before applying the weekly window.
+This includes updates and expired asks, not just distinct current-window requests.
+Retained history therefore grows toward refusal even when weekly usage is low;
+the report does not silently discard older history. Unrelated recipients and other
+claim kinds are not scanned. A valid ancestry continuation beyond 64 vertices also
+refuses the whole report, even if the mission was already found; missing provenance
+remains distinct and may be reported as unattributed.
+
 ## Linux
 
 On Linux with a systemd user manager, Fractal starts each terminal in a transient scope that it records
