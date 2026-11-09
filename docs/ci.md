@@ -1294,8 +1294,8 @@ those sparse p99s are effectively observed maxima. This bounded tolerance still 
 regressions on rare paths. CPU tolerates 0.05 cores. A PR without a main baseline fails as P0;
 a main bootstrap may check only absolute budgets and errors.
 
-The CPU budget (2 cores, `load_max_cores`) comes from [`slo/targets.toml`](../slo/targets.toml), which Fractal builds in. It is
-the bound under this synthetic load, not the member's production CPU target (`max_cores`). The file is built in:
+The CPU budget (2 cores, the `cpu` objective's `load-max-cores`) comes from [`slo/objectives.kdl`](../slo/objectives.kdl), which Fractal builds in. It is
+the bound under this synthetic load, not the member's production CPU target (`cores`). The file is built in:
 a missing file fails the build and an invalid one fails the run, with no default. The report and step summary also show each
 path's p99 target from that file (`descriptive_target_ms`, `over_descriptive_target`) when the path
 stands for one. Targets describe and never gate: the budgets and main's baseline remain the gates.
@@ -1362,7 +1362,7 @@ not past it at the start, at its lowest 5-second sample or at the end.
 
 Both runs add a faster measured mix: person reads and message sends at 2 a second and a fresh
 agents list at 1 a second, so each of the four measures has a p99 worth reading. The report pools
-every path a target in [`slo/targets.toml`](../slo/targets.toml) covers, the targets that
+every path a target in [`slo/objectives.kdl`](../slo/objectives.kdl) covers, the targets that
 `GET /v1/client/request-latency` serves: `person-read` (300 ms p99), `person-read-fresh` (300 ms),
 `write-ack` (300 ms) and `message-send` (a send against the write-ack target), each with and without
 the hog, and prints them as `summary.md`. A request that fails fails the run; a missed target does

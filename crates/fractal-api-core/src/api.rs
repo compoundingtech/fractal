@@ -1618,12 +1618,12 @@ pub fn request_latency_snapshot() -> Vec<Value> {
     request_latency().lock().unwrap().snapshot()
 }
 
-/// Only the targets' live windows, for the collector: see `slo/targets.toml`.
+/// Only the targets' live windows, for the collector: see `slo/objectives.kdl`.
 pub fn request_latency_target_windows() -> Value {
     request_latency().lock().unwrap().targets_only(Instant::now())
 }
 
-/// Every target's live windows, and every path's: see `slo/targets.toml`.
+/// Every target's live windows, and every path's: see `slo/objectives.kdl`.
 pub fn request_latency_windows() -> Value {
     request_latency().lock().unwrap().windows(Instant::now())
 }
@@ -1633,8 +1633,8 @@ fn note_cpu_busy(busy: smallclaims::windows::cpu_minutes::Busy) {
     request_latency().lock().unwrap_or_else(std::sync::PoisonError::into_inner).cpu_minutes().note(busy);
 }
 
-/// Close each UTC minute of the member's CPU as it ends, for the CPU targets in
-/// `slo/targets.toml`: read the daemon's CPU at the boundary beside the newest reading each of
+/// Close each UTC minute of the member's CPU as it ends, for the `cpu` objective in
+/// `slo/objectives.kdl`: read the daemon's CPU at the boundary beside the newest reading each of
 /// the `workers` replication workers this member runs has sent, note a replication catch-up, and
 /// check the seats of the minute closed one boundary earlier, once every harness observation
 /// stamped inside it has committed. The first boundary is this daemon's start.

@@ -1,4 +1,4 @@
-//! The member's CPU by closed UTC minute, for the CPU targets in `slo/targets.toml`: the daemon's
+//! The member's CPU by closed UTC minute, for the `cpu` objective in `slo/objectives.kdl`: the daemon's
 //! own process CPU and each replication worker's, with what kept each minute from being idle.
 //!
 //! The daemon reads its own CPU at each minute's boundary. A replication worker sends its
