@@ -175,7 +175,7 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
     let reserved = reserve_unix_socket(&socket, None).await.unwrap();
     let (ready, waiting) = tokio::sync::oneshot::channel();
     let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
-        reserved, router(state), Some(store.clone()), |_, _| HarnessAncestry::Bound("agent/example".into()),
+        reserved, router(state), Some(store.clone()), None, |_, _| HarnessAncestry::Bound("agent/example".into()),
         move || { let _ = ready.send(()); },
     ));
     waiting.await.unwrap();
@@ -200,7 +200,8 @@ async fn transport_publication_authorizes_with_ancestry_binding_enabled() {
 #[tokio::test]
 async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
     use http_body_util::BodyExt as _;
-    for ancestry in [HarnessAncestry::Unavailable, HarnessAncestry::Person] {
+    for (ancestry, worker) in [(HarnessAncestry::Unavailable, false),
+        (HarnessAncestry::Unavailable, true), (HarnessAncestry::Person, false)] {
         let root = tempfile::tempdir().unwrap();
         let state = state(root.path());
         let socket = root.path().join("bound.sock");
@@ -212,8 +213,11 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
             |_, _| HarnessAncestry::Person
         };
         let app = Router::new().fallback(|| async { Json(json!({"ok": true})) });
+        let authority: Option<WorkerAuthority> = worker.then(|| {
+            Arc::new(|| Ok(std::process::id())) as WorkerAuthority
+        });
         let server = tokio::spawn(serve_reserved_unix_with_ancestor_ready(
-            reserved, app, Some(state.store), lookup,
+            reserved, app, Some(state.store), authority, lookup,
             move || { let _ = ready.send(()); },
         ));
         waiting.await.unwrap();
@@ -227,6 +231,8 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
             ("GET", "/v1/agents/rename-id/proof/export", false, "{}", true),
             ("GET", "/v1/missions/rename-id/proof/export", false, "{}", true),
             ("GET", "/v1/internal/example", false, "{}", true),
+            ("POST", "/v1/internal/replication/receive", false, "{}", !worker),
+            ("POST", "/v1/internal/replication/receive", true, "{}", true),
             ("GET", "/v1/client/session", true, "{}", true),
             ("POST", "/v1/example", false, r#"{"actor":"person/operator"}"#, true),
             ("POST", "/v1/example", false, r#"{"requester":"agent/other"}"#, true),
@@ -240,6 +246,59 @@ async fn unverifiable_unix_ancestry_refuses_only_bound_sensitive_requests() {
         }
         server.abort();
     }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[tokio::test]
+async fn unreadable_same_uid_parent_admits_only_authenticated_worker_routes() {
+    use tower::ServiceExt as _;
+    let mut child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+    let pid = child.id();
+    let peer = fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap();
+    let process = local_harness_process(pid).unwrap();
+    let parent = pid + 1;
+    let ancestry = ancestry_or_record(walk_harness_ancestry(pid, Some(&peer),
+        |_| {
+            let mut process = process.clone();
+            process.generation.as_mut().unwrap().0 = parent;
+            Ok(process)
+        },
+        |candidate| if candidate == pid { Ok(HarnessAncestry::Person) } else {
+            // Model a same-uid, non-dumpable service manager: metadata remains readable,
+            // but its environment does not.
+            Err(AncestryUnavailableReason::ProcessReadFailed {
+                operation: "proc-environ-read", error: "Permission denied".into(),
+            })
+        }), |_| {});
+    assert_eq!(ancestry, HarnessAncestry::Unavailable);
+    let root = tempfile::tempdir().unwrap();
+    let store = state(root.path()).store;
+    for verified in [false, true] {
+        let authority: WorkerAuthority = Arc::new(move || Ok(if verified { pid } else { 0 }));
+        let app = Router::new().fallback(|| async { "accepted" })
+            .layer(from_fn_with_state((store.clone(), Some(authority)), guard_bound_actor));
+        for (path, person, worker_route) in [
+            ("/v1/internal/replication/receive", false, true),
+            ("/v1/internal/seat-freshness", false, true),
+            ("/v1/internal/seat-freshness/reads", false, true),
+            ("/v1/internal/seat-snapshot", false, true),
+            (crate::peer::CLIENT_READ_FORWARD_PATH, false, true),
+            ("/v1/internal/fleet/invites", false, false),
+            ("/v1/internal/replication/receive", true, true),
+        ] {
+            let mut request = Request::post(path);
+            if person { request = request.header(client_v0::LOCAL_PERSON_HEADER, "person/operator"); }
+            let mut request = request.body(Body::from(r#"{"actor":"person/operator"}"#)).unwrap();
+            request.extensions_mut().insert(ancestry.clone());
+            request.extensions_mut().insert(LocalPeer { pid, ancestor: None, peer_process: Some(peer.clone()) });
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), if verified && worker_route && !person {
+                StatusCode::OK
+            } else { StatusCode::UNPROCESSABLE_ENTITY }, "{verified} {path} {person}");
+        }
+    }
+    child.kill().unwrap();
+    child.wait().unwrap();
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
