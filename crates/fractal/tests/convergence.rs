@@ -79,18 +79,18 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v18.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v17.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
 }
 
 #[test]
-fn the_corpus_includes_every_registry_kind() {
+fn every_registry_kind_has_a_corpus_or_typed_thread_coverage() {
     for kind in fractal_schema::registry().claims.keys() {
         assert!(
-            corpus().contains_key(kind),
-            "add {kind} to a versioned corpus"
+            corpus().contains_key(kind) || fractal_schema::threads::is_reserved_kind(kind),
+            "add {kind} to a versioned corpus or its dedicated typed-admission coverage"
         );
     }
 }
@@ -1856,7 +1856,7 @@ const NEVER_TRIMS: &[u64] = &[2];
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v18 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v17 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -2085,7 +2085,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v18.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v17.json"
         }))
         .unwrap(),
     )

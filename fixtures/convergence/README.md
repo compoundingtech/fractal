@@ -237,8 +237,10 @@ Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/con
 Shared RNG draws shift: all 32 fixed seeds converge; 30 trim, exactly `[2, 34]` never trim (27 now trims). Refresh claims stay whole.
 
 
-`claims-v18.json` adds durable thread metadata to the existing v17 operation-receipt corpus.
-Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v18.json`.
-Versions 1 through 17 stay frozen. The generic claim generator excludes typed-only thread metadata;
-thread store tests cover owner admission, revision fences, replication, and historical origin replay.
-The added excluded kinds do not change generic kind selection or the v17 RNG schedule.
+Thread metadata uses `typed_thread_metadata_converges_after_replication_and_restart` rather than
+adding typed-only inputs to the frozen generic v17 corpus. The test creates and renames a thread
+on different members, closes it, exchanges the real operation claims, restarts both members, and
+checks owner visibility and receipt recovery. Ask-link admission and replication have dedicated
+thread store coverage. The current generated registry also adds optional message fields, so
+switching the random generator to it would change the v17 RNG schedule. Keep v17 and its measured
+`NEVER_TRIMS` unchanged; generated current-registry snapshots remain verification artifacts.
