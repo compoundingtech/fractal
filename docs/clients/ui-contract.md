@@ -695,6 +695,11 @@ needs the same `read.declarations` grant as `publication.definition`. A refusal 
 show this declaration to this device". A published revision never changes, so this read reads
 it directly. It is a `person-read` path.
 
+It also answers optional `provenance: {repository, commit, path, renderer}` when the revision's
+first publication recorded a `mission.provenance` claim, for example a mission rendered from
+TypeScript. Clients may link `repository` at `commit` and `path`; Fractal resolves and fetches
+nothing. It is absent for a revision published without provenance and on older daemons.
+
 The mission renderer emits deterministic KDL from `MissionSpec`, not original authored bytes.
 It redacts environment values and embedded declaration KDL. URI edges use stored subjects because
 published revisions do not retain URI locators. Legacy collection loops use their last accepted
