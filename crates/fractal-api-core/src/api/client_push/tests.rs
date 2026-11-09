@@ -9,6 +9,7 @@ const TOKEN: &str = "0123456789abcdef0123456789abcdef";
 
 fn state(root: &std::path::Path) -> AppState {
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         store: Arc::new(Store::open(&root.join("graph.db"), "push-test").unwrap()),
         notify: Arc::new(Notify::new()),

@@ -255,6 +255,7 @@ mission "orchid" state="ready" {
     .unwrap();
     store.apply_internal(&intent, "cli-output-fixture").unwrap();
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),

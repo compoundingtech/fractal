@@ -171,6 +171,7 @@ fn state(root: &Path, node: &str) -> AppState {
         ))
         .unwrap();
     AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(store),

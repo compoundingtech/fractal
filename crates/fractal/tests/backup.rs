@@ -51,6 +51,7 @@ async fn a_live_backup_download_restores_and_leaves_the_daemon_serving_reads() {
     }
     let socket = root.path().join("api.sock");
     let state = AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
