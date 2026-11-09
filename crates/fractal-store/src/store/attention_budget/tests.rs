@@ -110,3 +110,24 @@ fn the_window_seeks_the_accepted_time_index() {
         "{plan}"
     );
 }
+
+#[test]
+fn attention_request_count_reuses_a_pinned_snapshot() {
+    let store = Store::open_memory("node").unwrap();
+    let at = WEEK_MS + 100;
+    let standalone = store
+        .attention_request_count("livestore/cycle", "person/operator", at)
+        .unwrap();
+    let nested = store
+        .read_snapshot(|_| {
+            store.attention_request_count("livestore/cycle", "person/operator", at)
+        })
+        .unwrap();
+    let nested_unindexed = store
+        .read_snapshot_unindexed(|| {
+            store.attention_request_count("livestore/cycle", "person/operator", at)
+        })
+        .unwrap();
+    assert_eq!(standalone, nested);
+    assert_eq!(standalone, nested_unindexed);
+}

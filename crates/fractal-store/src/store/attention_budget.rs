@@ -37,19 +37,15 @@ pub struct AttentionRequestCount {
 }
 
 impl Store {
-    /// Read a rolling week at one SQLite snapshot. A replica may lack claims or lineage
-    /// already known on another member. The result does not certify fleet completeness.
+    /// Read a rolling week at one SQLite snapshot, reusing a caller's pinned snapshot.
+    /// A replica may lack claims or lineage; the result does not certify fleet completeness.
     pub fn attention_request_count(
         &self,
         mission: &str,
         person: &str,
         at: u128,
     ) -> Result<AttentionRequestCount> {
-        let connection = self.readers.get();
-        let snapshot = connection.unchecked_transaction()?;
-        let result = count(&snapshot, mission, person, at)?;
-        snapshot.commit()?;
-        Ok(result)
+        self.read_snapshot_unindexed(|| count(&self.readers.get(), mission, person, at))
     }
 }
 
@@ -83,7 +79,7 @@ fn count(
             subjects.insert(subject?);
             anyhow::ensure!(
                 subjects.len() <= MAX_SUBJECTS,
-                "too many attention requests to count in one rolling week"
+                "recipient-wide candidate-subject limit of {MAX_SUBJECTS} exceeded in one rolling week"
             );
         }
     }
