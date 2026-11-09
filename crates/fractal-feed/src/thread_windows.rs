@@ -89,7 +89,12 @@ pub(super) fn access(
     };
     let native_unsigned =
         capabilities.transport == TransportKind::Unix && capabilities.grant_id.is_none();
-    let can_message = has_signer || native_unsigned || granted("thread-browser-send");
+    let browser_send = capabilities.capabilities.iter().any(|capability| {
+        capability.id == "thread-browser-send"
+            && capability.version >= 1
+            && capability.state == CapabilityState::Granted
+    });
+    let can_message = has_signer || native_unsigned || browser_send;
     ThreadAccess {
         start: can_message && granted("thread.start"),
         reply: can_message && granted("thread.reply"),

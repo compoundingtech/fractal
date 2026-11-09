@@ -1367,6 +1367,14 @@ impl Threads {
         if self
             .focused
             .as_ref()
+            .is_some_and(|(_, mode)| !self.allowed(mode))
+        {
+            self.focused = None;
+            return false;
+        }
+        if self
+            .focused
+            .as_ref()
             .is_some_and(|(place, _)| place != &host)
         {
             self.focused = None;
@@ -1693,9 +1701,12 @@ impl Threads {
     }
 
     fn lifecycle(&mut self, host: &str, id: String, mutation: Mutation) {
-        if !matches!(mutation, Mutation::Close) && !self.access.reopen
-            || matches!(mutation, Mutation::Close) && !self.access.close
-        {
+        let allowed = match mutation {
+            Mutation::Close => self.access.close,
+            Mutation::Reopen => self.access.reopen,
+            _ => false,
+        };
+        if !allowed {
             return;
         }
         if self.has_edit(&id) {
@@ -1851,9 +1862,17 @@ impl Threads {
                     write.id.clone(),
                 ));
                 self.open.insert(write.host.clone(), write.id.clone());
-                self.focused = Some((write.host, Input::Reply(write.id)));
+                self.focused = self
+                    .access
+                    .reply
+                    .then_some((write.host, Input::Reply(write.id)));
             }
-            Mutation::Reopen => self.focused = Some((write.host, Input::Reply(write.id))),
+            Mutation::Reopen => {
+                self.focused = self
+                    .access
+                    .reply
+                    .then_some((write.host, Input::Reply(write.id)))
+            }
             Mutation::Rename(_) => self.focused = None,
             // Closing does not end the conversation or blur its composer.
             _ => {}
