@@ -73,6 +73,16 @@ impl Scope<'_> {
                 ("declared_budgets.token_budget", b.token_budget),
             ] {
                 if let Some(value) = value {
+                    if self.0 == "agent" {
+                        return Err(self.error(
+                            field,
+                            if field == "declared_budgets.cpu_seconds" {
+                                "cpu-seconds is allowed on missions only"
+                            } else {
+                                "token-budget is allowed on missions only"
+                            },
+                        ));
+                    }
                     self.number(field, Some(value))?;
                 }
             }
@@ -582,7 +592,14 @@ mod tests {
     fn numeric_semantics_and_details_table() {
         for child in ["cpu-seconds", "token-budget"] {
             for value in ["1", "9007199254740991"] {
-                parse_fields(&format!("declared-budgets {{ {child} {value}; }}")).unwrap();
+                parse(
+                    &format!("declared-budgets {{ {child} {value}; }}")
+                        .parse::<KdlDocument>()
+                        .unwrap(),
+                    "mission",
+                    "mission/example",
+                )
+                .unwrap();
             }
             for value in ["0", "-1", "9007199254740992", "18446744073709551616"] {
                 let error =
@@ -713,6 +730,30 @@ mod tests {
     }
 
     #[test]
+    fn agent_run_budgets_are_mission_only() {
+        for (child, field) in [
+            ("token-budget", "declared_budgets.token_budget"),
+            ("cpu-seconds", "declared_budgets.cpu_seconds"),
+        ] {
+            let error =
+                parse_fields(&format!("declared-budgets {{ {child} 300; }}")).unwrap_err();
+            assert_eq!(error.code, "invalid-declared-admission");
+            assert_eq!(error.details["subject"], "agent/example");
+            assert_eq!(error.details["field"], field);
+            assert!(
+                error
+                    .message
+                    .ends_with(&format!("{child} is allowed on missions only"))
+            );
+        }
+        let parsed =
+            parse_fields("declared-budgets { memory-max \"8G\"; disk-max \"20G\"; }").unwrap();
+        let budgets = parsed.budgets.unwrap();
+        assert_eq!(budgets.memory_max.as_deref(), Some("8G"));
+        assert_eq!(budgets.disk_max.as_deref(), Some("20G"));
+    }
+
+    #[test]
     fn empty_and_full_admission_roundtrip() {
         assert_eq!(parse_fields("").unwrap(), DeclaredAdmission::default());
         for source in ["declared-budgets", "declared-budgets {}"] {
@@ -727,7 +768,12 @@ mod tests {
                 .is_none()
             );
         }
-        let parsed = parse_fields("declared-priority \"background\"\ndeclared-lane \"build\"\ndeclared-budgets { cpu-seconds 300; memory-max \"0008G\"; disk-max \"20G\"; token-budget 100000; }").unwrap();
+        let parsed = parse(
+            &"declared-priority \"background\"\ndeclared-lane \"build\"\ndeclared-budgets { cpu-seconds 300; memory-max \"0008G\"; disk-max \"20G\"; token-budget 100000; }".parse::<KdlDocument>().unwrap(),
+            "mission",
+            "mission/example",
+        )
+        .unwrap();
         let json = serde_json::to_value(&parsed).unwrap();
         assert_eq!(json["budgets"]["memory_max"], "0008G");
         assert_eq!(
@@ -840,6 +886,29 @@ mod claim_tests {
     }
 
     #[test]
+    fn agent_run_budgets_are_refused_in_canonical_and_typed_claims() {
+        for (child, key) in [
+            ("token-budget", "token_budget"),
+            ("cpu-seconds", "cpu_seconds"),
+        ] {
+            for body in [
+                json!({"kind": "agent", "desired": {"children": [
+                    {"name": "declared-budgets", "children": [
+                        {"name": child, "arguments": [300]}
+                    ]}
+                ]}}),
+                json!({"kind": "agent", "member": {"declared_budgets": {key: 300}}}),
+            ] {
+                let error = validate_claim("intent.desired", "agent/test", &body).unwrap_err();
+                assert_eq!(error.code, "invalid-declared-admission");
+                assert_eq!(error.details["subject"], "agent/test");
+                assert_eq!(error.details["field"], format!("declared_budgets.{key}"));
+                assert!(error.message.ends_with("is allowed on missions only"));
+            }
+        }
+    }
+
+    #[test]
     fn old_payloads_are_not_newly_decoded_or_rejected() {
         for (kind, body) in [
             (
@@ -869,6 +938,8 @@ mod deferred_claim_tests {
             r#"host "node" { agent "worker" { declared-budgets { cpu-seconds 0; }; }; }"#,
             r#"agent "${ST_MISSION_RUN}/worker" { declared-lane "future"; }"#,
             r#"agent "worker" { "declared\u{2d}priority" "urgent"; }"#,
+            r#"agent "worker" { declared-budgets { token-budget 300; }; }"#,
+            r#"host "node" { agent "worker" { declared-budgets { cpu-seconds 300; }; }; }"#,
         ] {
             for mission in [
                 json!({"declarations_kdl": source}),
