@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "summary": "Inbox uses c to add a note to the highlighted answer option. Notes remain attached to their options when the highlight changes; only the chosen option's note is sent. Free custom answers have a distinct entry when permitted. Keyboard and mouse follow the same answer behavior, and refused answers retain their note and an inline error.",
+  "summary": "Inbox uses c to add a note to the highlighted answer option. Notes remain attached to their options when the highlight changes; only the chosen option's note is sent. Free custom answers have a distinct entry when permitted. Named answers without notes still send, without turning their summary into a note, and unstructured requests retain their reply editor. Keyboard and mouse follow the same answer behavior; visible Send buttons work on unfocused drafts, and refused answers retain their note and an inline error.",
   "replay": {"status": "none", "detail": "No claim replay changes."},
   "schema": {"status": "none", "detail": "No database or schema-version changes."},
   "rules": {"status": "none", "detail": "No checkpoint or digest changes; no coordinated upgrade required."},

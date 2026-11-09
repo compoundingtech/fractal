@@ -5085,7 +5085,13 @@ impl Ui {
                             self.flash("Put off until later · demo, this machine only");
                         }
                     }
-                    ("request", 'c') => self.start_answer_note(),
+                    ("request", 'c') => {
+                        if self.structured_request().is_some() {
+                            self.start_answer_note();
+                        } else {
+                            self.editing = true;
+                        }
+                    }
                     ("review" | "feedback" | "launch" | "message" | "revision", 'c') => {
                         self.editing = true;
                     }
@@ -6549,7 +6555,17 @@ impl Ui {
                 }
             }
             Hit::Enter => {
-                self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                // A visible Send belongs to this draft even after Esc or refusal restored it.
+                // Chat has a distinct send target; a stale chat must not capture this click.
+                if let Some(chat) = &mut self.chat {
+                    chat.editing = false;
+                }
+                if self.answering.is_some() && !self.editing {
+                    self.answer_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                } else {
+                    self.answering = None;
+                    self.submit();
+                }
             }
             Hit::Escape => {
                 self.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));

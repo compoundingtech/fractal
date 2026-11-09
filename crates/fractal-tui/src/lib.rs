@@ -435,6 +435,26 @@ fn person_answer(
     }
 }
 
+/// The action requires a summary even when a named answer has no optional note.
+fn person_step_response(
+    request: Option<&fractal_client::StructuredRequest>,
+    chosen: Option<String>,
+    note: Option<String>,
+) -> Result<(String, Option<fractal_client::PersonAnswerInput>)> {
+    let words = note.as_deref().unwrap_or("");
+    let summary = if !words.trim().is_empty() {
+        words.to_owned()
+    } else {
+        chosen.as_ref().and_then(|id| {
+            request.and_then(|request| request.answers.iter().find(|answer| &answer.id == id))
+        }).map(|answer| answer.label.clone())
+            .filter(|label| !label.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("a person step needs a response"))?
+    };
+    let answer = person_answer(request, chosen, words)?;
+    Ok((summary, answer))
+}
+
 /// Perform `action` on `current`, a card as st showed it, fenced on that card.
 async fn act_on_card(
     client: &Client,
@@ -498,10 +518,8 @@ async fn act_on_card(
             client.custom_reply(id, idem, fence, parameters).await?
         }
         "work.done" => {
-            let summary = reason
-                .filter(|summary| !summary.trim().is_empty())
-                .ok_or_else(|| anyhow::anyhow!("a person step needs a response"))?;
-            let answer = person_answer(attention.request.as_ref(), answer, &summary)?;
+            let (summary, answer) =
+                person_step_response(attention.request.as_ref(), answer, reason)?;
             client
                 .work_done(
                     id,
@@ -1132,6 +1150,34 @@ mod tests {
                 {"id": "change", "label": "Change", "consequence": "Revised.", "outcome": "request_changes"}
             ]),
         )
+    }
+
+    #[test]
+    fn work_done_transport_has_a_summary_without_inventing_a_named_note() {
+        let request = decision_request();
+        for (id, label) in [("land", "Land"), ("hold", "Hold")] {
+            for note in [None, Some(String::new()), Some("  ".into())] {
+                let (summary, answer) =
+                    person_step_response(Some(&request), Some(id.into()), note).unwrap();
+                let parameters = PersonStepParameters {
+                    target_id: "step-run/example".into(),
+                    episode: None,
+                    summary,
+                    evidence: vec![],
+                    answer,
+                };
+                assert_eq!(parameters.summary, label);
+                let answer = parameters.answer.unwrap();
+                assert_eq!(answer.id.as_deref(), Some(id));
+                assert_eq!(answer.text, None, "the summary is not an answer note");
+            }
+        }
+        let (summary, answer) = person_step_response(
+            Some(&request), Some("land".into()), Some("ship today".into())
+        ).unwrap();
+        assert_eq!(summary, "ship today");
+        assert_eq!(answer.unwrap().text.as_deref(), Some("ship today"));
+        assert!(person_step_response(None, None, None).is_err());
     }
 
     #[test]
