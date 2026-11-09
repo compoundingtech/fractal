@@ -434,7 +434,7 @@ test('thread windows share the paired socket, apply exact order, and follow agai
   const foreground = new ForegroundGate('active');
   const feed = new Feed(client, handlers, foreground, () => 'action/test', [5]);
   const rows = [], details = [], events = [], issues = [];
-  const context = { origin_ask: 'step-run/one', origin_ask_episode: 'episode/one' };
+  const context = { origin_source: 'notice/one', origin_episode: 'episode/one' };
   const summary = feed.followThreadSummaries(context, { onWindow: window => rows.push(window.items), onIssue: (...issue) => issues.push(issue) });
   const detail = feed.followThreadSummary('thread/one', { onWindow: window => details.push(window.items), onIssue: (...issue) => issues.push(issue) });
   const timeline = feed.followThreadTimeline('thread/one', { onWindow: window => events.push(window.items), onIssue: (...issue) => issues.push(issue) });
