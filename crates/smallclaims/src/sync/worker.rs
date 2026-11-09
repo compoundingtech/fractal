@@ -231,6 +231,7 @@ type ExchangeAnswer = Result<crate::replication::ReplicationExportResponse, Repl
 struct ExchangeJob {
     digest: String,
     answer: watch::Receiver<Option<ExchangeAnswer>>,
+    timing: Arc<ExchangeTiming>,
 }
 
 /// Only the store an exchange names, read before the whole exchange is decoded.
@@ -2490,7 +2491,7 @@ struct ExchangeTiming {
     server: bool,
     // Clients promote retained DEBUG boundaries on failure/slowness; servers
     // retain them for one always-INFO summary at response handoff.
-    boundaries: std::sync::Mutex<([Option<ExchangeBoundary>; 8], bool)>,
+    boundaries: std::sync::Mutex<([Option<ExchangeBoundary>; 12], bool)>,
 }
 
 #[derive(Clone, Copy)]
@@ -2579,6 +2580,73 @@ impl ExchangeTiming {
             elapsed_us = %boundary.elapsed_us,
             "replication exchange boundary"
         );
+    }
+
+    fn client_failed(&self, peer: &str) {
+        self.promote();
+        tracing::info!(
+            target: "smallclaims::replication",
+            correlation_id = %self.id,
+            stage = "client-failed",
+            unix_ms = %crate::store::now_ms(),
+            elapsed_us = %self.started.elapsed().as_micros(),
+            peer,
+            "replication exchange boundary"
+        );
+    }
+
+    fn failure_line(
+        &self,
+        headers: &HeaderMap,
+        peer: &str,
+        shard: Option<&str>,
+        outcome: &str,
+        failure: Option<&ReplicationExchangeFailure>,
+    ) -> String {
+        let boundaries = self.boundaries.lock().expect("exchange timing lock poisoned");
+        let elapsed_us = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let at = |stage| boundaries.0.iter().flatten()
+            .find(|event| event.stage == stage).map(|event| event.elapsed_us);
+        let duration = |start, end| at(start)
+            .map(|start| at(end).unwrap_or(elapsed_us).saturating_sub(start) / 1000);
+        let measured = |value: Option<u64>| value.map_or_else(|| "none".into(), |ms| ms.to_string());
+        let correlation = headers.get(EXCHANGE_CORRELATION_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| uuid::Uuid::parse_str(value).ok());
+        let phase = failure.map_or_else(
+            || if at("follow-up-export-start").is_some() { "follow-up-export" }
+                else if at("local-receive-start").is_some() { "local-receive" }
+                else { "none" },
+            |failure| match failure.phase {
+                ReplicationFailurePhase::Dial => "dial",
+                ReplicationFailurePhase::LocalExport => "local-export",
+                ReplicationFailurePhase::RequestHeaders => "request-headers",
+                ReplicationFailurePhase::ResponseBody => "response-body",
+                ReplicationFailurePhase::Verify => "verify",
+                ReplicationFailurePhase::LocalReceive => "local-receive",
+                ReplicationFailurePhase::FollowUpExport => "follow-up-export",
+            },
+        );
+        let code = failure.map_or(
+            if outcome == "no-answer" { "replication-no-answer" } else { "replication-overloaded" },
+            |failure| failure.code.as_str(),
+        );
+        let mut line = format!(
+            "fractal: replication exchange answer correlation_id={} peer={peer} shard={} outcome={outcome} code={code} phase={phase} elapsed_ms={} permit_wait_ms={} local_receive_ms={} follow_up_export_ms={}",
+            correlation.map_or_else(|| "none".into(), |id| id.to_string()),
+            shard.unwrap_or("none"), elapsed_us / 1000,
+            measured(at("permit-acquired").map(|us| us / 1000)),
+            measured(duration("local-receive-start", "local-receive-done")),
+            measured(duration("follow-up-export-start", "backend-done")),
+        );
+        if let Some(status) = failure
+            .filter(|failure| failure.phase == ReplicationFailurePhase::LocalReceive)
+            .and_then(|failure| failure.http_status)
+        {
+            use std::fmt::Write as _;
+            let _ = write!(line, " local_receive_http_status={status}");
+        }
+        line
     }
 
     fn server_boundaries(&self) -> [Option<ExchangeBoundary>; 3] {
@@ -2741,7 +2809,7 @@ async fn receive_exchange_inner<B: Backend>(
         Some(shard) => format!("{relay}\n{shard}"),
         None => relay.clone(),
     };
-    let mut answer = {
+    let (mut answer, job_timing) = {
         let mut jobs = state
             .fleet
             .exchange_jobs
@@ -2758,6 +2826,7 @@ async fn receive_exchange_inner<B: Backend>(
             && job.digest != request_digest
             && job.answer.borrow().is_none()
         {
+            eprintln!("{}", timing.failure_line(&headers, &relay, shard.as_deref(), "overload", None));
             return signed_overload(&state, &request_digest);
         }
         let reuse = jobs
@@ -2771,8 +2840,10 @@ async fn receive_exchange_inner<B: Backend>(
                 .clone()
                 .try_acquire_owned()
             else {
+                eprintln!("{}", timing.failure_line(&headers, &relay, shard.as_deref(), "overload", None));
                 return signed_overload(&state, &request_digest);
             };
+            timing.record("permit-acquired");
             let request: ReplicationExchange = match serde_json::from_slice(&body) {
                 Ok(request) => request,
                 Err(_) => {
@@ -2797,6 +2868,7 @@ async fn receive_exchange_inner<B: Backend>(
                 ExchangeJob {
                     digest: request_digest.clone(),
                     answer,
+                    timing: Arc::clone(timing),
                 },
             );
             let state = state.clone();
@@ -2808,17 +2880,21 @@ async fn receive_exchange_inner<B: Backend>(
                 async move {
                     let _permit = permit;
                     let started = std::time::Instant::now();
+                    backend_timing.record("local-receive-start");
                     if let Some(backend) = shard.as_ref().and_then(|shard| state.shards.get(shard)) {
                         // A shard carries no fleet claims, so none of the default store's
                         // membership or leave bookkeeping applies to its exchanges.
                         let result = async {
                             let received = backend
                                 .receive(&relay, state.auth.fleet_id(), &request, None, Default::default())
-                                .await
+                                .await;
+                            backend_timing.record("local-receive-done");
+                            let received = received
                                 .map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, started, None))?;
                             if received.changed {
                                 backend.changed().await;
                             }
+                            backend_timing.record("follow-up-export-start");
                             backend
                                 .export(state.auth.fleet_id(), &request.inventory, false, &request.signature_requests)
                                 .await
@@ -2842,12 +2918,15 @@ async fn receive_exchange_inner<B: Backend>(
                             None,
                             Default::default(),
                         )
-                        .await.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, started, None))?;
+                        .await;
+                        backend_timing.record("local-receive-done");
+                        let received = received.map_err(|error| exchange_failure(error, ReplicationFailurePhase::LocalReceive, started, None))?;
                         if received.receipt.received != 0 {
                             state.outbound_notify.send_modify(|generation| {
                                 *generation = generation.saturating_add(1)
                             });
                         }
+                        backend_timing.record("follow-up-export-start");
                         let response = state
                             .backend
                             .export(
@@ -2872,7 +2951,8 @@ async fn receive_exchange_inner<B: Backend>(
                 },
             ));
         }
-        jobs.get(&job_key).unwrap().answer.clone()
+        let job = jobs.get(&job_key).unwrap();
+        (job.answer.clone(), Arc::clone(&job.timing))
     };
     let ready = tokio::time::timeout(EXCHANGE_RESPONSE_BUDGET, async {
         loop {
@@ -2927,6 +3007,7 @@ async fn receive_exchange_inner<B: Backend>(
                 .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Ok(Some(Err(failure))) => {
+            eprintln!("{}", job_timing.failure_line(&headers, &relay, shard.as_deref(), "failed", Some(&failure)));
             // Let the next request retry a failed job. Reporting failure must never delay headers.
             finish_exchange_job(&state.fleet, &job_key, &answer);
             let response = signed_response(&state, &request_digest, 0, serde_json::json!({
@@ -2939,6 +3020,7 @@ async fn receive_exchange_inner<B: Backend>(
             }).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
         Ok(None) => {
+            eprintln!("{}", job_timing.failure_line(&headers, &relay, shard.as_deref(), "no-answer", None));
             finish_exchange_job(&state.fleet, &job_key, &answer);
             signed_error_response(
                 &state,
@@ -2949,7 +3031,10 @@ async fn receive_exchange_inner<B: Backend>(
             )
             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
         }
-        Err(_) => signed_overload(&state, &request_digest),
+        Err(_) => {
+            eprintln!("{}", job_timing.failure_line(&headers, &relay, shard.as_deref(), "overload", None));
+            signed_overload(&state, &request_digest)
+        }
     }
 }
 
@@ -4113,7 +4198,7 @@ async fn post_signed_to<B: Serialize, R: serde::de::DeserializeOwned>(
                 failure.request_body_bytes = Some(preparation.body_bytes);
                 failure.request_body_uncompressed_bytes = Some(preparation.uncompressed_body_bytes);
             }
-            timing.record("client-failed");
+            timing.client_failed(&peer.name);
             let display = error.to_string();
             error.context(failure).context(display)
         })

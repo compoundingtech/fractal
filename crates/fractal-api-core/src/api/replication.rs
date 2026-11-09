@@ -300,8 +300,12 @@ pub async fn replication_checkpoint_adopt(
 
 pub async fn replication_receive(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Json(request): Json<ReplicationReceiveRequest>,
 ) -> Result<Json<ReplicationReceiveResponse>, ApiError> {
+    let correlation = headers.get("x-fractal-exchange-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| uuid::Uuid::parse_str(value).ok());
     let store = state.store.clone();
     let (response, reconcile_changed, notice_visible) = blocking_action(move || {
         let before_index = store
@@ -407,7 +411,14 @@ pub async fn replication_receive(
             notice_was_visible || store.replication_peer_in_sync_notice(&request.peer),
         ))
     })
-    .await?;
+    .await.map_err(|error| {
+        eprintln!(
+            "fractal: replication receive error route=/v1/internal/replication/receive correlation_id={} code={}",
+            correlation.map_or_else(|| "none".into(), |id| id.to_string()),
+            error.code,
+        );
+        error
+    })?;
     if response.changed && reconcile_changed {
         crate::reconcile_telemetry::record_wake(
             crate::reconcile_telemetry::WakeCause::ReplicationReceive,

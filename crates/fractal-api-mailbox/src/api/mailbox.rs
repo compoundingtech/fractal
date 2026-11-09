@@ -4086,7 +4086,9 @@ mod tests {
             round_trip_ms: Some(1),
         };
         // Establish the remote incarnation before binding the live stream.
-        let Json(initial) = super::super::replication_receive(State(state.clone()), Json(request()))
+        let Json(initial) = super::super::replication_receive(
+            State(state.clone()), axum::http::HeaderMap::new(), Json(request()),
+        )
             .await
             .unwrap();
         assert!(initial.changed);
