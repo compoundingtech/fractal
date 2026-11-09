@@ -26,6 +26,7 @@ pub mod proof;
 pub mod profile;
 pub mod task_cpu;
 pub mod read_budget;
+pub mod receive_metrics;
 pub mod replication;
 pub mod rules;
 pub mod shards;

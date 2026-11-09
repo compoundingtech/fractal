@@ -223,6 +223,15 @@ pub enum Observation<'a> {
         status: Option<u16>,
         took: Duration,
     },
+    /// One logical mutation, including retries of a refused projection drain. The request
+    /// observations above still describe each physical attempt.
+    Mutation {
+        method: &'a str,
+        route: &'a str,
+        attempts: u32,
+        took: Duration,
+        retry_wait: Duration,
+    },
     /// A collections-stream frame: the subscription, the frame kind, its size, and for the
     /// first frame of a subscription how long after the subscribe command it arrived.
     Frame {
@@ -1319,6 +1328,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::InvalidCustodySuccessor
         | ErrorCode::CustodyPending
         | ErrorCode::MessageSelectorsNotReady
+        | ErrorCode::DatabaseBusy
         | ErrorCode::Unknown => message.to_owned(),
     }
 }
@@ -4460,18 +4470,50 @@ impl Client {
         content_type: &str,
     ) -> Result<T, ClientError> {
         let started = tokio::time::Instant::now();
+        let mutation = !matches!(method, Method::GET | Method::HEAD | Method::OPTIONS);
+        let drain_deadline = started + Duration::from_secs(60);
+        let mut draining = false;
+        let mut attempts = 0;
+        let mut retry_wait = Duration::ZERO;
         let mut pause = Duration::from_millis(100);
         let mut announced = false;
-        loop {
-            match self
-                .request_once(method.clone(), path, body.clone(), key, content_type, None)
-                .await
-            {
+        let result = loop {
+            attempts += 1;
+            let request =
+                self.request_once(method.clone(), path, body.clone(), key, content_type, None);
+            let outcome = request.await;
+            match outcome {
+                Err(error @ ClientError::Api(..))
+                    if mutation
+                        && matches!(&error,
+                    ClientError::Api(_, _, envelope)
+                        if envelope.retryable
+                            && envelope.details.get("reason").and_then(serde_json::Value::as_str)
+                                == Some("run-projection-drain")) =>
+                {
+                    let remaining =
+                        drain_deadline.saturating_duration_since(tokio::time::Instant::now());
+                    // Never cancel an in-flight mutation and then report the earlier refusal.
+                    // Reserve the complete ordinary request deadline before sending again.
+                    if remaining < request_deadline(&method, path) + pause {
+                        break Err(error);
+                    }
+                    draining = true;
+                    let waited = tokio::time::Instant::now();
+                    tokio::time::sleep(pause.min(remaining)).await;
+                    retry_wait += waited.elapsed();
+                    if drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                        < request_deadline(&method, path)
+                    {
+                        break Err(error);
+                    }
+                    pause = (pause * 2).min(Duration::from_secs(1));
+                }
                 Err(ClientError::Unreachable(mut outage)) if !self.outage_wait.is_zero() => {
                     let waited = started.elapsed();
                     if waited >= self.outage_wait {
                         outage.waited = Some(waited);
-                        return Err(ClientError::Unreachable(outage));
+                        break Err(ClientError::Unreachable(outage));
                     }
                     if self.announce_outage_wait && !announced {
                         eprintln!(
@@ -4481,12 +4523,37 @@ impl Client {
                         );
                         announced = true;
                     }
-                    tokio::time::sleep(pause.min(self.outage_wait - waited)).await;
+                    let remaining = if draining {
+                        (self.outage_wait - waited).min(
+                            drain_deadline.saturating_duration_since(tokio::time::Instant::now()),
+                        )
+                    } else {
+                        self.outage_wait - waited
+                    };
+                    let slept = tokio::time::Instant::now();
+                    tokio::time::sleep(pause.min(remaining)).await;
+                    retry_wait += slept.elapsed();
+                    if draining
+                        && drain_deadline.saturating_duration_since(tokio::time::Instant::now())
+                            < request_deadline(&method, path)
+                    {
+                        break Err(ClientError::Unreachable(outage));
+                    }
                     pause = (pause * 2).min(Duration::from_secs(1));
                 }
-                outcome => return outcome,
+                outcome => break outcome,
             }
+        };
+        if mutation && OBSERVER.get().is_some() {
+            observe(Observation::Mutation {
+                method: method.as_str(),
+                route: path.split('?').next().unwrap_or(path),
+                attempts,
+                took: started.elapsed(),
+                retry_wait,
+            });
         }
+        result
     }
     async fn request_once<T: DeserializeOwned>(
         &self,

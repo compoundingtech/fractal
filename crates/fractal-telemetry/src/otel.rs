@@ -774,6 +774,26 @@ pub fn record_http_request_duration(
         ],
     );
 }
+/// Count only bounded mutation refusals caused by pending run projections. Labels use the
+/// router's bounded route template and HTTP method, never a run, step, person or raw URL.
+pub fn record_run_projection_drain_refusal(method: &str, route: &str) {
+    if !metrics_enabled() {
+        return;
+    }
+    static REFUSALS: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
+        std::sync::LazyLock::new(|| {
+            opentelemetry::global::meter("st3.http")
+                .u64_counter("st.run_projection.drain.refusals")
+                .with_unit("{refusal}")
+                .with_description("Mutation refusals after the bounded run projection drain wait")
+                .build()
+        });
+    REFUSALS.add(1, &[
+        KeyValue::new("http.request.method", method.to_owned()),
+        KeyValue::new("http.route", route.to_owned()),
+    ]);
+}
+
 
 /// Bounded reasons a mailbox stream checks its authority; never label metrics with a seat.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
