@@ -125,9 +125,10 @@ async fn unix_and_fabric_admit_scoped_pairings_not_raw_person_headers() {
             .body(Body::empty()).unwrap();
         for (transport, app) in &apps {
             let response = app.clone().oneshot(request()).await.unwrap();
-            assert_eq!(response.status(), if index == 1 { StatusCode::OK } else { StatusCode::FORBIDDEN }, "{transport}");
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
+            assert_eq!(status, if index == 1 { StatusCode::OK } else { StatusCode::FORBIDDEN }, "{transport}: {}", String::from_utf8_lossy(&body));
             if index == 1 {
-                let body = axum::body::to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap();
                 let envelope: Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(envelope["value"]["person"], "person/example");
                 assert_eq!(envelope["value"]["inclusive"], 0);
@@ -151,6 +152,8 @@ async fn query_adapter_rejects_unknown_fields_invalid_time_and_non_missions() {
         ("/budget?mission=mission%2Fexample%2Fbudget&at=-1", StatusCode::BAD_REQUEST),
         ("/budget?person=person%2Fexample", StatusCode::BAD_REQUEST),
         ("/budget?mission=agent%2Fexample", StatusCode::UNPROCESSABLE_ENTITY),
+        ("/budget?mission=mission%2Fexample%2Fbudget&at=0", StatusCode::OK),
+        ("/budget?mission=mission%2Fexample%2Fbudget&at=1794182400000", StatusCode::OK),
     ] {
         let response = app.clone().oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), expected, "{uri}");

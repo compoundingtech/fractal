@@ -530,14 +530,14 @@ public struct CanonicalNode: Codable, Sendable { public let name: String; public
 public struct PublicationDefinition: Codable, Sendable { public let kind, subject, revision, token: String; public let declaration: [String: JSONValue] }
 public struct AttentionBudgetReport: Codable, Sendable {
     public let mission, person: String
-    public let windowStartExclusiveUnixMs, windowEndInclusiveUnixMs, localClaimIndex: UInt64
+    public let windowStartExclusiveUnixMS, windowEndInclusiveUnixMS, localClaimIndex: UInt64
     public let declared: AttentionBudgetDeclared
     public let charged, inclusive, notCharged, unattributedForPerson: UInt64
     public let fleetComplete, requestRefsComplete: Bool
     public let requestRefs: [AttentionBudgetRequestRef]
     enum CodingKeys: String, CodingKey {
         case mission, person, declared, charged, inclusive
-        case windowStartExclusiveUnixMs = "window_start_exclusive_unix_ms", windowEndInclusiveUnixMs = "window_end_inclusive_unix_ms"
+        case windowStartExclusiveUnixMS = "window_start_exclusive_unix_ms", windowEndInclusiveUnixMS = "window_end_inclusive_unix_ms"
         case localClaimIndex = "local_claim_index", notCharged = "not_charged", unattributedForPerson = "unattributed_for_person"
         case fleetComplete = "fleet_complete", requestRefsComplete = "request_refs_complete", requestRefs = "request_refs"
     }

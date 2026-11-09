@@ -2745,6 +2745,10 @@ async fn cli_reads_preserve_operational_views_after_restart() {
         vec!["missions", "show", &run.subject],
         vec!["missions", "queued", WORKER],
         vec!["attention", "ls", "--as", PERSON],
+        vec![
+            "budgets", "attention", "mission/example/inspect",
+            "--as", WORKER, "--person", PERSON, "--at", "0",
+        ],
         vec!["work", "ls", "--as", WORKER],
         vec!["work", "show", &run.steps[0].subject],
         vec!["work", "revision", "generations", &run.subject],
@@ -2802,6 +2806,12 @@ async fn cli_reads_preserve_operational_views_after_restart() {
                 String::from_utf8_lossy(&output.stderr)
             );
             assert!(!output.stdout.is_empty(), "{command:?}: no view");
+            if command.first() == Some(&"budgets") {
+                let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+                assert_eq!(response["value"]["mission"], "mission/example/inspect");
+                assert_eq!(response["value"]["person"], PERSON);
+                assert_eq!(response["value"]["inclusive"], 0);
+            }
         }
         daemon.restart().await;
         assert_eq!(

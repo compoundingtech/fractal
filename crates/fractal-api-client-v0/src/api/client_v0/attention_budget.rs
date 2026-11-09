@@ -5,7 +5,16 @@ use super::*;
 pub struct AttentionBudgetQuery {
     mission: String,
     person: Option<String>,
+    #[serde(default, deserialize_with = "query_timestamp")]
     at: Option<u128>,
+}
+
+// URL-encoded optional values arrive as strings; serde_urlencoded's optional
+// value deserializer does not implement u128. Preserve the full timestamp range.
+fn query_timestamp<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<u128>, D::Error> {
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| value.parse().map_err(serde::de::Error::custom))
+        .transpose()
 }
 
 fn authority(session: &ClientSession, requested: Option<&str>, now: u128) -> Result<String, ApiError> {
