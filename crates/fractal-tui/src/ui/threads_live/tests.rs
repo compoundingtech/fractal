@@ -815,3 +815,73 @@ fn first_definitive_refusal_releases_the_intent_and_dispatch_stays_on_its_origin
     );
     assert!(threads.pending_actions.is_empty());
 }
+
+#[test]
+fn feedback_adopts_only_an_empty_or_identical_original_thread_draft() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let item = "attention/feedback";
+    let input = Input::Start {
+        item: item.into(),
+        episode: "claim/feedback".into(),
+    };
+    threads.asks.insert(
+        item.into(),
+        Ask {
+            context: ThreadInterest::Ask {
+                id: "step-run/feedback".into(),
+                episode: "claim/feedback".into(),
+            },
+            agent: "agent/atlas".into(),
+            title: "Review".into(),
+            snapshot: snapshot().id,
+        },
+    );
+    let mut texts = HashMap::from([(format!("chat:{item}"), "Old private draft".into())]);
+    assert!(
+        threads
+            .start_with_text(
+                "home:attention/feedback",
+                item,
+                "Revision feedback",
+                &mut texts
+            )
+            .is_err()
+    );
+    assert_eq!(texts[&format!("chat:{item}")], "Old private draft");
+    assert!(!texts.contains_key(&input.key()));
+    texts.clear();
+    threads
+        .start_with_text(
+            "home:attention/feedback",
+            item,
+            "Revision feedback",
+            &mut texts,
+        )
+        .unwrap();
+    let write = threads.writes().pop().unwrap();
+    let Mutation::Start(start) = write.mutation else {
+        panic!("durable thread start")
+    };
+    assert_eq!(start.content, "Revision feedback");
+    assert!(threads.drafts[&input.key()].delivery.is_some());
+}
+
+#[test]
+fn internal_error_without_not_applied_answer_keeps_the_original_action() {
+    let mut threads = observed_threads(ThreadState::Open);
+    threads.lifecycle("thread:test", "thread/worker".into(), Mutation::Close);
+    let write = threads.writes().pop().unwrap();
+    let ClientError::Api(_, message, mut envelope) = forbidden() else {
+        unreachable!()
+    };
+    envelope.code = fractal_client::ErrorCode::Internal;
+    let error = ClientError::Api(fractal_client::ErrorCode::Internal, message, envelope);
+    threads.complete(
+        Receipt {
+            write,
+            confirmation: Confirmation::Failed(error),
+        },
+        &mut HashMap::new(),
+    );
+    assert!(threads.pending_actions["thread/worker"].unknown);
+}

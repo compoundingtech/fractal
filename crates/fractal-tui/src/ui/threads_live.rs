@@ -102,7 +102,19 @@ impl Delivery {
 
     fn failed(&mut self, error: &ClientError) -> bool {
         self.pending = false;
-        self.unknown |= error.outcome_unknown() || matches!(error, ClientError::Protocol(_));
+        self.unknown |= error.outcome_unknown()
+            || matches!(error, ClientError::Protocol(_))
+            || error.applied() != Some("none")
+                && matches!(
+                    error,
+                    ClientError::Api(
+                        fractal_client::ErrorCode::Internal
+                            | fractal_client::ErrorCode::Unknown
+                            | fractal_client::ErrorCode::RemoteUnavailable
+                            | fractal_client::ErrorCode::ResponseBudgetExceeded,
+                        ..
+                    )
+                );
         self.unknown
     }
 }
@@ -377,6 +389,44 @@ impl Threads {
         self.drafts.entry(key).or_default();
         self.focused = Some((host.into(), input));
         true
+    }
+
+    pub(super) fn start_with_text(
+        &mut self,
+        host: &str,
+        item: &str,
+        text: &str,
+        texts: &mut HashMap<String, String>,
+    ) -> Result<(), String> {
+        if !self.available || text.trim().is_empty() {
+            return Err("Reconnect to a current Fractal before starting this thread".into());
+        }
+        let input = self
+            .start_input(item)
+            .ok_or("This Inbox item has no available thread recipient")?;
+        let key = input.key();
+        let existing = texts
+            .get(&key)
+            .or_else(|| texts.get(&format!("chat:{item}")));
+        if existing.is_some_and(|existing| !existing.is_empty() && existing != text) {
+            return Err("This item already has a different thread draft. Finish it before sending this feedback".into());
+        }
+        if self
+            .drafts
+            .get(&key)
+            .and_then(|draft| draft.delivery.as_ref())
+            .is_some_and(|delivery| delivery.pending)
+        {
+            return Err("The original thread action is still being sent".into());
+        }
+        self.begin(host, item, texts);
+        texts.insert(key, text.into());
+        let queued = self.writes.len();
+        self.submit(host, input, texts);
+        if self.writes.len() == queued {
+            return Err("The thread is not ready to send; your feedback is kept".into());
+        }
+        Ok(())
     }
 
     fn start_input(&self, item: &str) -> Option<Input> {
