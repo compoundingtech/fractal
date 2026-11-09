@@ -7016,14 +7016,14 @@ fn step_history_input_window_bounds_materialization_and_keeps_sparse_boundary_st
     let insert = |from: usize, to: usize| {
         let connection = store.connection.write();
         connection.execute(
-            "WITH RECURSIVE n(x) AS (SELECT ?2 UNION ALL SELECT x+1 FROM n WHERE x<?3)
+            /* sqlite-large-value: allow-for-now lv-hdeb3f26f345c owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "WITH RECURSIVE n(x) AS (SELECT ?2 UNION ALL SELECT x+1 FROM n WHERE x<?3)
              INSERT INTO claims(id,batch_id,subject,kind,origin,body,predecessors,accepted_at_unix_ms)
              SELECT 'history-note-'||x,(SELECT batch_id FROM claims WHERE subject=?1 LIMIT 1),
                  ?1,'work.progress','node',CASE WHEN x%2=0 THEN '{\"fields\":{\"clock\":\"running\"}}' ELSE '{\"fields\":{\"summary\":\"ordinary note\"}}' END,'[]',CAST(1000000000000000+x AS TEXT) FROM n",
             rusqlite::params![subject, from, to],
         ).unwrap();
         connection.execute(
-            "INSERT OR IGNORE INTO claim_positions(claim_id,position)
+            /* sqlite-large-value: allow-for-now lv-h0e67d9bae7b1 owner=fractal_missions::store::tests TODO=prepare-body-and-predecessor-values */ "INSERT OR IGNORE INTO claim_positions(claim_id,position)
              SELECT id,store_index FROM claims WHERE subject=?1",
             [subject],
         ).unwrap();
@@ -7031,8 +7031,8 @@ fn step_history_input_window_bounds_materialization_and_keeps_sparse_boundary_st
     let measure = || {
         let connection = store.readers.get();
         let sql = format!("SELECT COUNT(*) FROM ({})", crate::store::missions::mission_step_history_sql());
-        let mut statement = connection.prepare(&sql).unwrap();
-        let rows: usize = statement.query_row([serde_json::to_string(&[&run.id]).unwrap()], |row| row.get(0)).unwrap();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h7e4c2618a702 owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ &sql).unwrap();
+        let rows: usize = statement.query_row(/* sqlite-large-value: allow-for-now lv-hd3351dff2a3a owner=fractal_missions::store::tests TODO=trace-statement-and-value-representation */ [serde_json::to_string(&[&run.id]).unwrap()], |row| row.get(0)).unwrap();
         (rows, statement.get_status(StatementStatus::VmStep))
     };
     insert(1, 1_000);
