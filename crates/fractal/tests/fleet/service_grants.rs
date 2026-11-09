@@ -214,6 +214,132 @@ async fn previous_release_refuses_plugin_service_grants_on_same_database_rollbac
     assert_retained(&node, &grants).await;
 }
 
+// Use the release's real issuance and policy routes: this history must predate the
+// candidate's first Store::open, rather than being seeded by candidate store code.
+async fn issue_with_policy(node: &Node, key: u8) -> Grant {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let owner = Client::unix_as(node.socket(), PERSON).unwrap();
+    let policy = json!({
+        "api_version":"st3.client.v0",
+        "scopes":["read.assistant.summary", "read.assistant.attention",
+            "read.assistant.missions", "read.assistant.agents"],
+        "expires_in_seconds":3600, "minimal_read_mode":"approval-once",
+        "disclosure_consent":true, "consent_evidence":"Disposable rollback fixture owner consent"
+    });
+    let mut begin = policy.clone();
+    begin["assistant_id"] = json!("assistant/chatgpt");
+    begin["device_name"] = json!(format!("rollback fixture {key}"));
+    let challenge: Value = owner.post("/v1/client/pairings", &begin).await.unwrap();
+    let challenge = challenge.get("value").unwrap_or(&challenge);
+    let pairing = challenge["pairing_id"].as_str().unwrap().trim_start_matches("pairing/");
+    let response = reqwest::Client::builder().unix_socket(node.socket()).build().unwrap()
+        .post(format!("http://localhost/v1/client/pairings/{pairing}/complete"))
+        .json(&json!({"api_version":"st3.client.v0", "code":challenge["code"],
+            "device_public_key":URL_SAFE_NO_PAD.encode([key; 32]), "key_storage":"software"}))
+        .send().await.unwrap();
+    let status = response.status();
+    let paired: Value = response.json().await.unwrap();
+    assert_eq!(status.as_u16(), 200, "baseline assistant issuance: {paired}");
+    let paired = paired.get("value").unwrap_or(&paired);
+    let id = paired["grant"]["id"].as_str().unwrap().trim_start_matches("assistant-grant/").to_owned();
+    let changed: Value = owner.post(
+        &format!("/v1/client/assistant/grants/{id}/policy"), &policy,
+    ).await.unwrap();
+    let changed = changed.get("value").unwrap_or(&changed);
+    assert_eq!(changed["policy_revision"], 2, "{changed}");
+    let subject = format!("custom/client/assistant-v1-{id}");
+    let claims = node.claims().await.into_iter()
+        .filter(|claim| claim["subject"] == subject)
+        .map(|claim| claim["id"].as_str().unwrap().to_owned()).collect();
+    Grant { id, credential: paired["credential"].as_str().unwrap().to_owned(), claims }
+}
+
+fn authority_history(node: &Node) -> Vec<(String, String)> {
+    let connection = rusqlite::Connection::open_with_flags(
+        node.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).unwrap();
+    connection.prepare(
+        "SELECT id, body FROM claims WHERE kind IN (?1, ?2, ?3) ORDER BY id",
+    ).unwrap().query_map([GRANTED, POLICY, REVOKED], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    }).unwrap().collect::<rusqlite::Result<_>>().unwrap()
+}
+
+fn assert_authority_projection_ready(node: &Node) {
+    let version: String = rusqlite::Connection::open_with_flags(
+        node.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).unwrap().query_row(
+        "SELECT value FROM meta WHERE key='assistant_grant_authority_version'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(version, "1", "candidate must complete authority backfill before rollback");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs ST3_COMPAT_BIN: the pinned previous published release"]
+async fn previous_release_authorizes_and_revokes_after_authority_projection_rollback() {
+    if fractal_daemon::test_support::supervise_test() { return; }
+    let root = tempfile::tempdir().unwrap();
+    let mut node = Node::new(root.path(), "issuer");
+    node.binary = compat_binary();
+    node.start().await;
+    let active = issue_with_policy(&node, 7).await;
+    let revoked = issue_with_policy(&node, 8).await;
+    let owner = Client::unix_as(node.socket(), PERSON).unwrap();
+    let _: Value = owner.post(
+        &format!("/v1/client/assistant/grants/{}/revoke", revoked.id), &json!({}),
+    ).await.unwrap();
+    assert_auth(&node, &active, true).await;
+    assert_auth(&node, &revoked, false).await;
+    let history = authority_history(&node);
+    assert_eq!(history.len(), 5, "two grants, two policy renewals and one revocation");
+    let projection_exists: bool = rusqlite::Connection::open_with_flags(
+        node.state_dir().join("claims.sqlite3"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ).unwrap().query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='assistant_grant_authority')",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert!(!projection_exists, "baseline history must predate authority projection initialization");
+    let state = node.state_dir();
+
+    node.stop();
+    node.binary = PathBuf::from(st3());
+    node.start().await;
+    assert_eq!(node.state_dir(), state);
+    assert_authority_projection_ready(&node);
+    assert_auth(&node, &active, true).await;
+    assert_auth(&node, &revoked, false).await;
+    assert_eq!(authority_history(&node), history, "backfill must not rewrite raw evidence");
+
+    node.stop();
+    node.binary = compat_binary();
+    node.start().await;
+    assert_eq!(node.state_dir(), state);
+    assert_auth(&node, &active, true).await;
+    assert_auth(&node, &revoked, false).await;
+    assert_eq!(authority_history(&node), history, "baseline must retain the backfilled history");
+    let owner = Client::unix_as(node.socket(), PERSON).unwrap();
+    let _: Value = owner.post(
+        &format!("/v1/client/assistant/grants/{}/revoke", active.id), &json!({}),
+    ).await.unwrap();
+    assert_auth(&node, &active, false).await;
+    let after_revoke = authority_history(&node);
+    assert_eq!(after_revoke.len(), history.len() + 1);
+    for claim in &history {
+        assert!(after_revoke.contains(claim), "baseline revoke changed prior evidence");
+    }
+
+    node.stop();
+    node.binary = PathBuf::from(st3());
+    node.start().await;
+    assert_authority_projection_ready(&node);
+    assert_auth(&node, &active, false).await;
+    assert_auth(&node, &revoked, false).await;
+    assert_retained(&node, &[active, revoked]).await;
+    assert_eq!(authority_history(&node), after_revoke, "reopen must retain the baseline revoke");
+}
+
 fn compat_binary() -> PathBuf {
     PathBuf::from(std::env::var("ST3_COMPAT_BIN").expect("ST3_COMPAT_BIN names the pinned baseline"))
 }

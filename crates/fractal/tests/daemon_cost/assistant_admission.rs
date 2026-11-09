@@ -65,7 +65,7 @@
 //! Each expired grant has three still-expired POLICY renewals. Each active session has
 //! ST_ADMISSION_WRONG_ORIGIN_OVERLAYS (default 1000; 0 allowed) authenticated wrong-origin
 //! overlays, alternating POLICY and REVOKED; every measured read must still succeed.
-//! ST_ADMISSION_READ_COUNTS_ONLY=1 measures only read counts: it skips the index probe,
+//! ST_ADMISSION_READ_COUNTS_ONLY=1 measures only read counts: it skips the
 //! candidate SQL, latency pairs, the q39 gate and the release-build requirement.
 //! Read counts require a fresh ST3_PROFILE_DIR and ST3_PROFILE_SLOW_MS=0. The existing
 //! profile `read_acquisitions` counts pooled read-connection/snapshot acquisitions per
@@ -73,9 +73,10 @@
 //! SQL work uses existing smallclaims sqlite::work trace counters (statements/VM steps).
 //! Authentication work is thread-scoped; standalone GET work is process-global through the
 //! receipt flush and can include background daemon SQL. No production code changes.
-//! The index DDL timing is a synthetic startup migration probe on the populated disposable
-//! real store, not total daemon startup or cold-disk startup. Latencies use the real daemon's
-//! bound sockets, bearer middleware, grant lookup, projection and durable approval consumption.
+//! Current-head candidate diagnostics read the effective authority projection only;
+//! the separate historical index DDL probe is not a current admission measurement.
+//! Latencies use the real daemon's bound sockets, bearer middleware, grant lookup,
+//! projection and durable approval consumption.
 
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::{Instant, SystemTime, UNIX_EPOCH}};
 
@@ -96,7 +97,7 @@ const POLICY_RENEWALS: usize = 3;
 const INDEX: &str = "claims_assistant_v1_principal_expiry_index";
 const CREATE_INDEX: &str = "CREATE INDEX claims_assistant_v1_principal_expiry_index ON claims(kind,COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt'),json_extract(body,'$.fields.expires_at_unix_ms'))";
 const A_QUERY: &str = "SELECT id FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2";
-const INDEXED_QUERY: &str = revision_api::ADMISSION_QUERY;
+const PROJECTION_INDEX: &str = "assistant_grant_effective_active_index";
 const PATH: &str = "/v1/client/assistant/summary";
 
 fn number(name: &str, default: usize) -> usize {
@@ -209,20 +210,9 @@ fn proof(paired: &Value, signer: &Ed25519KeyPair, sequence: usize) -> String {
     URL_SAFE_NO_PAD.encode(serde_json::to_vec(&json!({"payload":payload,"signature":signature})).unwrap())
 }
 
-fn explain(connection: &rusqlite::Connection, query: &str) -> Vec<String> {
-    // The production query names its indexes (INDEXED BY); before the probe recreates
-    // one, SQLite refuses to plan it. Record that instead of a plan.
-    let mut statement = match connection.prepare(&format!("EXPLAIN QUERY PLAN {query}")) {
-        Ok(statement) => statement,
-        Err(error) => return vec![format!("not plannable: {error}")],
-    };
-    let mut rows = if query == A_QUERY {
-        statement.query(rusqlite::params![GRANTED, "assistant/chatgpt"]).unwrap()
-    } else {
-        statement.query(rusqlite::params![GRANTED, "assistant/chatgpt", "custom.client.assistant.v1.revoked",
-            "custom.client.assistant.v1.policy",
-            u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap(), NODE]).unwrap()
-    };
+fn explain(connection: &rusqlite::Connection, query: &str, parameters: &[&dyn rusqlite::ToSql]) -> Vec<String> {
+    let mut statement = connection.prepare(&format!("EXPLAIN QUERY PLAN {query}")).unwrap();
+    let mut rows = statement.query(parameters).unwrap();
     let mut plan = Vec::new();
     while let Some(row) = rows.next().unwrap() { plan.push(row.get::<_, String>(3).unwrap()); }
     plan
@@ -440,22 +430,19 @@ async fn authenticated_get_during_pairing() {
         }
     }).await.unwrap();
     let connection = rusqlite::Connection::open(&database).unwrap();
-    let query = if indexed { INDEXED_QUERY } else { A_QUERY };
-    let (before, after, build_ms) = if counts_only {
-        (Vec::new(), Vec::new(), None)
+    let candidate_query = revision_api::candidate_query();
+    let query = candidate_query.as_ref().map_or(A_QUERY, |(query, _)| *query);
+    let after = if counts_only {
+        Vec::new()
+    } else if let Some((query, expiry)) = &candidate_query {
+        let plan = explain(&connection, query, rusqlite::params![
+            "assistant/chatgpt", OWNER, expiry, Option::<String>::None, Option::<String>::None
+        ]);
+        assert!(plan.iter().any(|line| line.contains(PROJECTION_INDEX)), "{plan:?}");
+        assert!(!plan.iter().any(|line| line.contains("claims")), "{plan:?}");
+        plan
     } else {
-        let index_exists: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)", [INDEX], |r| r.get(0)).unwrap();
-        assert_eq!(index_exists, indexed, "build baseline on 98e550cb; indexed on PR3-B");
-        if indexed {
-            connection.execute_batch("DROP INDEX claims_assistant_v1_principal_expiry_index").unwrap();
-            let before = explain(&connection, query);
-            let started = Instant::now();
-            connection.execute_batch(CREATE_INDEX).unwrap();
-            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-            let after = explain(&connection, query);
-            assert!(after.iter().any(|line| line.contains(INDEX)), "{after:?}");
-            (before, after, Some(elapsed))
-        } else { (explain(&connection, query), Vec::new(), None) }
+        explain(&connection, A_QUERY, rusqlite::params![GRANTED, "assistant/chatgpt"])
     };
     let total_rows: u64 = connection.query_row("SELECT count(*) FROM claims", [], |r| r.get(0)).unwrap();
     let mut principal_rows = BTreeMap::new();
@@ -463,17 +450,34 @@ async fn authenticated_get_during_pairing() {
         let count: u64 = connection.query_row("SELECT count(*) FROM claims WHERE kind=?1 AND COALESCE(json_extract(body,'$.fields.principal'),'assistant/chatgpt')=?2", rusqlite::params![GRANTED,principal], |r| r.get(0)).unwrap();
         principal_rows.insert(principal, count);
     }
-    // Isolate indexed SQL from claim/policy loading, provenance and locks.
-    // Diagnostic work stays outside HTTP samples; no request-path cache.
+    // Isolate the production effective-authority query from provenance and locks.
+    // Diagnostic work stays outside HTTP samples; no raw-history admission alias.
     let mut diagnostics = Vec::new();
     for _ in 0..8 {
-        let candidate = (indexed && !counts_only).then(|| {
+        let candidate = candidate_query.as_ref().filter(|_| !counts_only).map(|(query, expiry)| {
             let started = Instant::now();
-            let candidate_ids = connection.prepare(query).unwrap().query_map(rusqlite::params![
-                GRANTED,"assistant/chatgpt","custom.client.assistant.v1.revoked","custom.client.assistant.v1.policy",
-                u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap(),NODE
+            let mut statement = connection.prepare(query).unwrap();
+            let grant_records = statement.query_map(rusqlite::params![
+                "assistant/chatgpt", OWNER, expiry, Option::<String>::None, Option::<String>::None
             ], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
-            (candidate_ids.len(), started.elapsed().as_secs_f64() * 1000.0)
+            // This independent diagnostic connection is not a traced Store connection.
+            let status = |counter| u64::try_from(statement.get_status(counter)).unwrap();
+            let work = smallclaims::sqlite::work::SqliteWork {
+                statements: 1,
+                vm_steps: status(rusqlite::StatementStatus::VmStep),
+                fullscan_steps: status(rusqlite::StatementStatus::FullscanStep),
+                sorts: status(rusqlite::StatementStatus::Sort),
+                autoindex_rows: status(rusqlite::StatementStatus::AutoIndex),
+            };
+            assert_eq!(grant_records.len(), local_active + foreign_active,
+                "expired history and wrong-origin overlays must not change active N");
+            assert_eq!(work.fullscan_steps, 0, "candidate reads must not scan history");
+            assert!(work.vm_steps <= 512 + 128 * u64::try_from(local_active + foreign_active).unwrap(),
+                "candidate VM work must scale with active N, not expired history or overlay floods: {work:?}");
+            for record in &grant_records {
+                let _: fractal_daemon::model::ClaimRecord = serde_json::from_str(record).unwrap();
+            }
+            (grant_records.len(), started.elapsed().as_secs_f64() * 1000.0, sql_work(work))
         });
         let credential = sessions[0].1["credential"].as_str().unwrap();
         let digest = hex::encode(ring::digest::digest(&ring::digest::SHA256, credential.as_bytes()).as_ref());
@@ -488,8 +492,9 @@ async fn authenticated_get_during_pairing() {
         authentication_profile.finish();
         let direct_auth_ms = started.elapsed().as_secs_f64()*1000.0;
         let authentication_read_acquisitions = profile_reads(&profile_log, profile_from, "admission-bench/authenticate");
-        diagnostics.push(json!({"candidate_count":candidate.map(|(count, _)| count),
-            "candidate_sql_ms":candidate.map(|(_, ms)| ms),
+        diagnostics.push(json!({"candidate_count":candidate.as_ref().map(|(count, _, _)| count),
+            "candidate_sql_ms":candidate.as_ref().map(|(_, ms, _)| ms),
+            "candidate_sql_work":candidate.as_ref().map(|(_, _, work)| work),
             "direct_auth_ms":direct_auth_ms,"authentication_sql_work":authentication_sql_work,
             "authentication_read_acquisitions":authentication_read_acquisitions}));
     }
@@ -498,7 +503,7 @@ async fn authenticated_get_during_pairing() {
     api::client_v0::external_grants::projection(&state, &inspected).unwrap();
     let legacy_projection_ms = started.elapsed().as_secs_f64()*1000.0;
     let witness_projection_ms = revision_api::witness_projection_ms(&state, &inspected);
-    let plan = if counts_only { Vec::new() } else { explain(&connection, query) };
+    let plan = after.clone();
     println!("ADMISSION_DIAGNOSTICS {}", json!({"plan":plan,"samples":diagnostics,
         "legacy_projection_ms":legacy_projection_ms,"witness_projection_ms":witness_projection_ms}));
     drop(connection);
@@ -592,7 +597,7 @@ async fn authenticated_get_during_pairing() {
         "final_total_claim_rows":final_rows,"admission_query":query,
         "conflict_fold_diagnostics":diagnostics,
         "legacy_projection_ms":legacy_projection_ms,"witness_projection_ms":witness_projection_ms,
-        "explain_without_index":before,"explain_with_index":after,"synthetic_startup_index_build_ms":build_ms,
+        "explain_with_index":after,
         "measurements":measurements});
     println!("ADMISSION_MEASUREMENT {}", serde_json::to_string_pretty(&report).unwrap());
     if let Some(path) = std::env::var_os("ST_ADMISSION_REPORT") { std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap(); }
@@ -608,8 +613,9 @@ async fn authenticated_get_during_pairing() {
 /// ST_ADMISSION_INDEX_BUILD=1 "$ST_ADMISSION_BINARY" daemon_cost::assistant_admission::synthetic_large_store_index_build --exact --nocapture --test-threads=1
 /// ```
 /// ST_ADMISSION_INDEX_ROWS defaults to 1,000,000 total claims. ST_ADMISSION_INDEX_REPORT
-/// optionally saves JSON. Run on the indexed branch. This measures the exact startup index
-/// CREATE DDL, not full Store::open, cold-disk startup, admission, or signature verification.
+/// optionally saves JSON. This explicitly historical claims-index measurement is
+/// independent of the current effective-authority query. It measures CREATE DDL,
+/// not full Store::open, cold-disk startup, admission, or signature verification.
 /// Use the same identity-bound build/export commands above (including SOURCE_ROOT,
 /// EXPECT_REVISION and BINARY). Every index report carries the same execution identity.
 #[test]
@@ -636,12 +642,7 @@ fn synthetic_large_store_index_build() {
     // Native claims triggers retain their real digest implementation during the
     // synthetic population, just as on production/checkpoint writer connections.
     smallclaims::store::configure_projection_writer(&connection).unwrap();
-    let installed: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1)",
-        [INDEX], |row| row.get(0),
-    ).unwrap();
-    assert!(installed, "run the large-store index probe on the indexed branch");
-    connection.execute_batch("DROP INDEX claims_assistant_v1_principal_expiry_index").unwrap();
+    connection.execute_batch("DROP INDEX IF EXISTS claims_assistant_v1_principal_expiry_index").unwrap();
     // Copy every native required column rather than depending on a second claims schema.
     // The native autoincrement store_index, claim ID and subject must remain unique.
     let columns = {
@@ -673,12 +674,13 @@ fn synthetic_large_store_index_build() {
     let actual_rows: u64 = connection.query_row("SELECT count(*) FROM claims", [], |row| row.get(0)).unwrap();
     assert_eq!(actual_rows, u64::try_from(rows).unwrap());
     connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
-    let before = explain(&connection, INDEXED_QUERY);
+    // Independent historical A-query evidence, not the current authority query.
+    let before = explain(&connection, A_QUERY, rusqlite::params![GRANTED, "assistant/chatgpt"]);
     let main_bytes_before = std::fs::metadata(&database).unwrap().len();
     let started = Instant::now();
     connection.execute_batch(CREATE_INDEX).unwrap();
     let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-    let after = explain(&connection, INDEXED_QUERY);
+    let after = explain(&connection, A_QUERY, rusqlite::params![GRANTED, "assistant/chatgpt"]);
     assert!(after.iter().any(|line| line.contains(INDEX)), "{after:?}");
     let pages: u64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0)).unwrap();
     let page_size: u64 = connection.query_row("PRAGMA page_size", [], |row| row.get(0)).unwrap();
@@ -690,11 +692,12 @@ fn synthetic_large_store_index_build() {
         String::from_utf8(output.stdout).unwrap()
     };
     let report = json!({
-        "measurement":"synthetic startup index CREATE DDL only; not full startup",
+        "measurement":"historical claims principal/expiry index CREATE DDL only; not current admission or full startup",
         "execution_identity":identity,
         "claims_rows":actual_rows,"synthetic_copied_rows":rows - 1,
         "fixture_authority":"one native template; SQL copies are not signature-authoritative",
         "index_name":INDEX,"index_create_sql":CREATE_INDEX,"index_build_ms":elapsed_ms,
+        "historical_query":A_QUERY,
         "main_db_bytes_before":main_bytes_before,
         "main_db_bytes_after":std::fs::metadata(&database).unwrap().len(),
         "wal_bytes_after":wal_bytes,"logical_db_bytes_after":pages * page_size,
@@ -717,7 +720,7 @@ fn synthetic_large_store_index_build() {
 /// pub const REVISION: &str = "origin/main";
 /// pub const VARIANT: &str = "baseline";
 /// // origin/main admission is a credential-hash lookup with no candidate query.
-/// pub const ADMISSION_QUERY: &str = A_QUERY;
+/// pub fn candidate_query() -> Option<(&'static str, String)> { None }
 /// pub fn verified_writer(_: &Store, _: &str) -> bool {
 ///     panic!("origin/main has no provenance check; use FOREIGN_ACTIVE=0 and WRONG_ORIGIN_OVERLAYS=0")
 /// }
@@ -727,7 +730,11 @@ mod revision_api {
     use super::*;
     pub const REVISION: &str = "fixed-head";
     pub const VARIANT: &str = "indexed";
-    pub const ADMISSION_QUERY: &str = api::client_v0::external_grants::admission_query_for_test();
+    pub fn candidate_query() -> Option<(&'static str, String)> {
+        let now = u64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()).unwrap();
+        Some((smallclaims::store::assistant_grant_authority::CANDIDATES_QUERY,
+            smallclaims::store::assistant_grant_authority::expiry_key(now)))
+    }
     pub fn verified_writer(store: &Store, id: &str) -> bool {
         store.claim_has_authenticated_member_writer(id).unwrap()
     }

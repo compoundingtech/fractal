@@ -3634,6 +3634,13 @@ fn fleet_workflows_have_no_path_filter() {
             "previous_release_replicates_with_new_members_and_preserves_history_on_upgrade"
         )
     );
+    assert!(
+        stages.contains(
+            "fleet::service_grants::previous_release_authorizes_and_revokes_after_authority_projection_rollback"
+        ),
+        "fleet compatibility must exercise baseline rollback after authority projection backfill"
+    );
+    assert!(stages.contains("test result: ok. 10 passed"));
     // The optional macOS job lives in macos.yml so label events cannot restart this gate.
     assert!(
         !compat.to_ascii_lowercase().contains("macos-"),
