@@ -249,6 +249,7 @@ impl Store {
         let refused = || crate::FractalError::new("stale-subject", "the pairing challenge changed or was already consumed");
         if input.kind != "custom.client.pairing-completed"
             || input.expected_subject.is_some()
+            || input.idempotency_key.is_some()
             || input.evidence != [begun_id]
         {
             return Err(refused());
@@ -273,7 +274,7 @@ impl Store {
         };
         crate::store::append_claim_with_commit_context(self, input, None, None, None, None,
             crate::store::ClaimCommitContext {
-                client_operation: true, authority: Some(&authority), ..Default::default()
+                client_operation: true, admission: Some(&authority), ..Default::default()
             }).map(|(claim, _)| claim)
     }
 
