@@ -7183,7 +7183,8 @@ async fn serve_unix_with_ancestor_ready(
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
     let reserved = reserve_unix_socket(socket, state_socket).await?;
-    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, ancestor, ready).await
+    // Generic/injected-ancestry servers have no daemon supervisor authority.
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, None, ancestor, ready).await
 }
 
 /// An address reservation, not a listener. Connect attempts remain refused until
@@ -7263,13 +7264,15 @@ pub async fn reserve_unix_socket(
 /// Only a fully initialized router may turn the reservation into a listener.
 /// `Some(store)` binds local harness ancestry and guards every router before route effects;
 /// `None` selects the unbound listener used by the paired gateway.
+/// `worker` supplies the supervisor's generation authority for otherwise unavailable ancestry.
 pub async fn serve_reserved_unix_with_ready(
     reserved: ReservedUnixSocket,
     app: Router,
     bound_store: Option<Arc<Store>>,
+    worker: Option<WorkerAuthority>,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
-    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, harness_ancestor, ready)
+    serve_reserved_unix_with_ancestor_ready(reserved, app, bound_store, worker, harness_ancestor, ready)
         .await
 }
 
@@ -7277,6 +7280,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
     reserved: ReservedUnixSocket,
     app: Router,
     bound_store: Option<Arc<Store>>,
+    worker: Option<WorkerAuthority>,
     ancestor: fn(u32, Option<&fractal_runtime::PeerProcessIdentity>) -> HarnessAncestry,
     ready: impl FnOnce(),
 ) -> anyhow::Result<()> {
@@ -7288,7 +7292,7 @@ async fn serve_reserved_unix_with_ancestor_ready(
     // Install it here so directly constructed routers cannot bypass the guard.
     let bind_harness = bound_store.is_some();
     let app = match bound_store {
-        Some(store) => app.layer(from_fn_with_state(store, guard_bound_actor)),
+        Some(store) => app.layer(from_fn_with_state((store, worker), guard_bound_actor)),
         None => app,
     };
     let listener = socket.listen(1024)?;
@@ -7920,6 +7924,26 @@ fn record_legacy_poll(
     }
 }
 
+/// Generation authority supplied by the replication worker's supervisor.
+pub type WorkerAuthority = Arc<dyn Fn() -> anyhow::Result<u32> + Send + Sync>;
+
+pub fn worker_route(path: &str) -> bool {
+    path.starts_with("/v1/internal/replication/")
+        || matches!(path, "/v1/internal/seat-freshness" | "/v1/internal/seat-freshness/reads" | "/v1/internal/seat-snapshot")
+        || path == crate::peer::CLIENT_READ_FORWARD_PATH
+}
+
+pub fn authorize_worker(peer: Option<&LocalPeer>, observe: &dyn Fn() -> anyhow::Result<u32>) -> anyhow::Result<()> {
+    let peer = peer.ok_or_else(|| anyhow::anyhow!("worker socket credentials missing"))?;
+    anyhow::ensure!(peer.ancestor.is_none(), "seat callers cannot act as the worker");
+    let generation = peer.peer_process.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("worker process generation unavailable"))?;
+    generation.validate()?;
+    anyhow::ensure!(generation.pid() == peer.pid && observe()? == peer.pid,
+        "socket connector is not the supervised replication worker");
+    generation.validate()
+}
+
 /// The agent whose harness a local request comes from, when it comes from one.
 #[derive(Clone, Debug)]
 pub struct BoundAgent(pub String);
@@ -7927,12 +7951,24 @@ pub struct BoundAgent(pub String);
 // The serving boundary supplies the immutable ancestry binding and its identity store before
 // any route or admission effect runs, including for directly constructed routers.
 async fn guard_bound_actor(
-    State(store): State<Arc<Store>>,
-    request: Request<Body>,
+    State((store, worker)): State<(Arc<Store>, Option<WorkerAuthority>)>,
+    mut request: Request<Body>,
     next: Next,
 ) -> Response {
     let bound_agent = request.extensions().get::<BoundAgent>().map(|agent| agent.0.clone());
     let client_request = request.uri().path().starts_with("/v1/client/");
+    // This guard is outside all router layers. Authenticate here, before ancestry admission,
+    // independently of the ingress observe/enforce rollout.
+    if matches!(request.extensions().get::<HarnessAncestry>(), Some(HarnessAncestry::Unavailable))
+        && let Some(worker) = worker
+    {
+        let peer = request.extensions().get::<LocalPeer>().cloned();
+        if matches!(tokio::task::spawn_blocking(move || authorize_worker(peer.as_ref(), &*worker)).await, Ok(Ok(()))) {
+            // The supervised worker runs in no harness. Its live generation is stronger
+            // evidence than an unreadable service-manager environment.
+            request.extensions_mut().insert(HarnessAncestry::Person);
+        }
+    }
     match guard_bound_request(request, bound_agent.as_deref(), &store).await {
         Ok(request) => next.run(request).await,
         Err(error) if client_request => {
@@ -8001,12 +8037,11 @@ pub async fn guard_bound_request(
     )?.identity;
     // Free mode lets an agent do what its person may do, but always as itself: a harness never
     // names a person, or another agent, as the local client-v0 actor.
-    if let Some(person) = request
-        .headers()
-        .get(client_v0::LOCAL_PERSON_HEADER)
-        .and_then(|value| value.to_str().ok())
-        && !is_bound_actor(store, person, &bound_identity)?
+    for person in [client_v0::LOCAL_PERSON_HEADER, wire_names::LOCAL_PERSON_HEADER_ALIAS]
+        .into_iter().flat_map(|name| request.headers().get_all(name))
+        .filter_map(|value| value.to_str().ok())
     {
+        if is_bound_actor(store, person, &bound_identity)? { continue; }
         return Err(ApiError::bad(FractalError::new(
             "foreign-agent-actor",
             format!("this harness is `{bound_agent}` and cannot act as `{person}`"),
@@ -8104,6 +8139,7 @@ async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Bo
     if matches!(path, "/v1/backup" | "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
         || path.starts_with(INTERNAL_ROUTE_PREFIX)
         || request.headers().contains_key(client_v0::LOCAL_PERSON_HEADER)
+        || request.headers().contains_key(wire_names::LOCAL_PERSON_HEADER_ALIAS)
     {
         return Err(refuse());
     }
