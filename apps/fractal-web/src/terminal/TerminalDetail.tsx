@@ -6,7 +6,7 @@ import { Badge, type BadgeVariant, Note } from '../ui-compat/components.tsx'
 import { scale, tokens } from '../ui-compat/tokens.stylex.ts'
 import { incrDebugRuntime, RenderProfiler } from '../telemetry/meters.tsx'
 
-import type { UnobservedFeed } from '../data/FeedState.tsx'
+import type { UnobservedFeed } from '../data/unobservedFeed.ts'
 import { useDataSource, useFeedInterest, useGrants, useTerminal, useTerminalConnected } from '../data/react.tsx'
 import { credentialExpiredMessage, credentialNotice } from '../data/source.ts'
 import type { NativeSubjectProps } from '../resources/react.tsx'
