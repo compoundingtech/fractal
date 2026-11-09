@@ -49,7 +49,16 @@ fn answer(state: &AppState, session: &ClientSession, started: &Value, choice: &s
     ).unwrap().claims.into_iter().next().expect("native answer must emit its admission receipt");
     assert_eq!(receipt.origin,done.origin,"answer receipt origin");
     assert_eq!(receipt.actor,done.actor,"answer receipt actor");
-    assert!(state.store.client_operation_is_trusted(&receipt).unwrap(),"answer receipt operation authority");
+    let operation = state.store.claims_for_subject_kind_at(
+        &format!("custom/client/operation-{}",receipt.id),fractal_store::pairing::OPERATION_AUTHORIZED,None,true,1,
+    ).unwrap().claims.into_iter().next().expect("native answer receipt must have an operation proof");
+    assert_eq!(operation.body["fields"]["record_id"],receipt.id,"answer receipt operation record ID");
+    assert_eq!(operation.origin,receipt.origin,"answer receipt operation issuer");
+    assert_eq!(operation.actor,receipt.actor,"answer receipt operation person");
+    let expected_hash = fractal_store::pairing::record_hash(&receipt.origin,receipt.actor.as_deref(),&receipt.body["fields"]).unwrap();
+    assert_eq!(operation.body["fields"]["record_hash"],expected_hash,"answer receipt operation hash after reload");
+    assert_eq!((receipt.actor.as_deref(),state.store.client_operation_is_trusted(&receipt).unwrap()),
+        (done.actor.as_deref(),true),"answer receipt operation authority");
     let fields = &receipt.body["fields"];
     assert_eq!(fields["answer_id"],done.id,"answer receipt answer ID");
     assert_eq!(fields["ask"],ask.subject,"answer receipt ask subject");
