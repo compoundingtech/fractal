@@ -434,13 +434,13 @@ export const AgentTodo = /*#__PURE__*/ (() => Schema.Struct({
 export type AgentTodo = typeof AgentTodo.Type
 export type AgentTodoEncoded = typeof AgentTodo.Encoded
 
-/** Declared CPU seconds and input-plus-output tokens per seat incarnation or mission run, and peak memory/disk footprints. Scope labels create no counters, resets, aggregation, reservations or enforcement. */
+/** Declared mission-run totals, including all retries: accumulated CPU seconds and cost-weighted tokens, sum(tokens * class price / base input price), for input, output, cache writes including 1-hour writes, and cached reads. The unit is a base input token at the pricing version pinned at admission and recorded on the run, never repriced; unknown pricing reports unknown, never zero, and USD is reported alongside weighted tokens. Peak memory/disk have no accumulation window. New agent authoring accepts only memory/disk; historical agent reads retain all fields. Agents have no retry/run boundary or budget window; usage belongs to routing/quota/SLO accounting. Step-run windows are a future extension. These are data-only definitions: no counters, resets, aggregation, pricing capture, reporting, reservations or enforcement are implemented by declared admission. */
 export const DeclaredBudgets = /*#__PURE__*/ (() => Schema.Struct({
   "cpu_seconds": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(9007199254740991))),
   "disk_max": optionalKey(Schema.String),
   "memory_max": optionalKey(Schema.String),
   "token_budget": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).check(Schema.isLessThanOrEqualTo(9007199254740991)))
-}).annotate({ identifier: "DeclaredBudgets", description: "Declared CPU seconds and input-plus-output tokens per seat incarnation or mission run, and peak memory/disk footprints. Scope labels create no counters, resets, aggregation, reservations or enforcement." }))()
+}).annotate({ identifier: "DeclaredBudgets", description: "Declared mission-run totals, including all retries: accumulated CPU seconds and cost-weighted tokens, sum(tokens * class price / base input price), for input, output, cache writes including 1-hour writes, and cached reads. The unit is a base input token at the pricing version pinned at admission and recorded on the run, never repriced; unknown pricing reports unknown, never zero, and USD is reported alongside weighted tokens. Peak memory/disk have no accumulation window. New agent authoring accepts only memory/disk; historical agent reads retain all fields. Agents have no retry/run boundary or budget window; usage belongs to routing/quota/SLO accounting. Step-run windows are a future extension. These are data-only definitions: no counters, resets, aggregation, pricing capture, reporting, reservations or enforcement are implemented by declared admission." }))()
 export type DeclaredBudgets = typeof DeclaredBudgets.Type
 export type DeclaredBudgetsEncoded = typeof DeclaredBudgets.Encoded
 

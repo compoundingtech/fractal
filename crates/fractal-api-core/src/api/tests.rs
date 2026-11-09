@@ -12772,6 +12772,449 @@ async fn claims_endpoint_returns_bounded_cursor_pages() {
     );
 }
 
+async fn writer_binding_request(
+    app: Router,
+    path: &str,
+    bound: Option<&str>,
+    credential: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(bound) = bound {
+        request = request.extension(BoundAgent(bound.into()));
+    }
+    if let Some(credential) = credential {
+        request = request.header("authorization", format!("Bearer {credential}"));
+    }
+    let response = app
+        .oneshot(request.body(Body::from(body.to_string())).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let envelope: Value = serde_json::from_slice(&bytes).unwrap();
+    let value = if status.is_success() { envelope["value"].clone() } else { envelope };
+    (status, value)
+}
+
+fn writer_binding_pairing(state: &AppState, credential: &str, scopes: &[&str]) {
+    state.store.append_client_operation_claim(&ClaimInput {
+        subject: "custom/client/writer-binding".into(),
+        kind: "custom.client.pairing-completed".into(),
+        actor: Some("person/example".into()),
+        fields: serde_json::from_value(json!({
+            "credential_hash": client_v0::credential_digest(credential),
+            "session_actor": "person/example/session/phone",
+            "person_id": "person/example",
+            "device_id": "device/writer-binding",
+            "scopes": scopes,
+            "expires_at_unix_ms": u64::MAX,
+            "pairing_operation_version": 1
+        })).unwrap(),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: None,
+    }).unwrap();
+}
+
+#[tokio::test]
+async fn writer_binding_local_claims_preserve_optional_actor() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for (name, actor) in [("person", Some("person/example")), ("missing", None)] {
+        let subject = format!("custom/example/local-{name}");
+        let mut body = json!({"subject":subject, "kind":"custom.example.recorded", "fields":{}});
+        if let Some(actor) = actor {
+            body["actor"] = json!(actor);
+        }
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", None, None, body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {receipt}");
+        let claims = state.store.claims_for(&subject, Some("custom.example.recorded")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), actor);
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_bound_claim_actor_matches_and_omissions_are_attributed() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    for (name, actor) in [
+        ("explicit", Some(json!("agent/own"))),
+        ("missing", None),
+        ("null", Some(Value::Null)),
+    ] {
+        let subject = format!("custom/example/writer-{name}");
+        let mut body = json!({
+            "subject": subject, "kind": "custom.example.recorded", "fields": {}
+        });
+        if let Some(actor) = actor {
+            body["actor"] = actor;
+        }
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", Some("agent/own"), None, body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {receipt}");
+        let claims = state.store.claims_for(&subject, Some("custom.example.recorded")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), Some("agent/own"), "{name}");
+    }
+    for actor in ["agent/other", "person/example"] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = writer_binding_request(
+            app.clone(), "/v1/claims", Some("agent/own"), None,
+            json!({"subject":"custom/example/other-writer", "kind":"custom.example.recorded",
+                "actor":actor, "fields":{}}),
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_message_sender_matches_on_generic_and_message_routes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone())
+        .layer(from_fn_with_state((state.store.clone(), None), guard_bound_actor));
+    for sender in ["agent/other", "person/example"] {
+        for path in ["/v1/claims", "/v1/messages"] {
+            let before = state.store.index().unwrap();
+            let body = if path == "/v1/claims" {
+                json!({"subject":"message/writer-binding-other", "kind":"message.sent",
+                    "actor":"agent/own", "fields":{
+                        "from":sender, "to":"agent/receiver", "content":"hello", "status":"sent"
+                    }})
+            } else {
+                json!({"from":sender, "to":"agent/receiver", "content":"hello",
+                    "idempotency_key":"writer-binding-other"})
+            };
+            let (status, refusal) = writer_binding_request(
+                app.clone(), path, Some("agent/own"), None, body,
+            ).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {sender}: {refusal}");
+            assert_eq!(refusal["code"], "foreign-agent-actor");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+    for path in ["/v1/claims", "/v1/messages"] {
+        let body = if path == "/v1/claims" {
+            json!({"subject":"message/writer-binding-own", "kind":"message.sent",
+                "fields":{"from":"agent/own", "to":"agent/receiver", "content":"hello", "status":"sent"}})
+        } else {
+            json!({"from":"agent/own", "to":"agent/receiver", "content":"hello",
+                "idempotency_key":"writer-binding-own"})
+        };
+        let (status, receipt) = writer_binding_request(
+            app.clone(), path, Some("agent/own"), None, body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{path}: {receipt}");
+        let subject = receipt["subject"].as_str().unwrap();
+        let claims = state.store.claims_for(subject, Some("message.sent")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), Some("agent/own"));
+        assert_eq!(claims[0].body["fields"]["from"], "agent/own");
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_read_only_pairing_reads_and_refuses_generic_posts() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "writer-binding-read-only";
+    writer_binding_pairing(&state, credential, &["read.projections"]);
+    let app = router(state.clone());
+    let response = app.clone().oneshot(Request::builder()
+        .uri("/v1/claims")
+        .header("authorization", format!("Bearer {credential}"))
+        .body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    for (path, body) in [
+        ("/v1/claims", json!({"subject":"custom/example/paired-read", "kind":"custom.example.recorded",
+            "actor":"person/example", "fields":{}})),
+        ("/v1/claims", json!({"subject":"message/paired-read", "kind":"message.sent",
+            "actor":"person/example", "fields":{
+                "from":"person/example", "to":"agent/receiver", "content":"hello", "status":"sent"}})),
+        ("/v1/messages", json!({"from":"person/example", "to":"agent/receiver",
+            "content":"hello", "idempotency_key":"paired-read"})),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = writer_binding_request(
+            app.clone(), path, None, Some(credential), body,
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {refusal}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_pairing_uses_authority_actor_for_claims_and_senders() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "writer-binding-control";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.work", "control.messages"]);
+    let app = router(state.clone());
+    for (name, actor) in [
+        ("explicit", Some(json!("person/example"))),
+        ("missing", None),
+        ("null", Some(Value::Null)),
+    ] {
+        let subject = format!("custom/example/paired-{name}");
+        let mut body = json!({"subject":subject, "kind":"custom.example.recorded", "fields":{}});
+        if let Some(actor) = actor {
+            body["actor"] = actor;
+        }
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", None, Some(credential), body,
+        ).await;
+        assert_eq!(status, StatusCode::OK, "{name}: {receipt}");
+        let claims = state.store.claims_for(&subject, Some("custom.example.recorded")).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].actor.as_deref(), Some("person/example"));
+    }
+    for actor in ["person/example/session/phone", "person/other", "agent/other"] {
+        let before = state.store.index().unwrap();
+        let (status, refusal) = writer_binding_request(
+            app.clone(), "/v1/claims", None, Some(credential),
+            json!({"subject":"custom/example/paired-other", "kind":"custom.example.recorded",
+                "actor":actor, "fields":{}}),
+        ).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{actor}: {refusal}");
+        assert_eq!(refusal["code"], "foreign-agent-actor");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+    for sender in ["person/example", "person/other", "person/example/session/phone"] {
+        let before = state.store.index().unwrap();
+        let subject = "message/writer-binding-paired";
+        let (status, receipt) = writer_binding_request(
+            app.clone(), "/v1/claims", None, Some(credential),
+            json!({"subject":subject, "kind":"message.sent", "actor":"person/example",
+                "fields":{"from":sender, "to":"agent/receiver", "content":"hello", "status":"sent"}}),
+        ).await;
+        if sender == "person/example" {
+            assert_eq!(status, StatusCode::OK, "{receipt}");
+            let claims = state.store.claims_for(subject, Some("message.sent")).unwrap();
+            assert_eq!(claims.len(), 1);
+            assert_eq!(claims[0].actor.as_deref(), Some("person/example"));
+            assert_eq!(claims[0].body["fields"]["from"], sender);
+        } else {
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{sender}: {receipt}");
+            assert_eq!(receipt["code"], "foreign-agent-actor");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_pairing_records_retain_dedicated_writer_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let credential = "writer-binding-reserved-records";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.work"]);
+    let app = router(state.clone());
+    for bound in [false, true] {
+        let actor = if bound { "agent/own" } else { "person/example" };
+        for (subject, kind) in [
+            ("custom/client/writer-binding-reserved", "custom.client.pairing-completed"),
+            ("custom/client/pairing-writer-binding", "custom.example.recorded"),
+        ] {
+            let before = state.store.index().unwrap();
+            let (status, response) = writer_binding_request(
+                app.clone(), "/v1/claims", bound.then_some(actor),
+                (!bound).then_some(credential),
+                json!({"subject":subject, "kind":kind, "actor":actor,
+                    "fields":{"credential_hash":client_v0::credential_digest("reserved-record"),
+                        "session_actor":"person/example/session/other",
+                        "person_id":"person/example", "device_id":"device/other",
+                        "scopes":["control.work"], "expires_at_unix_ms":u64::MAX,
+                        "pairing_operation_version":1}}),
+            ).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bound}/{kind}: {response}");
+            assert_eq!(response["code"], "claim-write-forbidden");
+            assert_eq!(state.store.index().unwrap(), before);
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_legacy_attention_operations_require_attention_scope() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let intent = crate::graph::parse_internal_intent(
+        "version 2\nagent \"asker\" { workspace \"/tmp\"; command \"true\" }",
+        state.store.origin(),
+    ).unwrap();
+    state.store.apply_internal(&intent, "scope-api-agent").unwrap();
+    let actor = format!("agent/{}.asker", state.store.origin());
+    let app = router(state.clone());
+    let (status, ask) = json_request(app.clone(), "/v1/work/ask", json!({
+        "person":"person/example", "title":"Choose a date", "reason":"A date",
+        "actor":actor, "new_run":"scope-date", "idempotency_key":"scope-ask"
+    })).await;
+    assert_eq!(status, StatusCode::OK, "{ask}");
+    let subject = ask["subject"].as_str().unwrap();
+    let episode = state.store.claims_for(subject, Some("work.person-asked")).unwrap()[0].id.clone();
+    let credential = "writer-binding-work-only";
+    writer_binding_pairing(&state, credential, &["read.projections", "control.work"]);
+    for (path, body) in [
+        ("/v1/work/done", json!({"subject":subject, "actor":"person/example",
+            "summary":"Friday", "episode":episode, "evidence":[], "idempotency_key":"scope-done"})),
+        ("/v1/custom/reply", json!({"subject":"custom/example/reply",
+            "registration":"custom/example/registration", "revision":"revision/one",
+            "episode":"episode/one", "fields":{}, "actor":"person/example",
+            "idempotency_key":"scope-reply"})),
+    ] {
+        let before = state.store.index().unwrap();
+        let (status, response) = writer_binding_request(
+            app.clone(), path, None, Some(credential), body,
+        ).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}: {response}");
+        assert_eq!(state.store.index().unwrap(), before);
+    }
+    let projection = state.store.step_run(subject).unwrap().unwrap();
+    assert!(projection.person_answers.is_empty());
+}
+
+#[tokio::test]
+async fn writer_binding_native_sessions_and_internal_routes_retain_their_authority() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let peer = NativeDeliveryPeer {
+        agent: "agent/native".into(), transport: "claude-hook", pid: 37, archives_inbox: false,
+    };
+    for actor in ["agent/native", "agent/other", "person/example"] {
+        let request = Request::builder().method("POST").uri("/v1/claims")
+            .header("content-type", "application/json")
+            .extension(peer.clone())
+            .extension(client_v0::ClientSession::for_tests(actor, actor, "unix"))
+            .body(Body::from(r#"{"subject":"custom/example/session","kind":"custom.example.recorded","fields":{}}"#)).unwrap();
+        let result = super::write_principal::bind_request(&state, request).await;
+        assert_eq!(result.is_ok(), actor == "agent/native", "{actor}");
+    }
+    let app = router(state.clone()).layer(axum::Extension(peer.clone()));
+    let before = state.store.index().unwrap();
+    let (status, response) = writer_binding_request(
+        app, "/v1/agents/restart", None, None,
+        json!({"subject":"agent/native","actor":"agent/other","idempotency_key":"native-restart"}),
+    ).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{response}");
+    assert_eq!(response["code"], "foreign-agent-actor");
+    assert_eq!(state.store.index().unwrap(), before);
+    for path in ["/v1/internal/replication/receive", "/v1/repair/apply"] {
+        for native in [false, true] {
+            let mut request = Request::builder().method("POST").uri(path)
+                .header("content-type", "application/json");
+            if native { request = request.extension(peer.clone()); }
+            let result = super::write_principal::bind_request(
+                &state, request.body(Body::from("{}")).unwrap(),
+            ).await;
+            assert_eq!(result.is_ok(), !native, "{path}/{native}");
+        }
+    }
+    for native in [false, true] {
+        let mut request = Request::builder().method("POST").uri("/v1/claims")
+            .header("content-type", "application/json")
+            .extension(HarnessAncestry::Unavailable);
+        if native { request = request.extension(peer.clone()); }
+        let request = request.body(Body::from(r#"{"subject":"custom/example/session","kind":"custom.example.recorded","fields":{}}"#)).unwrap();
+        assert!(super::write_principal::bind_request(&state, request).await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_dedicated_optional_fields_use_the_connected_writer() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for (path, key) in [
+        ("/v1/launches", "requester"),
+        ("/v1/intent/apply", "actor"),
+        ("/v1/reviews/mission/example", "actor"),
+        ("/v1/messages/example/claims", "actor"),
+        ("/v1/delivery/hold", "actor"),
+    ] {
+        for body in [json!({}), json!({(key): null})] {
+            let request = Request::builder().method("POST").uri(path)
+                .header("content-type", "application/json")
+                .extension(BoundAgent("agent/own".into()))
+                .body(Body::from(body.to_string())).unwrap();
+            let bound = super::write_principal::bind_request(&state, request).await.unwrap();
+            let bytes = to_bytes(bound.into_body(), usize::MAX).await.unwrap();
+            let value: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value[key], "agent/own", "{path}: {value}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_native_receipts_and_tracking_retain_seat_attribution() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    for transport in ["app-server", "claude-channel", "claude-hook", "omp-channel", "pi-channel", "exec"] {
+        let app = router(state.clone()).layer(axum::Extension(NativeDeliveryPeer {
+            agent: "agent/native".into(), transport, pid: 37, archives_inbox: false,
+        }));
+        for (kind, subject, fields) in [
+            ("custom.agent.initial-message", format!("custom/agent/initial-{transport}"),
+                json!({"agent":"agent/native","incarnation":"one","from":"person/example"})),
+            ("custom.agent.first-native-launch", format!("custom/agent/seed-{transport}"),
+                json!({"agent":"agent/native","incarnation":"one","outcome":"fresh"})),
+            ("subagent.appeared", "agent/native".into(),
+                json!({"subagent_id":format!("child-{transport}"),"driver":transport,
+                    "incarnation_id":"one","lease_expires_at_unix_ms":u64::MAX})),
+            ("runtime.observed", "agent/native".into(), json!({"status":"running"})),
+        ] {
+            let (status, receipt) = writer_binding_request(app.clone(), "/v1/claims", None, None,
+                json!({"subject":subject,"kind":kind,"fields":fields})).await;
+            assert_eq!(status, StatusCode::OK, "{transport}/{kind}: {receipt}");
+            assert_eq!(receipt["actor"], "agent/native");
+            if kind == "custom.agent.initial-message" {
+                assert_eq!(receipt["body"]["fields"]["from"], "person/example");
+            }
+        }
+        let (status, receipt) = writer_binding_request(app, "/v1/claims", None, None,
+            json!({"subject":"custom/example/native-other","kind":"custom.example.recorded",
+                "actor":"person/example","fields":{}})).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{receipt}");
+    }
+}
+
+#[tokio::test]
+async fn writer_binding_json_media_types_and_missing_message_sender() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let app = router(state.clone());
+    for (media_type, sender, expected) in [
+        ("application/vnd.fractal+json; charset=utf-8", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("Application/JSON", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("Application/Vnd.Fractal+JSON", Some("person/other"), StatusCode::UNPROCESSABLE_ENTITY),
+        ("application/vnd.fractal+json; charset=utf-8", None, StatusCode::OK),
+    ] {
+        let mut fields = json!({"to":"agent/receiver","content":"hello","status":"sent"});
+        if let Some(sender) = sender { fields["from"] = json!(sender); }
+        let response = app.clone().oneshot(Request::builder()
+            .method("POST").uri("/v1/claims")
+            .header("content-type", media_type)
+            .extension(BoundAgent("agent/own".into()))
+            .body(Body::from(json!({"subject":"message/writer-binding-media",
+                "kind":"message.sent","fields":fields}).to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, expected, "{}", String::from_utf8_lossy(&bytes));
+    }
+    let claim = state.store.claims_for("message/writer-binding-media", Some("message.sent")).unwrap();
+    assert_eq!(claim[0].actor.as_deref(), Some("agent/own"));
+    assert_eq!(claim[0].body["fields"]["from"], "agent/own");
+}
+
 #[tokio::test]
 async fn ordinary_claim_writes_cannot_create_pairing_records() {
     let root = tempfile::tempdir().unwrap();

@@ -847,6 +847,11 @@ schedule "intake" {
                 if replay {
                     store.replay_replication_graph().unwrap();
                 }
+                let budget = store
+                    .attention_request_count("child-person-work", "person/avery", now_ms())
+                    .unwrap();
+                assert_eq!(budget.requests, 1);
+                assert_eq!(budget.requests_by_originating_run.get(&origin.run), Some(&1));
                 store.reconcile_person_asks().unwrap();
                 assert_eq!(
                     store.step_run(&ask.subject).unwrap().unwrap().status,
@@ -871,6 +876,13 @@ schedule "intake" {
                 answer: None,
             };
             store.finish_person_step(&response, false).unwrap();
+            assert_eq!(
+                store
+                    .attention_request_count("child-person-work", "person/avery", now_ms())
+                    .unwrap()
+                    .requests,
+                1
+            );
             assert_eq!(
                 store.step_run(&origin.subject).unwrap().unwrap().status,
                 "ready"
