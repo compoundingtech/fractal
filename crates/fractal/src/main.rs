@@ -7863,6 +7863,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let telemetry_started = Instant::now();
     telemetry.shutdown();
     stderr_message("fractal", format_args!("shutdown: telemetry stage finished in {} ms", telemetry_started.elapsed().as_millis()));
+    fractal_daemon::api::flush_ancestry_diagnostics();
     match stopped {
         Ok(signal) => end_by_signal(signal),
         Err(served) => served.map(|_| ()),

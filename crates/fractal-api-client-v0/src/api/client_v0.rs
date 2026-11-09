@@ -73,6 +73,8 @@ mod conversation_follow_tests;
 #[cfg(test)]
 mod launch_detail_tests;
 #[cfg(test)]
+mod mission_history_tests;
+#[cfg(test)]
 pub mod observer_subscription_detail_tests;
 #[cfg(test)]
 #[path = "client_v0/published_attention_tests.rs"]
@@ -3070,8 +3072,20 @@ pub fn mission_resources(
     history: bool,
     selected_id: Option<&str>,
 ) -> anyhow::Result<Vec<Value>> {
+    mission_resources_for_run(store, snapshot_index, history, selected_id, None)
+}
+
+/// [`mission_resources`], with `requested_run`'s timing, history and enrichment lifted on a detail
+/// read beside the open runs and the latest finished run.
+pub fn mission_resources_for_run(
+    store: &Store,
+    snapshot_index: u64,
+    history: bool,
+    selected_id: Option<&str>,
+    requested_run: Option<&str>,
+) -> anyhow::Result<Vec<Value>> {
     store.read_snapshot(|_| {
-        mission_resources_filtered(store, snapshot_index, history, selected_id, None)
+        mission_resources_filtered(store, snapshot_index, history, selected_id, None, requested_run)
     })
 }
 
@@ -3114,7 +3128,9 @@ fn mission_resources_filtered(
     history: bool,
     selected_id: Option<&str>,
     page_ids: Option<&[String]>,
+    requested_run: Option<&str>,
 ) -> anyhow::Result<Vec<Value>> {
+    let requested_run = requested_run.filter(|_| selected_id.is_some());
     let at_unix_ms = client_now_ms();
     let human_attention_runs = store.human_attention_runs()?;
     let mut missions = BTreeMap::<String, Vec<MissionRunView>>::new();
@@ -3257,16 +3273,25 @@ fn mission_resources_filtered(
             });
             let timing_runs = runs.iter().filter(|run|
                 !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
-                    || latest_finished.is_some_and(|latest| latest.subject == run.subject))
+                    || latest_finished.is_some_and(|latest| latest.subject == run.subject)
+                    || requested_run == Some(run.subject.as_str()))
                 .map(|run| run.subject.clone()).collect::<Vec<_>>();
             let timing = store.mission_step_timestamps_for_runs(&timing_runs, None)?;
+            // A detail also folds each enriched step's attempts, waits and transitions.
+            let histories = if selected_id.is_some() {
+                store.mission_step_histories_for_runs(&timing_runs, at_unix_ms)?
+            } else {
+                BTreeMap::new()
+            };
             let run_details = runs
                 .iter()
                 .map(|header| {
-                    // Enrich open runs and only the newest finished run, on the header snapshot.
+                    // Enrich open runs, the newest finished run and a requested run, on the
+                    // header snapshot.
                     let run = if selected_id.is_some()
                         && (!matches!(header.status.as_str(), "completed" | "failed" | "cancelled")
-                            || latest_finished.is_some_and(|run| run.subject == header.subject))
+                            || latest_finished.is_some_and(|run| run.subject == header.subject)
+                            || requested_run == Some(header.subject.as_str()))
                     {
                         store.mission_run(&header.id)?.ok_or_else(|| {
                             anyhow::anyhow!("mission run {} disappeared during detail read", header.id)
@@ -3359,6 +3384,12 @@ fn mission_resources_filtered(
                     let shows_steps = selected_id.is_some()
                         || !matches!(run.status.as_str(), "completed" | "failed" | "cancelled")
                         || latest.is_some_and(|latest| latest.subject == run.subject);
+                    let open_run = !matches!(run.status.as_str(), "completed" | "failed" | "cancelled");
+                    let step_etas = if selected_id.is_some() && open_run {
+                        store.mission_run_step_etas(&run.subject)?
+                    } else {
+                        BTreeMap::new()
+                    };
                     let steps = shows_steps.then(|| {
                         run.steps
                             .iter()
@@ -3380,7 +3411,7 @@ fn mission_resources_filtered(
                                         "failure": wake.failure,
                                     })
                                 });
-                                json!({
+                                let mut value = json!({
                                     "id": step.subject,
                                     "path": step.step,
                                     "title": step.title,
@@ -3408,7 +3439,19 @@ fn mission_resources_filtered(
                                     "wake": wake,
                                     "claim_expires_at": step.claim_expires_at_unix_ms.map(client_timestamp),
                                     "nudged_at": step.nudged_at_unix_ms.map(client_timestamp),
-                                })
+                                });
+                                if let Some(history) = histories.get(step.subject.as_str()) {
+                                    value["attempts"] = json!(history.attempts);
+                                    value["waits"] = json!(history.waits);
+                                    value["transitions"] = json!(history.transitions);
+                                    value["history_complete"] = json!(history.complete);
+                                }
+                                if let Some((low, high, samples)) = step_etas.get(&step.step)
+                                    .filter(|_| !matches!(step.status.as_str(), "completed" | "failed" | "cancelled" | "skipped"))
+                                {
+                                    value["eta"] = json!({"low_ms": low, "high_ms": high, "samples": samples});
+                                }
+                                value
                             })
                             .collect::<Vec<_>>()
                     });
@@ -4296,18 +4339,30 @@ fn missions_tree_value_within(
         "truncated": truncated }))
 }
 
+/// `GET /v1/client/missions/{id}?run=`: the run whose timing and step history the detail lifts
+/// beside its open runs and its latest finished run. Other query keys are ignored, as before.
+#[derive(Debug, Default, Deserialize)]
+pub struct MissionDetailQuery {
+    run: Option<String>,
+}
+
 pub async fn mission_detail(
     State(state): State<AppState>,
     Extension(snapshot): Extension<ClientSnapshot>,
     Extension(session): Extension<ClientSession>,
     AxumPath(id): AxumPath<String>,
+    Query(query): Query<MissionDetailQuery>,
 ) -> Result<Json<Value>, ApiError> {
     require_scope(&session, "read.projections")?;
     let store = state.store.clone();
     let snapshot_index = snapshot.store_index;
     let selected = client_detail_id("mission", &id);
+    let requested_run = query.run.filter(|run| !run.is_empty()).map(|run| {
+        if run.starts_with("mission-run/") { run } else { format!("mission-run/{run}") }
+    });
+    let requested = requested_run.clone();
     let mut items = super::blocking_store(move || {
-        let mut items = mission_resources(&store, snapshot_index, true, Some(&selected))?;
+        let mut items = mission_resources_for_run(&store, snapshot_index, true, Some(&selected), requested.as_deref())?;
         // The presentation the missions list publishes for this mission; a read computes none.
         if let Some(published) = store.published_missions_list().newest()
             && let Some(card) = published.rows.cards.get(&selected)
@@ -4321,6 +4376,13 @@ pub async fn mission_detail(
     })
     .await?;
     // A seat whose host keeps its receipts acknowledges a step's wake on that host.
+    if let Some(run) = &requested_run
+        && items.first().is_some_and(|item| {
+            !item["runs"].as_array().is_some_and(|runs| runs.iter().any(|known| known == run))
+        })
+    {
+        return Err(ApiError::not_found("the requested run does not belong to this mission"));
+    }
     fractal_api_core::api::message_reads::relay_client_wakes(&state, &mut items)
         .await
         .map_err(ApiError::internal)?;
