@@ -1,6 +1,6 @@
 use super::*;
 
-const SHIPPED: &str = include_str!("../../../slo/objectives.kdl");
+const SHIPPED: &str = /* sqlite-large-value: allow-for-now lv-ha01213f3c4b5 owner=fractal_kernel::objective_tests TODO=trace-statement-and-value-representation */ include_str!("../../../slo/objectives.kdl");
 
 fn one(text: &str) -> Result<Objective, FractalError> {
     parse_document(&format!("version 2\n{text}")).map(|mut objectives| objectives.remove(0))
