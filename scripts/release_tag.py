@@ -2,6 +2,9 @@
 import base64
 import os
 import subprocess
+import time
+
+from release_gh import delays, transient
 
 
 def run(*args, **kwargs):
@@ -32,7 +35,22 @@ def ensure_tag(repository, tag, sha, *, cwd, call=run):
         if observed != sha:
             raise ValueError('existing tag differs from the candidate SHA')
         return
-    # A concurrent creation rejects the absent-ref lease; never overwrite another publisher.
-    call('git', 'push', f'--force-with-lease={ref}:', remote, f'{sha}:{ref}', cwd=cwd, env=push_env)
+    # Reobserve ambiguous failures without ever weakening the absent-ref lease.
+    waits = delays()
+    for attempt in range(len(waits) + 1):
+        try:
+            call('git', 'push', f'--force-with-lease={ref}:', remote, f'{sha}:{ref}', cwd=cwd, env=push_env)
+            break
+        except subprocess.CalledProcessError as error:
+            observed = target()
+            if observed == sha:
+                return
+            if observed is not None:
+                raise ValueError('existing tag differs from the candidate SHA') from error
+            result = subprocess.CompletedProcess(error.cmd, error.returncode,
+                                                 error.stdout or '', error.stderr or '')
+            if attempt == len(waits) or not transient(result):
+                raise
+            time.sleep(waits[attempt])
     if target() != sha:
         raise ValueError('pushed tag differs from the candidate SHA')

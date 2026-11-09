@@ -82,8 +82,11 @@ Actions artifact.
 The publisher first pushes the immutable tag through Git with an absent-ref lease,
 then creates the release with `--verify-tag`. An existing tag at the same source
 SHA (including an annotated tag's peeled commit) is accepted; a different SHA
-or rejected lease stops before any release write. An interrupted run can leave a
-tag without a release; rerunning resumes against that tag, never replaces it.
+stops before any release write. Failed pushes reobserve the remote: a same-SHA
+winner is accepted, a different SHA is refused, and transient failures with no tag
+retry using the release API retry delays while retaining the absent-ref lease.
+An interrupted run can leave a tag without a release; rerunning resumes against
+that tag, never replaces it. The source commit must exist in the publisher's checkout.
 
 To produce the archive locally, apply the pinned workspace member with `mr apply`,
 then run `nix develop .#web --command node scripts/release-fractal-embed.mjs dist`.
@@ -386,9 +389,11 @@ seven-day retention, or build a fresh candidate.
 After verification it creates the selected tag at the exact approved source SHA if absent
 using a Git push with `--force-with-lease=refs/tags/TAG:` (an absent-ref lease), then publishes
 the existing bytes and notes and proposes compatibility baselines. A pre-existing tag at
-the approved SHA is accepted, including an annotated tag's peeled commit. A rejected lease
-stops without publishing; a retry can resume after a successful push followed by an interrupted
-release edit. The existing `GH_TOKEN` is passed only through Git's HTTP authentication environment.
+the approved SHA is accepted, including an annotated tag's peeled commit. A failed push
+reobserves the tag, accepting a same-SHA winner but refusing a different SHA; transient
+failures with no tag retry with the same absent-ref lease and release API retry delays.
+A retry can resume after a successful push followed by an interrupted release edit.
+The existing `GH_TOKEN` is passed only through Git's HTTP authentication environment.
 Daily draft creation and draft recovery remain untagged; no stable tag is pushed before product GO.
 Candidate runs never advance baselines. Consumers must pin only published release tags,
 not draft candidate version names. Drafts are private and are not available through

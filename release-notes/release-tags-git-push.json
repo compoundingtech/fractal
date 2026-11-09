@@ -7,5 +7,5 @@
   "compatibility": {"status": "none", "detail": "Release archive formats, runtime protocols and supported consumers are unchanged."},
   "downtime": {"status": "none", "detail": "No runtime restart or service interruption is required."},
   "manual": {"status": "none", "detail": "Publishers use the existing job token through Git authentication; no additional operator setup is required."},
-  "recovery": {"status": "none", "detail": "An interrupted push-before-release can leave a correct immutable tag without a release; rerun the publisher to resume. Existing tags at another source SHA and rejected leases stop without release writes."}
+  "recovery": {"status": "none", "detail": "An interrupted push-before-release can leave a correct immutable tag without a release; rerun the publisher to resume. Failed pushes accept a same-SHA winner, refuse a different SHA, and retry transient failures only while the tag remains absent."}
 }
