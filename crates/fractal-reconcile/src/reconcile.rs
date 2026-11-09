@@ -15279,7 +15279,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     ) -> Result<()> {
         let step = self
             .store
-            .step_run(subject)?
+            .step_run_fenced(subject)?
             .context("the feedback step disappeared")?;
         if step.attempt != attempt {
             return Ok(());
@@ -23091,7 +23091,7 @@ mission "orchid/replay" state="ready" {
         reconciler.evaluate_mission_runs().unwrap();
         let pending = serde_json::to_string(&crate::store::Aggregate::RunPart(run.id.clone())).unwrap();
         store.connection.write().execute(
-            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            /* sqlite-large-value: allow-for-now lv-h5a2563345d4d owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
             rusqlite::params![format!("projection-run-rebuild:{pending}"), pending],
         ).unwrap();
         reconciler.reconcile_once().unwrap();
@@ -23128,7 +23128,7 @@ mission "orchid/replay" state="ready" {
         }).unwrap();
         let pending = serde_json::to_string(&crate::store::Aggregate::RunPart(run.id.clone())).unwrap();
         store.connection.write().execute(
-            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            /* sqlite-large-value: allow-for-now lv-hc927df7b03e5 owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
             rusqlite::params![format!("projection-run-rebuild:{pending}"), pending],
         ).unwrap();
         let reconciler = Reconciler::new(
@@ -23180,11 +23180,11 @@ mission "orchid/replay" state="ready" {
             let mut connection = store.connection.write();
             let transaction = connection.transaction().unwrap();
             transaction.execute(
-                "UPDATE step_runs SET title='stale projection' WHERE subject=?1",
+                /* sqlite-large-value: allow-for-now lv-hd5bab3d616a3 owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET title='stale projection' WHERE subject=?1",
                 [&step.subject],
             ).unwrap();
             transaction.execute(
-                "INSERT INTO meta(key,value) VALUES(?1,?2)",
+                /* sqlite-large-value: allow-for-now lv-he0d8cbf77f9b owner=fractal_reconcile::reconcile TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
                 rusqlite::params![format!("projection-run-rebuild:{pending}"), pending],
             ).unwrap();
             transaction.commit().unwrap();

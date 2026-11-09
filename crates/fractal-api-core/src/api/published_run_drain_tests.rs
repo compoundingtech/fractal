@@ -13,7 +13,12 @@ fn backlog() -> (tempfile::TempDir, Arc<Store>, String, String) {
         inputs: BTreeMap::new(), idempotency_key: "drain-publication-run".into(),
     }).unwrap();
     let step = run.steps.iter().find(|step| step.step == "plant").unwrap().subject.clone();
+    // Creating a run leaves its steps pending. Work publications deliberately omit pending
+    // steps; establish the visible old ready row before replication, as the work-list fixtures do.
+    writer.set_step_state(&step, "ready", None).unwrap();
     crate::test_support::replicate(&writer, &reader);
+    assert!(reader.work(None, false).unwrap().iter()
+        .any(|view| view.subject == step && view.status == "ready"));
     reader.set_write_clock_at(now_ms() + 1_000_000).unwrap();
     reader.append_claim(&crate::model::ClaimInput {
         subject: "custom/drain/order".into(), kind: "custom.drain.order".into(), actor: None,

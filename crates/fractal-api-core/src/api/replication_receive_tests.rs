@@ -1,5 +1,6 @@
 use super::*;
 use crate::api::client_push::tests::LogBuffer;
+use fractal_reconcile::PublishedListStore;
 use tracing::instrument::WithSubscriber as _;
 
 fn state(root: &std::path::Path) -> AppState {
@@ -98,6 +99,10 @@ async fn replication_receive_final_drain_failure_retains_marker_and_retry_commit
         requester: Some("person/operator".into()), mode: Some("run".into()),
         inputs: BTreeMap::new(), idempotency_key: "summary-drain-run".into(),
     }).unwrap();
+    // The first receive otherwise appends transport.observed, moving the target beyond
+    // this pending marker's frontier and correctly selecting an unhealthy full replay.
+    // Seed that ordinary receive side effect before arming a final-drain-only failure.
+    state.store.record_transport_observation("summary-source", "up", None, None).unwrap();
     state.store.project_replication_backlog().unwrap();
     let step = &run.steps[0].subject;
     let aggregate = serde_json::to_string(&json!({
@@ -112,12 +117,12 @@ async fn replication_receive_final_drain_failure_retains_marker_and_retry_commit
         ).unwrap();
         assert_ne!(expected_status, "blocked");
         // Simulate the old projection kept behind a committed pending marker.
-        connection.execute("UPDATE step_runs SET status='blocked' WHERE subject=?1", [step]).unwrap();
-        connection.execute("INSERT INTO meta(key,value) VALUES(?1,?2)", [&marker, &aggregate]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-hd7dd9bea739f owner=fractal_api_core::api::replication_receive_tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE step_runs SET status='blocked' WHERE subject=?1", [step]).unwrap();
+        connection.execute(/* sqlite-large-value: allow-for-now lv-h00c99330d254 owner=fractal_api_core::api::replication_receive_tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)", [&marker, &aggregate]).unwrap();
         // Fail after rebuilding but before marker deletion, proving the rebuild rolls back too.
         // The audit trigger observes the rebuilt value at deletion in the successful transaction.
         connection.execute_batch(
-            "CREATE TABLE receive_drain_observation(status TEXT NOT NULL);
+            /* sqlite-large-value: allow-for-now lv-ha561f24a521a owner=fractal_api_core::api::replication_receive_tests TODO=chunk-or-reference-variable-columns */ "CREATE TABLE receive_drain_observation(status TEXT NOT NULL);
              CREATE TRIGGER receive_drain_observe AFTER DELETE ON meta
              WHEN OLD.key GLOB 'projection-run-rebuild:*'
              BEGIN INSERT INTO receive_drain_observation SELECT status FROM step_runs; END;
@@ -129,6 +134,8 @@ async fn replication_receive_final_drain_failure_retains_marker_and_retry_commit
     // Arm the existing deferred state without a new production/test-only injection API.
     assert!(!state.store.project_replication_backlog().unwrap());
     assert!(state.store.replication_projection_deferred());
+    let drain_cut = state.store.index().unwrap();
+    assert_eq!(state.store.projection_frontier().unwrap(), drain_cut);
     let source = Store::open_memory("summary-source").unwrap();
     let exchange = source.export_replication_summary("summary-fleet").unwrap();
     let request = ReplicationReceiveRequest {
@@ -145,6 +152,7 @@ async fn replication_receive_final_drain_failure_retains_marker_and_retry_commit
             let _ = replication_receive(
                 State(state.clone()), axum::http::HeaderMap::new(), Json(request.clone()),
             ).await.unwrap();
+            assert_eq!(state.store.index().unwrap(), drain_cut, "receive must not add source claims before the final drain");
             let connection = state.store.connection.write();
             let pending: bool = connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)", [&marker], |row| row.get(0),
@@ -163,7 +171,7 @@ async fn replication_receive_final_drain_failure_retains_marker_and_retry_commit
                 assert!(pending);
                 assert_eq!(status, "blocked", "the failed drain must roll back its rebuild");
                 assert!(observed.is_empty());
-                connection.execute_batch("DROP TRIGGER receive_drain_fail").unwrap();
+                connection.execute_batch(/* sqlite-large-value: allow-for-now lv-h4bc9d78adbcf owner=fractal_api_core::api::replication_receive_tests TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER receive_drain_fail").unwrap();
             }
             drop(connection);
             let bytes = logs.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -175,9 +183,11 @@ async fn replication_receive_final_drain_failure_retains_marker_and_retry_commit
             if retry {
                 assert!(summary.contains("outcome=ok"), "{summary}");
                 assert!(summary.contains("projection_stage=-"), "{summary}");
+                assert!(summary.contains("projection_chunks=1"), "{summary}");
             } else {
                 assert!(summary.contains("outcome=internal"), "{summary}");
                 assert!(summary.contains("projection_stage=final-drain"), "{summary}");
+                assert!(summary.contains("projection_chunks=0"), "{summary}");
             }
         }
     }.with_subscriber(subscriber).await;

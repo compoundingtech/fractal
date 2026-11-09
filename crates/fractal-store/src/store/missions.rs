@@ -281,21 +281,13 @@ impl Store {
             }))
             .map_err(internal)?,
         ));
-        // The lend records where its hold goes; scheduled starts at :00 and :30 queue every write
-        // behind it. Nothing in it asks this thread for another writer loan.
+        // Admission and capacity decisions see all pending run parts under one writer fence.
         let stages = holds::Stages::begin();
-        let mut connection = self.connection.write();
-        let transaction = connection.transaction().map_err(internal)?;
+        self.with_all_runs_fenced(|transaction| {
         let subject = occurrence_subject.map(str::to_owned).unwrap_or_else(|| {
             self.mission_run_subject_for_idempotency_key(&request.idempotency_key)
         });
-        let mut drained = finish_run_projection_tx(&transaction, &subject)?;
-        if let Some(child) = &child {
-            drained |= finish_run_projection_tx(
-                &transaction,
-                &format!("mission-run/{}", child.root_run_id),
-            )?;
-        }
+        // The wrapper drains every run before checking an occurrence or global capacity.
         stages.enter("existing-occurrence");
         if let Some(subject) = occurrence_subject
             && let Some(run) = transaction
@@ -308,9 +300,6 @@ impl Store {
                 .map_err(internal)?
         {
             let view = mission_run_view_tx(&transaction, &run).map_err(internal)?;
-            transaction.commit().map_err(internal)?;
-            drop(connection);
-            if drained { self.run_projection_finished(); }
             return Ok(view);
         }
         stages.enter("idempotency");
@@ -331,9 +320,6 @@ impl Store {
                 ));
             }
             let view = serde_json::from_str(&response).map_err(internal)?;
-            transaction.commit().map_err(internal)?;
-            drop(connection);
-            if drained { self.run_projection_finished(); }
             return Ok(view);
         }
         stages.enter("admission");
@@ -568,11 +554,8 @@ impl Store {
                 params![opaque_cache_key(&request.idempotency_key), request_hash],
             )
             .map_err(internal)?;
-        stages.enter("commit");
-        transaction.commit().map_err(internal)?;
-        drop(connection);
-        if drained { self.run_projection_finished(); }
         Ok(view)
+        })
     }
 
     pub fn mission_run(&self, run: &str) -> Result<Option<MissionRunView>> {
@@ -699,25 +682,30 @@ impl Store {
 
     pub fn step_run(&self, subject: &str) -> Result<Option<StepRunView>> {
         let subject = normalize_step_run(subject);
-        let mut connection = self.connection.write();
-        let transaction = connection.transaction()?;
-        let drained = finish_run_projection_tx(&transaction, &subject)?;
-        let mut view = transaction
+        let connection = self.readers.get();
+        Self::step_run_view(&connection, &subject)
+    }
+
+    /// Mutation prechecks need the admitted tree; ordinary read endpoints use `step_run`.
+    pub fn step_run_fenced(&self, subject: &str) -> Result<Option<StepRunView>> {
+        let subject = normalize_step_run(subject);
+        self.with_run_fence(&subject, |transaction| Self::step_run_view(transaction, &subject))
+    }
+
+    fn step_run_view(connection: &Connection, subject: &str) -> Result<Option<StepRunView>> {
+        let mut view = connection
             .query_row(
                 "SELECT subject, run_id, step_path, definition_hash, status, attempt, assignee, available_to, agentless, title, goals, worker_reported,
                         lease_owner, lease_incarnation, lease_expires_at_unix_ms, blocked_reason, not_before_unix_ms, created_at_unix_ms, updated_at_unix_ms, readiness_epoch, constraints
                  FROM step_runs WHERE subject=?1",
-                [subject],
+                [&subject],
                 step_run_from_row,
             )
             .optional()
             .map_err(anyhow::Error::from)?;
         if let Some(view) = &mut view {
-            enrich_step_queue(&transaction, view)?;
+            enrich_step_queue(&connection, view)?;
         }
-        transaction.commit()?;
-        drop(connection);
-        if drained { self.run_projection_finished(); }
         Ok(view)
     }
 

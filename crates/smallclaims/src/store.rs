@@ -8992,7 +8992,7 @@ impl Store {
                         transaction.rollback()?;
                     } else {
                         transaction.execute(
-                            /* sqlite-large-value: allow-for-now lv-h50cb263d1821 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms, error_code)
+                            /* sqlite-large-value: allow-for-now lv-hbfbbc30b5bd5 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms, error_code)
                              VALUES ('graph', ?3, ?1, ?2, ?4)
                              ON CONFLICT(aggregate) DO UPDATE SET status=excluded.status, last_good_store_index=excluded.last_good_store_index,
                                 error_code=?4, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",

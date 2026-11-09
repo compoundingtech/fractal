@@ -7598,7 +7598,7 @@ fn validate_work_fence(state: &AppState, target: &str, fence: &Fence) -> Result<
     let target = client_detail_id("step-run", target);
     let work = state
         .store
-        .step_run(&target)
+        .step_run_fenced(&target)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("work `{target}` does not exist")))?;
     if fence.mission_generation.as_deref() != Some(work.generation.as_str())

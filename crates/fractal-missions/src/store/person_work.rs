@@ -428,7 +428,7 @@ impl PersonWorkStore for Store {
         }
         let now = now_ms();
         let subject = normalize_step_run(input.step.as_deref().expect("existing-run ask has a step"));
-        adhoc_work::with_run_projection(self, &subject, |tx| {
+        self.with_run_fence(&subject, |tx| {
             let mut stable_input;
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
             let input = if actor == input.actor { input } else {
@@ -540,7 +540,7 @@ impl PersonWorkStore for Store {
         };
         let deadlines = self.ask_deadlines();
         let subject = normalize_step_run(&input.subject);
-        adhoc_work::with_run_projection(self, &subject, |tx| {
+        self.with_run_fence(&subject, |tx| {
             let mut stable_input;
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
             let input = if actor == input.actor { input } else {
@@ -875,7 +875,7 @@ impl PersonWorkStore for Store {
         }
         let structured = canonical_request(input)?;
         let about = structured["about"].as_str().unwrap_or_default().to_owned();
-        self.connection.batched(|tx| {
+        self.with_all_runs_fenced(|tx| {
             let mut stable_input;
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
             let input = if actor == input.actor { input } else {
@@ -892,7 +892,7 @@ impl PersonWorkStore for Store {
                     input.person)));
             }
             self.append_update_tx(tx, &input.actor, &input.person, &input.title, &input.reason, &input.idempotency_key, &structured)
-        }).map_err(internal)?
+        })
     }
 
     fn tell_ask_ended(&self, tx: &Transaction<'_>, ask: &ClaimRecord) -> Result<()> {
@@ -982,7 +982,7 @@ impl PersonWorkStore for Store {
         }
         let structured = canonical_request(input)?;
         let deadline = deadline_and_default(input, &structured, self.ask_deadlines().then(|| self.default_ask_deadline_ms()), now_ms())?;
-        self.connection.batched(|tx| {
+        self.with_all_runs_fenced(|tx| {
             let mut stable_input;
             let actor = fractal_store::store::identities::resolve_reference_conn(tx, &input.actor)?;
             let input = if actor == input.actor { input } else {
@@ -1026,7 +1026,7 @@ impl PersonWorkStore for Store {
                     "waiting_since": waiting_since, "legacy_request": input.legacy_request}}), &structured), &deadline), &evidence, None).map_err(claim_append_error)?;
             project(tx, &claim)?;
             step(tx, &subject).map_err(internal)?.ok_or_else(|| FractalError::new("missing-step-run", "the ask could not be projected"))
-        }).map_err(internal)?
+        })
     }
 }
 

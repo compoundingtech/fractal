@@ -1131,11 +1131,14 @@ final graph against canonical replay.
 Run-part rebuilds queued by these chunks remain pending durably until their canonical tree is
 rebuilt. Reconciliation and dispatch skip a pending part; the committed drain records a local
 `run-projection.finished` observation for each rebuilt run so its readers re-evaluate on the normal
-change notification, without a retry timer. External work, cancellation and revision actions drain
-their part inside their own writer transaction before reading its tree, then invalidate published
-views after commit. Generation and attempt fences are checked against that drained tree: a
-superseded cancellation or revision approval is refused rather than applied to the old generation.
-Queue and lane mutations likewise drain before their transactional admission checks.
+change notification, without a retry timer. Mission/run mutations enter through two central
+transaction fences. `with_run_fence` drains the named run or step's part and its ancestor root's
+part before own-work decisions, including lease renewals. `with_all_runs_fenced` drains every
+pending part before descendant, capacity, retirement or repair decisions. Queue, lane and attention
+claim admission uses the same selector inside its existing writer transaction, without nesting
+another writer. Published views are invalidated only after commit. Generation and attempt fences
+are checked against the drained tree: a superseded cancellation or revision approval is refused
+rather than applied to the old generation.
 Later receive chunks can queue that part again. Read APIs retain their existing catch-up behavior;
 this fence does not introduce a new response field or change the client wire format.
 

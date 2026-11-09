@@ -2732,8 +2732,7 @@ impl Store {
             let transaction = connection.unchecked_transaction()?;
             run_projection_pending_tx(&transaction, subject).map_err(anyhow::Error::new)
         } else {
-            pending_run_for_subject_tx(&connection, subject)
-                .map(|pending| pending.is_some()).map_err(anyhow::Error::new)
+            run_and_root_projection_pending(&connection, subject).map_err(anyhow::Error::new)
         }
     }
 
@@ -2741,6 +2740,35 @@ impl Store {
     /// Call only after the transaction containing `finish_run_projection_tx` committed.
     pub fn run_projection_finished(&self) {
         self.fractal.projection_advanced(true);
+    }
+
+    /// Fence a mutation that reads its own run or step and the ancestor root.
+    pub fn with_run_fence<T: Send, E: From<FractalError> + Send>(
+        &self,
+        subject: &str,
+        action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E> + Send,
+    ) -> std::result::Result<T, E> {
+        let (value, drained) = self.connection.batched(|transaction| {
+            let drained = finish_run_mutation_fence_tx(transaction, RunMutationFence::Run(subject))
+                .map_err(E::from)?;
+            action(transaction).map(|value| (value, drained))
+        }).map_err(|error| E::from(internal(error)))??;
+        if drained { self.run_projection_finished(); }
+        Ok(value)
+    }
+
+    /// Fence a mutation that reads descendants, capacity or other cross-run state.
+    pub fn with_all_runs_fenced<T: Send, E: From<FractalError> + Send>(
+        &self,
+        action: impl FnOnce(&Transaction<'_>) -> std::result::Result<T, E> + Send,
+    ) -> std::result::Result<T, E> {
+        let (value, drained) = self.connection.batched(|transaction| {
+            let drained = finish_run_mutation_fence_tx(transaction, RunMutationFence::All)
+                .map_err(E::from)?;
+            action(transaction).map(|value| (value, drained))
+        }).map_err(|error| E::from(internal(error)))??;
+        if drained { self.run_projection_finished(); }
+        Ok(value)
     }
 
     /// The explicitly registered keyed views for this graph. This getter performs no reads
@@ -3341,8 +3369,7 @@ impl Store {
         fractal_missions_base::declared_admission::validate_publication(intent)?;
         crate::graph::validate_mission_runtimes(intent, &self.origin)?;
         let publication::CommitChecks { owned, guard } = checks;
-        self.connection
-            .batched(|transaction| -> Result<ApplyResponse, FractalError> {
+        let apply = |transaction: &Transaction<'_>| -> Result<ApplyResponse, FractalError> {
                 declared_admission::validate_publication(transaction, &self.origin, intent)?;
                 let normalized_intent = identities::normalize_intent(transaction, intent)?;
                 let intent = normalized_intent.as_ref();
@@ -4245,27 +4272,31 @@ impl Store {
                     )
                     .map_err(internal)?;
                 cache_local_apply_receipt_tx(transaction,response,local_receipt,idempotency_key)
-            })
-            .map_err(|error| FractalError::new("internal", error))?
+            };
+        if intent.mission_runs.is_empty() {
+            self.connection.batched(apply)
+                .map_err(|error| FractalError::new("internal", error))?
+        } else {
+            self.with_all_runs_fenced(apply)
+        }
     }
 
     pub fn append_claim(&self, input: &ClaimInput) -> Result<ClaimRecord, FractalError> {
         self.append_claim_outcome(input).map(|(claim, _)| claim)
     }
 
-    /// Revalidate a run action after draining its pending projection, in the claim's own
+    /// Revalidate a cross-run action after draining all pending parts, in the claim's own
     /// transaction. Operation replays and mismatches retain ordinary append precedence.
     pub fn append_claim_with_run_projection(
         &self,
         input: &ClaimInput,
-        subjects: &[String],
         admission: &ClaimAdmission<'_>,
     ) -> Result<ClaimRecord, FractalError> {
         let (claim, _) = append_claim_with_commit_context(
             &self.graph, input, None, None, None, None,
             ClaimCommitContext {
                 admission: Some(admission),
-                run_projection_subjects: subjects,
+                all_run_projections: true,
                 ..Default::default()
             },
         )?;
@@ -4835,8 +4866,7 @@ impl Store {
     ) -> Result<OperationalRepairResult, FractalError> {
         let (digest, filter) = decode_repair_token(token)?;
         let repair_subject = format!("repair/{digest}");
-        let mut connection = self.connection.write();
-        let transaction = connection.transaction().map_err(internal)?;
+        self.with_all_runs_fenced(|transaction| {
         if let Some(receipt) = transaction
             .query_row(
                 /* sqlite-large-value: allow-for-now lv-h689aadac7c87 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &canonical_sql(
@@ -4862,7 +4892,6 @@ impl Store {
                 .collect::<Vec<_>>();
             affected_subjects.sort();
             affected_subjects.dedup();
-            transaction.commit().map_err(internal)?;
             return Ok(OperationalRepairResult {
                 api_version: "st3.operational-repair.v0".into(),
                 token: token.into(),
@@ -4873,13 +4902,6 @@ impl Store {
                 receipt_claim_id: Some(receipt.0),
             });
         }
-        // The approval token binds projected evidence. Recompute it only after committed
-        // run claims are reflected in the same writer snapshot used by the repair.
-        let drained = projection_work_pending_tx(&transaction)?;
-        while projection_work_pending_tx(&transaction)? {
-            finish_projection_work_tx(&transaction)?;
-        }
-
         let plan = filter_repair_plan(operational_repair_plan_with_legacy_starts_tx(
             &transaction, now_ms(), &self.origin, native_evidence,
         ).map_err(internal)?, &filter).map_err(internal)?;
@@ -4895,9 +4917,6 @@ impl Store {
             .with_detail("current_token", plan.token));
         }
         if plan.items.is_empty() {
-            transaction.commit().map_err(internal)?;
-            drop(connection);
-            if drained { self.run_projection_finished(); }
             return Ok(OperationalRepairResult {
                 api_version: plan.api_version,
                 token: token.into(),
@@ -5095,9 +5114,6 @@ impl Store {
             None,
         )
         .map_err(internal)?;
-        transaction.commit().map_err(internal)?;
-        drop(connection);
-        if drained { self.run_projection_finished(); }
         Ok(OperationalRepairResult {
             api_version: plan.api_version,
             token: token.into(),
@@ -5106,6 +5122,7 @@ impl Store {
             affected_subjects,
             claim_ids,
             receipt_claim_id: Some(receipt.id),
+        })
         })
     }
 
@@ -17124,7 +17141,7 @@ fn rebuild_pending_run_tx(transaction: &Transaction<'_>, aggregate: &Aggregate) 
         Aggregate::RunPart(top) => holds::stage("rebuild-part", || rebuild_run_part_tx(transaction, top))?,
         _ => return Err(FractalError::new("invalid-pending-rebuild", "pending rebuild is not a run aggregate")),
     }
-    transaction.execute("DELETE FROM meta WHERE key=?1", [pending_run_rebuild_key(aggregate)?])
+    transaction.execute(/* sqlite-large-value: allow-for-now lv-h8a1016207aaf owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [pending_run_rebuild_key(aggregate)?])
         .map_err(internal)?;
     if let Aggregate::RunTree(root) = &effective {
         for pending in pending_run_rebuilds_tx(transaction)? {
@@ -17133,14 +17150,14 @@ fn rebuild_pending_run_tx(transaction: &Transaction<'_>, aggregate: &Aggregate) 
                 _ => continue,
             };
             if run_tree_of_tx(transaction, &format!("mission-run/{top}"))?.as_ref() == Some(root) {
-                transaction.execute("DELETE FROM meta WHERE key=?1", [pending_run_rebuild_key(&pending)?])
+                transaction.execute(/* sqlite-large-value: allow-for-now lv-hb06ed251a5f3 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key=?1", [pending_run_rebuild_key(&pending)?])
                     .map_err(internal)?;
             }
         }
     }
     if !projection_work_pending_tx(transaction)? {
         transaction.execute(
-            "UPDATE projection_health SET status='healthy',error_code=NULL,error_message=NULL
+            /* sqlite-large-value: allow-for-now lv-h4aef87558ab0 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "UPDATE projection_health SET status='healthy',error_code=NULL,error_message=NULL
              WHERE aggregate='graph' AND error_code='pending-projection-work'",
             [],
         ).map_err(internal)?;
@@ -17190,13 +17207,31 @@ fn pending_run_for_subject_tx(
     Ok(None)
 }
 
-/// Decision paths must not act on a run whose committed claims await a tree rebuild.
+/// Decision paths wait for both their run's part and its ancestor root's part.
 /// Read-only views may continue serving the previously published tree while it is pending.
 pub fn run_projection_pending_tx(
     transaction: &Transaction<'_>,
     subject: &str,
 ) -> Result<bool, FractalError> {
-    Ok(pending_run_for_subject_tx(transaction, subject)?.is_some())
+    run_and_root_projection_pending(transaction, subject)
+}
+
+fn run_and_root_projection_pending(
+    connection: &Connection,
+    subject: &str,
+) -> Result<bool, FractalError> {
+    if !projection_work_pending_tx(connection)? {
+        return Ok(false);
+    }
+    if pending_run_for_subject_tx(connection, subject)?.is_some() {
+        return Ok(true);
+    }
+    let Some(root) = run_tree_of_tx(connection, subject)? else {
+        return Ok(false);
+    };
+    let root = format!("mission-run/{root}");
+    smallclaims::touched::note_read(|| root.clone());
+    Ok(pending_run_for_subject_tx(connection, &root)?.is_some())
 }
 
 /// A local writer drains its run's pending part before making a decision from projected rows.
@@ -17221,6 +17256,34 @@ pub fn finish_all_run_projections_tx(
         finish_projection_work_tx(transaction)?;
     }
     Ok(drained)
+}
+
+enum RunMutationFence<'a> {
+    Run(&'a str),
+    All,
+}
+
+// Append admission already owns its writer transaction; use the same selector without
+// nesting a writer loan. Unrelated claims do not request a run fence.
+fn finish_run_mutation_fence_tx(
+    transaction: &Transaction<'_>,
+    fence: RunMutationFence<'_>,
+) -> Result<bool, FractalError> {
+    match fence {
+        RunMutationFence::Run(subject) => {
+            if !projection_work_pending_tx(transaction)? {
+                return Ok(false);
+            }
+            let root = run_tree_of_tx(transaction, subject)?;
+            let mut drained = false;
+            if let Some(root) = root {
+                drained |= finish_run_projection_tx(transaction, &format!("mission-run/{root}"))?;
+            }
+            drained |= finish_run_projection_tx(transaction, subject)?;
+            Ok(drained)
+        }
+        RunMutationFence::All => finish_all_run_projections_tx(transaction),
+    }
 }
 
 pub fn try_project_simple_replication_tx(
@@ -17823,13 +17886,13 @@ fn try_project_simple_replication_inner_tx(
         })?;
     }
     if defer_runs {
-        transaction.execute("DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-heceb932b7114 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
             .map_err(internal)?;
     }
     for aggregate in trees {
         if defer_runs {
             let value = serde_json::to_string(aggregate).map_err(internal)?;
-            transaction.execute("INSERT INTO meta(key,value) VALUES(?1,?2)",
+            transaction.execute(/* sqlite-large-value: allow-for-now lv-h9138a3691eef owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
                 params![pending_run_rebuild_key(aggregate)?, value]).map_err(internal)?;
             continue;
         }
@@ -17851,7 +17914,7 @@ fn try_project_simple_replication_inner_tx(
         })?;
     }
     if !defer_runs {
-        transaction.execute("DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hec593db44a4b owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
             .map_err(internal)?;
     }
     match planning_sessions {
@@ -17952,7 +18015,7 @@ fn replay_graph_from_nothing_with_progress_tx(
             }
         }
         note_run_projection_finished_tx(transaction, &finished)?;
-        transaction.execute("DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h801bff7f7812 owner=fractal_store::store TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM meta WHERE key GLOB ?1", [PENDING_RUN_REBUILD])
             .map_err(internal)?;
     }
     Ok(())
@@ -22785,6 +22848,10 @@ pub fn expire_work_lease_by_claim(store: &Store, subject: &str, actor: &str, inc
 
 #[cfg(test)]
 pub mod tests;
+#[cfg(test)]
+mod real_part_rebuild_bench;
+#[cfg(test)]
+mod real_part_fence_bench;
 
 /// The projected tables the graph digest commits: digest label, table, digested columns in
 /// order, and row order. Triggers built from the same list bump `graph_generation` whenever one
@@ -22973,8 +23040,8 @@ pub struct ClaimCommitContext<'a> {
     pub run_projection_subjects: &'a [String],
     /// Implicit cross-run selection needs the entire pending set, not an optimistic candidate.
     pub all_run_projections: bool,
-    /// Derive persisted fields from the admitted projection, retaining the request's identity.
-    pub prepare_fields: Option<&'a ClaimFieldPreparation<'a>>,
+    /// Derive request fields before hashing, preserving the base operation digest format.
+    pub prepare_request_fields: Option<&'a ClaimFieldPreparation<'a>>,
     pub assistant: Option<&'a assistant_write::AssistantWriteAuthorization>,
     pub native_receipt: Option<&'a crate::conversation_delivery::NativeReceipt>,
     /// Dedicated client operations publish a native receipt in the same transaction.
@@ -23071,6 +23138,22 @@ pub fn append_claim_with_commit_context(
                 assistant_input.fields.insert("assistant_session_actor".into(), json!(authorization.actor));
                 &assistant_input
             } else { input };
+            let mut prepared_input;
+            let input = if let Some(prepare) = context.prepare_request_fields {
+                let recorded = if let Some((operation, _)) = identities::claim_operation(input)? {
+                    operation_tx(transaction, &operation).map_err(internal)?.is_some()
+                } else { false };
+                if !recorded {
+                    if context.all_run_projections || context.run_projection_subjects.len() > 1 {
+                        finish_run_mutation_fence_tx(transaction, RunMutationFence::All)?;
+                    } else if let Some(subject) = context.run_projection_subjects.first() {
+                        finish_run_mutation_fence_tx(transaction, RunMutationFence::Run(subject))?;
+                    }
+                }
+                prepared_input = input.clone();
+                prepared_input.fields = prepare(transaction, input)?;
+                &prepared_input
+            } else { input };
             let operation = identities::claim_operation(input)?;
             if let Some((subject, revision, current)) = observer_completion {
                 check_observer_completion(transaction, subject, revision, Some(current))?;
@@ -23144,14 +23227,10 @@ pub fn append_claim_with_commit_context(
             }
             // Replays and key/body mismatches settle before lifecycle admission. A new send
             // and retirement serialize here, in the same savepoint as their durable claims.
-            if context.all_run_projections {
-                while projection_work_pending_tx(transaction)? {
-                    finish_projection_work_tx(transaction)?;
-                }
-            } else {
-                for subject in context.run_projection_subjects {
-                    finish_run_projection_tx(transaction, subject)?;
-                }
+            if context.all_run_projections || context.run_projection_subjects.len() > 1 {
+                finish_run_mutation_fence_tx(transaction, RunMutationFence::All)?;
+            } else if let Some(subject) = context.run_projection_subjects.first() {
+                finish_run_mutation_fence_tx(transaction, RunMutationFence::Run(subject))?;
             }
             admission(transaction)?;
             if let Some(expected_subjects) = expected_subjects {
@@ -23264,9 +23343,6 @@ pub fn append_claim_with_commit_context(
                 return Ok((existing, false));
             }
             let mut stored_fields = custom::prepare(transaction, input)?;
-            if let Some(prepare) = context.prepare_fields {
-                stored_fields = Some(prepare(transaction, input)?);
-            }
             if let Some(fields) = normalize_resource_observation(transaction, input)? {
                 stored_fields = Some(fields);
             }

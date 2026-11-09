@@ -1,3 +1,5 @@
+#[path = "huge_part_digest.rs"] mod huge_part_digest;
+#[path = "huge_part_snapshot.rs"] mod huge_part_snapshot;
 // Keep this file identical on the base and head revisions: all fixture APIs predate coalescing.
 use super::*;
 use super::coalesce_run_part_rebuild::write_coalesced_rebuild_backlog;
@@ -123,6 +125,7 @@ fn measure(children: usize, steps_per_run: usize, extra_generations: usize, hist
     // rebuild_ms is the complete single-claim receive/admit/project wall time, not a span
     // timer inside SQLite. longest_hold uses the same managed-writer observer as the old bench.
     let elapsed = started.elapsed();
+    huge_part_digest::print_part_digest(&worker.connection.write(), &runs.iter().map(|run| run.id.clone()).collect(), &subjects);
     let rebuilds = RUN_TREE_REBUILDS.with(std::cell::Cell::get);
     let part_runs = RUN_PART_RUNS.with(std::cell::Cell::get);
     let gate = elapsed <= std::time::Duration::from_secs(15)

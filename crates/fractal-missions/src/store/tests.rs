@@ -23,6 +23,8 @@ use super::*;
 use crate::graph::parse_test_intent as parse_intent;
 use proptest::prelude::*;
 mod huge_part_rebuild_bench;
+mod run_projection_fence_cost;
+mod run_mutation_writer_guard;
 use fractal_delivery::store::shared_missions::*;
 use fractal_delivery::store::shared_missions::{RUN_TREE_REBUILDS, STEP_TIMING_FOLD_CALLS, STEP_TIMING_ROWS_PARSED};
 use fractal_delivery::store::shared_seats_shared_missions::*;
@@ -96,7 +98,7 @@ fn operational_repair_rejects_expired_lease_token_after_pending_renewal() {
         ).unwrap();
         let aggregate = serde_json::to_string(&Aggregate::RunPart(run.id.clone())).unwrap();
         transaction.execute(
-            "INSERT INTO meta(key,value) VALUES(?1,?2)",
+            /* sqlite-large-value: allow-for-now lv-hc9da72f0670e owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
             params![format!("projection-run-rebuild:{aggregate}"), aggregate],
         ).unwrap();
         transaction.commit().unwrap();
@@ -106,7 +108,7 @@ fn operational_repair_rejects_expired_lease_token_after_pending_renewal() {
     assert_eq!(error.code, "stale-repair-plan");
     assert_eq!(store.index().unwrap(), before, "stale repair writes no release claim");
     assert!(store.run_projection_pending(&run.subject).unwrap(), "refusal rolls back its speculative drain");
-    let renewed = store.step_run(subject).unwrap().unwrap();
+    let renewed = store.step_run_fenced(subject).unwrap().unwrap();
     assert_eq!(renewed.claimant.as_deref(), Some("agent/node.worker"));
     assert_eq!(renewed.claim_incarnation.as_deref(), Some("one"));
     assert_eq!(renewed.claim_expires_at_unix_ms, Some(expiry));
@@ -144,11 +146,11 @@ fn restore_pending_generation(store: &Store, first: &MissionRunView) {
     let mut connection = store.connection.write();
     let transaction = connection.transaction().unwrap();
     transaction.execute(
-        "UPDATE mission_runs SET current_generation_id=?2 WHERE id=?1",
+        /* sqlite-large-value: allow-for-now lv-h73d3dc893f08 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "UPDATE mission_runs SET current_generation_id=?2 WHERE id=?1",
         params![first.id, generation_id_from_subject(&first.generation)],
     ).unwrap();
     transaction.execute(
-        "INSERT INTO meta(key,value) VALUES(?1,?2)",
+        /* sqlite-large-value: allow-for-now lv-hf24507980846 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,?2)",
         params![format!("projection-run-rebuild:{pending}"), pending],
     ).unwrap();
     transaction.commit().unwrap();
@@ -170,9 +172,9 @@ fn cancellation_drains_current_generation_and_unprojected_descendants() {
     {
         let mut connection = store.connection.write();
         let transaction = connection.transaction().unwrap();
-        transaction.execute("DELETE FROM step_runs WHERE run_id=?1", [&child.id]).unwrap();
-        transaction.execute("DELETE FROM run_generations WHERE run_id=?1", [&child.id]).unwrap();
-        transaction.execute("DELETE FROM mission_runs WHERE id=?1", [&child.id]).unwrap();
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h43d796c2dd69 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs WHERE run_id=?1", [&child.id]).unwrap();
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-hf5140af438b4 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM run_generations WHERE run_id=?1", [&child.id]).unwrap();
+        transaction.execute(/* sqlite-large-value: allow-for-now lv-h81f8c3a10c9a owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id=?1", [&child.id]).unwrap();
         transaction.commit().unwrap();
     }
     restore_pending_generation(&store, &first);
@@ -192,6 +194,157 @@ fn cancellation_drains_current_generation_and_unprojected_descendants() {
         assert!(run.steps.iter().all(|step| matches!(step.status.as_str(), "completed" | "failed" | "cancelled")));
     }
     assert!(store.work(None, false).unwrap().is_empty());
+}
+
+#[test]
+fn root_cancellation_and_descendant_termination_drain_only_the_reopened_child_part() {
+    for cancel_root in [true, false] {
+        let (controller, worker, root, children) = replicated_run_tree(1);
+        let child = &children[0];
+        controller.set_step_state(
+            &child.steps[0].subject, "failed", Some("retryable child failure"),
+        ).unwrap();
+        controller.set_mission_run_state(&child.id, "failed", "terminal", None).unwrap();
+        replicate_fully(&controller, &worker);
+        let terminal = worker.mission_run(&child.id).unwrap().unwrap();
+        assert_eq!(terminal.status, "failed");
+        // The local retry API disallows child reopening. Model the admitted remote
+        // structural claims directly, using the same generation/state shape as adoption;
+        // this regression covers projection fencing, not that external API restriction.
+        let successor = format!("{}-reopened", terminal.generation);
+        {
+            let mut connection = controller.connection.write();
+            let transaction = connection.transaction().unwrap();
+            for (subject, kind, fields) in [
+                (terminal.generation.as_str(), "run-generation.superseded", json!({
+                    "status": "superseded", "successor": successor, "reason": "retry child work",
+                })),
+                (successor.as_str(), "run-generation.created", json!({
+                    "run": terminal.subject, "revision": terminal.revision,
+                    "predecessor": terminal.generation, "status": "running",
+                    "reason": "retry child work", "compatible_steps": [],
+                })),
+                (terminal.subject.as_str(), "mission-run.state", json!({
+                    "status": "running", "phase": "normal",
+                    "previous_phase": "terminal", "reason": "retry child work",
+                })),
+            ] {
+                append_claim_tx(
+                    &transaction, &controller.origin, subject, kind, Some("person/operator"),
+                    &json!({"fields": fields}), &[], None,
+                ).unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+        controller.replay_replication_graph().unwrap();
+        let reopened = controller.mission_run(&child.id).unwrap().unwrap();
+        assert_eq!(reopened.generation, successor);
+        assert_eq!(reopened.steps.len(), 1);
+        assert_eq!(reopened.steps[0].status, "pending");
+        assert_eq!(reopened.status, "running");
+        assert_ne!(reopened.generation, terminal.generation);
+        receive_until_run_projection_is_pending(&controller, &worker);
+
+        // The root is clean: a root-only fence must not accidentally pass this regression.
+        let markers = worker.readers.get().prepare(
+            "SELECT value FROM meta WHERE key GLOB 'projection-run-rebuild:*' ORDER BY key",
+        ).unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        assert_eq!(markers, vec![serde_json::to_string(&Aggregate::RunPart(child.id.clone())).unwrap()]);
+        assert!(!worker.run_projection_pending(&root.subject).unwrap());
+        assert!(worker.run_projection_pending(&child.subject).unwrap());
+        let stale = worker.mission_run(&child.id).unwrap().unwrap();
+        assert_eq!(stale.status, "failed");
+        assert_eq!(stale.generation, terminal.generation);
+
+        if cancel_root {
+            assert!(worker.request_mission_run_cancellation(
+                &root.subject, "cancel the root and reopened child",
+            ).unwrap());
+        } else {
+            assert!(worker.terminate_mission_run_descendants(
+                &root.subject, "terminate the reopened child",
+            ).unwrap());
+            let unchanged_root = worker.mission_run(&root.id).unwrap().unwrap();
+            assert_eq!(unchanged_root.generation, root.generation);
+            assert_eq!(unchanged_root.steps[0].status, root.steps[0].status);
+        }
+        let cancelled = worker.mission_run(&child.id).unwrap().unwrap();
+        assert_eq!(cancelled.generation, reopened.generation);
+        assert!(cancelled.steps.iter().all(|step| step.status == "cancelled"));
+        assert_eq!(cancelled.status, "cancelled");
+        assert!(!worker.run_projection_pending(&child.subject).unwrap());
+    }
+}
+
+#[test]
+fn capacity_refuses_creation_and_reopening_adoption_with_another_pending_reopen() {
+    for adopt in [false, true] {
+        let source = Store::open_memory("controller").unwrap();
+        let target = Store::open_memory("worker").unwrap();
+        source.bind_fleet(TEST_FLEET).unwrap();
+        target.bind_fleet(TEST_FLEET).unwrap();
+        // TAKEOVER_SOURCE has the default max_active_runs=1.
+        let failed = failed_takeover_run(&source, &["deploy-check"]);
+        let request = |key: &str| MissionRunRequest {
+            mission: "takeover".into(), revision: None, workspace: "/tmp".into(),
+            requester: Some("person/requester".into()), mode: Some("run".into()),
+            inputs: BTreeMap::new(), idempotency_key: key.into(),
+        };
+        let other = source.create_mission_run(&request("other-terminal-run")).unwrap();
+        for step in &other.steps {
+            source.set_step_state(
+                &step.subject,
+                if step.step == "deploy-check" { "failed" } else { "completed" },
+                None,
+            ).unwrap();
+        }
+        source.set_mission_run_state(&other.id, "failed", "terminal", None).unwrap();
+        let revised = publish_takeover(
+            &source,
+            &TAKEOVER_SOURCE.replace(
+                r#"step "smoke-check" { depends-on"#,
+                r#"step "smoke-check" { goal "Probe the new health endpoint."; depends-on"#,
+            ),
+            "pending-capacity-revision",
+        );
+        replicate_fully(&source, &target);
+        assert!(target.active_mission_runs_for_mission("takeover").unwrap().is_empty());
+        let reopened = source.retry_failed_step(
+            &takeover_step(&failed, "deploy-check").subject,
+            "person/operator", "retry the failed check", "pending-capacity-reopen",
+        ).unwrap();
+        assert_eq!(reopened.status, "running");
+        assert_ne!(reopened.generation, failed.generation);
+        receive_until_run_projection_is_pending(&source, &target);
+        assert!(target.run_projection_pending(&failed.subject).unwrap());
+        let stale = target.mission_run(&failed.id).unwrap().unwrap();
+        assert_eq!(stale.status, "failed");
+        assert_eq!(stale.generation, failed.generation);
+        let other_before = target.mission_run(&other.id).unwrap().unwrap();
+        assert_eq!(other_before.status, "failed");
+        let before = target.index().unwrap();
+
+        let refused = if adopt {
+            target.adopt_mission_revision(
+                &other.subject, &revised, "person/operator",
+                "reopen against the new revision", "capacity-refused-adoption",
+            ).unwrap_err()
+        } else {
+            target.create_mission_run(&request("capacity-refused-create")).unwrap_err()
+        };
+        assert_eq!(refused.code, "mission-run-capacity");
+        assert!(refused.message.contains(&failed.subject));
+        assert_eq!(target.index().unwrap(), before, "refusal writes no claims");
+        assert!(target.run_projection_pending(&failed.subject).unwrap(), "refusal rolls back its drain");
+        let other_after = target.mission_run(&other.id).unwrap().unwrap();
+        assert_eq!(other_after.generation, other_before.generation);
+        assert_eq!(other_after.status, "failed");
+        target.project_replication_backlog().unwrap();
+        let active = target.active_mission_runs_for_mission("takeover").unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].generation, reopened.generation);
+    }
 }
 
 #[test]
@@ -747,10 +900,10 @@ mission "page-root" state="ready" {
     );
     let connection = store.connection.write();
     connection
-        .execute(/* sqlite-large-value: allow-for-now lv-hf5140af438b4 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM run_generations WHERE run_id=?1", [&cursor])
+        .execute(/* sqlite-large-value: allow-for-now lv-h67bf56e420d0 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM run_generations WHERE run_id=?1", [&cursor])
         .unwrap();
     connection
-        .execute(/* sqlite-large-value: allow-for-now lv-h81f8c3a10c9a owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id=?1", [&cursor])
+        .execute(/* sqlite-large-value: allow-for-now lv-h1d52e989f6a1 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM mission_runs WHERE id=?1", [&cursor])
         .unwrap();
     drop(connection);
     assert!(store
@@ -947,7 +1100,7 @@ mission "clock-automatic" state="ready" {
     store
         .connection
         .write()
-        .execute(/* sqlite-large-value: allow-for-now lv-h43d796c2dd69 owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs WHERE run_id=?1", [&empty.id])
+        .execute(/* sqlite-large-value: allow-for-now lv-hbf335004190c owner=fractal_missions::store::tests TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM step_runs WHERE run_id=?1", [&empty.id])
         .unwrap();
     store
         .connection
@@ -4041,6 +4194,12 @@ use coalesce_run_part_rebuild::{coalesced_rebuild_fixture, write_coalesced_rebui
 #[test]
 fn receive_coalesces_run_part_rebuilds_and_resumes_after_interruption() {
     let (controller, uninterrupted, interrupted, directory, step) = coalesced_rebuild_fixture();
+    // Full digests include claim_sources (IDs and acceptance times). Start from an exact
+    // authority copy rather than two independently timestamped local ordering claims.
+    drop(interrupted);
+    let interrupted_path = directory.path().join("interrupted-copy.sqlite");
+    uninterrupted.copy_store_to(&interrupted_path).unwrap();
+    let interrupted = Store::open(&interrupted_path, "worker").unwrap();
     write_coalesced_rebuild_backlog(&controller, &step, 1_536);
     let mut inventory = uninterrupted.replication_inventory().unwrap();
     // A bare public inventory has no accepts hint and otherwise gets the legacy 512 page.
@@ -4082,7 +4241,7 @@ fn receive_coalesces_run_part_rebuilds_and_resumes_after_interruption() {
     assert_eq!(RUN_TREE_REBUILDS.with(std::cell::Cell::get), 0);
     assert!(interrupted.replication_projection_needs_recovery().unwrap());
     drop(interrupted);
-    let resumed = Store::open(&directory.path().join("worker.sqlite"), "worker").unwrap();
+    let resumed = Store::open(&interrupted_path, "worker").unwrap();
     assert!(resumed.replication_projection_deferred());
     assert!(resumed.replication_projection_needs_recovery().unwrap());
     assert!(resumed.project_replication_backlog().unwrap());
@@ -4245,6 +4404,48 @@ fn full_replay_wakes_runs_skipped_while_projection_was_pending() {
 }
 
 #[test]
+fn pre_upgrade_step_bound_attention_request_replays_without_digest_mismatch() {
+    let (_controller, worker, _root, children) = replicated_run_tree(1);
+    let step = children[0].steps[0].subject.clone();
+    let subject = "attention/pre-upgrade-binding";
+    let request = AttentionRequest {
+        reviewer: "person/test".into(),
+        title: "Review the current step".into(),
+        reason: "Keep the original request digest".into(),
+        severity: "warning".into(),
+        targets: Vec::new(),
+        actor: "agent/worker.one".into(),
+        idempotency_key: "pre-upgrade-attention-binding".into(),
+    };
+    // This is the exact ClaimInput shape produced by the base request_attention_closing.
+    let original = worker.append_claim(&ClaimInput {
+        subject: subject.into(),
+        kind: "attention.requested".into(),
+        actor: Some(request.actor.clone()),
+        fields: BTreeMap::from([
+            ("reviewer".into(), json!(request.reviewer)),
+            ("title".into(), json!(request.title)),
+            ("reason".into(), json!(request.reason)),
+            ("severity".into(), json!(request.severity)),
+            ("targets".into(), json!(request.targets)),
+            ("step".into(), json!(step)),
+            ("step_attempt".into(), json!(1)),
+        ]),
+        evidence: Vec::new(),
+        expected_subject: None,
+        idempotency_key: Some(request.idempotency_key.clone()),
+    }).unwrap();
+    let closing = AttentionClosing { step: Some(step.clone()), ..Default::default() };
+    let replayed = worker.request_attention_closing(subject, &request, &closing).unwrap();
+    assert_eq!(replayed.request, original.id);
+    worker.set_step_state(&step, "completed", None).unwrap();
+    assert_eq!(worker.request_attention_closing(subject, &request, &closing).unwrap().request, original.id);
+    let mut changed = request;
+    changed.reason.push_str(" (changed)");
+    assert_eq!(worker.request_attention_closing(subject, &changed, &closing).unwrap_err().code, "idempotency-mismatch");
+}
+
+#[test]
 fn attention_explicit_step_revalidates_after_pending_completion() {
     let (controller, worker, _root, children) = replicated_run_tree(1);
     let step = &children[0].steps[0].subject;
@@ -4308,7 +4509,7 @@ fn person_routing_repair_excludes_runs_completed_in_pending_projection() {
     let child = &children[0];
     worker.append_claim(&ClaimInput {
         subject: "custom/known-repaired-person".into(),
-        kind: "custom.known-repaired-person".into(),
+        kind: "custom.fixture.known-repaired-person".into(),
         actor: Some("person/repaired".into()),
         fields: BTreeMap::new(),
         evidence: Vec::new(),

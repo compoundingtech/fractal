@@ -210,8 +210,24 @@ impl Store {
         let subjects = closing.step.iter().cloned().collect::<Vec<_>>();
         let prepare = |connection: &Connection, input: &ClaimInput| {
             let actor = input.actor.as_deref().expect("attention requests have an actor");
-            let step = attention_closing_step(connection, actor, request, closing)?;
             let mut fields = input.fields.clone();
+            // Base requests hashed the selected step and attempt. Reuse that binding for
+            // a receipt retry, but continue hashing every caller-supplied field afresh.
+            if let Some((operation, _)) = identities::claim_operation(input)?
+                && let Some((_, canonical_claim, _)) = operation_tx(connection, &operation).map_err(internal)?
+                && let Some(claim) = claim_by_id_tx(connection, &canonical_claim).map_err(internal)?
+                && let Some(previous) = claim.body.get("fields")
+                && let Some(step) = previous.get("step").and_then(Value::as_str)
+                && closing.until.is_none() && closing.closed_by.is_none()
+                && closing.step.as_deref().is_none_or(|requested| requested == step)
+            {
+                fields.insert("step".into(), Value::String(step.into()));
+                if let Some(attempt) = previous.get("step_attempt") {
+                    fields.insert("step_attempt".into(), attempt.clone());
+                }
+                return Ok(fields);
+            }
+            let step = attention_closing_step(connection, actor, request, closing)?;
             if let Some((step, attempt)) = step {
                 fields.insert("step".into(), Value::String(step));
                 fields.insert("step_attempt".into(), Value::from(attempt));
@@ -224,7 +240,7 @@ impl Store {
                 run_projection_subjects: &subjects,
                 all_run_projections: closing.step.is_none()
                     && closing.until.is_none() && closing.closed_by.is_none(),
-                prepare_fields: Some(&prepare),
+                prepare_request_fields: Some(&prepare),
                 ..Default::default()
             },
         )?;

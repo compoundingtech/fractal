@@ -416,8 +416,7 @@ impl LanesStore for Store {
         {
             return self.lane_change_response(&lane_subject, None);
         }
-        let subjects = view.run.iter().cloned().collect::<Vec<_>>();
-        let claim = self.append_claim_with_run_projection(&input, &subjects, &|connection| {
+        let claim = self.append_claim_with_run_projection(&input, &|connection| {
             let declaration = connection.query_row(
                 "SELECT subject, kind, body, member, owner_run, owner_generation, owner_step
                  FROM desired WHERE subject=?1 AND kind='lane'",
