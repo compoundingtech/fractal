@@ -4255,7 +4255,7 @@ mod declared_admission_tests {
     async fn declared_admission_refusal_keeps_stable_envelope_fields() {
         let error = ApiError::bad(FractalError::new(
             "invalid-declared-admission",
-            "agent 'agent/example' declared_budgets.cpu_seconds must be an integer from 1 to 9007199254740991",
+            "agent 'agent/example' declared_budgets.cpu_seconds cpu-seconds is allowed on missions only",
         ).with_detail("subject", "agent/example")
             .with_detail("field", "declared_budgets.cpu_seconds"));
         assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
@@ -4276,6 +4276,8 @@ mod declared_admission_tests {
         assert!(client_declared_admission(&json!({"children": [
             {"name": "declared-budgets", "children": []}
         ]})).is_none());
+        // Read projection must retain historical agent numeric budgets, even though
+        // new agent declarations can no longer author these mission-only fields.
         let desired = json!({"children": [
             {"name": "declared-priority", "arguments": ["future-level"]},
             {"name": "declared-lane", "arguments": ["future-lane"]},

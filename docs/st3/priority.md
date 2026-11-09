@@ -64,16 +64,19 @@ IO level 7 acts only under the `bfq` and `mq-deadline` disk schedulers. On an NV
 **Declared admission — declared, not enforced.**
 st stores and returns these values. They do not change scheduling, admission, process priority or resource limits.
 
-Agent and mission declarations accept the same optional, declaration-local metadata:
+Agent and mission declarations accept optional, declaration-local metadata.
+This mission example includes total CPU and token budgets:
 
 ```kdl
-declared-priority "normal"
-declared-lane "check"
-declared-budgets {
-  cpu-seconds 300
-  memory-max "8G"
-  disk-max "20G"
-  token-budget 100000
+mission "garden/check" {
+  declared-priority "normal"
+  declared-lane "check"
+  declared-budgets {
+    cpu-seconds 300
+    memory-max "8G"
+    disk-max "20G"
+    token-budget 100000
+  }
 }
 ```
 
@@ -82,14 +85,35 @@ Declared priority accepts the complete set `background < normal`; declared lane 
 `check` or `build`, without an ordering. Neither selects the runtime `seat_priority`,
 `ST_SEAT_PRIORITY`, or an enforced capacity lane.
 
-CPU seconds are accumulated CPU seconds; token budget counts input plus output tokens.
-“Per seat incarnation” and “per mission run” describe their intended scope only:
-there are no counters, resets or aggregation. Memory and disk describe peak footprints;
-disk is not IO traffic or a free-space floor. CPU and token values must be integers from
+**Budget window.** A mission's `token-budget` is the total cost-weighted tokens for
+one mission run, including all attempts and retries; retrying does not start a new window.
+`cpu-seconds` is accumulated CPU seconds over that same mission-run window.
+A step-run window is a future extension, not an accepted declaration location.
+
+Cost-weighted tokens are `sum(tokens * (class price / base input price))` across
+models and usage classes: input, output, cache writes (including 1-hour cache writes),
+and cached reads. The unit is one base input token at the pricing version pinned
+at run admission and recorded on the run. A run is never repriced when prices change.
+Unknown pricing reports unknown usage, never zero. Usage reporting must show USD
+alongside cost-weighted tokens.
+
+**Agents.** New agent declarations accept only `memory-max` and `disk-max` in
+`declared-budgets`; `cpu-seconds` and `token-budget` refuse publication with
+`invalid-declared-admission` and the corresponding budget field. An agent has no
+retry/run boundary and no budget window. Agent and provider quota is governed by
+usage routing and the quota SLO, not a per-incarnation CPU or token budget.
+
+Memory and disk describe peak footprints, without an accumulation window; disk is
+not IO traffic or a free-space floor. CPU and token values must be integers from
 1 to 9007199254740991. Sizes reuse the `capacity memory=` parser: plain byte counts
 or integer strings followed by case-insensitive `K`, `M`, `G`, or `T` (powers of 1024).
 The checked final byte count must be greater than zero and no greater than
 18446744073709551615. The original size string is preserved.
+
+These definitions are data only: no counters, resets, aggregation, pricing capture,
+usage reporting, reservations, or enforcement are implemented by declared admission.
+The window and pricing rules define the intended accounting contract, not a runtime
+accounting implementation.
 
 Omission means not declared, never zero, unlimited, or a runtime default. There is no
 inheritance or merging between declarations; replacement omission removes the value.
@@ -101,7 +125,8 @@ refusals retain the existing declaration syntax codes.
 
 Typed declaration fields are `declared_priority`, `declared_lane`, and
 `declared_budgets`; budget members use snake_case. Existing agent and mission reads
-instead expose a single optional, nonnullable `declared_admission` group:
+instead expose a single optional, nonnullable `declared_admission` group. This is
+the mission example's read shape:
 
 ```json
 {"declared_admission":{"priority":"normal","lane":"check","budgets":{"cpu_seconds":300,"memory_max":"8G","disk_max":"20G","token_budget":100000}}}
@@ -113,6 +138,12 @@ and re-encode the original string. Strict decoding deliberately rejects unknown 
 These fields extend existing declaration claims only, with no new table, claim kind,
 index, migration, or backfill. Old declarations without the fields retain their
 canonical bytes and hashes.
+
+CLI and API authoring use the same scope rules: agent budgets are peak memory/disk
+only; mission budgets may also contain accumulated CPU and cost-weighted tokens.
+Historical readers and wire types still retain all four budget fields, including
+CPU/token fields in older agent declarations; this does not permit new agent
+authoring of those fields. Replay and historical interpretation are unchanged.
 
 ## Linux
 
