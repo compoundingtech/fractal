@@ -79,7 +79,7 @@ pub fn hold_pre_boot_mail(
     Ok(())
 }
 
-/// Add routing only after the caller has authorized this recipient's delivery.
+/// Add an authenticated bound-delivery routing hint for this exact admitted message.
 pub fn attach_thread_delivery_context(
     store: &Store,
     message: &mut crate::model::MessageView,
@@ -102,7 +102,8 @@ pub fn attach_thread_delivery_context(
     Ok(())
 }
 
-/// The legacy poll must establish both the native delivery peer and the bound recipient.
+/// Current native polling establishes both the delivery peer and the exact bound recipient.
+/// This string routes replies; structured history uses the dedicated bound endpoint.
 pub(super) fn attach_polled_thread_context(
     store: &Store,
     native: bool,
