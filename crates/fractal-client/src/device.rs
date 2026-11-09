@@ -192,9 +192,9 @@ impl std::fmt::Debug for Device {
 }
 
 impl Client {
-    /// Whether this client has a device key for ordinary and thread message signatures.
+    /// Whether this client can prepare ordinary and thread messages with a delegated device key.
     pub fn has_message_signer(&self) -> bool {
-        self.signing_device.is_some()
+        self.signing_device.as_ref().is_some_and(|device| device.message_signing_key().is_ok())
     }
 
     /// Prepare the first request without sending it. Retain these exact signed parameters for retries.

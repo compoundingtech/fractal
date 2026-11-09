@@ -468,7 +468,7 @@ fn rust_operation_methods(
             };
             writeln!(
                 out,
-                "    pub async fn {method}(&self, id: impl Into<String>, idempotency_key: impl Into<String>, fence: Fence, mut parameters: {parameters}) -> Result<Envelope<ActionResult>, ClientError> {{ let idempotency_key = idempotency_key.into(); if parameters.signature.is_none() && self.has_message_signer() {{ {recipient} {prepare}.map_err(|error| ClientError::Protocol(error.to_string()))?; }} let request = ActionRequest::{method}(id, idempotency_key, fence, parameters).map_err(|error| ClientError::Protocol(error.to_string()))?; self.action_internal(&request).await }}"
+                "    pub async fn {method}(&self, id: impl Into<String>, idempotency_key: impl Into<String>, fence: Fence, mut parameters: {parameters}) -> Result<Envelope<ActionResult>, ClientError> {{ let idempotency_key = idempotency_key.into(); if parameters.signature.is_none() && self.signing_device.is_some() {{ {recipient} {prepare}.map_err(|error| ClientError::Protocol(error.to_string()))?; }} let request = ActionRequest::{method}(id, idempotency_key, fence, parameters).map_err(|error| ClientError::Protocol(error.to_string()))?; self.action_internal(&request).await }}"
             )?;
         } else {
             writeln!(
