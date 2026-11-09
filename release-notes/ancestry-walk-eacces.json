@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Correlate unavailable ancestry diagnostics with each request authorization decision",
+  "replay": {"status": "none", "detail": "No claim, projection or replay changes."},
+  "schema": {"status": "none", "detail": "No schema changes."},
+  "rules": {"status": "none", "detail": "Ancestry failures, worker generation verification and request authorization retain their existing conditions and results. No service-manager or EACCES exception grants or suppresses authority."},
+  "compatibility": {"status": "changed", "detail": "Ancestry failures are reported after request authorization with connector PID and accept-time generation, method, path, full cause and decision. Admitted GET/HEAD and independently verified worker requests use debug level; refusals and other admissions use warning level. Suppression keys contain cause kind, typed OS error code and decision, never PID or arbitrary error text. Suppressed counts flush on the next event after rollover, eviction, or orderly daemon shutdown. At most 1024 windows are retained with oldest-window eviction. A global 100-event-per-minute cap counts dropped non-refusal records; first refusals and count summaries bypass that cap."},
+  "downtime": {"status": "none", "detail": "The logging change takes effect on daemon restart; no migration is required."},
+  "manual": {"status": "none", "detail": "No configuration changes are required. Queries, headers, bodies and environment values are not included in diagnostics. Request and shutdown diagnostics build records under the limiter lock but write to the log sink only after releasing it."},
+  "recovery": {"status": "none", "detail": "Binary swap-back requires no migration."}
+}
