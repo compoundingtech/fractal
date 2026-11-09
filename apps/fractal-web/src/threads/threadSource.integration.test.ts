@@ -34,7 +34,7 @@ it.each(['missing', 'ungranted'] as const)('does not infer current metadata when
   const fetchImpl = vi.fn(async () => Response.json({
     ...base, value: { ...base.value, capabilities: [
       ...base.value.capabilities,
-      { id: 'threads-v1', version: 1, state: 'granted' },
+      { id: 'threads-v1', version: 2, state: 'granted' },
       { id: 'thread.start', version: 0, state: 'granted' },
       ...(state === 'missing' ? [] : [{ id: 'thread-summary-feed', version: 1, state: 'ungranted' }]),
     ] },
@@ -60,7 +60,7 @@ it('reads the exact agent, paginates by opaque cursor and sends the observed met
       ...base,
       value: { ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
-        { id: 'threads-v1', version: 1, state: 'granted' },
+        { id: 'threads-v1', version: 2, state: 'granted' },
         { id: 'thread-summary-feed', version: 1, state: 'granted' },
         { id: 'thread.close', version: 0, state: 'granted' },
       ] },
@@ -114,7 +114,7 @@ it('starts with the exact ask episode and retries the same first message after a
       ...base,
       value: { ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
-        { id: 'threads-v1', version: 1, state: 'granted' },
+        { id: 'threads-v1', version: 2, state: 'granted' },
         { id: 'thread-summary-feed', version: 1, state: 'granted' },
         { id: 'thread.start', version: 0, state: 'granted' },
       ] },
@@ -135,7 +135,7 @@ it('starts with the exact ask episode and retries the same first message after a
   const registry = AtomRegistry.make()
   const source = gatewayThreads(client, registry)
   const stop = registry.mount(source.access)
-  const input = { agent_id: agent, origin_ask: 'step-run/review', origin_ask_episode: 'claim/ask', title: 'PR #42', content: 'Can we run the worker test?' }
+  const input = { agent_id: agent, origin: { source_id: 'step-run/review', episode: 'claim/ask' }, title: 'PR #42', content: 'Can we run the worker test?' }
   try {
     await vi.waitFor(() => expect(registry.get(source.access).actions.has('thread.start')).toBe(true))
     expect((await source.start('ask/review', input))._tag).toBe('Refused')
@@ -161,7 +161,7 @@ it('offers metadata edits but omits the unsigned composer on paired web transpor
     ...base,
     value: { ...base.value, capabilities: [
       ...base.value.capabilities,
-      { id: 'threads-v1', version: 1, state: 'granted' },
+      { id: 'threads-v1', version: 2, state: 'granted' },
       { id: 'thread-summary-feed', version: 1, state: 'granted' },
       ...['thread.start', 'thread.reply', 'thread.close'].map(id => ({ id, version: 0, state: 'granted' })),
     ] },
@@ -186,7 +186,7 @@ it('observes exact summary receipt updates without a write grant or a follow-up 
       ...base,
       value: { ...base.value, transport: 'local-web', capabilities: [
         ...base.value.capabilities,
-        { id: 'threads-v1', version: 1, state: 'granted' },
+        { id: 'threads-v1', version: 2, state: 'granted' },
         { id: 'thread-summary-feed', version: 1, state: 'granted' },
       ] },
     })
@@ -231,7 +231,7 @@ it('sends the same typed actions for approved browsers and blocks writes if the 
     if (String(input).endsWith('/capabilities')) return Response.json({
       ...base, value: { ...base.value, capabilities: [
         ...base.value.capabilities,
-        { id: 'threads-v1', version: 1, state: 'granted' },
+        { id: 'threads-v1', version: 2, state: 'granted' },
         { id: 'thread-summary-feed', version: 1, state: 'granted' },
         { id: 'thread-browser-send', version: 1, state: browserGrant ? 'granted' : 'ungranted' },
         { id: 'thread.start', version: 0, state: 'granted' },
@@ -248,7 +248,7 @@ it('sends the same typed actions for approved browsers and blocks writes if the 
   const registry = AtomRegistry.make()
   const source = gatewayThreads(client, registry)
   const stop = registry.mount(source.access)
-  const start = { agent_id: agent, origin_ask: 'step-run/review', origin_ask_episode: 'claim/ask', title: 'PR #42', content: 'Can we run the worker test?' }
+  const start = { agent_id: agent, origin: { source_id: 'step-run/review', episode: 'claim/ask' }, title: 'PR #42', content: 'Can we run the worker test?' }
   const reply = { target_id: id, content: 'Please include cancellation.', thread_quote_id: 'message/worker-tests' }
   try {
     await vi.waitFor(() => expect(registry.get(source.access).actions).toEqual(new Set(['thread.start', 'thread.reply'])))
@@ -278,7 +278,7 @@ it('retains the exact rename intent across malformed receipt, denial and a chang
   const client = new FractalClient({ baseUrl: 'http://example.test', fetchImpl: async (input, init) => {
     if (String(input).endsWith('/capabilities')) return Response.json({ ...base, value: { ...base.value, capabilities: [
       ...base.value.capabilities,
-      ...['threads-v1', 'thread-summary-feed', 'thread.rename'].map(id => ({ id, version: 1, state: 'granted' })),
+      ...['threads-v1', 'thread-summary-feed', 'thread.rename'].map(id => ({ id, version: id === 'threads-v1' ? 2 : 1, state: 'granted' })),
     ] } })
     const action = JSON.parse(String(init?.body)) as Record<string, unknown>
     writes.push(action)
@@ -310,5 +310,25 @@ it('retains the exact rename intent across malformed receipt, denial and a chang
     expect(writes).toHaveLength(3)
     expect(writes[1]).toEqual(writes[0])
     expect(writes[2]).toEqual(writes[0])
+  } finally { stop(); registry.dispose() }
+})
+
+
+it('requires the current Inbox origin version before reading or sending', async () => {
+  const fetchImpl = vi.fn(async () => Response.json({
+    ...base, value: { ...base.value, transport: 'local-web', capabilities: [
+      ...base.value.capabilities,
+      { id: 'threads-v1', version: 1, state: 'granted' },
+      { id: 'thread-summary-feed', version: 1, state: 'granted' },
+      { id: 'thread.start', version: 0, state: 'granted' },
+    ] },
+  }))
+  const registry = AtomRegistry.make()
+  const source = gatewayThreads(new FractalClient({ baseUrl: 'http://example.test', fetchImpl }), registry)
+  const stop = registry.mount(source.list({ agent_id: agent }))
+  try {
+    await vi.waitFor(() => expect(registry.get(source.access)).toMatchObject({ read: false, inboxOrigins: false, upgradeRequired: true }))
+    expect(await source.start('notice-draft', { agent_id: agent, origin: { source_id: 'person-work/notice', episode: 'opaque-episode' }, title: 'Notice', content: 'Please clarify' })).toMatchObject({ _tag: 'Refused' })
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
   } finally { stop(); registry.dispose() }
 })

@@ -19,7 +19,7 @@ export type ThreadSendResult =
   | { readonly _tag: 'Sent'; readonly threadId: string }
   | { readonly _tag: 'Refused'; readonly detail: string }
 
-type ThreadAccess = { readonly read: boolean; readonly upgradeRequired?: boolean; readonly actions: ReadonlySet<string>; readonly actor?: string }
+type ThreadAccess = { readonly read: boolean; readonly inboxOrigins?: boolean; readonly upgradeRequired?: boolean; readonly actions: ReadonlySet<string>; readonly actor?: string }
 
 export interface ThreadSource {
   readonly access: Atom.Atom<ThreadAccess>
@@ -62,15 +62,16 @@ export function gatewayThreads(client: FractalClient, registry: AtomRegistry.Ato
     get.addFinalizer(() => abort.abort())
     void client.capabilities({ signal: abort.signal }).then(({ value }) => {
       const caps = Native.decodeUnknownSync(Native.Capabilities)(value)
-      const upgradeRequired = ['threads-v1', 'thread-summary-feed'].some(id => !caps.capabilities.some(capability => capability.id === id && capability.version >= 1))
-      const read = hasConversationCapability(caps, 'threads-v1') && hasConversationCapability(caps, 'read.projections') && hasConversationCapability(caps, 'thread-summary-feed')
+      const upgradeRequired = ([['threads-v1', 2], ['thread-summary-feed', 1]] as const).some(([id, version]) => !caps.capabilities.some(capability => capability.id === id && capability.version >= version))
+      const inboxOrigins = caps.capabilities.some(capability => capability.id === 'threads-v1' && capability.version >= 2 && capability.state === 'granted')
+      const read = inboxOrigins && hasConversationCapability(caps, 'read.projections') && hasConversationCapability(caps, 'thread-summary-feed')
       if (!abort.signal.aborted) {
         if (!read && registry.get(titles).size > 0) registry.set(titles, new Map())
         const actions = new Set(read ? caps.capabilities.filter(capability =>
           capability.state === 'granted' && capability.id.startsWith('thread.')
           && (canSendUnsignedThread(caps) || (capability.id !== 'thread.start' && capability.id !== 'thread.reply'))
         ).map(capability => capability.id) : [])
-        get.setSelf({ read, upgradeRequired, actions, actor: caps.session_actor })
+        get.setSelf({ read, inboxOrigins, upgradeRequired, actions, actor: caps.session_actor })
       }
     }).catch(() => { if (!abort.signal.aborted) get.setSelf(noAccess) })
     return noAccess
