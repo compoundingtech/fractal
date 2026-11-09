@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Advance the effect-utils Nix and source-member pins to published revision 7b85367b113b50ff6fd44f60372205f24740b17b (published from fc1396c40ff312a5d0624c10b9019f549c1f7a6f) and regenerate the frozen TypeScript dependency installation pin. The bundled pty revision is unchanged.",
+  "replay": {"status": "none", "detail": "No claim or replay behavior change."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint or fleet coordination change."},
+  "compatibility": {"status": "changed", "detail": "Consumers overriding Fractal's effect-utils input must align it with published revision 7b85367b113b50ff6fd44f60372205f24740b17b and its regenerated installation producer identity."},
+  "downtime": {"status": "none", "detail": "The dependency pin refresh does not itself require a daemon restart."},
+  "manual": {"status": "changed", "detail": "Repin consumer effect-utils inputs to published revision 7b85367b113b50ff6fd44f60372205f24740b17b; use scripts/nix-typescript-client-deps-hash when changing the producer."},
+  "recovery": {"status": "none", "detail": "Revert this published-revision update's Nix input, source-member locks and dependency installation pin together to restore the 277dc6d9 cohort."}
+}
