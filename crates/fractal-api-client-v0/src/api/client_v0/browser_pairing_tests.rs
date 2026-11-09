@@ -339,8 +339,9 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     }
 
     let start_payload = json!({
-        "target_id": thread, "agent_id": agent, "origin_ask": ask.subject,
-        "origin_ask_episode": episode.id, "title": "Review CI", "content": "Check worker tests.",
+        "target_id": thread, "agent_id": agent,
+        "origin": {"source_id": ask.subject, "episode": episode.id},
+        "title": "Review CI", "content": "Check worker tests.",
     });
     assert_eq!(post(&publisher_bearer, "thread.start", "publisher-start", start_payload.clone())
         .send().await.unwrap().status(), StatusCode::FORBIDDEN);
