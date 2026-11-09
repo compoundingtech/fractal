@@ -8034,7 +8034,6 @@ async fn create_agent(
         ("model", &parameters.model),
         ("effort", &parameters.effort),
         ("host", &parameters.host),
-        ("description", &parameters.description),
         ("repo", &parameters.repo),
         ("base", &parameters.base),
         ("branch", &parameters.branch),
@@ -8042,6 +8041,13 @@ async fn create_agent(
         if let Some(value) = value {
             creation_string(value, field, 4096)?;
         }
+    }
+    if let Some(description) = &parameters.description {
+        creation_string(
+            description,
+            "description",
+            fractal_drivers::spec::AGENT_DESCRIPTION_MAX_BYTES,
+        )?;
     }
     if let Some(message) = &parameters.message {
         creation_string(message, "message", 65536)?;
@@ -14498,6 +14504,32 @@ subscription "watch/source" {
                 .unwrap(),
             ids
         );
+    }
+
+    #[tokio::test]
+    async fn agent_create_refuses_a_charter_over_eight_kib_without_writing() {
+        let root = tempfile::tempdir().unwrap();
+        let state = test_state_named(root.path(), "example");
+        let session = ClientSession::local(Some("person/ada")).unwrap();
+        let description = "x".repeat(fractal_drivers::spec::AGENT_DESCRIPTION_MAX_BYTES + 1);
+        let request = ActionRequest {
+            api_version: CLIENT_API_VERSION.into(),
+            id: "action/charter".into(),
+            action_type: "agent.create".into(),
+            idempotency_key: "agent-charter-too-long".into(),
+            fence: Fence::default(),
+            parameters: json!({"name":"parser", "harness":"codex", "description":description}),
+        };
+        let index = state.store.index().unwrap();
+        let error = create_agent(&state, &new_client_snapshot(&state), &session, &request)
+            .await
+            .unwrap_err();
+        assert!(
+            error.message.contains("description must be nonempty, without NUL, and at most 8192 bytes"),
+            "{}",
+            error.message
+        );
+        assert_eq!(state.store.index().unwrap(), index);
     }
 
     #[tokio::test]

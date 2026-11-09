@@ -136,6 +136,21 @@ not a claim about every external declaration.
 This per-feature gate does not establish the general adjacent-release guarantee
 described above. See [declared admission](priority.md#declared-admission).
 
+### Agent charter publication
+
+An agent's `description`, its charter, holds up to 8,192 UTF-8 bytes. A member that
+does not advertise `features.agent_charter=1` bounds it at 1,000 bytes whenever it
+parses declaration KDL: when it publishes or previews, and when it materializes the
+agents a mission declares for a run it evaluates. It admits replicated desired claims
+and reconciles a top-level agent from its stored declaration without that check.
+Publishing an agent declaration, directly or inside a mission, whose charter exceeds
+1,000 bytes therefore requires every active fleet incarnation to advertise
+`features.agent_charter=1`, under the membership and evidence policy of declared
+admission publication. A refusal fails with `agent-charter-feature-barrier` before
+anything is written. A charter of at most 1,000 bytes needs no advertisement. The
+gate checks support only at write time: keep every member on a supporting binary
+while a longer charter exists.
+
 ### Checkpoints in a mixed fleet
 
 The current [checkpoint contract](checkpoints.md) requires exactly equal rules
