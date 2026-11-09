@@ -146,6 +146,14 @@ export const StructuredRequest = /*#__PURE__*/ (() => Schema.Struct({
 export type StructuredRequest = typeof StructuredRequest.Type
 export type StructuredRequestEncoded = typeof StructuredRequest.Encoded
 
+/** A note about another named option, not the chosen answer. IDs must exist in the request and be unique; text must be nonblank. */
+export const PersonOptionNote = /*#__PURE__*/ (() => Schema.Struct({
+  "id": Schema.String,
+  "text": Schema.String.check(Schema.isPattern(new RegExp("\\S", "u"))).check(Schema.isMinCodePoints(1)).check(Schema.isMaxCodePoints(8000))
+}).annotate({ identifier: "PersonOptionNote", description: "A note about another named option, not the chosen answer. IDs must exist in the request and be unique; text must be nonblank." }))()
+export type PersonOptionNote = typeof PersonOptionNote.Type
+export type PersonOptionNoteEncoded = typeof PersonOptionNote.Encoded
+
 /** Canonical host-qualified notes URI; component spelling is validated by the public fractal-schema profile. */
 export const PrivateNotesUri = /*#__PURE__*/ (() => Schema.String.check(Schema.isPattern(new RegExp("^dev\\.schickling\\.agent-private-notes://[^/]+/[^/]+$", "u"))).pipe(Schema.brand("st3/PrivateNotesUri")).annotate({ identifier: "PrivateNotesUri", description: "Canonical host-qualified notes URI; component spelling is validated by the public fractal-schema profile." }))()
 export type PrivateNotesUri = typeof PrivateNotesUri.Type
@@ -2895,6 +2903,8 @@ export type UsageEncoded = typeof Usage.Encoded
 export const PersonAnswer = /*#__PURE__*/ (() => Schema.Struct({
   "id": optionalKey(Schema.String),
   "label": optionalKey(Schema.String),
+  /** Notes about other named options, omitted when empty. */
+  "option_notes": optionalKey(Schema.Array(PersonOptionNote)).annotate({ description: "Notes about other named options, omitted when empty." }),
   "outcome": Schema.Literals([
   "accept",
   "decline",

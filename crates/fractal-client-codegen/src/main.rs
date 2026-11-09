@@ -950,6 +950,7 @@ fn validate_surfaces(
         "PersonUpdate",
         "RequestSubject",
         "RequestAnswerOption",
+        "PersonOptionNote",
         "PersonAnswerInput",
         "PersonAnswer",
         "PersonAnswerRecord",
