@@ -21,7 +21,7 @@ use super::{
 };
 
 #[derive(Clone)]
-struct Ask {
+struct Origin {
     context: ThreadInterest,
     agent: String,
     title: String,
@@ -304,8 +304,9 @@ impl Earlier {
 pub(super) struct Threads {
     available: bool,
     read_enabled: bool,
-    asks: BTreeMap<String, Ask>,
-    unread_asks: BTreeSet<String>,
+    origins: BTreeMap<String, Origin>,
+    retained_origins: BTreeMap<String, Origin>,
+    unread_items: BTreeSet<String>,
     sessions: BTreeMap<String, String>,
     lists: BTreeMap<ThreadInterest, Vec<String>>,
     summaries: BTreeMap<String, Envelope<ThreadSummary>>,
@@ -328,7 +329,7 @@ impl Threads {
         if !available {
             self.read_enabled = false;
             self.lists.clear();
-            self.unread_asks.clear();
+            self.unread_items.clear();
             self.start_slot = None;
             self.summaries.clear();
             self.histories.clear();
@@ -358,7 +359,7 @@ impl Threads {
     }
 
     pub(super) fn can_start(&self, id: &str) -> bool {
-        self.available && self.asks.contains_key(id)
+        self.available && self.origins.contains_key(id)
     }
 
     pub(super) fn editing_in(&self, pane: &Pane) -> bool {
@@ -398,39 +399,71 @@ impl Threads {
         text: &str,
         texts: &mut HashMap<String, String>,
     ) -> Result<(), String> {
-        if !self.available || text.trim().is_empty() {
+        if !self.available {
             return Err("Reconnect to a current Fractal before starting this thread".into());
         }
-        let input = self
-            .start_input(item)
-            .ok_or("This Inbox item has no available thread recipient")?;
+        if text.trim().is_empty()
+            || text.starts_with("doc/")
+            || text.len() > fractal_client::device::INLINE_MAX_BYTES
+        {
+            return Err(
+                "Use nonempty message text within the thread message limit; your feedback is kept"
+                    .into(),
+            );
+        }
+        let origin = self
+            .origins
+            .get(item)
+            .ok_or("This Inbox item has no current thread recipient")?;
+        let ThreadInterest::Inbox { source, episode } = &origin.context else {
+            return Err("The Inbox origin is unavailable".into());
+        };
+        let input = Input::Start {
+            item: item.into(),
+            episode: episode.clone(),
+        };
         let key = input.key();
-        let existing = texts
+        let old = texts
             .get(&key)
             .or_else(|| texts.get(&format!("chat:{item}")));
-        if existing.is_some_and(|existing| !existing.is_empty() && existing != text) {
+        if old.is_some_and(|old| !old.is_empty() && old != text) {
             return Err("This item already has a different thread draft. Finish it before sending this feedback".into());
         }
-        if self
-            .drafts
-            .get(&key)
-            .and_then(|draft| draft.delivery.as_ref())
-            .is_some_and(|delivery| delivery.pending)
-        {
-            return Err("The original thread action is still being sent".into());
+        let empty = Draft::default();
+        let draft = self.drafts.get(&key).unwrap_or(&empty);
+        if let Some(delivery) = &draft.delivery {
+            let Mutation::Start(start) = &delivery.write.mutation else {
+                return Err("The original action has a different intent".into());
+            };
+            if start.agent_id != origin.agent
+                || start.origin.source_id != *source
+                || start.origin.episode != *episode
+                || start.content != text
+            {
+                return Err(
+                    "The original thread action has a different recipient, origin or text".into(),
+                );
+            }
         }
-        self.begin(host, item, texts);
+        let write = self.prepare_write(host, &input, text, draft)?;
+        // Preparation has validated the current origin, recipient and immutable retry. From
+        // here there are no refusal paths: caller feedback is released only after retention.
+        if !texts.contains_key(&key) {
+            texts.remove(&format!("chat:{item}"));
+        }
         texts.insert(key, text.into());
-        let queued = self.writes.len();
-        self.submit(host, input, texts);
-        if self.writes.len() == queued {
-            return Err("The thread is not ready to send; your feedback is kept".into());
-        }
+        self.focused = Some((host.into(), input.clone()));
+        self.retain_and_queue(&input, write);
         Ok(())
     }
 
     fn start_input(&self, item: &str) -> Option<Input> {
-        let ThreadInterest::Ask { episode, .. } = &self.asks.get(item)?.context else {
+        let ThreadInterest::Inbox { episode, .. } = &self
+            .origins
+            .get(item)
+            .or_else(|| self.retained_origins.get(item))?
+            .context
+        else {
             return None;
         };
         Some(Input::Start {
@@ -511,30 +544,30 @@ impl Threads {
                         .map(|(id, session)| (id.clone(), session.owner_id.clone())),
                 ),
         );
-        self.asks.clear();
-        self.unread_asks.clear();
+        self.origins.clear();
+        self.unread_items.clear();
         let Some(snapshot) = &model.now.snapshot else {
             return;
         };
         for item in model.attention() {
             if item.thread_unread == Some(true) {
-                self.unread_asks.insert(item.header.id.clone());
+                self.unread_items.insert(item.header.id.clone());
             }
-            if item.episode.is_empty() || !item.source_id.starts_with("step-run/") {
+            if item.episode.is_empty() || item.source_id.is_empty() {
                 continue;
             }
             let Some(agent) = item
-                .requester_id
+                .conversation_id
                 .as_ref()
                 .filter(|id| id.starts_with("agent/"))
             else {
                 continue;
             };
-            self.asks.insert(
+            self.origins.insert(
                 item.header.id.clone(),
-                Ask {
-                    context: ThreadInterest::Ask {
-                        id: item.source_id.clone(),
+                Origin {
+                    context: ThreadInterest::Inbox {
+                        source: item.source_id.clone(),
                         episode: item.episode.clone(),
                     },
                     agent: agent.clone(),
@@ -547,7 +580,11 @@ impl Threads {
 
     fn context(&self, pane: &Pane) -> Option<ThreadInterest> {
         match pane {
-            Pane::Home(Some(id)) => self.asks.get(id).map(|ask| ask.context.clone()),
+            Pane::Home(Some(id)) => self
+                .origins
+                .get(id)
+                .or_else(|| self.retained_origins.get(id))
+                .map(|origin| origin.context.clone()),
             Pane::Agent(Some(id)) if id.starts_with("agent/") => {
                 Some(ThreadInterest::Agent(id.clone()))
             }
@@ -738,7 +775,7 @@ impl Threads {
                 && list
                     .ids
                     .get(*index)
-                    .is_some_and(|id| self.unread_asks.contains(id))
+                    .is_some_and(|id| self.unread_items.contains(id))
             {
                 second.push(Span::styled(
                     " · unread thread replies",
@@ -823,7 +860,17 @@ impl Threads {
             let ids = self.lists.get(&context);
             let start = match pane {
                 Pane::Home(Some(item)) if ids.is_some() => self.start_input(item),
-                _ => None,
+                _ => self.retained_origins.iter().find_map(|(item, origin)| {
+                    if context != ThreadInterest::Agent(origin.agent.clone()) {
+                        return None;
+                    }
+                    let input = self.start_input(item)?;
+                    self.drafts
+                        .get(&input.key())
+                        .and_then(|draft| draft.delivery.as_ref())
+                        .filter(|delivery| delivery.unknown || delivery.pending)
+                        .map(|_| input)
+                }),
             };
             let drafting = start
                 .as_ref()
@@ -841,7 +888,10 @@ impl Threads {
             }
             if let Some(input) = drafting {
                 if let Input::Start { item, .. } = input
-                    && let Some(ask) = self.asks.get(item)
+                    && let Some(ask) = self
+                        .origins
+                        .get(item)
+                        .or_else(|| self.retained_origins.get(item))
                 {
                     doc.line(thread::heading(&ask.title, " · Draft", true, width));
                 }
@@ -985,20 +1035,18 @@ impl Threads {
             }
             doc.append(shell_doc(rendered, host, id), 0);
             if open {
-                if let Some(delivery) = draft.and_then(|draft| draft.delivery.as_ref()) {
-                    self.feedback(doc, host, delivery, width);
-                }
                 if let Some(delivery) = self.pending_actions.get(id) {
                     self.feedback(doc, host, delivery, width);
                 }
-                // Renaming may outlive the editor's disclosure or its host.
-                if self.focused.as_ref() != Some(&(host.into(), Input::Rename(id.into())))
-                    && let Some(delivery) = self
-                        .drafts
-                        .get(&Input::Rename(id.into()).key())
-                        .and_then(|draft| draft.delivery.as_ref())
-                {
-                    self.feedback(doc, host, delivery, width);
+                for (input, draft) in &self.drafts {
+                    if let Some(delivery) = &draft.delivery
+                        && delivery.write.id == id
+                        && !(input == &Input::Rename(id.into()).key()
+                            && self.focused.as_ref()
+                                == Some(&(host.into(), Input::Rename(id.into()))))
+                    {
+                        self.feedback(doc, host, delivery, width);
+                    }
                 }
             }
         }
@@ -1341,21 +1389,24 @@ impl Threads {
         self.summaries.get(id).map(metadata_fence)
     }
 
-    fn submit(&mut self, host: &str, input: Input, texts: &HashMap<String, String>) {
-        let key = input.key();
-        let Some(draft) = self.drafts.get(&key) else {
-            return;
-        };
-        let Some(text) = texts.get(&key).filter(|text| !text.trim().is_empty()) else {
-            return;
-        };
+    fn prepare_write(
+        &self,
+        host: &str,
+        input: &Input,
+        text: &str,
+        draft: &Draft,
+    ) -> Result<Write, String> {
+        if !self.available || text.trim().is_empty() {
+            return Err("The thread is not ready to send".into());
+        }
         if draft
             .delivery
             .as_ref()
             .is_some_and(|delivery| delivery.pending)
         {
-            return;
+            return Err("The original action is still being sent".into());
         }
+        let key = input.key();
         let write = if let Some(delivery) = &draft.delivery {
             delivery.write.clone()
         } else {
@@ -1365,14 +1416,14 @@ impl Threads {
                     item,
                     episode: observed_episode,
                 } => {
-                    let Some(ask) = self.asks.get(item) else {
-                        return;
+                    let Some(ask) = self.origins.get(item) else {
+                        return Err("The thread context is not ready".into());
                     };
-                    let ThreadInterest::Ask { id, episode } = &ask.context else {
-                        return;
+                    let ThreadInterest::Inbox { source, episode } = &ask.context else {
+                        return Err("The thread context is not ready".into());
                     };
                     if episode != observed_episode {
-                        return;
+                        return Err("The thread context is not ready".into());
                     }
                     let target_id = format!("thread/{}", uuid::Uuid::now_v7());
                     (
@@ -1384,17 +1435,19 @@ impl Threads {
                         Mutation::Start(ThreadStartParameters {
                             target_id,
                             agent_id: ask.agent.clone(),
-                            origin_ask: id.clone(),
-                            origin_ask_episode: episode.clone(),
+                            origin: fractal_client::ThreadStartOrigin {
+                                source_id: source.clone(),
+                                episode: episode.clone(),
+                            },
                             title: ask.title.clone(),
-                            content: text.clone(),
+                            content: text.to_owned(),
                             signature: None,
                         }),
                     )
                 }
                 Input::Reply(id) => {
                     let Some(observed) = self.summaries.get(id) else {
-                        return;
+                        return Err("The thread context is not ready".into());
                     };
                     (
                         id.clone(),
@@ -1404,7 +1457,7 @@ impl Threads {
                         },
                         Mutation::Reply(ThreadReplyParameters {
                             target_id: id.clone(),
-                            content: text.clone(),
+                            content: text.to_owned(),
                             thread_quote_id: draft.quote.clone(),
                             signature: None,
                         }),
@@ -1416,7 +1469,7 @@ impl Threads {
                         .as_ref()
                         .or_else(|| self.summaries.get(id))
                     else {
-                        return;
+                        return Err("The thread context is not ready".into());
                     };
                     (
                         id.clone(),
@@ -1439,17 +1492,38 @@ impl Threads {
                 client: None,
             }
         };
-        if let Some(draft) = self.drafts.get_mut(&key) {
-            let unknown = draft
-                .delivery
-                .as_ref()
-                .is_some_and(|delivery| delivery.unknown);
-            draft.delivery = Some(Delivery {
-                unknown,
-                ..Delivery::new(write.clone())
-            });
+        Ok(write)
+    }
+
+    fn retain_and_queue(&mut self, input: &Input, write: Write) {
+        let key = input.key();
+        let draft = self.drafts.entry(key).or_default();
+        let unknown = draft
+            .delivery
+            .as_ref()
+            .is_some_and(|delivery| delivery.unknown);
+        draft.delivery = Some(Delivery {
+            unknown,
+            ..Delivery::new(write.clone())
+        });
+        if let Input::Start { item, .. } = input
+            && let Some(origin) = self
+                .origins
+                .get(item)
+                .or_else(|| self.retained_origins.get(item))
+        {
+            self.retained_origins.insert(item.clone(), origin.clone());
         }
         self.writes.push(write);
+    }
+
+    fn submit(&mut self, host: &str, input: Input, texts: &HashMap<String, String>) {
+        let key = input.key();
+        if let (Some(draft), Some(text)) = (self.drafts.get(&key), texts.get(&key))
+            && let Ok(write) = self.prepare_write(host, &input, text, draft)
+        {
+            self.retain_and_queue(&input, write);
+        }
     }
 
     fn has_edit(&self, id: &str) -> bool {
@@ -1611,6 +1685,11 @@ impl Threads {
             // Capture the original authenticated member even if a reconnect changes the active client.
             delivery.write = write.clone();
             if !delivery.failed(&error) {
+                if matches!(write.mutation, Mutation::Start(_))
+                    && let Some(item) = write.host.strip_prefix("home:")
+                {
+                    self.retained_origins.remove(item);
+                }
                 if let Some(key) = &write.input {
                     let draft = self.drafts.get_mut(key).unwrap();
                     draft.delivery = None;
@@ -1623,6 +1702,11 @@ impl Threads {
         }
         self.pending_actions.remove(&write.id);
         if matches!(confirmation, Confirmation::Rejected) {
+            if matches!(write.mutation, Mutation::Start(_))
+                && let Some(item) = write.host.strip_prefix("home:")
+            {
+                self.retained_origins.remove(item);
+            }
             if let Some(key) = &write.input {
                 let draft = self.drafts.get_mut(key).unwrap();
                 draft.delivery = None;
@@ -1642,10 +1726,13 @@ impl Threads {
         }
         match write.mutation {
             Mutation::Start(start) => {
+                if let Some(item) = write.host.strip_prefix("home:") {
+                    self.retained_origins.remove(item);
+                }
                 self.start_slot = Some((
-                    ThreadInterest::Ask {
-                        id: start.origin_ask,
-                        episode: start.origin_ask_episode,
+                    ThreadInterest::Inbox {
+                        source: start.origin.source_id,
+                        episode: start.origin.episode,
                     },
                     write.id.clone(),
                 ));

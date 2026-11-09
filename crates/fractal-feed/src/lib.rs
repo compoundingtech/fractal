@@ -594,12 +594,12 @@ async fn connected(
     };
     // The summary exists only where st grants it; an older member has no such collection.
     let summary = supports("summary");
-    let upgrade_required = ["threads-v1", "thread-summary-feed"].iter().any(|id| {
+    let upgrade_required = [("threads-v1", 2), ("thread-summary-feed", 1)].iter().any(|(id, version)| {
         !capabilities.value.capabilities.iter().any(|capability| {
-            capability.id == *id && capability.version >= 1
+            capability.id == *id && capability.version >= *version
         })
     });
-    let threads_granted = supports("threads-v1") && supports("collections") && supports("thread-summary-feed");
+    let threads_granted = !upgrade_required && supports("threads-v1") && supports("collections") && supports("thread-summary-feed");
     let thread_read_granted = threads_granted && capabilities.value.capabilities.iter().any(|capability| {
         capability.id == "thread.read" && capability.state == CapabilityState::Granted
     });

@@ -1869,11 +1869,6 @@ pub fn run(context: Context) -> Result<()> {
                     ref agent,
                     ref text,
                     ..
-                }
-                | Effect::Discuss {
-                    to: ref agent,
-                    ref text,
-                    ..
                 } => {
                     let token = uuid::Uuid::now_v7().to_string();
                     let sent = Arc::new(Mutex::new(None));
@@ -2954,32 +2949,6 @@ async fn perform(
             )
             .await?;
             Ok(("Reply sent".into(), None))
-        }
-        Effect::Discuss { to, title, text } => {
-            let (to, session) = (
-                to.clone(),
-                model
-                    .agents()
-                    .find(|candidate| candidate.header.id == to)
-                    .and_then(|agent| agent.current_session_id.clone()),
-            );
-            let id = send_message(
-                client,
-                &to,
-                text,
-                Some(title),
-                None,
-                session,
-                Vec::new(),
-                Vec::new(),
-                sent,
-                latest_snapshot(model),
-            )
-            .await?;
-            Ok((
-                "Sent; the reply will show here and in their conversation".into(),
-                id,
-            ))
         }
         Effect::OpenImage { image } => {
             // In the person's own viewer where this machine has one; saved where they keep
@@ -4359,14 +4328,9 @@ mod tests {
         assert_eq!(
             store.index().unwrap(),
             reply_index,
-            "threaded replies keep the same retry receipt"
+            "ordinary conversation replies keep the same retry receipt"
         );
         for effect in [
-            Effect::Discuss {
-                to: "agent/example/worker".into(),
-                title: "Copper discussion".into(),
-                text: "Record the evidence".into(),
-            },
             Effect::CreateTerminal {
                 name: "Copper shell".into(),
             },

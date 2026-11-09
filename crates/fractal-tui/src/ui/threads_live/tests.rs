@@ -70,16 +70,16 @@ fn native_mounts_share_the_same_timeline_and_a_direct_reply() {
     let mission = Pane::Mission(Some("mission/example".into()));
     let inbox = Pane::Home(Some("attention/ask".into()));
     let tab = Pane::Thread(thread.into());
-    let ask = ThreadInterest::Ask {
-        id: "step-run/example/ask".into(),
+    let ask = ThreadInterest::Inbox {
+        source: "step-run/example/ask".into(),
         episode: "claim/ask".into(),
     };
     assert!(threads.interests(&agent).is_empty());
 
     threads.enable(true);
-    threads.asks.insert(
+    threads.origins.insert(
         "attention/ask".into(),
-        Ask {
+        Origin {
             context: ask.clone(),
             agent: "agent/atlas".into(),
             title: "Worker test".into(),
@@ -325,13 +325,52 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     );
     assert!(visible.contains("You"), "{visible}");
 
-    ui.click(Hit::Thread(host, thread::Tap::Close(id.into())));
-    let close = ui.threads.writes().pop().expect("native close action");
-    let receipt = close.perform(client.clone()).await;
+    ui.click(Hit::Thread(host.clone(), thread::Tap::Close(id.into())));
+    let mut close = ui.threads.writes().pop().expect("native close action");
+    ui.threads.bind(&mut close, client.clone());
+    let receipt = close.clone().perform(client.clone()).await;
+    assert!(
+        matches!(receipt.confirmation, Confirmation::Applied(_)),
+        "real Close committed"
+    );
+    // Lose only the reply after the real mutation, then deliver the live summary first.
+    ui.threads.complete(
+        Receipt {
+            write: close.clone(),
+            confirmation: Confirmation::Failed(ClientError::Transport(
+                "lost Close acknowledgement".into(),
+            )),
+        },
+        &mut ui.conversation_state.drafts,
+    );
+    ui.threads.put_summary(client.thread_get(id).await.unwrap());
+    ui.click(Hit::Thread(
+        host.clone(),
+        thread::Tap::Retry(close.key.clone()),
+    ));
+    let retry = ui.threads.writes().pop().expect("original Close retry");
+    assert_eq!(retry.key, close.key);
+    assert_eq!(retry.fence, close.fence);
     assert_eq!(
-        ui.threads
-            .complete(receipt, &mut ui.conversation_state.drafts),
-        None,
+        ui.threads.complete(
+            retry.perform(client.clone()).await,
+            &mut ui.conversation_state.drafts
+        ),
+        None
+    );
+    let timeline = client
+        .thread_timeline(id, None, Some(50))
+        .await
+        .unwrap()
+        .value;
+    assert_eq!(
+        timeline
+            .items
+            .iter()
+            .filter(|event| matches!(event.change, ThreadTimelineChange::Closed))
+            .count(),
+        1,
+        "retry must not create another lifecycle event"
     );
     apply_window(&mut ui, &mut stream, id).await;
     assert_eq!(
@@ -347,6 +386,54 @@ agent "garden/reviewer" { workspace "/work/garden"; harness "omp" {} }
     );
     assert!(visible.contains("Reopen thread"), "{visible}");
     assert!(visible.contains("Message thread"), "{visible}");
+    let quoted = client
+        .thread_timeline(id, None, Some(50))
+        .await
+        .unwrap()
+        .value
+        .items
+        .into_iter()
+        .find(|event| matches!(event.change, ThreadTimelineChange::Message { .. }))
+        .unwrap()
+        .id;
+    ui.click(Hit::Thread(
+        host,
+        thread::Tap::Reply {
+            thread: id.into(),
+            message: quoted.clone(),
+        },
+    ));
+    ui.paste("A person can follow up while closed.".into());
+    ui.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let reply = ui
+        .threads
+        .writes()
+        .pop()
+        .expect("closed person reply from native composer");
+    let outcome = ui.threads.complete(
+        reply.perform(client.clone()).await,
+        &mut ui.conversation_state.drafts,
+    );
+    assert_eq!(
+        outcome, None,
+        "the real person route must allow replies without Reopen"
+    );
+    assert_eq!(
+        client.thread_get(id).await.unwrap().value.state,
+        ThreadState::Closed
+    );
+    let timeline = client
+        .thread_timeline(id, None, Some(50))
+        .await
+        .unwrap()
+        .value;
+    assert!(timeline.items.iter().any(|event| matches!(&event.change,ThreadTimelineChange::Message { content,thread_quote_id } if content == "A person can follow up while closed." && thread_quote_id.as_ref() == Some(&quoted))));
+    assert!(
+        !timeline
+            .items
+            .iter()
+            .any(|event| matches!(event.change, ThreadTimelineChange::Reopened))
+    );
     server.abort();
 }
 
@@ -358,14 +445,14 @@ fn inbox_start_keeps_the_accepted_thread_in_the_draft_slot() {
     let cursor = edit::Cursor::default();
     let mut texts = HashMap::new();
     let inbox = Pane::Home(Some("attention/ask".into()));
-    let context = ThreadInterest::Ask {
-        id: "step-run/example/ask".into(),
+    let context = ThreadInterest::Inbox {
+        source: "step-run/example/ask".into(),
         episode: "claim/ask".into(),
     };
     let older = summary();
-    threads.asks.insert(
+    threads.origins.insert(
         "attention/ask".into(),
-        Ask {
+        Origin {
             context: context.clone(),
             agent: older.agent_id.clone(),
             title: older.title.clone(),
@@ -824,11 +911,11 @@ fn feedback_adopts_only_an_empty_or_identical_original_thread_draft() {
         item: item.into(),
         episode: "claim/feedback".into(),
     };
-    threads.asks.insert(
+    threads.origins.insert(
         item.into(),
-        Ask {
-            context: ThreadInterest::Ask {
-                id: "step-run/feedback".into(),
+        Origin {
+            context: ThreadInterest::Inbox {
+                source: "step-run/feedback".into(),
                 episode: "claim/feedback".into(),
             },
             agent: "agent/atlas".into(),
@@ -884,4 +971,194 @@ fn internal_error_without_not_applied_answer_keeps_the_original_action() {
         &mut HashMap::new(),
     );
     assert!(threads.pending_actions["thread/worker"].unknown);
+}
+
+#[test]
+fn inbox_summary_timeline_and_lists_all_remain_requested() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let item = "attention/notice";
+    let pane = Pane::Home(Some(item.into()));
+    threads.origins.insert(
+        item.into(),
+        Origin {
+            context: ThreadInterest::Inbox {
+                source: "agent/example".into(),
+                episode: "claim/fault".into(),
+            },
+            agent: "agent/atlas".into(),
+            title: "Fault".into(),
+            snapshot: snapshot().id,
+        },
+    );
+    threads.open.insert(pane.key(), "thread/worker".into());
+    let interests = threads.interests(&pane);
+    assert_eq!(interests.len(), 4);
+    assert!(interests.contains(&ThreadInterest::RecentlyClosed));
+    assert!(interests.contains(&ThreadInterest::Summary("thread/worker".into())));
+    assert!(interests.contains(&ThreadInterest::Timeline("thread/worker".into())));
+}
+
+#[test]
+fn feedback_refusals_leave_both_drafts_unchanged_and_success_is_retained() {
+    let item = "attention/feedback";
+    for scenario in [
+        "unavailable",
+        "too-long",
+        "busy",
+        "different-draft",
+        "missing-recipient",
+    ] {
+        let mut threads = observed_threads(ThreadState::Open);
+        threads.origins.insert(
+            item.into(),
+            Origin {
+                context: ThreadInterest::Inbox {
+                    source: "agent/example".into(),
+                    episode: "claim/feedback".into(),
+                },
+                agent: "agent/atlas".into(),
+                title: "Review".into(),
+                snapshot: snapshot().id,
+            },
+        );
+        let input = Input::Start {
+            item: item.into(),
+            episode: "claim/feedback".into(),
+        };
+        let text = if scenario == "too-long" {
+            "x".repeat(fractal_client::device::INLINE_MAX_BYTES + 1)
+        } else {
+            "Feedback".into()
+        };
+        let mut texts = HashMap::from([("revision:original".into(), text.clone())]);
+        match scenario {
+            "unavailable" => threads.enable(false),
+            "missing-recipient" => {
+                threads.origins.clear();
+            }
+            "different-draft" => {
+                texts.insert(input.key(), "Existing thread draft".into());
+            }
+            "busy" => {
+                threads
+                    .start_with_text("home:attention/feedback", item, &text, &mut texts)
+                    .unwrap();
+                threads.writes();
+            }
+            _ => {}
+        }
+        let before = texts.clone();
+        let focused = threads.focused.clone();
+        let prior_key = threads
+            .drafts
+            .get(&input.key())
+            .and_then(|draft| draft.delivery.as_ref())
+            .map(|delivery| delivery.write.key.clone());
+        assert!(
+            threads
+                .start_with_text("home:attention/feedback", item, &text, &mut texts)
+                .is_err(),
+            "{scenario}"
+        );
+        assert_eq!(texts, before, "{scenario}");
+        assert!(threads.focused == focused, "{scenario}");
+        assert_eq!(
+            threads
+                .drafts
+                .get(&input.key())
+                .and_then(|draft| draft.delivery.as_ref())
+                .map(|delivery| delivery.write.key.clone()),
+            prior_key,
+            "{scenario}"
+        );
+        assert!(threads.writes().is_empty(), "{scenario}");
+    }
+    let mut threads = observed_threads(ThreadState::Open);
+    threads.origins.insert(
+        item.into(),
+        Origin {
+            context: ThreadInterest::Inbox {
+                source: "agent/example".into(),
+                episode: "claim/feedback".into(),
+            },
+            agent: "agent/atlas".into(),
+            title: "Review".into(),
+            snapshot: snapshot().id,
+        },
+    );
+    let mut texts = HashMap::new();
+    threads
+        .start_with_text("home:attention/feedback", item, "Feedback", &mut texts)
+        .unwrap();
+    let write = threads.writes().pop().unwrap();
+    let retained = threads.drafts[&Input::Start {
+        item: item.into(),
+        episode: "claim/feedback".into(),
+    }
+    .key()]
+        .delivery
+        .as_ref()
+        .unwrap();
+    assert_eq!(retained.write.key, write.key);
+    let Mutation::Start(parameters) = &write.mutation else {
+        panic!("thread.start")
+    };
+    assert_eq!(parameters.origin.source_id, "agent/example");
+    assert_eq!(parameters.content, "Feedback");
+}
+
+#[test]
+fn unconfirmed_start_remains_in_its_agents_draft_surface_after_inbox_source_disappears() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let item = "attention/notice";
+    threads.origins.insert(
+        item.into(),
+        Origin {
+            context: ThreadInterest::Inbox {
+                source: "agent/example".into(),
+                episode: "claim/source".into(),
+            },
+            agent: "agent/atlas".into(),
+            title: "Fault context".into(),
+            snapshot: snapshot().id,
+        },
+    );
+    let mut texts = HashMap::new();
+    threads
+        .start_with_text("home:attention/notice", item, "Please explain", &mut texts)
+        .unwrap();
+    let original = threads.writes().pop().unwrap();
+    threads.complete(
+        Receipt {
+            write: original.clone(),
+            confirmation: Confirmation::Failed(ClientError::Transport("lost".into())),
+        },
+        &mut texts,
+    );
+    threads.origins.clear();
+    let pane = Pane::Agent(Some("agent/atlas".into()));
+    threads
+        .lists
+        .insert(ThreadInterest::Agent("agent/atlas".into()), Vec::new());
+    let doc = threads.mount(
+        &pane,
+        100,
+        &edit::Cursor::default(),
+        &super::super::demo::test_world(),
+        &texts,
+    );
+    assert!(
+        doc.lines
+            .iter()
+            .any(|line| line.to_string().contains("Fault context · Draft"))
+    );
+    assert!(doc.targets.iter().any(|target| matches!(&target.hit,Hit::Thread(_,thread::Tap::Retry(key)) if key == &original.key)));
+    threads.tap(
+        &pane.key(),
+        thread::Tap::Retry(original.key.clone()),
+        &mut texts,
+    );
+    let retry = threads.writes().pop().unwrap();
+    assert_eq!(retry.key, original.key);
+    assert_eq!(retry.id, original.id);
 }
