@@ -104,7 +104,7 @@ export const AgentResourcesView = ({ agentRef, onOpen, opening, cache, contribut
     {groups.map(group => {
       const section = nativeSections.get(group.title)
       const observations = reported.filter(resource => group.kinds.some(kind => kind === resource.kind))
-      const ids = new Set(observations.map(resource => resource.id))
+      const ids = new Set<string>(observations.map(resource => resource.id))
       const items = [...observations.map(observed), ...(section?.items._tag === 'Known' ? section.items.value.filter(item => !ids.has(item.uri)).map(item => nativeItem(item, native)) : [])]
       return <PanelSection key={group.title} title={group.title} items={items} onOpen={onOpen} section={section} />
     })}
