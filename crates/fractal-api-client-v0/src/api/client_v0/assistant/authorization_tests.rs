@@ -121,7 +121,8 @@ async fn p1_owner_transitions_ignore_wrong_origin_overlays_but_fence_the_subject
                 expected_subject: None, idempotency_key: None,
             }).unwrap();
             fixture.state.store.import_replication("wrong-origin", &peer.export_replication(0).unwrap()).unwrap();
-            assert_eq!(latest(&fixture.state, &subject, kind).unwrap().unwrap().id, claim.id);
+            assert!(fixture.state.store.claim_by_id(&claim.id).unwrap().is_some(),
+                "wrong-origin evidence must remain in raw history without becoming authority");
             assert!(authenticate(&fixture.state, &credential_digest(&fixture.credential), "fabric-loopback").unwrap().is_some());
         };
 

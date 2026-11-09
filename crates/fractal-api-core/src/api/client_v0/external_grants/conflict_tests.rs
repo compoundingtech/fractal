@@ -271,8 +271,8 @@ fn compat_counterexample_suspends_the_valid_pair_and_refuses_the_malformed_servi
     for id in [assistant, service] {
         assert_conflict(&authenticate_id(&state, id).expect_err("the valid opposite pair is suspended"));
     }
-    let refused = authenticate_id(&state, malformed).expect_err("service grants never authenticate");
-    assert_eq!((refused.status, refused.code.as_str()), (StatusCode::FORBIDDEN, "forbidden"));
+    assert!(authenticate_id(&state, malformed).unwrap().is_none(),
+        "malformed service evidence must not enter bearer authority");
 }
 
 #[test]

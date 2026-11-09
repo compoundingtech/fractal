@@ -259,6 +259,15 @@ impl Store {
                     .map_err(internal)?;
                 if inserted != 0 {
                     let index = transaction.last_insert_rowid() as u64;
+                    if matches!(claim.kind.as_str(),
+                        smallclaims::store::assistant_grant_authority::GRANTED
+                        | smallclaims::store::assistant_grant_authority::POLICY
+                        | smallclaims::store::assistant_grant_authority::REVOKED)
+                    {
+                        smallclaims::store::assistant_grant_authority::refresh_claim(
+                            &transaction, &claim.id, false,
+                        ).map_err(internal)?;
+                    }
                     let effective = register_operation_tx(&transaction, claim).map_err(internal)?;
                     if effective {
                         insert_event(
