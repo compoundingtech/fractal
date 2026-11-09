@@ -41,11 +41,12 @@ if args[:2] == ['release', 'view']:
     print(json.dumps({'assets': [{'name': n} for n in state['release']['assets']]}))
 elif args[:2] == ['release', 'create']:
     if state['release'] is not None: fail('release already exists')
+    assert '--verify-tag' in args and state['tag'] == option('--target'), args
     files = [a for a in args[args.index('--notes-file') + 2:] if not a.startswith('--')]
     state['release'] = {'assets': {pathlib.Path(f).name: pathlib.Path(f).read_text(errors='replace')[:20] for f in files},
                         'prerelease': '--prerelease' in args, 'latest': option('--latest=false') is None and '--latest=false' not in args,
                         'notes': pathlib.Path(option('--notes-file')).read_text(), 'title': option('--title')}
-    state['tag'] = option('--target')
+    # A release create must use the tag already pushed through Git.
 elif args[:2] == ['release', 'upload']:
     files = [a for a in args[args.index('--clobber') + 1:]]
     for f in files: state['release']['assets'][pathlib.Path(f).name] = pathlib.Path(f).read_text(errors='replace')[:20]
@@ -141,9 +142,10 @@ with tempfile.TemporaryDirectory() as temporary:
     for name in ('release-fractal-edge', 'release-fractal-manifest.py', 'release_gh.py'):
         shutil.copy(repo / 'scripts' / name, checkout / 'scripts' / name)
     sh('git', 'init', '-q', '-b', 'main', cwd=checkout)
-    # Fixture history must not depend on the account's interactive signing agent.
+    # Fixture history must not depend on account signing or identity hooks.
     sh('git', 'config', '--local', 'commit.gpgsign', 'false', cwd=checkout)
     sh('git', 'config', '--local', 'tag.gpgsign', 'false', cwd=checkout)
+    sh('git', 'config', '--local', 'core.hooksPath', '/dev/null', cwd=checkout)
     sh('git', 'config', 'user.name', 'Fixture', cwd=checkout)
     sh('git', 'config', 'user.email', 'fixture@example.invalid', cwd=checkout)
     commits = []
@@ -201,14 +203,15 @@ with tempfile.TemporaryDirectory() as temporary:
     assert sum(1 for call in second['calls'] if call[:2] == ['release', 'create']) == 1, 'one release, not one per commit'
     mutations = [call[:2] for call in second['calls'] if call[:2] in (
         ['release', 'upload'], ['git', 'push'], ['release', 'edit'])]
-    assert mutations[-3:] == [['release', 'upload'], ['git', 'push'], ['release', 'edit']], mutations
-    assert second['calls'][next(i for i, call in enumerate(second['calls'])
-                               if call[:2] == ['git', 'push'])][2] == f'--force-with-lease=refs/tags/edge:{commits[0]}'
+    assert mutations[-3:] == [['git', 'push'], ['release', 'upload'], ['release', 'edit']], mutations
+    pushes = [call for call in second['calls'] if call[:2] == ['git', 'push']]
+    assert pushes[0][2] == '--force-with-lease=refs/tags/edge:'
+    assert pushes[-1][2] == f'--force-with-lease=refs/tags/edge:{commits[0]}'
 
     # Rerunning the same commit is harmless; a run for an older commit changes nothing at all.
     checkout_tags()
     assert publish(commits[2], 'three-again').returncode == 0
-    assert sum(call[:2] == ['git', 'push'] for call in current()['calls']) == 1, 'same source skips push'
+    assert sum(call[:2] == ['git', 'push'] for call in current()['calls']) == len(pushes), 'same source skips push'
     before = current()
     checkout_tags()
     done = publish(commits[1], 'two')
@@ -294,6 +297,7 @@ with tempfile.TemporaryDirectory() as temporary:
                         release=older, tag=commits[1])
     assert done.returncode != 0 and calls(['git', 'push']) == 1, (done, current())
     assert current()['tag'] == commits[1] and calls(['release', 'edit']) == 0, current()
+    assert calls(['release', 'upload']) == 0 and calls(['release', 'create']) == 0, current()
     # Anything but a 5xx or a timeout fails at once.
     done = from_scratch((['release', 'edit'], False, 1, 'HTTP 422: Validation Failed'))
     assert done.returncode != 0 and calls(['release', 'edit']) == 1 and '422' in done.stderr, (done, current())
