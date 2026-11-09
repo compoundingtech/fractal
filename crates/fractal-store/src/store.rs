@@ -22941,6 +22941,8 @@ pub fn append_claim_with_commit_context(
                             "SELECT revision FROM arrangements WHERE subject=?1 AND created=1 AND retired=0",
                             [subject], |row| row.get::<_, String>(0),
                         ).optional().map_err(internal)?
+                    } else if fractal_schema::threads::is_reserved_subject(subject) {
+                        thread_metadata::metadata_revision_at(transaction, subject)?
                     } else {
                         latest_claim_id_tx(transaction, subject).map_err(internal)?
                     };

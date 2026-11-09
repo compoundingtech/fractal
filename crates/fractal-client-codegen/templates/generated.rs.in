@@ -4082,7 +4082,7 @@ pub struct ActionResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub membership_revision: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata_revision: Option<String>,
+    pub metadata_claim_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]

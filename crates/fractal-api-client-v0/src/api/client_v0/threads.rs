@@ -301,6 +301,15 @@ fn validate_session_identity(
     Ok(())
 }
 
+/// Resolve an extra generic action fence through the same authorized metadata projection.
+pub(super) fn metadata_fence_revision(
+    state: &AppState, session: &ClientSession, subject: &str,
+) -> Result<String, ApiError> {
+    let current = current_session(state, session)?;
+    let person = read_person(&current)?;
+    Ok(thread_metadata::summary(&state.store, person, subject).map_err(store_error)?.revision)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LifecycleParameters {
@@ -370,7 +379,7 @@ fn run_lifecycle(
     }
     Ok(Json(json!({
         "kind": "action-result", "action_id": request.id, "operation_id": claim.operation_id,
-        "status": "completed", "affected_ids": [claim.subject], "metadata_revision": claim.id,
+        "status": "completed", "affected_ids": [claim.subject], "metadata_claim_id": claim.id,
         "snapshot_id": new_client_snapshot(state).id,
     })))
 }

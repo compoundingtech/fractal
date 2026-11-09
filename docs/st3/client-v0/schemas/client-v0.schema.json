@@ -3839,7 +3839,7 @@
         "arrangement_revision": { "$ref": "#/$defs/Revision" },
         "harness_answer": {"$ref": "#/$defs/HarnessAnswerResult"},
         "membership_revision": { "$ref": "#/$defs/Revision" },
-        "metadata_revision": { "$ref": "#/$defs/Revision" }
+        "metadata_claim_id": { "$ref": "#/$defs/Revision" }
       }
     },
     "AssistantPrincipal": { "enum": ["assistant/chatgpt", "assistant/mcp"] },

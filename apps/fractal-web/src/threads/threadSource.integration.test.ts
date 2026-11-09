@@ -71,7 +71,7 @@ it('reads the exact agent, paginates by opaque cursor and sends the observed met
       ...base,
       value: {
         kind: 'action-result', action_id: (body as { id: string }).id, operation_id: 'operation/one', status: 'completed',
-        affected_ids: [id], metadata_revision: 'claim/closed', snapshot_id: base.snapshot.id,
+        affected_ids: [id], metadata_claim_id: 'claim/closed', snapshot_id: base.snapshot.id,
       },
     })
     return Response.json({ ...base, value: summary })
@@ -286,7 +286,7 @@ it('retains the exact rename intent across malformed receipt, denial and a chang
     if (writes.length === 2) return Response.json({ api_version: base.api_version, error_version: 'st3.client.error.v0', request_id: action.id,
       code: 'forbidden', message: 'grant expired', retryable: false, details: {} }, { status: 403 })
     return Response.json({ ...base, value: { kind: 'action-result', action_id: action.id, status: 'completed',
-      operation_id: 'operation/rename', snapshot_id: base.snapshot.id, affected_ids: [id], metadata_revision: writes.length === 1 ? '' : 'claim/new-title' } })
+      operation_id: 'operation/rename', snapshot_id: base.snapshot.id, affected_ids: [id], metadata_claim_id: writes.length === 1 ? '' : 'claim/new-title' } })
   } })
   const registry = AtomRegistry.make()
   const source = gatewayThreads(client, registry)

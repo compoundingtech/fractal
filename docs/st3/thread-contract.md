@@ -149,6 +149,10 @@ conversation operations when an agent moves. They do not require the old runtime
 a separate writer service. If the conversation path cannot admit an operation, report its
 actual availability or refusal.
 
+Lifecycle action receipts expose the immutable acknowledged operation claim as `metadata_claim_id`.
+It is not a CAS revision. Obtain the next metadata fence from the rendered `ThreadSummary.revision`;
+receipt recovery must not manufacture a fresh version for metadata the client has not observed.
+
 Use the daemon's typed receipt to show an accepted action. Local acceptance confirms the
 local commit, not admission at another member or delivery to the agent. If the response is
 lost, retry the same request key. A member that has the receipt returns it. Partitioned
@@ -157,8 +161,7 @@ conflicting key reuse produces the existing typed conflict. Surface that outcome
 the affected view rather than presenting the earlier local receipt as fleet-wide proof.
 
 A revision check fences stale changes against the admitting member's known state. Concurrent
-changes accepted on different members reconcile by a deterministic claim projection. Close
-prevents outgoing replies on a member that knows the thread is closed. An independently
+changes accepted on different members reconcile by a deterministic claim projection. Ordinary replies remain in a closed thread without reopening it. An independently
 admitted reply and close may both stand after exchange. Preserve accepted replies in history.
 The operation does not impose an atomic order across disconnected members. The
 [existing replication rules](replication.md) define the underlying

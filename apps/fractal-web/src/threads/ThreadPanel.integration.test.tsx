@@ -101,7 +101,7 @@ it.each(['close', 'rename'] as const)('keeps the original %s reachable after its
     writes.push(action)
     if (writes.length === 1) throw new TypeError('The close committed but its reply was lost')
     return Response.json({ ...base, value: { kind: 'action-result', action_id: action.id, operation_id: 'operation/close', status: 'completed',
-      affected_ids: [action.parameters.target_id], metadata_revision: 'claim/closed', snapshot_id: base.snapshot.id } })
+      affected_ids: [action.parameters.target_id], metadata_claim_id: 'claim/closed', snapshot_id: base.snapshot.id } })
   } })
   const registry = AtomRegistry.make()
   const source = gatewayThreads(client, registry)

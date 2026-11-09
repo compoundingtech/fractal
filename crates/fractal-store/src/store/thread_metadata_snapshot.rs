@@ -42,7 +42,10 @@ impl MetadataSnapshot {
                 // Ineligible intermediates still carry immutable causal links. Every edge
                 // walked by heads() must be complete before exposing a versioned snapshot.
                 pending.extend(claim.predecessors.iter().map(String::as_str));
-            } else if claim_by_id_tx(connection, parent).map_err(internal)?.is_none() {
+            } else if !connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM claims WHERE id=?1)", [parent],
+                |row| row.get::<_, bool>(0),
+            ).map_err(internal)? {
                 return Err(unavailable());
             }
         }

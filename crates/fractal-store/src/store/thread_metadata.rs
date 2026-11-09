@@ -318,6 +318,11 @@ fn apply_inner(
     )
 }
 
+/// The same semantic version used by typed metadata writes, for other atomic graph fences.
+pub(super) fn metadata_revision_at(connection: &Connection, subject: &str) -> Result<Option<String>, FractalError> {
+    MetadataSnapshot::read(connection, subject)?.revision()
+}
+
 fn unavailable() -> FractalError {
     FractalError::new("thread-unavailable", "the thread is unavailable")
 }

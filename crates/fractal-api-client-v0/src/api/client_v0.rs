@@ -40,6 +40,8 @@ pub mod assistant;
 pub mod browser_pairing;
 #[cfg(test)]
 mod browser_pairing_tests;
+#[cfg(test)]
+mod thread_fence_tests;
 pub mod device_renewal;
 pub mod pairing_verifier;
 pub mod collection_ivm;
@@ -7790,10 +7792,12 @@ fn validate_snapshot_fence(state: &AppState, fence: &Fence) -> Result<(), ApiErr
     Ok(())
 }
 
-fn validate_fence(state: &AppState, fence: &Fence) -> Result<(), ApiError> {
+fn validate_fence(state: &AppState, fence: &Fence, session: &ClientSession) -> Result<(), ApiError> {
     validate_snapshot_fence(state, fence)?;
     for (subject, revision) in &fence.subject_revisions {
-        let current = if subject.starts_with("attention/") {
+        let current = if fractal_schema::threads::is_reserved_subject(subject) {
+            Some(threads::metadata_fence_revision(state, session, subject)?)
+        } else if subject.starts_with("attention/") {
             client_attention_resources(&state.store, None, false)
                 .map_err(ApiError::internal)?
                 .into_iter()
@@ -9529,7 +9533,7 @@ async fn action_inner(
         if request.action_type == "private-notes.write" {
             // Never replay a private fence from the graph or bypass current
             // ownership checks and owner-local exact-request recovery.
-            validate_fence(&state, &request.fence)?;
+            validate_fence(&state, &request.fence, &session)?;
             return private_notes::write(&state, &session, &mut request, &receipt_subject, &request_digest).await.map(Json);
         }
         let mut result = receipt
@@ -9562,7 +9566,7 @@ async fn action_inner(
         let live =
             remote_terminal_live_session(&state, &terminal_subject(&terminal_id), incarnation)?;
         if live.owner_host_id != client_host_id(&state.node) {
-            validate_fence(&state, &request.fence)?;
+            validate_fence(&state, &request.fence, &session)?;
             let relay = state
                 .client_relay
                 .as_ref()
@@ -9664,7 +9668,7 @@ async fn action_inner(
             subject.starts_with("attention/") || subject.starts_with("session/external-")
         });
     }
-    let fence_result = validate_fence(&state, &checked_fence);
+    let fence_result = validate_fence(&state, &checked_fence, &session);
     if let Err(error) = fence_result {
         if request.action_type == "terminal.attach" {
             reconciled_attachment =
@@ -23774,7 +23778,7 @@ mission "example/zero-run" state="ready" {
             })
             .unwrap();
         assert!(
-            validate_fence(&state, &fence).is_ok(),
+            validate_fence(&state, &fence, &session).is_ok(),
             "unrelated writes do not invalidate declaration mutations"
         );
         let mut attach_fence = fence.clone();
@@ -23854,19 +23858,19 @@ mission "example/zero-run" state="ready" {
         }
         let mut foreign = fence.clone();
         foreign.snapshot_id = foreign.snapshot_id.replacen(&state.node, "another-host", 1);
-        assert!(validate_fence(&state, &foreign).is_err());
+        assert!(validate_fence(&state, &foreign, &session).is_err());
         let mut future = fence.clone();
         future.snapshot_id = format!(
             "snapshot/{}/{}/digest",
             state.node,
             state.store.index().unwrap() + 1
         );
-        assert!(validate_fence(&state, &future).is_err());
+        assert!(validate_fence(&state, &future, &session).is_err());
         let mut revision = fence.clone();
         revision
             .subject_revisions
             .insert("agent/unrelated".into(), "old-revision".into());
-        assert!(validate_fence(&state, &revision).is_err());
+        assert!(validate_fence(&state, &revision, &session).is_err());
         observe("replacement-incarnation");
         let error = action(
             State(state.clone()),
