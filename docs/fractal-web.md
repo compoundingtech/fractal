@@ -212,9 +212,11 @@ its port when non-default.
 For an immutable deployment, the flake exposes `packages.<system>.fractal-web-publisher`
 and `apps.<system>.fractal-web-publisher`. The executable bundles the upstream
 `server/main.mts` and its dependencies from the frozen workspace installation and
-runs with the pinned Node 24 runtime. No source checkout or package installation is
-needed on the serving host. The publisher does not include assets or start the
-daemon; select the assets independently with `WF_DIST`:
+runs with the pinned Node 24 runtime. During packaging, esbuild reads dependencies
+directly from the immutable installation via `NODE_PATH` and writes the bundle to
+the writable build directory; no dependency-tree copy is needed. No source checkout
+or package installation is needed on the serving host. The publisher does not include
+assets or start the daemon; select the assets independently with `WF_DIST`:
 
 ```sh
 WF_DIST=/path/to/selected-package/share/fractal-web \

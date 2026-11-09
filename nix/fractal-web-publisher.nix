@@ -20,9 +20,10 @@ pkgs.stdenvNoCC.mkDerivation {
   dontConfigure = true;
   buildPhase = ''
     runHook preBuild
-    cp -a ${installation}/. .
-    esbuild apps/fractal-web/server/main.mts --bundle --platform=node --format=esm \
-      --target=node24 --outfile=publisher.mjs
+    # esbuild only reads dependencies; keep the frozen installation in the store.
+    NODE_PATH="${installation}/apps/fractal-web/node_modules:${installation}/node_modules" \
+      esbuild apps/fractal-web/server/main.mts --bundle --platform=node --format=esm \
+        --target=node24 --outfile=publisher.mjs
     runHook postBuild
   '';
   installPhase = ''
