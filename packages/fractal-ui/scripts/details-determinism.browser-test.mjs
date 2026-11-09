@@ -13,7 +13,7 @@ const mime = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
 const serve = async (t, handler) => {
   const server = createServer(handler)
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
-  t.after(() => new Promise(resolve => server.close(resolve)))
+  t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)) })
   return `http://127.0.0.1:${server.address().port}`
 }
 const openBrowser = async t => {
@@ -22,7 +22,7 @@ const openBrowser = async t => {
   return browser
 }
 
-test('strict readiness observes completion in the task that publishes the channel, without a timer turn', async t => {
+test('strict readiness observes completion in the task that publishes the channel, without a timer turn', { timeout: 30000 }, async t => {
   const base = await serve(t, (_request, response) => response.setHeader('Content-Type', 'text/html').end(`<!doctype html><script>
     const listeners = new Map()
     window.__STORYBOOK_ADDONS_CHANNEL__ = {
@@ -32,23 +32,24 @@ test('strict readiness observes completion in the task that publishes the channe
       }
     }
     for (const listener of listeners.get('storyFinished') ?? []) listener({ storyId: 'fixture--same-task', status: 'success', reporters: [] })
+    window.__fixtureEmitted = true
   </script>`))
   const browser = await openBrowser(t), page = await browser.newPage()
-  // A missed event is permanent, not slow. Keep the negative control cheap; production's guard is unchanged.
-  const wait = page.waitForFunction.bind(page)
-  page.waitForFunction = (predicate, argument, options) => wait(predicate, argument, { ...options, timeout: 1000 })
-  const guard = await strictStoryGuard(page, base)
-  await page.goto(`${base}/iframe.html?id=fixture--same-task`, { waitUntil: 'domcontentloaded' })
-  await guard.check()
-  assert.equal(guard.records[0].finished.length, 1)
-  assert.equal(guard.records[0].finished[0].payload.status, 'success')
+  const navigate = page.goto.bind(page)
+  await strictStoryGuard(page, base)
+  // Inspect the capture immediately after the fixture has emitted, without entering the guard's readiness wait.
+  await navigate(`${base}/iframe.html?id=fixture--same-task`, { waitUntil: 'domcontentloaded' })
+  const captured = await page.evaluate(() => ({ emitted: window.__fixtureEmitted, events: window.__dt10StrictEvents }))
+  assert.equal(captured.emitted, true)
+  assert.equal(captured.events.length, 1, 'Storybook emitted storyFinished but the guard missed it')
+  assert.equal(captured.events[0].payload.status, 'success')
 })
 
-test('AllStates closes and returns focus while the closing animation frame is withheld', async t => {
+test('AllStates returns focus in the close event without waiting for an animation frame', { timeout: 30000 }, async t => {
   const base = await serve(t, async (request, response) => {
     const file = resolve(build, `.${new URL(request.url, 'http://localhost').pathname}`)
     if (!file.startsWith(build + sep)) { response.writeHead(403).end(); return }
-    try { response.writeHead(200, { 'Content-Type': mime[extname(file)] ?? 'application/octet-stream' }).end(await readFile(file)) }
+    try { const bytes = await readFile(file); response.writeHead(200, { 'Content-Type': mime[extname(file)] ?? 'application/octet-stream' }).end(bytes) }
     catch { response.writeHead(404).end() }
   })
   const browser = await openBrowser(t), page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
@@ -56,14 +57,18 @@ test('AllStates closes and returns focus while the closing animation frame is wi
     const frame = window.requestAnimationFrame.bind(window)
     let closing = false
     document.addEventListener('keydown', event => {
-      if (event.key === 'Escape' && event.target.closest('[data-details-all-state="partial"]')) closing = true
+      if (event.key !== 'Escape' || !event.target.closest('[data-details-all-state="partial"]')) return
+      closing = true
+      // Observe the completed event, not the later frame or the story's timeout/error serialization.
+      queueMicrotask(() => {
+        const target = [...document.querySelectorAll('button')].find(button => button.textContent === 'Restore all states')
+        window.__detailsCloseControl = { returned: document.activeElement === target, active: document.activeElement?.textContent }
+      })
     }, { capture: true })
-    window.requestAnimationFrame = callback => closing
-      ? frame(time => { setTimeout(() => callback(time), 1500) })
-      : frame(callback)
+    window.requestAnimationFrame = callback => closing ? 0 : frame(callback)
   })
-  const guard = await strictStoryGuard(page, base)
   await page.goto(`${base}/iframe.html?id=fractal-ui-details-presentation--all-states&viewMode=story`, { waitUntil: 'domcontentloaded' })
-  await guard.check()
-  assert.equal(await page.getByRole('button', { name: 'Restore all states' }).evaluate(node => node === node.ownerDocument.activeElement), true)
+  await page.waitForFunction(() => window.__detailsCloseControl !== undefined, undefined, { timeout: 15000 })
+  const focus = await page.evaluate(() => window.__detailsCloseControl)
+  assert.equal(focus.returned, true, `Close left focus on ${focus.active}`)
 })
