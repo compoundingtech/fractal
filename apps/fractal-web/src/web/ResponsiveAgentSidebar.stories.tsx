@@ -87,7 +87,7 @@ const tabsFitPlay = async ({ canvasElement }: { readonly canvasElement: HTMLElem
       const computed = getComputedStyle(child)
       if (computed.visibility === 'hidden' || computed.display === 'none' || child.getClientRects().length === 0) continue
       let visuallyHidden = false
-      for (let ancestor = child.parentElement; ancestor !== null && ancestor !== sidebar; ancestor = ancestor.parentElement) {
+      for (let ancestor: HTMLElement | null = child; ancestor !== null && ancestor !== sidebar; ancestor = ancestor.parentElement) {
         if (getComputedStyle(ancestor).clipPath === 'inset(50%)') { visuallyHidden = true; break }
       }
       if (visuallyHidden) continue
