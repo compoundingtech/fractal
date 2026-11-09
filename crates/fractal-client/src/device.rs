@@ -191,6 +191,29 @@ impl std::fmt::Debug for Device {
     }
 }
 
+impl Client {
+    /// Whether this client has a device key for ordinary and thread message signatures.
+    pub fn has_message_signer(&self) -> bool {
+        self.signing_device.is_some()
+    }
+
+    /// Prepare the first request without sending it. Retain these exact signed parameters for retries.
+    pub fn prepare_thread_start(&self, idempotency_key: &str, parameters: &mut ThreadStartParameters) -> Result<()> {
+        if parameters.signature.is_none() && let Some(device) = &self.signing_device {
+            parameters.signature = Some(device.sign_thread_start(idempotency_key, parameters)?);
+        }
+        Ok(())
+    }
+
+    /// The caller supplies the already observed recipient; preparation performs no network lookup.
+    pub fn prepare_thread_reply(&self, idempotency_key: &str, agent_id: &str, parameters: &mut ThreadReplyParameters) -> Result<()> {
+        if parameters.signature.is_none() && let Some(device) = &self.signing_device {
+            parameters.signature = Some(device.sign_thread_reply(idempotency_key, agent_id, parameters)?);
+        }
+        Ok(())
+    }
+}
+
 impl Device {
     pub fn client(&self) -> Result<Client> {
         let mut client = if self.endpoint.starts_with("fabric:") {
