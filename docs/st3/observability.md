@@ -800,7 +800,7 @@ or harness end, retirement, or removal still excludes the incarnation.
 Refresh subscribes to the store commit notification before the initial fold,
 then coalesces commits with a minimum 30-second rest (or the preceding fold's
 duration, whichever is longer). It also wakes for the earliest relevant shared
-classification boundary: idle freshness at heard-at + 90,001 ms, launch/down at
+classification boundary: idle freshness at heard-at + `HARNESS_OBSERVATION_FRESHNESS` + 1 ms,
 launch + 120,001 ms or heard-at + 661,001 ms, an owned live child's lease expiry,
 and the canonical attention snapshot's next visibility boundary. These strict-age
 offsets match the existing card overlay; working turns have no age-only expiry.

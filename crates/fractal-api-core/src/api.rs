@@ -29,6 +29,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::{Arc, LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use fractal_drivers::harness_state::HARNESS_OBSERVATION_FRESHNESS;
 
 use axum::body::{Body, to_bytes};
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
@@ -3435,7 +3436,7 @@ fn overlay_agent_resources_at(
             let report_age_ms = heard_at.map(|at| u64::try_from(now.saturating_sub(at)).unwrap_or(u64::MAX));
             let observation = match report_age_ms {
                 None => "missing",
-                Some(age) if age > 90_000 => "stale",
+                Some(age) if u128::from(age) > HARNESS_OBSERVATION_FRESHNESS.as_millis() => "stale",
                 Some(_) => "current",
             };
             let reported = item["harness_state"].as_str().map(str::to_owned);
@@ -3516,9 +3517,9 @@ fn overlay_declaration_restart(item: &mut Value, now: u128) {
 /// How long a declared seat may take to show a running session before it is called down.
 pub const LAUNCH_WINDOW_MS: u64 = 120_000;
 
-/// How old a harness report may be and still show that the seat's driver is alive. A driver at an
-/// empty prompt reports every five minutes, so its report is older than the 90 s freshness window
-/// for most of every interval; two intervals and a minute of slack never call such a seat down.
+/// How old a harness report may be and still show that the seat's driver is alive. This is a
+/// liveness grace period, not observation freshness: two five-minute refresh intervals and
+/// a minute of slack avoid calling a seat down after one missed report.
 pub const HEARTBEAT_MS: u64 = 661_000;
 
 /// Settles a seat whose runtime row says it is not running yet. Every app shows the result and
@@ -3544,7 +3545,7 @@ pub fn overlay_down(
     if report_age_ms.is_some_and(|age| age <= HEARTBEAT_MS)
         && !matches!(reported, None | Some("starting" | "ended" | "failed"))
     {
-        let lapsed = report_age_ms.is_some_and(|age| age > 90_000);
+        let lapsed = report_age_ms.is_some_and(|age| u128::from(age) > HARNESS_OBSERVATION_FRESHNESS.as_millis());
         item["state"] = json!(match reported {
             Some("working") => "running",
             Some("ready" | "idle") if !lapsed => "running",

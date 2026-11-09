@@ -619,8 +619,8 @@ export const Agent = /*#__PURE__*/ (() => Schema.Struct({
   "name": Schema.String,
   "next_work": Schema.OptionFromOptionalNullOr(WorkLabel, NULL_NONE),
   "next_work_id": Schema.OptionFromOptionalNullOr(Id, NULL_NONE),
-  /** Stale after 90 seconds without a new observation; missing when this runtime has no observation. */
-  "observation": optionalKey(Schema.Literals(["current","stale","missing"])).annotate({ description: "Stale after 90 seconds without a new observation; missing when this runtime has no observation." }),
+  /** Stale after the shared harness observation freshness window without a new observation; missing when this runtime has no observation. */
+  "observation": optionalKey(Schema.Literals(["current","stale","missing"])).annotate({ description: "Stale after the shared harness observation freshness window without a new observation; missing when this runtime has no observation." }),
   "operational": optionalKey(Operational),
   "owner_run_id": Schema.OptionFromOptionalNullOr(MissionRunId, NULL_NONE),
   /** st's presentation of this agent: its state word, list group, why it needs someone, and what it holds and has queued. Clients read it instead of deriving their own (docs/clients/ui-contract.md, Agent). Absent on older daemons. */

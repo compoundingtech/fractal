@@ -260,8 +260,8 @@ Older OMP releases without `getSessionName` still apply the declared label witho
 Claude's status line reads the same graph authority on each render and chains the existing renderer.
 Native `/rename` is temporary: the next authority update restores the declared name.
 
-Live harness evidence is refreshed every twenty seconds, inside the client's ninety-second
-observation freshness horizon. The driver retries its durable observation outbox across daemon
+Live harness evidence is refreshed every five minutes, inside the shared
+`HARNESS_OBSERVATION_FRESHNESS` window (refresh interval plus thirty seconds). The driver retries its durable observation outbox across daemon
 outages; mailbox subscriptions reconnect under the existing incarnation and fence. Once the daemon
 returns, quiet seats recover their current observation without a provider restart or a new turn.
 Heartbeats remain evidence-gated: missing, ended, superseded, or disconnected provider observations
