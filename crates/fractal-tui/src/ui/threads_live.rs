@@ -1507,7 +1507,7 @@ impl Threads {
             delivery.write.clone()
         } else {
             let new_key = uuid::Uuid::now_v7().to_string();
-            let (id, fence, mutation) = match &input {
+            let (id, fence, mutation) = match input {
                 Input::Start {
                     item,
                     episode: observed_episode,
