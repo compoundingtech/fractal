@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Show topic threads in native Inbox, agent sessions, missions, and standalone tabs when the daemon advertises support.",
+  "replay": { "status": "none", "detail": "The native client reuses conversation draft persistence and reads the daemon's durable thread history." },
+  "schema": { "status": "none", "detail": "This client presentation adds no stored claims." },
+  "rules": { "status": "none", "detail": "Thread actions keep the selected connection's existing authority and signing path." },
+  "compatibility": { "status": "none", "detail": "Older members retain the current Inbox and conversation views. The thread controls require the complete threads capability." },
+  "downtime": { "status": "none", "detail": "The client presentation requires no service restart." },
+  "manual": { "status": "none", "detail": "No manual action is required for existing clients." },
+  "recovery": { "status": "none", "detail": "Returning to an older client preserves server-side history." }
+}

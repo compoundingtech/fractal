@@ -798,6 +798,12 @@ fn confirm_row(doc: &mut Doc, drafts: &Drafts<'_>, label: &str) -> bool {
 }
 
 pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Drafts<'_>) -> Doc {
+    home_detail_with_threads(world, id, width, drafts, false)
+}
+
+pub(super) fn home_detail_with_threads(
+    world: &World, id: Option<&str>, width: usize, drafts: &Drafts<'_>, thread_start: bool,
+) -> Doc {
     let mut doc = Doc::new();
     let Some(item) = id.and_then(|id| world.attention.items().iter().find(|item| item.id == id))
     else {
@@ -1522,7 +1528,8 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
             ("esc", "Close chat", Hit::Escape, theme::OVERLAY1),
         ]);
     } else if !drafts.editing && drafts.confirm.is_none() {
-        let mut buttons = vec![("t", "Chat about this", Hit::Key('t'), theme::SAPPHIRE)];
+        let mut buttons = Vec::new();
+        if !thread_start { buttons.push(("t", "Chat about this", Hit::Key('t'), theme::SAPPHIRE)); }
         if item.mission.is_some() || item.agent.is_some() {
             buttons.push((
                 "g",
@@ -1535,7 +1542,7 @@ pub fn home_detail(world: &World, id: Option<&str>, width: usize, drafts: &Draft
                 theme::OVERLAY1,
             ));
         }
-        card.buttons(&buttons);
+        if !buttons.is_empty() { card.buttons(&buttons); }
     }
     card.blank();
     let title = format!("{} · waiting {}", item.kind.word(), item.age);

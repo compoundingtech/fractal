@@ -24,7 +24,8 @@ impl Ui {
         let footer = Rect::new(area.x, area.bottom() - 1, area.width, 1);
         // Text to read stays quiet: moving over messages leaves the normal keys in the footer
         // (Nathan, 2026-10-07).
-        if matches!(hit, Hit::Message | Hit::Subject | Hit::InlineImage(_)) {
+        if matches!(hit, Hit::Message | Hit::Subject | Hit::InlineImage(_)
+            | Hit::Thread(_, super::thread::Tap::MessageHeader(_))) {
             return;
         }
         if rect.intersects(footer)
@@ -57,7 +58,7 @@ impl Ui {
             Hit::Usage => "show/hide Usage".into(),
             Hit::Connection => "connection details".into(),
             Hit::Row(_) => "select row".into(),
-            Hit::Message | Hit::Subject | Hit::InlineImage(_) => String::new(),
+            Hit::Message | Hit::Subject | Hit::InlineImage(_) | Hit::ThreadBody { .. } => String::new(),
             Hit::Resize => "drag resize; double-click equalize".into(),
             Hit::SidebarResize => "drag resize sidebar; double-click reset".into(),
             Hit::Key(_) | Hit::Enter | Hit::Escape | Hit::Menu(_) => label,
@@ -91,6 +92,9 @@ impl Ui {
             Hit::Document(super::documents::Tap::Back) => "back one document [b]".into(),
             Hit::Document(super::documents::Tap::Retry) => "read it again [r]".into(),
             Hit::Document(super::documents::Tap::More) => "more documents [m]".into(),
+            Hit::Thread(_, super::thread::Tap::Toggle(_)) => "show or hide this thread".into(),
+            Hit::Thread(_, super::thread::Tap::Compose(_)) => "edit thread message".into(),
+            Hit::Thread(_, _) => label,
             Hit::Split(true) => "split right [Ctrl+V]".into(),
             Hit::Split(false) => "split below [Ctrl+X]".into(),
             Hit::GlassTab(..) => {
