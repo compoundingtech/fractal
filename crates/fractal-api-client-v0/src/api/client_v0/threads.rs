@@ -648,6 +648,34 @@ mod tests {
         (status, serde_json::from_slice(&body).unwrap())
     }
 
+    async fn local_post(state: &AppState, path: &str, parameters: Value) -> Value {
+        let response = crate::api::router(state.clone()).oneshot(
+            Request::builder().method("POST").uri(path)
+                .header(LOCAL_PERSON_HEADER, "person/operator")
+                .header("Content-Type", "application/json")
+                .body(Body::from(parameters.to_string())).unwrap(),
+        ).await.unwrap();
+        let status = response.status();
+        let body: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), CLIENT_MAX_RESPONSE_BYTES).await.unwrap(),
+        ).unwrap();
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body["value"].clone()
+    }
+
+    async fn paired_native_device(state: &AppState, name: &str, scopes: &[&str]) -> Value {
+        let begun = local_post(state, "/v1/client/pairings", json!({
+            "api_version": CLIENT_API_VERSION, "person_id": "person/operator",
+            "device_name": name, "scopes": scopes,
+        })).await;
+        let id = begun["pairing_id"].as_str().unwrap().strip_prefix("pairing/").unwrap();
+        let key = smallclaims::fleet::MemberKey::generate().unwrap().0;
+        local_post(state, &format!("/v1/client/pairings/{id}/complete"), json!({
+            "api_version": CLIENT_API_VERSION, "code": begun["code"],
+            "device_public_key": key.public().to_string(),
+        })).await
+    }
+
     #[tokio::test]
     async fn thread_capabilities_require_the_same_fleet_writer_gate() {
         let root = tempfile::tempdir().unwrap();
@@ -689,25 +717,10 @@ mod tests {
     async fn thread_capabilities_honor_read_only_and_revoked_pairings() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::test_state_named(root.path(), "thread-capability-pair");
+        state.store.set_node_key(Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0)).unwrap();
         state.store.configure_thread_write_rollout([]);
-        let grant_id = "custom/client/pairing-thread-readonly";
-        let credential = "fixture-thread-read-only";
-        state.store.append_claim(&ClaimInput {
-            subject: grant_id.into(),
-            kind: "custom.client.pairing-completed".into(),
-            actor: None,
-            fields: BTreeMap::from([
-                ("person_id".into(), json!("person/operator")),
-                ("session_actor".into(), json!("client/paired/thread-reader")),
-                ("credential_hash".into(), json!(credential_digest(credential))),
-                ("expires_at_unix_ms".into(), json!(client_now_ms() as u64 + 60_000)),
-                ("scopes".into(), json!(["read.projections"])),
-            ]),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: None,
-        }).unwrap();
-        let bearer = format!("Bearer {credential}");
+        let paired = paired_native_device(&state, "Thread reader", &["read.projections"]).await;
+        let bearer = format!("Bearer {}", paired["credential"].as_str().unwrap());
         let (status, read) = get_capabilities(&state, AUTHORIZATION.as_str(), &bearer).await;
         assert_eq!(status, StatusCode::OK, "{read}");
         assert_eq!(grant(&read, "threads-v1"), "granted");
@@ -728,15 +741,12 @@ mod tests {
         ).await.unwrap();
         assert_eq!(blocked.status(), StatusCode::FORBIDDEN);
 
-        state.store.append_claim(&ClaimInput {
-            subject: grant_id.into(),
-            kind: "custom.client.pairing-revoked".into(),
-            actor: None,
-            fields: BTreeMap::new(),
-            evidence: Vec::new(),
-            expected_subject: None,
-            idempotency_key: None,
-        }).unwrap();
+        local_post(&state, "/v1/client/actions", json!({
+            "api_version": CLIENT_API_VERSION, "id": "action/revoke-thread-reader",
+            "type": "pairing.revoke", "idempotency_key": "revoke-thread-reader",
+            "fence": {"snapshot_id": new_client_snapshot(&state).id},
+            "parameters": {"target_id": paired["device_id"]},
+        })).await;
         let (status, revoked) = get_capabilities(&state, AUTHORIZATION.as_str(), &bearer).await;
         assert_eq!(status, StatusCode::FORBIDDEN, "{revoked}");
     }
@@ -745,6 +755,8 @@ mod tests {
     async fn paired_thread_read_updates_the_same_owner_on_another_device() {
         let root = tempfile::tempdir().unwrap();
         let state = super::super::tests::test_state_named(root.path(), "thread-read-devices");
+        let node_key = Arc::new(smallclaims::fleet::MemberKey::generate().unwrap().0);
+        state.store.set_node_key(node_key.clone()).unwrap();
         state.store.configure_thread_write_rollout([]);
         let person = "person/operator";
         let agent = "agent/example";
@@ -762,23 +774,19 @@ mod tests {
             ]),
             evidence: vec![], expected_subject: None, idempotency_key: Some("send-device-reply".into()),
         }, thread_metadata::PersonAuthority::TrustedLocal, None).unwrap();
-        let pair = |name: &str, scopes: &[&str]| {
-            state.store.append_claim(&ClaimInput {
-                subject: format!("custom/client/pairing-{name}"), kind: "custom.client.pairing-completed".into(),
-                actor: None,
-                fields: BTreeMap::from([
-                    ("person_id".into(), json!(person)),
-                    ("session_actor".into(), json!(format!("client/paired/{name}"))),
-                    ("credential_hash".into(), json!(credential_digest(name))),
-                    ("expires_at_unix_ms".into(), json!(client_now_ms() as u64 + 60_000)),
-                    ("scopes".into(), json!(scopes)),
-                ]),
-                evidence: vec![], expected_subject: None, idempotency_key: None,
-            }).unwrap();
-            format!("Bearer {name}")
-        };
-        let writer = pair("thread-read-writer", &["read.projections", "control.messages"]);
-        let observer = pair("thread-read-observer", &["read.projections"]);
+        let writer = paired_native_device(
+            &state, "Thread writer", &["read.projections", "control.messages"],
+        ).await;
+        let observer = paired_native_device(&state, "Thread observer", &["read.projections"]).await;
+        let writer = format!("Bearer {}", writer["credential"].as_str().unwrap());
+        let observer = format!("Bearer {}", observer["credential"].as_str().unwrap());
+        // These are actual existing enrollments, including their operation receipts:
+        // reuse both credentials after a full store reopen and graph replay.
+        drop(state);
+        let state = super::super::tests::test_state_named(root.path(), "thread-read-devices");
+        state.store.set_node_key(node_key).unwrap();
+        state.store.configure_thread_write_rollout([]);
+        state.store.replay_replication_graph().unwrap();
         let app = crate::api::router(state.clone());
         let summary = |bearer: &str| {
             let app = app.clone();
