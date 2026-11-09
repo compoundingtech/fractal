@@ -1,11 +1,12 @@
 // C6 is opt-in, device-local, and never part of observation reporting.
 export type C6Context = { route: 'tailscale' | 'lan' | 'https' | 'fabric' | 'none'; path: 'direct' | 'relay' | 'unknown' };
 export type C6Snapshot = { identity: object | null; context: C6Context };
+type C6ObservedContext = { route: C6Context['route']; observedPath: C6Context['path'] };
 export type C6Row = {
   runId: string; blockId: string; index: number; operation: 'status' | 'send-echo';
-  version: string; start: C6Context; end: C6Context; requestId: string | null; messageId: string | null;
+  version: string; start: C6ObservedContext; end: C6ObservedContext; pathScope: 'module-global' | 'unknown'; pathFlag: 'changed' | 'unknown' | null; requestId: string | null; messageId: string | null;
   ackMs: number | null; echoMs: number | null; status: 'ok' | 'failed' | 'timeout' | 'invalid' | 'cancelled';
-  errorCode: 'request-failed' | 'timeout' | 'route-changed' | 'path-changed' | 'path-unknown' | 'cancelled' | null;
+  errorCode: 'request-failed' | 'timeout' | 'route-changed' | 'cancelled' | null;
 };
 export type C6Send = { signal: AbortSignal; request: (id: string) => void; ack: () => void; cleanup: (close: () => void) => void };
 export const C6_LIMIT = 200;
@@ -38,11 +39,11 @@ export class C6Recorder<TSample extends C6Snapshot = C6Snapshot> {
     try {
       for (let index = 1; index <= 10; index++) {
         // Capture transport and its label together; execute receives this exact snapshot.
-        const sample = { ...this.ports.snapshot() }, start = { ...sample.context };
-        if (start.route === 'fabric' && !this.cancelled) start.path = await this.ports.readFabricPath();
+        const sample = { ...this.ports.snapshot() }, start: C6ObservedContext = { route: sample.context.route, observedPath: sample.context.path };
+        if (start.route === 'fabric' && !this.cancelled) start.observedPath = await this.ports.readFabricPath();
         const startRead = this.ports.snapshot();
         const began = this.ports.now();
-        const row: C6Row = { runId, blockId, index, operation, version: this.ports.version, start, end: start, requestId: null, messageId: null, ackMs: null, echoMs: null, status: 'ok', errorCode: null };
+        const row: C6Row = { runId, blockId, index, operation, version: this.ports.version, start, end: start, pathScope: start.route === 'fabric' ? 'module-global' : 'unknown', pathFlag: null, requestId: null, messageId: null, ackMs: null, echoMs: null, status: 'ok', errorCode: null };
         if (this.cancelled) {
           row.status = 'cancelled'; row.errorCode = 'cancelled';
         } else {
@@ -83,16 +84,17 @@ export class C6Recorder<TSample extends C6Snapshot = C6Snapshot> {
             this.pending = undefined;
           }
           const end = this.ports.snapshot();
-          row.end = { ...end.context };
-          if (row.end.route === 'fabric') row.end.path = await this.ports.readFabricPath();
+          row.end = { route: end.context.route, observedPath: end.context.path };
+          if (row.end.route === 'fabric') row.end.observedPath = await this.ports.readFabricPath();
           const endRead = this.ports.snapshot();
           if (this.cancelled) { row.status = 'cancelled'; row.errorCode = 'cancelled'; } else {
             if (sample.identity !== startRead.identity || sample.identity !== end.identity || sample.identity !== endRead.identity || row.start.route !== startRead.context.route || row.start.route !== row.end.route || row.end.route !== endRead.context.route) {
               row.status = 'invalid'; row.errorCode = 'route-changed';
-            } else if (row.start.route === 'fabric' && (row.start.path === 'unknown' || row.end.path === 'unknown')) {
-              row.status = 'invalid'; row.errorCode = 'path-unknown';
-            } else if (row.start.route === 'fabric' && row.start.path !== row.end.path) {
-              row.status = 'invalid'; row.errorCode = 'path-changed';
+            }
+            if (row.start.route === 'fabric' && (row.start.observedPath === 'unknown' || row.end.observedPath === 'unknown')) {
+              row.pathFlag = 'unknown';
+            } else if (row.start.route === 'fabric' && row.start.observedPath !== row.end.observedPath) {
+              row.pathFlag = 'changed';
             }
           }
         }

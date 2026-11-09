@@ -167,19 +167,20 @@ function C6Section() {
       <T dim>Opt-in: 10 sequential samples, 15s each; last 200 rows in memory on this phone. Choose a disposable conversation: real messages wake the agent. Leaving Fleet or backgrounding cancels remaining sends.</T>
       {data.agents.map(item => <Button key={item.id} label={`${target === item.id ? 'selected: ' : ''}${item.id}`} disabled={c6.busy} onPress={() => setTarget(item.id)} />)}
       <T dim>Target: {target || 'none selected'}. ACK and stream echo are separate durations. Changed routes are invalid.</T>
+      <T dim>Observed Fabric paths are module-global hints, not per-request evidence. Changed/unknown hints are flagged and remain in route percentiles.</T>
       <Button label="10 status reads" disabled={c6.busy || status !== 'online'} onPress={() => void run('status')} />
       <Button label="10 signed send+echo" disabled={c6.busy || status !== 'online' || !agent || !feed} onPress={() => void run('send-echo')} />
       <Button label="Share C6 results" disabled={c6.busy || !c6.rows.length} onPress={() => { setShareIssue(''); void Share.share({ message: c6.export() }).catch(() => setShareIssue('Could not share C6 results.')); }} />
       <Button label="Clear C6 results" disabled={c6.busy || !c6.rows.length} onPress={() => c6.clear()} />
       <T dim>{c6.busy ? 'Recording…' : 'Idle'} · {c6.rows.filter(row => row.status === 'ok').length} valid successes · {c6.rows.filter(row => row.status !== 'ok').length} failed, timed out or invalid</T>
-      {(['status', 'send-echo'] as const).map(operation => {
-        const rows = c6.rows.filter(row => row.operation === operation && row.status === 'ok');
+      {Array.from(new Set(c6.rows.map(row => row.start.route))).flatMap(route => (['status', 'send-echo'] as const).map(operation => {
+        const rows = c6.rows.filter(row => row.start.route === route && row.operation === operation && row.status === 'ok');
         const summary = (field: 'ackMs' | 'echoMs') => {
           const values = rows.flatMap(row => row[field] === null ? [] : [row[field]]);
           return `${nearestRank(values, 0.5)?.toFixed(1) ?? '—'}/${nearestRank(values, 0.95)?.toFixed(1) ?? '—'}`;
         };
-        return <T key={operation} dim>{operation} p50/p95 ms · ACK {summary('ackMs')} · echo {summary('echoMs')}</T>;
-      })}
+        return <T key={`${route}/${operation}`} dim>{route} {operation} p50/p95 ms · ACK {summary('ackMs')} · echo {summary('echoMs')}</T>;
+      }))}
       {shareIssue ? <T color={theme.fault}>{shareIssue}</T> : null}
     </View>
   </>;

@@ -20,7 +20,7 @@ test('freezes start context, invalidates a changed route, and does not refill fa
     context.route = 'fabric'; context.path = 'relay';
   });
   assert.equal(calls, 10);
-  assert.deepEqual(recorder.rows[0].start, { route: 'tailscale', path: 'unknown' });
+  assert.deepEqual(recorder.rows[0].start, { route: 'tailscale', observedPath: 'unknown' });
   assert.equal(recorder.rows[0].status, 'invalid');
   assert.equal(recorder.rows[0].errorCode, 'route-changed');
   assert.equal(recorder.rows[1].status, 'ok');
@@ -28,7 +28,8 @@ test('freezes start context, invalidates a changed route, and does not refill fa
   const pathOnly = fixture();
   pathOnly.context.route = 'fabric'; pathOnly.context.path = 'direct';
   await pathOnly.recorder.run('status', async () => { pathOnly.context.path = 'relay'; });
-  assert.equal(pathOnly.recorder.rows[0].errorCode, 'path-changed');
+  assert.equal(pathOnly.recorder.rows[0].status, 'ok');
+  assert.equal(pathOnly.recorder.rows[0].pathFlag, 'changed');
 });
 
 test('correlates own nonce only, including echo before ACK, and records separate durations', async () => {
@@ -71,7 +72,10 @@ test('keeps ACK when echo is missing and never exports raw errors or message con
   const exported = JSON.parse(recorder.export());
   assert.equal(exported.schema, 'ios-c6.v1');
   assert.equal(exported.rows.length, 20);
-  assert.deepEqual(Object.keys(exported.rows[0]).sort(), ['runId', 'blockId', 'index', 'operation', 'version', 'start', 'end', 'requestId', 'messageId', 'ackMs', 'echoMs', 'status', 'errorCode'].sort());
+  assert.deepEqual(Object.keys(exported.rows[0]).sort(), ['runId', 'blockId', 'index', 'operation', 'version', 'start', 'end', 'pathScope', 'pathFlag', 'requestId', 'messageId', 'ackMs', 'echoMs', 'status', 'errorCode'].sort());
+  assert.deepEqual(Object.keys(exported.rows[0].start).sort(), ['observedPath', 'route']);
+  assert.deepEqual(Object.keys(exported.rows[0].end).sort(), ['observedPath', 'route']);
+  assert.equal(exported.rows[0].pathScope, 'unknown');
   assert(!/secret|credential|private.invalid|message body|nonce-3/.test(recorder.export()));
   assert(exported.rows.slice(10).every(row => row.status === 'failed' && row.errorCode === 'request-failed'));
 });
@@ -174,14 +178,18 @@ test('Fabric reads fresh paths twice per sample, ignores cached paths, and exclu
   });
   assert.equal(reads, 20, 'two uncached native path reads for each of ten samples');
   for (const row of recorder.rows) {
-    assert.equal(row.start.path, 'relay', 'cached direct path must not label this sample');
-    assert.equal(row.end.path, 'direct');
-    assert.equal(row.status, 'invalid'); assert.equal(row.errorCode, 'path-changed');
+    assert.equal(row.start.observedPath, 'relay', 'cached direct hint must not label this observation');
+    assert.equal(row.end.observedPath, 'direct');
+    assert.equal(row.pathScope, 'module-global'); assert.equal(row.pathFlag, 'changed');
+    assert.equal(row.status, 'ok'); assert.equal(row.errorCode, null);
     assert.equal(row.ackMs, 3); assert.equal(row.echoMs, 7);
   }
+  assert.equal(nearestRank(recorder.rows.filter(row => row.status === 'ok').map(row => row.ackMs), 0.5), 3, 'flagged successes remain in route percentiles');
+  const exported = JSON.parse(recorder.export());
+  assert(exported.rows.every(row => row.pathScope === 'module-global' && row.start.observedPath === 'relay' && !('path' in row.start)));
 });
 
-test('unknown at either Fabric boundary invalidates the row; Tailscale never reads Fabric paths', async () => {
+test('unknown at either Fabric boundary flags a valid row; Tailscale never reads Fabric paths', async () => {
   for (const unknownAt of ['start', 'end']) {
     let id = 0, reads = 0;
     const recorder = new C6Recorder({
@@ -191,7 +199,7 @@ test('unknown at either Fabric boundary invalidates the row; Tailscale never rea
     });
     await recorder.run('status', async (_, hooks) => hooks.ack());
     assert.equal(reads, 20);
-    assert(recorder.rows.every(row => row.status === 'invalid' && row.errorCode === 'path-unknown'));
+    assert(recorder.rows.every(row => row.status === 'ok' && row.errorCode === null && row.pathFlag === 'unknown' && row.pathScope === 'module-global'));
   }
   let reads = 0, id = 0;
   const recorder = new C6Recorder({
@@ -201,5 +209,5 @@ test('unknown at either Fabric boundary invalidates the row; Tailscale never rea
   });
   await recorder.run('status', async (_, hooks) => hooks.ack());
   assert.equal(reads, 0);
-  assert(recorder.rows.every(row => row.status === 'ok' && row.start.path === 'unknown' && row.end.path === 'unknown'));
+  assert(recorder.rows.every(row => row.status === 'ok' && row.start.observedPath === 'unknown' && row.end.observedPath === 'unknown' && row.pathScope === 'unknown' && row.pathFlag === null));
 });
