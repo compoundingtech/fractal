@@ -356,6 +356,7 @@ pub mod tests {
             fields: BTreeMap::from([
                 ("from".into(), json!(person)), ("to".into(), json!(agent)),
                 ("content".into(), json!("Keep the original context.")),
+                ("status".into(), json!("sent")),
             ]),
             evidence: vec![], expected_subject: None, idempotency_key: None,
         };
