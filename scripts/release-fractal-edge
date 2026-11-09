@@ -12,6 +12,7 @@ versioned release (which reads the latest release) ignore it. A run for a commit
 current edge changes nothing, so slow runs cannot move edge backwards.
 """
 import argparse
+import base64
 import json
 import os
 import pathlib
@@ -28,8 +29,8 @@ SHA = re.compile(r'[0-9a-f]{40}')
 LISTED = 30
 
 
-def run(*cmd, cwd=None, check=True):
-    done = subprocess.run(cmd, check=False, text=True, capture_output=True, cwd=cwd)
+def run(*cmd, cwd=None, check=True, env=None):
+    done = subprocess.run(cmd, check=False, text=True, capture_output=True, cwd=cwd, env=env)
     if check and done.returncode != 0:
         raise SystemExit(f'release-fractal-edge: {" ".join(cmd[:3])} failed: {done.stderr.strip() or done.stdout.strip()}')
     return done
@@ -101,16 +102,21 @@ def release_assets(repository):
     return {a['name'] for a in json.loads(done.stdout)['assets']}
 
 
-def tag_commit(repository):
+def tag_target(repository):
+    """Return the observed ref object SHA and its peeled commit SHA."""
     done = gh('api', f'repos/{repository}/git/ref/tags/{TAG}', check=False)
     if missing(done):
-        return None
+        return None, None
     if done.returncode != 0:
         raise SystemExit(f'release-fractal-edge: reading the {TAG} tag failed: {done.stderr.strip()}')
     ref = json.loads(done.stdout)['object']
     if ref['type'] == 'commit':
-        return ref['sha']
-    return json.loads(gh('api', f'repos/{repository}/git/tags/{ref["sha"]}').stdout)['object']['sha']
+        return ref['sha'], ref['sha']
+    return ref['sha'], json.loads(gh('api', f'repos/{repository}/git/tags/{ref["sha"]}').stdout)['object']['sha']
+
+
+def tag_commit(repository):
+    return tag_target(repository)[1]
 
 
 def main():
@@ -162,9 +168,22 @@ def main():
         for stale in sorted(existing - set(names)):
             gh('release', 'delete-asset', TAG, stale, '--repo', repository, '--yes',
                done=lambda stale=stale: stale not in (release_assets(repository) or set()))
-    if tag_commit(repository) != args.source:
-        gh('api', '--method', 'PATCH', f'repos/{repository}/git/refs/tags/{TAG}',
-           '-f', f'sha={args.source}', '-F', 'force=true', done=lambda: tag_commit(repository) == args.source)
+    observed, commit = tag_target(repository)
+    if commit != args.source:
+        # Checkout does not persist credentials. Pass the job token only through
+        # git's environment, never its command line or the remote URL.
+        push_env = os.environ.copy()
+        if token := push_env.get('GH_TOKEN'):
+            index = int(push_env.get('GIT_CONFIG_COUNT', '0'))
+            push_env.update({
+                'GIT_CONFIG_COUNT': str(index + 1),
+                f'GIT_CONFIG_KEY_{index}': 'http.https://github.com/.extraheader',
+                f'GIT_CONFIG_VALUE_{index}': 'AUTHORIZATION: basic ' + base64.b64encode(
+                    f'x-access-token:{token}'.encode()).decode(),
+            })
+        run('git', 'push', f'--force-with-lease=refs/tags/{TAG}:{observed or ""}',
+            f'https://github.com/{repository}.git', f'{args.source}:refs/tags/{TAG}',
+            cwd=repo, env=push_env)
     gh('release', 'edit', TAG, '--repo', repository, '--prerelease', '--latest=false', '--title', title,
        '--notes-file', str(notes_file))
 

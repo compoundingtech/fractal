@@ -1,9 +1,10 @@
 //! Local GET-agents counts from the HTTP telemetry boundary, retained by a single minute writer.
+mod fault;
 mod ledger;
 
 use std::path::PathBuf;
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
@@ -36,6 +37,7 @@ struct Boundary {
 #[derive(Default)]
 struct Pending {
     serving: bool,
+    clock_epoch: u64,
     minutes: [Option<Receipt>; 2],
     latest_slot: Option<u64>,
     rewind_from: Option<u64>,
@@ -50,15 +52,21 @@ impl Pending {
     }
 
     fn stop_serving(&mut self) {
-        *self = Self::default();
+        self.serving = false;
+        self.minutes = [None; 2];
     }
 
     fn observe_slot(&mut self, slot: u64) {
         if self.latest_slot.is_some_and(|latest| slot < latest) {
             self.minutes = [None; 2];
+            self.clock_epoch += 1;
             self.rewind_from = Some(self.rewind_from.map_or(slot, |prior| prior.min(slot)));
         }
         self.latest_slot = Some(slot);
+    }
+
+    fn can_route(&self, epoch: u64) -> bool {
+        self.serving && self.clock_epoch == epoch && self.rewind_from.is_none()
     }
 
     fn record(&mut self, slot: u64, observed_slot: u64, fast: bool) {
@@ -138,6 +146,16 @@ pub(super) struct Reading {
     fast: u128,
     verdict: Verdict,
     storage_ready: bool,
+    #[serde(flatten)]
+    fault: FaultHealth,
+}
+
+#[derive(Clone, Copy, Default, Serialize)]
+struct FaultHealth {
+    fault_outbox_overflow: bool,
+    fault_pending: u64,
+    fault_quarantined: u64,
+    fault_delivery_blocked: bool,
 }
 
 impl Reading {
@@ -150,6 +168,7 @@ impl Reading {
             fast: 0,
             verdict: Verdict::Unknown,
             storage_ready,
+            fault: FaultHealth::default(),
         }
     }
 
@@ -201,9 +220,19 @@ impl Drop for Completion {
 
 static PENDING: LazyLock<Mutex<Pending>> = LazyLock::new(|| Mutex::new(Pending::default()));
 static PUBLISHED: Mutex<Option<Reading>> = Mutex::new(None);
+static FAULT_HEALTH: LazyLock<Mutex<FaultHealth>> =
+    LazyLock::new(|| Mutex::new(FaultHealth::default()));
 
 fn now_ms() -> u64 {
     super::client_now_ms() as u64
+}
+
+fn can_route_epoch(epoch: u64) -> bool {
+    let mut pending = PENDING.lock();
+    if pending.serving {
+        pending.observe_slot(now_ms() / MINUTE_MS);
+    }
+    pending.can_route(epoch)
 }
 
 pub(super) fn record(method: &str, route: &str, outcome: RequestOutcome, elapsed: Duration) {
@@ -222,13 +251,15 @@ pub(super) fn read() -> Reading {
     let pending = PENDING.lock();
     let end = now_ms() / MINUTE_MS;
     let published = *PUBLISHED.lock();
-    published
+    let mut reading = published
         .filter(|reading| {
             pending.serving
                 && pending.rewind_from.is_none()
                 && reading.through_unix_ms == end * MINUTE_MS
         })
-        .unwrap_or_else(|| Reading::new(end, published.is_some()))
+        .unwrap_or_else(|| Reading::new(end, published.is_some()));
+    reading.fault = *FAULT_HEALTH.lock();
+    reading
 }
 
 /// Owns agent-list measurement for the native listeners' serving lifetime.
@@ -265,23 +296,32 @@ pub async fn stop_before_listener_drop<T>(
 }
 
 /// Start once, when the native listeners enter service.
-pub fn start_agents_request_slo(state_dir: PathBuf, node: String) -> AgentsRequestSloServing {
+pub fn start_agents_request_slo(
+    state_dir: PathBuf,
+    node: String,
+    fault_binding: Option<(Arc<crate::store::Store>, String)>,
+) -> AgentsRequestSloServing {
     PENDING.lock().start_serving();
     AgentsRequestSloServing(tokio::spawn(smallclaims::task_cpu::account(
         "slo.agents_request_minutes",
-        run(state_dir, node),
+        run(state_dir, node, fault_binding),
     )))
 }
 
 // Awaiting each blocking update bounds the writer to one receipt in flight.
-async fn run(state_dir: PathBuf, node: String) {
+async fn run(
+    state_dir: PathBuf,
+    node: String,
+    fault_binding: Option<(Arc<crate::store::Store>, String)>,
+) {
+    let fault_binding = fault_binding.map(Arc::new);
     let path = std::sync::Arc::new(state_dir.join(LEDGER_NAME));
     let node = std::sync::Arc::new(node);
     let mut previous = None;
     let mut invalidate_from = None;
     let mut ledger = None;
     loop {
-        let (boundary, receipt) = {
+        let (boundary, receipt, clock_epoch) = {
             let mut pending = PENDING.lock();
             if !pending.serving {
                 return;
@@ -296,18 +336,70 @@ async fn run(state_dir: PathBuf, node: String) {
                 invalidate_from = Some(invalidate_from.map_or(slot, |prior: u64| prior.min(slot)));
                 *PUBLISHED.lock() = None;
             }
-            (boundary, receipt)
+            (boundary, receipt, pending.clock_epoch)
         };
         previous = Some(boundary);
         let db_path = path.clone();
         let db_node = node.clone();
+        let fault_binding = fault_binding.clone();
         let result = tokio::task::spawn_blocking(move || {
             smallclaims::task_cpu::blocking("slo.agents_request_minutes", || {
                 let mut ledger = match ledger {
                     Some(ledger) => ledger,
                     None => Ledger::open(&db_path, &db_node)?,
                 };
-                let reading = ledger.update(boundary.slot, receipt, invalidate_from)?;
+                let reviewer = fault_binding
+                    .as_deref()
+                    .map(|(_, reviewer)| reviewer.as_str());
+                let drain = |ledger: &mut Ledger| {
+                    let Some((store, reviewer)) = fault_binding.as_deref() else {
+                        return true;
+                    };
+                    let routed = ledger.drain_faults(|cut| {
+                        // Linearize graph admission against rewind/stop, then release
+                        // the hot lock before checking the reviewer or writing claims.
+                        anyhow::ensure!(
+                            can_route_epoch(clock_epoch),
+                            "agent-list SLO cut epoch changed"
+                        );
+                        fault::route(store, reviewer, cut)
+                    });
+                    if let Err(error) = routed {
+                        tracing::warn!(%error, "agent-list SLO fault delivery blocked");
+                        return false;
+                    }
+                    true
+                };
+                let mut blocked = false;
+                if let Some(reviewer) = reviewer
+                    && ledger.fence_if_full(invalidate_from, reviewer)?
+                {
+                    blocked = !drain(&mut ledger);
+                }
+                // A rewind detected during pre-drain invalidates this receipt. If a
+                // rewind races the commit itself, the routing epoch check defers it.
+                let receipt = receipt.filter(|_| {
+                    let pending = PENDING.lock();
+                    pending.clock_epoch == clock_epoch && pending.rewind_from.is_none()
+                });
+                // The normal path fences and admits the receipt and its verdict atomically.
+                let mut reading =
+                    ledger.update(boundary.slot, receipt, invalidate_from, reviewer)?;
+                {
+                    let mut health = FAULT_HEALTH.lock();
+                    let was_blocked = health.fault_delivery_blocked;
+                    *health = reading.fault;
+                    health.fault_delivery_blocked = was_blocked && reviewer.is_some();
+                }
+                if reviewer.is_some() {
+                    reading.fault.fault_delivery_blocked = blocked || !drain(&mut ledger);
+                    reading.fault.fault_pending = ledger.pending_fault_count()?;
+                    if reading.fault.fault_outbox_overflow {
+                        tracing::error!(
+                            "agent-list SLO fault outbox overflow requires reconciliation"
+                        );
+                    }
+                }
                 Ok::<_, anyhow::Error>((ledger, reading))
             })
         })
@@ -318,6 +410,7 @@ async fn run(state_dir: PathBuf, node: String) {
             Ok((stored, reading)) => {
                 ledger = Some(stored);
                 invalidate_from = None;
+                *FAULT_HEALTH.lock() = reading.fault;
                 *PUBLISHED.lock() = Some(reading);
             }
             Err(error) => {
@@ -523,6 +616,37 @@ mod tests {
         let result =
             stop_before_listener_drop(serving, async { 15 }, || admitting.set(false)).await;
         assert_eq!(result, 15);
+    }
+
+    #[test]
+    fn newly_observed_rewind_fences_a_writer_until_the_next_cut() {
+        let mut pending = Pending::default();
+        pending.start_serving();
+        pending.observe_slot(10);
+        let in_flight_epoch = pending.clock_epoch;
+        assert!(pending.can_route(in_flight_epoch));
+        pending.observe_slot(9);
+        assert!(!pending.can_route(in_flight_epoch));
+        assert!(!pending.can_route(pending.clock_epoch));
+        let (_, _, rewind) = pending.boundary(None, 9 * MINUTE_MS + 5, Instant::now(), false);
+        assert_eq!(rewind, Some(9));
+        assert!(!pending.can_route(in_flight_epoch));
+        assert!(pending.can_route(pending.clock_epoch));
+    }
+
+    #[test]
+    fn stale_score_preserves_last_known_outbox_health() {
+        let prior = *FAULT_HEALTH.lock();
+        *FAULT_HEALTH.lock() = FaultHealth {
+            fault_outbox_overflow: true,
+            fault_pending: 64,
+            ..FaultHealth::default()
+        };
+        let reading = read();
+        *FAULT_HEALTH.lock() = prior;
+        assert_eq!(reading.verdict, Verdict::Unknown);
+        assert!(reading.fault.fault_outbox_overflow);
+        assert_eq!(reading.fault.fault_pending, 64);
     }
 
     #[test]

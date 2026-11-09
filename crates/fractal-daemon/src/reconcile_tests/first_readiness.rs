@@ -111,6 +111,7 @@ let fresh = start(&store, "fresh", "new-first-readiness", root.path());
 creation_order.push(fresh.id.clone());
 let notify = Arc::new(Notify::new());
 let state = AppState {
+    browser_pairing_login: None,
     seat_admission: Default::default(),
     owning_person: None,
     store: store.clone(),
@@ -278,6 +279,7 @@ assert!(
 
 let notify = Arc::new(Notify::new());
 let state = AppState {
+    browser_pairing_login: None,
     seat_admission: Default::default(),
     owning_person: None,
     store: store.clone(),

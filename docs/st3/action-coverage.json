@@ -1112,6 +1112,15 @@
       "verification": "real CLI over private Unix socket; disk store reopened between actions"
     },
     {
+      "command": "st devices renew-stage",
+      "description": "Stage a key-bound replacement for one audited device grant",
+      "tests": [
+        "crates/fractal/src/main_tests.rs::device_renewal_staging_posts_sealed_terms_and_returns_only_receipt",
+        "crates/fractal/src/main_tests.rs::device_renewal_staging_refuses_remote_endpoints_without_connecting"
+      ],
+      "verification": "CLI parsing and Unix request contract; renewal handler and writer-transaction tests"
+    },
+    {
       "command": "st devices revoke",
       "description": "Revoke one paired device",
       "tests": [

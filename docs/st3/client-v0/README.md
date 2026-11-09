@@ -250,6 +250,15 @@ omit their stored principal remain ChatGPT grants. MCP pairing is an explicit
 choice, not a reinterpretation of a ChatGPT profile. Older servers that do not
 recognize `assistant/mcp` reject it; clients must not retry as a person or ChatGPT.
 
+Assistant challenge storage uses the member-local keyed verifier, bound to the
+stored full `assistant-grant/<hex>` grant ID. Request/response shapes and bearer
+credential digests are unchanged. Unknown verifier markers or key replacement
+require HTTP 403 `pairing-restart-required` (`start pairing again`), without
+changing BEGUN or writing GRANTED, credentials, or completion state; the denied
+completion audit is retained. Unmarked legacy challenges have a bounded
+five-minute lifetime. See [assistant verifier recovery](../external-assistants.md#pairing-verifier-and-recovery)
+for secret storage, logical-backup exclusions, and restart/downgrade guidance.
+
 ### Mission run timing
 
 `GET /v1/client/missions/{id}` requires `read.projections`, like other projection reads.
@@ -1811,6 +1820,37 @@ socket. The selected concrete scopes are sealed into that pairing; existing limi
 not silently upgraded and must be re-paired, then revoked when no longer needed. Revocation takes
 effect for every subsequent request, including a new bounded terminal WebSocket exchange.
 
+Person challenges use 40-bit random codes with a 300-second expiry and independent random
+128-bit pairing IDs and begin-claim subjects, not IDs derived from the code. New
+`custom.client.pairing-begun` claims carry `verifier: "hmac-sha256-v1"`:
+`code_hash` holds HMAC-SHA-256, and
+`verifier_key_id` holds the SHA-256 fingerprint of the member-local secret. The secret lives
+at `state_dir/pairing-verifier/key` (0600, parent directory 0700), never in claims or backups.
+The MAC input is the domain bytes `fractal/pairing-code-verifier/v1` (no NUL),
+then the full prefixed pairing ID's UTF-8 bytes, then the code's UTF-8 bytes, each
+prefixed by its byte length as an unsigned big-endian u32, without normalization.
+Verifiers are bound to the stored pairing ID, including its namespace prefix.
+Replicated claims alone cannot support offline guessing against this keyed verifier.
+The threat bound remains a 40-bit code valid for 300 seconds, not a high-entropy credential;
+use an encrypted path and independently verify the person-root fingerprint.
+
+Reopening the same state directory with the same secret preserves live challenges. After a
+claim-only restore or a missing, replaced, or rotated verifier secret, old pending challenges
+require a fresh trusted-local begin. Completion returns HTTP 403 `pairing-restart-required`,
+`retryable: false`, with message `start pairing again`; retrying the old code cannot recover it.
+A wrong code with the matching verifier secret still returns the existing `forbidden` error.
+Legacy challenges without the marker are accepted only if unexpired and their expiry minus
+the claim timestamp is at most 300,000 ms; a longer legacy lifetime returns
+`pairing-restart-required`. Existing completed person pairings remain usable.
+Downgrading to a pre-keyed-verifier binary makes in-flight keyed pairings fail with
+HTTP 403 `forbidden`, message `the pairing code is invalid, expired, or already used`:
+the older binary ignores the marker and compares the stored HMAC with the unkeyed
+code digest. Restart those pairings on the downgraded member; no stored claims or
+verifier state need cleanup.
+There is no rollback protection when both secret and claims are restored to an earlier state:
+a previously consumed challenge can become usable again until its original expiry. This is
+an accepted limitation, not a guarantee of preserved single-use history across such a restore.
+
 ### External assistant grants
 
 External assistants use a separate, closed principal namespace, never person delegation.
@@ -2351,6 +2391,12 @@ or start a new pairing on the desired member.
 This guarantee holds only when every member accepting pairing completion runs this
 version or later. An older member has no origin check and can still complete a replicated
 challenge begun on an upgraded member, so upgrade all members.
+
+Person pairing completion returns HTTP 403 `pairing-restart-required`, `retryable: false`,
+and message `start pairing again` when the challenge's verifier key is missing or changed,
+or a legacy challenge's expiry exceeds 300,000 ms after its claim timestamp. Begin a fresh
+pairing on the intended member; do not retry completion of the old challenge. This is
+distinct from an incorrect code, which retains the existing `forbidden` response.
 
 Adding optional fields is compatible. Removing or retyping a field, changing ordering or token
 rules, adding a required action parameter, or changing action semantics requires a new capability

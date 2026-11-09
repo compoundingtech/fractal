@@ -794,7 +794,8 @@ pub fn authenticate(
         }
         let pairing_completion = request.method() == axum::http::Method::POST
             && request.uri().path().starts_with("/v1/client/pairings/")
-            && request.uri().path().ends_with("/complete");
+            && (request.uri().path().ends_with("/complete")
+                || request.uri().path() == "/v1/client/pairings/renewals/pending");
         return pairing_completion
             .then(ClientSession::pairing)
             .ok_or_else(|| forbidden("the Fabric-loopback client credential is required"));

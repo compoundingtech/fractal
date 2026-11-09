@@ -37,6 +37,11 @@ pub use fractal_api_core::api::client_v0::{authenticate, bound_mission_cards, ca
 pub use fractal_api_core::api::client_v0::{published_missions, published_runtimes, require_scope, resources, start_operation_report, timeline_value, validation};
 pub mod arrangements;
 pub mod assistant;
+pub mod browser_pairing;
+#[cfg(test)]
+mod browser_pairing_tests;
+pub mod device_renewal;
+pub mod pairing_verifier;
 pub mod collection_ivm;
 pub mod collection_windows;
 pub mod conversation_blocks;
@@ -194,6 +199,12 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/assistant/missions-rich", get(assistant::read_projection))
         .route("/v1/client/assistant/agents-rich", get(assistant::read_projection))
         .route("/v1/client/pairings", post(pairing_begin))
+        .route("/v1/client/pairing/browser-requests", post(browser_pairing::begin))
+        .route("/v1/client/pairing/browser-requests/{id}/redeem", post(browser_pairing::redeem))
+        .route("/v1/client/pairing/browser-requests/revoke-current", post(browser_pairing::revoke_current))
+        .route("/v1/client/pairings/renewals/stage", post(device_renewal::stage))
+        .route("/v1/client/pairings/renewals/pending", post(device_renewal::pending))
+        .route("/v1/client/pairings/renewals/complete", post(device_renewal::complete))
         .route("/v1/client/assistant/grants/{id}", get(assistant::inspect))
         .route("/v1/client/assistant/grants/{id}/revoke", post(assistant::revoke))
         .route("/v1/client/assistant/grants/{id}/read-trust", post(assistant::pin_read_trust))
@@ -5605,19 +5616,29 @@ pub async fn pairing_begin(
             "the pairing request requires a valid version, device name, and concrete initiating person",
         ));
     }
-    let mut random = [0_u8; 10];
+    let mut random = [0_u8; 8];
     getrandom::fill(&mut random).map_err(ApiError::internal)?;
     const ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let code = random[..8]
         .iter()
         .map(|byte| ALPHABET[*byte as usize % ALPHABET.len()] as char)
         .collect::<String>();
-    let stable = hex::encode(Sha256::digest(
-        format!("{}:{code}", request.device_name).as_bytes(),
-    ));
-    let pairing_id = format!("pairing/{}", &stable[..24]);
-    let subject = format!("custom/client/pairing-{}", &stable[..24]);
-    let expires_at = client_now_ms() + 300_000;
+    begin_person_challenge(state, session, request, code)
+}
+
+// Keep entropy generation separate from claim construction so the same-code case
+// can prove identities and all other stored fields are independent of the code.
+fn begin_person_challenge(
+    state: AppState,
+    session: ClientSession,
+    request: PairingBegin,
+    code: String,
+) -> Result<Json<Value>, ApiError> {
+    let stable = pairing_verifier::random_id().map_err(ApiError::internal)?;
+    let pairing_id = format!("pairing/{stable}");
+    let subject = format!("custom/client/pairing-{stable}");
+    let expires_at = client_now_ms() + pairing_verifier::CHALLENGE_TTL_MS;
+    let verifier_key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
     let person_id = request.person_id;
     let fabric_gateway = request.fabric_gateway == Some(true);
     let scopes: Vec<&str> = match (request.full_control.unwrap_or(false), request.scopes) {
@@ -5654,9 +5675,13 @@ pub async fn pairing_begin(
         ("device_name".into(), Value::String(request.device_name)),
         ("person_id".into(), Value::String(person_id.clone())),
         ("scopes".into(), json!(scopes)),
-        ("code_hash".into(), Value::String(credential_digest(&code))),
+        ("verifier".into(), Value::String(pairing_verifier::MARKER.into())),
+        ("verifier_key_id".into(), Value::String(pairing_verifier::key_id(&verifier_key))),
         ("expires_at_unix_ms".into(), json!(expires_at)),
     ]);
+    let stored_pairing_id = begun_fields["pairing_id"].as_str().expect("pairing ID is a string");
+    let code_hash = pairing_verifier::digest(&verifier_key, stored_pairing_id, &code);
+    begun_fields.insert("code_hash".into(), Value::String(code_hash));
     if fabric_gateway {
         begun_fields.insert("fabric_gateway".into(), Value::Bool(true));
     }
@@ -5852,6 +5877,13 @@ pub async fn pairing_complete(
                 == Some(pairing_id.as_str())
         })
         .ok_or_else(|| ApiError::not_found(format!("pairing `{pairing_id}` does not exist")))?;
+    if begun.body["fields"]["browser_request"] == true
+        && (browser_pairing::approval(&state, &begun)? != "approved"
+            || request.device_public_key != format!("browser:{id}")
+            || request.fabric_node_id.is_some())
+    {
+        return Err(forbidden("browser pairing requires its owner's approved request"));
+    }
     if begun.origin != state.store.origin() {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
@@ -5869,18 +5901,45 @@ pub async fn pairing_complete(
         .map_err(ApiError::internal)?
         .claims
         .is_empty();
-    let valid_code = begun
-        .body
-        .pointer("/fields/code_hash")
-        .and_then(Value::as_str)
-        == Some(credential_digest(&request.code).as_str());
+    let restart = pairing_verifier::restart;
     let expires = begun
         .body
         .pointer("/fields/expires_at_unix_ms")
         .and_then(Value::as_u64)
         .map(u128::from)
         .unwrap_or_default();
-    if used || !valid_code || expires <= client_now_ms() {
+    let now = client_now_ms();
+    let expected = begun.body.pointer("/fields/code_hash").and_then(Value::as_str).unwrap_or_default();
+    let valid_code = match begun.body.pointer("/fields/verifier") {
+        Some(Value::String(marker)) if marker == browser_pairing::VERIFIER => {
+            if begun.body["fields"]["browser_request"] != true {
+                return Err(restart());
+            }
+            browser_pairing::verify_request_key(&request.code, expected)
+        }
+        Some(Value::String(marker)) if marker == pairing_verifier::MARKER => {
+            let key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
+            if begun.body.pointer("/fields/verifier_key_id").and_then(Value::as_str)
+                != Some(pairing_verifier::key_id(&key).as_str())
+            {
+                return Err(restart());
+            }
+            let stored_pairing_id = begun.body.pointer("/fields/pairing_id")
+                .and_then(Value::as_str).ok_or_else(restart)?;
+            pairing_verifier::verify(&key, stored_pairing_id, &request.code, expected)
+        }
+        Some(_) => return Err(restart()),
+        None => {
+            if begun.body["fields"]["browser_request"] == true {
+                return Err(restart());
+            }
+            if !pairing_verifier::legacy_window_open(expires, begun.accepted_at_unix_ms, now) {
+                return Err(restart());
+            }
+            expected == credential_digest(&request.code)
+        }
+    };
+    if used || !valid_code || expires <= now {
         return Err(forbidden(
             "the pairing code is invalid, expired, or already used",
         ));
@@ -8199,7 +8258,7 @@ async fn dispatch_action(
             let target = parameter_string(p, "target_id")?;
             let result = state
                 .store
-                .finish_person_step_authorized(
+                .finish_person_step_kind(
                     &PersonStepResponse {
                         delegation: None,
                         subject: target,
@@ -8233,6 +8292,8 @@ async fn dispatch_action(
                     },
                     action == "work.cancel-ask",
                     session.assistant_write.as_ref(),
+                    false,
+                    session.pairing_grant.as_deref().filter(|_| !session.local_peer).map(|grant| (grant, session.actor.as_str())),
                 )
                 .map_err(|error| {
                     if error.code == "forbidden" {
@@ -13787,6 +13848,7 @@ mission "differential" state="ready" {
         AppState {
             seat_admission: Default::default(),
             owning_person: Some("person/operator".into()),
+            browser_pairing_login: None,
             store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
             notify: Arc::new(Notify::new()),
             event_notify: watch::channel(0_u64).0,

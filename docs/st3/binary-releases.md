@@ -228,7 +228,7 @@ After a `main` run of **Fractal tag release** passes every job, its last job (`r
 moves one GitHub pre-release, tagged `edge`, to that commit. It is a single release that is updated, not
 one release per commit. It builds nothing: it takes the run's `fractal-release-attempt-N` artifact, re-checks the
 checksums and the source recorded in each archive, then replaces the assets (both target archives and
-their compatibility archives, their `.sha256` files, `SHA256SUMS` and `RELEASE.json`), rewrites the notes, and moves the tag. The notes give the exact
+their compatibility archives, their `.sha256` files, `SHA256SUMS` and `RELEASE.json`), moves the tag, then rewrites the title and notes. The notes give the exact
 source commit, a link to the run, and the merged pull request titles since the previous edge (at most 30).
 The ID-based download uses `merge-multiple: true` and `path: dist`, keeping archives,
 `SHA256SUMS` and `RELEASE.json` directly in `dist/`, as assembly and the edge publisher require.
@@ -241,6 +241,10 @@ Archives carry no tag in `BUILD.json`; `source` identifies the commit.
 - A run for a commit older than the current edge changes nothing, so a slow run cannot move edge
   backwards. Runs are serialized. While assets are being replaced, a download can briefly pair a new
   archive with an old checksum; the installer fails closed on the mismatch, so retry after a minute.
+- Tag movement uses a Git push with a force-with-lease against the observed tag object SHA, rather
+  than the REST ref update. The publisher passes `GH_TOKEN` through Git's HTTP authentication
+  environment when checkout has not persisted credentials. A rejected lease stops before the
+  release title and notes are changed; retrying reobserves the tag and replaces the assets again.
 - The `edge` tag is excluded from the tag trigger, and a tag moved with the workflow's token starts no workflow.
 - `scripts/release-fractal-edge --dry-run --source SHA --dist DIRECTORY` verifies a downloaded artifact
   and prints the notes without publishing.
