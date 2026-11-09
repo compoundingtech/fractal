@@ -79,3 +79,75 @@ test('a closed thread keeps its composer and exact-message quote without implici
   assert.deepEqual(calls, [['reply', thread, 'Follow up', message.id]]);
   assert.equal(thread.state, 'closed');
 });
+
+test('the first draft uses the retained composer through its receipt and accepted summary', async () => {
+  const calls = [];
+  const id = 'thread/new';
+  const state = hooks();
+  const draftCache = { current: new Map() };
+  let accepted = false;
+  const start = {
+    id, accepted: false, origin: { agentId: 'agent/reviewer', ask: 'step-run/review', episode: 'episode/exact' },
+    title: 'Review', onAccepted: () => { accepted = true; }, onCancel() {},
+  };
+  const store = {
+    status: 'online', draftCache, draftsReady: true, saveDrafts() {},
+    actions: {
+      startThread: async (...args) => { calls.push(['start', ...args]); return { how: 'sent' }; },
+      replyToThread: async (...args) => { calls.push(['reply', ...args]); return { how: 'sent' }; },
+    },
+  };
+  const composer = compile('ThreadComposer', 'function ThreadComposeField', {
+    ...state, useStore: () => store, useRef: current => ({ current }),
+    useEffect() {}, useFocusEffect() {}, useCallback: fn => fn, threadDraftKey: key => key,
+    threadStartScope: origin => JSON.stringify(origin), readThreadDraft: raw => raw ? JSON.parse(raw) : { text: '' },
+    rememberBounded: (cache, key, value) => cache.set(key, value), threadTextIssue: () => undefined,
+    View: 'View', T: 'T', Button: 'Button', ThreadComposeField: 'ThreadComposeField', ThreadActionFeedback: 'ThreadActionFeedback',
+  });
+  let props = { start, canReply: true, selectionVersion: 0 };
+  let field = find(composer(props), 'ThreadComposeField');
+  field.props.onChange('First message');
+  state.reset();
+  field = find(composer(props), 'ThreadComposeField');
+  assert.equal(field.props.text, 'First message');
+  assert.equal(JSON.parse(draftCache.current.get(id)).text, 'First message');
+  field.props.onSend();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(accepted, true);
+  assert.deepEqual(calls, [['start', id, start.origin, start.title, 'First message']]);
+  state.reset();
+  field = find(composer({ ...props, start: { ...start, accepted: true } }), 'ThreadComposeField');
+  assert.equal(field.props.text, '');
+  assert.equal(field.props.enabled, true, 'same editable field remains while confirmed history is loading');
+  assert.equal(field.props.canSend, false, 'another send waits for the accepted summary');
+  assert.equal(field.props.onCancel, undefined);
+
+  const thread = { id, agent_id: 'agent/reviewer', state: 'open', title: 'Review' };
+  props = { thread, canReply: true, selectionVersion: 0 };
+  state.reset();
+  field = find(composer(props), 'ThreadComposeField');
+  assert.equal(field.props.enabled, true);
+  field.props.onChange('Follow-up');
+  state.reset();
+  field = find(composer(props), 'ThreadComposeField');
+  field.props.onSend();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls[1], ['reply', thread, 'Follow-up', undefined]);
+});
+
+test('an unsent inline thread does not request server history or subscribe to a fabricated summary', async () => {
+  let read, follow;
+  const calls = [];
+  const inline = compile('InlineThread', 'function threadTextIssue', {
+    useStore: () => ({ feed: { belongsTo: () => true, followThreadSummary: (...args) => calls.push(args) } }),
+    useCallback: fn => fn,
+    useThreadPage: (reader, _refresh, follower) => { read = reader; follow = follower; return { items: [], loading: false }; },
+    ThreadDetailContent: 'ThreadDetailContent',
+  });
+  const start = { id: 'thread/draft', accepted: false, title: 'Draft' };
+  const rendered = inline({ client: { threadGet: (...args) => calls.push(args) }, id: start.id, refresh: 0, start });
+  assert.equal(rendered.props.start, start);
+  assert.deepEqual(await read(undefined, new AbortController().signal), { value: { items: [], next_cursor: null } });
+  assert.equal(follow({}), undefined);
+  assert.deepEqual(calls, []);
+});

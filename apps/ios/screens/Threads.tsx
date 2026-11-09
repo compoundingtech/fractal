@@ -217,14 +217,14 @@ function ThreadDetail({ client, id }: { client: ThreadClient; id: string }) {
   </ScrollView>;
 }
 
-function ThreadDetailContent({ thread, issue, loading, reload, client, onOpen }: {
-  thread?: ThreadSummary; issue?: string; loading: boolean; reload: () => void; client: ThreadClient; onOpen?: () => void;
+function ThreadDetailContent({ thread, issue, loading, reload, client, onOpen, start }: {
+  thread?: ThreadSummary; issue?: string; loading: boolean; reload: () => void; client: ThreadClient; onOpen?: () => void; start?: ThreadStartDraft;
 }) {
   const [expanded, setExpanded] = useState(true);
-  if (thread) return <>
-    {onOpen ? <EmbeddedThreadHeader title={thread.title} state={threadSummaryLine(thread)} expanded={expanded} toggle={() => setExpanded(value => !value)} />
-      : <T bold>{thread.title}<T dim> · {threadSummaryLine(thread)}</T></T>}
-    {expanded || !onOpen ? <ThreadBody client={client} thread={thread} onOpen={onOpen} /> : null}
+  if (thread || start) return <>
+    {onOpen ? <EmbeddedThreadHeader title={thread?.title ?? start!.title} state={thread ? threadSummaryLine(thread) : start?.accepted ? 'Loading history…' : 'draft'} expanded={expanded} toggle={() => setExpanded(value => !value)} />
+      : <T bold>{thread?.title ?? start!.title}<T dim> · {thread ? threadSummaryLine(thread) : start?.accepted ? 'Loading history…' : 'draft'}</T></T>}
+    {expanded || !onOpen ? <ThreadBody client={client} thread={thread} start={thread ? undefined : start} onOpen={onOpen} /> : null}
   </>;
   if (issue) return <>
     <T color={theme.waiting}>{issue}</T>
@@ -261,73 +261,46 @@ export function AskThread({ origin, initialTitle, onOpen, allowStart = true }: {
     : null;
 }
 
+type ThreadStartDraft = {
+  id: string; origin: ThreadStartOrigin; title: string; accepted: boolean; onAccepted: () => void; onCancel: () => void;
+};
+
 function AskThreadStart({ client, origin, initialTitle, onOpen, canStart }: {
   client: ThreadClient; origin: ThreadStartOrigin; initialTitle: string; onOpen: (id: string) => void; canStart: boolean;
 }) {
-  const { actions, status, threadRefresh, threadDeliveries } = useStore();
-  const [started, setStarted] = useState<{ client: ThreadClient; id: string }>();
-  const [showComposer, setShowComposer] = useState(false);
-  const [draftExpanded, setDraftExpanded] = useState(true);
-  const [draft, setDraft] = useState('');
-  const [sending, setSending] = useState(false);
-  const [failure, setFailure] = useState<{ client: ThreadClient; result: ThreadEditResult }>();
+  const { status, threadRefresh, threadDeliveries } = useStore();
+  const [local, setLocal] = useState<{ client: ThreadClient; id: string; accepted: boolean }>();
   const delivery = threadDeliveries?.get(threadStartScope(origin));
-  const feedback = delivery?.retry ? { how: 'unconfirmed' as const, retry: delivery.retry } : failure?.client === client ? failure.result : undefined;
-  const startedId = started?.client === client ? started.id : undefined;
-  const content = draft.trim();
-  const title = threadTitleFromAsk(initialTitle);
-  const issue = threadTextIssue(content);
-  const enabled = canStart && status === 'online' && !sending && !delivery;
-  const submit = async (id: string, send: () => Promise<ThreadEditResult>) => {
-    setSending(true);
-    try {
-      const next = await send();
-      if (next.how === 'sent') {
-        setStarted({ client, id });
-        setShowComposer(false);
-        setDraft('');
-      }
-      setFailure(next.how === 'failed' ? { client, result: next } : undefined);
-    } finally {
-      setSending(false);
-    }
-  };
-  const start = () => {
-    const id = `thread/${Crypto.randomUUID()}`;
-    void submit(id, () => actions.startThread(id, origin, title, content));
-  };
+  const current = local?.client === client ? local : undefined;
+  const id = current?.id ?? delivery?.target;
+  const accepted = current?.accepted === true;
+  const draft: ThreadStartDraft | undefined = id ? {
+    id, origin, accepted, title: threadTitleFromAsk(initialTitle),
+    onAccepted: () => setLocal({ client, id, accepted: true }),
+    onCancel: () => setLocal(undefined),
+  } : undefined;
   return <View style={{ gap: 6 }}>
-    <ThreadGroup context={{ origin_ask: origin.ask, origin_ask_episode: origin.episode }} openThread={onOpen} excludeId={startedId} />
-    {startedId ? <InlineThread client={client} id={startedId} refresh={threadRefresh} onOpen={() => onOpen(startedId)} /> : null}
-    {!canStart && !delivery ? null
-      : !showComposer && !delivery ? <Button label={startedId ? 'Start another thread' : 'Start thread'} disabled={status !== 'online'} onPress={() => {
-        setDraftExpanded(true);
-        setShowComposer(true);
-      }} />
-      : <View style={{ gap: 6 }}>
-        <EmbeddedThreadHeader title={title} state="draft" expanded={draftExpanded} toggle={() => setDraftExpanded(value => !value)} />
-        {draftExpanded ? <>
-          <ThreadComposeField text={draft} onChange={setDraft} onSend={start} onCancel={() => setShowComposer(false)}
-            enabled={enabled} canSend={!!content && !issue} autoFocus={enabled} />
-          {issue ? <T color={theme.waiting}>{issue}</T> : null}
-          <ThreadActionFeedback result={feedback} busy={sending || status !== 'online'} onRetry={() => {
-            if (delivery?.retry) void submit(delivery.target, delivery.retry);
-          }} />
-        </> : null}
-      </View>}
+    <ThreadGroup context={{ origin_ask: origin.ask, origin_ask_episode: origin.episode }} openThread={onOpen} excludeId={accepted ? id : undefined} />
+    {id ? <InlineThread key={id} client={client} id={id} refresh={threadRefresh} onOpen={() => onOpen(id)} start={draft} /> : null}
+    {canStart && (!draft || accepted) ? <Button label={accepted ? 'Start another thread' : 'Start thread'} disabled={status !== 'online' || !!delivery}
+      onPress={() => setLocal({ client, id: `thread/${Crypto.randomUUID()}`, accepted: false })} /> : null}
   </View>;
 }
 
-function InlineThread({ client, id, refresh, onOpen }: { client: ThreadClient; id: string; refresh: number; onOpen?: () => void }) {
+function InlineThread({ client, id, refresh, onOpen, start }: {
+  client: ThreadClient; id: string; refresh: number; onOpen?: () => void; start?: ThreadStartDraft;
+}) {
   const { feed } = useStore();
+  const accepted = !start || start.accepted;
   const read = useCallback(async (_cursor: string | undefined, signal: AbortSignal) => {
+    if (!accepted) return { value: { items: [], next_cursor: null } };
     const { value } = await client.threadGet(id, { signal });
     return { value: { items: [value], next_cursor: null } };
-  }, [client, id]);
+  }, [accepted, client, id]);
   const follow = useCallback((handlers: ThreadWindowHandlers<ThreadSummary>) =>
-    feed?.belongsTo(client) ? feed.followThreadSummary(id, handlers) : undefined, [client, feed, id]);
+    accepted && feed?.belongsTo(client) ? feed.followThreadSummary(id, handlers) : undefined, [accepted, client, feed, id]);
   const page = useThreadPage<ThreadSummary>(read, refresh, follow);
-  return <ThreadDetailContent thread={page.items[0]} issue={page.issue} loading={page.loading} reload={page.reload} client={client} onOpen={onOpen} />;
+  return <ThreadDetailContent thread={page.items[0]} issue={page.issue} loading={page.loading} reload={page.reload} client={client} onOpen={onOpen} start={start} />;
 }
 
 function threadTextIssue(content: string): string | undefined {
@@ -356,13 +329,16 @@ function eventLine(event: Exclude<ThreadTimelineEvent, ThreadMessage>): string {
 }
 
 // The same thread view renders inside a conversation and on its own screen.
-function ThreadBody({ client, thread, onOpen, revealComposer }: {
-  client: ThreadClient; thread: ThreadSummary; onOpen?: () => void; revealComposer?: (row: View) => void;
+function ThreadBody({ client, thread, start, onOpen, revealComposer }: {
+  client: ThreadClient; thread?: ThreadSummary; start?: ThreadStartDraft; onOpen?: () => void; revealComposer?: (row: View) => void;
 }) {
   const { actions, threadActions, status, threadRefresh, threadDeliveries, actor, data, feed } = useStore();
-  const read = useCallback((cursor: string | undefined, signal: AbortSignal) => client.threadTimeline(thread.id, { cursor, limit: THREAD_WINDOW_SIZE }, { signal }), [client, thread.id]);
+  const id = thread?.id ?? start!.id;
+  const read = useCallback(async (cursor: string | undefined, signal: AbortSignal) => thread
+    ? client.threadTimeline(id, { cursor, limit: THREAD_WINDOW_SIZE }, { signal })
+    : { value: { items: [], next_cursor: null } }, [client, id, !!thread]);
   const follow = useCallback((handlers: ThreadWindowHandlers<ThreadTimelineEvent>) =>
-    feed?.belongsTo(client) ? feed.followThreadTimeline(thread.id, handlers) : undefined, [client, feed, thread.id]);
+    thread && feed?.belongsTo(client) ? feed.followThreadTimeline(id, handlers) : undefined, [client, feed, id, !!thread]);
   const page = useThreadPage<ThreadTimelineEvent>(read, threadRefresh, follow);
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -380,7 +356,7 @@ function ThreadBody({ client, thread, onOpen, revealComposer }: {
     return agent ? agentName(agent) : id;
   };
   const messages = new Map(page.items.flatMap(event => event.kind === 'message' ? [[event.id, event] as const] : []));
-  const canReply = threadActions.has('thread.reply');
+  const canReply = threadActions.has(start ? 'thread.start' : 'thread.reply');
   const chooseQuote = (message: ThreadMessage) => {
     setQuote(message);
     setQuoteFocus(previous => previous + 1);
@@ -396,10 +372,11 @@ function ThreadBody({ client, thread, onOpen, revealComposer }: {
     try { const result = await send(); setEditResult(retained && result.how === 'unconfirmed' ? undefined : result); }
     finally { setEditing(false); }
   };
-  const canMarkRead = thread.unread === true && !!actor && threadActions.has('thread.read');
+  const canMarkRead = thread?.unread === true && !!actor && threadActions.has('thread.read');
   const readCandidates = canMarkRead ? page.items.filter((event): event is ThreadMessage =>
     event.kind === 'message' && !ownMessage(event.actor_id)) : [];
   const markVisibleRead = () => void runEdit(async () => {
+    if (!thread) return { how: 'failed', error: 'This thread has not been sent yet.' };
     const top = Math.max(headerHeight, insets.top);
     const [viewport, rows] = await Promise.all([
       measureThreadViewport(viewports, { x: insets.left, y: top, width: width - insets.left - insets.right, height: height - top - Math.max(tabBarHeight, insets.bottom) }),
@@ -410,7 +387,7 @@ function ThreadBody({ client, thread, onOpen, revealComposer }: {
     if (!ids.length) return { how: 'failed', error: 'Scroll a reply into view to mark it read.' };
     return actions.markThreadRead(thread, ids);
   });
-  const rename = () => Alert.prompt('Rename thread', undefined, title => {
+  const rename = () => thread && Alert.prompt('Rename thread', undefined, title => {
     const trimmed = title.trim();
     if (trimmed && trimmed !== thread.title) void runEdit(() => actions.editThread(thread, { kind: 'rename', title: trimmed }), true);
   }, 'plain-text', thread.title);
@@ -447,20 +424,20 @@ function ThreadBody({ client, thread, onOpen, revealComposer }: {
         { id: 'markRead', title: 'Mark visible replies read', run: markVisibleRead },
       ] : []}>{row}</ContextMenu>;
     })}
-    {page.issue ? <T color={theme.waiting}>{page.issue}</T> : !page.items.length ? <T dim>{page.loading ? 'Loading history…' : 'No thread messages yet.'}</T> : null}
+    {page.issue ? <T color={theme.waiting}>{page.issue}</T> : !start && !page.items.length ? <T dim>{page.loading ? 'Loading history…' : 'No thread messages yet.'}</T> : null}
     {readCandidates.length ? <Button label="Mark visible replies read" disabled={!editable} onPress={markVisibleRead} /> : null}
-    {canReply || threadDeliveries?.has(thread.id) ? <ThreadComposer key={thread.id} thread={thread} canReply={canReply}
+    {canReply || threadDeliveries?.has(id) || start ? <ThreadComposer key={id} thread={thread} start={start} canReply={canReply}
       selection={quote ? { id: quote.id, from: actorLabel(quote.actor_id), text: quote.content } : undefined} selectionVersion={quoteFocus} revealComposer={revealComposer}
     /> : null}
     <ThreadActionFeedback result={editFeedback} busy={editing || !!editDelivery && !editDelivery.retry || status !== 'online'} onRetry={() => {
       if (editFeedback?.how === 'unconfirmed') void runEdit(editFeedback.retry, !!editDelivery);
     }} />
-    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+    {thread ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
       {threadActions.has('thread.rename') ? <Button label="Rename" onPress={rename} disabled={!editable} /> : null}
       {threadActions.has(thread.state === 'open' ? 'thread.close' : 'thread.reopen') ? <Button label={thread.state === 'open' ? 'Close thread' : 'Reopen thread'} disabled={!editable} onPress={() => void runEdit(() => actions.editThread(thread, { kind: thread.state === 'open' ? 'close' : 'reopen' }), true)} /> : null}
       {onOpen ? <Button label="Open thread" onPress={onOpen} /> : null}
       <Button label="Refresh history" onPress={page.reload} disabled={page.loading || status !== 'online'} />
-    </View>
+    </View> : null}
   </View>;
 }
 
@@ -480,8 +457,8 @@ function readThreadDraft(raw: string | undefined): ThreadDraft {
   }
 }
 
-function ThreadComposer({ thread, canReply, selection, selectionVersion, revealComposer }: {
-  thread: ThreadSummary; canReply: boolean; selection?: Quote; selectionVersion: number; revealComposer?: (row: View) => void;
+function ThreadComposer({ thread, start, canReply, selection, selectionVersion, revealComposer }: {
+  thread?: ThreadSummary; start?: ThreadStartDraft; canReply: boolean; selection?: Quote; selectionVersion: number; revealComposer?: (row: View) => void;
 }) {
   const { actions, draftCache, draftsReady, saveDrafts, status, threadDeliveries } = useStore();
   const input = useRef<TextInput>(null);
@@ -489,13 +466,14 @@ function ThreadComposer({ thread, canReply, selection, selectionVersion, revealC
   const reveal = () => {
     if (row.current && input.current?.isFocused()) revealComposer?.(row.current);
   };
-  const key = threadDraftKey(thread.id);
+  const id = thread?.id ?? start!.id;
+  const key = threadDraftKey(id);
   const [draft, setDraft] = useState(() => readThreadDraft(draftCache.current.get(key)));
   const touched = useRef(false);
   const appliedSelection = useRef(selectionVersion);
   const [sending, setSending] = useState(false);
   const [failure, setFailure] = useState<ThreadEditResult>();
-  const delivery = threadDeliveries?.get(thread.id);
+  const delivery = threadDeliveries?.get(start ? threadStartScope(start.origin) : id);
   const feedback = delivery?.retry ? { how: 'unconfirmed' as const, retry: delivery.retry } : failure;
   const enabled = canReply && status === 'online' && !sending && !delivery;
   const content = draft.text.trim();
@@ -531,7 +509,10 @@ function ThreadComposer({ thread, canReply, selection, selectionVersion, revealC
     setSending(true);
     try {
       const next = await run();
-      if (next.how === 'sent') setDraft({ text: '' });
+      if (next.how === 'sent') {
+        storeDraft({ text: '' });
+        start?.onAccepted();
+      }
       setFailure(next.how === 'failed' ? next : undefined);
     } finally {
       setSending(false);
@@ -544,7 +525,10 @@ function ThreadComposer({ thread, canReply, selection, selectionVersion, revealC
       <Button label="Remove quote" disabled={!enabled} onPress={() => storeDraft({ text: draft.text })} />
     </View> : null}
     {canReply ? <ThreadComposeField inputRef={input} rowRef={revealComposer ? row : undefined} onReveal={revealComposer ? reveal : undefined} text={draft.text} onChange={text => storeDraft({ ...draft, text })}
-      onSend={() => void send(() => actions.replyToThread(thread, content, draft.quote?.id))} enabled={enabled} canSend={!!content && !issue} /> : null}
+      onSend={() => void send(() => start
+        ? actions.startThread(id, start.origin, start.title, content)
+        : actions.replyToThread(thread!, content, draft.quote?.id))} enabled={enabled} canSend={!start?.accepted && !!content && !issue}
+      autoFocus={!!start} onCancel={start && !start.accepted && !delivery && !sending ? start.onCancel : undefined} /> : null}
     {canReply && issue ? <T color={theme.waiting}>{issue}</T> : null}
     <ThreadActionFeedback result={feedback} busy={sending || status !== 'online'} onRetry={() => {
       if (delivery?.retry) void send(delivery.retry);
