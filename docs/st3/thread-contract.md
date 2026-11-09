@@ -43,7 +43,14 @@ conditional activation.
 The native CLI convenience `fractal alerts discuss ITEM --body TEXT --as PERSON`
 starts the same durable thread through `thread.start`. It uses the exact current source and
 episode and the daemon-assigned responsible agent. It offers no recipient override. Use
-`--idempotency-key KEY` to recover an uncertain start with the same input.
+`--idempotency-key KEY` to deduplicate a start while the source episode, title and responsible
+agent remain unchanged. This stateless convenience rereads the current Inbox source; it does
+not retain the original action packet. A resolved source is refused locally, and a changed
+source or recipient with the same explicit key conflicts instead of creating another thread.
+Inspect retained history by its durable thread ID in a current thread client. Without an
+explicit key, the CLI uses its ordinary content-and-hour deduplication policy; an explicit key
+keeps retry identity stable across that hour boundary. Clients that retain the original exact
+action packet can use the daemon's receipt recovery after the source resolves.
 
 A bound agent can create an ask with `fractal work ask`, then run
 `fractal work link-thread ASK --thread THREAD --episode CLAIM --as "$ST_AGENT"`.

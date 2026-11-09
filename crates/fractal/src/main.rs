@@ -4019,7 +4019,7 @@ struct AttentionDiscussArgs {
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Person)))]
     #[arg(long = "as", value_parser = parse_person_subject)]
     actor: Option<String>,
-    /// Name this thread start for retries; reuse the same key and input after an uncertain response.
+    /// Deduplicate this start while its Inbox episode, title and responsible agent stay unchanged.
     #[arg(long)]
     idempotency_key: Option<String>,
 }

@@ -2297,6 +2297,7 @@ async fn attention_discuss_requires_the_configured_fallback_for_a_person_owned_s
     let intent = fractal_daemon::graph::parse_intent(
         r#"version 2
 agent "discussion" { workspace "/tmp"; command "true" }
+agent "other-discussion" { workspace "/tmp"; command "true" }
 mission "owner-decision" state="ready" {
   goal "A person-owned source";
   step "review" { assigned-to "person/avery"; goal "Choose a path"; }
@@ -2332,6 +2333,23 @@ mission "owner-decision" state="ready" {
     assert_eq!(summary.message_count, 1);
     let creation = store.claims_for(thread, Some("thread.created")).unwrap().remove(0);
     assert_eq!(creation.body["fields"]["origin_source"], source.subject);
+    let message = receipt["affected_ids"][1].as_str().unwrap();
+    let other_agent = format!("agent/{}.other-discussion", store.origin());
+    store.configure_inbox_fallback_agent(Some(&other_agent)).unwrap();
+    let before = store.graph.index().unwrap();
+    let changed = run_cli(&socket, &args).await;
+    assert!(!changed.status.success(), "stateless retries cannot retarget a prior accepted start");
+    assert_eq!(store.graph.index().unwrap(), before, "a changed source must not append a replacement");
+    assert_eq!(store.claims_for(thread, Some("thread.created")).unwrap().len(), 1);
+    assert_eq!(store.claims_for(message, Some("message.sent")).unwrap().len(), 1);
+    assert_eq!(fractal_daemon::store::thread_metadata::summary(&store, "person/avery", thread).unwrap().agent_id, agent);
+    value(&run_cli(&socket, &["work", "done", source.subject.as_str(), "--as", "person/avery", "--summary", "Done"]).await);
+    let before = store.graph.index().unwrap();
+    let resolved = run_cli(&socket, &args).await;
+    assert!(!resolved.status.success());
+    assert!(String::from_utf8_lossy(&resolved.stderr).contains("not currently actionable"));
+    assert_eq!(store.graph.index().unwrap(), before, "a resolved source cannot create a replacement thread");
+    assert_eq!(fractal_daemon::store::thread_metadata::summary(&store, "person/avery", thread).unwrap().message_count, 1);
     server.abort();
 }
 
