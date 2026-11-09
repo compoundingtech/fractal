@@ -106,7 +106,7 @@ export const AgentAlerts = ({
   const [first, ...rest] = alerts
   return (
     <div {...stylex.props(styles.pinned)} data-testid="conversation-alerts">
-      <div {...stylex.props(styles.strip)}>
+      <div {...stylex.props(styles.strip)} tabIndex={0}>
         {alerts.length > 1 ? <div {...stylex.props(styles.count)}>◆ {alerts.length} alerts</div> : null}
         {one(first!)}
         {/* The first alert is open; the others open on a click, as on the phone. */}

@@ -226,6 +226,7 @@ describe('contextual alert landmarks', () => {
       const inbox = renderToStaticMarkup(<AgentAlerts alerts={[item]} context="Inbox" />)
       expect(conversation).toContain(`aria-label="${item.title}"`)
       expect(inbox).toContain(`aria-label="Inbox: ${item.title}"`)
+      expect(inbox).toContain('<div tabindex="0">')
     }
   })
 })
