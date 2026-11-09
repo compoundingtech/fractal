@@ -40,6 +40,8 @@ mod admitted;
 #[cfg(any(test, feature = "test-support"))]
 mod temporary;
 pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
+mod projection_gate;
+pub use projection_gate::{ProjectionGate, ProjectionGuard};
 
 mod proof;
 pub mod prepared_envelope;
@@ -891,8 +893,8 @@ pub struct Store {
     sealed_fleet_cache: Mutex<Option<(i64, crate::fleet::FleetView)>>,
     /// The member part of the trust roots, folded at the `fleet_generation` shown.
     pub roots_cache: Mutex<Option<(i64, MemberRoots)>>,
-    /// Serializes projection passes while they lend the writer back between chunks.
-    pub projection: Mutex<()>,
+    /// Serializes projection passes in FIFO order while they lend the writer back between chunks.
+    pub projection: ProjectionGate,
     pub replication_timers: ReplicationTimers,
     /// Where the next compact answer starts listing differing ranges.
     replication_listing_turn: std::sync::atomic::AtomicUsize,
@@ -1349,7 +1351,7 @@ impl Store {
             signature_backfill: Mutex::default(),
             sealed_fleet_cache: Mutex::new(None),
             roots_cache: Mutex::new(None),
-            projection: Mutex::new(()),
+            projection: ProjectionGate::default(),
             replication_timers: ReplicationTimers::default(),
             replication_listing_turn: Default::default(),
             replication_projection_state: AtomicU64::new(u64::from(projection_pending)),
@@ -2318,6 +2320,41 @@ thread_local! {
     static CLOCK_SNAPSHOT: std::cell::Cell<Option<u128>> = const { std::cell::Cell::new(None) };
 }
 
+/// Raw clock overrides carried across a writer-thread hop. `None` keeps execution-time
+/// system-clock sampling rather than freezing the instant at which a job was queued.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ClockContext {
+    thread: Option<u128>,
+    snapshot: Option<u128>,
+}
+
+impl ClockContext {
+    pub(crate) fn capture() -> Self {
+        Self {
+            thread: THREAD_CLOCK.with(std::cell::Cell::get),
+            snapshot: CLOCK_SNAPSHOT.with(std::cell::Cell::get),
+        }
+    }
+
+    /// Install only for this callback; enclosing jobs and shared finalizers keep their clocks.
+    pub(crate) fn enter(self) -> impl Drop {
+        struct Entered {
+            previous: ClockContext,
+            _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+        }
+        impl Drop for Entered {
+            fn drop(&mut self) {
+                THREAD_CLOCK.with(|clock| clock.set(self.previous.thread));
+                CLOCK_SNAPSHOT.with(|clock| clock.set(self.previous.snapshot));
+            }
+        }
+        let previous = Self::capture();
+        THREAD_CLOCK.with(|clock| clock.set(self.thread));
+        CLOCK_SNAPSHOT.with(|clock| clock.set(self.snapshot));
+        Entered { previous, _thread: std::marker::PhantomData }
+    }
+}
+
 /// The time every reader and the reconciler compare against: the system clock, or the time a
 /// simulation set for this thread, held fixed while a [`clock_snapshot`] is alive.
 pub fn now_ms() -> u128 {
@@ -2356,7 +2393,7 @@ pub fn clock_snapshot() -> impl Drop {
 
 #[cfg(test)]
 mod clock_tests {
-    use super::{clock_snapshot, now_ms, set_thread_clock};
+    use super::{ClockContext, clock_snapshot, now_ms, set_thread_clock};
 
     #[test]
     fn reader_clock_snapshots_nest_and_restore_on_unwind() {
@@ -2376,6 +2413,78 @@ mod clock_tests {
         assert!(result.is_err());
         assert_eq!(now_ms(), 300);
         set_thread_clock(None);
+    }
+
+    #[test]
+    fn raw_clock_contexts_preserve_none_nest_and_restore_on_unwind() {
+        let original = ClockContext::capture();
+        let empty = ClockContext { thread: None, snapshot: None };
+        {
+            let _outer = ClockContext { thread: Some(100), snapshot: Some(200) }.enter();
+            assert_eq!(now_ms(), 200);
+            let result = std::panic::catch_unwind(|| {
+                let _inner = empty.enter();
+                assert_eq!(ClockContext::capture(), empty);
+                set_thread_clock(Some(300));
+                assert_eq!(now_ms(), 300);
+                {
+                    let _snapshot = clock_snapshot();
+                    let captured = ClockContext::capture();
+                    assert_eq!(captured.thread, Some(300));
+                    assert_eq!(captured.snapshot, Some(300));
+                }
+                panic!("restore both enclosing overrides");
+            });
+            assert!(result.is_err());
+            assert_eq!(ClockContext::capture(), ClockContext {
+                thread: Some(100), snapshot: Some(200),
+            });
+            assert_eq!(now_ms(), 200);
+        }
+        assert_eq!(ClockContext::capture(), original);
+    }
+
+    #[test]
+    fn batched_jobs_transport_clock_overrides_and_restore_after_all_outcomes() {
+        let writer = crate::sqlite::WriterConnection::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        );
+        let empty = ClockContext { thread: None, snapshot: None };
+        let _restore = empty.enter();
+        writer.install_transaction_finalizer(move |_| {
+            assert_eq!(ClockContext::capture(), empty, "shared finalizers keep the writer clock");
+            Ok(())
+        }).unwrap();
+        for outcome in 0..3 {
+            {
+                let expected = ClockContext {
+                    thread: Some(100 + outcome), snapshot: Some(200 + outcome),
+                };
+                let _clock = expected.enter();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    writer.batched(|_| -> Result<(), ()> {
+                        assert_eq!(ClockContext::capture(), expected);
+                        assert_eq!(now_ms(), 200 + outcome);
+                        match outcome {
+                            0 => Ok(()),
+                            1 => Err(()),
+                            _ => panic!("restore the writer clock on unwind"),
+                        }
+                    })
+                }));
+                match outcome {
+                    0 => assert_eq!(result.unwrap().unwrap(), Ok(())),
+                    1 => assert_eq!(result.unwrap().unwrap(), Err(())),
+                    _ => assert!(result.is_err()),
+                }
+                assert_eq!(ClockContext::capture(), expected);
+            }
+            writer.batched(|_| -> Result<(), ()> {
+                assert_eq!(ClockContext::capture(), empty);
+                Ok(())
+            }).unwrap().unwrap();
+        }
     }
 }
 
@@ -8783,10 +8892,7 @@ impl Store {
         mut log: impl FnMut(&str),
         mut progress: impl FnMut(ProjectionProgress),
     ) -> Result<bool> {
-        let _projecting = self
-            .projection
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let _projecting = self.projection.lock();
         let _timing = time_stage(&self.replication_timers.projection);
         self.defer_replication_projection();
         self.last_replication_projection_unix_ms

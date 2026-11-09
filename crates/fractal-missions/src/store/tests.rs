@@ -272,7 +272,13 @@ fn root_cancellation_and_descendant_termination_drain_only_the_reopened_child_pa
         let cancelled = worker.mission_run(&child.id).unwrap().unwrap();
         assert_eq!(cancelled.generation, reopened.generation);
         assert!(cancelled.steps.iter().all(|step| step.status == "cancelled"));
-        assert_eq!(cancelled.status, "cancelled");
+        if cancel_root {
+            assert_eq!(cancelled.status, "running");
+            assert_eq!(cancelled.phase, "cleanup-cancelled");
+        } else {
+            assert_eq!(cancelled.status, "cancelled");
+            assert_eq!(cancelled.phase, "terminal");
+        }
         assert!(!worker.run_projection_pending(&child.subject).unwrap());
     }
 }
@@ -4508,7 +4514,7 @@ fn person_routing_repair_excludes_runs_completed_in_pending_projection() {
     let (controller, worker, _root, children) = replicated_run_tree(1);
     let child = &children[0];
     worker.append_claim(&ClaimInput {
-        subject: "custom/known-repaired-person".into(),
+        subject: "custom/fixture/known-repaired-person".into(),
         kind: "custom.fixture.known-repaired-person".into(),
         actor: Some("person/repaired".into()),
         fields: BTreeMap::new(),

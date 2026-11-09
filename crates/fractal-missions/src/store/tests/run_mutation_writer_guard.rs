@@ -30,6 +30,18 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
             reason: "rebuild_planning_projection, create_planning_session, add_planning_candidate, save_planning_preview and set_planning_status modify planning-only tables, not mission-run action admission",
             counts: [5, 0, 0, 2, 0],
         },
+        Exception {
+            reason: "mission_run_for_parent_step uses the writer connection only to SELECT and hydrate a child run view",
+            counts: [1, 0, 0, 0, 0],
+        },
+        Exception {
+            reason: "eval_runtime_records uses the writer connection only to SELECT disposable runtime record identities",
+            counts: [1, 0, 0, 0, 0],
+        },
+        Exception {
+            reason: "runtime_authority and the seat-start intent-leaf lookup open read snapshots on reader connections, not the writer",
+            counts: [0, 0, 0, 0, 2],
+        },
     ]);
     guard("fractal-missions/store/adhoc_work.rs", /* sqlite-large-value: allow-for-now lv-h0d4d3ff70f92 owner=fractal_missions::store::tests::run_mutation_writer_guard TODO=trace-statement-and-value-representation */ include_str!("../adhoc_work.rs"), &[]);
     guard("fractal-missions/store/lanes.rs", /* sqlite-large-value: allow-for-now lv-h2647cbb8190d owner=fractal_missions::store::tests::run_mutation_writer_guard TODO=trace-statement-and-value-representation */ include_str!("../lanes.rs"), &[]);
@@ -40,7 +52,12 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
         },
     ]);
     guard("fractal-store/store/missions.rs", /* sqlite-large-value: allow-for-now lv-heb0f50aee834 owner=fractal_missions::store::tests::run_mutation_writer_guard TODO=trace-statement-and-value-representation */ include_str!("../../../../fractal-store/src/store/missions.rs"), &[]);
-    guard("fractal-store/store/attention.rs", /* sqlite-large-value: allow-for-now lv-hcb7e3bbcfebf owner=fractal_missions::store::tests::run_mutation_writer_guard TODO=trace-statement-and-value-representation */ include_str!("../../../../fractal-store/src/store/attention.rs"), &[]);
+    guard("fractal-store/store/attention.rs", /* sqlite-large-value: allow-for-now lv-hcb7e3bbcfebf owner=fractal_missions::store::tests::run_mutation_writer_guard TODO=trace-statement-and-value-representation */ include_str!("../../../../fractal-store/src/store/attention.rs"), &[
+        Exception {
+            reason: "population_attention_ownership_tests are cfg(test) fixtures that seed source claims and desired rows; no production raw writers",
+            counts: [2, 0, 0, 1, 0],
+        },
+    ]);
     guard("fractal-store/store/person_rename.rs", /* sqlite-large-value: allow-for-now lv-h26ef9f935cb0 owner=fractal_missions::store::tests::run_mutation_writer_guard TODO=trace-statement-and-value-representation */ include_str!("../../../../fractal-store/src/store/person_rename.rs"), &[]);
     guard("fractal-attention/store/attention.rs", /* sqlite-large-value: allow-for-now lv-h11b742e08358 owner=fractal_missions::store::tests::run_mutation_writer_guard TODO=trace-statement-and-value-representation */ include_str!("../../../../fractal-attention/src/store/attention.rs"), &[
         Exception {
@@ -49,14 +66,6 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
         },
     ]);
     guard("fractal-store/store.rs", /* sqlite-large-value: allow-for-now lv-he22304140063 owner=fractal_missions::store::tests::run_mutation_writer_guard TODO=trace-statement-and-value-representation */ include_str!("../../../../fractal-store/src/store.rs"), &[
-        Exception {
-            reason: "with_run_fence and with_all_runs_fenced are the two central wrapper bodies",
-            counts: [0, 0, 2, 0, 0],
-        },
-        Exception {
-            reason: "append_claim_with_commit_context is the shared claim writer: its run-mutation selector drains before action admission in that same transaction",
-            counts: [0, 0, 1, 0, 0],
-        },
         Exception {
             reason: "finish_open, open_with_ivm_views and open_shared_memory install schema at startup; migrate_mission_run_deadlines is a schema migration",
             counts: [3, 0, 0, 0, 1],
@@ -88,6 +97,12 @@ fn mission_run_mutations_cannot_add_unfenced_writer_acquisitions() {
         Exception {
             reason: "cfg(test)/test-support helpers: cache_idempotency_response, roll_back_claim_for_test, replace_desired_member_for_test, step-state fixture and inventory proof fixture",
             counts: [1, 3, 1, 2, 0],
+        },
+    ]);
+    guard("fractal-store/store/run_fence.rs", include_str!("../../../../fractal-store/src/store/run_fence.rs"), &[
+        Exception {
+            reason: "the central bounded fence executor probes in one batched job, then rebuilds one aggregate per standalone writer loan",
+            counts: [1, 0, 1, 0, 0],
         },
     ]);
 }

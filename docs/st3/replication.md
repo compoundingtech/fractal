@@ -1129,18 +1129,48 @@ fallback replay. The regression interleaves local writes with committed prefixes
 final graph against canonical replay.
 
 Run-part rebuilds queued by these chunks remain pending durably until their canonical tree is
-rebuilt. Reconciliation and dispatch skip a pending part; the committed drain records a local
-`run-projection.finished` observation for each rebuilt run so its readers re-evaluate on the normal
-change notification, without a retry timer. Mission/run mutations enter through two central
-transaction fences. `with_run_fence` drains the named run or step's part and its ancestor root's
-part before own-work decisions, including lease renewals. `with_all_runs_fenced` drains every
-pending part before descendant, capacity, retirement or repair decisions. Queue, lane and attention
-claim admission uses the same selector inside its existing writer transaction, without nesting
-another writer. Published views are invalidated only after commit. Generation and attempt fences
-are checked against the drained tree: a superseded cancellation or revision approval is refused
-rather than applied to the old generation.
-Later receive chunks can queue that part again. Read APIs retain their existing catch-up behavior;
-this fence does not introduce a new response field or change the client wire format.
+rebuilt. Reconciliation and dispatch skip a pending part. Mission/run mutations use
+`with_run_fence` for the named run or step's part and its ancestor root, or
+`with_all_runs_fenced` for descendant, capacity, retirement, repair and cross-run owner-routing
+decisions. Both use one FIFO projection gate shared with receive, catch-up and maintenance.
+The gate stays held across drain turns, but each turn selects at most one pending aggregate in
+a standalone writer loan, commits it, and returns the writer before selecting again. A drain
+turn does not group-commit with another drain or the eventual action. This is option A: an
+individual aggregate still rebuilds from its full canonical history; no attempt is made to
+split that history or bound its own SQL duration.
+
+After every returned writer loan, completion summaries invalidate the affected caches and
+publish local `run-projection.finished` observations so readers re-evaluate on the normal
+change notification, without a retry timer. The full caught-up roster wake is sent only when
+no part is pending and replication projection is not deferred. Completing one part alone
+does not assert that all admitted envelopes are projected. Selection is fresh in every
+writer transaction: restoration's `replay_replication_graph` may interleave without the gate
+because it atomically replays the graph, updates projections and health, and clears or widens
+marker state in its own transaction.
+
+The action enters a separate foreground writer turn only after its fence is empty. That
+transaction rechecks pending state before running the action and checks generation and attempt
+fences against the drained tree, so a superseded cancellation or revision approval is refused
+rather than applied to the old generation. Queue, lane and attention claim admission retains
+the same selector inside its existing writer transaction, without nesting another writer.
+API-facing wrappers allow eight seconds for gate admission and between-part progress. On
+expiry they do not invoke the action: the existing retryable HTTP 503 `database-busy` carries
+`details.reason: "run-projection-drain"` and `details.pending_parts`. An already-running
+aggregate transaction finishes before this refusal; the eight seconds is not cancellation
+of its SQL. Daemon-only evaluator, observer and canonical-settlement paths use
+`with_run_fence_internal` or `with_all_runs_fenced_internal` to finish draining without this
+API refusal budget. Helpers shared with API callers retain the bounded wrappers.
+
+Both Rust clients retry only this typed mutation refusal with the identical serialized body
+and idempotency key, exponential pauses, and one total 60-second window. Before sending
+again they reserve the entire ordinary request deadline; a started mutation is never cancelled
+and misreported as an earlier refusal. The raw daemon client's `set_mutation_observer` and
+the typed SDK's `set_observer` (`Mutation` event) expose physical attempt count, total elapsed
+duration and cumulative retry-wait duration. Per-attempt SDK `Request` events remain unchanged.
+The daemon counts these refusals per matched route and method in
+`st.run_projection.drain.refusals`; no run, person or raw URL labels are recorded.
+Later receive chunks can queue a part again. Read APIs retain their existing catch-up behavior;
+there is no new error kind or claim format.
 
 The first start of a build with this rule replays from nothing once. A run that this node created
 could show as over in its old graph while its claims say it runs. Starting that work again long

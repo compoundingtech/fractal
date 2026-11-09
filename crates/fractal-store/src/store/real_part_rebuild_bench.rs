@@ -223,7 +223,24 @@ pub(super) fn print_shape(shape: &PartShape) {
 #[test]
 #[ignore = "requires an offline /scratch- database; daemon-style open can mutate it"]
 fn measure_real_part_rebuild() {
+    let (digest_after_open, digest_after_rebuild) =
+        match std::env::var("FRACTAL_REAL_PART_WHOLE_DIGEST") {
+            Ok(mode) => match mode.as_str() {
+                "1" | "after_rebuild" => (false, true),
+                "both" => (true, true),
+                _ => panic!("FRACTAL_REAL_PART_WHOLE_DIGEST must be 1, after_rebuild, or both; unset it to disable (got {mode:?})"),
+            },
+            Err(std::env::VarError::NotPresent) => (false, false),
+            Err(error) => panic!("invalid FRACTAL_REAL_PART_WHOLE_DIGEST: {error}; expected 1, after_rebuild, or both"),
+        };
     let store = open_real_part_store();
+    if digest_after_open {
+        let mut connection = store.connection.write();
+        // No rebuild writes: pin the committed post-open state for the entire scan.
+        let transaction = connection.transaction().unwrap();
+        huge_part_digest::print_whole_store_digest(&transaction, "after_open");
+        transaction.rollback().expect("post-open read snapshot must roll back");
+    }
     let shape = {
         let mut connection = store.connection.write();
         let transaction = connection.transaction().unwrap();
@@ -242,6 +259,9 @@ fn measure_real_part_rebuild() {
         if result.is_ok() {
             println!("real_part_digest_rep rep={rep}");
             huge_part_digest::print_part_digest(&transaction, &shape.runs, &shape.subjects);
+            if rep == 1 && digest_after_rebuild {
+                huge_part_digest::print_whole_store_digest(&transaction, "after_rebuild");
+            }
         }
         transaction.rollback().expect("rebuild transaction must roll back");
         result.expect("rebuild failed (transaction rolled back)");

@@ -192,6 +192,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case agentRosterNotReady
     case agentRosterCutNotReady
     case messageSelectorsNotReady
+    case databaseBusy
     case projectionDetailTooLarge
     case projectionDetailInvalidSource
     case runtimeNotLocal
@@ -284,6 +285,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "agent-roster-not-ready": .agentRosterNotReady
         case "agent-roster-cut-not-ready": .agentRosterCutNotReady
         case "message-selectors-not-ready": .messageSelectorsNotReady
+        case "database-busy": .databaseBusy
         case "runtime-not-local": .runtimeNotLocal
         case "timeline-history-incomplete": .timelineHistoryIncomplete
         case "conversation-content-invalidated": .conversationContentInvalidated
@@ -376,6 +378,7 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .agentRosterNotReady: "agent-roster-not-ready"
         case .agentRosterCutNotReady: "agent-roster-cut-not-ready"
         case .messageSelectorsNotReady: "message-selectors-not-ready"
+        case .databaseBusy: "database-busy"
         case .runtimeNotLocal: "runtime-not-local"
         case .timelineHistoryIncomplete: "timeline-history-incomplete"
         case .conversationContentInvalidated: "conversation-content-invalidated"
