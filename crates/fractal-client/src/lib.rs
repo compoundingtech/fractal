@@ -1281,6 +1281,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::RuntimeNotLocal
         | ErrorCode::PrivateNotesCarrierConflict
         | ErrorCode::GrantProfileConflict
+        | ErrorCode::AssistantGrantAuthorityNotReady
         | ErrorCode::PrivateNotesUnreachable
         | ErrorCode::PrivateNotesIndeterminate
         | ErrorCode::ArrangementExists
