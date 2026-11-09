@@ -2666,6 +2666,23 @@ stop "agent/alder.asker""#, "alder").unwrap();
     }
 
     #[test]
+    fn unavailable_fallback_does_not_hide_an_ordinary_person_ask() {
+        let (store, _origin, input) = fixture();
+        let ask = store.ask_person(&input).unwrap();
+        store.configure_inbox_fallback_agent(Some("agent/example/pending-inbox")).unwrap();
+        store.connection.batched(|tx| -> Result<()> {
+            tx.execute("INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms) VALUES('record/inbox-pending','example-peer',1,'inbox-pending',0,'{}','unknown','agent/example/pending-inbox','agent.renamed','1')", [])?;
+            Ok(())
+        }).unwrap().unwrap();
+        let items = store.attention_items(Some("person/avery")).unwrap();
+        let item = items.iter().find(|item| item.subject == ask.subject).unwrap();
+        assert_eq!(item.conversation.as_deref(), Some("agent/alder.asker"));
+        assert!(!item.actions.is_empty());
+        assert!(item.is_alert());
+        assert_eq!(store.inbox_responsibility_check(&items).unwrap().status, "warn");
+    }
+
+    #[test]
     fn an_updates_about_link_alone_does_not_choose_its_conversation() {
         let (store, _origin, input) = fixture();
         let ask = store.ask_person(&input).unwrap();

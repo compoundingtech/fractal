@@ -94,7 +94,10 @@ when that agent has stopped. For a system or person-owned source with no such ag
 restart the daemon. Home Manager exposes the same setting as
 `services.smalltalk.inboxFallbackAgent`. This is an explicit agent identity, never an inferred company role or the
 fault handler. Missing configuration and undeclared fallback agents appear in the
-`inbox-responsibility` doctor diagnostic. Setup and person-only security approvals remain
+`inbox-responsibility` doctor diagnostic. A pending or conflicting identity retains its recorded
+association and adds a discussion diagnostic in the resource's existing `operational.reasons`;
+the card's person-only actions stay actionable. New discussion admission still refuses the
+unavailable identity. Database failures remain errors. Setup and person-only security approvals remain
 available before an agent is configured; creating a discussion requires an admitted recipient.
 The fallback is daemon-local routing policy, not replicated history. Changing it updates current
 Inbox associations and invalidates their derived caches. A thread freezes its responsible agent

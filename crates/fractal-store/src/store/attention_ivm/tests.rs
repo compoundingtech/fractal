@@ -68,3 +68,55 @@ fn inbox_fallback_changes_invalidate_materialized_associations() {
         assert_eq!(direct.conversation.as_deref(), fallback);
     }
 }
+
+#[test]
+fn unavailable_inbox_fallback_keeps_cards_and_actions_visible_but_refuses_discussion_admission() {
+    use super::*;
+    for state in ["unknown", "invalid"] {
+        let store = Store::open_memory("example").unwrap();
+        custom(&store, "custom/garden/review/v1/agent-origin", "person/example");
+        let subject = "custom/garden/review/v1/person-origin";
+        store.append_claim(&input(subject, "custom.garden.review.v1.requested", "person/example",
+            json!({"title":"Review my work","detail":"A person-owned review","recipient":"person/example"}))).unwrap();
+        let views = Views::new(definitions()).unwrap();
+        views.create_schema(&store.connection.write()).unwrap();
+        install(&store, &views);
+        let fallback = "agent/example/inbox";
+        store.configure_inbox_fallback_agent(Some(fallback)).unwrap();
+        store.connection.batched(|tx| -> Result<()> {
+            while !flush(tx, &views, now_ms(), 2)? {}
+            // The identity reader's real lifecycle fence: unresolved replica evidence is
+            // pending; rejected evidence is conflicting. Neither is a storage failure.
+            tx.execute("INSERT INTO replica_records(record_ref,writer,sequence,envelope_hash,position,raw,state,subject_hint,kind_hint,updated_at_unix_ms) VALUES('record/inbox-pending','example-peer',1,'inbox-pending',0,'{}',?1,?2,'agent.renamed','1')",
+                params![state, fallback])?;
+            Ok(())
+        }).unwrap().unwrap();
+        assert!(!clean(&store.readers.get(), Some(CUSTOM_VIEW)).unwrap(), "recipient lifecycle changes must invalidate its cached diagnostics");
+        let direct = store.attention_items(Some("person/example")).unwrap();
+        let item = direct.iter().find(|item| item.subject == subject).unwrap();
+        assert_eq!(item.conversation.as_deref(), Some(fallback));
+        assert!(!item.actions.is_empty(), "the person action remains available");
+        assert_eq!(store.inbox_responsibility_check(&direct).unwrap().status, "warn");
+        store.connection.batched(|tx| -> Result<()> {
+            let error = store.inbox_responsible_agent_at(tx, item).unwrap_err();
+            assert_eq!(error.downcast_ref::<FractalError>().unwrap().code, "lifecycle-unavailable");
+            while !flush(tx, &views, now_ms(), 2)? {}
+            let rows = window(tx, &views, CUSTOM_VIEW, "person/example", u128::MAX, 10)?;
+            let cached = rows.iter().find(|row| row["source_id"] == subject).unwrap();
+            assert_eq!(cached["conversation_id"], fallback);
+            assert_eq!(cached["operational"]["actionable"], true);
+            assert!(cached["operational"]["reasons"].as_array().unwrap().contains(&json!("discussion-lifecycle-unavailable")));
+            assert_eq!(cached["actions"], json!(["custom.reply"]));
+            tx.execute("DELETE FROM replica_records WHERE record_ref='record/inbox-pending'", [])?;
+            assert!(!clean(tx, Some(CUSTOM_VIEW))?);
+            while !flush(tx, &views, now_ms(), 2)? {}
+            let rows = window(tx, &views, CUSTOM_VIEW, "person/example", u128::MAX, 10)?;
+            let restored = rows.iter().find(|row| row["source_id"] == subject).unwrap();
+            assert!(!restored["operational"]["reasons"].as_array().unwrap().contains(&json!("discussion-lifecycle-unavailable")));
+            // A missing database relation remains an error; the lifecycle exception is narrow.
+            tx.execute("ALTER TABLE identity_names RENAME TO broken_identity_names", [])?;
+            assert!(crate::store::inbox::responsible_agent_at(tx, item).is_err());
+            Ok(())
+        }).unwrap().unwrap();
+    }
+}

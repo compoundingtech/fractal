@@ -8,18 +8,58 @@ pub fn configured_agent_at(connection: &Connection) -> Result<Option<String>> {
     Ok(connection.query_row("SELECT value FROM meta WHERE key=?1", [FALLBACK_AGENT], |row| row.get(0)).optional()?)
 }
 
-/// Resolve only canonical source ownership or explicit configuration. A historical origin
-/// remains the origin after its seat stops; admission of a new send is a separate check.
-pub fn responsible_agent_at(connection: &Connection, item: &AttentionItemView) -> Result<Option<String>> {
+/// Choose responsibility without conflating discussion admission and approval visibility.
+fn candidate_agent_at(connection: &Connection, item: &AttentionItemView) -> Result<Option<String>> {
     if let Some(agent) = item.conversation.as_deref() {
-        return Ok(Some(identities::resolve_reference_conn(connection, agent)?));
+        return Ok(Some(agent.to_owned()));
     }
     if let Some(agent) = attention_snapshot::conversation_agent(connection, item.step.as_deref(), item.mission_run.as_deref())? {
         return Ok(Some(agent));
     }
-    configured_agent_at(connection)?.map(|agent|
-        identities::resolve_reference_conn(connection, &agent).map_err(anyhow::Error::from)
+    configured_agent_at(connection)
+}
+
+fn presentation_identity_at(connection: &Connection, agent: &str) -> Result<(String, Option<String>)> {
+    match identities::resolve_reference_conn(connection, agent) {
+        Ok(identity) => Ok((identity, None)),
+        // Keep the recorded association visible; unavailable lifecycle evidence does not
+        // authorize a send and must not suppress an unrelated person-only approval.
+        Err(error) if error.code == "lifecycle-unavailable" => Ok((agent.to_owned(), Some("lifecycle-unavailable".into()))),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// A historical or temporarily unavailable association remains visible. Only the expected
+/// lifecycle fence is presentation data; storage failures still fail the read.
+pub fn responsible_agent_at(connection: &Connection, item: &AttentionItemView) -> Result<Option<String>> {
+    candidate_agent_at(connection, item)?.map(|agent|
+        presentation_identity_at(connection, &agent).map(|(identity, _)| identity)
     ).transpose()
+}
+
+fn discussion_unavailable_at(connection: &Connection, item: &AttentionItemView) -> Result<Option<String>> {
+    let Some(agent) = candidate_agent_at(connection, item)? else {
+        return Ok(Some("inbox-agent-not-configured".into()));
+    };
+    let (agent, unavailable) = presentation_identity_at(connection, &agent)?;
+    if unavailable.is_some() { return Ok(unavailable) }
+    match person_work::declaration_live(connection, &agent) {
+        Ok(true) => Ok(None),
+        Ok(false) => Ok(Some("agent-not-declared".into())),
+        Err(error) if error.downcast_ref::<FractalError>().is_some_and(|error| error.code == "lifecycle-unavailable") =>
+            Ok(Some("lifecycle-unavailable".into())),
+        Err(error) => Err(error),
+    }
+}
+
+/// Discussion availability is separate from the card's existing approval actions.
+pub fn annotate_resource_at(connection: &Connection, item: &AttentionItemView, row: &mut Value) -> Result<()> {
+    if let Some(reason) = discussion_unavailable_at(connection, item)? {
+        let reasons = row["operational"]["reasons"].as_array_mut()
+            .context("attention resource has no operational reasons")?;
+        reasons.push(json!(format!("discussion-{reason}")));
+    }
+    Ok(())
 }
 
 impl Store {
@@ -54,7 +94,9 @@ impl Store {
     /// The caller supplies the source item read under this same writer/read cut. This does
     /// not authorize answering its approval or sending to a stopped recipient.
     pub fn inbox_responsible_agent_at(&self, connection: &Connection, item: &AttentionItemView) -> Result<Option<String>> {
-        responsible_agent_at(connection, item)
+        candidate_agent_at(connection, item)?.map(|agent|
+            identities::resolve_reference_conn(connection, &agent).map_err(anyhow::Error::from)
+        ).transpose()
     }
 
     /// Missing configuration is visible to operators, while bootstrap and security approval
@@ -65,21 +107,22 @@ impl Store {
         let configured = configured_agent_at(&connection)?;
         let setup_complete: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM desired WHERE kind='agent')", [], |row| row.get(0))?;
         let needs_configuration = configured.is_none() && setup_complete;
-        let undeclared = match configured {
-            Some(agent) => usize::from(!person_work::declaration_live(&connection,
-                &identities::resolve_reference_conn(&connection, &agent)?)?),
-            None => 0,
-        };
+        let mut unavailable = 0;
         for item in items.iter().filter(|item| item.person.starts_with("person/")) {
-            match responsible_agent_at(&connection, item)? {
-                None => missing += 1,
-                Some(_) => {}
+            match discussion_unavailable_at(&connection, item)?.as_deref() {
+                Some("inbox-agent-not-configured") => missing += 1,
+                Some(_) => unavailable += 1,
+                None => {}
             }
         }
+        let configured_unavailable = match configured {
+            Some(agent) => presentation_identity_at(&connection, &agent)?.1.is_some(),
+            None => false,
+        };
         Ok(DoctorCheck {
             name: "inbox-responsibility".into(),
-            status: if missing + undeclared == 0 && !needs_configuration { "pass" } else { "warn" }.into(),
-            message: format!("Inbox fallback configuration required: {needs_configuration}. {missing} Inbox sources need an explicit inbox_fallback_agent; {undeclared} configured fallback recipients are not declared. Initial setup and person-only approvals remain available; discussion requires a declared recipient."),
+            status: if missing + unavailable == 0 && !needs_configuration && !configured_unavailable { "pass" } else { "warn" }.into(),
+            message: format!("Inbox fallback configuration required: {needs_configuration}. {missing} Inbox sources need an explicit inbox_fallback_agent; {unavailable} discussion recipients are unavailable; configured fallback lifecycle unavailable: {configured_unavailable}. Initial setup and person-only approvals remain available; discussion requires a declared recipient."),
         })
     }
 }

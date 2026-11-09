@@ -4868,6 +4868,7 @@ fn client_attention_resources_from_items(
         if !conversations.is_empty() {
             resource["conversation_ids"] = json!(conversations);
         }
+        crate::store::inbox::annotate_resource_at(&store.readers.get(), &item, &mut resource)?;
         // An ask resolves by itself at its deadline, with its default answer if it has one.
         if let Some(deadline) = item.deadline_unix_ms {
             resource["deadline_at"] = json!(client_timestamp(deadline));
