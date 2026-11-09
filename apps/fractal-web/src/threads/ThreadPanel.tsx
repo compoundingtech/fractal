@@ -72,7 +72,7 @@ export function ThreadPanel({
       <span aria-hidden="true">{open ? '▾' : '▸'}</span>
       {title}{metadata}{unreadDot}
     </Button> : <h2 {...stylex.props(styles.header)}>{title}{metadata}{unreadDot}</h2>
-  return <section data-thread-panel="" aria-label={thread.title} {...stylex.props(styles.panel)}>
+  return <section data-thread-panel="" role="group" aria-label={thread.title} {...stylex.props(styles.panel)}>
     {open && onMarkRead !== undefined ? <div data-thread-read-heading="" {...stylex.props(styles.readHeader)}>
       <div {...stylex.props(styles.readHeadingRow)}>
         {heading}

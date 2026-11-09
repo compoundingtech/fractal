@@ -27,6 +27,7 @@ it('collapses the entire embedded conversation and keeps lifecycle state authori
   }
   try {
     await render('open')
+    expect(host.querySelector('[data-thread-panel]')?.getAttribute('role')).toBe('group')
     const header = host.querySelector('button')
     expect(header?.getAttribute('aria-expanded')).toBe('false')
     expect(header?.textContent).toContain('3 messages')
