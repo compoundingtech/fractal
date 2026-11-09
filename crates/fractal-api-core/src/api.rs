@@ -7528,6 +7528,8 @@ enum AncestryUnavailableReason {
     WitnessMissing,
     LookupTaskFailed(String),
     ProcessReadFailed { operation: &'static str, error: String },
+    #[cfg(target_os = "linux")]
+    ServiceManagerEnvironmentDenied,
     ProcessMetadataInvalid(&'static str),
     ProcessTerminal,
     EmptyEnvironment,
@@ -7550,6 +7552,8 @@ impl AncestryUnavailableCause {
             AncestryUnavailableReason::WitnessMissing => "witness-missing",
             AncestryUnavailableReason::LookupTaskFailed(_) => "lookup-task-failed",
             AncestryUnavailableReason::ProcessReadFailed { operation, .. } => operation,
+            #[cfg(target_os = "linux")]
+            AncestryUnavailableReason::ServiceManagerEnvironmentDenied => "service-manager-environ-denied",
             AncestryUnavailableReason::ProcessMetadataInvalid(_) => "process-metadata-invalid",
             AncestryUnavailableReason::ProcessTerminal => "process-terminal",
             AncestryUnavailableReason::EmptyEnvironment => "empty-environment",
@@ -7567,12 +7571,23 @@ impl AncestryUnavailableCause {
 
     fn record(&self) {
         use std::io::Write as _;
+        static LAST_REPORT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+        let Ok(mut last_report) = LAST_REPORT.lock() else { return; };
+        if !ancestry_diagnostic_due(&mut last_report, std::time::Instant::now()) { return; }
         // The default daemon has no tracing subscriber without telemetry export.
         // Diagnostic write failures must not interrupt the fail-closed response.
         let _ = writeln!(std::io::stderr(),
             "st3: local caller ancestry unavailable pid={:?} reason={} detail={:?}",
             self.pid, self.reason_code(), self.reason);
     }
+}
+
+fn ancestry_diagnostic_due(last_report: &mut Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    if last_report.is_some_and(|last| now.duration_since(last) < std::time::Duration::from_secs(60)) {
+        return false;
+    }
+    *last_report = Some(now);
+    true
 }
 
 fn ancestry_or_record(
@@ -7624,10 +7639,18 @@ fn walk_harness_ancestry(
         if observed.insert(pid, birth).is_some() {
             return Err(cause(pid, AncestryUnavailableReason::AncestorCycle));
         }
-        match identity(pid).map_err(|reason| cause(pid, reason))? {
-            HarnessAncestry::Person => {}
-            HarnessAncestry::Unavailable => return Err(cause(pid, AncestryUnavailableReason::InvalidIdentity)),
-            ancestry => { binding = ancestry; break; }
+        match identity(pid) {
+            // A same-uid service manager may deliberately be non-dumpable. End
+            // the walk quietly, but do not upgrade an unverifiable caller to Person.
+            #[cfg(target_os = "linux")]
+            Err(AncestryUnavailableReason::ServiceManagerEnvironmentDenied) if pid != connector => {
+                binding = HarnessAncestry::Unavailable;
+                break;
+            }
+            Err(reason) => return Err(cause(pid, reason)),
+            Ok(HarnessAncestry::Person) => {}
+            Ok(HarnessAncestry::Unavailable) => return Err(cause(pid, AncestryUnavailableReason::InvalidIdentity)),
+            Ok(ancestry) => { binding = ancestry; break; }
         }
         pid = parent;
     }
@@ -7687,11 +7710,24 @@ fn local_harness_process(pid: u32) -> Result<HarnessProcess, AncestryUnavailable
 }
 
 #[cfg(target_os = "linux")]
+fn linux_environment_read_failure(
+    error: std::io::Error,
+    command: impl FnOnce() -> std::io::Result<Vec<u8>>,
+) -> AncestryUnavailableReason {
+    if error.raw_os_error() == Some(libc::EACCES)
+        && command().is_ok_and(|name| name == b"systemd\n")
+    {
+        return AncestryUnavailableReason::ServiceManagerEnvironmentDenied;
+    }
+    AncestryUnavailableReason::ProcessReadFailed {
+        operation: "proc-environ-read", error: error.to_string(),
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn local_harness_identity(pid: u32) -> Result<HarnessAncestry, AncestryUnavailableReason> {
     let environment = fs::read(format!("/proc/{pid}/environ"))
-        .map_err(|error| AncestryUnavailableReason::ProcessReadFailed {
-            operation: "proc-environ-read", error: error.to_string(),
-        })?;
+        .map_err(|error| linux_environment_read_failure(error, || fs::read(format!("/proc/{pid}/comm"))))?;
     if environment.is_empty() { return Err(AncestryUnavailableReason::EmptyEnvironment); }
     if !environment.ends_with(&[0]) { return Err(AncestryUnavailableReason::TruncatedEnvironment); }
     match HarnessAncestry::of_linux_environment(&environment) {
