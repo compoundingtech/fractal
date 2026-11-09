@@ -474,7 +474,7 @@ fn string_list(value: &Value) -> Option<Vec<String>> {
 /// A span as its largest whole unit: `7d`, `90m`.
 fn span(ms: u64) -> String {
     for (unit, size) in [("d", 86_400_000), ("h", 3_600_000), ("m", 60_000), ("s", 1_000)] {
-        if ms >= size && ms % size == 0 {
+        if ms >= size && ms.is_multiple_of(size) {
             return format!("{}{unit}", ms / size);
         }
     }
@@ -542,7 +542,7 @@ impl Context<'_> {
                 _ => {}
             }
         }
-        open_over.sort_by(|a, b| b.1.cmp(&a.1));
+        open_over.sort_by_key(|point| std::cmp::Reverse(point.1));
         let window = span(self.window.ms);
         let goal_within = duration(within);
         let target = format!("p{p} ≤ {goal_within}");
