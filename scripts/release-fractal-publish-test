@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import runpy
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -255,6 +256,46 @@ class TagPushTest(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             ensure_tag('example/project', 'v1.2.3', SHA, cwd='.', call=call)
         self.assertEqual(len(calls), 2)
+
+    def test_concurrent_creation_cannot_be_overwritten(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            remote = root / 'remote.git'
+            checkout = root / 'checkout'
+
+            def git(*args):
+                return subprocess.run(
+                    ['git', '-c', 'core.hooksPath=/dev/null', *map(str, args)],
+                    check=True, text=True, capture_output=True).stdout.strip()
+
+            git('init', '--bare', remote)
+            git('init', checkout)
+            git('-C', checkout, 'config', 'user.name', 'Release test')
+            git('-C', checkout, 'config', 'core.hooksPath', '/dev/null')
+            git('-C', checkout, 'config', 'user.email', 'release@example.invalid')
+            git('-C', checkout, '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'candidate')
+            candidate = git('-C', checkout, 'rev-parse', 'HEAD')
+            git('-C', checkout, '-c', 'commit.gpgsign=false', 'commit', '--allow-empty', '-m', 'competitor')
+            competitor = git('-C', checkout, 'rev-parse', 'HEAD')
+            ref = 'refs/tags/v1.2.3'
+            calls = []
+
+            def call(*args, **kwargs):
+                calls.append(args)
+                local_args = [str(remote) if arg == 'https://github.com/example/project.git' else arg
+                              for arg in args]
+                observed = subprocess.run(
+                    local_args, check=True, text=True, capture_output=True, **kwargs).stdout.strip()
+                if args[:2] == ('git', 'ls-remote'):
+                    # Another publisher wins after observation but before the leased push.
+                    git('-C', checkout, 'push', remote, f'{competitor}:{ref}')
+                return observed
+
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                ensure_tag('example/project', 'v1.2.3', candidate, cwd=checkout, call=call)
+            self.assertIn('stale info', raised.exception.stderr)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(git('--git-dir', remote, 'rev-parse', ref), competitor)
 
     def test_failed_read_is_not_absence(self):
         with self.assertRaises(subprocess.CalledProcessError):
