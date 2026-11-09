@@ -7,7 +7,7 @@ const load = perfLoadJobs['perf-load']
 const setup = load.steps.slice(0, load.steps.findIndex(step => step.id === 'load'))
 
 // Throwaway #6089 component measurements, not production SLO evidence.
-// Base uses the pre-contention component harness; contention requires head-only client APIs.
+// Head runs independently; the unsupported base harness is explicitly not measured.
 export default githubWorkflow(scopeLinuxNixSandbox({
   name: 'Performance',
   on: { workflow_dispatch: {} },
@@ -27,36 +27,7 @@ export default githubWorkflow(scopeLinuxNixSandbox({
       steps: [
         ...setup,
         {
-          name: 'Prepare baseline with the pre-contention component harness',
-          run: `set -euo pipefail
-base="$RUNNER_TEMP/component-base"
-git worktree add --detach "$base" d8532489
-for file in coalesce_run_part_rebuild huge_part_rebuild_bench huge_part_digest huge_part_snapshot; do
-  path="crates/fractal-missions/src/store/tests/$file.rs"
-  mkdir -p "$base/$(dirname "$path")"
-  git show "d3b2dc6a^:$path" > "$base/$path"
-done
-printf '\\nmod coalesce_run_part_rebuild;\\nmod huge_part_rebuild_bench;\\n' >> "$base/crates/fractal-missions/src/store/tests.rs"
-python3 - "$base" <<'PY'
-from pathlib import Path
-import sys
-path = Path(sys.argv[1]) / 'crates/fractal-missions/src/store/tests/huge_part_rebuild_bench.rs'
-source = path.read_text()
-replacements = [
-    ('let (mut probe_times, wall_times, received, total, longest_hold, rebuilds) =', 'let (mut probe_times, wall_times, received, total, longest_hold, rebuilds, effective_page) ='),
-    ('let mut received = 0;', 'let mut received = 0; let mut effective_page = 0;'),
-    ('wall_times.push(page_started.elapsed());', 'effective_page = effective_page.max(exchange.envelopes.len()); wall_times.push(page_started.elapsed());'),
-    ('(probe.join().unwrap(), wall_times, received, total, longest_hold, rebuilds)', '(probe.join().unwrap(), wall_times, received, total, longest_hold, rebuilds, effective_page)'),
-    ('huge_receive backlog={backlog} pages=', 'huge_receive backlog={backlog} page={effective_page} page_source=observed_max_envelopes pages='),
-]
-for old, new in replacements:
-    assert source.count(old) == 1, old
-    source = source.replace(old, new)
-path.write_text(source)
-PY`,
-        },
-        {
-          name: 'Compile release once per revision and run base then head serially',
+          name: 'Compile head release once and run component and contended benches serially',
           run: `set -euo pipefail
 mkdir -p "$RUNNER_TEMP/component-bench"
 nix develop '.#perf' -c bash -euo pipefail <<'BENCH' 2>&1 | tee "$RUNNER_TEMP/component-bench/results.log"
@@ -69,22 +40,34 @@ run() {
   env "$@" cargo test --release --locked -p fractal-missions --lib "$T::$TEST" -- --exact --ignored --nocapture --test-threads=1
   echo "== $label END $(date -u +%TZ)"
 }
-for revision in base head; do
-  if [ "$revision" = base ]; then cd "$RUNNER_TEMP/component-base"; else cd "$GITHUB_WORKSPACE"; fi
-  echo "REVISION=$revision commit=$(git rev-parse HEAD) host=$(hostname) arch=$(uname -m) nproc=$(nproc)"
-  cargo test --release --locked -p fractal-missions --lib --no-run
-  TEST=measure_single_huge_part_rebuild
-  if [ "$revision" = base ]; then
-    run "base-1024-defaultpage" FRACTAL_HUGE_PART_BACKLOG=1024
-    echo 'base contended: NOT RUN (client observation/refusal APIs are head-only)'
-  else
-    run "head-1024-p512" FRACTAL_HUGE_PART_BACKLOG=1024 FRACTAL_HUGE_PART_PAGE=512
-    run "head-1024-p4096" FRACTAL_HUGE_PART_BACKLOG=1024 FRACTAL_HUGE_PART_PAGE=4096
-    TEST=measure_huge_part_contended_mutations
-    run "head-contended-4096" FRACTAL_HUGE_PART_BACKLOG=4096 FRACTAL_HUGE_PART_PAGE=4096
-  fi
-done
+cd "$GITHUB_WORKSPACE"
+echo "REVISION=head commit=$(git rev-parse HEAD) host=$(hostname) arch=$(uname -m) nproc=$(nproc)"
+cargo test --release --locked -p fractal-missions --lib --no-run
+TEST=measure_single_huge_part_rebuild
+run "head-1024-p512" FRACTAL_HUGE_PART_BACKLOG=1024 FRACTAL_HUGE_PART_PAGE=512
+run "head-1024-p4096" FRACTAL_HUGE_PART_BACKLOG=1024 FRACTAL_HUGE_PART_PAGE=4096
+TEST=measure_huge_part_contended_mutations
+run "head-contended-4096" FRACTAL_HUGE_PART_BACKLOG=4096 FRACTAL_HUGE_PART_PAGE=4096
 BENCH`,
+        },
+        {
+          name: 'Report unsupported baseline without blocking head measurements',
+          if: 'always()',
+          'continue-on-error': true,
+          run: `echo 'BASE NOT RUN: harness needs head-only APIs' | tee -a "$GITHUB_STEP_SUMMARY"`,
+        },
+        {
+          name: 'Summarize raw component and contended measurements',
+          if: 'always()',
+          run: `python3 - <<'PY'
+import os
+from pathlib import Path
+log = Path(os.environ['RUNNER_TEMP']) / 'component-bench/results.log'
+lines = [line for line in log.read_text().splitlines() if line.startswith(('huge_receive ', 'contended_mutations '))] if log.exists() else []
+with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
+    summary.write('## Hosted component bench (not production SLO proof)\\n\\n')
+    summary.write('\\n'.join(lines) + '\\n' if lines else 'HEAD measurements NOT RUN or no measurement lines emitted; see raw log.\\n')
+PY`,
         },
         {
           name: 'Retain component and contended measurements',
