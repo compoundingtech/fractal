@@ -3045,17 +3045,7 @@ pub async fn publication_definition(
     Ok((Extension(result.0), Json(value)))
 }
 
-const LIMITED_PAIRING_SCOPES: &[&str] = &[
-    "read.projections",
-    "write.client-diagnostics",
-    "read.glasses",
-    "control.glasses",
-    "read.arrangements",
-    "control.arrangements",
-    "terminal.read",
-    "control.attention",
-    "control.launches",
-];
+use crate::pairing::LIMITED_PAIRING_SCOPES;
 
 fn session_claim_actor(session: &ClientSession) -> String {
     if session.authority_actor.starts_with("person/")

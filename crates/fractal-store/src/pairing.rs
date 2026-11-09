@@ -5,6 +5,20 @@ use serde_json::Value;
 use crate::{config::LegacyPairingAllowance, store::Store};
 use smallclaims::claim::{ClaimInput, ClaimRecord};
 
+/// Authority granted by a historical person pairing challenge with no explicit scopes.
+/// The API and atomic completion admission must use the same limited policy.
+pub const LIMITED_PAIRING_SCOPES: &[&str] = &[
+    "read.projections",
+    "write.client-diagnostics",
+    "read.glasses",
+    "control.glasses",
+    "read.arrangements",
+    "control.arrangements",
+    "terminal.read",
+    "control.attention",
+    "control.launches",
+];
+
 /// Every configured allowance ends no later than 2026-11-15T23:00:00Z.
 pub const LEGACY_ALLOWANCE_CAP_UNIX_MS: u128 = 1_794_783_600_000;
 
@@ -259,11 +273,15 @@ impl Store {
             let begun = latest_operation(connection, &input.subject, "custom.client.pairing-begun")
                 .map_err(|error| crate::FractalError::new("internal", error.to_string()))?.ok_or_else(refused)?;
             let fields = &begun.body["fields"];
+            // Historical challenges omitted scopes; their established meaning is this
+            // limited policy. Explicit scopes, including malformed values, stay exact.
+            let scopes = fields.get("scopes").cloned()
+                .unwrap_or_else(|| serde_json::json!(LIMITED_PAIRING_SCOPES));
             if begun.id != begun_id || begun.origin != self.origin()
                 || input.actor != begun.actor
                 || fields["person_id"] != input.fields.get("person_id").cloned().unwrap_or_default()
                 || fields["pairing_id"] != input.fields.get("pairing_id").cloned().unwrap_or_default()
-                || fields["scopes"] != input.fields.get("scopes").cloned().unwrap_or_default()
+                || scopes != input.fields.get("scopes").cloned().unwrap_or_default()
                 || fields["expires_at_unix_ms"].as_u64().is_none_or(|expiry| u128::from(expiry) <= now)
                 || latest_completion(connection, &input.subject, None, now)
                     .map_err(|error| crate::FractalError::new("internal", error.to_string()))?.is_some()
