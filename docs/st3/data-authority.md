@@ -7,6 +7,13 @@ have their own logical authority digests; local physical fields and caches are o
 
 The claim log and immutable blobs are the durable graph authority.
 
+Run-part rebuilds reuse prepared statements with bound claim values. They clear
+`projection:runs:<claim-id>` health rows only for the claims selected for replay,
+then retain a savepoint per claim: a handler failure rolls back only that claim
+and quarantines it. Terminalization still follows replay order; repeated terminal
+claims can change cancellation reasons and timestamps, so they cannot simply be
+deduplicated by run or generation.
+
 The `local_completion_health_v1_*` tables are member-local, rebuildable projections
 of retained claims and their ordering/repair metadata. Their candidate rows, pending
 work and hydration progress are not shared logical rows. They add no registry
