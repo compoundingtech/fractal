@@ -326,6 +326,78 @@ pub mod tests {
     }
 
     #[test]
+    fn persisted_ask_origin_remains_in_exact_inbox_history_after_resolution_and_replay() {
+        use crate::store::thread_metadata::{
+            Edit, InboxOrigin, StartFromInbox, ThreadContext, apply, list_context, start_from_inbox,
+        };
+        let (store, _, input) = fixture();
+        store.configure_thread_write_rollout([]);
+        let ask = store.ask_person(&input).unwrap();
+        let episode = request(&store.readers.get(), &ask.subject).unwrap().unwrap();
+        let person = "person/avery";
+        let agent = episode.actor.as_deref().unwrap();
+        // Load the persisted historical format directly, without retaining an obsolete
+        // live writer. The normal claim/operation decoder and replay own this boundary.
+        for thread in ["thread/history-a", "thread/history-b"] {
+            store.connection.batched(|tx| -> Result<()> {
+                let claim = append_claim_tx(tx, "alder", thread, "thread.created", Some(person), &json!({
+                    "fields": {"person": person, "agent": agent, "title": "Historical thread",
+                        "origin_ask": ask.subject, "origin_ask_episode": episode.id},
+                    "evidence": [episode.id],
+                    "_operation": {"id": format!("op/{thread}"), "request_digest": thread},
+                }), &[], None)?;
+                register_operation_tx(tx, &claim)?;
+                Ok(())
+            }).unwrap().unwrap();
+        }
+        let origin = InboxOrigin { source_id: ask.subject.clone(), episode: episode.id.clone() };
+        let message = ClaimInput {
+            subject: "message/history-new".into(), kind: "message.sent".into(), actor: Some(person.into()),
+            fields: BTreeMap::from([
+                ("from".into(), json!(person)), ("to".into(), json!(agent)),
+                ("content".into(), json!("Keep the original context.")),
+            ]),
+            evidence: vec![], expected_subject: None, idempotency_key: None,
+        };
+        let (created, _) = start_from_inbox(&store, StartFromInbox {
+            thread: "thread/history-c", title: "Current thread", person, origin: &origin,
+            key: "history-new", first_message: &message,
+        }).unwrap();
+        assert_eq!(created.body["fields"]["origin_source"], ask.subject);
+        assert_eq!(created.body["fields"]["origin_episode"], episode.id);
+        assert!(created.body["fields"].get("origin_ask").is_none());
+        assert!(created.body["fields"].get("origin_ask_episode").is_none());
+        let delivered = store.claims_for(&message.subject, Some("message.sent")).unwrap();
+        assert_eq!(delivered[0].body["fields"]["thread_origin_source"], ask.subject);
+        assert!(delivered[0].body["fields"].get("thread_origin_ask").is_none());
+        let context = || ThreadContext::Inbox { source: &ask.subject, episode: &episode.id };
+        let first = list_context(&store, person, context(), None, 1).unwrap();
+        assert_eq!(first.items[0].id, "thread/history-a");
+        let cursor = first.next_cursor.unwrap();
+        store.finish_person_step(&PersonStepResponse {
+            delegation: None, subject: ask.subject.clone(), actor: person.into(),
+            summary: "Friday".into(), evidence: vec![], episode: None,
+            idempotency_key: "resolve-history-source".into(), answer: None,
+        }, false).unwrap();
+        store.replay_replication_graph().unwrap();
+        let after = list_context(&store, person, context(), Some(&cursor), 20).unwrap();
+        assert_eq!(after.items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec!["thread/history-b", "thread/history-c"]);
+        assert!(after.next_cursor.is_none());
+        assert!(list_context(&store, "person/robin", context(), None, 20).unwrap().items.is_empty());
+        assert!(list_context(&store, "person/robin", context(), Some(&cursor), 20).is_err());
+        assert!(list_context(&store, person,
+            ThreadContext::Inbox { source: &ask.subject, episode: "different-episode" },
+            Some(&cursor), 20).is_err());
+        let historical = list_context(&store, person, context(), None, 1).unwrap().items.remove(0);
+        let (closed, _) = apply(&store, person, &historical.id, "close-history", Edit::Close {
+            revision: &historical.revision,
+        }).unwrap();
+        apply(&store, person, &historical.id, "reopen-history", Edit::Reopen { revision: &closed.id }).unwrap();
+        assert_eq!(list_context(&store, person, context(), None, 20).unwrap().items.len(), 3);
+    }
+
+    #[test]
     fn enrolled_device_starts_thread_with_signed_ask_origin_and_first_message() {
         use crate::store::thread_metadata::{InboxOrigin, PersonAuthority, StartFromInbox, start_from_inbox_as};
         use smallclaims::principal::{ClaimSignature, FIELDS_FORMAT, fields_signing_bytes};
