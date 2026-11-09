@@ -50,7 +50,7 @@ pub enum Indicator {
     /// Events in a CI series per hour.
     CiCount { series: String },
     /// Work that starts and stops in claims, one sample per subject.
-    Interval(Interval),
+    Interval(Box<Interval>),
 }
 
 impl Indicator {
@@ -376,7 +376,7 @@ fn parse_indicator(node: &Value, fail: &dyn Fn(String) -> FractalError) -> Resul
             }
             if kind == "ci-duration" { Indicator::CiDuration { series } } else { Indicator::CiCount { series } }
         }
-        "interval" => Indicator::Interval(parse_interval(&kids, fail)?),
+        "interval" => Indicator::Interval(Box::new(parse_interval(&kids, fail)?)),
         other => return Err(fail(format!("has an unknown indicator `{other}`"))),
     })
 }
