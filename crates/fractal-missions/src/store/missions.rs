@@ -5,6 +5,7 @@ pub use fractal_delivery::store::missions::*;
 use fractal_store::store::identities::resolve_reference_conn;
 
 mod run_review;
+pub mod step_history;
 #[doc(hidden)]
 pub use run_review::{
     ReviewOwnerSnapshot, review_owner_snapshot, validate_run_reviewer,
@@ -236,6 +237,27 @@ pub(crate) fn mission_step_timestamps_sql() -> String {
               'work.claimed','work.failed','work.person-done','work.person-cancelled')
          JOIN batches ON batches.id=claims.batch_id
          ORDER BY claims.subject, {CANONICAL_ORDER}"
+    )
+}
+
+/// The lifecycle claims of the runs in `?1`'s current-generation steps for the detail read's step
+/// history, in canonical order, seeking each step's claims by subject and kind like
+/// [`mission_step_timestamps_sql`]. Renewals and clockless progress notes are never read.
+pub(crate) fn mission_step_history_sql() -> String {
+    format!(
+        "WITH steps AS MATERIALIZED (
+             SELECT s.subject
+             FROM mission_runs r JOIN step_runs s INDEXED BY step_runs_run_index
+               ON s.run_id=r.id AND s.generation_id=r.current_generation_id
+             WHERE r.id IN (SELECT value FROM json_each(?1)))
+         SELECT claims.subject, claims.kind, claims.body, claims.accepted_at_unix_ms
+         FROM steps CROSS JOIN claims INDEXED BY claims_subject_kind_index
+           ON claims.subject=steps.subject
+          AND claims.kind IN ({kinds})
+         JOIN batches ON batches.id=claims.batch_id
+         WHERE claims.kind<>'work.progress' OR json_extract(claims.body, '$.fields.clock') IS NOT NULL
+         ORDER BY claims.subject, {CANONICAL_ORDER}",
+        kinds = step_history::STEP_HISTORY_KINDS,
     )
 }
 
@@ -1695,6 +1717,11 @@ pub trait MissionsStore {
     fn mission_step_timestamps_for_runs(&self, runs: &[String], subjects: Option<&[String]>) -> Result<MissionStepTimestamps>;
     /// Remaining duration from bounded, incrementally projected completed-run samples.
     fn mission_run_eta(&self, run: &str, at_unix_ms: u128) -> Result<Option<Value>>;
+    /// Each remaining step's p25/p75 duration and sample count, for the steps that have samples.
+    fn mission_run_step_etas(&self, run: &str) -> Result<BTreeMap<String, (u64, u64, usize)>>;
+    /// Each current-generation step's attempts, waits and transitions in the runs in `runs`,
+    /// folded from its lifecycle claims as of `at_unix_ms` (`step_history`).
+    fn mission_step_histories_for_runs(&self, runs: &[String], at_unix_ms: u128) -> Result<BTreeMap<String, step_history::StepHistory>>;
     fn active_mission_runs_for_origin(&self, origin: &str) -> Result<Vec<MissionRunView>>;
     /// Live work that `seat` holds or is assigned in a run outside the root of `owner_run`. With
     /// `before`, only work in runs this host recorded before that store index (`stop_intake`).
@@ -2160,6 +2187,33 @@ fn set_step_state_guarded(
 impl MissionsStore for Store {
     fn mission_run_eta(&self, run: &str, at_unix_ms: u128) -> Result<Option<Value>> {
         fractal_delivery::store::run_eta::read(&self.readers.get(), run, at_unix_ms)
+    }
+
+    fn mission_run_step_etas(&self, run: &str) -> Result<BTreeMap<String, (u64, u64, usize)>> {
+        fractal_delivery::store::run_eta::read_steps(&self.readers.get(), run)
+    }
+
+    fn mission_step_histories_for_runs(&self, runs: &[String], at_unix_ms: u128) -> Result<BTreeMap<String, step_history::StepHistory>> {
+        if runs.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let runs = runs.iter().map(|run| run.trim_start_matches("mission-run/")).collect::<Vec<_>>();
+        let connection = self.readers.get();
+        let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-hd90c689f2276 owner=fractal_missions::store::missions TODO=trace-statement-and-value-representation */ &mission_step_history_sql())?;
+        let rows = statement.query_map(params![serde_json::to_string(&runs)?], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?))
+        })?;
+        let mut events = BTreeMap::<String, Vec<(String, Value, u128)>>::new();
+        for row in rows {
+            let (subject, kind, body, at) = row?;
+            events.entry(subject).or_default().push((kind, serde_json::from_str(&body)?, at.parse()?));
+        }
+        let holds = step_history::foreign_holds(&events);
+        Ok(events.iter().map(|(subject, events)| {
+            let holds = holds.get(subject).map_or(&[][..], Vec::as_slice);
+            (subject.clone(), step_history::fold_step_history(events, holds, at_unix_ms))
+        }).collect())
     }
 
 

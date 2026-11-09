@@ -1,0 +1,13 @@
+{
+  "mission": "mission/example/build",
+  "revision": "build-revision",
+  "published_at": 1794131000000,
+  "text": "version 2\nmission \"example/build\" state=\"ready\" {\n  goal \"Build.\"\n}\n",
+  "legacy": false,
+  "provenance": {
+    "repository": "https://example.invalid/fleet/missions",
+    "commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "path": "missions/build.ts",
+    "renderer": "fractal-declarations"
+  }
+}
