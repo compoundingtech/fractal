@@ -99,7 +99,7 @@ const tabsFitPlay = async ({ canvasElement }: { readonly canvasElement: HTMLElem
   }
   for (let variant = 0; variant < widestTabs.length; variant++) {
     await assertFits()
-    const row = within(sidebar).getByRole('button', { name: 'Builder session', exact: true })
+    const row = within(sidebar).getByRole('button', { name: 'Builder session' })
     row.focus()
     await expect(row).toHaveFocus()
     await expect(sidebar.scrollLeft).toBe(0)
