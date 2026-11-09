@@ -9191,13 +9191,17 @@ async fn dispatch_action(
                 .claims_for_kind_at("custom.client.pairing-completed", None, true, 10_000)
                 .map_err(ApiError::internal)?;
             let mut paired = None;
+            let mut legacy = None;
             for claim in &claims.claims {
                 if claim.body.pointer("/fields/device_id").and_then(Value::as_str) == Some(device.as_str()) {
-                    paired = Some(claim);
-                    break;
+                    if state.store.pairing_completion_is_admitted(claim, client_now_ms()).map_err(ApiError::internal)? {
+                        paired = Some(claim);
+                        break;
+                    }
+                    legacy.get_or_insert(claim);
                 }
             }
-            let paired = paired.ok_or_else(|| {
+            let paired = paired.or(legacy).ok_or_else(|| {
                 ApiError::not_found(format!("paired device `{device}` does not exist"))
             })?;
             if paired.origin != state.node {
@@ -16419,13 +16423,20 @@ subscription "watch/source" {
             } else {
                 state.store.append_claim(&input).unwrap()
             };
+            if native {
+                // A newer retained record with the same device ID must not mask the admitted grant.
+                let mut retained = input.clone();
+                retained.subject = "custom/client/legacy-shadow".into();
+                retained.fields.insert("credential_hash".into(), json!("unrelated-retained-digest"));
+                state.store.append_claim(&retained).unwrap();
+            }
             let bearer = Request::builder().uri("/v1/client/agents")
                 .header(AUTHORIZATION, "Bearer legacy-revoke-secret")
                 .body(Body::empty()).unwrap();
             assert_eq!(authenticate(&state, &bearer, "fabric-loopback").is_ok(), native);
             let snapshot = new_client_snapshot(&state);
             let mut request = ActionRequest {
-                api_version: API_VERSION.into(), id:"action/legacy-revoke".into(),
+                api_version: CLIENT_API_VERSION.into(), id:"action/legacy-revoke".into(),
                 action_type:"pairing.revoke".into(), idempotency_key:"legacy-revoke-test-key".into(),
                 fence: Fence { snapshot_id:snapshot.id.clone(), ..Default::default() },
                 parameters:json!({"target_id":"device/legacy-revoke"}),

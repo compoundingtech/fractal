@@ -1872,6 +1872,10 @@ pub fn device_resources(
             "custom.client.pairing-completed"
                 if fields.get("person_id").and_then(Value::as_str) == Some(person) =>
             {
+                if unadmitted.contains(&claim.id)
+                    && paired.get(device_id).is_some_and(|(current, _)| !unadmitted.contains(&current.id)) {
+                    continue;
+                }
                 paired.insert(device_id.to_owned(), (claim, None));
             }
             "custom.client.pairing-revoked" => {
