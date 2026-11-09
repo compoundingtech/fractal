@@ -2369,6 +2369,84 @@ export const MissionRunOutcome = /*#__PURE__*/ (() => Schema.Struct({
 export type MissionRunOutcome = typeof MissionRunOutcome.Type
 export type MissionRunOutcomeEncoded = typeof MissionRunOutcome.Encoded
 
+export const MissionStepAttempt = /*#__PURE__*/ (() => Schema.Struct({
+  /** Who last claimed the attempt; null for agentless execution or an attempt never claimed. */
+  "claimant": Schema.OptionFromNullOr(ActorRef).annotate({ description: "Who last claimed the attempt; null for agentless execution or an attempt never claimed." }),
+  /** When the attempt ended (failure, terminal state, or the retry that opened the next attempt), in Unix milliseconds; null while running. */
+  "ended_at": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "When the attempt ended (failure, terminal state, or the retry that opened the next attempt), in Unix milliseconds; null while running." }),
+  /** The attempt number, as `attempt` counts it. */
+  "n": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).annotate({ description: "The attempt number, as `attempt` counts it." }),
+  /** running also covers a submission still awaiting verification. Clients treat an unknown word as running. */
+  "outcome": openEnum(["done","failed","cancelled","running"]).annotate({ description: "running also covers a submission still awaiting verification. Clients treat an unknown word as running." }),
+  /** The failure or retry reason, when one was given. */
+  "reason": optionalKey(Schema.String).annotate({ description: "The failure or retry reason, when one was given." }),
+  /** First execution opening, in Unix milliseconds; a reclaim keeps it. */
+  "started_at": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "First execution opening, in Unix milliseconds; a reclaim keeps it." })
+}).annotate({ identifier: "MissionStepAttempt" }))()
+export type MissionStepAttempt = typeof MissionStepAttempt.Type
+export type MissionStepAttemptEncoded = typeof MissionStepAttempt.Encoded
+
+/** Mission detail only, on a remaining step of an open run that has completed-run samples: its own p25/p75 duration from the samples the run eta reads. Present per step even when another step's missing samples keep the run eta null. Absent for a step without samples, a finished step or run, and on older daemons. */
+export const MissionStepEta = /*#__PURE__*/ (() => Schema.Struct({
+  /** p75 duration in milliseconds. */
+  "high_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "p75 duration in milliseconds." }),
+  /** p25 duration in milliseconds. */
+  "low_ms": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "p25 duration in milliseconds." }),
+  "samples": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))
+}).annotate({ identifier: "MissionStepEta", description: "Mission detail only, on a remaining step of an open run that has completed-run samples: its own p25/p75 duration from the samples the run eta reads. Present per step even when another step's missing samples keep the run eta null. Absent for a step without samples, a finished step or run, and on older daemons." }))()
+export type MissionStepEta = typeof MissionStepEta.Type
+export type MissionStepEtaEncoded = typeof MissionStepEta.Encoded
+
+export const MissionStepTransition = /*#__PURE__*/ (() => Schema.Struct({
+  /** Unix milliseconds. */
+  "at": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "Unix milliseconds." }),
+  "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  /** The claim behind it. nudged is a stall marker: st nudged an idle holder, and status repeats the state it found. Clients treat an unknown event as state. */
+  "event": openEnum([
+  "state",
+  "carried",
+  "retried",
+  "claimed",
+  "submitted",
+  "failed",
+  "released",
+  "nudged"
+]).annotate({ description: "The claim behind it. nudged is a stall marker: st nudged an idle holder, and status repeats the state it found. Clients treat an unknown event as state." }),
+  /** nudged only: since when the holder had been idle, in Unix milliseconds. */
+  "idle_since": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "nudged only: since when the holder had been idle, in Unix milliseconds." }),
+  "reason": optionalKey(Schema.String),
+  /** The step's state after the event, in the WorkState vocabulary of `state`. Open, because it replays durable claims: a status word an older or newer writer recorded passes through. A repeat of the previous state and attempt is not listed again. */
+  "status": openEnum([
+  "waiting-person",
+  "waiting",
+  "ready",
+  "claimed",
+  "blocked",
+  "verifying",
+  "completed",
+  "failed",
+  "cancelled"
+]).annotate({ description: "The step's state after the event, in the WorkState vocabulary of `state`. Open, because it replays durable claims: a status word an older or newer writer recorded passes through. A repeat of the previous state and attempt is not listed again." })
+}).annotate({ identifier: "MissionStepTransition" }))()
+export type MissionStepTransition = typeof MissionStepTransition.Type
+export type MissionStepTransitionEncoded = typeof MissionStepTransition.Encoded
+
+export const MissionStepWait = /*#__PURE__*/ (() => Schema.Struct({
+  "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  /** Unix milliseconds; null while the wait is open. */
+  "end": Schema.OptionFromNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "Unix milliseconds; null while the wait is open." }),
+  /** you: a person ask by or for this step, until answered or cancelled. paused: a wait the holder declared, until it resumed, a new claim, or its deadline. retry: a retry backoff, until the next claim or its not-before time. dependency: pending, until ready. queue: ready, until claimed. Clients treat an unknown kind as an opaque wait. */
+  "kind": openEnum(["you","paused","retry","dependency","queue"]).annotate({ description: "you: a person ask by or for this step, until answered or cancelled. paused: a wait the holder declared, until it resumed, a new claim, or its deadline. retry: a retry backoff, until the next claim or its not-before time. dependency: pending, until ready. queue: ready, until claimed. Clients treat an unknown kind as an opaque wait." }),
+  /** The ask's title, the pause's summary or reason, or the retry reason. */
+  "reason": optionalKey(Schema.String).annotate({ description: "The ask's title, the pause's summary or reason, or the retry reason." }),
+  /** Unix milliseconds. */
+  "start": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)).annotate({ description: "Unix milliseconds." }),
+  /** The deadline the wait declared, in Unix milliseconds: a pause's wait-until or a retry's not-before. */
+  "until": optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))).annotate({ description: "The deadline the wait declared, in Unix milliseconds: a pause's wait-until or a retry's not-before." })
+}).annotate({ identifier: "MissionStepWait" }))()
+export type MissionStepWait = typeof MissionStepWait.Type
+export type MissionStepWaitEncoded = typeof MissionStepWait.Encoded
+
 export const MissionWake = /*#__PURE__*/ (() => Schema.Struct({
   "acknowledged_by": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "assignee": ActorRef,
@@ -2385,6 +2463,8 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   "agentless": optionalKey(Schema.Boolean),
   "assignee": Schema.OptionFromOptionalNullOr(ActorRef, NULL_NONE),
   "attempt": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  /** Mission detail only, on the runs it enriches (open runs, the latest finished run and a `?run=` run): each attempt of this step, oldest first, folded from its lifecycle claims. Absent elsewhere and on older daemons, which is not proof of one attempt. */
+  "attempts": optionalKey(Schema.Array(MissionStepAttempt)).annotate({ description: "Mission detail only, on the runs it enriches (open runs, the latest finished run and a `?run=` run): each attempt of this step, oldest first, folded from its lifecycle claims. Absent elsewhere and on older daemons, which is not proof of one attempt." }),
   "blocked_reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
   "blockers": optionalKey(Schema.Array(Id)),
   "claim_expires_at": Schema.OptionFromOptionalNullOr(Timestamp, NULL_NONE),
@@ -2392,7 +2472,10 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   /** Authoritative terminal transition of the selected attempt, in Unix milliseconds. */
   "completed_at": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "Authoritative terminal transition of the selected attempt, in Unix milliseconds." }),
   "constraints": optionalKey(Schema.Array(Schema.String)),
+  "eta": optionalKey(MissionStepEta),
   "goals": optionalKey(Schema.Array(Schema.String)),
+  /** Present with attempts, waits and transitions. False when the per-step caps (20 attempts, 40 waits, 60 transitions; the newest are kept) dropped older entries. The claims are durable, so nothing else shortens a history. */
+  "history_complete": optionalKey(Schema.Boolean).annotate({ description: "Present with attempts, waits and transitions. False when the per-step caps (20 attempts, 40 waits, 60 transitions; the newest are kept) dropped older entries. The claims are durable, so nothing else shortens a history." }),
   "id": Id,
   /** st's own step that holds its run open while the mission watches, not work: declared with `keep-open`, or (for revisions published before the flag) a step named keep-watch, retire, steward-intake, standing, keep-open or *-retirement. Absent on older daemons. */
   "keep_open": optionalKey(Schema.Boolean).annotate({ description: "st's own step that holds its run open while the mission watches, not work: declared with `keep-open`, or (for revisions published before the flag) a step named keep-watch, retire, steward-intake, standing, keep-open or *-retirement. Absent on older daemons." }),
@@ -2413,6 +2496,10 @@ export const MissionStep = /*#__PURE__*/ (() => Schema.Struct({
   "started_at": Schema.OptionFromOptionalNullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)), NULL_NONE).annotate({ description: "First execution opening of the selected attempt, in Unix milliseconds." }),
   "state": WorkState,
   "title": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE),
+  /** Mission detail only, like attempts: the step's state changes and stall markers (consecutive nudges as one), oldest first. */
+  "transitions": optionalKey(Schema.Array(MissionStepTransition)).annotate({ description: "Mission detail only, like attempts: the step's state changes and stall markers (consecutive nudges as one), oldest first." }),
+  /** Mission detail only, like attempts: the intervals this step waited, by start. */
+  "waits": optionalKey(Schema.Array(MissionStepWait)).annotate({ description: "Mission detail only, like attempts: the intervals this step waited, by start." }),
   "wake": Schema.OptionFromOptionalNullOr(MissionWake, NULL_NONE),
   /** The deferral's blocked reason, or the observed wake failure when no deferral reason exists. */
   "wake_reason": Schema.OptionFromOptionalNullOr(Schema.String, NULL_NONE).annotate({ description: "The deferral's blocked reason, or the observed wake failure when no deferral reason exists." })
@@ -3732,10 +3819,23 @@ export const MailBacklog = /*#__PURE__*/ (() => Schema.Struct({
 export type MailBacklog = typeof MailBacklog.Type
 export type MailBacklogEncoded = typeof MailBacklog.Encoded
 
+/** Where this revision's source lives, as its mission.provenance claim recorded it at first publication. Absent when the revision was published without provenance, and on older daemons. Inert text: nothing here is resolved or fetched. */
+export const MissionDeclarationProvenance = /*#__PURE__*/ (() => Schema.Struct({
+  "commit": Schema.String.check(Schema.isPattern(new RegExp("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$", "u"))),
+  /** Repository-relative path of the source file. */
+  "path": Schema.String.annotate({ description: "Repository-relative path of the source file." }),
+  /** What rendered the source into KDL, for example fractal-declarations. */
+  "renderer": optionalKey(Schema.String).annotate({ description: "What rendered the source into KDL, for example fractal-declarations." }),
+  "repository": Schema.String
+}).annotate({ identifier: "MissionDeclarationProvenance", description: "Where this revision's source lives, as its mission.provenance claim recorded it at first publication. Absent when the revision was published without provenance, and on older daemons. Inert text: nothing here is resolved or fetched." }))()
+export type MissionDeclarationProvenance = typeof MissionDeclarationProvenance.Type
+export type MissionDeclarationProvenanceEncoded = typeof MissionDeclarationProvenance.Encoded
+
 export const MissionDeclaration = /*#__PURE__*/ (() => Schema.Struct({
   /** Contains removed loop shapes that the current parser rejects. */
   "legacy": Schema.Boolean.annotate({ description: "Contains removed loop shapes that the current parser rejects." }),
   "mission": Schema.String.check(Schema.isPattern(new RegExp("^mission/[^\\s]+$", "u"))),
+  "provenance": optionalKey(MissionDeclarationProvenance),
   "published_at": Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   "revision": Revision,
   "text": Schema.String
