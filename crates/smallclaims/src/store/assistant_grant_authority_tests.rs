@@ -208,6 +208,124 @@ fn late_envelope_signature_promotes_previously_admitted_grant() {
     assert_reference_and_rebuild(&target);
 }
 
+fn backfill_markers(connection: &Connection) -> Vec<(String, String)> {
+    connection.prepare(
+        "SELECT key,value FROM meta WHERE key='assistant_grant_authority_version'
+            OR key='assistant_grant_authority_membership_generation'
+            OR key LIKE 'assistant_grant_authority_cursor/%' ORDER BY key"
+    ).unwrap().query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap().collect::<rusqlite::Result<_>>().unwrap()
+}
+
+fn insert_raw_signature(connection: &Connection, signature: &ReplicaEnvelopeSignature) {
+    connection.execute(
+        "INSERT OR IGNORE INTO replica_envelope_signatures
+            (writer,sequence,envelope_hash,member_key,signature,stored_at_unix_ms)
+         VALUES(?1,?2,?3,?4,?5,'0')",
+        params![signature.writer,signature.sequence,signature.hash,signature.member_key,signature.signature],
+    ).unwrap();
+}
+
+#[test]
+fn raw_signature_only_insert_survives_reopen_and_promotes_grant_policy_and_revoke_without_rescan() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("late-signature.sqlite3");
+    let (source, key) = source();
+    let mut target = Store::open(&path, "reader", Arc::new(Plain)).unwrap();
+    target.bind_fleet(FLEET).unwrap();
+    target.pin_fleet_anchor(key.public()).unwrap();
+    // Establish membership first: no membership change may drive these promotions.
+    receive(&target, &export(&source, &target));
+    let mut grant_id = String::new();
+    for kind in [GRANTED, POLICY, REVOKED] {
+        let mut value = fields();
+        if kind == POLICY { value["expires_at_unix_ms"] = json!(20000); }
+        let claim = append(&source, SUBJECT, kind, value);
+        if kind == GRANTED { grant_id.clone_from(&claim.id); }
+        let exchange = export(&source, &target);
+        receive(&target, &unsigned(&exchange));
+        assert!(raw_claims(&target).iter().any(|record| record.id == claim.id));
+        assert!(!authority::contains(&target.readers.get(), &claim.id).unwrap());
+        while !target.advance_assistant_grant_authority_backfill().unwrap() {}
+        let markers = backfill_markers(&target.readers.get());
+        authority::ready(&target.readers.get()).unwrap();
+        drop(target);
+
+        // Simulate an older writer, bypassing every Store admission/refresh hook.
+        {
+            let connection = Connection::open(&path).unwrap();
+            for signature in signatures(&exchange).signatures {
+                insert_raw_signature(&connection, &signature);
+            }
+            let dirty: Vec<String> = connection.prepare(
+                "SELECT claim_id FROM assistant_grant_dirty ORDER BY claim_id"
+            ).unwrap().query_map([], |row| row.get(0)).unwrap()
+                .collect::<rusqlite::Result<_>>().unwrap();
+            assert_eq!(dirty, vec![claim.id.clone()]);
+            assert!(authority::ready(&connection).is_err());
+            assert_eq!(backfill_markers(&connection), markers);
+        }
+        // Reopen before Store startup can drain the durable queue automatically.
+        {
+            let mut connection = Connection::open(&path).unwrap();
+            assert!(authority::ready(&connection).is_err());
+            let transaction = connection.transaction().unwrap();
+            assert!(authority::backfill_slice(&transaction, Duration::from_secs(60)).unwrap());
+            authority::ready(&transaction).unwrap();
+            assert!(authority::contains(&transaction, &claim.id).unwrap());
+            assert_eq!(backfill_markers(&transaction), markers, "completed history or membership was rescanned");
+            transaction.commit().unwrap();
+        }
+        target = Store::open(&path, "reader", Arc::new(Plain)).unwrap();
+        assert_reference_and_rebuild(&target);
+        if kind == REVOKED {
+            assert!(decisions(&target, 0).is_empty());
+            let revoked: bool = target.readers.get().query_row(
+                "SELECT revoked FROM assistant_grant_effective WHERE claim_id=?1",
+                [&grant_id], |row| row.get(0),
+            ).unwrap();
+            assert!(revoked);
+        } else {
+            assert_eq!(decisions(&target, 0), vec![grant_id.clone()]);
+            assert_eq!(decisions(&target, 15000).is_empty(), kind == GRANTED);
+        }
+    }
+}
+
+#[test]
+fn malformed_raw_signature_row_is_drained_without_authenticating_a_pending_revoke() {
+    let (source, key) = source();
+    let target = node("reader", Some(key.public()));
+    let grant = append(&source, SUBJECT, GRANTED, fields());
+    receive(&target, &export(&source, &target));
+    let revoke = append(&source, SUBJECT, REVOKED, fields());
+    let exchange = export(&source, &target);
+    receive(&target, &unsigned(&exchange));
+    while !target.advance_assistant_grant_authority_backfill().unwrap() {}
+    let markers = backfill_markers(&target.readers.get());
+    {
+        let mut connection = target.connection.write();
+        for mut signature in signatures(&exchange).signatures {
+            signature.signature = "not-an-ed25519-signature".into();
+            insert_raw_signature(&connection, &signature);
+        }
+        assert!(authority::ready(&connection).is_err());
+        let transaction = connection.transaction().unwrap();
+        assert!(authority::backfill_slice(&transaction, Duration::from_secs(60)).unwrap());
+        authority::ready(&transaction).unwrap();
+        assert!(!authority::contains(&transaction, &revoke.id).unwrap());
+        let authenticated: bool = transaction.query_row(
+            "SELECT authenticated FROM assistant_grant_pending WHERE claim_id=?1",
+            [&revoke.id], |row| row.get(0),
+        ).unwrap();
+        assert!(!authenticated);
+        assert_eq!(backfill_markers(&transaction), markers);
+        transaction.commit().unwrap();
+    }
+    assert_eq!(decisions(&target, 0), vec![grant.id]);
+    assert_reference_and_rebuild(&target);
+}
+
 #[test]
 fn membership_sealed_after_grant_admission_promotes_pending_authority() {
     let (source, key) = source();

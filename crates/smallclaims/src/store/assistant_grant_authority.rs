@@ -115,6 +115,16 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
          CREATE TRIGGER IF NOT EXISTS assistant_grant_dirty_insert AFTER INSERT ON claims
          WHEN NEW.kind IN ('custom.client.assistant.v1.granted','custom.client.assistant.v1.policy','custom.client.assistant.v1.revoked')
          BEGIN INSERT OR IGNORE INTO assistant_grant_dirty VALUES(NEW.id); END;
+         CREATE TRIGGER IF NOT EXISTS assistant_grant_dirty_signature_insert
+         AFTER INSERT ON replica_envelope_signatures
+         BEGIN
+            INSERT OR IGNORE INTO assistant_grant_dirty(claim_id)
+            SELECT records.claim_id FROM replica_records AS records
+            JOIN claims ON claims.id=records.claim_id
+            WHERE records.writer=NEW.writer AND records.sequence=NEW.sequence
+              AND records.envelope_hash=NEW.envelope_hash
+              AND claims.kind IN ('custom.client.assistant.v1.granted','custom.client.assistant.v1.policy','custom.client.assistant.v1.revoked');
+         END;
          CREATE TABLE IF NOT EXISTS assistant_grant_membership_windows (
             writer TEXT NOT NULL, member_key TEXT NOT NULL, start INTEGER NOT NULL, end INTEGER,
             PRIMARY KEY(writer,member_key));"
@@ -378,8 +388,8 @@ fn refresh_membership_from(connection: &Connection, membership: &crate::fleet::M
 }
 /// Resumable, idempotent versioned backfill. Each page uses claims_kind_index;
 /// unrelated claims are never visited. Cursor and projection changes commit
-/// together in the caller's transaction. Old-build appends are captured by the
-/// additive dirty trigger even after the version has completed.
+/// together in the caller's transaction. Old-build appends and signature-only
+/// arrivals are captured by persistent dirty triggers even after completion.
 pub fn backfill_slice(connection: &Connection, budget: Duration) -> Result<bool> {
     let started = Instant::now();
     let origin = local_origin(connection)?;
