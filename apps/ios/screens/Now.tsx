@@ -15,7 +15,7 @@ import { useStore } from '../store';
 import { randomName } from '../launcher';
 import { AlertBody, RequestAnswers, RequestQuestion, StructuredRequestView } from './Alerts';
 import { ThreadViewport } from '../threadViewport';
-import { AskThread, ThreadGroup } from './Threads';
+import { InboxThread, ThreadGroup } from './Threads';
 import { theme } from '../theme';
 import { Button, GroupedHeader, GroupedRow, Markdown, Note, SystemScreen as Screen, T } from '../ui';
 import type { RootScreen } from '../navigation';
@@ -133,10 +133,12 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   const agentId = [item.requester_id, item.source_id].find(id => id?.startsWith('agent/'));
   const agent = agentId ? data.agents.find(candidate => candidate.id === agentId) : undefined;
   const mission = item.mission_id ? data.missions.find(candidate => candidate.id === item.mission_id) : undefined;
-  const requester = item.requester_id;
-  const askOrigin = isRequest(item.attention_kind) && item.source_id.startsWith('step-run/') && item.source_id.length > 'step-run/'.length
-    && requester?.startsWith('agent/') && requester.length > 'agent/'.length && item.episode
-    ? { agentId: requester, ask: item.source_id, episode: item.episode } : undefined;
+  const conversationAgent = item.conversation_id?.startsWith('agent/') && item.conversation_id.length > 'agent/'.length
+    ? item.conversation_id : undefined;
+  const threadEntry = item.source_id && item.episode
+    ? <ThreadViewport viewport={requestScroll}><InboxThread origin={{ sourceId: item.source_id, episode: item.episode }}
+      agentId={conversationAgent} initialTitle={item.title} onOpen={id => navigation.navigate('Thread', { id })} /></ThreadViewport>
+    : <T dim>Thread context is unavailable for this Inbox item.</T>;
   const other = item.actions.filter(action => action !== 'work.done' && action !== 'message.read' && action !== 'prompt.respond');
   // Closed elsewhere, so nothing here can be answered; it stays until the person clears it.
   if (item.closedElsewhere && !item.update) {
@@ -147,7 +149,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         <T bold selectable>{row.title}</T>
         {item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
         <T dim>This was closed. It stays under Recently closed until you clear it.</T>
-        {askOrigin ? <ThreadViewport viewport={requestScroll}><AskThread origin={askOrigin} initialTitle={item.title} allowStart={false} onOpen={id => navigation.navigate('Thread', { id })} /></ThreadViewport> : null}
+        {threadEntry}
         <Button label="clear from Now" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
         <T dim selectable>{item.id}</T>
       </ScrollView>
@@ -157,7 +159,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
     const from = agent ? agentName(agent) : item.requester_id?.replace(/^agent\//, '') ?? 'An agent';
     return <Screen>
       <Banners />
-      <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}>
+      <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 8, paddingBottom: 32 }}>
         <T><T bold color={theme[row.color]}>{row.glyph} update</T><T dim>  {row.age} ago</T></T>
         <T bold selectable>{row.title}</T>
         <T><T dim>from  </T><T bold color={theme.person}>{from}</T></T>
@@ -166,6 +168,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         {item.update.subjects?.map((subject, index) => subject.url
           ? <Pressable key={index} onPress={() => void Linking.openURL(subject.url!)}><T color={theme.accent}>↗ {subject.label}</T></Pressable>
           : <T key={index} dim>↗ {subject.label}  {subject.ref ?? ''}</T>)}
+        {threadEntry}
         <T dim>{item.closedElsewhere ? 'This was closed. It stays under Recently closed until you clear it.' : 'Nothing waits on this. It stays on Now until you mark it read.'}</T>
         {item.closedElsewhere
           ? <Button label="clear from Now" onPress={() => { actions.clearClosed(item.id); navigation.goBack(); }} />
@@ -192,7 +195,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
           </>}
           {blockedLine(item) ? <T dim selectable>{blockedLine(item)}</T> : <T dim>Answer it, or Nothing to do if there is nothing for you to do. Either way the step it waits on continues.</T>}
           {mission ? <Button label={`mission ${missionTitle(mission)}`} onPress={() => navigation.navigate('Mission', { id: mission.id })} /> : item.mission_id ? <T dim>mission {item.mission_id}</T> : null}
-          {askOrigin ? <ThreadViewport viewport={requestScroll}><AskThread origin={askOrigin} initialTitle={item.title} onOpen={id => navigation.navigate('Thread', { id })} /></ThreadViewport> : null}
+          {threadEntry}
           {agentId ? <Button label="Open agent conversation" onPress={() => navigation.navigate('Conversation', { target: agentId, title: from })} /> : null}
           <T dim selectable>{item.id}</T>
         </ScrollView>
@@ -201,7 +204,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
   }
   return <Screen>
     <Banners />
-    <ScrollView contentInsetAdjustmentBehavior="automatic" contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
+    <ScrollView ref={requestScroll} contentInsetAdjustmentBehavior="automatic" automaticallyAdjustKeyboardInsets keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 12, gap: 6, paddingBottom: 32 }}>
       <T><T bold color={theme[row.color]}>{row.glyph} {row.kind}</T><T dim>  {attentionKindLabel(item.attention_kind)} · {item.priority} · waited {row.age}</T></T>
       <T bold selectable>{row.title}</T>
       {item.attention_kind === 'harness-prompt' || item.attention_kind === 'harness-login'
@@ -210,6 +213,7 @@ export function AttentionScreen({ route, navigation }: RootScreen<'Attention'>) 
         : item.detail ? <Markdown text={item.detail} color={theme.subtext0} /> : null}
       {item.because ? <T soft>because {item.because}</T> : null}
       {row.waiting ? <T dim>{row.waiting}</T> : null}
+      {threadEntry}
       {mission ? <Button label={`mission ${missionTitle(mission)}`} onPress={() => navigation.navigate('Mission', { id: mission.id })} /> : item.mission_id ? <T dim>mission {item.mission_id}</T> : null}
       {agentId ? <Button label="Open agent conversation" onPress={() => navigation.navigate('Conversation', { target: agentId, title: agent ? agentName(agent) : undefined })} /> : null}
       <T dim selectable>{item.id}{item.source_id !== item.id ? ` · from ${item.source_id}` : ''}</T>

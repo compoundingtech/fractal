@@ -132,12 +132,12 @@ async function signThreadMessage(key: string, signing: PhoneSigning, fields: Thr
   return { signature, messageId: message.subject };
 }
 
-export type ThreadStartOrigin = { agentId: string; ask: string; episode: string };
+export type ThreadStartOrigin = { agentId: string; sourceId: string; episode: string };
 export function threadDraftKey(thread: string): string {
   return `thread-draft/${thread}`;
 }
-export function threadStartScope(origin: ThreadStartOrigin): string {
-  return JSON.stringify([origin.ask, origin.episode]);
+export function threadStartScope(origin: Pick<ThreadStartOrigin, 'sourceId' | 'episode'>): string {
+  return JSON.stringify([origin.sourceId, origin.episode]);
 }
 export function threadEditScope(thread: string): string { return `edit/${thread}`; }
 type ThreadDelivery = { target: string; retry?: () => Promise<ThreadEditResult> };
@@ -348,9 +348,9 @@ function useAppStore(proof?: FabricProfile) {
   const push = pushRef.current;
   const pushGranted = !proof && capsClient.current === client && !!caps?.capabilities.some(capability => capability.id === 'push-registration' && capability.version >= 1 && capability.state === 'granted');
   const threadUpgradeRequired = capsClient.current === client && !!caps && ['threads-v1', 'thread-summary-feed'].some(id =>
-    !caps.capabilities.some(capability => capability.id === id && capability.version >= 1));
+    !caps.capabilities.some(capability => capability.id === id && capability.version >= (id === 'threads-v1' ? 2 : 1)));
   const threadClient = capsClient.current === client && ['threads-v1', 'thread-summary-feed'].every(id => caps?.capabilities.some(capability =>
-    capability.id === id && capability.version >= 1 && capability.state === 'granted')) ? client : null;
+    capability.id === id && capability.version >= (id === 'threads-v1' ? 2 : 1) && capability.state === 'granted')) ? client : null;
   const threadActions = new Set(caps?.capabilities.filter(capability =>
     capability.state === 'granted' && capability.id.startsWith('thread.')).map(capability => capability.id));
   const [threadRefresh, setThreadRefresh] = useState(0);
@@ -1034,10 +1034,10 @@ function useAppStore(proof?: FabricProfile) {
         if (!signing) throw new Error('Pair this phone again to sign thread messages.');
         const { signature, messageId } = await signThreadMessage(key, signing, {
           content, from: signing.person, to: origin.agentId, thread_id: thread, title,
-          thread_origin_ask: origin.ask, thread_origin_episode: origin.episode,
+          thread_origin_source: origin.sourceId, thread_origin_episode: origin.episode,
         });
         return { messageId, send: request => member.threadStart({ ...request, parameters: {
-          target_id: thread, agent_id: origin.agentId, origin_ask: origin.ask, origin_ask_episode: origin.episode,
+          target_id: thread, agent_id: origin.agentId, origin: { source_id: origin.sourceId, episode: origin.episode },
           title, content, signature,
         } }) };
       }));

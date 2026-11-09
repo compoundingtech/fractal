@@ -5,7 +5,7 @@ import ts from 'typescript';
 import { isRequest } from '@fractal/views';
 
 // Execute the production JSX entry points without booting React Native. The element
-// factory records the tree, including which branch mounted the real AskThread gate.
+// factory records the tree, including which branch mounted the real InboxThread gate.
 const React = { createElement: (type, props, ...children) => ({ type, props, children }) };
 function component(file, name, next, dependencies) {
   const source = readFileSync(new URL(file, import.meta.url), 'utf8');
@@ -26,45 +26,64 @@ const find = (element, type) => !element || typeof element !== 'object' ? undefi
 
 function render(item, enabled = true, start = true) {
   const navigation = { navigate() {}, goBack() {} };
-  const AskThread = component('./screens/Threads.tsx', 'AskThread', 'AskThreadStart', {
+  const InboxThread = component('./screens/Threads.tsx', 'InboxThread', 'InboxThreadStart', {
     useStore: () => ({ threadClient: enabled ? {} : null, threadActions: new Set(start ? ['thread.start'] : []) }),
-    AskThreadStart: 'AskThreadStart',
+    InboxThreadStart: 'InboxThreadStart', threadStartScope: origin => JSON.stringify([origin.sourceId, origin.episode]),
   });
   const dependencies = {
     useStore: () => ({ data: { attention: [item], agents: [], missions: [] }, actions: {} }),
     useMissionsOnFocus() {}, useFocusEffect() {}, useHeaderHeight: () => 0, useCallback: callback => callback, useRef: current => ({ current }), detailRow: () => ({}),
-    cleanMessageText: text => text, blockedLine: () => undefined, theme: {},
+    spaced: text => text, attentionKindLabel: kind => kind, attentionActionLabel: action => action, cleanMessageText: text => text, blockedLine: () => undefined, theme: {},
     Screen: 'Screen', Banners: 'Banners', ScrollView: 'ScrollView', KeyboardAvoidingView: 'KeyboardAvoidingView', T: 'Text',
-    Button: 'Button', Markdown: 'Markdown', RequestQuestion: 'RequestQuestion', RequestAnswers: 'RequestAnswers', ThreadViewport: 'ThreadViewport', isRequest, AskThread,
+    AlertBody: 'AlertBody', Button: 'Button', Markdown: 'Markdown', RequestQuestion: 'RequestQuestion', RequestAnswers: 'RequestAnswers', ThreadViewport: 'ThreadViewport', isRequest, InboxThread,
   };
   const AttentionScreen = component('./screens/Now.tsx', 'AttentionScreen', undefined, dependencies);
   const screen = AttentionScreen({ route: { params: { id: item.id } }, navigation });
-  const entry = find(screen, AskThread);
-  return { screen, entry, gated: entry ? AskThread(entry.props) : undefined };
+  const entry = find(screen, InboxThread);
+  return { screen, entry, gated: entry ? InboxThread(entry.props) : undefined };
 }
 
 const ask = {
   id: 'attention/card', attention_kind: 'person-step', source_id: 'step-run/review',
-  episode: 'episode/now', requester_id: 'agent/builder', title: 'Review the change',
+  conversation_id: 'agent/authoritative', episode: 'episode/now', requester_id: 'agent/builder', title: 'Review the change',
   detail: 'Approve this?', actions: ['work.done'],
 };
 
 test('the active Inbox ask mounts inline start with the exact origin and keeps its answer controls', () => {
   for (const attention_kind of ['person-step', 'agent-request']) {
     const { screen, entry, gated } = render({ ...ask, attention_kind });
-    assert.deepEqual(entry.props.origin, { agentId: 'agent/builder', ask: 'step-run/review', episode: 'episode/now' });
-    assert.equal(gated.type, 'AskThreadStart');
+    assert.deepEqual(entry.props.origin, { sourceId: 'step-run/review', episode: 'episode/now' });
+    assert.equal(entry.props.agentId, 'agent/authoritative');
+    assert.equal(gated.type, 'InboxThreadStart');
     assert.equal(gated.props.canStart, true);
     assert.ok(find(screen, 'RequestAnswers'));
     assert.equal(find(screen, 'KeyboardAvoidingView').props.behavior, 'padding');
   }
 });
 
-test('the Inbox thread entry respects capability, action grant, and exact ask identity', () => {
+test('all existing Inbox item kinds use their canonical source and server-resolved agent', () => {
+  for (const attention_kind of ['person-step', 'agent-request', 'notice', 'message', 'harness-prompt', 'harness-login']) {
+    const { entry, gated } = render({ ...ask, attention_kind, actions: [], source_id: 'notice/source' });
+    assert.deepEqual(entry.props.origin, { sourceId: 'notice/source', episode: ask.episode });
+    assert.equal(entry.props.agentId, 'agent/authoritative');
+    assert.equal(gated.props.canStart, true);
+  }
+  const { entry } = render({ ...ask, attention_kind: 'notice', closedElsewhere: true });
+  assert.ok(entry, 'cached resolved Inbox items keep the same thread entry');
+});
+
+test('an Inbox update retains the same thread component beside its existing controls', () => {
+  const { entry } = render({ ...ask, attention_kind: 'notice', update: { about: 'agent/worker', summary: 'Ready' } });
+  assert.equal(entry.props.agentId, 'agent/authoritative');
+  assert.deepEqual(entry.props.origin, { sourceId: ask.source_id, episode: ask.episode });
+});
+
+test('missing canonical agent disables starts without guessing requester responsibility', () => {
+  const item = { ...ask, conversation_id: undefined };
+  const { entry, gated } = render(item);
+  assert.equal(entry.props.agentId, undefined);
+  assert.equal(gated.props.canStart, false);
   assert.equal(render(ask, false).gated, null);
   assert.equal(render(ask, true, false).gated.props.canStart, false);
-  for (const patch of [{ source_id: 'agent/builder' }, { requester_id: undefined }, { episode: undefined }]) {
-    assert.equal(render({ ...ask, ...patch }).entry, undefined);
-  }
-  assert.equal(render({ ...ask, closedElsewhere: true }).gated.props.canStart, false);
+  assert.equal(render({ ...ask, episode: undefined }).entry, undefined);
 });

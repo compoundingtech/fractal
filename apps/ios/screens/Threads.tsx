@@ -117,13 +117,13 @@ function ContextThreadList({ context, client, openThread, title, excludeId }: {
   const { threadRefresh, feed } = useStore();
   const agent = 'agent_id' in context ? context.agent_id : undefined;
   const mission = 'mission_id' in context ? context.mission_id : undefined;
-  const ask = 'origin_ask' in context ? context.origin_ask : undefined;
-  const episode = 'origin_ask_episode' in context ? context.origin_ask_episode : undefined;
+  const ask = 'origin_source' in context ? context.origin_source : undefined;
+  const episode = 'origin_episode' in context ? context.origin_episode : undefined;
   const recentlyClosed = 'recently_closed' in context && context.recently_closed;
   const selector = useMemo<ThreadCollectionContext | undefined>(() => {
     if (agent) return { agent_id: agent };
     if (mission) return { mission_id: mission };
-    if (ask && episode) return { origin_ask: ask, origin_ask_episode: episode };
+    if (ask && episode) return { origin_source: ask, origin_episode: episode };
     if (recentlyClosed) return { recently_closed: true };
     return undefined;
   }, [agent, mission, ask, episode, recentlyClosed]);
@@ -217,14 +217,14 @@ function ThreadDetail({ client, id }: { client: ThreadClient; id: string }) {
   </ScrollView>;
 }
 
-function ThreadDetailContent({ thread, issue, loading, reload, client, onOpen, start }: {
-  thread?: ThreadSummary; issue?: string; loading: boolean; reload: () => void; client: ThreadClient; onOpen?: () => void; start?: ThreadStartDraft;
+function ThreadDetailContent({ thread, issue, loading, reload, client, onOpen, start, embedded }: {
+  thread?: ThreadSummary; issue?: string; loading: boolean; reload: () => void; client: ThreadClient; onOpen?: () => void; start?: ThreadStartDraft; embedded?: boolean;
 }) {
   const [expanded, setExpanded] = useState(true);
   if (thread || start) return <>
-    {onOpen ? <EmbeddedThreadHeader title={thread?.title ?? start!.title} state={thread ? threadSummaryLine(thread) : start?.accepted ? 'Loading history…' : 'draft'} expanded={expanded} toggle={() => setExpanded(value => !value)} />
+    {onOpen || embedded ? <EmbeddedThreadHeader title={thread?.title ?? start!.title} state={thread ? threadSummaryLine(thread) : start?.accepted ? 'Loading history…' : 'draft'} expanded={expanded} toggle={() => setExpanded(value => !value)} />
       : <T bold>{thread?.title ?? start!.title}<T dim> · {thread ? threadSummaryLine(thread) : start?.accepted ? 'Loading history…' : 'draft'}</T></T>}
-    {expanded || !onOpen ? <ThreadBody client={client} thread={thread} start={thread ? undefined : start} onOpen={onOpen} /> : null}
+    {expanded || !(onOpen || embedded) ? <ThreadBody client={client} thread={thread} start={start} onOpen={onOpen} /> : null}
   </>;
   if (issue) return <>
     <T color={theme.waiting}>{issue}</T>
@@ -252,55 +252,66 @@ function EmbeddedThreadHeader({ title, state, expanded, toggle }: {
   </Pressable>;
 }
 
-export function AskThread({ origin, initialTitle, onOpen, allowStart = true }: {
-  origin: ThreadStartOrigin; initialTitle: string; onOpen: (id: string) => void; allowStart?: boolean;
+export function InboxThread({ origin, agentId, initialTitle, onOpen }: {
+  origin: Pick<ThreadStartOrigin, 'sourceId' | 'episode'>; agentId?: string;
+  initialTitle: string; onOpen: (id: string) => void;
 }) {
   const { threadClient, threadActions } = useStore();
-  return threadClient
-    ? <AskThreadStart key={`${origin.ask}:${origin.episode}`} client={threadClient} origin={origin} initialTitle={initialTitle} onOpen={onOpen} canStart={allowStart && threadActions.has('thread.start')} />
-    : null;
+  return threadClient ? <InboxThreadStart key={threadStartScope(origin)} client={threadClient} origin={origin} agentId={agentId}
+    initialTitle={initialTitle} onOpen={onOpen} canStart={!!agentId && threadActions.has('thread.start')} /> : null;
 }
 
 type ThreadStartDraft = {
-  id: string; origin: ThreadStartOrigin; title: string; accepted: boolean; onAccepted: () => void; onCancel: () => void;
+  target?: string; cacheKey: string; origin: ThreadStartOrigin; title: string; accepted: boolean;
+  onAccepted: (id: string) => void; onCancel: () => void;
 };
 
-function AskThreadStart({ client, origin, initialTitle, onOpen, canStart }: {
-  client: ThreadClient; origin: ThreadStartOrigin; initialTitle: string; onOpen: (id: string) => void; canStart: boolean;
+function InboxThreadStart({ client, origin, agentId, initialTitle, onOpen, canStart }: {
+  client: ThreadClient; origin: Pick<ThreadStartOrigin, 'sourceId' | 'episode'>; agentId?: string;
+  initialTitle: string; onOpen: (id: string) => void; canStart: boolean;
 }) {
-  const { status, threadRefresh, threadDeliveries } = useStore();
-  const [local, setLocal] = useState<{ client: ThreadClient; id: string; accepted: boolean }>();
-  const delivery = threadDeliveries?.get(threadStartScope(origin));
+  const { status, threadRefresh, threadDeliveries, draftCache, draftsReady, saveDrafts } = useStore();
+  const scope = threadStartScope(origin);
+  const cacheKey = threadDraftKey(scope);
+  const [local, setLocal] = useState<{ client: ThreadClient; target?: string; accepted: boolean; generation: number }>();
+  const delivery = threadDeliveries?.get(scope);
   const current = local?.client === client ? local : undefined;
-  const id = current?.id ?? delivery?.target;
+  const target = current?.target ?? delivery?.target;
   const accepted = current?.accepted === true;
-  const draft: ThreadStartDraft | undefined = id ? {
-    id, origin, accepted, title: threadTitleFromAsk(initialTitle),
-    onAccepted: () => setLocal({ client, id, accepted: true }),
-    onCancel: () => setLocal(undefined),
+  const show = !!current || !!delivery || draftsReady && draftCache.current.has(cacheKey);
+  const draft: ThreadStartDraft | undefined = show && agentId ? {
+    target, cacheKey, origin: { ...origin, agentId }, accepted, title: threadTitleFromAsk(initialTitle),
+    onAccepted: id => setLocal({ client, target: id, accepted: true, generation: current?.generation ?? 0 }),
+    onCancel: () => {
+      draftCache.current.delete(cacheKey);
+      saveDrafts();
+      setLocal(undefined);
+    },
   } : undefined;
   return <View style={{ gap: 6 }}>
-    <ThreadGroup context={{ origin_ask: origin.ask, origin_ask_episode: origin.episode }} openThread={onOpen} excludeId={accepted ? id : undefined} />
-    {id ? <InlineThread key={id} client={client} id={id} refresh={threadRefresh} onOpen={() => onOpen(id)} start={draft} /> : null}
+    <ThreadGroup context={{ origin_source: origin.sourceId, origin_episode: origin.episode }} openThread={onOpen} excludeId={accepted ? target : undefined} />
+    {draft ? <InlineThread key={`${scope}:${current?.generation ?? 0}`} client={client} id={target} refresh={threadRefresh}
+      onOpen={target && accepted ? () => onOpen(target) : undefined} start={draft} embedded /> : null}
+    {!agentId ? <T dim>No agent is assigned to this Inbox item.</T> : null}
     {canStart && (!draft || accepted) ? <Button label={accepted ? 'Start another thread' : 'Start thread'} disabled={status !== 'online' || !!delivery}
-      onPress={() => setLocal({ client, id: `thread/${Crypto.randomUUID()}`, accepted: false })} /> : null}
+      onPress={() => setLocal(previous => ({ client, accepted: false, generation: (previous?.generation ?? 0) + 1 }))} /> : null}
   </View>;
 }
 
-function InlineThread({ client, id, refresh, onOpen, start }: {
-  client: ThreadClient; id: string; refresh: number; onOpen?: () => void; start?: ThreadStartDraft;
+function InlineThread({ client, id, refresh, onOpen, start, embedded }: {
+  client: ThreadClient; id?: string; refresh: number; onOpen?: () => void; start?: ThreadStartDraft; embedded?: boolean;
 }) {
   const { feed } = useStore();
   const accepted = !start || start.accepted;
   const read = useCallback(async (_cursor: string | undefined, signal: AbortSignal) => {
-    if (!accepted) return { value: { items: [], next_cursor: null } };
+    if (!accepted || !id) return { value: { items: [], next_cursor: null } };
     const { value } = await client.threadGet(id, { signal });
     return { value: { items: [value], next_cursor: null } };
   }, [accepted, client, id]);
   const follow = useCallback((handlers: ThreadWindowHandlers<ThreadSummary>) =>
-    accepted && feed?.belongsTo(client) ? feed.followThreadSummary(id, handlers) : undefined, [accepted, client, feed, id]);
+    accepted && id && feed?.belongsTo(client) ? feed.followThreadSummary(id, handlers) : undefined, [accepted, client, feed, id]);
   const page = useThreadPage<ThreadSummary>(read, refresh, follow);
-  return <ThreadDetailContent thread={page.items[0]} issue={page.issue} loading={page.loading} reload={page.reload} client={client} onOpen={onOpen} start={start} />;
+  return <ThreadDetailContent thread={page.items[0]} issue={page.issue} loading={page.loading} reload={page.reload} client={client} onOpen={onOpen} start={start} embedded={embedded} />;
 }
 
 function threadTextIssue(content: string): string | undefined {
@@ -333,12 +344,12 @@ function ThreadBody({ client, thread, start, onOpen, revealComposer }: {
   client: ThreadClient; thread?: ThreadSummary; start?: ThreadStartDraft; onOpen?: () => void; revealComposer?: (row: View) => void;
 }) {
   const { actions, threadActions, status, threadRefresh, threadDeliveries, actor, data, feed } = useStore();
-  const id = thread?.id ?? start!.id;
+  const id = thread?.id ?? start?.target;
   const read = useCallback(async (cursor: string | undefined, signal: AbortSignal) => thread
-    ? client.threadTimeline(id, { cursor, limit: THREAD_WINDOW_SIZE }, { signal })
+    ? client.threadTimeline(thread.id, { cursor, limit: THREAD_WINDOW_SIZE }, { signal })
     : { value: { items: [], next_cursor: null } }, [client, id, !!thread]);
   const follow = useCallback((handlers: ThreadWindowHandlers<ThreadTimelineEvent>) =>
-    thread && feed?.belongsTo(client) ? feed.followThreadTimeline(id, handlers) : undefined, [client, feed, id, !!thread]);
+    thread && feed?.belongsTo(client) ? feed.followThreadTimeline(thread.id, handlers) : undefined, [client, feed, id, !!thread]);
   const page = useThreadPage<ThreadTimelineEvent>(read, threadRefresh, follow);
   const { width, height } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -356,7 +367,7 @@ function ThreadBody({ client, thread, start, onOpen, revealComposer }: {
     return agent ? agentName(agent) : id;
   };
   const messages = new Map(page.items.flatMap(event => event.kind === 'message' ? [[event.id, event] as const] : []));
-  const canReply = threadActions.has(start ? 'thread.start' : 'thread.reply');
+  const canReply = threadActions.has(thread ? 'thread.reply' : 'thread.start');
   const chooseQuote = (message: ThreadMessage) => {
     setQuote(message);
     setQuoteFocus(previous => previous + 1);
@@ -426,7 +437,7 @@ function ThreadBody({ client, thread, start, onOpen, revealComposer }: {
     })}
     {page.issue ? <T color={theme.waiting}>{page.issue}</T> : !start && !page.items.length ? <T dim>{page.loading ? 'Loading history…' : 'No thread messages yet.'}</T> : null}
     {readCandidates.length ? <Button label="Mark visible replies read" disabled={!editable} onPress={markVisibleRead} /> : null}
-    {canReply || threadDeliveries?.has(id) || start ? <ThreadComposer key={id} thread={thread} start={start} canReply={canReply}
+    {canReply || id && threadDeliveries?.has(id) || start ? <ThreadComposer key={start?.cacheKey ?? id} thread={thread} start={start} canReply={canReply}
       selection={quote ? { id: quote.id, from: actorLabel(quote.actor_id), text: quote.content } : undefined} selectionVersion={quoteFocus} revealComposer={revealComposer}
     /> : null}
     <ThreadActionFeedback result={editFeedback} busy={editing || !!editDelivery && !editDelivery.retry || status !== 'online'} onRetry={() => {
@@ -466,14 +477,15 @@ function ThreadComposer({ thread, start, canReply, selection, selectionVersion, 
   const reveal = () => {
     if (row.current && input.current?.isFocused()) revealComposer?.(row.current);
   };
-  const id = thread?.id ?? start!.id;
-  const key = threadDraftKey(id);
+  const id = thread?.id ?? start?.target;
+  const key = thread || start?.accepted ? threadDraftKey(id!) : start!.cacheKey;
   const [draft, setDraft] = useState(() => readThreadDraft(draftCache.current.get(key)));
   const touched = useRef(false);
   const appliedSelection = useRef(selectionVersion);
   const [sending, setSending] = useState(false);
+  const sentTarget = useRef<string | undefined>(undefined);
   const [failure, setFailure] = useState<ThreadEditResult>();
-  const delivery = threadDeliveries?.get(start ? threadStartScope(start.origin) : id);
+  const delivery = threadDeliveries?.get(!thread && start ? threadStartScope(start.origin) : id!);
   const feedback = delivery?.retry ? { how: 'unconfirmed' as const, retry: delivery.retry } : failure;
   const enabled = canReply && status === 'online' && !sending && !delivery;
   const content = draft.text.trim();
@@ -511,7 +523,9 @@ function ThreadComposer({ thread, start, canReply, selection, selectionVersion, 
       const next = await run();
       if (next.how === 'sent') {
         storeDraft({ text: '' });
-        start?.onAccepted();
+        if (start && !thread) {
+          start.onAccepted(sentTarget.current!);
+        }
       }
       setFailure(next.how === 'failed' ? next : undefined);
     } finally {
@@ -525,13 +539,16 @@ function ThreadComposer({ thread, start, canReply, selection, selectionVersion, 
       <Button label="Remove quote" disabled={!enabled} onPress={() => storeDraft({ text: draft.text })} />
     </View> : null}
     {canReply ? <ThreadComposeField inputRef={input} rowRef={revealComposer ? row : undefined} onReveal={revealComposer ? reveal : undefined} text={draft.text} onChange={text => storeDraft({ ...draft, text })}
-      onSend={() => void send(() => start
-        ? actions.startThread(id, start.origin, start.title, content)
-        : actions.replyToThread(thread!, content, draft.quote?.id))} enabled={enabled} canSend={!start?.accepted && !!content && !issue}
-      autoFocus={!!start} onCancel={start && !start.accepted && !delivery && !sending ? start.onCancel : undefined} /> : null}
+      onSend={() => void send(() => {
+        if (thread) return actions.replyToThread(thread, content, draft.quote?.id);
+        const target = start!.target ?? `thread/${Crypto.randomUUID()}`;
+        sentTarget.current = target;
+        return actions.startThread(target, start!.origin, start!.title, content);
+      })} enabled={enabled} canSend={(!!thread || !start?.accepted) && !!content && !issue}
+      autoFocus={!!start && !thread} onCancel={start && !thread && !start.accepted && !delivery && !sending ? start.onCancel : undefined} /> : null}
     {canReply && issue ? <T color={theme.waiting}>{issue}</T> : null}
     <ThreadActionFeedback result={feedback} busy={sending || status !== 'online'} onRetry={() => {
-      if (delivery?.retry) void send(delivery.retry);
+      if (delivery?.retry) { sentTarget.current = delivery.target; void send(delivery.retry); }
     }} />
   </View>;
 }

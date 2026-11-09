@@ -87,8 +87,8 @@ test('the first draft uses the retained composer through its receipt and accepte
   const draftCache = { current: new Map() };
   let accepted = false;
   const start = {
-    id, accepted: false, origin: { agentId: 'agent/reviewer', ask: 'step-run/review', episode: 'episode/exact' },
-    title: 'Review', onAccepted: () => { accepted = true; }, onCancel() {},
+    cacheKey: 'draft-origin', accepted: false, origin: { agentId: 'agent/reviewer', sourceId: 'notice/source', episode: 'episode/exact' },
+    title: 'Review', onAccepted: target => { assert.equal(target, id); accepted = true; }, onCancel() {},
   };
   const store = {
     status: 'online', draftCache, draftsReady: true, saveDrafts() {},
@@ -102,7 +102,7 @@ test('the first draft uses the retained composer through its receipt and accepte
     useEffect() {}, useFocusEffect() {}, useCallback: fn => fn, threadDraftKey: key => key,
     threadStartScope: origin => JSON.stringify(origin), readThreadDraft: raw => raw ? JSON.parse(raw) : { text: '' },
     rememberBounded: (cache, key, value) => cache.set(key, value), threadTextIssue: () => undefined,
-    View: 'View', T: 'T', Button: 'Button', ThreadComposeField: 'ThreadComposeField', ThreadActionFeedback: 'ThreadActionFeedback',
+    Crypto: { randomUUID: () => 'new' }, View: 'View', T: 'T', Button: 'Button', ThreadComposeField: 'ThreadComposeField', ThreadActionFeedback: 'ThreadActionFeedback',
   });
   let props = { start, canReply: true, selectionVersion: 0 };
   let field = find(composer(props), 'ThreadComposeField');
@@ -110,13 +110,13 @@ test('the first draft uses the retained composer through its receipt and accepte
   state.reset();
   field = find(composer(props), 'ThreadComposeField');
   assert.equal(field.props.text, 'First message');
-  assert.equal(JSON.parse(draftCache.current.get(id)).text, 'First message');
+  assert.equal(JSON.parse(draftCache.current.get(start.cacheKey)).text, 'First message');
   field.props.onSend();
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(accepted, true);
   assert.deepEqual(calls, [['start', id, start.origin, start.title, 'First message']]);
   state.reset();
-  field = find(composer({ ...props, start: { ...start, accepted: true } }), 'ThreadComposeField');
+  field = find(composer({ ...props, start: { ...start, target: id, accepted: true } }), 'ThreadComposeField');
   assert.equal(field.props.text, '');
   assert.equal(field.props.enabled, true, 'same editable field remains while confirmed history is loading');
   assert.equal(field.props.canSend, false, 'another send waits for the accepted summary');
@@ -144,10 +144,32 @@ test('an unsent inline thread does not request server history or subscribe to a 
     useThreadPage: (reader, _refresh, follower) => { read = reader; follow = follower; return { items: [], loading: false }; },
     ThreadDetailContent: 'ThreadDetailContent',
   });
-  const start = { id: 'thread/draft', accepted: false, title: 'Draft' };
-  const rendered = inline({ client: { threadGet: (...args) => calls.push(args) }, id: start.id, refresh: 0, start });
+  const start = { cacheKey: 'draft-origin', accepted: false, title: 'Draft' };
+  const rendered = inline({ client: { threadGet: (...args) => calls.push(args) }, id: undefined, refresh: 0, start });
   assert.equal(rendered.props.start, start);
   assert.deepEqual(await read(undefined, new AbortController().signal), { value: { items: [], next_cursor: null } });
   assert.equal(follow({}), undefined);
   assert.deepEqual(calls, []);
+});
+
+test('an origin-scoped first draft survives navigating away and starts without a preallocated thread ID', () => {
+  const origin = { sourceId: 'notice/canonical', episode: 'episode/original' };
+  const cacheKey = 'thread-draft/["notice/canonical","episode/original"]';
+  const draftCache = { current: new Map([[cacheKey, JSON.stringify({ text: 'Retained first draft' })]]) };
+  const client = {};
+  const component = compile('InboxThreadStart', 'function InlineThread', {
+    useStore: () => ({ status: 'online', threadRefresh: 0, draftCache, draftsReady: true, saveDrafts() {} }),
+    useState: initial => [initial, () => {}], threadStartScope: value => JSON.stringify([value.sourceId, value.episode]),
+    threadDraftKey: value => `thread-draft/${value}`, threadTitleFromAsk: value => value,
+    View: 'View', T: 'T', Button: 'Button', ThreadGroup: 'ThreadGroup', InlineThread: 'InlineThread',
+  });
+  for (let navigation = 0; navigation < 2; navigation++) {
+    const tree = component({ client, origin, agentId: 'agent/canonical', initialTitle: 'Notice', canStart: true, onOpen() {} });
+    const inline = find(tree, 'InlineThread');
+    assert.equal(inline.props.id, undefined);
+    assert.equal(inline.props.start.target, undefined);
+    assert.equal(inline.props.start.cacheKey, cacheKey);
+    assert.deepEqual(inline.props.start.origin, { ...origin, agentId: 'agent/canonical' });
+    assert.deepEqual(find(tree, 'ThreadGroup').props.context, { origin_source: origin.sourceId, origin_episode: origin.episode });
+  }
 });
