@@ -62,7 +62,7 @@ fn fresh_nonmember_proof_receipt_has_constant_complete_transaction_vm_cost() {
     let anchor = raw_claims(&source).into_iter().find(|claim| claim.kind=="fleet.member-admitted").unwrap();
     let grant = append(&source, SUBJECT, GRANTED, fields());
     let exchange = export(&source, &target);
-    receive(&target, &unsigned(&exchange));
+    receive_pre_projection_unsigned_history(&target, &exchange);
     let envelope = receipt_signature_for_claim(&target, &fleet_exchange, &anchor);
     {
         let connection = target.connection.write();
@@ -121,7 +121,7 @@ fn sustained_fresh_nonmember_proof_receipts_leave_unrelated_established_credenti
     pending_fields["session_actor"] = json!("assistant/chatgpt/session/assistant-grant/fedcba9876543210fedcba98");
     let pending = append(&source, "custom/client/assistant-v1-fedcba9876543210fedcba98", GRANTED, pending_fields);
     let exchange = export(&source, &target);
-    receive(&target, &unsigned(&exchange));
+    receive_pre_projection_unsigned_history(&target, &exchange);
     let envelope = receipt_signature_for_claim(&target, &fleet_exchange, &anchor);
     let before = receipt_projection_work_state(&target.readers.get());
     for arrival in 0..256 {

@@ -228,7 +228,7 @@ fn fenced_opposite_profile_witness_matches_independent_raw_history_oracle() {
         receive(&target, &export(&source, &target));
         append(&source, &subject, REVOKED, service_fields);
         let revoke_exchange = export(&source, &target);
-        receive(&target, &unsigned(&revoke_exchange));
+        receive_pre_projection_unsigned_history(&target, &revoke_exchange);
         assert_conflict_oracle(&target, &own, &witness, true);
         assert!(!authority::contains(&target.readers.get(), &witness.id).unwrap());
         {
@@ -250,7 +250,7 @@ fn fenced_opposite_profile_witness_matches_independent_raw_history_oracle() {
         // Conversely, pending work on the bearer's own subject must deny that
         // bearer, without changing the independent conflict-history answer.
         append(&source, SUBJECT, POLICY, fields());
-        receive(&target, &unsigned(&export(&source, &target)));
+        receive_pre_projection_unsigned_history(&target, &export(&source, &target));
         assert!(!authority::contains(&target.readers.get(), &own.id).unwrap());
         assert!(authority::by_credential(&target.readers.get(), &"a".repeat(64)).unwrap().is_none());
         assert!(authority::subject_ready(&target.readers.get(), SUBJECT).is_err());

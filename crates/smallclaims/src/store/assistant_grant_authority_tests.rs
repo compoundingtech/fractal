@@ -245,7 +245,7 @@ fn raw_signature_only_insert_survives_reopen_and_promotes_grant_policy_and_revok
         let claim = append(&source, SUBJECT, kind, value);
         if kind == GRANTED { grant_id.clone_from(&claim.id); }
         let exchange = export(&source, &target);
-        receive(&target, &unsigned(&exchange));
+        receive_pre_projection_unsigned_history(&target, &exchange);
         assert!(raw_claims(&target).iter().any(|record| record.id == claim.id));
         assert!(!authority::contains(&target.readers.get(), &claim.id).unwrap());
         while !target.advance_assistant_grant_authority_backfill().unwrap() {}
@@ -305,7 +305,7 @@ fn malformed_raw_signature_row_is_drained_without_authenticating_a_pending_revok
     receive(&target, &export(&source, &target));
     let revoke = append(&source, SUBJECT, REVOKED, fields());
     let exchange = export(&source, &target);
-    receive(&target, &unsigned(&exchange));
+    receive_pre_projection_unsigned_history(&target, &exchange);
     while !target.advance_assistant_grant_authority_backfill().unwrap() {}
     let markers = backfill_markers(&target.readers.get());
     {
@@ -474,6 +474,30 @@ fn reset_projection(connection: &Connection) {
 
 fn drain_authority(store: &Store) {
     while !store.advance_assistant_grant_authority_backfill().unwrap() {}
+}
+
+// Build the raw, unsigned keyed-writer history an older importer could leave.
+// Today's admission correctly holds unsigned keyed envelopes before raw claims
+// exist, so receive(unsigned(exchange)) cannot exercise projection authentication.
+// Use the real signed transport to materialize batches/receipt records, then
+// discard this exchange's proofs and rebuild the projection from the remaining
+// evidence before making any assertion. Existing earlier signatures survive.
+fn receive_pre_projection_unsigned_history(target: &Store, exchange: &ReplicationExchange) {
+    receive(target, exchange);
+    {
+        let mut connection = target.connection.write();
+        let transaction = connection.transaction().unwrap();
+        for signature in signatures(exchange).signatures {
+            transaction.execute(
+                "DELETE FROM replica_envelope_signatures
+                 WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=?4",
+                params![signature.writer, signature.sequence, signature.hash, signature.member_key],
+            ).unwrap();
+        }
+        reset_projection(&transaction);
+        transaction.commit().unwrap();
+    }
+    drain_authority(target);
 }
 
 fn assert_bearer_rejected(store: &Store, grant: &ClaimRecord) {
@@ -715,7 +739,7 @@ fn malformed_and_unsigned_same_origin_flood_preserves_previous_authority_and_con
             append(&source, SUBJECT, REVOKED, fields());
         }
         let unsigned_rows = export(&source, &target);
-        receive(&target, &unsigned(&unsigned_rows));
+        receive_pre_projection_unsigned_history(&target, &unsigned_rows);
         let after = transition_cost(&target, &grant);
         assert_eq!(after, before, "same-origin flood changed selected authority or request VM/read cost at {count}");
         assert_eq!(candidate_cost(&target), candidate_before, "candidate request cost grew at {count}");
@@ -800,7 +824,7 @@ fn nonmember_signature_flood_has_constant_membership_first_vm_cost() {
     receive(&target,&export(&source,&target));
     let grant = append(&source,SUBJECT,GRANTED,fields());
     let exchange = export(&source,&target);
-    receive(&target,&unsigned(&exchange));
+    receive_pre_projection_unsigned_history(&target, &exchange);
     let signature = signatures(&exchange).signatures.into_iter().find(|signature| {
         target.readers.get().query_row(
             "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND sequence=?2)",
@@ -839,7 +863,7 @@ fn eligible_evidence_beyond_first_key_page_resumes_and_cryptographically_verifie
     receive(&target,&export(&source,&target));
     let grant = append(&source,SUBJECT,GRANTED,fields());
     let exchange = export(&source,&target);
-    receive(&target,&unsigned(&exchange));
+    receive_pre_projection_unsigned_history(&target, &exchange);
     let signature = signatures(&exchange).signatures.into_iter().find(|signature| {
         target.readers.get().query_row(
             "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND sequence=?2)",
@@ -896,7 +920,7 @@ fn changed_membership_writer_flood_uses_the_same_fixed_refresh_budget() {
     for _ in 0..(authority::CLAIMS_PER_SLICE*2+7) {
         append(&source,SUBJECT,GRANTED,fields());
     }
-    receive(&target,&unsigned(&export(&source,&target)));
+    receive_pre_projection_unsigned_history(&target, &export(&source,&target));
     let mut connection = target.connection.write();
     let markers = backfill_markers(&connection);
     connection.execute(
@@ -929,7 +953,7 @@ fn late_signature_restarts_an_in_progress_key_cursor_before_its_old_position() {
     receive(&target,&export(&source,&target));
     let grant = append(&source,SUBJECT,GRANTED,fields());
     let exchange = export(&source,&target);
-    receive(&target,&unsigned(&exchange));
+    receive_pre_projection_unsigned_history(&target, &exchange);
     let signature = signatures(&exchange).signatures.into_iter().find(|signature| {
         target.readers.get().query_row(
             "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND sequence=?2)",
@@ -967,7 +991,7 @@ fn envelope_record_arriving_before_auth_cursor_restarts_preexisting_signature_se
     receive(&target,&export(&source,&target));
     let grant = append(&source,SUBJECT,GRANTED,fields());
     let exchange = export(&source,&target);
-    receive(&target,&unsigned(&exchange));
+    receive_pre_projection_unsigned_history(&target, &exchange);
     let signature = signatures(&exchange).signatures.into_iter().find(|signature| {
         target.readers.get().query_row(
             "SELECT EXISTS(SELECT 1 FROM replica_records WHERE claim_id=?1 AND sequence=?2)",
@@ -1086,7 +1110,7 @@ fn unsigned_pending_revoke_fences_only_its_established_subject_after_dirty_work_
     let independent = independent_grant(&target);
     let revoke = append(&source, SUBJECT, REVOKED, fields());
     let exchange = export(&source, &target);
-    receive(&target, &unsigned(&exchange));
+    receive_pre_projection_unsigned_history(&target, &exchange);
     drain_authority(&target);
     {
         let connection = target.readers.get();
