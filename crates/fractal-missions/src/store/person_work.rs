@@ -299,17 +299,17 @@ fn send_response_tx(
             if let Some(text) = answer["text"].as_str() {
                 content.push_str(&format!("\n{text}"));
             }
+            if let Some(notes) = answer["option_notes"].as_array() {
+                for note in notes {
+                    content.push_str(&format!(
+                        "\n\nNote on {} (not selected):\n{}",
+                        note["id"].as_str().unwrap_or_default(),
+                        note["text"].as_str().unwrap_or_default()
+                    ));
+                }
+            }
         }
         None => content.push_str(summary),
-    }
-    if let Some(notes) = answer.and_then(|answer| answer["option_notes"].as_array()) {
-        for note in notes {
-            content.push_str(&format!(
-                "\n\nNote on {} (not selected):\n{}",
-                note["id"].as_str().unwrap_or_default(),
-                note["text"].as_str().unwrap_or_default()
-            ));
-        }
     }
     content.push_str(&format!(
         "\n\nThe answer as data: `st work show {} --json` (person_answers).",

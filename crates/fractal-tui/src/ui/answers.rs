@@ -176,6 +176,45 @@ mod tests {
     }
 
     #[test]
+    fn dismissal_uses_its_named_note_and_preserves_every_other_note() {
+        let mut ui = saved_notes(false);
+        if let Load::Ready(items) = &mut ui.world.attention {
+            for item in items {
+                if let AttentionKind::Request { structured: Some(request), .. } = &mut item.kind {
+                    let mut dismiss = request.answers[0].clone();
+                    dismiss.id = "dismiss".into();
+                    dismiss.label = "Dismiss".into();
+                    request.answers.push(dismiss);
+                }
+            }
+        }
+        ui.conversation_state.drafts.insert(
+            "answer:attention/first:dismiss".into(), "  No action needed  ".into(),
+        );
+        press(&mut ui, KeyCode::Char('x'));
+        assert_eq!(ui.confirm, Some('r'));
+        press(&mut ui, KeyCode::Char('y'));
+        assert!(matches!(&ui.effects[..], [Effect::Attention {
+            answer: Some(answer), reason: Some(text), option_notes, ..
+        }] if answer == "dismiss" && text == "  No action needed  " && option_notes == &[
+            ("yes".to_owned(), "A".to_owned()), ("other".to_owned(), "B".to_owned()),
+        ]), "{:?}", ui.effects);
+    }
+
+    #[test]
+    fn synthetic_dismissal_preserves_every_named_note() {
+        let mut ui = saved_notes(false);
+        press(&mut ui, KeyCode::Char('x'));
+        assert_eq!(ui.confirm, Some('r'));
+        press(&mut ui, KeyCode::Char('y'));
+        assert!(matches!(&ui.effects[..], [Effect::Attention {
+            answer: Some(answer), reason: Some(text), option_notes, ..
+        }] if answer == "dismiss" && text == "Dismissed without an answer." && option_notes == &[
+            ("yes".to_owned(), "A".to_owned()), ("other".to_owned(), "B".to_owned()),
+        ]), "{:?}", ui.effects);
+    }
+
+    #[test]
     fn a_custom_answer_carries_the_notes_on_named_answers() {
         let mut ui = saved_notes(true);
         ui.click(Hit::Answer(2));

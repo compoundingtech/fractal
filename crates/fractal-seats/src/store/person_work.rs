@@ -1590,6 +1590,42 @@ agent "alder.asker" { workspace "/tmp"; command "true"; restart always; }"#,
             "Review auth first.\nNote on land (not selected): Keep the current gateway as a fallback.");
     }
 
+    #[test]
+    fn custom_and_dismissed_notifications_include_each_option_note_once() {
+        for chosen in [None, Some("dismiss")] {
+            let (store, origin, mut input) = fixture();
+            store.set_step_state(&origin.subject, "completed", None).unwrap();
+            input.step = None;
+            input.new_run = Some("gateway".into());
+            input.request = Some(json!({
+                "version": 1, "type": "choice", "question": "Which route?",
+                "why_person": "Choose the tradeoff.", "custom": true,
+                "answers": [
+                    {"id": "land", "label": "Land", "consequence": "Ship now."},
+                    {"id": "hold", "label": "Hold", "consequence": "Wait."}
+                ]
+            }));
+            let ask = store.ask_person(&input).unwrap();
+            store.finish_person_step(&PersonStepResponse {
+                delegation: None, subject: ask.subject.clone(), actor: "person/avery".into(),
+                summary: "Use the alternate route.".into(), evidence: vec![], episode: None,
+                idempotency_key: "other-answer".into(),
+                answer: Some(crate::person_request::AnswerInput {
+                    id: chosen.map(str::to_owned), text: Some("Use the alternate route.".into()),
+                    option_notes: vec![crate::person_request::OptionNote {
+                        id: "land".into(), text: "Keep this route available.".into(),
+                    }],
+                }),
+            }, false).unwrap();
+            let messages = store.messages(Some("agent/alder.asker"), true).unwrap();
+            assert_eq!(messages.len(), 1);
+            let content = &messages[0].content;
+            assert_eq!(content.matches("Note on land (not selected)").count(), 1, "{content}");
+            assert_eq!(content.matches("Keep this route available.").count(), 1, "{content}");
+            assert!(!content.contains("Answer:"), "{content}");
+        }
+    }
+
     /// An update brings the person what they asked for: the poster keeps working, the update
     /// stays on the person's home after the poster stops, and reading it clears it without
     /// telling anyone. Work the person did not ask for takes no update.

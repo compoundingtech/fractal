@@ -223,6 +223,20 @@ pub fn validate_delegated_answer(
                 "the answer does not match the offered structured answer",
             ));
         }
+        // Generic claim validation cannot rewrite the submitted fields. Require the same
+        // text-only history that the person-answer API appends before persisting a claim.
+        let mut notes_summary = String::new();
+        crate::person_request::append_option_notes_summary(&mut notes_summary, submitted);
+        if !fields["summary"]
+            .as_str()
+            .unwrap()
+            .contains(notes_summary.trim_start())
+        {
+            return Err(FractalError::new(
+                "delegation-refused",
+                "the summary must include every option note in answer history format",
+            ));
+        }
     } else if fields.contains_key("answer") {
         return Err(FractalError::new(
             "delegation-refused",

@@ -5924,10 +5924,11 @@ impl Ui {
         if matches!(action, 'y' | 'n' | 'r') && self.current_kind() == Some("request") {
             // r closes a request that needs nothing from the person; the step continues. A
             // decision or choice is set aside by name: st tells its asker it was dismissed.
-            let named = action == 'r'
-                && self
-                    .structured_request()
-                    .is_some_and(|(_, request)| !request.answers.is_empty());
+            let request = if action == 'r' { self.structured_request() } else { None };
+            let named = request.as_ref().is_some_and(|(_, request)| !request.answers.is_empty());
+            let chosen = request.as_ref()
+                .and_then(|(_, request)| request.answers.iter().find(|answer| answer.id == "dismiss"))
+                .map(|answer| answer.id.as_str());
             let answer = match action {
                 'y' => "Yes",
                 'n' => "No",
@@ -5935,11 +5936,15 @@ impl Ui {
                 _ => "Nothing for me to do here.",
             };
             if self.live {
-                let option_notes = self.option_notes(&id, None);
+                let reason = chosen
+                    .and_then(|chosen| self.conversation_state.drafts.get(&format!("answer:{id}:{chosen}")))
+                    .cloned()
+                    .unwrap_or_else(|| answer.into());
+                let option_notes = self.option_notes(&id, chosen);
                 self.effects.push(Effect::Attention {
                     id,
                     action: "work.done".into(),
-                    reason: Some(answer.into()),
+                    reason: Some(reason),
                     answer: named.then(|| "dismiss".to_owned()),
                     option_notes,
                 });
