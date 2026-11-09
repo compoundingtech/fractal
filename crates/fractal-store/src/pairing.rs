@@ -254,7 +254,7 @@ impl Store {
         {
             return Err(refused());
         }
-        let authority = |connection: &Connection| {
+        let admission = |connection: &Connection| {
             let now = smallclaims::store::now_ms();
             let begun = latest_operation(connection, &input.subject, "custom.client.pairing-begun")
                 .map_err(|error| crate::FractalError::new("internal", error.to_string()))?.ok_or_else(refused)?;
@@ -274,7 +274,7 @@ impl Store {
         };
         crate::store::append_claim_with_commit_context(self, input, None, None, None, None,
             crate::store::ClaimCommitContext {
-                client_operation: true, admission: Some(&authority), ..Default::default()
+                client_operation: true, admission: Some(&admission), ..Default::default()
             }).map(|(claim, _)| claim)
     }
 
