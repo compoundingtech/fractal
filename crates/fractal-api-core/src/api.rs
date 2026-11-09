@@ -8186,7 +8186,7 @@ pub async fn guard_bound_request(
 
 async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Body>, ApiError> {
     let refuse = || ApiError::bad(FractalError::new(
-        "foreign-agent-actor", "local caller ancestry could not be verified",
+        "foreign-agent-actor", "local caller ancestry could not be verified; run person commands from a local terminal on this host (SSH sessions are not supported)",
     ));
     let path = request.uri().path();
     if matches!(path, "/v1/backup" | "/v1/agents/rename-id/proof/export" | "/v1/missions/rename-id/proof/export")
