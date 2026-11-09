@@ -380,7 +380,7 @@ it('discovers original first sends by source across changed episodes and retries
     stop = registry.mount(pendingStarts(sourceId))
     expect(registry.get(retained)).toMatchObject([{ draftKey: 'draft/old', state: 'unconfirmed', parameters: original }])
     // Another signed-in actor cannot discover or rebind this person's pending content.
-    actor = 'person/another'
+    actor = 'person/blair'
     registry.refresh(source.access)
     await vi.waitFor(() => expect(registry.get(source.access).actor).toBe(actor))
     expect(registry.get(retained)).toEqual([])
