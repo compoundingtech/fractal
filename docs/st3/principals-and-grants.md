@@ -119,6 +119,15 @@ and absent-principal legacy ChatGPT grants retain their existing meaning.
 Claims persist credential/code digests, never bearer tokens or pairing codes;
 grant projections expose neither credential material nor its digests.
 
+New assistant BEGUN claims bind their keyed `code_hash` to the stored full
+`assistant-grant/<hex>` grant ID, with `verifier: "hmac-sha256-v1"` and
+`verifier_key_id` identifying the member-local secret. The secret is excluded
+from replicated claims and logical claim backups; bearer credential digests are
+unchanged. Unmarked legacy challenges remain usable only while unexpired and
+with a lifetime no longer than 300,000 ms from BEGUN acceptance. Unknown/malformed
+markers or a lost or replaced verifier key require fresh pairing, not legacy
+fallback. See [assistant verifier recovery](external-assistants.md#pairing-verifier-and-recovery).
+
 | ID | Criterion (observable and testable) | Milestone | Current state and evidence | Verification method |
 | --- | --- | --- | --- | --- |
 | R27 | A host user service outside a harness authenticates as a stable non-person subject provisioned by a person or a node, not as its invoking agent. | M1 | NOT STARTED: #5019/#3268; plugin/assistant primitives do not prove this consumer contract. | Restart unattended service and invoke from two agents; every read retains the same service subject. |

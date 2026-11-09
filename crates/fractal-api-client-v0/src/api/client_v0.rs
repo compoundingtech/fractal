@@ -40,6 +40,7 @@ pub mod assistant;
 pub mod browser_pairing;
 #[cfg(test)]
 mod browser_pairing_tests;
+pub mod device_renewal;
 pub mod pairing_verifier;
 pub mod collection_ivm;
 pub mod collection_windows;
@@ -201,6 +202,9 @@ pub fn routes(app: Router<AppState>) -> Router<AppState> {
         .route("/v1/client/pairing/browser-requests", post(browser_pairing::begin))
         .route("/v1/client/pairing/browser-requests/{id}/redeem", post(browser_pairing::redeem))
         .route("/v1/client/pairing/browser-requests/revoke-current", post(browser_pairing::revoke_current))
+        .route("/v1/client/pairings/renewals/stage", post(device_renewal::stage))
+        .route("/v1/client/pairings/renewals/pending", post(device_renewal::pending))
+        .route("/v1/client/pairings/renewals/complete", post(device_renewal::complete))
         .route("/v1/client/assistant/grants/{id}", get(assistant::inspect))
         .route("/v1/client/assistant/grants/{id}/revoke", post(assistant::revoke))
         .route("/v1/client/assistant/grants/{id}/read-trust", post(assistant::pin_read_trust))
@@ -5633,7 +5637,7 @@ fn begin_person_challenge(
     let stable = pairing_verifier::random_id().map_err(ApiError::internal)?;
     let pairing_id = format!("pairing/{stable}");
     let subject = format!("custom/client/pairing-{stable}");
-    let expires_at = client_now_ms() + pairing_verifier::PERSON_TTL_MS;
+    let expires_at = client_now_ms() + pairing_verifier::CHALLENGE_TTL_MS;
     let verifier_key = pairing_verifier::load_key(&state.state_dir).map_err(ApiError::internal)?;
     let person_id = request.person_id;
     let fabric_gateway = request.fabric_gateway == Some(true);
@@ -5897,12 +5901,7 @@ pub async fn pairing_complete(
         .map_err(ApiError::internal)?
         .claims
         .is_empty();
-    let restart = || ApiError {
-        status: StatusCode::FORBIDDEN,
-        code: "pairing-restart-required".into(),
-        message: "start pairing again".into(),
-        details: Box::default(),
-    };
+    let restart = pairing_verifier::restart;
     let expires = begun
         .body
         .pointer("/fields/expires_at_unix_ms")
@@ -5934,9 +5933,7 @@ pub async fn pairing_complete(
             if begun.body["fields"]["browser_request"] == true {
                 return Err(restart());
             }
-            if expires <= now || expires.checked_sub(begun.accepted_at_unix_ms)
-                .is_none_or(|lifetime| lifetime > pairing_verifier::PERSON_TTL_MS)
-            {
+            if !pairing_verifier::legacy_window_open(expires, begun.accepted_at_unix_ms, now) {
                 return Err(restart());
             }
             expected == credential_digest(&request.code)

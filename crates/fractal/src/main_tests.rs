@@ -6824,6 +6824,130 @@ fn human_mutations_reject_missing_or_shorthand_identity() {
 }
 
 #[test]
+fn device_renewal_staging_requires_audited_terms_without_key_or_scope_overrides() {
+    let base = [
+        "fractal", "devices", "renew-stage", "device/phone",
+        "--migration-epoch", "phone-renewal", "--allow", "audited-digest",
+    ];
+    let cli = Cli::try_parse_from(base).unwrap();
+    let Command::Devices(DevicesArgs {
+        command: Some(DevicesCommand::RenewStage {
+            device_id, migration_epoch, allow_digest, expires_in_hours,
+        }), ..
+    }) = cli.command else { panic!("expected renewal staging") };
+    assert_eq!(device_id, "device/phone");
+    assert_eq!(migration_epoch, "phone-renewal");
+    assert_eq!(allow_digest, "audited-digest");
+    assert_eq!(expires_in_hours, 72);
+    for missing in [
+        vec!["fractal", "devices", "renew-stage", "device/phone"],
+        vec!["fractal", "devices", "renew-stage", "device/phone", "--migration-epoch", "epoch"],
+        vec!["fractal", "devices", "renew-stage", "device/phone", "--allow", "digest"],
+    ] {
+        assert!(Cli::try_parse_from(missing).is_err());
+    }
+    for extra in [
+        ["--scope", "control.messages"],
+        ["--candidate-public-key", "key"],
+        ["--expires-in-hours", "0"],
+        ["--expires-in-hours", "169"],
+    ] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(extra)).is_err());
+    }
+    assert!(Cli::try_parse_from(base.into_iter().chain(["--expires-in-hours", "168"])).is_ok());
+}
+
+#[tokio::test]
+async fn device_renewal_staging_refuses_remote_endpoints_without_connecting() {
+    for endpoint in [
+        Endpoint::Http("http://127.0.0.1:1".into()),
+        Endpoint::parse("fabric://devbox/st3-client-v0").unwrap(),
+    ] {
+        let error = stage_device_renewal(&endpoint, "person/alex", DeviceRenewalStageRequest {
+            api_version: CLIENT_V0_API_VERSION,
+            device_id: "device/phone".into(),
+            migration_epoch: "phone-renewal".into(),
+            allow_digest: "audited-digest".into(),
+            expires_in_hours: 72,
+        }).await.err().expect("remote staging must fail");
+        assert!(error.to_string().contains("trusted local Unix socket"), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn device_renewal_staging_posts_sealed_terms_and_returns_only_receipt() {
+    let root = tempfile::tempdir().unwrap();
+    let socket = root.path().join("renewal.sock");
+    let server_socket = socket.clone();
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let sent = Arc::new(std::sync::Mutex::new(Some(sent)));
+    let app = axum::Router::new().route(
+        "/v1/client/pairings/renewals/stage",
+        axum::routing::post(move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
+            let sent = sent.clone();
+            async move {
+                sent.lock().unwrap().take().unwrap().send((headers, body)).unwrap();
+                let mut envelope = json!({
+                    "api_version": CLIENT_V0_API_VERSION,
+                    "request_id": "request/renew-stage",
+                    "snapshot": {
+                        "id": "snapshot/host-a/1844/44cd", "host_id": "host/host-a", "store_index": 1844,
+                        "projection_version": "client-projection.v0", "created_at": "2026-09-20T12:00:02Z"
+                    },
+                });
+                envelope["value"] = json!({
+                    "kind": "device-renewal-staged",
+                    "renewal_id": "renewal/phone",
+                    "expires_at": "2026-11-11T12:00:00Z",
+                    "allow_digest": "audited-digest",
+                    "credential": "not-a-receipt-field",
+                });
+                axum::Json(envelope)
+            }
+        }),
+    );
+    let server = tokio::spawn(async move { serve_unix(&server_socket, app).await.unwrap() });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !socket.exists() { tokio::task::yield_now().await; }
+    }).await.unwrap();
+    let receipt = stage_device_renewal(&Endpoint::Unix(socket), "agent/deployer", DeviceRenewalStageRequest {
+        api_version: CLIENT_V0_API_VERSION,
+        device_id: "device/phone".into(),
+        migration_epoch: "phone-renewal".into(),
+        allow_digest: "audited-digest".into(),
+        expires_in_hours: 72,
+    }).await.unwrap();
+    let (headers, body) = received.await.unwrap();
+    assert_eq!(headers["x-st3-person"], "agent/deployer");
+    assert_eq!(body, json!({
+        "api_version": CLIENT_V0_API_VERSION,
+        "device_id": "device/phone",
+        "migration_epoch": "phone-renewal",
+        "allow_digest": "audited-digest",
+        "expires_in_hours": 72,
+    }));
+    assert_eq!(serde_json::to_value(receipt).unwrap(), json!({
+        "kind": "device-renewal-staged",
+        "renewal_id": "renewal/phone",
+        "expires_at": "2026-11-11T12:00:00Z",
+        "allow_digest": "audited-digest",
+    }));
+    server.abort();
+}
+
+#[test]
+fn device_renewal_staging_requires_the_callers_literal_agent_actor() {
+    let command = |actor: &str| Cli::try_parse_from([
+        "fractal","devices","renew-stage","--as",actor,"device/phone",
+        "--migration-epoch","phone-renewal","--allow","audited-digest",
+    ]).unwrap().command;
+    assert!(guard_mutating_cli_actor(&command("agent/deployer"),Some("agent/deployer"),None).is_ok());
+    for actor in ["person/alex","agent/other"] {
+        assert!(guard_mutating_cli_actor(&command(actor),Some("agent/deployer"),None).is_err());
+    }
+}
+
+#[test]
 fn full_control_device_pairing_is_an_explicit_cli_choice() {
     let limited =
         Cli::try_parse_from(["st3", "devices", "--as", "person/alex", "pair", "iPhone"])
