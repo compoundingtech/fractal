@@ -32,7 +32,9 @@ test('thread actions require a completed receipt for the exact action, thread an
   }
   const lifecycle = { ...value, affected_ids: [targetId] };
   await assert.rejects(actionReceiptCheck({ kind: 'metadata', actionId, targetId })(async () => result(lifecycle)), outcomeUnknown);
-  await actionReceiptCheck({ kind: 'metadata', actionId, targetId })(async () => result({ ...lifecycle, metadata_revision: 'claim/reopen' }));
+  // An immutable receipt claim ID is distinct from the observed CAS revision.
+  await assert.rejects(actionReceiptCheck({ kind: 'metadata', actionId, targetId })(async () => result({ ...lifecycle, metadata_revision: 'old-shape' })), outcomeUnknown);
+  await actionReceiptCheck({ kind: 'metadata', actionId, targetId })(async () => result({ ...lifecycle, metadata_claim_id: 'claim/reopen' }));
 });
 
 test('thread read accepts only receipts for the exact action and a subset of visible replies', async () => {
@@ -76,6 +78,36 @@ test('an ambiguous reply keeps the signed action and key until its matching rece
   assert.deepEqual(received[3], received[2]);
 });
 
+test('an uncertain metadata action retains its observed CAS token until the claim receipt arrives', async () => {
+  const received = [];
+  const lifecycle = { ...value, affected_ids: [targetId] };
+  const sdk = new FractalClient({
+    baseUrl: 'https://paired.invalid',
+    fetchImpl: async (_url, options) => {
+      if (options.method === 'GET') return Response.json(result({ capabilities: [] }));
+      received.push(JSON.parse(options.body));
+      if (received.length === 1) return Response.json(result({ ...lifecycle, metadata_revision: 'old-shape' }));
+      if (received.length === 2) return new Response('{', { status: 200 });
+      return Response.json(result({ ...lifecycle, metadata_claim_id: 'claim/closed' }));
+    },
+  });
+  const request = { id: actionId, idempotency_key: 'close-original',
+    fence: { snapshot_id: 'snapshot/old', subject_revisions: { [targetId]: 'opaque/observed' } },
+    parameters: { target_id: targetId } };
+  const confirm = actionReceiptCheck({ kind: 'metadata', actionId, targetId });
+  const ports = { build: async () => request,
+    fence: async () => ({ snapshot_id: 'snapshot/new', subject_revisions: { [targetId]: 'opaque/observed' } }),
+    send: input => confirm(() => sdk.threadClose(input)), wait: async () => {} };
+  const initial = await sendBoundAction('member/one', ports);
+  assert.equal(initial.how, 'unconfirmed');
+  assert.deepEqual(received[0], received[1]);
+  const retried = await resendBoundAction(initial.request);
+  assert.equal(retried.how, 'sent');
+  assert.equal(received.length, 3);
+  assert.deepEqual(received[2], { ...received[0], fence: await ports.fence() });
+  assert.equal(received[2].fence.subject_revisions[targetId], 'opaque/observed');
+});
+
 test('a definitive daemon refusal still reaches the caller', async () => {
   const refusal = new ClientError(refusalPayload, 403);
   const confirm = actionReceiptCheck({ kind: 'message', actionId, targetId, messageId });
@@ -92,7 +124,7 @@ test('ordinary sends and thread sends share strict receipt confirmation', async 
     ]) await assert.rejects(actionReceiptCheck(expected)(async () => result(payload)), outcomeUnknown);
     await actionReceiptCheck(expected)(async () => result(value));
   }
-  await assert.rejects(actionReceiptCheck({ kind: 'metadata', actionId, targetId })(async () => result({ ...value, metadata_revision: '' })), outcomeUnknown);
+  await assert.rejects(actionReceiptCheck({ kind: 'metadata', actionId, targetId })(async () => result({ ...value, metadata_claim_id: '' })), outcomeUnknown);
 });
 
 

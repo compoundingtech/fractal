@@ -244,7 +244,7 @@ impl Write {
             Mutation::Rename(_) | Mutation::Close | Mutation::Reopen => {
                 receipt.affected_ids.contains(&self.id)
                     && receipt
-                        .metadata_revision
+                        .metadata_claim_id
                         .as_ref()
                         .is_some_and(|revision| !revision.is_empty())
             }

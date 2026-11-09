@@ -58,7 +58,7 @@ async function confirmActionReceipt<TResponse extends EnvelopeOf<ActionResult>>(
 function matchesAffected(value: ActionResult, expected: ActionReceiptExpectation): boolean {
   switch (expected.kind) {
     case 'read': return value.affected_ids.every(id => expected.readMessageIds.includes(id));
-    case 'metadata': return value.affected_ids.includes(expected.targetId) && nonempty(value.metadata_revision);
+    case 'metadata': return value.affected_ids.includes(expected.targetId) && nonempty(value.metadata_claim_id);
     case 'message': return (expected.messageId ? value.affected_ids.includes(expected.messageId) : value.affected_ids.some(id => id.startsWith('message/')))
       && (!expected.targetId || value.affected_ids.includes(expected.targetId) && value.affected_ids.length === 2);
   }

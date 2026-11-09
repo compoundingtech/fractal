@@ -904,6 +904,32 @@ fn read_retry_keeps_the_original_shown_ids_even_after_the_view_moves() {
 }
 
 #[test]
+fn metadata_receipts_require_an_immutable_claim_id_not_an_observed_cas_revision() {
+    let mut threads = observed_threads(ThreadState::Open);
+    let id = "thread/worker";
+    threads.lifecycle(&Pane::Thread(id.into()).key(), id.into(), Mutation::Close);
+    let write = threads.writes().pop().unwrap();
+    let result = |metadata| {
+        let mut value = serde_json::json!({
+            "kind": "action-result", "action_id": format!("action/{}", write.key),
+            "operation_id": "operation/close", "status": "completed",
+            "affected_ids": [id], "snapshot_id": "snapshot/receipt",
+        });
+        value.as_object_mut().unwrap().extend(metadata);
+        serde_json::from_value::<fractal_client::ActionResult>(value).unwrap()
+    };
+    assert!(!write.matches_receipt(&result(serde_json::Map::from_iter([
+        ("metadata_revision".into(), serde_json::json!("old-shape")),
+    ]))));
+    assert!(!write.matches_receipt(&result(serde_json::Map::from_iter([
+        ("metadata_claim_id".into(), serde_json::json!("")),
+    ]))));
+    assert!(write.matches_receipt(&result(serde_json::Map::from_iter([
+        ("metadata_claim_id".into(), serde_json::json!("claim/closed")),
+    ]))));
+}
+
+#[test]
 fn closed_person_composer_keeps_original_quote_and_payload_until_settled() {
     let mut threads = observed_threads(ThreadState::Closed);
     let id = "thread/worker";
