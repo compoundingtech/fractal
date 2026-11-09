@@ -7,5 +7,5 @@
   "compatibility": {"status": "none", "detail": "Uses the existing named-answer id and text fields; no wire-protocol changes."},
   "downtime": {"status": "none", "detail": "No expected interruption or additional startup work."},
   "manual": {"status": "none", "detail": "No configuration changes or re-pairing required."},
-  "recovery": {"status": "changed", "detail": "A refused Inbox answer restores its option binding and note in the running TUI. The error remains inline on the restored request until the person acts, rather than disappearing with a transient flash. Drafts are not persisted across TUI restarts."}
+  "recovery": {"status": "changed", "detail": "A refused Inbox answer restores its option binding and note in the running TUI. The error remains inline on the restored request until the person acts, rather than disappearing with a transient flash. Option notes are saved as drafts: they survive a TUI restart and are kept for 30 days, like other drafts."}
 }
