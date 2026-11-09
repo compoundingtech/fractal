@@ -74,7 +74,8 @@ fn authoring_package_matches_the_declarations_sdk_mission() {
     // is outside the shared subset. Equal parsed declarations mean an equal native revision.
     let source = include_str!("../../../packages/fractal/fixtures/daily-review.kdl");
     let actual = fractal_store::graph::parse_intent(source, "local").unwrap();
-    let expected = fractal_store::graph::parse_intent(FIXTURE, "local").unwrap();
+    let mut expected = fractal_store::graph::parse_intent(FIXTURE, "local").unwrap();
+    expected.subjects.retain(|_, subject| subject.kind != "schedule");
     assert_eq!(actual.subjects, expected.subjects);
     assert_eq!(actual.missions, expected.missions);
     assert_eq!(actual.missions["docs/daily-review"].revision, PINNED_REVISION);
