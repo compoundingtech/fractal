@@ -20,7 +20,6 @@ import * as stylex from '@stylexjs/stylex'
 import { Button } from 'react-aria-components'
 import { geometryVars as g, interactionVars as interaction, radiusVars as r, spaceVars as s, statusVars as status, surfaceVars as surface, textVars as ink, typeVars as t } from '../composition-tokens.stylex'
 import { Icon } from '../composition/Icons'
-import { TruncatedLabel } from '../composition/Controls'
 import { NarrowLayoutContext } from '../composition/NarrowLayout'
 import { HoverCard, type HoverCardPlacement } from '../entity/HoverCard'
 import { formatRelative } from '../../time/human-time'
@@ -39,7 +38,7 @@ export function ThingMarkGlyph({ mark }: { readonly mark: ThingMark }) {
   </span>
 }
 
-function Title({ face, fact }: { readonly face: Pick<ThingFace, 'title' | 'titleStyle'>; readonly fact: boolean }) {
+function Title({ face }: { readonly face: Pick<ThingFace, 'title' | 'titleStyle'> }) {
   if (face.titleStyle === 'path') {
     const cut = face.title.lastIndexOf('/')
     return <span data-thing-title {...stylex.props(styles.title, styles.mono, styles.pathTitle)}>
@@ -47,8 +46,6 @@ function Title({ face, fact }: { readonly face: Pick<ThingFace, 'title' | 'title
       <span {...stylex.props(styles.pathTail)}>{cut < 0 ? face.title : face.title.slice(cut + 1)}</span>
     </span>
   }
-  // An openable row names its full title in its label and card; a fact row has neither, so a cut title discloses itself.
-  if (fact) return <TruncatedLabel data-thing-title text={face.title} style={styles.title} />
   return <span data-thing-title {...stylex.props(styles.title)}>{face.title}</span>
 }
 
@@ -91,7 +88,7 @@ export function ThingRow({ observed, now, openable, hoverCard, hoverPlacement = 
       <ThingMarkGlyph mark={{ shape: 'none', word: '' }} />
       <span {...stylex.props(styles.icon)}><Icon name={observed.hint.icon} /></span>
       <span {...stylex.props(styles.rowMain)}>
-        {observed._tag === 'Loading' && observed.hint.title === undefined ? <span data-thing-skeleton {...stylex.props(styles.skeleton)} /> : <Title face={face} fact={fact} />}
+        {observed._tag === 'Loading' && observed.hint.title === undefined ? <span data-thing-skeleton {...stylex.props(styles.skeleton)} /> : <Title face={face} />}
         <span data-thing-note {...stylex.props(styles.note)}>{note}</span>
       </span>
     </div>
@@ -104,12 +101,10 @@ export function ThingRow({ observed, now, openable, hoverCard, hoverPlacement = 
     <ThingMarkGlyph mark={face.mark} />
     <span {...stylex.props(styles.icon)}><Icon name={face.icon} /></span>
     <span {...stylex.props(styles.rowMain)}>
-      <Title face={face} fact={fact} />
+      <Title face={face} />
       <RowMeta age={age} id={face.id} word={face.act === undefined ? face.mark.word : undefined} />
     </span>
-    {face.act !== undefined && paint !== undefined && (fact
-      ? <TruncatedLabel data-thing-act={paint} text={face.act.label} style={[styles.act, actStyle(paint)]} />
-      : <span data-thing-act={paint} {...stylex.props(styles.act, actStyle(paint))}>{face.act.label}</span>)}
+    {face.act !== undefined && paint !== undefined && <span data-thing-act={paint} {...stylex.props(styles.act, actStyle(paint))}>{face.act.label}</span>}
   </div>
   return withHover(row, hoverCard, openable, hoverPlacement, `${face.kind} ${face.title}`)
 }

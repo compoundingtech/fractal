@@ -147,6 +147,7 @@ export const RowsByKind: Story = {
         if (row.fact === true) {
           await expect(element).not.toHaveAttribute('role')
           await expect(element).not.toHaveAttribute('tabindex')
+          await expect(element.querySelector('[tabindex], button, a')).toBeNull()
           await expect(getComputedStyle(element).cursor).not.toBe('pointer')
         } else {
           await expect(element).toHaveAttribute('role', 'link')
