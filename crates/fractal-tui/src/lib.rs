@@ -410,24 +410,18 @@ async fn no_longer_asked(client: &Client, source: &str) -> String {
     }
 }
 
-/// The typed answer for a person step: the named answer chosen, or the person's own words where
-/// the request takes them. Words alone on a structured request were refused (`answer-required`),
-/// so an answer typed into a custom choice left the item on Home (Nathan, 2026-10-03).
+/// Named answers carry optional notes. Words alone answer only feedback or a custom choice;
+/// the server validates required text, including the changes on a request-changes answer.
 fn person_answer(
     request: Option<&fractal_client::StructuredRequest>,
     chosen: Option<String>,
     words: &str,
 ) -> Result<Option<fractal_client::PersonAnswerInput>> {
     if let Some(id) = chosen {
-        // Requesting changes carries the changes, in the person's words.
-        let changes = request.is_some_and(|request| {
-            request.answers.iter().any(|answer| {
-                answer.id == id && answer.outcome.as_deref() == Some("request_changes")
-            })
-        });
+        let text = words.trim();
         return Ok(Some(fractal_client::PersonAnswerInput {
             id: Some(id),
-            text: changes.then(|| words.trim().to_owned()),
+            text: (!text.is_empty()).then(|| text.to_owned()),
         }));
     }
     let Some(request) = request else {
@@ -437,18 +431,7 @@ fn person_answer(
     match request.entry_type.as_str() {
         "feedback" => Ok(Some(fractal_client::PersonAnswerInput { id: None, text })),
         "choice" if request.custom => Ok(Some(fractal_client::PersonAnswerInput { id: None, text })),
-        // A decision takes words as its request for changes, when it offers one.
-        _ => match request
-            .answers
-            .iter()
-            .find(|answer| answer.outcome.as_deref() == Some("request_changes"))
-        {
-            Some(changes) => Ok(Some(fractal_client::PersonAnswerInput {
-                id: Some(changes.id.clone()),
-                text,
-            })),
-            None => anyhow::bail!("This asks you to pick one of its answers: a chooses one"),
-        },
+        _ => anyhow::bail!("This asks you to pick one of its answers: a chooses one"),
     }
 }
 
@@ -1127,48 +1110,20 @@ mod tests {
         assert_eq!(line["epoch_ms"], 1_791_443_946_902_u64);
     }
 
-    #[test]
-    fn words_answer_a_structured_request_the_way_it_takes_them() {
-        let request = |kind: &str,
-                       custom: bool,
-                       answers: serde_json::Value|
-         -> fractal_client::StructuredRequest {
-            serde_json::from_value(serde_json::json!({
-                "version": 1, "type": kind, "question": "Ship it?", "why_person": "You own it.",
-                "custom": custom, "answers": answers
-            }))
-            .unwrap()
-        };
-        let options = serde_json::json!([
-            {"id": "works", "label": "Works", "consequence": "Done."},
-            {"id": "broken", "label": "Broken", "consequence": "Fixed."}
-        ]);
-        // Nathan, 2026-10-03: words on a custom choice were sent as a bare summary and refused.
-        let custom = request("choice", true, options.clone());
-        let answer = person_answer(Some(&custom), None, " found it, works ")
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            (answer.id, answer.text.as_deref()),
-            (None, Some("found it, works"))
-        );
-        // A chosen answer goes by its id.
-        let chosen = person_answer(Some(&custom), Some("works".into()), "Works")
-            .unwrap()
-            .unwrap();
-        assert_eq!(chosen.id.as_deref(), Some("works"));
-        // Feedback takes words; a free-text ask takes the summary alone.
-        let feedback = request("feedback", false, serde_json::json!([]));
-        assert!(
-            person_answer(Some(&feedback), None, "notes")
-                .unwrap()
-                .unwrap()
-                .text
-                .is_some()
-        );
-        assert!(person_answer(None, None, "notes").unwrap().is_none());
-        // A decision takes words as its request for changes; a fixed choice cannot take words.
-        let decision = request(
+    fn person_request(
+        kind: &str,
+        custom: bool,
+        answers: serde_json::Value,
+    ) -> fractal_client::StructuredRequest {
+        serde_json::from_value(serde_json::json!({
+            "version": 1, "type": kind, "question": "Ship it?", "why_person": "You own it.",
+            "custom": custom, "answers": answers
+        }))
+        .unwrap()
+    }
+
+    fn decision_request() -> fractal_client::StructuredRequest {
+        person_request(
             "decision",
             false,
             serde_json::json!([
@@ -1176,19 +1131,77 @@ mod tests {
                 {"id": "hold", "label": "Hold", "consequence": "Nothing.", "outcome": "decline"},
                 {"id": "change", "label": "Change", "consequence": "Revised.", "outcome": "request_changes"}
             ]),
-        );
-        let chosen = person_answer(Some(&decision), Some("change".into()), "rename it")
-            .unwrap()
-            .unwrap();
-        assert_eq!(chosen.text.as_deref(), Some("rename it"));
-        let changes = person_answer(Some(&decision), None, "rename it")
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            (changes.id.as_deref(), changes.text.as_deref()),
-            (Some("change"), Some("rename it"))
-        );
-        assert!(person_answer(Some(&request("choice", false, options)), None, "words").is_err());
+        )
+    }
+
+    #[test]
+    fn named_decision_answers_preserve_notes_for_every_outcome() {
+        let request = decision_request();
+        for id in ["land", "hold", "change"] {
+            let answer = person_answer(Some(&request), Some(id.into()), "  Keep the scope small.\n ")
+                .unwrap()
+                .unwrap();
+            assert_eq!(answer.id.as_deref(), Some(id));
+            assert_eq!(answer.text.as_deref(), Some("Keep the scope small."));
+        }
+    }
+
+    #[test]
+    fn named_choice_answers_preserve_notes_without_enabling_custom_answers() {
+        for custom in [false, true] {
+            let request = person_request(
+                "choice",
+                custom,
+                serde_json::json!([
+                    {"id": "works", "label": "Works", "consequence": "Done."}
+                ]),
+            );
+            let answer = person_answer(Some(&request), Some("works".into()), " found it, works ")
+                .unwrap()
+                .unwrap();
+            assert_eq!(answer.id.as_deref(), Some("works"));
+            assert_eq!(answer.text.as_deref(), Some("found it, works"));
+        }
+    }
+
+    #[test]
+    fn words_alone_do_not_infer_a_request_changes_answer() {
+        let request = decision_request();
+        assert!(person_answer(Some(&request), None, "rename it").is_err());
+        assert!(person_answer(Some(&request), None, "").is_err());
+    }
+
+    #[test]
+    fn blank_named_answer_notes_remain_absent_for_server_validation() {
+        let request = decision_request();
+        for id in ["land", "hold", "change"] {
+            let answer = person_answer(Some(&request), Some(id.into()), " \n\t ")
+                .unwrap()
+                .unwrap();
+            assert_eq!(answer.id.as_deref(), Some(id));
+            // The server, not the transport, rejects request_changes without text.
+            assert!(answer.text.is_none());
+        }
+    }
+
+    #[test]
+    fn words_alone_answer_only_feedback_or_a_custom_choice() {
+        let options = serde_json::json!([
+            {"id": "works", "label": "Works", "consequence": "Done."}
+        ]);
+        for request in [
+            person_request("choice", true, options.clone()),
+            person_request("feedback", false, serde_json::json!([])),
+        ] {
+            let answer = person_answer(Some(&request), None, " found it, works ")
+                .unwrap()
+                .unwrap();
+            assert!(answer.id.is_none());
+            assert_eq!(answer.text.as_deref(), Some("found it, works"));
+        }
+        let fixed = person_request("choice", false, options);
+        assert!(person_answer(Some(&fixed), None, "words").is_err());
+        assert!(person_answer(None, None, "notes").unwrap().is_none());
     }
     #[test]
     fn regression_person_falls_back_to_local_config() {
