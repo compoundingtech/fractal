@@ -63,7 +63,7 @@ BENCH`,
 import os
 from pathlib import Path
 log = Path(os.environ['RUNNER_TEMP']) / 'component-bench/results.log'
-lines = [line for line in log.read_text().splitlines() if line.startswith(('huge_receive ', 'contended_mutations '))] if log.exists() else []
+lines = [line for line in log.read_text().splitlines() if line.startswith(('huge_receive ', 'huge_receive_settle ', 'contended_mutations '))] if log.exists() else []
 with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as summary:
     summary.write('## Hosted component bench (not production SLO proof)\\n\\n')
     summary.write('\\n'.join(lines) + '\\n' if lines else 'HEAD measurements NOT RUN or no measurement lines emitted; see raw log.\\n')
