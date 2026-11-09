@@ -122,7 +122,9 @@ export const Dark1440: Story = { play: async ({ canvasElement }) => {
     await new Promise(resolve => requestAnimationFrame(resolve))
   }
   await expect(header).toContainElement(copy)
-  await expect(header).toContainElement(answers[0]!.querySelector('time'))
+  // One timestamp per episode, at its head.
+  await expect(answers[0]!.querySelector('time')).toBeNull()
+  await expect(answers[0]!.closest('[data-testid="transcript-turn"]')!.querySelector('[data-testid="turn-time"]')).not.toBeNull()
   await expect(header.getBoundingClientRect().height).toBe(16)
   await expect(header.getBoundingClientRect().bottom).toBeLessThanOrEqual(markdown.getBoundingClientRect().top)
   await expect(answers[0]!.getBoundingClientRect().bottom - markdown.getBoundingClientRect().bottom).toBeLessThanOrEqual(2)
