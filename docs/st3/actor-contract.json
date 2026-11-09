@@ -786,6 +786,15 @@
         "actor_environment": null,
         "ignores_actor": false
       },
+      "st devices renew-stage": {
+        "actor": "optional",
+        "accepts_person": true,
+        "can_carry_person": true,
+        "as_role": "actor",
+        "alternate_actor_option": null,
+        "actor_environment": null,
+        "ignores_actor": false
+      },
       "st devices revoke": {
         "actor": "optional",
         "accepts_person": true,

@@ -22,8 +22,10 @@ cd "$sparse"
 python3 scripts/script-process-test
 # Socket fixtures need a short temporary root; nix develop's TMPDIR can exceed AF_UNIX's path limit.
 TMPDIR=/tmp python3 -m unittest discover -s apps/fractal-web/scripts/devnet -p '*_test.py'
+# Evaluate only the shared hook: no flake inputs, shell realization or network.
+python3 scripts/sccache-shell-env-test --offline
 parallel_tests \
-  compat-baseline-test \
+  compat-baseline-test ci-compat-archive-test \
   ios-release-delivery-test \
   ci-ready-pr-test ci-draft-admission-test ci-workflow-concurrency-test check-ci-runner-test ci-namespace-usage-test \
   ci-mail-redelivery-canaries-test ci-test-partitions-test ci-test-archive-test ci-build-memory-test ci-evidence-source-test \

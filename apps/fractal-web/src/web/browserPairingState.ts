@@ -94,6 +94,7 @@ export const createPairingStore = ({ port, deviceLabel, credentialChanged, pollM
       return
     }
     if (at !== generation) return
+    if (reply?.credentialChanged === true) { changed(); return }
     set(reply === undefined ? { _tag: 'Hidden' }
       : reply.status === 'pending' ? { _tag: 'Pending', ...(reply.displayCode === undefined ? {} : { displayCode: reply.displayCode }) }
       : reply.status === 'unpaired' && refused ? { _tag: 'Unpaired', sendRefused: true }

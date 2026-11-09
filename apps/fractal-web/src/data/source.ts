@@ -318,7 +318,7 @@ export interface AttachmentPort {
 
 export type BrowserPairingStatus = 'unpaired' | 'paired' | 'pending' | 'denied' | 'expired'
 /** `undefined` when this host does not offer browser pairing (HTTP 404). */
-export type BrowserPairingStatusReply = { readonly status: BrowserPairingStatus; readonly displayCode?: string | undefined } | undefined
+export type BrowserPairingStatusReply = { readonly status: BrowserPairingStatus; readonly displayCode?: string | undefined; readonly credentialChanged?: boolean | undefined } | undefined
 
 /**
  * Pairs this browser with the serving Fractal host (`/_fractal/pair/*`). The credential lives in a

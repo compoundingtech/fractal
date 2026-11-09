@@ -1,42 +1,44 @@
+import { Schema } from 'effect'
+
 /**
  * What a tab shows. The persisted identity is the TUI's opaque pane key (`crates/fractal-tui/src/ui/pane.rs`),
  * which is also what a glass stores, so one person's tabs can mean the same thing in every client.
  * A key this client cannot render is kept verbatim as `Unsupported`: dropping it would delete another
  * client's tab on the next sync.
  */
-export type Subject =
-  | { readonly _tag: 'Conversation'; readonly agent: string }
+export const Subject = Schema.TaggedUnion({
+  Conversation: { agent: Schema.String },
   /** Only as a key or a link: a tab this client opens is the agent's, with its terminal face shown. */
-  | { readonly _tag: 'Terminal'; readonly agent: string }
-  | { readonly _tag: 'Inbox' }
-  | { readonly _tag: 'Alert'; readonly id: string }
-  | { readonly _tag: 'Missions' }
-  | { readonly _tag: 'Mission'; readonly ref: string }
-  | { readonly _tag: 'Usage'; readonly group?: string }
-  | { readonly _tag: 'Document'; readonly ref: string }
+  Terminal: { agent: Schema.String },
+  Inbox: {},
+  Alert: { id: Schema.String },
+  Missions: {},
+  Mission: { ref: Schema.String },
+  Usage: { group: Schema.optionalKey(Schema.String) },
+  Document: { ref: Schema.String },
   /** A subject's whole declaration, as KDL. */
-  | { readonly _tag: 'Declaration'; readonly ref: string }
+  Declaration: { ref: Schema.String },
   /** Any other ref: a generic resource tab, unless a contributed kind claims it. */
-  | { readonly _tag: 'Resource'; readonly ref: string }
-  | { readonly _tag: 'Unsupported'; readonly key: string }
+  Resource: { ref: Schema.String },
+  Unsupported: { key: Schema.String },
+})
+export type Subject = typeof Subject.Type
 
 export type SubjectKind = Subject['_tag']
 
-export const paneKey = (subject: Subject): string => {
-  switch (subject._tag) {
-    case 'Conversation': return `agent:${subject.agent}`
-    case 'Terminal': return `terminal:${subject.agent}`
-    case 'Inbox': return 'list:home'
-    case 'Alert': return `home:${subject.id}`
-    case 'Missions': return 'list:missions'
-    case 'Mission': return `mission:${subject.ref}`
-    case 'Usage': return `usage:${subject.group ?? ''}`
-    case 'Document': return `document:${subject.ref}`
-    case 'Declaration': return `declaration:${subject.ref}`
-    case 'Resource': return `resource:${subject.ref}`
-    case 'Unsupported': return subject.key
-  }
-}
+export const paneKey: (subject: Subject) => string = Subject.match({
+  Conversation: ({ agent }) => `agent:${agent}`,
+  Terminal: ({ agent }) => `terminal:${agent}`,
+  Inbox: () => 'list:home',
+  Alert: ({ id }) => `home:${id}`,
+  Missions: () => 'list:missions',
+  Mission: ({ ref }) => `mission:${ref}`,
+  Usage: ({ group }) => `usage:${group ?? ''}`,
+  Document: ({ ref }) => `document:${ref}`,
+  Declaration: ({ ref }) => `declaration:${ref}`,
+  Resource: ({ ref }) => `resource:${ref}`,
+  Unsupported: ({ key }) => key,
+})
 
 export const parsePane = (key: string): Subject => {
   const separator = key.indexOf(':')
@@ -73,38 +75,34 @@ export const subjectAgent = (subject: Subject | undefined): string | undefined =
 const encodePath = (ref: string) => ref.split('/').map(encodeURIComponent).join('/')
 
 /** The one deep link of a subject. The URL names the active subject and nothing about the other tabs. */
-export const subjectPath = (subject: Subject): string => {
-  switch (subject._tag) {
-    case 'Conversation': return `/w/${encodePath(subject.agent)}`
-    case 'Terminal': return `/w/terminal/${encodePath(subject.agent.slice('agent/'.length))}`
-    case 'Inbox': return '/w/inbox'
-    case 'Alert': return `/w/inbox/${encodeURIComponent(subject.id)}`
-    case 'Missions': return '/w/missions'
-    case 'Mission': return `/w/${encodePath(subject.ref)}`
-    case 'Usage': return subject.group === undefined ? '/w/usage' : `/w/usage/${encodePath(subject.group)}`
-    case 'Document': return `/w/${encodePath(subject.ref)}`
-    case 'Declaration': return `/w/declaration/${encodePath(subject.ref)}`
-    case 'Resource':
-    case 'Unsupported': return `/w/pane/${encodeURIComponent(paneKey(subject))}`
-  }
-}
+export const subjectPath: (subject: Subject) => string = Subject.match({
+  Conversation: ({ agent }) => `/w/${encodePath(agent)}`,
+  Terminal: ({ agent }) => `/w/terminal/${encodePath(agent.slice('agent/'.length))}`,
+  Inbox: () => '/w/inbox',
+  Alert: ({ id }) => `/w/inbox/${encodeURIComponent(id)}`,
+  Missions: () => '/w/missions',
+  Mission: ({ ref }) => `/w/${encodePath(ref)}`,
+  Usage: ({ group }) => group === undefined ? '/w/usage' : `/w/usage/${encodePath(group)}`,
+  Document: ({ ref }) => `/w/${encodePath(ref)}`,
+  Declaration: ({ ref }) => `/w/declaration/${encodePath(ref)}`,
+  Resource: subject => `/w/pane/${encodeURIComponent(paneKey(subject))}`,
+  Unsupported: subject => `/w/pane/${encodeURIComponent(paneKey(subject))}`,
+})
 
 /** The one ref of a subject: what `open(ref)` and a drag carry. `subjectOfRef` reads it back. */
-export const subjectRef = (subject: Subject): string => {
-  switch (subject._tag) {
-    case 'Conversation': return subject.agent
-    case 'Terminal': return `terminal/${subject.agent.slice('agent/'.length)}`
-    case 'Inbox': return 'inbox'
-    case 'Alert': return `alert/${subject.id}`
-    case 'Missions': return 'missions'
-    case 'Mission': return subject.ref
-    case 'Usage': return subject.group === undefined ? 'monitor/quota' : `usage/${subject.group}`
-    case 'Document': return subject.ref
-    case 'Declaration': return `declaration/${subject.ref}`
-    case 'Resource':
-    case 'Unsupported': return `pane/${paneKey(subject)}`
-  }
-}
+export const subjectRef: (subject: Subject) => string = Subject.match({
+  Conversation: ({ agent }) => agent,
+  Terminal: ({ agent }) => `terminal/${agent.slice('agent/'.length)}`,
+  Inbox: () => 'inbox',
+  Alert: ({ id }) => `alert/${id}`,
+  Missions: () => 'missions',
+  Mission: ({ ref }) => ref,
+  Usage: ({ group }) => group === undefined ? 'monitor/quota' : `usage/${group}`,
+  Document: ({ ref }) => ref,
+  Declaration: ({ ref }) => `declaration/${ref}`,
+  Resource: subject => `pane/${paneKey(subject)}`,
+  Unsupported: subject => `pane/${paneKey(subject)}`,
+})
 
 /** A subject ref as the rest of the app names it (`OpenRequest`, sidebar rows, document links). */
 export const subjectOfRef = (ref: string): Subject => {

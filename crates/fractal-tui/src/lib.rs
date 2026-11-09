@@ -1423,6 +1423,7 @@ mission "release" state="ready" {
                 })
                 .unwrap();
             let state = fractal_daemon::api::AppState {
+                browser_pairing_login: None,
                 seat_admission: Default::default(),
                 owning_person: None,
                 store: store.clone(),

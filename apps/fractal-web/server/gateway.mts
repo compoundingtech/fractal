@@ -24,6 +24,18 @@ export const cleanHeaders = (headers: IncomingHttpHeaders, upgrade = false): Out
   if (upgrade) { result.connection = 'Upgrade'; result.upgrade = 'websocket' }
   return result
 }
+/**
+ * The browser cannot send SDK feature headers on a WebSocket, and the generated SDK does not ask for
+ * message participants, so the gateway adds it to every client read: a mail header then names its
+ * `author` (`daemon/runtime` for a wake) on replace pages and live deltas alike, and never flips between them.
+ * Old daemons ignore an unknown feature.
+ */
+export const participantsFeature = 'conversation-message-participants.v1'
+export const withClientFeatures = (requested: string | readonly string[] | undefined): string => {
+  const list: string = typeof requested === 'string' ? requested : requested === undefined ? 'custom-subjects.v1, conversation-blocks.v1' : requested.join(',')
+  const features = list.split(',').map(feature => feature.trim()).filter(feature => feature !== '')
+  return (features.includes(participantsFeature) ? features : [...features, participantsFeature]).join(', ')
+}
 /** Decode once; reject paths whose interpretation could change in another router. */
 export const browserPath = (url: string): string | undefined => {
   try {
@@ -90,6 +102,7 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
       }
       const upstream = request({ socketPath, path: req.url, method: req.method, headers: {
         ...cleanHeaders(req.headers), host, authorization: browserAuthorization(req.headers, authorization), ...traceHeaders(span),
+        'x-st3-features': withClientFeatures(req.headers['x-st3-features']),
       }, agent: false }, (incoming) => {
         reply = incoming
         const headers = cleanHeaders(incoming.headers)
@@ -154,7 +167,7 @@ const makeGateway = ({ socketPath, host, authorization, timeoutMs }: { socketPat
         ...upgradeClientHeaders(req),
         // Browser WebSocket cannot send SDK headers, including on the early socket.
         // Old daemons ignore this additive feature; readers still detect optional blocks.
-        'x-st3-features': 'custom-subjects.v1, conversation-blocks.v1',
+        'x-st3-features': withClientFeatures(undefined),
       }, agent: false })
       socket.once('error', error); socket.once('close', clientClosed)
       upstream.on('error', error)

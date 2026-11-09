@@ -4,6 +4,7 @@ import type { BrowserPairingPort } from './source.ts'
 const decodeStatus = Schema.decodeUnknownSync(Schema.Struct({
   status: Schema.Literals(['unpaired', 'paired', 'pending', 'denied', 'expired']),
   displayCode: Schema.optional(Schema.String),
+  credentialChanged: Schema.optional(Schema.Boolean),
 }))
 const decodeStarted = Schema.decodeUnknownSync(Schema.Struct({ requestId: Schema.String, displayCode: Schema.String }))
 

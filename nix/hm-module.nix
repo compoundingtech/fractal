@@ -52,7 +52,7 @@ let
     ++ lib.optionals (cfg.socket != null) [ "--socket" cfg.socket ]
     ++ lib.optionals (cfg.clientGatewaySocket != null) [ "--client-gateway-socket" cfg.clientGatewaySocket ]
     ++ [ "--web-listen" (if cfg.webListen == null then "off" else cfg.webListen) ]
-    ++ lib.optionals (!externallyManaged) [ "--web-dist" "${effectivePackage}/share/fractal-web" ]
+    ++ lib.optionals (!externallyManaged) [ "--web-dist" "${cfg.package}/share/fractal-web" ]
     ++ lib.optionals (cfg.clientGatewaySocket == null && pkgs.stdenv.hostPlatform.isDarwin)
       [ "--client-gateway-socket" "${cfg.stateDir}/run/fractal-client.sock" ]
     ++ (if externallyManaged then
@@ -447,6 +447,58 @@ in
               fi
               receiptOwned=true
             fi
+            # A pre-Fractal rollback restores physical st3 but can leave an
+            # unrelated candidate at fractal. Require installer provenance for
+            # st3; the leftover's bytes are deliberately not evidence.
+            rollbackSnapshot() {
+              local candidate=$1 legacy="$binDir/st3" hash
+              [[ -f "$candidate" && ! -L "$candidate" ]] || return 1
+              [[ -f "$legacy" && ! -L "$legacy" ]] || return 1
+              ${pkgs.coreutils}/bin/stat -c '%d:%i:%f' "$candidate" "$legacy" || return 1
+              hash=$(${pkgs.coreutils}/bin/sha256sum "$legacy") || return 1
+              printf '%s\n' "''${hash%% *}"
+              if [[ -e "$binDir/st" || -L "$binDir/st" ]]; then
+                [[ -L "$binDir/st" ]] || return 1
+                ${pkgs.coreutils}/bin/stat -c '%d:%i:%f' "$binDir/st" || return 1
+                ${pkgs.coreutils}/bin/readlink "$binDir/st" || return 1
+              else
+                printf 'absent\n'
+              fi
+            }
+            rollbackLayout() {
+              local package recorded legacy hash expected
+              rollbackProof=$(rollbackSnapshot "$target") || return 1
+              [[ ! -e "$installReceipt" && ! -L "$installReceipt" ]] || return 1
+              [[ ! -e "$pendingReceipt" && ! -L "$pendingReceipt" ]] || return 1
+              [[ -f "$target" && ! -L "$target" ]] || return 1
+              legacy="$binDir/st3"
+              [[ -f "$legacy" && ! -L "$legacy" ]] || return 1
+              if [[ -e "$binDir/st" || -L "$binDir/st" ]]; then
+                [[ -L "$binDir/st" ]] || return 1
+                case "$(${pkgs.coreutils}/bin/readlink "$binDir/st")" in
+                  st3|"$legacy") ;;
+                  *) return 1 ;;
+                esac
+              fi
+              recorded="$binDir/../binary-installer/current.json"
+              [[ -f "$recorded" && ! -L "$recorded" ]] || return 1
+              package=$(${pkgs.jq}/bin/jq -er -s '
+                select(length == 1) | .[0] |
+                select(type == "object" and (.installer | type == "string")
+                  and (.narHash | type == "string")) | .package |
+                select(type == "string" and
+                  test("^/nix/store/[0-9a-z]{32}-(st3-with-pty|fractal-with-pty|fractal(-[0-9][^/]*)?)$"))
+              ' "$recorded") || return 1
+              expected="$package/bin/st3"
+              [[ -f "$expected" ]] || return 1
+              if [[ "$(${pkgs.coreutils}/bin/readlink -e "$legacy")" != "$(${pkgs.coreutils}/bin/readlink -e "$expected")" ]]; then
+                hash=$(${pkgs.coreutils}/bin/sha256sum "$legacy") || return 1
+                expected=$(${pkgs.coreutils}/bin/sha256sum "$expected") || return 1
+                [[ "''${hash%% *}" == "''${expected%% *}" ]] || return 1
+              fi
+              [[ "$(rollbackSnapshot "$target")" == "$rollbackProof" ]] || return 1
+            }
+            preserveRollback=false
             # Matching payload bytes alone are not ownership: require the receipt
             # or the historical forward/reverse alias layout.
             if [[ -e "$target" || -L "$target" ]]; then
@@ -455,8 +507,9 @@ in
                 case "$(${pkgs.coreutils}/bin/readlink "$target")" in
                   st3|"$binDir/st3") owned=true ;;
                 esac
-              elif [[ -f "$target" && -x "$target" ]]; then
-                aliasOwned=true
+              elif [[ -f "$target" ]]; then
+                aliasOwned=false
+                if [[ -x "$target" ]]; then aliasOwned=true; fi
                 for name in st st3; do
                   if [[ ! -L "$binDir/$name" ]]; then aliasOwned=false; break; fi
                   case "$(${pkgs.coreutils}/bin/readlink "$binDir/$name")" in
@@ -465,6 +518,10 @@ in
                   esac
                 done
                 if "$aliasOwned"; then owned=true; fi
+                if ! "$owned" && rollbackLayout; then
+                  owned=true
+                  preserveRollback=true
+                fi
               fi
               if ! "$owned"; then
                 printf 'Home Manager: refusing to replace foreign fractal command: %s\n' "$target" >&2
@@ -512,6 +569,29 @@ in
             trap rollback EXIT
             if [[ -e "$target" || -L "$target" ]]; then
               ${pkgs.coreutils}/bin/ln -P "$target" "$backup/binary"
+            fi
+            if "$preserveRollback"; then
+              # mktemp reserves a unique timestamped sibling, including when
+              # several rollback/roll-forward cycles occur within one second.
+              replaced=$(${pkgs.coreutils}/bin/mktemp "$binDir/fractal.replaced-$(${pkgs.coreutils}/bin/date -u +%Y%m%dT%H%M%S).XXXXXX")
+              if ${pkgs.coreutils}/bin/mv -f "$target" "$replaced"; then
+                binaryPublished=true
+              else
+                printf 'Home Manager: refusing to replace foreign fractal command: %s\n' "$target" >&2
+                exit 1
+              fi
+              if [[ "$(rollbackSnapshot "$replaced")" != "$rollbackProof" ]] ||
+                [[ -e "$installReceipt" || -L "$installReceipt" || -e "$pendingReceipt" || -L "$pendingReceipt" ]]; then
+                # Do not let the EXIT trap restore the earlier backup over a
+                # concurrently published target, even if this restore fails.
+                binaryPublished=false
+                if ! ${pkgs.coreutils}/bin/mv -Tn "$replaced" "$target" ||
+                  [[ -e "$replaced" || -L "$replaced" ]]; then
+                  printf 'Home Manager: preserved candidate at %s; leaving concurrent command at %s untouched.\n' "$replaced" "$target" >&2
+                fi
+                printf 'Home Manager: refusing to replace foreign fractal command: %s\n' "$target" >&2
+                exit 1
+              fi
             fi
             if [[ -e "$installReceipt" || -L "$installReceipt" ]]; then
               ${pkgs.coreutils}/bin/ln -P "$installReceipt" "$backup/receipt"

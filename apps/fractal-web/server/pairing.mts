@@ -106,7 +106,7 @@ export const handlePairing = async (req: IncomingMessage, res: ServerResponse, g
       const grant = await daemonCall(gateway, '/v1/client/capabilities', undefined, `Bearer ${bearer}`, 'GET')
       if (grant.status === 401 || grant.status === 403) {
         res.setHeader('set-cookie', secureCookie(deviceCookie, '', 0))
-        json(res, 200, { status: 'unpaired' }); return
+        json(res, 200, { status: 'unpaired', credentialChanged: true }); return
       }
       if (grant.status !== 200) { json(res, 502, { error: 'Could not validate this browser' }); return }
       json(res, 200, { status: 'paired' }); return
@@ -118,7 +118,7 @@ export const handlePairing = async (req: IncomingMessage, res: ServerResponse, g
     if (result.status !== 200 || !record(response)) { json(res, 502, { error: 'Could not check browser pairing' }); return }
     if (typeof response.bearer === 'string' && /^[A-Za-z0-9_-]{43}$/.test(response.bearer)) {
       res.setHeader('set-cookie', [secureCookie(deviceCookie, response.bearer, deviceLifetime), secureCookie(pairCookie, '', 0)])
-      json(res, 200, { status: 'paired' }); return
+      json(res, 200, { status: 'paired', credentialChanged: true }); return
     }
     if (response.status === 'pending') { json(res, 200, { status: 'pending', displayCode: pending.displayCode }); return }
     if (response.status === 'denied' || response.status === 'expired') {

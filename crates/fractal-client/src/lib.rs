@@ -1275,6 +1275,7 @@ fn render_message(code: Option<&ErrorCode>, message: &str, human: bool) -> Strin
         | ErrorCode::AttentionMigrated
         | ErrorCode::IssuerRequired
         | ErrorCode::PairingOriginRequired
+        | ErrorCode::PairingRestartRequired
         | ErrorCode::SuspendAuthoredSessionSelection
         | ErrorCode::LegacyActionReceiptUntrusted
         | ErrorCode::RuntimeNotLocal
@@ -2505,6 +2506,19 @@ impl Client {
     }
     pub async fn missions_get(&self, id: &str) -> Result<Envelope<Resource>, ClientError> {
         self.resource_internal("missions", id).await
+    }
+    /// The mission detail with the timing and step-history bound lifted for `run` (`mission-run/<id>` or `<id>`), which must be a run of this mission.
+    pub async fn missions_get_run(
+        &self,
+        id: &str,
+        run: &str,
+    ) -> Result<Envelope<Resource>, ClientError> {
+        self.get(&format!(
+            "/v1/client/missions/{}?run={}",
+            percent_encode_segment(id),
+            percent_encode(run)
+        ))
+        .await
     }
     pub async fn work_list(
         &self,

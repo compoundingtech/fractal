@@ -91,6 +91,20 @@ describe('BrowserPairing', () => {
     expect(notice()).toBeNull()
   })
 
+  it.each(['paired', 'unpaired'] as const)('reloads when the first status changes the credential to %s', async status => {
+    const { port } = fakePort({ status, credentialChanged: true })
+    const { store, credentialChanged } = await mount(port)
+    expect(store.snapshot()).toEqual({ _tag: 'Reloading' })
+    expect(credentialChanged).toHaveBeenCalledOnce()
+  })
+
+  it('does not reload for an already valid browser credential', async () => {
+    const { port } = fakePort({ status: 'paired' })
+    const { store, credentialChanged } = await mount(port)
+    expect(store.snapshot()).toEqual({ _tag: 'Paired' })
+    expect(credentialChanged).not.toHaveBeenCalled()
+  })
+
   it('shows the code to approve, polls while pending and reloads once approved', async () => {
     const { port, next } = fakePort({ status: 'unpaired' })
     const { credentialChanged } = await mount(port)

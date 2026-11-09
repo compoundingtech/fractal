@@ -18,6 +18,7 @@
   "dependencies": {
     "@effect/atom-react": "4.1.0",
     "@effect/opentelemetry": "4.1.0",
+    "@effect/platform-browser": "4.1.0",
     "@effect/platform-node": "4.1.0",
     "@effect/platform-node-shared": "4.1.0",
     "@fractal/client": "file:../../clients/typescript/fractal-client",
