@@ -184,4 +184,12 @@ export const ReadOnly: Story = { args: { placement: 'tab', connection: 'read-onl
 export const EmptyStart: Story = { args: { scenario: 'empty' }, play: AllStates.play }
 export const ClosedThread: Story = { args: { placement: 'tab', scenario: 'closed' } }
 export const MultipleThreads: Story = { args: { scenario: 'multiple' }, play: AllStates.play }
-export const CustomInboxSource: Story = { args: { scenario: 'custom-source' }, play: AllStates.play }
+export const CustomInboxSource: Story = {
+  args: { scenario: 'custom-source' },
+  play: async context => {
+    await AllStates.play?.(context)
+    const canvas = within(context.canvasElement)
+    await userEvent.click(await canvas.findByRole('button', { name: 'Start thread' }))
+    await within(await canvas.findByRole('region', { name: 'Answer Worker report ready' })).findByRole('textbox', { name: 'Message' })
+  },
+}
