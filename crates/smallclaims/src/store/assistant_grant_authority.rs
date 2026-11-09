@@ -236,7 +236,7 @@ fn subject_pending(connection: &Connection, subject: &str) -> Result<bool, Fract
 pub fn subject_ready(connection: &Connection, subject: &str) -> Result<(), FractalError> {
     ready(connection)?;
     if subject_pending(connection, subject)? {
-        return Err(FractalError::new("assistant-grant-authority-not-ready", "external-grant subject authentication is in progress"));
+        return Err(FractalError::new("assistant-grant-subject-not-ready", "external-grant subject authentication is in progress"));
     }
     Ok(())
 }

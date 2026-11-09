@@ -18,7 +18,7 @@ pub const PRINCIPAL: &str = "assistant/chatgpt";
 pub const MCP_PRINCIPAL: &str = "assistant/mcp";
 
 fn authority_error(error: FractalError) -> ApiError {
-    if error.code == "assistant-grant-authority-not-ready" {
+    if error.code == "assistant-grant-subject-not-ready" {
         credential_rejected("the client credential is unknown or expired")
     } else {
         ApiError::bad(error)
