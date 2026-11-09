@@ -171,7 +171,7 @@ exclusive_lanes() {
     fi
     lane "UI kit Storybook and module graph" kit_storybook
     if first_shard; then
-      lane "UI kit deterministic lifecycle controls" node --test packages/fractal-ui/scripts/details-determinism.browser-test.mjs
+      lane "UI kit deterministic lifecycle controls" node --test --test-timeout=120000 packages/fractal-ui/scripts/details-determinism.browser-test.mjs
     fi
   fi
   if first_shard; then

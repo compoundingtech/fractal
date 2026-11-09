@@ -53,6 +53,9 @@ test('AllStates returns focus in the close event without waiting for an animatio
     catch { response.writeHead(404).end() }
   })
   const browser = await openBrowser(t), page = await browser.newPage({ viewport: { width: 1440, height: 900 } })
+  let reportClose
+  const closed = new Promise(resolve => { reportClose = resolve })
+  await page.exposeFunction('__detailsCloseObserved', reportClose)
   await page.addInitScript(() => {
     const frame = window.requestAnimationFrame.bind(window)
     let closing = false
@@ -62,13 +65,12 @@ test('AllStates returns focus in the close event without waiting for an animatio
       // Observe the completed event, not the later frame or the story's timeout/error serialization.
       queueMicrotask(() => {
         const target = [...document.querySelectorAll('button')].find(button => button.textContent === 'Restore all states')
-        window.__detailsCloseControl = { returned: document.activeElement === target, active: document.activeElement?.textContent }
+        void window.__detailsCloseObserved({ returned: document.activeElement === target, active: document.activeElement?.textContent })
       })
     }, { capture: true })
     window.requestAnimationFrame = callback => closing ? 0 : frame(callback)
   })
   await page.goto(`${base}/iframe.html?id=fractal-ui-details-presentation--all-states&viewMode=story`, { waitUntil: 'domcontentloaded' })
-  await page.waitForFunction(() => window.__detailsCloseControl !== undefined, undefined, { timeout: 15000 })
-  const focus = await page.evaluate(() => window.__detailsCloseControl)
+  const focus = await closed
   assert.equal(focus.returned, true, `Close left focus on ${focus.active}`)
 })
