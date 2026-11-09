@@ -4269,6 +4269,7 @@ impl MissionsStore for Store {
             return serde_json::from_str(&response).map_err(internal);
         }
         owned_sets::refuse_unmanaged(&transaction, &format!("mission/{mission_id}"))?;
+        let drained = fractal_store::store::finish_all_run_projections_tx(&transaction)?;
         let active = transaction
             .query_row(
                 "SELECT id FROM mission_runs
@@ -4326,6 +4327,8 @@ impl MissionsStore for Store {
             )
             .map_err(internal)?;
         transaction.commit().map_err(internal)?;
+        drop(connection);
+        if drained { self.run_projection_finished(); }
         Ok(retired)
     }
 

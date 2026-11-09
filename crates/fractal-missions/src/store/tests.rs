@@ -8962,6 +8962,47 @@ fn a_mission_with_an_active_run_is_not_retired() {
 }
 
 #[test]
+fn mission_retirement_refuses_a_pending_reopened_run() {
+    let source = Store::open_memory("controller").unwrap();
+    let target = Store::open_memory("worker").unwrap();
+    source.bind_fleet(TEST_FLEET).unwrap();
+    target.bind_fleet(TEST_FLEET).unwrap();
+    let failed = failed_takeover_run(&source, &["deploy-check"]);
+    let exchange = exchange_from(&source, &target.replication_inventory().unwrap());
+    assert_eq!(receive_and_project(&target, "controller", &exchange).invalid, 0);
+    assert_eq!(target.mission_run(&failed.id).unwrap().unwrap().status, "failed");
+
+    let reopened = source.retry_failed_step(
+        &takeover_step(&failed, "deploy-check").subject,
+        "person/operator",
+        "retry the failed check",
+        "pending-retirement-retry",
+    ).unwrap();
+    assert_eq!(reopened.status, "running");
+    receive_until_run_projection_is_pending(&source, &target);
+    assert!(target.run_projection_pending(&failed.subject).unwrap());
+    assert_eq!(target.mission_run(&failed.id).unwrap().unwrap().status, "failed");
+    let before = target.index().unwrap();
+    let refused = target.retire_mission(
+        &failed.mission, "person/operator", "retire-pending-reopen",
+    ).unwrap_err();
+    assert_eq!(refused.code, "mission-has-active-run");
+    assert!(refused.message.contains(&failed.subject));
+    assert_eq!(target.index().unwrap(), before, "refusal commits no retirement claim");
+    assert_eq!(
+        target.mission_spec(&failed.mission, None).unwrap().unwrap().state,
+        MissionState::Ready,
+    );
+    assert!(target.run_projection_pending(&failed.subject).unwrap(), "refusal rolls its drain back");
+    target.project_replication_backlog().unwrap();
+    assert_eq!(target.mission_run(&failed.id).unwrap().unwrap().generation, reopened.generation);
+    assert_eq!(
+        target.retire_mission(&failed.mission, "person/operator", "retire-after-drain").unwrap_err().code,
+        "mission-has-active-run",
+    );
+}
+
+#[test]
 fn step_views_carry_the_current_attempts_progress_and_completion_summaries() {
     let store = Store::open_memory("node").unwrap();
     let source = r#"version 2

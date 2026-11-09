@@ -17211,6 +17211,18 @@ pub fn finish_run_projection_tx(
     Ok(true)
 }
 
+/// Cross-run decisions drain all pending parts, including runs not projected yet.
+/// Notify with `Store::run_projection_finished` only after the transaction commits.
+pub fn finish_all_run_projections_tx(
+    transaction: &Transaction<'_>,
+) -> Result<bool, FractalError> {
+    let drained = projection_work_pending_tx(transaction)?;
+    while projection_work_pending_tx(transaction)? {
+        finish_projection_work_tx(transaction)?;
+    }
+    Ok(drained)
+}
+
 pub fn try_project_simple_replication_tx(
     transaction: &Transaction<'_>,
     origin: &str,
