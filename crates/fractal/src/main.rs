@@ -7806,12 +7806,13 @@ async fn run_up(args: UpArgs) -> Result<()> {
         let served = tokio::try_join!(
             fractal_daemon::api::serve_reserved_unix_with_ready(
                 local_reserved,
-                fractal_daemon::api::worker_authenticated(router(state.clone()), worker_observer, config.worker_ingress_generation_check.unwrap_or_default()).layer(web_status.clone()),
+                fractal_daemon::api::worker_authenticated(router(state.clone()), worker_observer.clone(), config.worker_ingress_generation_check.unwrap_or_default()).layer(web_status.clone()),
                 Some(state.store.clone()),
+                Some(worker_observer),
                 ready
             ),
             fractal_daemon::api::serve_reserved_unix_with_ready(
-                gateway_reserved, fabric_router(state).layer(web_status), None, ready,
+                gateway_reserved, fabric_router(state).layer(web_status), None, None, ready,
             ),
             async {
                 let result = web.serve(web_state, config.worker_ingress_generation_check.unwrap_or_default()).await;
