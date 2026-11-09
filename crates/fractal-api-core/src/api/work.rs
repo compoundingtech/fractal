@@ -211,7 +211,7 @@ pub async fn wake_work(
     }
     let step = state
         .store
-        .step_run(&subject)
+        .step_run_fenced(&subject)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("step run `{subject}` does not exist")))?;
     let agent = step.assigned_to.as_deref().ok_or_else(|| {
@@ -330,7 +330,7 @@ pub async fn retry_work(
     };
     state
         .store
-        .step_run(&subject)
+        .step_run_fenced(&subject)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("step run `{subject}` does not exist")))?;
     let store = state.store.clone();
@@ -358,7 +358,7 @@ pub async fn publish_work_mission(
     )?;
     let step = state
         .store
-        .step_run(&subject)
+        .step_run_fenced(&subject)
         .map_err(ApiError::internal)?
         .ok_or_else(|| ApiError::not_found(format!("step run `{subject}` does not exist")))?;
     let actor = if request.actor.contains('/') {

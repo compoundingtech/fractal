@@ -40,6 +40,8 @@ mod admitted;
 #[cfg(any(test, feature = "test-support"))]
 mod temporary;
 pub use admitted::{AdmittedStore, STORE_DATABASE_FILES};
+mod projection_gate;
+pub use projection_gate::{ProjectionGate, ProjectionGuard};
 
 mod proof;
 pub mod prepared_envelope;
@@ -891,8 +893,8 @@ pub struct Store {
     sealed_fleet_cache: Mutex<Option<(i64, crate::fleet::FleetView)>>,
     /// The member part of the trust roots, folded at the `fleet_generation` shown.
     pub roots_cache: Mutex<Option<(i64, MemberRoots)>>,
-    /// Serializes projection passes while they lend the writer back between chunks.
-    pub projection: Mutex<()>,
+    /// Serializes projection passes in FIFO order while they lend the writer back between chunks.
+    pub projection: ProjectionGate,
     pub replication_timers: ReplicationTimers,
     /// Where the next compact answer starts listing differing ranges.
     replication_listing_turn: std::sync::atomic::AtomicUsize,
@@ -1299,6 +1301,7 @@ impl Store {
             [index.to_string()],
         )?;
         let committed_index = Arc::new(AtomicU64::new(index));
+        let projection_pending = runtime.projection_work_pending(&connection)?;
         let connection = if let Some(admitted) = readers.admitted_handle() {
             WriterConnection::new_admitted(
                 connection, committed_index.clone(), runtime.writer_observer(), admitted,
@@ -1348,10 +1351,10 @@ impl Store {
             signature_backfill: Mutex::default(),
             sealed_fleet_cache: Mutex::new(None),
             roots_cache: Mutex::new(None),
-            projection: Mutex::new(()),
+            projection: ProjectionGate::default(),
             replication_timers: ReplicationTimers::default(),
             replication_listing_turn: Default::default(),
-            replication_projection_state: AtomicU64::new(0),
+            replication_projection_state: AtomicU64::new(u64::from(projection_pending)),
             projection_diagnostics: Mutex::new(ProjectionDiagnosticState::default()),
             projection_contention_generation: AtomicU64::new(0),
             last_replication_projection_unix_ms: AtomicU64::new(0),
@@ -2317,6 +2320,41 @@ thread_local! {
     static CLOCK_SNAPSHOT: std::cell::Cell<Option<u128>> = const { std::cell::Cell::new(None) };
 }
 
+/// Raw clock overrides carried across a writer-thread hop. `None` keeps execution-time
+/// system-clock sampling rather than freezing the instant at which a job was queued.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ClockContext {
+    thread: Option<u128>,
+    snapshot: Option<u128>,
+}
+
+impl ClockContext {
+    pub(crate) fn capture() -> Self {
+        Self {
+            thread: THREAD_CLOCK.with(std::cell::Cell::get),
+            snapshot: CLOCK_SNAPSHOT.with(std::cell::Cell::get),
+        }
+    }
+
+    /// Install only for this callback; enclosing jobs and shared finalizers keep their clocks.
+    pub(crate) fn enter(self) -> impl Drop {
+        struct Entered {
+            previous: ClockContext,
+            _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+        }
+        impl Drop for Entered {
+            fn drop(&mut self) {
+                THREAD_CLOCK.with(|clock| clock.set(self.previous.thread));
+                CLOCK_SNAPSHOT.with(|clock| clock.set(self.previous.snapshot));
+            }
+        }
+        let previous = Self::capture();
+        THREAD_CLOCK.with(|clock| clock.set(self.thread));
+        CLOCK_SNAPSHOT.with(|clock| clock.set(self.snapshot));
+        Entered { previous, _thread: std::marker::PhantomData }
+    }
+}
+
 /// The time every reader and the reconciler compare against: the system clock, or the time a
 /// simulation set for this thread, held fixed while a [`clock_snapshot`] is alive.
 pub fn now_ms() -> u128 {
@@ -2355,7 +2393,7 @@ pub fn clock_snapshot() -> impl Drop {
 
 #[cfg(test)]
 mod clock_tests {
-    use super::{clock_snapshot, now_ms, set_thread_clock};
+    use super::{ClockContext, clock_snapshot, now_ms, set_thread_clock};
 
     #[test]
     fn reader_clock_snapshots_nest_and_restore_on_unwind() {
@@ -2375,6 +2413,78 @@ mod clock_tests {
         assert!(result.is_err());
         assert_eq!(now_ms(), 300);
         set_thread_clock(None);
+    }
+
+    #[test]
+    fn raw_clock_contexts_preserve_none_nest_and_restore_on_unwind() {
+        let original = ClockContext::capture();
+        let empty = ClockContext { thread: None, snapshot: None };
+        {
+            let _outer = ClockContext { thread: Some(100), snapshot: Some(200) }.enter();
+            assert_eq!(now_ms(), 200);
+            let result = std::panic::catch_unwind(|| {
+                let _inner = empty.enter();
+                assert_eq!(ClockContext::capture(), empty);
+                set_thread_clock(Some(300));
+                assert_eq!(now_ms(), 300);
+                {
+                    let _snapshot = clock_snapshot();
+                    let captured = ClockContext::capture();
+                    assert_eq!(captured.thread, Some(300));
+                    assert_eq!(captured.snapshot, Some(300));
+                }
+                panic!("restore both enclosing overrides");
+            });
+            assert!(result.is_err());
+            assert_eq!(ClockContext::capture(), ClockContext {
+                thread: Some(100), snapshot: Some(200),
+            });
+            assert_eq!(now_ms(), 200);
+        }
+        assert_eq!(ClockContext::capture(), original);
+    }
+
+    #[test]
+    fn batched_jobs_transport_clock_overrides_and_restore_after_all_outcomes() {
+        let writer = crate::sqlite::WriterConnection::new(
+            rusqlite::Connection::open_in_memory().unwrap(),
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        );
+        let empty = ClockContext { thread: None, snapshot: None };
+        let _restore = empty.enter();
+        writer.install_transaction_finalizer(move |_| {
+            assert_eq!(ClockContext::capture(), empty, "shared finalizers keep the writer clock");
+            Ok(())
+        }).unwrap();
+        for outcome in 0..3 {
+            {
+                let expected = ClockContext {
+                    thread: Some(100 + outcome), snapshot: Some(200 + outcome),
+                };
+                let _clock = expected.enter();
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    writer.batched(|_| -> Result<(), ()> {
+                        assert_eq!(ClockContext::capture(), expected);
+                        assert_eq!(now_ms(), 200 + outcome);
+                        match outcome {
+                            0 => Ok(()),
+                            1 => Err(()),
+                            _ => panic!("restore the writer clock on unwind"),
+                        }
+                    })
+                }));
+                match outcome {
+                    0 => assert_eq!(result.unwrap().unwrap(), Ok(())),
+                    1 => assert_eq!(result.unwrap().unwrap(), Err(())),
+                    _ => assert!(result.is_err()),
+                }
+                assert_eq!(ClockContext::capture(), expected);
+            }
+            writer.batched(|_| -> Result<(), ()> {
+                assert_eq!(ClockContext::capture(), empty);
+                Ok(())
+            }).unwrap().unwrap();
+        }
     }
 }
 
@@ -8358,6 +8468,7 @@ impl Store {
                 let started = std::time::Instant::now();
                 let end = (next + ADMISSION_CHUNK_ENVELOPES).min(pending.len());
                 let first = next;
+                let mut admitted_envelopes = 0;
                 while next < end {
                     if next != first && started.elapsed() >= ADMISSION_WRITER_BUDGET {
                         break;
@@ -8443,6 +8554,7 @@ impl Store {
                                 envelope_carries_fleet_claims(&savepoint, envelope)?;
                             membership_changed |= changes_membership;
                             savepoint.commit()?;
+                            admitted_envelopes += 1;
                             if changes_membership {
                                 // Re-fold off the writer before any later envelope uses the
                                 // authority introduced or removed by this admitted claim.
@@ -8466,6 +8578,7 @@ impl Store {
                         [current_index_tx(&pass)?.to_string()])?;
                 }
                 pass.commit()?;
+                crate::receive_metrics::envelopes_admitted(admitted_envelopes);
                 crate::windows::holds::covered("admitted envelopes", next - first);
                 #[cfg(any(test, feature = "test-support"))]
                 ADMISSION_TRANSACTIONS.with(|count| count.set(count.get() + 1));
@@ -8544,7 +8657,9 @@ impl Store {
             [],
             |row| row.get(0),
         )?;
-        if self.replication_projection_deferred() || snapshot.unsealed || waiting {
+        if self.replication_projection_deferred() || snapshot.unsealed || waiting
+            || self.runtime.projection_work_pending(&self.readers.get())?
+        {
             return Ok((String::new(), BTreeMap::new()));
         }
         Ok((
@@ -8559,6 +8674,7 @@ impl Store {
 
     fn note_projection_contention(&self) {
         self.projection_contention_generation.fetch_add(1, Ordering::AcqRel);
+        crate::receive_metrics::contended();
     }
 
     fn defer_replication_projection(&self) {
@@ -8738,6 +8854,9 @@ impl Store {
         target: u64,
         log: &mut impl FnMut(&str),
     ) {
+        crate::receive_metrics::projection_error(
+            error.code, error.details.get("projection_stage").and_then(Value::as_str),
+        );
         let stage = error
             .details
             .get("projection_stage")
@@ -8773,10 +8892,9 @@ impl Store {
         mut log: impl FnMut(&str),
         mut progress: impl FnMut(ProjectionProgress),
     ) -> Result<bool> {
-        let _projecting = self
-            .projection
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let gate_wait = std::time::Instant::now();
+        let _projecting = self.projection.lock();
+        crate::receive_metrics::projection_gate_wait(gate_wait.elapsed());
         let _timing = time_stage(&self.replication_timers.projection);
         self.defer_replication_projection();
         self.last_replication_projection_unix_ms
@@ -8796,7 +8914,9 @@ impl Store {
             let mut progress_staged =
                 |update: ProjectionProgress| stages.during("callbacks", || progress(update));
             let mut log_staged = |line: &str| stages.during("callbacks", || log(line));
+            let writer_wait = std::time::Instant::now();
             let mut connection = self.connection.write();
+            crate::receive_metrics::projection_writer_wait(writer_wait.elapsed());
             stages.enter("begin");
             // Acquire SQLite's write lock before reading a snapshot. A deferred upgrade can
             // fail immediately when the independent WAL checkpoint connection holds that lock.
@@ -8837,7 +8957,8 @@ impl Store {
             // A healthy, already-projected source needs no projection transaction.
             // In particular, an empty peer wake must not spend another runtime's
             // deferred maintenance allowance. Missing/stale health still retries.
-            let source_empty = count == 0 && frontier == target
+            let rebuild_pending = self.runtime.projection_work_pending(&transaction)?;
+            let source_empty = count == 0 && frontier == target && !rebuild_pending
                 && !self.verdicts_due.load(Ordering::Acquire)
                 && health.as_ref().is_some_and(|(frontier, status)| frontier.is_some() && status == "healthy");
             progress_staged(ProjectionProgress {
@@ -8847,8 +8968,33 @@ impl Store {
                 processed: None,
                 total: None,
             });
+            let final_drain = count == 0 && rebuild_pending;
+            // Preserve typed failures even when the chunk deliberately returns Ok(false).
+            // This also covers errors after rebuilding, while recording health or committing.
+            let record_error = |error: FractalError| {
+                let error = if final_drain {
+                    error.with_detail("projection_stage", "final-drain")
+                } else if !error.details.contains_key("projection_stage") {
+                    error.with_detail("projection_stage", "chunk")
+                } else {
+                    error
+                };
+                crate::receive_metrics::projection_error(
+                    error.code, error.details.get("projection_stage").and_then(Value::as_str),
+                );
+                error
+            };
             let result = (|| -> Result<bool, FractalError> {
                 if source_empty {
+                    return Ok(false);
+                }
+                if final_drain {
+                    stages.enter("finish-projection-work");
+                    let started = std::time::Instant::now();
+                    let finished = self.runtime.finish_projection_work(&transaction);
+                    crate::receive_metrics::final_drain(started.elapsed());
+                    finished?;
+                    self.runtime.after_projection(&transaction)?;
                     return Ok(false);
                 }
                 // Non-contention incremental failures retain the full replay fallback,
@@ -8861,7 +9007,7 @@ impl Store {
                 let fallback_reason =
                     match self
                         .runtime
-                        .project_incremental(&transaction, &self.origin, through)
+                        .project_incremental_chunk(&transaction, &self.origin, through)
                     {
                         Ok(projected) => {
                             transaction
@@ -8945,6 +9091,8 @@ impl Store {
             })();
             match result {
                 Ok(replayed) => {
+                    let rebuild_pending = self.runtime.projection_work_pending(&transaction)
+                        .map_err(record_error)?;
                     stages.enter("health");
                     // A fallback replay folds the whole log, including anything admitted after
                     // this pass started. An incremental chunk advances only its bounded frontier.
@@ -8957,14 +9105,18 @@ impl Store {
                         transaction.rollback()?;
                     } else {
                         transaction.execute(
-                            /* sqlite-large-value: allow-for-now lv-h50cb263d1821 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms)
-                             VALUES ('graph', 'healthy', ?1, ?2)
-                             ON CONFLICT(aggregate) DO UPDATE SET status='healthy', last_good_store_index=excluded.last_good_store_index,
-                                error_code=NULL, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
-                            params![through, now_ms().to_string()],
-                        )?;
+                            /* sqlite-large-value: allow-for-now lv-hbfbbc30b5bd5 owner=smallclaims::store TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO projection_health(aggregate, status, last_good_store_index, updated_at_unix_ms, error_code)
+                             VALUES ('graph', ?3, ?1, ?2, ?4)
+                             ON CONFLICT(aggregate) DO UPDATE SET status=excluded.status, last_good_store_index=excluded.last_good_store_index,
+                                error_code=?4, error_message=NULL, updated_at_unix_ms=excluded.updated_at_unix_ms",
+                            params![through, now_ms().to_string(),
+                                if rebuild_pending { "stale" } else { "healthy" },
+                                rebuild_pending.then_some("pending-projection-work")],
+                        ).map_err(internal).map_err(record_error)?;
                         stages.enter("commit");
-                        transaction.commit_with_deferred_runtime()?;
+                        transaction.commit_with_deferred_runtime()
+                            .map_err(internal).map_err(record_error)?;
+                        crate::receive_metrics::projection_chunk();
                         // A fallback replay folds the whole log in this one hold.
                         crate::windows::holds::covered(
                             "projected claims",
@@ -8991,15 +9143,15 @@ impl Store {
                     drop(stages);
                     // Readers may have cached the preceding prefix at the same admitted store
                     // index. Its projection changed even when no additional claim arrived.
-                    chunked |= through < target;
+                    chunked |= through < target || rebuild_pending;
                     if replayed {
                         self.runtime.forget_views();
                     } else if chunked {
                         // Only more of the admitted claims projected: published lists keep
                         // serving what readers had until they refold once the backlog is in.
-                        self.runtime.projection_advanced(through >= target);
+                        self.runtime.projection_advanced(through >= target && !rebuild_pending);
                     }
-                    if through < target {
+                    if through < target || rebuild_pending {
                         between();
                         continue;
                     }
@@ -9031,6 +9183,8 @@ impl Store {
                     return Ok(true);
                 }
                 Err(error) => {
+                    let error = record_error(error);
+                    self.log_projection_failure(&error, phase, frontier, target, &mut log_staged);
                     stages.enter("rollback");
                     transaction.rollback()?;
                     if error.is_sqlite_contention() {
@@ -9068,7 +9222,8 @@ impl Store {
                 |row| row.get(0),
             )
             .optional()?;
-        Ok(status.as_deref() != Some("healthy"))
+        Ok(status.as_deref() != Some("healthy")
+            || self.runtime.projection_work_pending(&connection)?)
     }
 
     /// Apply each recorded repair on its own. A repair that cannot be applied is recorded as an

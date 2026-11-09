@@ -558,6 +558,10 @@ impl ApiError {
         }
     }
 }
+/// Carried through JSON framing so telemetry counts the typed refusal, never a parsed body.
+#[derive(Clone, Copy)]
+struct RunProjectionDrainRefusal;
+
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
@@ -572,6 +576,11 @@ impl IntoResponse for ApiError {
         let mut response = (self.status, Json(body)).into_response();
         if self.code == "read-deadline" {
             response.extensions_mut().insert(crate::otel::ReadDeadline);
+        }
+        if self.code == "database-busy"
+            && self.details.get("reason").and_then(Value::as_str) == Some("run-projection-drain")
+        {
+            response.extensions_mut().insert(RunProjectionDrainRefusal);
         }
         response
     }
@@ -1108,6 +1117,9 @@ pub async fn response_envelope(
     };
     let response = read_deadline::envelope(state, request, next).await;
     duration.outcome = crate::otel::RequestOutcome::from_response(Some(&response));
+    if response.extensions().get::<RunProjectionDrainRefusal>().is_some() {
+        crate::otel::record_run_projection_drain_refusal(duration.method, duration.route);
+    }
     response
 }
 
