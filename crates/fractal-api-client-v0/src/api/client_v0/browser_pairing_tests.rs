@@ -157,12 +157,12 @@ async fn browser_pairing_expiry_refuses_redeem_even_after_approval() {
     answer(&state,&owner,&started,"approve").unwrap();
     let mut request = begun(&state,&started);
     request.body["fields"]["expires_at_unix_ms"] = json!(1);
-    assert_eq!(approval(&state,&request).unwrap(),"expired");
-    state.store.append_claim(&ClaimInput {
+    let expired = state.store.append_client_operation_claim(&ClaimInput {
         subject:request.subject,kind:request.kind,actor:request.actor,
         fields:serde_json::from_value(request.body["fields"].clone()).unwrap(),
         evidence:vec![],expected_subject:None,idempotency_key:None,
     }).unwrap();
+    assert_eq!(approval(&state,&expired).unwrap(),"expired");
     assert_eq!(poll(&state,&owner,&started,&"a".repeat(64)).await.unwrap().0["status"],"expired");
 }
 
