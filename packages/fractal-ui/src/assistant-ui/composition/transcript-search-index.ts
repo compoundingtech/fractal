@@ -1,5 +1,9 @@
 import { convertConversationItem, type ConversationItem } from '../embrace-converter'
 import type { WorkLogCall } from '../taste/work-log'
+import { completeStreamingTail } from './Markdown'
+import { markdownSearchText, normalizeSearchText, normalizeQuery, searchOffsets } from './transcript-search-text'
+
+export { normalizeQuery } from './transcript-search-text'
 
 export interface SearchableTurn {
   readonly id: string
@@ -24,7 +28,15 @@ const itemText = (item: ConversationItem): string => {
   const cached = itemTexts.get(item)
   if (cached !== undefined) return cached
   const content = convertConversationItem(item).content
-  const text = typeof content === 'string' ? content : content.flatMap(part => part.type === 'text' || part.type === 'reasoning' ? [part.text] : []).join('\n')
+  const raw = typeof content === 'string' ? content : content.flatMap(part => part.type === 'text' || part.type === 'reasoning' ? [part.text] : []).join('\n')
+  // User prompts and semantic rows are literal text. Received prose, thoughts and mail bodies use Markdown.
+  const text = item._tag === 'Text' && item.role === 'assistant' || item._tag === 'Reasoning'
+    ? markdownSearchText(item.streaming ? completeStreamingTail(item.text) : item.text)
+    : item._tag === 'Message'
+      ? item.text === undefined && item.from === undefined && item.to === undefined && item.author === undefined
+        ? markdownSearchText(raw)
+        : normalizeSearchText([item.title ?? '', markdownSearchText(item.text ?? '')].join('\n'))
+      : normalizeSearchText(raw)
   itemTexts.set(item, text)
   return text
 }
@@ -38,22 +50,15 @@ export const searchEntries = (turns: readonly SearchableTurn[]): readonly Search
     }
     const call = calls.get(item.id)
     if (call === undefined) return []
-    const label = call.argsSummary === undefined ? call.title : `${call.title} ${call.argsSummary}`
-    return [{ id: item.id, label, detail: [call.summary, call.rawInput, call.detail].filter(text => text !== undefined && text !== '').join('\n') }]
+    const label = normalizeSearchText(call.argsSummary === undefined ? call.title : `${call.title} ${call.argsSummary}`)
+    return [{ id: item.id, label, detail: normalizeSearchText([call.summary, call.rawInput, call.detail].filter(text => text !== undefined && text !== '').join('\n')) }]
   })
 })
-const occurrences = (text: string, needle: string) => {
-  const lower = text.toLowerCase()
-  let count = 0
-  for (let at = lower.indexOf(needle); at !== -1; at = lower.indexOf(needle, at + needle.length)) count++
-  return count
-}
-export const normalizeQuery = (query: string) => query.trim().toLowerCase()
 export const findMatches = (entries: readonly SearchEntry[], query: string): readonly SearchMatch[] => {
   const needle = normalizeQuery(query)
   if (needle === '') return []
   return entries.flatMap(entry => {
-    const shallow = occurrences(entry.label, needle), total = shallow + occurrences(entry.detail, needle)
+    const shallow = searchOffsets(normalizeSearchText(entry.label), needle).length, total = shallow + searchOffsets(normalizeSearchText(entry.detail), needle).length
     return Array.from({ length: total }, (_, occurrence) => ({ entryId: entry.id, occurrence, deep: occurrence >= shallow }))
   })
 }

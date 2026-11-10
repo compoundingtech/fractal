@@ -5,6 +5,7 @@ import { borderVars as border, elevationVars as elevation, geometryVars as g, in
 import { Icon } from './Icons'
 import type { TranscriptRevealStore } from './transcript-reveal'
 import { findMatches, nearestMatch, normalizeQuery, searchEntries, searchMatchKey, stepMatch, type SearchableTurn, type SearchMatch } from './transcript-search-index'
+import { rangesIn } from './transcript-search-text.ts'
 
 type History = { readonly _tag: 'Complete' } | { readonly _tag: 'HasOlder'; readonly onLoadEarlier?: () => void; readonly older?: { readonly _tag: 'Loading' | 'Failed' } }
 /** What a conversation keeps across tab switches when one transcript instance serves several tabs. */
@@ -73,40 +74,6 @@ const highlights = () => {
   return sharedHighlights
 }
 const entrySelector = (id: string) => { const escaped = CSS.escape(id); return `[data-item-id="${escaped}"], [data-scroll-anchor-id="${escaped}"], [data-conversation-entry-id="${escaped}"]` }
-/** Row chrome is not content: only a tool row's own label counts among its controls. */
-const isChrome = (element: Element) => element.closest('[aria-hidden="true"], time, [data-call-meta]') !== null || (element.closest('button') !== null && element.closest('[data-call-title]') === null)
-/** Matches across inline boundaries, since Markdown and syntax highlighting split text into many nodes. */
-const rangesIn = (root: Element, needle: string): readonly Range[] => {
-  const walker = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT)
-  const nodes: { readonly node: Text; readonly start: number }[] = []
-  let text = ''
-  for (let node = walker.nextNode() as Text | null; node !== null; node = walker.nextNode() as Text | null) {
-    if (node.parentElement === null || isChrome(node.parentElement)) continue
-    nodes.push({ node, start: text.length })
-    text += node.data
-  }
-  const lower = text.toLowerCase()
-  // A rare locale folding that changes length cannot map back to offsets.
-  if (lower.length !== text.length) return []
-  const at = (offset: number, end: boolean) => {
-    let low = 0, high = nodes.length - 1
-    while (low < high) {
-      const middle = Math.ceil((low + high) / 2)
-      if (nodes[middle]!.start < offset || (!end && nodes[middle]!.start === offset)) low = middle
-      else high = middle - 1
-    }
-    return nodes[low]!
-  }
-  const ranges: Range[] = []
-  for (let index = lower.indexOf(needle); index !== -1; index = lower.indexOf(needle, index + needle.length)) {
-    const from = at(index, false), to = at(index + needle.length, true)
-    const range = root.ownerDocument.createRange()
-    range.setStart(from.node, index - from.start)
-    range.setEnd(to.node, index + needle.length - to.start)
-    ranges.push(range)
-  }
-  return ranges
-}
 
 /** Transcript search. Reads source rows, so the viewport's window never narrows it; history the host has not loaded is the only gap it reports. */
 export function TranscriptFind({ scrollId, turns, rowIds, revealRow, history, active, reveal, memory, memoryKey }: {
@@ -131,9 +98,7 @@ export function TranscriptFind({ scrollId, turns, rowIds, revealRow, history, ac
   const input = React.useRef<HTMLInputElement>(null)
   const returnFocus = React.useRef<HTMLElement | null>(null)
   const origin = React.useRef(0)
-  const pending = React.useRef<{ readonly match: SearchMatch; readonly until: number } | undefined>(undefined)
-  // Coming back to a tab or pane restores its rows and paint; only moving to a different match may take the reader's scroll.
-  const navigated = React.useRef(remembered?.activeKey)
+  const pending = React.useRef<{ readonly match: SearchMatch; mounted: boolean } | undefined>(undefined)
   const lane = () => document.getElementById(scrollId)
 
   const entries = React.useMemo(() => open ? searchEntries(turns) : [], [open, turns])
@@ -145,6 +110,9 @@ export function TranscriptFind({ scrollId, turns, rowIds, revealRow, history, ac
   const index = pinned !== -1 ? pinned : nearestMatch(matches, rowIndex, origin.current)
   const current = index === -1 ? undefined : matches[index]
   const currentKey = current === undefined ? undefined : searchMatchKey(current)
+  const navigationKey = current === undefined ? undefined : `${needle}\u0000${currentKey}\u0000${current.deep}`
+  // Restoring a tab restores its disclosures and paint without taking the reader's scroll.
+  const navigated = React.useRef(remembered?.activeKey === currentKey ? navigationKey : undefined)
   const usable = open && active
 
   React.useEffect(() => { memory.set(memoryKey, { open, query, ...(currentKey === undefined ? {} : { activeKey: currentKey }) }) }, [memory, memoryKey, open, query, currentKey])
@@ -190,22 +158,31 @@ export function TranscriptFind({ scrollId, turns, rowIds, revealRow, history, ac
 
   // Typing waits a beat, so passing through a query does not open and close rows; stepping acts at once.
   React.useEffect(() => {
-    if (!usable) return
-    if (current === undefined) { pending.current = undefined; reveal.set({ deep: false }); return }
+    pending.current = undefined
+    if (!usable || current === undefined) {
+      reveal.set({ deep: false })
+      if (current === undefined) navigated.current = undefined
+      return
+    }
     const go = () => {
       // Pinned by identity from here on, so older pages prepending never move it.
       setActiveKey(searchMatchKey(current))
       reveal.set({ entryId: current.entryId, deep: current.deep })
-      if (navigated.current === currentKey) return
-      navigated.current = currentKey
-      pending.current = { match: current, until: performance.now() + 1000 }
-      revealRow(current.entryId, true)
+      if (navigated.current === navigationKey) return
+      navigated.current = navigationKey
+      pending.current = { match: current, mounted: false }
+      revealRowRef.current(current.entryId, true)
+      paint.current()
     }
-    if (immediate) { go(); return }
-    const timer = setTimeout(go, 120)
-    return () => clearTimeout(timer)
-    // Only a different match navigates; streaming updates to `revealRow` must not re-scroll the reader.
-  }, [usable, currentKey])
+    const timer = immediate ? undefined : setTimeout(go, 120)
+    if (immediate) go()
+    return () => {
+      clearTimeout(timer)
+      pending.current = undefined
+    }
+    // A new query or disclosure depth is a new navigation even at the same occurrence.
+    // Streaming updates to `revealRow` must not re-scroll the reader.
+  }, [usable, navigationKey, reveal])
   React.useEffect(() => () => reveal.set({ deep: false }), [reveal])
 
   const clearPainted = React.useRef<() => void>(() => undefined)
@@ -223,7 +200,7 @@ export function TranscriptFind({ scrollId, turns, rowIds, revealRow, history, ac
       if (row === null) continue
       const ranges = rangesIn(row, needle)
       all.push(...ranges)
-      if (id === current?.entryId) currentRange = ranges[Math.min(current.occurrence, ranges.length - 1)]
+      if (id === current?.entryId) currentRange = ranges[current.occurrence]
     }
     clearPainted.current()
     if (highlightsSupported()) {
@@ -238,11 +215,14 @@ export function TranscriptFind({ scrollId, turns, rowIds, revealRow, history, ac
     box.current?.setAttribute('data-highlighted', String(all.length))
     const target = pending.current
     if (target === undefined) return
-    if (performance.now() > target.until) { pending.current = undefined; return }
+    // The mutation observer follows the virtualizer until the row actually mounts.
     const row = element.querySelector<HTMLElement>(entrySelector(target.match.entryId))
     if (row === null) return
     // The row is mounted: navigation now owns the lane, as a followed message link does.
-    revealRowRef.current(target.match.entryId)
+    if (!target.mounted) {
+      target.mounted = true
+      revealRowRef.current(target.match.entryId)
+    }
     const bounds = element.getBoundingClientRect(), inset = box.current?.getBoundingClientRect().bottom ?? bounds.top
     const rect = (currentRange ?? row).getBoundingClientRect()
     if (rect.top < inset || rect.bottom > bounds.bottom) element.scrollTop += rect.top - bounds.top - bounds.height / 3
@@ -255,9 +235,21 @@ export function TranscriptFind({ scrollId, turns, rowIds, revealRow, history, ac
     const schedule = () => { frame ??= requestAnimationFrame(() => { frame = undefined; paint.current() }) }
     const observer = typeof MutationObserver === 'undefined' ? undefined : new MutationObserver(schedule)
     observer?.observe(element, { childList: true, subtree: true, characterData: true })
+    const cancelNavigation = () => { pending.current = undefined }
+    const cancelKey = (event: KeyboardEvent) => {
+      if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(event.key)) cancelNavigation()
+    }
+    element.addEventListener('wheel', cancelNavigation, { passive: true })
+    element.addEventListener('touchstart', cancelNavigation, { passive: true })
+    element.addEventListener('pointerdown', cancelNavigation)
+    element.addEventListener('keydown', cancelKey)
     schedule()
     return () => {
       observer?.disconnect()
+      element.removeEventListener('wheel', cancelNavigation)
+      element.removeEventListener('touchstart', cancelNavigation)
+      element.removeEventListener('pointerdown', cancelNavigation)
+      element.removeEventListener('keydown', cancelKey)
       if (frame !== undefined) cancelAnimationFrame(frame)
     }
   }, [usable, scrollId])

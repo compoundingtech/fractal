@@ -5,6 +5,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { EmbraceRuntimeProvider } from '../../../../packages/fractal-ui/src/assistant-ui/EmbraceRuntime.tsx'
 import { Transcript, type TranscriptHistory, type TranscriptTurn } from '../../../../packages/fractal-ui/src/assistant-ui/composition/Transcript.tsx'
+import { TranscriptFind } from '../../../../packages/fractal-ui/src/assistant-ui/composition/TranscriptFind.tsx'
+import { createTranscriptRevealStore } from '../../../../packages/fractal-ui/src/assistant-ui/composition/transcript-reveal.ts'
 
 vi.mock('@stylexjs/stylex', () => import('../testStylex.ts'))
 
@@ -119,6 +121,41 @@ it('expands a collapsed tool row and renders the output a match sits in', async 
   expect(container.querySelector('[data-testid="tool-preview-remaining"]')).toBeNull()
 })
 
+it('restores disclosures opened by search on close and when the pane becomes inactive', async () => {
+  const turns = [turn(0), toolTurn]
+  await render(view(turns))
+  composer().focus()
+  await press({ key: 'f', ctrlKey: true })
+  await type('needle')
+  await settle()
+  expect(container.querySelector('[data-testid="tool-detail-preview"]')?.textContent).toContain('needle on line six')
+  await press({ key: 'Escape' })
+  await settle()
+  expect(container.querySelector('[data-testid="work-log"]')?.textContent).not.toContain('needle on line six')
+  composer().focus()
+  await press({ key: 'f', ctrlKey: true })
+  await settle()
+  expect(container.querySelector('[data-testid="tool-detail-preview"]')?.textContent).toContain('needle on line six')
+  await render(view(turns, { active: false }))
+  await settle()
+  expect(container.querySelector('[data-testid="work-log"]')?.textContent).not.toContain('needle on line six')
+})
+
+it('reveals a different query in the same entry and occurrence when it moves into collapsed detail', async () => {
+  await render(view([turn(0), toolTurn]))
+  composer().focus()
+  await press({ key: 'f', ctrlKey: true })
+  await type('Read notes')
+  await settle()
+  expect(count()).toBe('1/1')
+  expect(container.querySelector('[data-testid="tool-raw-input"]')).toBeNull()
+  expect(container.querySelector('[data-testid="tool-detail-preview"]')?.textContent).not.toContain('needle on line six')
+  await type('needle')
+  await settle()
+  expect(count()).toBe('1/1')
+  expect(container.querySelector('[data-testid="tool-detail-preview"]')?.textContent).toContain('needle on line six')
+})
+
 it('reports partial coverage and pages history on demand until complete, with Stop', async () => {
   let pages = 0
   const onLoadEarlier = () => { pages += 1 }
@@ -213,4 +250,90 @@ it('leaves the shortcut to a focused terminal', async () => {
   container.querySelector<HTMLElement>('[data-testid="terminal-surface"]')!.focus()
   expect((await press({ key: 'f', metaKey: true })).defaultPrevented).toBe(false)
   expect(find()).toBeNull()
+})
+
+it('completes navigation when a virtualized match mounts after the former deadline', async () => {
+  const revealRow = vi.fn()
+  const reveal = createTranscriptRevealStore()
+  const memory = new Map()
+  const turns = [turn(0, 'needle in a distant row')]
+  const rowIds = ['prompt-0']
+  const fixture = (mounted: boolean) => <>
+    <input data-testid="composer" />
+    <section>
+      <TranscriptFind scrollId="delayed-lane" turns={turns} rowIds={rowIds} revealRow={revealRow} history={{ _tag: 'Complete' }} active reveal={reveal} memory={memory} memoryKey="delayed" />
+      <div id="delayed-lane">{mounted && <div data-item-id="prompt-0">needle in a distant row</div>}</div>
+    </section>
+  </>
+  await render(fixture(false))
+  composer().focus()
+  await press({ key: 'f', ctrlKey: true })
+  await type('needle')
+  expect(revealRow).toHaveBeenCalledWith('prompt-0', true)
+  expect(revealRow).not.toHaveBeenCalledWith('prompt-0')
+  // A slow virtualizer can take arbitrarily longer than one second; only its mount is readiness.
+  const clock = vi.spyOn(performance, 'now').mockReturnValue(performance.now() + 2000)
+  try {
+    await render(fixture(true))
+    await settle()
+    expect(revealRow).toHaveBeenCalledWith('prompt-0')
+  } finally {
+    clock.mockRestore()
+  }
+})
+
+it('cancels pending virtualized navigation when the reader scrolls instead', async () => {
+  const revealRow = vi.fn()
+  const reveal = createTranscriptRevealStore()
+  const memory = new Map()
+  const turns = [turn(0, 'needle')]
+  const rowIds = ['prompt-0']
+  const fixture = (mounted: boolean) => <>
+    <input data-testid="composer" />
+    <section>
+      <TranscriptFind scrollId="cancel-lane" turns={turns} rowIds={rowIds} revealRow={revealRow} history={{ _tag: 'Complete' }} active reveal={reveal} memory={memory} memoryKey="cancel" />
+      <div id="cancel-lane">{mounted && <div data-item-id="prompt-0">needle</div>}</div>
+    </section>
+  </>
+  await render(fixture(false))
+  composer().focus()
+  await press({ key: 'f', ctrlKey: true })
+  await type('needle')
+  expect(revealRow).toHaveBeenCalledWith('prompt-0', true)
+  document.getElementById('cancel-lane')!.dispatchEvent(new WheelEvent('wheel', { bubbles: true }))
+  await render(fixture(true))
+  await settle()
+  expect(revealRow).not.toHaveBeenCalledWith('prompt-0')
+})
+
+it('scrolls to a new query in the same mounted entry even when its occurrence and depth are unchanged', async () => {
+  const revealRow = vi.fn()
+  const reveal = createTranscriptRevealStore()
+  const memory = new Map()
+  const turns = [turn(0, 'first phrase followed by second phrase')]
+  await render(<>
+    <input data-testid="composer" />
+    <section>
+      <TranscriptFind scrollId="phrase-lane" turns={turns} rowIds={['prompt-0']} revealRow={revealRow} history={{ _tag: 'Complete' }} active reveal={reveal} memory={memory} memoryKey="phrases" />
+      <div id="phrase-lane"><div data-item-id="prompt-0">first phrase followed by second phrase</div></div>
+    </section>
+  </>)
+  const lane = document.getElementById('phrase-lane')!
+  const bounds = vi.spyOn(lane, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 200, 100))
+  const ranges = vi.spyOn(Range.prototype, 'getBoundingClientRect').mockImplementation(function (this: Range) {
+    return new DOMRect(0, this.toString() === 'second phrase' ? 1000 : 10, 50, 10)
+  })
+  try {
+    composer().focus()
+    await press({ key: 'f', ctrlKey: true })
+    await type('first phrase')
+    expect(count()).toBe('1/1')
+    expect(lane.scrollTop).toBe(0)
+    await type('second phrase')
+    expect(count()).toBe('1/1')
+    expect(lane.scrollTop).toBeGreaterThan(900)
+  } finally {
+    ranges.mockRestore()
+    bounds.mockRestore()
+  }
 })

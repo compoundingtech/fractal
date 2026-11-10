@@ -217,14 +217,15 @@ export function ToolDetailPreview({ call, onOpen, semantic }: { readonly call: W
   const command = readableCommand(call)
   const showOutput = (call.detail ?? '') !== '' || call.rawInput === undefined
   return <div data-testid="tool-detail-preview" {...stylex.props(styles.preview)}>
-    {semantic ?? <p>{call.summary ?? call.title} · {call.status}</p>}
+    {semantic ?? <p>{call.summary === undefined ? call.title : <span data-search-tool-summary>{call.summary}</span>} · {call.status}</p>}
     {call.status === 'error' && call.detail !== undefined && <p data-testid="tool-error-reason" {...stylex.props(styles.errorReason)}>{errorReason(call.detail)}</p>}
     <Disclosure isExpanded={rawOpen} onExpandedChange={setRawOpen}>
       <Button slot="trigger" {...stylex.props(styles.previewOpen)}>Show raw input/output</Button>
       <DisclosurePanel>{rawOpen && <>
-        {call.rawInput !== undefined && <pre data-testid="tool-raw-input" {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}>{call.rawInput}</code></pre>}
+        {semantic != null && call.summary !== undefined && <p data-search-tool-summary>{call.summary}</p>}
+        {call.rawInput !== undefined && <pre data-testid="tool-raw-input" data-search-tool-input {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}>{call.rawInput}</code></pre>}
         {command !== undefined ? <pre data-testid="tool-command" {...stylex.props(styles.output, styles.command)}><code>{command}</code></pre> : call.rawInput === undefined && call.argsSummary !== undefined && <pre {...stylex.props(styles.output)}>{call.argsSummary}</pre>}
-        {showOutput && <pre {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}><HighlightedSource code={onOpen === undefined || wholeOutput ? output : lines.slice(0, 4).join('\n')} language={workLogOutputLanguage(call)} /></code></pre>}
+        {showOutput && <pre data-search-tool-output={call.detail !== undefined && call.detail !== '' ? true : undefined} {...stylex.props(styles.output)}><code {...stylex.props(styles.outputCode)}><HighlightedSource code={onOpen === undefined || wholeOutput ? output : lines.slice(0, 4).join('\n')} language={workLogOutputLanguage(call)} /></code></pre>}
         {onOpen !== undefined && <div data-testid="tool-preview-actions" {...stylex.props(styles.previewActions)}>{remaining > 0 && !wholeOutput && <><span data-testid="tool-preview-remaining">+{remaining} {remaining === 1 ? 'line' : 'lines'}</span><span aria-hidden="true">·</span></>}<Button aria-label={`Open ${call.title} tool detail`} onPress={() => onOpen(call)} {...stylex.props(styles.previewOpen)}>Open</Button></div>}
       </>}</DisclosurePanel>
     </Disclosure>
