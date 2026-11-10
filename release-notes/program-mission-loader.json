@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The private `fractal` package's tree loader publishes program missions: `loadSubjectTree({ root, bundleDir })` bundles each `Fractal.mission(intent, program)` with `bun build --target=bun` into `<bundleDir>/<sha256>.mjs`, and the mission renders as KDL with its text inputs, `concurrent-runs`, run `authority` block and one `program` step pinning the bundle",
+  "replay": {"status": "none", "detail": "No daemon, claim or projection change. The rendered declaration uses the `program` step and `authority` grammar the daemon parses."},
+  "schema": {"status": "none", "detail": "No table, index, migration or claim kind change."},
+  "rules": {"status": "none", "detail": "No rule change. The authoring schemas gain the mission `authority` block (publish, start, revise and write rules); what it grants is enforced by the daemon."},
+  "compatibility": {"status": "changed", "detail": "Additive authoring surface: `StepSchema.program`, `MissionSchema.authority` and `MissionSchema.concurrentRuns`, and the `bundleDir` and `bun` options of `loadSubjectTree`. A tree that contains a program mission now needs `bundleDir` and a `bun` on PATH; trees without program missions load and render exactly as before. Rendered `program` steps and `authority` blocks need a daemon whose parser knows them."},
+  "downtime": {"status": "none", "detail": "No deploy-time effect; the package is private and not published to npm."},
+  "manual": {"status": "none", "detail": "No operator action is required."},
+  "recovery": {"status": "none", "detail": "Bundles are content-addressed files in the caller's bundle directory; rebuilding the same tree writes the same file."}
+}
