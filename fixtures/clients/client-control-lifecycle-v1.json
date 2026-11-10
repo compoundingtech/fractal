@@ -209,7 +209,7 @@
             "reason": "granted",
             "sequence": 0
           },
-          "expected": "ignore-stale-started"
+          "expected": "refuse-invalid-frame"
         },
         {
           "resource": {
