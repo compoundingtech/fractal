@@ -3028,10 +3028,16 @@ export type PairingAdmissionRecord = {
 export type PairingAdvertisement = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   capabilities: Array<{
-  id: "device-key-proofs" | "fabric-gateway-grant";
+  id: "device-key-proofs" | "fabric-gateway-grant" | "pairing-key-binding";
   state: "granted";
-  version: 1;
-}>;
+  version: 1 | 2;
+} & ({
+  id?: "device-key-proofs" | "fabric-gateway-grant";
+  version?: 1;
+} | {
+  id?: "pairing-key-binding";
+  version?: 2;
+})>;
 };
 
 export type PairingApprovalWaitApproved = {

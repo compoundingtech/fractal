@@ -5159,6 +5159,118 @@ pub struct PairingKeyStatus {
     pub device_key_fingerprint: Option<String>,
     pub expires_at: String,
 }
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingExchangeEmpty {}
+/// The permit secret is deliberately excluded from Debug output.
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingFabricPermit {
+    pub node_id: String,
+    pub attempt_id: String,
+    pub secret: String,
+}
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingQrPayload {
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    pub version: u8,
+    pub gateway: String,
+    pub id: String,
+    pub code: String,
+    pub expires_at_unix_ms: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fabric: Option<PairingFabricPermit>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingAdvertisement {
+    pub api_version: String,
+    pub capabilities: Vec<PairingAdvertisedCapability>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingAdvertisedCapability {
+    pub id: String,
+    pub version: u32,
+    pub state: String,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PairingExchangeOperation {
+    Capabilities,
+    Claim,
+    ApprovalWait,
+    Complete,
+    Ack,
+}
+/// Body is the canonical request model for op, not a handwritten JSON copy.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingExchangeRequest<T> {
+    pub v: u8,
+    pub request_id: String,
+    pub op: PairingExchangeOperation,
+    pub body: T,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingExchangeRefusal {
+    pub code: ErrorCode,
+    pub message: String,
+}
+/// One reply envelope for every operation, with its typed success body.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingExchangeReply<T> {
+    pub v: u8,
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<PairingExchangeRefusal>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingApprovalWaitRequest {
+    pub pairing_id: String,
+    pub key_fingerprint: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingApprovalWaitApproved {
+    pub status: String,
+    pub key_fingerprint: String,
+    pub approved_at: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingExchangeAck {
+    pub request_id: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingAdmissionPending {
+    pub state: String,
+    pub pairing_id: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingResultRequest {
+    pub api_version: String,
+    pub attempt_id: String,
+    pub device_public_key: String,
+    pub proof: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingResultPending {
+    pub code: ErrorCode,
+    pub retryable: bool,
+    pub deadline: String,
+}
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct PairingChallenge {
     pub kind: String,
