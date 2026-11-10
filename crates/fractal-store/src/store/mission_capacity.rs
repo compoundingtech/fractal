@@ -96,7 +96,7 @@ pub(super) fn validate_mission(
 
 fn validate_barrier(connection: &Connection, origin: &str, barrier: &Barrier) -> Result<(), FractalError> {
     let Barrier { feature, code, later, .. } = barrier;
-    let refused = |reason: String| FractalError::new(*code, reason);
+    let refused = |reason: String| FractalError::new(code, reason);
     let membership = fleet_membership_tx(connection).map_err(internal)?;
     for member in membership.incarnations().filter(|member| member.end.is_none()) {
         // This host runs this build.
