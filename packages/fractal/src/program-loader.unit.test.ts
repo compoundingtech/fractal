@@ -171,8 +171,9 @@ describe('program missions', () => {
         const root = join(scratch(), 'tree')
         symlinkSync(programs, root)
         const file = join(root, 'factory/land-program/mission.ts')
+        const real = pathToFileURL(join(programs, 'factory/land-program/mission.ts')).href
         const module = yield* Effect.promise(
-          (): Promise<{ readonly default: unknown }> => import(pathToFileURL(file).href),
+          (): Promise<{ readonly default: unknown }> => import(real),
         )
         const rendered = yield* programMission({ root, file, bundleDir, definition: module.default })
         expect(rendered).toEqual({ kdl, bundle: join(bundleDir, `${sha256}.mjs`), sha256 })
