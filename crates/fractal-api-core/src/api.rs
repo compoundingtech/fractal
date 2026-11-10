@@ -833,6 +833,7 @@ pub fn router_for_transport(state: AppState, transport: ClientTransportBoundary,
         .route("/v1/messages/by-key", get(messages::message_by_key))
         .route("/v1/status", get(operations::status))
         .route("/v1/desired/{*subject}", get(operations::get_desired))
+        .route("/v1/desired", get(operations::desired_batch))
         .route("/v1/resource-references/{*subject}", get(operations::resource_referrers))
         .route("/v1/events", get(operations::events))
         .route("/v1/events/page", get(events_page))
@@ -8179,7 +8180,8 @@ pub async fn guard_bound_request(
         return Ok(request);
     }
     let (parts, body) = request.into_parts();
-    let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024)
+    // A publication carries program bundles, so the buffer matches the publication route limit.
+    let bytes = axum::body::to_bytes(body, PUBLICATION_BODY_LIMIT)
         .await
         .map_err(ApiError::internal)?;
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
@@ -8221,7 +8223,7 @@ async fn guard_unverifiable_request(request: Request<Body>) -> Result<Request<Bo
         return Ok(request);
     }
     let (parts, body) = request.into_parts();
-    let bytes = axum::body::to_bytes(body, 16 * 1024 * 1024).await.map_err(ApiError::internal)?;
+    let bytes = axum::body::to_bytes(body, PUBLICATION_BODY_LIMIT).await.map_err(ApiError::internal)?;
     if let Ok(value) = serde_json::from_slice::<Value>(&bytes)
         && ["actor", "requester"].iter().any(|key| value.get(key).is_some_and(|v| !v.is_null()))
     {
