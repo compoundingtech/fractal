@@ -141,7 +141,7 @@ can run an effect to its end but can never journal it.
 | daemon → host | `nack` | `step`, `attempt`, `seq`, `error` | the entry could not be written; the program fails with a defect |
 | daemon → host | `cancel` | `step`, `attempt`, `reason` | the step ended or moved to another attempt; stop the program and its effects |
 | host → daemon | `run` | `step`, `attempt`, `seq`, `key`, `mission`, `input` | start or adopt the linked child run for `key` (§6) |
-| host → daemon | `ask` | `step`, `attempt`, `seq`, `key`, `for`, `request`, `deadline`, `default` | open or adopt the person ask for `key` (§6) |
+| host → daemon | `ask` | `step`, `attempt`, `seq`, `key`, `for`, `title`, `request`, `deadline`, `default` | open or adopt the person ask for `key` (§6) |
 | daemon → host | `resolved` | `step`, `attempt`, `seq`, `key`, `exit` | the child run or ask for `key` ended; its result is journaled |
 | host → daemon | `done` | `step`, `attempt`, `exit` (`{_tag: Success, value}` or `{_tag: Failure, error}`) | the program ended |
 | host → daemon | `unresponsive` | `step`, `attempt`, `ms` | the program's worker missed the liveness deadline and was terminated (DQ8) |
@@ -165,7 +165,8 @@ ended by the next daemon (DQ2).
 The daemon starts the host with `FRACTAL_PROGRAM_RUNTIME`, or else `bun` on its `PATH`; a member
 without either cannot run program steps. Cancellation is eager: every evaluation of a run tells the
 engine which of the run's program attempts left their step (ended, failed, timed out, retried,
-cancelled with the run, or replaced by a new generation), and the engine sends `cancel` at once.
+cancelled with the run, or replaced by a new generation), and the engine sends `cancel` at once and
+cancels the child runs and asks the attempt still waits on (§6).
 
 ### 3. Declaration and authority
 
@@ -260,29 +261,60 @@ fail the step (a bug), interrupts (host or daemon gone) are never journaled and 
 Long-lived loops do not grow one journal forever: a recurring program is a schedule of finite runs,
 and an iterative program that needs more than a few thousand steps runs rounds as child runs (§6).
 
-### 6. Linked child runs and worker turns
+### 6. Linked child runs, worker turns and asks
 
-`Fractal.run(mission, inputs)` asks the daemon to create a child run with
-`create_child_mission_run`, the path `uses-mission` already takes: `parent_step_run` is the program
-step, the idempotency key is `program:STEP:ATTEMPT:KEY`, so a resumed attempt adopts its child
-instead of starting another, while a retried attempt starts a new one (§5). The child is natively
-linked: cancelling the parent run cancels the child through `cancel_descendant_mission_runs_tx`
-(R08); a capacity-full child start waits (mission graph runtime §Run ownership). The engine learns
-the child's terminal state from its own store transition, not by polling, and journals it under the
-child step's key.
+A program waits on two kinds of things the daemon owns: a linked child run (`run`, from
+`Fractal.run` and worker turns) and a native person ask (`ask`, from `Fractal.ask`). The engine
+journals a `started` entry for the key when the request arrives, and the program's run evaluation
+does the rest: it starts or adopts what the key waits on, journals a second `started` entry whose
+`child` names it, and, once it ends, journals the result under the key (with `child` set) and sends
+`resolved`. Everything the evaluation looks at is a noted read, so the store transition that ends a
+child run or answers an ask evaluates the parent run again; nothing polls. A replayed key never
+asks again; a resumed attempt that asks for an open key adopts what that key already waits on. A
+request the daemon refuses (an unknown mission, inputs the mission does not accept, an ask without
+a person) fails the program step with the reason, as a defect would.
 
-A worker turn (`Fractal.step(...).pipe(Effect.provide(Fractal.Worker.layer(agent)))`) is a child run
-of a one-step mission whose step is assigned to that agent, with the step's `goal` and `success`
-schema; the result is the child's declared product. A run-scoped reviewer
-(`agent/${ST_MISSION_RUN}/reviewer`, one-shot) is declared by that child mission, so independence
-holds as in LandingMission.
+**Child runs.** The evaluation calls `create_child_mission_run`, the path `uses-mission` takes:
+`parent_step_run` is the program step, the inputs are the request's, and the idempotency key is
+`program:STEP:ATTEMPT:KEY`, so a resumed attempt adopts its child (the run subject follows from the
+key) while a retried attempt starts a new one (§5). The child runs for the parent run's requester in
+its workspace. A start that finds the mission at its `concurrent-runs` limit waits: the evaluation
+notes reads of the runs that hold the capacity, so the end of any of them evaluates the parent
+again and the start is retried then. When the child ends, the program receives:
 
-Cancellation is eager: when the reconciler terminates a program step (run cancelled, timed out), it
-tells the engine, which sends `cancel` to the host; the host interrupts the program and kills its
-effects' process groups.
+| Child | Exit |
+|---|---|
+| `completed` | Success `{ run, status: 'completed', products? }`; `products` holds the value of each product the child's steps declare, by full subject (`resource/mission-run/CHILD/…`) |
+| `failed` / `cancelled` | Failure `{ _tag: 'ChildFailed', run, status, reason }`; `reason` is the run's end reason, else its failed step's |
 
-`Fractal.ask` is a native person ask on the program step (`work ask --step` semantics, deadlines and
-defaults), resolved through the same journal key.
+A worker turn, `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission,
+input, product })))`, is a child run of `mission` with `input`. Its value is the child's product
+`resource/RUN/PRODUCT`, decoded with `success`; the worker mission declares the agent, goal and
+product (for example a run-scoped one-shot reviewer `agent/${ST_MISSION_RUN}/reviewer`, so
+independence holds as in LandingMission).
+
+**Asks.** `Fractal.ask({ id, for, title, request, deadline, default })` opens a native person ask on
+the program step, with `work ask --step` semantics: the same structured requests, deadlines and
+default answers (the fleet's ask-deadline policy applies), and the same inbox. Its requester is
+`daemon/program`: a program step has no claimant, so the step's attempt fences the ask instead of a
+claim. The step waits on a person (`waiting-person`) while any ask is open; its program stays loaded
+and its execution clock pauses (DQ6), and a program may hold several asks at once. The program
+receives:
+
+| Ask | Exit |
+|---|---|
+| answered by a person | Success `{ answer?: { type, outcome?, id?, label?, text? }, summary?, resolved_by }`, `resolved_by` the person |
+| resolved at its deadline | the same, with the default answer (none for a free-text ask) and `resolved_by: 'deadline'` |
+| withdrawn while the run goes on | Failure `{ _tag: 'AskCancelled', ask }` |
+
+An ask that ends with its run is never resolved: the program ended with it.
+
+**Cancellation.** Cancelling the parent run cancels its children through
+`cancel_descendant_mission_runs_tx` (R08), and its asks end with the run. When a program step ends,
+fails, times out or moves to a retried attempt while its run goes on, the engine cancels the child
+runs and asks that attempt journaled as `child` and holds no result for, in the same evaluation that
+sends the host `cancel`. A program that ends while a child run or ask it started is still open (a
+lost race) cancels it the same way.
 
 ### 7. Serialized sections
 
@@ -296,7 +328,9 @@ Two concurrent landings must not publish one host at once (R09).
 | Coalescing | the owner can skip superseded heads | a queued publish for an older head finds the host at or past it and is a no-op |
 | Cost | lane bookkeeping (0.03 s) plus an owner | child run start (no agent: one reconciler pass) |
 
-Choice: a child run. It needs no standing owner and reuses §6.
+Choice: a child run. It needs no standing owner and reuses §6: a publication whose start finds the
+publish mission's one run active waits, journaled as `started` without a `child`, and starts in the
+evaluation the active run's end triggers.
 
 ### 8. Visibility and stall detection
 
@@ -339,15 +373,19 @@ command (`Fractal.command(argv, { priority: 'background' })`); this is the progr
 
 ### 11. Program API
 
-The author-facing API is the `Fractal` namespace of the `fractal` package (D7), on `effect/workflow`:
+The author-facing API is the `Fractal` namespace of the `fractal` package's `fractal/effect` entry
+point (`import { Fractal } from 'fractal/effect'`, D7), on `effect/workflow`. The entry point's other
+named exports (`ProgramEntry`, `HostContextV1`, `ProgramExit`, `ChildRun`, `ChildFailed`,
+`AskAnswer`, `AskCancelled`) are the host contract a bundle implements and the exits it decodes.
 
 | `Fractal` | `effect/workflow` | Engine |
 |---|---|---|
 | `Fractal.mission(intent, program)` | `Workflow.make` with `intent.input` as payload and `intent.output` as success schema | one `program` step; the bundle's entry runs the workflow body for the step run's current attempt |
 | `Fractal.step({ id, success, error }, effect)` | `Activity.make` named by the step's key (`id`, `id#2`, …) | a `program.step` entry under that key, replayed by the key |
-| `Fractal.ask({ id, for, request, deadline, default })` | `DurableDeferred.make` named by the ask's key | a native person ask on the program step; the answer is journaled under the key |
-| `Fractal.run(mission, input)` | a child workflow execution | a linked child run (§6), its terminal result journaled under the key |
-| — | `WorkflowEngine` | the host's engine: `activityExecute` returns a journaled result or runs the activity and records it through the host protocol; `deferredResult` reads the journal |
+| `Fractal.step({ id, success }).pipe(Effect.provide(Fractal.Worker.layer({ mission, input, product })))` | `DurableDeferred.make` named by the key | a worker turn: `ctx.child` (protocol `run`) of `mission` with `input`; the value is the child's product `resource/RUN/PRODUCT` decoded with `success` (§6) |
+| `Fractal.ask({ id, for, title, request, deadline, default })` | `DurableDeferred.make` named by the ask's key | `ctx.ask` (protocol `ask`): a native person ask on the program step; the answer is journaled under the key, `AskCancelled` when it is withdrawn (§6) |
+| `Fractal.run(mission, input, { id })` | `DurableDeferred.make` named by the key (default: the mission's id) | `ctx.child` (protocol `run`): a linked child run; its end is journaled under the key, `ChildFailed` when it does not complete (§6) |
+| — | `WorkflowEngine` | the host's engine: `activityExecute` returns a journaled result or runs the activity and records it through the host protocol; `deferredResult` reads the journal, else waits for the daemon's `resolved` |
 
 Inputs and outputs are Effect Schemas. `intent.input` is a Struct: each field renders as a native
 mission `input`, `missions start` checks the inputs against it, and the program receives the decoded
@@ -375,7 +413,8 @@ program to the same wait.
   journals, and whether replay checks the body's step sequence against the journal and refuses a
   mismatch.
 - **DQ6 Execution clock:** whether time a program waits on a child run or an ask stops the step's
-  timeout clock, as `work wait` does for seats.
+  timeout clock, as `work wait` does for seats. Today an open ask pauses it (the step is
+  `waiting-person`) and a child run does not.
 - **DQ7 Native graph retirement:** whether native step-graph execution is retired once every
   data-DSL mission lowers to a program.
 - **DQ8 Program liveness:** decided: the host pings each program's worker; a worker that does not
