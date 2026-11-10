@@ -12,7 +12,8 @@ fn windows(membership: &crate::fleet::Membership) -> Windows {
 fn projection_rows(connection: &Connection) -> [Vec<Vec<SqlValue>>; 3] {
     [
         "SELECT * FROM assistant_grant_authority ORDER BY claim_id,base_claim_id",
-        "SELECT * FROM assistant_grant_pending ORDER BY claim_id",
+        "SELECT claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record
+         FROM assistant_grant_pending ORDER BY claim_id",
         "SELECT * FROM assistant_grant_effective ORDER BY claim_id",
     ].map(|query| {
         let mut statement = connection.prepare(query).unwrap();
@@ -20,6 +21,150 @@ fn projection_rows(connection: &Connection) -> [Vec<Vec<SqlValue>>; 3] {
         statement.query_map([], |row| (0..columns).map(|index| row.get(index)).collect())
             .unwrap().collect::<rusqlite::Result<_>>().unwrap()
     })
+}
+
+// Only wire validation is shared with production. Authentication comes from raw
+// provenance and durable local admission; attachment/latest/revocation are a
+// separate Rust fold, never a projection query or a backfill invocation.
+fn oracle_pending_valid(claim: &ClaimRecord) -> bool {
+    let fields = &claim.body["fields"];
+    let principal = fields.get("principal").and_then(Value::as_str).unwrap_or("assistant/chatgpt");
+    let profile = fields.get("profile").and_then(Value::as_str).unwrap_or("assistant");
+    let Some(id) = fields["grant_id"].as_str() else { return false; };
+    let suffix = id.strip_prefix("assistant-grant/").unwrap_or(id);
+    let identity = fields.is_object()
+        && fields.get("principal").is_none_or(|value| value.as_str().is_some())
+        && fields.get("profile").is_none_or(|value| value.as_str().is_some())
+        && matches!(principal, "assistant/chatgpt" | "assistant/mcp")
+        && matches!(profile, "assistant" | "service")
+        && suffix.len() == 24 && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && claim.subject.strip_prefix("custom/client/assistant-v1-") == Some(suffix)
+        && claim.actor.as_deref().is_some_and(|actor| fields["issuer"].as_str() == Some(actor));
+    let digest = |value: &Value| value.as_str().is_some_and(|text|
+        text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    if !identity { return false; }
+    match claim.kind.as_str() {
+        GRANTED => fields.get("credential").is_none() && fields.get("code").is_none()
+            && digest(&fields["credential_hash"])
+            && fields.get("code_hash").is_none_or(digest),
+        POLICY => {
+            // A policy need not carry a credential. Supply one only on its
+            // synthetic base to ask the shared structural validator about it.
+            let mut base = claim.clone();
+            base.body["fields"]["credential_hash"] = json!("0".repeat(64));
+            base.body["fields"].as_object_mut().unwrap().remove("credential");
+            base.body["fields"].as_object_mut().unwrap().remove("code");
+            base.body["fields"].as_object_mut().unwrap().remove("code_hash");
+            authority::structurally_valid(&base, claim)
+        }
+        REVOKED => true,
+        _ => false,
+    }
+}
+
+fn assert_raw_projection_oracle(store: &Store, expected_windows: &Windows, context: &str) {
+    let claims = raw_claims(store);
+    let connection = store.readers.get();
+    let local_ids: std::collections::BTreeSet<String> = connection.prepare(
+        "SELECT claim_id FROM assistant_grant_local_appends",
+    ).unwrap().query_map([], |row| row.get(0)).unwrap()
+        .collect::<rusqlite::Result<_>>().unwrap();
+    let pending: Vec<_> = claims.iter().filter(|claim| oracle_pending_valid(claim))
+        .map(|claim| {
+            let authenticated = (claim.origin == store.origin && local_ids.contains(&claim.id))
+                || store.claim_has_authenticated_member_writer(&claim.id).unwrap();
+            (claim, authenticated)
+        }).collect();
+    let mut expected_pending: Vec<_> = pending.iter().map(|(claim, authenticated)|
+        (claim.id.clone(), *authenticated)).collect();
+    expected_pending.sort();
+    let actual_pending: Vec<(String, bool)> = connection.prepare(
+        "SELECT claim_id,authenticated FROM assistant_grant_pending ORDER BY claim_id",
+    ).unwrap().query_map([], |row| Ok((row.get(0)?,row.get(1)?))).unwrap()
+        .collect::<rusqlite::Result<_>>().unwrap();
+    assert_eq!(actual_pending, expected_pending, "raw pending/authentication fold: {context}");
+    for (claim, trusted) in &pending {
+        if !trusted { continue; }
+        let (key, sequence): (Option<String>, Option<u64>) = connection.query_row(
+            "SELECT auth_member_key,auth_sequence FROM assistant_grant_pending WHERE claim_id=?1",
+            [&claim.id], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        if claim.origin == store.origin && local_ids.contains(&claim.id) {
+            assert_eq!((key, sequence), (None, None), "local admission is not a remote proof");
+            continue;
+        }
+        let key = key.expect("authenticated remote row must record its verified key");
+        let sequence = sequence.expect("authenticated remote row must record its proof sequence");
+        let (start, end) = expected_windows.get(&(claim.origin.clone(), key.clone()))
+            .expect("recorded proof key must remain in fresh fleet membership");
+        assert!(sequence >= *start && end.is_none_or(|end| sequence <= end),
+            "recorded proof lost fresh window coverage: {context}");
+        let fleet_id = fleet_meta(&connection, "assistant_grant_authority_fleet_id").unwrap().unwrap();
+        let shard = fleet_meta(&connection, "shard_id").unwrap();
+        let evidence: Vec<(String, String)> = connection.prepare(
+            "SELECT records.envelope_hash,signatures.signature FROM replica_records AS records
+             JOIN replica_envelopes AS envelopes USING(writer,sequence,envelope_hash)
+             JOIN replica_envelope_signatures AS signatures USING(writer,sequence,envelope_hash)
+             WHERE records.claim_id=?1 AND records.writer=?2 AND records.sequence=?3
+               AND signatures.member_key=?4 AND records.state='valid'
+               AND envelopes.receipt_state IN ('validated','degraded')",
+        ).unwrap().query_map(params![claim.id,claim.origin,sequence,key],
+            |row| Ok((row.get(0)?,row.get(1)?))).unwrap()
+            .collect::<rusqlite::Result<_>>().unwrap();
+        assert!(evidence.iter().any(|(hash, signature)|
+            VerifiedEnvelopeSignature::verify(shard.as_deref(), &fleet_id, &claim.origin,
+                sequence, hash, &key, signature).is_some()),
+            "recorded proof was not actually verified: {context}");
+    }
+
+    let authenticated: Vec<_> = pending.iter().filter_map(|(claim, trusted)|
+        trusted.then_some(*claim)).collect();
+    let text = |value: &str| SqlValue::Text(value.to_owned());
+    let optional_text = |value: Option<&str>| value.map_or(SqlValue::Null, |value| text(value));
+    let mut expected_authority = Vec::new();
+    let mut expected_effective = Vec::new();
+    for grant in authenticated.iter().copied().filter(|claim| claim.kind == GRANTED) {
+        let transitions: Vec<_> = authenticated.iter().copied().filter(|claim|
+            claim.kind != GRANTED && authority::transition_valid(grant, claim)).collect();
+        let selected_policy = transitions.iter().copied().filter(|claim| claim.kind == POLICY)
+            .max_by_key(|claim| claim.store_index);
+        let base_attached = authority::structurally_valid(grant, grant) || selected_policy.is_some();
+        for claim in base_attached.then_some(grant).into_iter().chain(transitions.iter().copied()) {
+            let fields = &claim.body["fields"];
+            expected_authority.push(vec![
+                text(&claim.id), text(&grant.id), text(&claim.subject), text(&claim.kind),
+                text(&claim.origin), optional_text(claim.actor.as_deref()),
+                text(fields["principal"].as_str().unwrap_or("assistant/chatgpt")),
+                text(fields["profile"].as_str().unwrap_or("assistant")),
+                text(&format!("{:020}", fields["expires_at_unix_ms"].as_u64().unwrap_or(0))),
+                SqlValue::Integer(claim.store_index as i64),
+                optional_text((claim.kind == GRANTED).then(|| fields["credential_hash"].as_str()).flatten()),
+                text(&serde_json::to_string(claim).unwrap()),
+            ]);
+        }
+        let policy = selected_policy.unwrap_or(grant);
+        if !authority::structurally_valid(grant, policy) { continue; }
+        let fields = &policy.body["fields"];
+        expected_effective.push(vec![
+            text(&grant.id), text(&grant.subject),
+            text(fields["principal"].as_str().unwrap_or("assistant/chatgpt")),
+            optional_text(grant.actor.as_deref()),
+            text(fields["profile"].as_str().unwrap_or("assistant")),
+            text(&format!("{:020}", fields["expires_at_unix_ms"].as_u64().unwrap())),
+            SqlValue::Integer(i64::from(transitions.iter().any(|claim| claim.kind == REVOKED))),
+            text(&serde_json::to_string(grant).unwrap()),
+        ]);
+    }
+    let row_key = |row: &Vec<SqlValue>| {
+        let SqlValue::Text(claim_id) = &row[0] else { unreachable!() };
+        let SqlValue::Text(base_id) = &row[1] else { unreachable!() };
+        (claim_id.clone(), base_id.clone())
+    };
+    expected_authority.sort_by_key(row_key);
+    expected_effective.sort_by_key(row_key);
+    let [actual_authority, _, actual_effective] = projection_rows(&connection);
+    assert_eq!(actual_authority, expected_authority, "raw authority fold: {context}");
+    assert_eq!(actual_effective, expected_effective, "raw effective fold: {context}");
 }
 
 // Recreate the projection from the same raw evidence, then roll it back. In
@@ -55,6 +200,7 @@ fn assert_windows(store: &Store, authority_store: &Store, context: &str) {
     ).unwrap().query_map([], |row| Ok(((row.get(0)?, row.get(1)?), (row.get(2)?, row.get(3)?))))
         .unwrap().collect::<rusqlite::Result<_>>().unwrap();
     assert_eq!(actual, expected, "persisted membership: {context}");
+    assert_raw_projection_oracle(store, &expected, context);
     assert_fresh_backfill(store, &expected, context);
 }
 
@@ -339,11 +485,13 @@ fn learned_fence_revalidates_signed_transition(kind: &str) {
                 [&transition.id], |row| row.get(0),
             ).unwrap();
             assert!(authenticated);
-            // The base is at the cursor, but its authenticated transition is
-            // still ahead of it. A writer queue must fence the whole subject.
+            // Only the recorded key beyond the cursor is queued. Its transition
+            // fences this subject even though the base itself is behind it.
             connection.execute(
-                "INSERT OR REPLACE INTO assistant_grant_membership_dirty VALUES(?1,?2,?3)",
-                params![grant.origin,grant_sequence,grant.id],
+                "INSERT INTO assistant_grant_retractions
+                 (writer,member_key,lower_sequence,upper_sequence,sequence,claim_id)
+                 VALUES(?1,?2,?3,?4,?3,?5)",
+                params![grant.origin,peer_key.public(),grant_sequence,i64::MAX,grant.id],
             ).unwrap();
             assert!(authority::subject_ready(&connection, SUBJECT).is_err());
             assert!(!authority::contains(&connection, &grant.id).unwrap());
@@ -420,4 +568,126 @@ fn signed_policy_beyond_later_learned_fence_loses_authority() {
 #[test]
 fn signed_revoke_beyond_later_learned_fence_loses_authority_and_unrevokes_effective_grant() {
     learned_fence_revalidates_signed_transition(REVOKED);
+}
+
+fn receive_without_authority_maintenance(target: &Store, exchange: &ReplicationExchange) {
+    target.receive_replication_exchange(&exchange.peer, FLEET, exchange).unwrap();
+    target.validate_replication_backlog().unwrap();
+    target.project_replication_backlog().unwrap();
+}
+
+fn assert_established_grants_ready(store: &Store, grants: &[ClaimRecord]) {
+    let connection = store.readers.get();
+    for grant in grants {
+        assert!(authority::subject_ready(&connection, &grant.subject).is_ok(),
+            "unaffected subject fenced: {}", grant.subject);
+        assert!(authority::contains(&connection, &grant.id).unwrap(),
+            "unaffected grant denied: {}", grant.id);
+    }
+}
+
+#[test]
+fn repeated_future_floor_window_additions_do_not_reauthenticate_or_fence_established_history() {
+    let (sponsor, key) = source();
+    let peer_key = Arc::new(MemberKey::generate().unwrap().0);
+    let source = node("peer", Some(key.public()));
+    source.set_member_key(Some(peer_key.clone())).unwrap();
+    let target = node("reader", Some(key.public()));
+    append(&sponsor, "host/peer", "fleet.member-admitted", json!({
+        "member_key": peer_key.public(), "via": "member", "sponsor": "anchor",
+        "writer_floor": 0, "mode": "listening"
+    }));
+    receive(&source, &export(&sponsor, &source));
+    receive(&target, &export(&sponsor, &target));
+    let grants: Vec<_> = (0..authority::CLAIMS_PER_SLICE * 3).map(|index| {
+        let suffix = format!("{index:024x}");
+        append(&source, &format!("custom/client/assistant-v1-{suffix}"), GRANTED,
+            fixture_fields(&suffix, "assistant", 'a'))
+    }).collect();
+    receive(&target, &export(&source, &target));
+    assert_windows(&target, &target, "established authenticated history");
+    for index in 0..6 {
+        let future_key = MemberKey::generate().unwrap().0;
+        append(&sponsor, "host/peer", "fleet.member-admitted", json!({
+            "member_key": future_key.public(), "via": "member", "sponsor": "anchor",
+            "writer_floor": 1_000_000 + index, "mode": "listening"
+        }));
+        authority::take_authentication_attempts();
+        authority::take_authentication_claims();
+        receive_without_authority_maintenance(&target, &export(&sponsor, &target));
+        assert_established_grants_ready(&target, &grants);
+        loop {
+            let complete = target.advance_assistant_grant_authority_backfill().unwrap();
+            assert_established_grants_ready(&target, &grants);
+            if complete { break; }
+        }
+        let fresh_windows = windows(&fleet_membership_tx(&target.readers.get()).unwrap());
+        assert_eq!(fresh_windows.len(), 3 + index as usize,
+            "future-floor admission failed to add a real window");
+        assert!(fresh_windows.contains_key(&("peer".to_owned(), future_key.public().to_owned())));
+        assert_eq!(authority::take_authentication_attempts(), 0,
+            "future-floor addition reauthenticated established history at event {index}");
+        assert!(authority::take_authentication_claims().is_empty());
+        assert_windows(&target, &target, &format!("future-floor addition {index}"));
+    }
+}
+
+#[test]
+fn membership_retraction_reauthenticates_only_rows_using_the_lost_recorded_key() {
+    let (anchor, anchor_key) = source();
+    let first_key = Arc::new(MemberKey::generate().unwrap().0);
+    let second_key = Arc::new(MemberKey::generate().unwrap().0);
+    let peer = node("peer", Some(anchor_key.public()));
+    let target = node("reader", Some(anchor_key.public()));
+    for key in [&first_key, &second_key] {
+        append(&anchor, "host/peer", "fleet.member-admitted", json!({
+            "member_key": key.public(), "via": "member", "sponsor": "anchor",
+            "writer_floor": 0, "mode": "listening"
+        }));
+    }
+    receive(&target, &export(&anchor, &target));
+    receive(&peer, &export(&anchor, &peer));
+    peer.set_member_key(Some(first_key.clone())).unwrap();
+    let removed_grant = append(&peer, SUBJECT, GRANTED, fields());
+    receive(&target, &export(&peer, &target));
+    peer.set_member_key(Some(second_key.clone())).unwrap();
+    let suffix = "abcdef0123456789abcdef01";
+    let retained_grant = append(&peer, &format!("custom/client/assistant-v1-{suffix}"),
+        GRANTED, fixture_fields(suffix, "service", 'b'));
+    receive(&target, &export(&peer, &target));
+    assert_windows(&target, &target, "two recorded proof keys on one writer");
+    for (grant, key) in [(&removed_grant, &first_key), (&retained_grant, &second_key)] {
+        let recorded_key: String = target.readers.get().query_row(
+            "SELECT auth_member_key FROM assistant_grant_pending WHERE claim_id=?1",
+            [&grant.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(recorded_key, key.public());
+    }
+    append(&anchor, "host/peer", "fleet.member-removed", json!({
+        "member_key": first_key.public(), "high_water": 0, "reason": "proof-key regression"
+    }));
+    authority::take_authentication_attempts();
+    authority::take_authentication_claims();
+    receive_without_authority_maintenance(&target, &export(&anchor, &target));
+    loop {
+        let complete = target.advance_assistant_grant_authority_backfill().unwrap();
+        assert_established_grants_ready(&target, std::slice::from_ref(&retained_grant));
+        if complete { break; }
+    }
+    // One failed key page followed by end-of-evidence may require more than one
+    // authentication call. Record exactly which claims were refreshed below.
+    assert!(authority::take_authentication_attempts() > 0);
+    let refreshed = authority::take_authentication_claims();
+    assert!(!refreshed.is_empty());
+    assert!(refreshed.iter().all(|claim_id| claim_id == &removed_grant.id),
+        "retraction refreshed rows using an unaffected proof key: {refreshed:?}");
+    let connection = target.readers.get();
+    let lost: bool = connection.query_row(
+        "SELECT authenticated FROM assistant_grant_pending WHERE claim_id=?1",
+        [&removed_grant.id], |row| row.get(0),
+    ).unwrap();
+    assert!(!lost);
+    assert!(authority::subject_ready(&connection, &removed_grant.subject).is_err());
+    drop(connection);
+    assert_windows(&target, &target, "only the lost proof key is retracted");
 }

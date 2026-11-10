@@ -9528,9 +9528,14 @@ fn assistant_grant_subject_maintenance_checks(
          FROM assistant_grant_pending WHERE authenticated=0
          UNION
          SELECT pending.grant_subject, 'writer membership revalidation queued: ' || dirty.writer
-         FROM assistant_grant_membership_dirty dirty
-         JOIN assistant_grant_pending pending ON pending.origin=dirty.writer
-         WHERE (pending.sequence,pending.claim_id)>(dirty.sequence,dirty.claim_id)
+         FROM assistant_grant_retractions dirty
+         JOIN assistant_grant_pending pending
+           ON pending.origin=dirty.writer AND pending.auth_member_key=dirty.member_key
+         WHERE pending.auth_sequence BETWEEN dirty.lower_sequence AND dirty.upper_sequence
+           AND (pending.auth_sequence,pending.claim_id)>(dirty.sequence,dirty.claim_id)
+         UNION
+         SELECT claims.subject, 'retracted authority effective-state recomputation'
+         FROM assistant_grant_recompute work JOIN claims ON claims.id=work.claim_id
          ORDER BY 1,2",
     )?;
     let rows = statement.query_map([], |row| {

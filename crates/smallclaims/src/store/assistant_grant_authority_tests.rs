@@ -465,6 +465,8 @@ fn reset_projection(connection: &Connection) {
          DELETE FROM assistant_grant_dirty;
          DELETE FROM assistant_grant_auth_cursor;
          DELETE FROM assistant_grant_membership_dirty;
+         DELETE FROM assistant_grant_retractions;
+         DELETE FROM assistant_grant_recompute;
          UPDATE assistant_grant_membership_state SET applied_generation=-1 WHERE id=1;
          UPDATE meta SET value=value WHERE key='fleet_anchor_key';
          DELETE FROM meta WHERE key='assistant_grant_authority_version'

@@ -1095,14 +1095,14 @@ fn doctor_lists_subject_maintenance_for_authenticated_membership_retries() {
     ] {
         connection.execute(
             "INSERT INTO assistant_grant_pending
-             (claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record)
-             VALUES(?1,?2,?3,?4,'person/operator',?5,?6,'{}')",
+             (claim_id,grant_subject,kind,origin,actor,sequence,authenticated,record,auth_member_key,auth_sequence)
+             VALUES(?1,?2,?3,?4,'person/operator',?5,?6,'{}','key/birch',?5)",
             rusqlite::params![id, subject, kind, origin, sequence, authenticated],
         ).unwrap();
     }
     connection.execute(
-        "INSERT INTO assistant_grant_membership_dirty(writer,sequence,claim_id)
-         VALUES('birch',7,'claim/a')", [],
+        "INSERT INTO assistant_grant_retractions(writer,member_key,lower_sequence,upper_sequence,sequence,claim_id)
+         VALUES('birch','key/birch',7,7,7,'claim/a')", [],
     ).unwrap();
     let checks = assistant_grant_subject_maintenance_checks(&connection).unwrap();
     assert_eq!(checks.len(), 2);
@@ -1113,7 +1113,7 @@ fn doctor_lists_subject_maintenance_for_authenticated_membership_retries() {
         && check.message.contains("unauthenticated grant, policy or revocation evidence")));
     assert!(checks.iter().all(|check| check.message.contains("generic credential rejection")));
     connection.execute(
-        "UPDATE assistant_grant_membership_dirty SET claim_id='claim/b' WHERE writer='birch'", [],
+        "UPDATE assistant_grant_retractions SET claim_id='claim/b' WHERE writer='birch'", [],
     ).unwrap();
     let checks = assistant_grant_subject_maintenance_checks(&connection).unwrap();
     assert_eq!(checks.len(), 1);

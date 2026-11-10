@@ -219,8 +219,12 @@ upgrade. A verified historical signature removes the unauthenticated warning.
 The same private provenance check lists affected grant subjects and their
 maintenance causes: dirty claims awaiting projection, signature authentication
 cursors in progress, unauthenticated grant/policy/revocation evidence, or queued
-writer membership revalidation. A membership warning covers only evidence beyond
-that writer's durable revalidation cursor and clears as maintenance advances.
+writer membership revalidation. Retractions revisit only claims authenticated by
+the affected member key at sequences that lost window coverage; unaffected
+authenticated subjects are not fenced by new membership windows. Durable
+key/range cursors and per-base authority deletion/effective recomputation share
+the 64-unit transaction budget. A membership warning covers only those precise
+proof dependencies beyond its cursor and clears as maintenance advances.
 These details remain on trusted-local doctor only: paired clients with
 `read.projections` cannot retrieve the provenance check through either the
 operations collection or operation detail. Clients continue to receive generic
