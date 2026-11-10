@@ -163,6 +163,13 @@ public enum ErrorCode: Codable, Sendable, Equatable {
     case pairingKeyBindingRequired
     case pairingAlreadyClaimed
     case pairingClaimInvalid
+    case pairingRouteNotAllowed
+    case pairingResultPending
+    case pairingResultExpired
+    case pairingRequestConflict
+    case pairingWaitBusy
+    case pairingRejected
+    case pairingExpired
     case suspendAuthoredSessionSelection
     case legacyActionReceiptUntrusted
     case arrangementExists
@@ -257,6 +264,13 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case "pairing-key-binding-required": .pairingKeyBindingRequired
         case "pairing-already-claimed": .pairingAlreadyClaimed
         case "pairing-claim-invalid": .pairingClaimInvalid
+        case "pairing-route-not-allowed": .pairingRouteNotAllowed
+        case "pairing-result-pending": .pairingResultPending
+        case "pairing-result-expired": .pairingResultExpired
+        case "pairing-request-conflict": .pairingRequestConflict
+        case "pairing-wait-busy": .pairingWaitBusy
+        case "pairing-rejected": .pairingRejected
+        case "pairing-expired": .pairingExpired
         case "invalid-answer": .invalidAnswer; case "not-answerable": .notAnswerable
         case "suspend-authored-session-selection": .suspendAuthoredSessionSelection
         case "legacy-action-receipt-untrusted": .legacyActionReceiptUntrusted
@@ -353,6 +367,13 @@ public enum ErrorCode: Codable, Sendable, Equatable {
         case .pairingKeyBindingRequired: "pairing-key-binding-required"
         case .pairingAlreadyClaimed: "pairing-already-claimed"
         case .pairingClaimInvalid: "pairing-claim-invalid"
+        case .pairingRouteNotAllowed: "pairing-route-not-allowed"
+        case .pairingResultPending: "pairing-result-pending"
+        case .pairingResultExpired: "pairing-result-expired"
+        case .pairingRequestConflict: "pairing-request-conflict"
+        case .pairingWaitBusy: "pairing-wait-busy"
+        case .pairingRejected: "pairing-rejected"
+        case .pairingExpired: "pairing-expired"
         case .invalidAnswer: "invalid-answer"; case .notAnswerable: "not-answerable"
         case .suspendAuthoredSessionSelection: "suspend-authored-session-selection"
         case .legacyActionReceiptUntrusted: "legacy-action-receipt-untrusted"

@@ -1895,6 +1895,13 @@ export type ErrorCode = (
   | "pairing-key-binding-required"
   | "pairing-already-claimed"
   | "pairing-claim-invalid"
+  | "pairing-route-not-allowed"
+  | "pairing-result-pending"
+  | "pairing-result-expired"
+  | "pairing-request-conflict"
+  | "pairing-wait-busy"
+  | "pairing-rejected"
+  | "pairing-expired"
   | "suspend-authored-session-selection"
   | "stale-fence"
   | "cursor-gap"
@@ -2983,6 +2990,41 @@ export type PageInfo = {
 
 export type PairedSession = (PersonPairedSession | AssistantPairedSession);
 
+export type PairingAdmissionPending = {
+  pairing_id: Id;
+  state: "admission-pending";
+};
+
+export type PairingAdmissionRecord = {
+  attempt_id: string;
+  bound_node_id: string;
+  cleanup_reason?: string;
+  cleanup_started_at?: Timestamp;
+  committed_at?: Timestamp;
+  completion?: PairedSession;
+  confirm_receipt?: {
+  committed_at: Timestamp;
+  node_id: string;
+  policy_revision: number;
+};
+  confirm_request: PairingFabricConfirmRequest;
+  creation_id: string;
+  device_public_key: string;
+  grant_id?: Id;
+  pairing_id: Id;
+  permit_deadline: Timestamp;
+  policy_revision?: number;
+  refused?: true;
+  remove_peer_receipt?: {
+
+};
+  result_fetched_at?: Timestamp;
+  revoke_receipt?: {
+
+};
+  state: "S1" | "S2" | "S3" | "S4" | "S5";
+};
+
 export type PairingAdvertisement = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   capabilities: Array<{
@@ -2990,6 +3032,17 @@ export type PairingAdvertisement = {
   state: "granted";
   version: 1;
 }>;
+};
+
+export type PairingApprovalWaitApproved = {
+  approved_at: Timestamp;
+  key_fingerprint: string;
+  status: "approved";
+};
+
+export type PairingApprovalWaitRequest = {
+  key_fingerprint: string;
+  pairing_id: Id;
 };
 
 export type PairingBegin = (PersonPairingBegin | AssistantPairingBegin);
@@ -3032,6 +3085,65 @@ export type PairingComplete = {
   proof?: string;
 };
 
+export type PairingExchangeRefusal = {
+  code: ErrorCode;
+  message: string;
+};
+
+export type PairingExchangeReply = {
+  body?: (PairingAdvertisement | PairingKeyStatus | PairingApprovalWaitApproved | PairingAdmissionPending | Record<string, never>);
+  ok: boolean;
+  refusal?: PairingExchangeRefusal;
+  request_id: string;
+  v: 1;
+} & ({
+  ok?: true;
+  refusal?: never;
+} | {
+  body?: never;
+  ok?: false;
+});
+
+export type PairingExchangeRequest = {
+  body: unknown;
+  op: "capabilities" | "claim" | "approval-wait" | "complete" | "ack";
+  request_id: string;
+  v: 1;
+} & ({
+  body?: Record<string, never>;
+  op?: "capabilities";
+} | {
+  body?: PairingKeyClaim;
+  op?: "claim";
+} | {
+  body?: PairingApprovalWaitRequest;
+  op?: "approval-wait";
+} | {
+  body?: PairingComplete;
+  op?: "complete";
+} | {
+  body?: {
+  request_id: string;
+};
+  op?: "ack";
+});
+
+export type PairingFabricConfirmRequest = {
+  attempt_id: string;
+  expected_attempt_revision: number;
+  expected_node_id: string;
+  expected_policy_revision: number;
+  operation: "confirm";
+  owner: string;
+  request_id: string;
+};
+
+export type PairingFabricPermit = {
+  attempt_id: string;
+  node_id: string;
+  secret: string;
+};
+
 export type PairingKeyApproval = {
   api_version: "st3.client.v0" | "fractal.client.v0";
   device_key_fingerprint: string;
@@ -3049,6 +3161,34 @@ export type PairingKeyStatus = {
   expires_at: Timestamp;
   kind: "pairing-key-status";
   status: "awaiting-key" | "awaiting-approval" | "approved" | "completed" | "expired";
+};
+
+export type PairingQrPayload = {
+  _tag: "fractal.pairing";
+  code: string;
+  expires_at_unix_ms: number;
+  fabric?: PairingFabricPermit;
+  gateway: string;
+  id: Id;
+  version: 1 | 2;
+} & ({
+  fabric?: never;
+  version?: 1;
+} | {
+  version?: 2;
+});
+
+export type PairingResultPending = {
+  code: "pairing-result-pending";
+  deadline: Timestamp;
+  retryable: true;
+};
+
+export type PairingResultRequest = {
+  api_version: "st3.client.v0" | "fractal.client.v0";
+  attempt_id: string;
+  device_public_key: string;
+  proof: string;
 };
 
 export type ParticipantRef = string;

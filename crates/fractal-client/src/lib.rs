@@ -5371,6 +5371,84 @@ fn percent_encode_segment(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn pairing_approval_wait_schema_validates_all_reply_and_request_fixtures() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))
+        .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/pairing-approval-wait.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let schema = serde_json::json!({"$ref": format!("#/$defs/{}", case["schema"].as_str().unwrap()), "$defs": contract["$defs"]});
+            let validator = jsonschema::options()
+                .should_validate_formats(true)
+                .build(&schema)
+                .unwrap();
+            assert_eq!(
+                validator.is_valid(&case["value"]),
+                case["valid"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
+    fn pairing_admission_state_schema_validates_every_durable_branch() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/schemas/client-v0.schema.json"
+        ))
+        .unwrap();
+        let schema = serde_json::json!({"$ref": "#/$defs/PairingAdmissionRecord", "$defs": contract["$defs"]});
+        let validator = jsonschema::options()
+            .should_validate_formats(true)
+            .build(&schema)
+            .unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../docs/st3/client-v0/fixtures/pairing-admission-states.json"
+        ))
+        .unwrap();
+        for case in fixture["cases"].as_array().unwrap() {
+            let mut record = fixture["base"].as_object().unwrap().clone();
+            record.insert("state".into(), case["state"].clone());
+            for group in case["groups"].as_array().unwrap() {
+                record.extend(
+                    fixture[group.as_str().unwrap()]
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                );
+            }
+            if let Some(fields) = case["set"].as_object() {
+                record.extend(fields.clone());
+            }
+            if let Some(fields) = case["remove"].as_array() {
+                for field in fields {
+                    record.remove(field.as_str().unwrap());
+                }
+            }
+            if let Some(fields) = case["remove_receipt"].as_array() {
+                let receipt = record
+                    .get_mut("confirm_receipt")
+                    .unwrap()
+                    .as_object_mut()
+                    .unwrap();
+                for field in fields {
+                    receipt.remove(field.as_str().unwrap());
+                }
+            }
+            assert_eq!(
+                validator.is_valid(&serde_json::Value::Object(record)),
+                case["valid"].as_bool().unwrap(),
+                "{}",
+                case["name"]
+            );
+        }
+    }
+
+    #[test]
     fn phone_documents_without_params_matches_the_schema() {
         let value = serde_json::to_value(PhoneNavigateArgs::Documents(None)).unwrap();
         assert_eq!(value, serde_json::json!({"screen": "Documents"}));
