@@ -2,8 +2,8 @@
 //!
 //! An objective is a target with windows and an error budget: the daemon's latency targets, its
 //! store and CPU targets, the database's size and the paired phone's reported targets, all from
-//! `slo/targets.toml` and the same report as `GET /v1/client/request-latency`, and CI's durations
-//! and counts, which `slo/targets.toml` declares and the Workspace CI runs a repository observer
+//! `slo/objectives.kdl` and the same report as `GET /v1/client/request-latency`, and CI's durations
+//! and counts, which `slo/objectives.kdl` ships and the Workspace CI runs a repository observer
 //! read feed, held in memory on the member that observes. A budget is an
 //! allowance that resets: each account's weekly and 5-hour limits, from the readings `st usage`
 //! shows. Nothing here measures anything. It reads those sources and says, for each row, its
