@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Discover and read canonical incoming assistant replies independently of agent restarts",
+  "replay": {"status": "none", "detail": "Uses normally admitted and projected canonical messages. Existing retained-reference upgrade revalidation is unchanged; no resend, record replacement or database repair."},
+  "schema": {"status": "changed", "detail": "Local recipient/time reply-read indexes support bounded source seeks. No storage version or signed-data changes."},
+  "rules": {"status": "none", "detail": "Admission, signature verification, native transcript handles, generic search and write authority are unchanged."},
+  "compatibility": {"status": "changed", "detail": "The existing conversation list accepts replies=true for authenticated-principal-only incoming reply metadata. Its complete read handles use the existing conversation reader, pin immutable sent-claim identities and bind principal, grant and policy. Native conversation listing remains available without this mode."},
+  "downtime": {"status": "none", "detail": "No coordinated rollout or service downtime is required by the read contract."},
+  "manual": {"status": "none", "detail": "Refresh MCP tools, discover replies with replies=true and pass returned read objects unchanged to the reader. Long replies use bounded next_range continuations."},
+  "recovery": {"status": "none", "detail": "No new migration or recovery path. Revoked or expired grants and policy-invalidated handles remain refused."}
+}

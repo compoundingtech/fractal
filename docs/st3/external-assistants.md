@@ -394,11 +394,27 @@ binding. A detail preview's `page.next_cursor` continues through
 its pinned metadata rows when an agent restarts; a no-longer-current session has
 `read: null` rather than an invalid content handle or a failed page.
 
+For incoming agent replies, call `fractal_conversations_list` with `{"replies":true}`.
+This bounded, newest-first view selects canonical messages addressed to the
+authenticated assistant principal, never a caller-selected recipient or person.
+Its items include sender, recipient, message identity, reply relationship, original
+sent time and a complete `read` object, but no message text. Pass `read` unchanged
+to `fractal_conversation_read`; use the returned `next_range` to continue a long
+reply and the list's `page.next_cursor` with `replies:true` to continue discovery.
+Each text range is at most 512 UTF-8 bytes. Reply references pin the immutable
+sent-claim revision and bind the authenticated principal, grant and policy.
+Revocation, expiry and policy changes invalidate redemption. Canonical replies
+remain readable after their sender restarts; this does not change native transcript
+handle invalidation or expose another principal's mailbox. Retained historical
+replies must first pass normal upgrade revalidation and projection; no resend,
+record replacement or database repair is required.
+
 Conversation DTOs disclose only allowlisted identifiers, timestamps, role/type
 metadata, bounded chat text and content references. Native tool bodies, diagnostic
-records, attachments, paths and environments are excluded. The discovery/readback
-surface does not add sender or recipient fields. Content remains untrusted external
-data, and these reads confer no write authority or deployment/activation permission.
+records, attachments, paths and environments are excluded. Reply-mode discovery
+also identifies the canonical sender, recipient and source claim, without copying
+the signed record into its response. Content remains untrusted external data, and
+these reads confer no write authority or deployment/activation permission.
 
 ### Read trust
 
