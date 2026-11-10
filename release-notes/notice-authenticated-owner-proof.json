@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Define explicit notice owner acknowledgement fields and authenticated member-position evidence.",
+  "replay": { "status": "changed", "detail": "Owner proof reads verified envelope signatures and authenticated member sequence and claim position. Missing proof remains unavailable rather than being inferred from asserted actors or timestamps." },
+  "schema": { "status": "changed", "detail": "Notice owner acknowledgements carry an exact owner binding, previous acknowledgement, active or ended status, and nullable runtime binding." },
+  "rules": { "status": "changed", "detail": "Only the admitted owner incarnation can establish acknowledgement authority. Conflicting envelope or member-position evidence fails closed." },
+  "compatibility": { "status": "changed", "detail": "Unsigned or actor-asserted history cannot substitute for authenticated owner evidence. The prepared batch context and existing replication API remain unchanged." },
+  "downtime": { "status": "none", "detail": "No deployment outage is required." },
+  "manual": { "status": "none", "detail": "No separate operator action is required for the proof contract." },
+  "recovery": { "status": "changed", "detail": "Restore missing authenticated proof and retry admission; do not infer signatures, causal order, or owner membership." }
+}

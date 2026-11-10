@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Project notice delivery only from receipts authorized at their authenticated owner positions.",
+  "replay": { "status": "changed", "detail": "Receipt projection checks the durable historical acknowledgement chain and authenticated causal position, preserving valid evidence across later graph withdrawal and replay." },
+  "schema": { "status": "none", "detail": "The projection consumes the existing immutable receipt and owner acknowledgement contracts." },
+  "rules": { "status": "changed", "detail": "A wrong signer, missing signature, forked acknowledgement chain, or receipt outside the active owner interval yields unknown delivery. Completion timestamps and current runtime designation do not establish authority." },
+  "compatibility": { "status": "changed", "detail": "Unsigned and actor-asserted legacy receipts do not become delivery evidence. Generic reserved reads remain denied." },
+  "downtime": { "status": "none", "detail": "No deployment outage is required." },
+  "manual": { "status": "none", "detail": "Projection itself performs no delivery or recipient action." },
+  "recovery": { "status": "changed", "detail": "Restore missing causal prerequisites and retry admission. Unknown delivery is not permission to resend." }
+}

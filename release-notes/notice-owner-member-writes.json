@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Write notice acknowledgements and immutable delivery receipts as the bound owner member.",
+  "replay": { "status": "changed", "detail": "Locally written acknowledgements and receipts retain authenticated member authorship for the same historical authority checks used after replication." },
+  "schema": { "status": "none", "detail": "This write surface uses the existing acknowledgement and receipt contracts." },
+  "rules": { "status": "changed", "detail": "Writes require the exact admitted owner incarnation and valid acknowledgement chain. Runtime actor assertions do not grant receipt authority." },
+  "compatibility": { "status": "none", "detail": "The internal store surface adds no paired-client capability or smallclaims API change." },
+  "downtime": { "status": "none", "detail": "No deployment outage is required." },
+  "manual": { "status": "changed", "detail": "The selected owner acknowledges its exact owner and runtime bindings before recording delivery evidence." },
+  "recovery": { "status": "changed", "detail": "Restore the selected owner's prerequisites or repair an explicit conflict before retrying. Do not elect a fallback owner or manufacture a closing acknowledgement." }
+}
