@@ -197,6 +197,7 @@ bundled_app_kit_inputs = (
     "apps/fractal-web/src/monitor/UsageSection.tsx",
     "apps/fractal-web/src/monitor/model.ts",
     "apps/fractal-web/src/monitor/state.ts",
+    "apps/fractal-web/src/monitor/usageSectionState.ts",
     "apps/fractal-web/src/monitor/usageSectionView.ts",
     "apps/fractal-web/src/monitor/wire.ts",
     "apps/fractal-web/src/shell/sameFolderFleet.ts",
@@ -281,6 +282,7 @@ bundled_app_kit_inputs = (
 assert detector_contract["kit_paths"](bundled_app_kit_inputs) == list(bundled_app_kit_inputs)
 assert not detector_contract["kit_paths"]([
     "apps/fractal-web/src/missions/missionTitle.unit.test.ts",
+    "apps/fractal-web/src/monitor/usageSectionState.unit.test.ts",
     "apps/fractal-web/src/web/themePreference.unit.test.ts",
     "apps/fractal-web/src/workspace/model.unit.test.ts",
     "apps/fractal-web/src/plugins/github/model.unit.test.ts",
