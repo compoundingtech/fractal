@@ -79,7 +79,7 @@ const SEEDS: &[u64] = &[
 fn corpus() -> &'static BTreeMap<String, fractal_schema::ClaimSpec> {
     static CORPUS: std::sync::LazyLock<BTreeMap<String, fractal_schema::ClaimSpec>> =
         std::sync::LazyLock::new(|| {
-            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v17.json"))
+            serde_json::from_str(include_str!("../../../fixtures/convergence/claims-v19.json"))
                 .expect("versioned convergence input schema")
         });
     &CORPUS
@@ -1855,7 +1855,7 @@ const NEVER_TRIMS: &[u64] = &[2];
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {
     let outcome = run(seed, Sabotage::None);
-    eprintln!("convergence corpus v17 seed {seed}: trimmed={}", outcome.trimmed);
+    eprintln!("convergence corpus v19 seed {seed}: trimmed={}", outcome.trimmed);
     if let Some(failure) = &outcome.failure {
         panic!("seed {seed} failed\n{failure}");
     }
@@ -2084,7 +2084,7 @@ fn fixed_sweep() {
         directory.join("summary.json"),
         serde_json::to_vec_pretty(&json!({
             "first":first, "count":count, "failures":failures,
-            "identity":"seeded-convergence-v1", "corpus":"claims-v17.json"
+            "identity":"seeded-convergence-v1", "corpus":"claims-v19.json"
         }))
         .unwrap(),
     )

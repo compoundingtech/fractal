@@ -236,6 +236,14 @@ The first characterization run failed only the four stale v14 trim expectations.
 Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v16.json`.
 Shared RNG draws shift: all 32 fixed seeds converge; 30 trim, exactly `[2, 34]` never trim (27 now trims). Refresh claims stay whole.
 
-`claims-v17.json` adds `read-position.advanced` (a person's forward-only read position per conversation); v1–v16 stay frozen.
-Generate with `cargo run -p fractal-schema --example claims_json -- fixtures/convergence/claims-v17.json`; do not hand-edit it.
-The simulation draws no read-position subject; re-characterize the never-trim seeds after generating.
+`claims-v19.json` captures the complete merged registry, including operation receipts from main
+and `read-position.advanced` (a person's forward-only read position per conversation).
+Versions 1 through 17 remain frozen. Version 18 is reserved by the independent mail-expiry change
+(#6216); the loader selects one literal filename and does not require contiguous version numbers.
+Generate v19 with
+`cargo run --locked -p fractal-schema --example claims_json -- fixtures/convergence/claims-v19.json`;
+do not hand-edit it. As in #6216, the native generator supplies admissible fields and actors, and
+the focused read-position regression checks admission and oracle replication, not just membership.
+Changing the selected kind list and each kind's random draws changes subsequent actions in the
+shared SplitMix64 schedule, including checkpoint work. A previous corpus's trim characterization
+is not evidence for this corpus; never add trim exceptions without observing the generated inputs.
