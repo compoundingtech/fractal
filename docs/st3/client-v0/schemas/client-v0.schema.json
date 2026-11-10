@@ -637,6 +637,9 @@
       "pairing-key-binding-required",
       "pairing-already-claimed",
       "pairing-claim-invalid",
+      "pairing-route-not-allowed",
+      "pairing-result-pending",
+      "pairing-result-expired",
       "suspend-authored-session-selection",
       "stale-fence",
       "cursor-gap",
@@ -4351,6 +4354,95 @@
         "status": { "enum": ["awaiting-key", "awaiting-approval", "approved", "completed", "expired"] },
         "device_key_fingerprint": { "type": "string", "pattern": "^sha256:[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$" },
         "expires_at": { "$ref": "#/$defs/Timestamp" }
+      }
+    },
+    "PairingFabricPermit": {
+      "description": "Cold-bootstrap permit. Secret stays in memory only, is never logged or persisted, and is cleared when the attempt ends. Node ID pins the gateway dial target.",
+      "type": "object", "additionalProperties": false, "required": ["node_id", "attempt_id", "secret"],
+      "properties": {
+        "node_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "attempt_id": { "type": "string", "minLength": 1 },
+        "secret": { "type": "string", "minLength": 1, "x-st-codec": "redacted" }
+      }
+    },
+    "PairingQrPayload": {
+      "description": "Version 1 retains its six fields. Version 2 adds exactly fabric. A cold client ignores gateway and dials the pinned fabric.node_id; there is no HTTP fallback.",
+      "type": "object", "additionalProperties": false,
+      "required": ["_tag", "version", "gateway", "id", "code", "expires_at_unix_ms"],
+      "properties": {
+        "_tag": { "const": "fractal.pairing" }, "version": { "enum": [1, 2] },
+        "gateway": { "type": "string", "format": "uri" }, "id": { "$ref": "#/$defs/Id" },
+        "code": { "type": "string", "pattern": "^[A-Z2-9]{8}$" },
+        "expires_at_unix_ms": { "type": "integer" }, "fabric": { "$ref": "#/$defs/PairingFabricPermit" }
+      },
+      "oneOf": [
+        { "properties": { "version": { "const": 1 }, "fabric": false } },
+        { "required": ["fabric"], "properties": { "version": { "const": 2 } } }
+      ]
+    },
+    "PairingAdmissionPending": {
+      "description": "Exchange completion acknowledges durable S1 only, never a credential or a grant.",
+      "type": "object", "additionalProperties": false, "required": ["state", "pairing_id"],
+      "properties": { "state": { "const": "admission-pending" }, "pairing_id": { "$ref": "#/$defs/Id" } }
+    },
+    "PairingExchangeRequest": {
+      "description": "One UTF-8 JSON envelope per Fabric exchange message. Request IDs are unique per attempt. Only capabilities, claim, complete and ack are allowed; complete requires a successful claim.",
+      "type": "object", "additionalProperties": false, "required": ["v", "request_id", "op", "body"],
+      "properties": { "v": { "const": 1 }, "request_id": { "type": "string", "minLength": 1 }, "op": { "enum": ["capabilities", "claim", "complete", "ack"] }, "body": {} },
+      "oneOf": [
+        { "properties": { "op": { "const": "capabilities" }, "body": { "type": "object", "additionalProperties": false } } },
+        { "properties": { "op": { "const": "claim" }, "body": { "$ref": "#/$defs/PairingKeyClaim" } } },
+        { "properties": { "op": { "const": "complete" }, "body": { "$ref": "#/$defs/PairingComplete" } } },
+        { "properties": { "op": { "const": "ack" }, "body": { "type": "object", "additionalProperties": false, "required": ["request_id"], "properties": { "request_id": { "type": "string", "minLength": 1 } } } } }
+      ]
+    },
+    "PairingExchangeRefusal": {
+      "type": "object", "additionalProperties": false, "required": ["code", "message"],
+      "properties": { "code": { "$ref": "#/$defs/ErrorCode" }, "message": { "type": "string" } }
+    },
+    "PairingExchangeReply": {
+      "description": "Completion returns admission-pending, never a usable completion body. A typed refusal is queued until ack or the permit deadline, then the attempt is rejected. Ack has no authority effect.",
+      "type": "object", "additionalProperties": false, "required": ["v", "request_id", "ok"],
+      "properties": { "v": { "const": 1 }, "request_id": { "type": "string" }, "ok": { "type": "boolean" }, "body": { "oneOf": [{ "$ref": "#/$defs/PairingAdvertisement" }, { "$ref": "#/$defs/PairingKeyStatus" }, { "$ref": "#/$defs/PairingAdmissionPending" }, { "type": "object", "additionalProperties": false }] }, "refusal": { "$ref": "#/$defs/PairingExchangeRefusal" } },
+      "oneOf": [
+        { "required": ["body"], "properties": { "ok": { "const": true }, "refusal": false } },
+        { "required": ["refusal"], "properties": { "ok": { "const": false }, "body": false } }
+      ]
+    },
+    "PairingResultRequest": {
+      "description": "POST /v1/client/pairings/{id}/result, only on the isolated Fabric-preface receiver. Sign four UTF-8 lines: pairing.result.v1, full pairing ID, attempt_id, bound NodeID; single LF separators, no trailing LF. Same key/signature encoding as claim. Transport NodeID comes only from the trusted Fabric preface, never this body, a query or an HTTP header.",
+      "type": "object", "additionalProperties": false, "required": ["api_version", "attempt_id", "device_public_key", "proof"],
+      "properties": {
+        "api_version": { "enum": ["st3.client.v0", "fractal.client.v0"] }, "attempt_id": { "type": "string", "minLength": 1 },
+        "device_public_key": { "type": "string", "minLength": 32 },
+        "proof": { "type": "string", "pattern": "^[A-Za-z0-9_-]{85}[AQgw]$" }
+      }
+    },
+    "PairingResultPending": {
+      "description": "Reactive hold lasts at most 30 seconds. A second hold replaces the first, returning pending to the first. Reissue immediately, stop at deadline. Deadline is retained committed_at + 600 seconds in S2/S3 or the permit deadline in S1.",
+      "type": "object", "additionalProperties": false, "required": ["code", "retryable", "deadline"],
+      "properties": { "code": { "const": "pairing-result-pending" }, "retryable": { "const": true }, "deadline": { "$ref": "#/$defs/Timestamp" } }
+    },
+    "PairingFabricConfirmRequest": {
+      "description": "Exact request persisted before calling Fabric confirm; retries use the identical body.",
+      "type": "object", "additionalProperties": false,
+      "required": ["operation", "owner", "attempt_id", "expected_node_id", "expected_attempt_revision", "expected_policy_revision", "request_id"],
+      "properties": { "operation": { "const": "confirm" }, "owner": { "type": "string" }, "attempt_id": { "type": "string" }, "expected_node_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" }, "expected_attempt_revision": { "type": "integer", "minimum": 0 }, "expected_policy_revision": { "type": "integer", "minimum": 0 }, "request_id": { "type": "string" } }
+    },
+    "PairingAdmissionRecord": {
+      "description": "Durable state only moves forward S1 admission-pending, S2 confirmed-unfinalized, S3 finalized, S4 cleanup tombstone, S5 closed. S4 is persisted before remove_peer, then grant revoke, then S5. Reconcile current owner access at startup and before transitions; absent access never resurrects. Sweep orphans only after S1 reconciliation.",
+      "type": "object", "additionalProperties": false,
+      "required": ["state", "pairing_id", "device_public_key", "bound_node_id", "creation_id", "attempt_id", "permit_deadline", "confirm_request"],
+      "properties": {
+        "state": { "enum": ["S1", "S2", "S3", "S4", "S5"] }, "pairing_id": { "$ref": "#/$defs/Id" },
+        "device_public_key": { "type": "string" }, "bound_node_id": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "creation_id": { "type": "string" }, "attempt_id": { "type": "string" }, "permit_deadline": { "$ref": "#/$defs/Timestamp" },
+        "confirm_request": { "$ref": "#/$defs/PairingFabricConfirmRequest" },
+        "confirm_receipt": { "type": "object", "description": "Full retained Fabric confirm receipt, including committed_at and policy_revision." },
+        "committed_at": { "$ref": "#/$defs/Timestamp" }, "policy_revision": { "type": "integer", "minimum": 0 },
+        "completion": { "$ref": "#/$defs/PairedSession" }, "grant_id": { "$ref": "#/$defs/Id" },
+        "result_fetched_at": { "$ref": "#/$defs/Timestamp" }, "remove_peer_receipt": { "type": "object" }, "revoke_receipt": { "type": "object" },
+        "refused": { "type": "boolean" }
       }
     },
     "PairingChallenge": {

@@ -3610,3 +3610,78 @@ null means unknown, not zero. Null reset means unknown. Freshness expires after
 the positive horizon, both for snapshot generation and each account observation;
 consumers must label expired readings stale. Unsupported versions are unavailable.
 
+
+## Fabric cold-bootstrap pairing client contract
+
+The isolated pairing receiver uses the canonical `PairingQrPayload`,
+`PairingExchangeRequest`, `PairingExchangeReply`, `PairingResultRequest` and
+`PairingAdmissionRecord` schema definitions. Production receivers are unchanged.
+Readers must support this contract before an issuer enables QR version 2.
+Version 1 retains its existing six fields and behavior.
+
+QR version 2 adds exactly `fabric: {node_id, attempt_id, secret}`. The NodeID is
+64 lowercase hexadecimal characters and pins the gateway. Dial `fabric/pair/1`
+on that NodeID; ignore `gateway` on this cold route. The secret exists only in
+memory, never logs or persistent storage, and is cleared when the attempt ends.
+The permit grants exactly the isolated client service, inbound-only, and expires
+at the earlier of the challenge expiry and ten minutes after issue.
+
+Each exchange message is one UTF-8 JSON envelope:
+`{v:1, request_id, op, body}`. Request IDs cannot repeat within an attempt.
+Allowed operations are `capabilities`, `claim`, `complete`, and `ack`.
+Other operations return `pairing-route-not-allowed`. Complete before a successful
+claim returns `pairing-claim-invalid`. Claim and complete retain their signed HTTP
+request bodies. Success is `{v:1, request_id, ok:true, body}`; refusal is
+`{v:1, request_id, ok:false, refusal:{code,message}}`. The completion body is
+`{state:"admission-pending",pairing_id}`: it contains no credential or grant.
+After queuing a refusal, the server waits for `ack` with body
+`{request_id: REFUSED_REQUEST_ID}` or the permit deadline before rejecting.
+Ack has no authority effect.
+
+The server stores the exact confirm request in S1 before calling Fabric confirm.
+The advertised completion NodeID must equal Fabric's authenticated bound NodeID.
+After confirm the server persists the retained receipt as S2, then atomically
+finalizes exactly one grant and stores the completion body as S3. Fabric confirm
+and the grant are separate durable transactions; S1 and S2 never return credentials.
+The client reads restricted Fabric status after disconnect or completion, clears
+the secret on a terminal state, and on confirmed dials the isolated client service.
+It verifies the remote NodeID against the QR pin before sending any request.
+
+POST `/v1/client/pairings/{id}/result` takes
+`{api_version,attempt_id,device_public_key,proof}`. Sign exactly four UTF-8 lines:
+`pairing.result.v1`, full pairing ID, attempt ID, bound NodeID. Separate lines
+with one LF byte and omit a trailing LF. Key and signature encodings are the
+same as claim. The key must be the approved key. Transport NodeID comes only
+from the trusted Fabric preface on the dedicated isolated Unix receiver,
+never a body, query or HTTP header. The ordinary receiver refuses this route.
+Wrong key or preface NodeID returns `pairing-key-mismatch`; missing preface is
+refused. This receiver also serves credential-authenticated client routes, using
+the same trusted preface identity rather than a caller-supplied header.
+
+Result returns the identical stored completion body in S3 without creating a
+grant. In S1 or S2 it waits reactively at most 30 seconds, then returns
+`pairing-result-pending`, `retryable:true`, and RFC3339 `deadline`.
+The deadline is the permit deadline in S1, or retained Fabric `committed_at`
+plus 600 seconds after confirm. Only one hold is open per pairing: a new hold
+replaces the previous hold, which returns pending. The client immediately
+reissues pending requests and stops at the deadline. A transition wakes a hold,
+including reconciliation after restart. S4 and S5 return terminal
+`pairing-result-expired`. A usable session requires result fetch followed by one
+credential-authenticated client request.
+
+Reconcile at startup and before every transition using current Fabric owner
+access provenance, never a historical confirmed receipt alone. Retry S1 pending
+with the identical persisted confirm request; S1 confirmed moves to S2 first.
+Expired, rejected or exchange-lost S1 attempts close refused with no grant.
+S2 with current owner access and before the retained deadline finalizes once;
+missing access in S2 or S3 enters S4 and never re-adds the peer. If no successful
+result fetch has occurred by the retained deadline, enter S4. Revoke uses the
+same path. Persist S4 before idempotent peer removal, then revoke any grant,
+then persist S5. S4 and S5 cannot resurrect access.
+
+Sweep orphan peers only after reconciling S1. A confirmed S1 attempt first moves
+to S2 and must not be swept. Unknown pairing IDs and peers whose pairing record
+is S4, S5 or refused enter cleanup. A finalized grant with no owner record also
+enters cleanup. No static add-peer, HTTP, pre-grant, or saved-gateway fallback
+is permitted.
+
