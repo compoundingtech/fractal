@@ -1591,8 +1591,8 @@ pub fn run(context: Context) -> Result<()> {
                         let agent = agent.clone();
                         let fallback = ui.terminal_fallback;
                         let task = runtime.spawn(async move {
-                            // A shell has no other view to fall back to, and one started a moment ago
-                            // can be refused while st settles which host runs it: wait, say why, retry.
+                            // Discovery refusals may settle for a new shell. Capability timeouts
+                            // retry inside attach_terminal, keeping its selected incarnation.
                             let delays: &[Duration] = if agent.starts_with("terminal/") {
                                 &attach::RETRY_DELAYS
                             } else {
@@ -1603,6 +1603,7 @@ pub fn run(context: Context) -> Result<()> {
                                     .map_err(|_| "attach setup cancelled".to_owned())?;
                                 retry_attach(
                                     delays,
+                                    true,
                                     || wanted.load(Ordering::Relaxed),
                                     |reason| {
                                         let _ = tx.send(Fetched::AttachWaiting {
@@ -3239,6 +3240,7 @@ mod tests {
                 .unwrap()
                 .block_on(retry_attach(
                     &vec![Duration::ZERO; delays],
+                    true,
                     || true,
                     |reason| said.push(reason.to_owned()),
                     || {
@@ -3284,9 +3286,56 @@ mod tests {
             Some(&fractal_client::ErrorCode::NotFound),
             "terminal/x"
         )));
-        // Transient shell discovery may retry briefly, but a phase timeout is never retried.
+        // Capability issuance opens no PTY; upgrade cancellation has no cleanup receipt.
         assert_eq!(super::attach::RETRY_DELAYS.iter().sum::<Duration>(), Duration::from_secs(3));
+        assert!(super::worth_retrying("raw terminal capability timed out"));
+        assert!(!super::worth_retrying("raw terminal connect/upgrade (including auth and owner-open) timed out"));
+        assert!(!super::worth_retrying("raw terminal first-frame timed out"));
         assert!(!super::worth_retrying("raw terminal stream timed out"));
+    }
+
+    #[test]
+    fn setup_timeouts_retry_only_capability_and_drop_each_attempt_before_retry() {
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        struct Cleanup(Arc<AtomicUsize>);
+        impl Drop for Cleanup {
+            fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time().build().unwrap();
+        for phase in [
+            attach::SetupPhase::Capability,
+            attach::SetupPhase::Upgrade,
+            attach::SetupPhase::FirstFrame,
+        ] {
+            let attempts = Arc::new(AtomicUsize::new(0));
+            let cleaned = Arc::new(AtomicUsize::new(0));
+            let result: Result<(), String> = runtime.block_on(retry_attach(
+                &[Duration::ZERO; attach::RETRY_DELAYS.len()],
+                false,
+                || true,
+                |_| {},
+                || {
+                    let attempt = attempts.fetch_add(1, Ordering::SeqCst);
+                    assert_eq!(cleaned.load(Ordering::SeqCst), attempt,
+                        "the previous setup future must be dropped before another starts");
+                    let guard = Cleanup(cleaned.clone());
+                    async move {
+                        attach::phase(phase.name(), Duration::from_millis(1), async move {
+                            let _guard = guard;
+                            std::future::pending::<Result<(), String>>().await
+                        }).await
+                    }
+                },
+            ));
+            let reason = result.unwrap_err();
+            assert_eq!(attach::SetupPhase::timeout(&reason), Some(phase));
+            let expected = if phase.retry_safe() { 3 } else { 1 };
+            assert_eq!(attempts.load(Ordering::SeqCst), expected);
+            assert_eq!(cleaned.load(Ordering::SeqCst), expected);
+        }
+        assert_eq!(attach::SetupPhase::timeout("raw terminal stream timed out"), None);
+        assert_eq!(attach::SetupPhase::timeout("raw terminal capability refused"), None);
     }
 
     #[test]
@@ -3301,6 +3350,7 @@ mod tests {
             .unwrap()
             .block_on(retry_attach(
                 &[Duration::ZERO; 20],
+                true,
                 || wanted.get(),
                 |_| {
                     said += 1;
@@ -5080,6 +5130,9 @@ fn connecting_text(waited: Duration) -> String {
 /// runs the terminal, that host is briefly out of reach, or st asked for a pause. A terminal that
 /// is gone, restarted or not allowed is not retried.
 fn worth_retrying(reason: &str) -> bool {
+    if let Some(phase) = attach::SetupPhase::timeout(reason) {
+        return phase.retry_safe();
+    }
     [
         "cannot tell yet which host",
         "cannot be reached right now",
@@ -5095,6 +5148,7 @@ fn worth_retrying(reason: &str) -> bool {
 /// as `wanted` says nobody is waiting any more (the tab was closed).
 async fn retry_attach<T, Fut>(
     delays: &[Duration],
+    transient_refusals: bool,
     wanted: impl Fn() -> bool,
     mut waiting: impl FnMut(&str),
     mut attempt: impl FnMut() -> Fut,
@@ -5105,7 +5159,8 @@ where
     let mut delays = delays.iter();
     loop {
         match attempt().await {
-            Err(reason) if worth_retrying(&reason) => match delays.next() {
+            Err(reason) if worth_retrying(&reason)
+                && (transient_refusals != attach::SetupPhase::timeout(&reason).is_some()) => match delays.next() {
                 Some(delay) if wanted() => {
                     waiting(&reason);
                     tokio::time::sleep(*delay).await;
@@ -5259,13 +5314,21 @@ async fn attach_terminal(
         }
         direct::Opened::UseGateway { route } => route,
     };
-    let attachment = attach::phase("raw terminal attachment", attach::GATEWAY, async {
-        client.raw_terminal_attachment(terminal, &incarnation, fractal_client::RawTerminalMode::Attach)
-            .await.map_err(|error| format!("{route}: {}", error.human()))
-    }).await?;
+    // Retry only this pre-open phase, not discovery: every attempt keeps the same incarnation.
+    let attachment = retry_attach(
+        &attach::RETRY_DELAYS,
+        false,
+        || true,
+        |_| {},
+        || attach::phase(attach::SetupPhase::Capability.name(), attach::GATEWAY, async {
+            client.raw_terminal_attachment(terminal, &incarnation, fractal_client::RawTerminalMode::Attach)
+                .await.map_err(|error| format!("{route}: {}", error.human()))
+        }),
+    ).await?;
     // An unused capability opens no PTY and expires on the server after 60 seconds.
-    // Once upgraded, dropping the stream cancels its bridge, including on task abort.
-    let stream = attach::phase("raw terminal stream", attach::GATEWAY, async {
+    // Cancelling this upgrade does not acknowledge completion of remote owner cleanup;
+    // unlike capability issuance, its timeout must not trigger another attachment.
+    let stream = attach::phase(attach::SetupPhase::Upgrade.name(), attach::GATEWAY, async {
         client.raw_terminal_stream(&attachment).await
             .map_err(|error| format!("{route}: {}", error.human()))
     }).await?;
