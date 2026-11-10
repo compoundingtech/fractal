@@ -80,6 +80,11 @@ function TabFace({ tab, showCount, showIcon = true }: { readonly tab: SidebarTab
   </span>
 }
 
+/** The sidebar tab count alone, for other tab rows: 16px, a true circle around one digit, amber only when it needs the person. Painted; the tab's name carries the words. */
+export function CountPill({ count, needsYou = false }: { readonly count: number; readonly needsYou?: boolean }) {
+  return <span aria-hidden="true" data-sidebar-tab-marker={needsYou ? 'needs-you' : 'count'} data-sidebar-tab-count={count > 99 ? '99+' : count} {...stylex.props(styles.pill, needsYou ? styles.attention : styles.neutral)} />
+}
+
 /**
  * Controlled sidebar tabs (React Aria): ←/→ move between tabs, Home/End to the ends. Every tab spans the full row and labels
  * never truncate; when the row cannot hold every count, all counts drop together and attention stays as a dot.

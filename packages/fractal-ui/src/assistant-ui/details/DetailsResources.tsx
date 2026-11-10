@@ -332,7 +332,7 @@ function resourceIcon(resource: DetailsResource): IconName {
     case 'mission': return 'message'
     case 'attention': return 'alert'
     case 'session': return resource.glyph === '◷' ? 'clock' : 'message'
-    default: return resource.card.kind === 'diff' ? 'pencil' : 'attach'
+    default: return resource.card.kind === 'diff' ? 'pencil' : 'info'
   }
 }
 
@@ -351,6 +351,14 @@ function DenseRow({ resource, now, open }: { resource: DetailsResource; now: num
   const facts = [...new Set([meta, resource.agent === undefined ? resource.card.detail : undefined, resource.file !== undefined && resource.file.path !== resource.card.label ? resource.file.path : undefined])].filter((fact): fact is string => fact !== undefined && fact !== '')
   const descriptionId = React.useId()
   const narrow = React.useContext(NarrowLayoutContext)
+  // Reported facts have nothing to open yet, so this is plain text until resource rows get their own design.
+  if (resource.uri.startsWith('details:') || resource.uri.startsWith('session:')) return <div data-resource-card data-details-resource-static role="listitem" {...stylex.props(styles.denseEntry, styles.staticRow)}>
+    <span data-details-resource-icon={resourceIcon(resource)} {...stylex.props(styles.resourceIcon)}><Icon name={resourceIcon(resource)} /></span>
+    <span {...stylex.props(styles.staticText)}>
+      <span data-details-resource-title {...stylex.props(styles.wrappedLabel)}>{resource.card.label}</span>
+      {resource.card.detail === '' ? null : <span {...stylex.props(styles.staticDetail)}>{resource.card.detail}</span>}
+    </span>
+  </div>
   return <div data-resource-card role="listitem" {...dragProps} {...stylex.props(styles.denseEntry)}><TooltipTrigger delay={150}>
     <AriaButton data-details-resource-row aria-describedby={facts.length > 0 ? descriptionId : undefined} onPress={event => open(paneKey, event.metaKey || event.ctrlKey)} {...stylex.props(styles.denseRow, narrow && styles.touchRow)}>
       <span data-details-resource-icon={resourceIcon(resource)} {...stylex.props(styles.resourceIcon)}><Icon name={resourceIcon(resource)} /></span>
@@ -406,6 +414,10 @@ const styles = stylex.create({
   // Identity labels wrap in full (no clamp) with balanced lines: a long branch never leaves one orphaned word beside its badge.
   wrappedLabel: { whiteSpace: 'normal', overflow: 'visible', overflowWrap: 'anywhere', textWrap: 'balance' },
   denseMeta: { marginInlineStart: 'auto', color: ink.fgMuted, fontSize: t.microSize },
+  // Holds the place of a properly designed fact row; nothing else depends on it.
+  staticRow: { display: 'flex', alignItems: 'flex-start', gap: s.md, paddingBlock: s.xs },
+  staticText: { display: 'flex', flexDirection: 'column', minWidth: 0 },
+  staticDetail: { color: ink.fgMuted, fontSize: t.microSize, overflowWrap: 'anywhere' },
   contentShell: { display: 'flex', flexDirection: 'column', minWidth: 0 },
   content: { display: 'flex', flexDirection: 'column', gap: s.sm, minWidth: 0 },
   skeletonHidden: { visibility: 'hidden' },
