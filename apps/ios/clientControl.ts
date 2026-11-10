@@ -1,56 +1,70 @@
-import type { DeviceCommand, PhoneNavigateArgs } from '../../clients/typescript/fractal-client';
-import { authorizeClientControl, revokeClientControl } from './clientControlWire.ts';
-
-/** App-local committed route; item IDs are present only when actually observed. */
-export type VisibleState =
-  | { readonly screen: 'NowRoot'; readonly itemIds?: readonly string[] }
-  | { readonly screen: 'Attention'; readonly id: string; readonly itemIds?: readonly string[] };
-
-/** UI projection only. This is not a wire grant and cannot establish authority. */
-export interface ActiveControlGrant {
-  readonly runId: string;
-  readonly revokeState: 'available' | 'pending' | 'failed';
-}
+import { CLIENT_RESULT_PURPOSE, type ClientControlGrant, type ClientResultBinding, type ClientVisibleState, type DeviceCommand, type PhoneNavigateArgs } from '../../clients/typescript/fractal-client';
 
 export interface ClientControlPorts {
-  navigate(args: PhoneNavigateArgs): void;
-  visible(): VisibleState | undefined;
+  identity: { device: string; session: string };
   foreground(): boolean;
+  visible(): ClientVisibleState | undefined;
+  navigate(args: PhoneNavigateArgs): Promise<void>;
+  result(binding: ClientResultBinding, current: () => boolean): Promise<void>;
+  revoke(): Promise<void>;
 }
-
-/** Pure navigation only: no answer, close, read-state or result capability. */
-export const navigateClientControl = (args: PhoneNavigateArgs, navigate: ClientControlPorts['navigate']): boolean => {
-  if (args.screen !== 'NowRoot' && args.screen !== 'Attention') return false;
-  navigate(args);
-  return true;
-};
-
-/** Local policy only; the wire adapter must independently establish grant authority. */
-export const applyGrantedClientControl = (command: DeviceCommand, scope: { verbs: readonly string[]; screens: readonly string[] }, ports: ClientControlPorts): void => {
-  if (!scope.verbs.includes(command.command_kind) || !ports.foreground()) return;
-  if (command.command_kind === 'phone.inspect') { ports.visible(); return; }
-  if (command.command_kind !== 'phone.navigate' || !scope.screens.includes(command.args.screen)) return;
-  navigateClientControl(command.args, ports.navigate);
-};
-
+const v1Screen = (screen: string): boolean => screen === 'NowRoot' || screen === 'Attention';
 export class ClientControlController {
+  private grant: ClientControlGrant | undefined;
+  private listeners = new Set<() => void>();
+  private expires: ReturnType<typeof setTimeout> | undefined;
+  private pending = Promise.resolve();
+  private disposed = false;
+  private revoked = false;
+  private epoch = 0;
+  private seen = new Map<string, Set<string>>();
   constructor(private readonly ports: ClientControlPorts) {}
-
-  // #6274: no authoritative generated grant source exists. The snapshot is
-  // permanently absent, so there are no store changes to subscribe to yet.
-  readonly getGrant = (): ActiveControlGrant | undefined => undefined;
-  readonly subscribe = (_listener: () => void): (() => void) => () => {};
-
-  readonly handle = async (command: DeviceCommand): Promise<void> => {
-    const grant = this.getGrant();
-    if (!authorizeClientControl(command, { grant, foreground: this.ports.foreground })) return;
-    if (!grant) return;
-    applyGrantedClientControl(command, { verbs: ['phone.inspect', 'phone.navigate'], screens: ['NowRoot', 'Attention'] }, this.ports);
-    // No result is posted: signing/encoding must come from #6274 codegen.
+  // TODO #6274: only a generated lifecycle resource may publish the idle run indicator.
+  readonly getGrant = (): ClientControlGrant | undefined => undefined;
+  readonly subscribe = (listener: () => void): (() => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; };
+  readonly suspend = (): void => {
+    this.epoch++; clearTimeout(this.expires); this.grant = undefined;
+    for (const listener of this.listeners) listener();
   };
-
-  readonly revoke = async (): Promise<void> => {
-    // Do not clear UI state or claim enrollment ended when wire revoke is absent.
-    await revokeClientControl(this.getGrant());
+  readonly dispose = (): void => { this.disposed = true; this.suspend(); this.listeners.clear(); };
+  readonly revoke = async (): Promise<void> => { this.revoked = true; this.suspend(); await this.ports.revoke(); };
+  private authorized(command: DeviceCommand, grant: ClientControlGrant): boolean {
+    const now = Date.now();
+    return !this.disposed && !this.revoked && grant.state === 'active'
+      && command.device_id === this.ports.identity.device && grant.device === this.ports.identity.device
+      && command.session_actor === this.ports.identity.session && grant.session === this.ports.identity.session
+      && command.grant_id === grant.grant_id && command.run_id === grant.run_id && command.issued_by === grant.actor_agent
+      && Date.parse(grant.expires_at) > now && Date.parse(command.expires_at) > now
+      && (command.command_kind === 'phone.inspect' || command.command_kind === 'phone.navigate') && grant.verbs.includes(command.command_kind)
+      && (command.command_kind !== 'phone.navigate' || v1Screen(command.args.screen) && grant.screens.includes(command.args.screen)
+        && (!grant.item_id || command.args.screen !== 'Attention' || command.args.params.id === grant.item_id));
+  }
+  readonly handle = (command: DeviceCommand): Promise<void> => {
+    const epoch = this.epoch;
+    const task = this.pending.then(() => epoch === this.epoch ? this.apply(command) : undefined);
+    this.pending = task.catch(() => {});
+    return task;
   };
+  private async apply(command: DeviceCommand): Promise<void> {
+    const grant = command.control_grant;
+    if (grant?.grant_id === this.grant?.grant_id && grant?.state !== 'active') this.suspend();
+    if (!grant || command.state !== 'delivered' || !this.authorized(command, grant)) return;
+    const seen = this.seen.get(grant.grant_id) ?? new Set<string>();
+    if (seen.has(command.id) || seen.size >= grant.max_commands) return;
+    seen.add(command.id); this.seen.set(grant.grant_id, seen);
+    this.grant = grant; clearTimeout(this.expires);
+    this.expires = setTimeout(this.suspend, Math.min(Date.parse(grant.expires_at) - Date.now(), 2_147_483_647));
+    for (const listener of this.listeners) listener();
+    const epoch = this.epoch;
+    const current = () => epoch === this.epoch && this.grant === grant && this.authorized(command, grant);
+    const foreground = this.ports.foreground();
+    if (foreground && command.command_kind === 'phone.navigate') await this.ports.navigate(command.args);
+    if (!current()) return;
+    const visible = this.ports.visible();
+    if (!visible || !v1Screen(visible.screen) || !grant.screens.includes(visible.screen)
+      || grant.item_id && visible.screen === 'Attention' && visible.opened_item?.id !== grant.item_id) return;
+    await this.ports.result({ purpose: CLIENT_RESULT_PURPOSE, command_kind: command.command_kind === 'phone.inspect' ? 'phone.inspect' : 'phone.navigate',
+      device: grant.device, session: grant.session, grant_id: grant.grant_id, run_id: grant.run_id, command_id: command.id,
+      outcome: foreground && this.ports.foreground() ? 'completed' : 'not-foreground', error_code: null, visible_state: visible }, current);
+  }
 }

@@ -140,6 +140,7 @@ export class Feed {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private stream: CollectionStream | undefined;
   private commands: ((command: DeviceCommand) => void) | undefined;
+  private commandsReset: (() => void) | undefined;
   private cancelOpen: (() => void) | undefined;
   private windows: Partial<Record<FeedWindow, CollectionWindow>> = {};
   private terminal: TerminalFollow | undefined;
@@ -184,12 +185,14 @@ export class Feed {
   }
 
   /** Test clients alone may consume commands, on this pairing's existing socket. */
-  followCommands(testMode: boolean, granted: boolean, receive: (command: DeviceCommand) => void): () => void {
+  followCommands(testMode: boolean, granted: boolean, receive: (command: DeviceCommand) => void, reset?: () => void): () => void {
     if (!testMode || !granted) return () => {};
     this.commands = receive;
+    this.commandsReset = reset;
     this.stream?.subscribe('commands', 'commands');
     return () => {
       if (this.commands !== receive) return;
+      this.commandsReset?.(); this.commandsReset = undefined;
       this.commands = undefined;
       this.stream?.unsubscribe('commands');
     };
@@ -264,6 +267,7 @@ export class Feed {
   }
 
   private suspend(unexpected = false): void {
+    this.commandsReset?.();
     this.attempt++;
     this.cancelOpen?.();
     this.cancelOpen = undefined;
@@ -416,9 +420,11 @@ export class Feed {
   }
 
   private frame(frame: CollectionFrame, received: number): void {
+    if ((frame.kind === 'resync' || frame.kind === 'error') && frame.id === 'commands') { this.commandsReset?.(); return; }
     if ((frame.kind === 'snapshot' || frame.kind === 'changes') && frame.collection === 'commands' && frame.id === 'commands') {
+      if (frame.kind === 'snapshot' || frame.removes.length) this.commandsReset?.();
       for (const command of frame.kind === 'snapshot' ? frame.items : frame.upserts) {
-        if (command.kind === 'device-command' && command.state === 'delivered') this.commands?.(command);
+        if (command.kind === 'device-command') this.commands?.(command);
       }
       return;
     }

@@ -1,11 +1,11 @@
 {
   "version": 1,
-  "summary": "Gate iOS test-client commands on test mode and capability; keep control disabled until the generated grant and signed-result contract is available",
+  "summary": "Add capability-gated iOS test-client command admission and canonical signed-result support; native lifecycle integration remains disabled pending codegen",
   "replay": {"status": "none", "detail": "No claim replay changes."},
   "schema": {"status": "none", "detail": "No schema changes or handwritten wire models."},
   "rules": {"status": "none", "detail": "No checkpoint rule changes."},
   "compatibility": {"status": "none", "detail": "Normal apps never subscribe to commands; test-client commands fail closed without an authoritative grant source."},
   "downtime": {"status": "none", "detail": "No deployment or native installation."},
-  "manual": {"status": "none", "detail": "No pairing or enrollment performed; test-client flag and canonical codegen are prerequisites."},
-  "recovery": {"status": "none", "detail": "No persisted state changes."}
+  "manual": {"status": "none", "detail": "No pairing or enrollment performed; test-client flag, lifecycle codegen and native SHA-256 adapter are prerequisites."},
+  "recovery": {"status": "none", "detail": "No persisted state changes in the command policy layer."}
 }

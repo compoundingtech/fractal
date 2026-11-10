@@ -5,13 +5,13 @@ import { fakeClient } from './fakeFeed.mjs';
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 20));
 for (const [testMode, granted] of [[undefined, true], [false, false], [false, true], [true, false], [true, true]]) {
-  test(`commands subscription test mode=${testMode} capability=${granted}`, { todo: '#6274 codegen: base client index exports absent ClientControl.generated.ts' }, async () => {
+  test(`commands subscription test mode=${testMode} capability=${granted}`, async () => {
     const { Feed } = await import('./feed.ts');
     const { client, sockets } = fakeClient();
     const foreground = new ForegroundGate('active');
     const feed = new Feed(client, { onWindow() {}, onConnection() {} }, foreground, () => 'action/test');
-    const received = [];
-    const stop = feed.followCommands(testMode, granted, command => received.push(command));
+    const received = []; let resets = 0;
+    const stop = feed.followCommands(testMode, granted, command => received.push(command), () => { resets++; });
     await settle();
     const subscribed = () => sockets.at(-1).sent.some(frame => frame.collection === 'commands');
     assert.equal(subscribed(), testMode === true && granted);
@@ -21,6 +21,7 @@ for (const [testMode, granted] of [[undefined, true], [false, false], [false, tr
     assert.equal(received.length, testMode === true && granted ? 1 : 0);
     foreground.update('background');
     assert.equal(sockets[0].closed, true);
+    assert.equal(resets > 0, testMode === true && granted, 'background invalidates grant authority');
     foreground.update('active');
     await settle();
     assert.equal(subscribed(), testMode === true && granted, 'same policy applies on reconnect');
