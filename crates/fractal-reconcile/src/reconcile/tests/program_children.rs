@@ -323,16 +323,18 @@ fn children_are_cancelled_with_their_run_or_their_step_and_a_retry_starts_a_new_
     let retried = fixture.start("retried", "child");
     fixture.until("the second parent's child starts", || fixture.child(&retried.step, "publish", 1).is_some());
     let attempt_one = fixture.child(&retried.step, "publish", 1).unwrap();
-    // The program step fails while its run goes on (it has another attempt): its child is
-    // cancelled in that evaluation.
+    // The program step fails while its run goes on (it has another attempt): its child's
+    // cancellation is requested in that evaluation.
     fixture.store.set_step_state(&retried.step, "failed", Some("the active execution timeout expired")).unwrap();
     fixture.reconciler.evaluate_changed_mission_runs().unwrap();
-    assert_eq!(fixture.run_status(&attempt_one), "cancelled");
+    let cancelling = fixture.store.mission_run(&attempt_one).unwrap().unwrap();
+    assert_ne!((cancelling.status.as_str(), cancelling.phase.as_str()), ("running", "normal"));
     assert_eq!(fixture.run_status(&retried.run), "running");
     // The retried attempt starts from the top with a new child.
     fixture.until("attempt 2 starts its child", || fixture.child(&retried.step, "publish", 2).is_some());
     let attempt_two = fixture.child(&retried.step, "publish", 2).unwrap();
     assert_ne!(attempt_two, attempt_one);
+    assert_eq!(fixture.run_status(&attempt_one), "cancelled");
     assert_eq!(fixture.result(&retried.step, "publish", 1), None);
     // A child that fails is a typed failure in its parent.
     let child_step = fixture.store.mission_run(&attempt_two).unwrap().unwrap().steps.remove(0).subject;
