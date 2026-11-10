@@ -15750,15 +15750,12 @@ pub fn catch_up_projection_distinguishes_inline_local_writes_from_new_admission_
         source.bind_fleet(FLEET).unwrap();
         target.bind_fleet(FLEET).unwrap();
         let append = |store: &Store, index: usize| {
-            store.append_claim(&ClaimInput {
-                subject: format!("custom/projection-watermark/{index}"),
-                kind: "custom.projection-watermark".into(),
-                actor: None,
-                fields: BTreeMap::new(),
-                evidence: Vec::new(),
-                expected_subject: None,
-                idempotency_key: None,
-            }).unwrap();
+            store.put_document(
+                &format!("doc/projection-watermark/{index}"),
+                b"An invented local write.",
+                &None,
+                &format!("projection-watermark-{index}"),
+            ).unwrap();
         };
         let admit = || {
             let mut inventory = target.replication_inventory().unwrap();
