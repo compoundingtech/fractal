@@ -5400,14 +5400,40 @@ fn message_delivery_for(
         })
     };
     let mut status = message.status.clone();
-    if let Some(host) = message_reads::relay_host(store, message)? {
-        match relayed {
-            Some(message_reads::Relayed::Answered { status: Some(relayed), .. }) => {
-                if crate::store::message_marks::rank(relayed) > crate::store::message_marks::rank(&status) {
-                    status = (*relayed).to_owned();
-                }
+    let host = message_reads::relay_host(store, message)?;
+    if host.is_some()
+        && let Some(message_reads::Relayed::Answered { status: Some(relayed), .. }) = relayed
+        && crate::store::message_marks::rank(relayed) > crate::store::message_marks::rank(&status)
+    {
+        status = (*relayed).to_owned();
+    }
+    // Durable expiry wins over seat diagnostics and an unavailable remote, but
+    // never over actual consumption, including a receipt just relayed by its host.
+    if let Some(expiry) = store.message_expiry(&message.subject)? {
+        if expiry.superseded
+            && let Some(current) = store.message(&message.subject)?
+            && crate::store::message_marks::rank(&current.status) > crate::store::message_marks::rank(&status)
+        {
+            status = current.status;
+        }
+        if !expiry.superseded && !matches!(status.as_str(), "delivered" | "read") {
+            if host.is_some()
+                && let Some(message_reads::Relayed::Answered { consumed: Some(phase), .. }) = relayed
+            {
+                return message_delivery_value(store, &message.to, phase, sent_at, now);
             }
-            Some(message_reads::Relayed::Answered { status: None, .. }) => {}
+            return Ok(json!({
+                "state": "expired", "phase": "expired",
+                "reason": expiry.claim.body["fields"]["reason"],
+                "age_ms": now.saturating_sub(sent_at),
+                "recipient_delivery": delivery_presence::known(&message.to).map(|path| path.to_value()),
+            }));
+        }
+        return message_delivery_value(store, &message.to, &status, sent_at, now);
+    }
+    if let Some(host) = host {
+        match relayed {
+            Some(message_reads::Relayed::Answered { .. }) => {}
             Some(message_reads::Relayed::Unknown { reason, .. }) => {
                 return Ok(unknown(reason.clone()));
             }
