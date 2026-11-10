@@ -611,6 +611,82 @@ pub fn prepared_counter_guard() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Bound the derived header independently of the native payloads it summarizes.
+pub fn bound_header(value: &mut Value) {
+    fn clean(value: &mut Value) {
+        match value {
+            Value::String(text) => text.retain(|character| !character.is_control()),
+            Value::Array(values) => values.iter_mut().for_each(clean),
+            Value::Object(values) => values.values_mut().for_each(clean),
+            _ => {}
+        }
+    }
+    bound_open_value(value);
+    clean(value);
+}
+
+/// Header-only projection of folded entries. Large native payloads never enter this path.
+/// Unlike display preparation, this deliberately retains header facts from an entry whose
+/// display body will be replaced for size, and uses the native ask call ID before clipping.
+pub fn header_items(source: &ExternalSession, session_id: &str, items: &[Value]) -> Vec<Value> {
+    items.iter().map(|item| {
+        let mut blocks = item["body"]["blocks"].as_array().into_iter().flatten().map(|block| {
+            let mut projected = json!({
+                "kind": block["kind"],
+                "metadata": {},
+                "view": null,
+                "payload": {"call_id": block["payload"]["call_id"].as_str()},
+            });
+            if matches!(block["view"]["type"].as_str(), Some("todo" | "task" | "job" | "hub" | "ask")) {
+                projected["view"] = block["view"].clone();
+            }
+            if let Some(model) = block["metadata"]["model"].as_str() {
+                projected["metadata"]["model"] = json!(model);
+            }
+            if let Some(tokens) = block["metadata"]["context_tokens"].as_u64() {
+                projected["metadata"]["context_tokens"] = json!(tokens);
+            }
+            if let Some(cost) = block["metadata"].pointer("/usage/cost_usd").and_then(Value::as_f64) {
+                projected["metadata"]["usage"] = json!({"cost_usd": cost});
+            }
+            projected
+        }).collect::<Vec<_>>();
+        prepare_task_links(source, session_id, &mut blocks);
+        for block in &mut blocks {
+            for key in ["metadata", "view", "payload"] {
+                bound_open_value(&mut block[key]);
+            }
+        }
+        json!({
+            "id": item["id"], "type": item["type"],
+            "timestamp": item["timestamp"], "sequence": item["sequence"],
+            "body": {"code": item["body"]["code"], "call_id": item["body"]["call_id"], "blocks": blocks},
+        })
+    }).collect()
+}
+
+fn prepare_task_links(source: &ExternalSession, session_id: &str, blocks: &mut [Value]) {
+    for block in blocks.iter_mut()
+        .filter(|block| block["kind"] == "tool_output" && block["view"]["type"] == "task")
+    {
+        let Some(agents) = block.get_mut("view").and_then(|view| view.get_mut("agents"))
+            .and_then(Value::as_array_mut) else { continue; };
+        for agent in agents {
+            let Some(task_id) = agent.get("id").and_then(Value::as_str).map(str::to_owned)
+                else { continue; };
+            let Some(agent) = agent.as_object_mut() else { continue; };
+            match crate::subagent_sessions::child_transcript(source, &task_id) {
+                Some(_) => {
+                    agent.insert("conversation".into(), json!({
+                        "session_id": crate::subagent_sessions::child_session_id(source, &task_id, session_id),
+                    }));
+                }
+                None => { agent.remove("conversation"); }
+            }
+        }
+    }
+}
+
 pub fn prepare_one(
     source: &ExternalSession,
     session: &ClientSession,
@@ -713,42 +789,7 @@ pub fn prepare_one(
     if session.conversation_blocks
         && let Some(blocks) = body.get_mut("blocks").and_then(Value::as_array_mut)
     {
-        for block in blocks
-            .iter_mut()
-            .filter(|block| block["kind"] == "tool_output" && block["view"]["type"] == "task")
-        {
-            let Some(agents) = block
-                .get_mut("view")
-                .and_then(|view| view.get_mut("agents"))
-                .and_then(Value::as_array_mut)
-            else {
-                continue;
-            };
-            for agent in agents {
-                let Some(task_id) = agent.get("id").and_then(Value::as_str).map(str::to_owned)
-                else {
-                    continue;
-                };
-                let Some(agent) = agent.as_object_mut() else {
-                    continue;
-                };
-                match crate::subagent_sessions::child_transcript(source, &task_id) {
-                    Some(_) => {
-                        agent.insert(
-                            "conversation".into(),
-                            json!({"session_id": crate::subagent_sessions::child_session_id(
-                                source,
-                                &task_id,
-                                session_id,
-                            )}),
-                        );
-                    }
-                    None => {
-                        agent.remove("conversation");
-                    }
-                }
-            }
-        }
+        prepare_task_links(source, session_id, blocks);
     }
     // Keep open display objects (including assistant text/reasoning metadata) bounded.
     // JSON continuations can cover the whole body, but an image's continuation must keep

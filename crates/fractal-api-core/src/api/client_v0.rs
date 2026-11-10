@@ -2556,7 +2556,7 @@ pub fn native_slice_page_at_generation(
     };
     drop(preparation);
     let (mut native, suppressed_sequence) = canonical_native_slice(
-        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed, true,
+        state, snapshot, source, session, session_id, &messages, order, before, read_limit, managed, false,
     )?;
     if native.basis != source_basis {
         return Err(client_page_expired("the transcript changed while reading the page"));
@@ -2572,7 +2572,7 @@ pub fn native_slice_page_at_generation(
         let head = if before.is_some() {
             Some(canonical_native_slice(
                 state, snapshot, source, session, session_id, &messages, order,
-                None, CLIENT_MAX_PAGE_ITEMS, managed, true,
+                None, CLIENT_MAX_PAGE_ITEMS, managed, false,
             )?.0)
         } else {
             None
@@ -2580,15 +2580,26 @@ pub fn native_slice_page_at_generation(
         let head = head.as_ref().unwrap_or(&native);
         native_head_fence(head, &source_basis, native.generation)?;
         let count = head.items.len().min(CLIENT_MAX_PAGE_ITEMS);
-        conversation_page_header(
-            state, session, session_id, &head.items[..count],
+        let header_items = conversation_blocks::header_items(source, session_id, &head.items[..count]);
+        let mut header = conversation_page_header(
+            state, session, session_id, &header_items,
             head.has_more || head.items.len() > count,
-        )
+        );
+        if let Some(value) = &mut header {
+            conversation_blocks::bound_header(value);
+        }
+        header
     } else {
         None
     };
     native.has_more |= native.items.len() > limit + 1;
     native.items.truncate(limit + 1);
+    for item in &mut native.items {
+        conversation_blocks::prepare_one(source, session, session_id, &source_basis, item)?;
+    }
+    if conversation_blocks::basis(source)? != source_basis {
+        return Err(client_page_expired("the transcript changed while preparing the page"));
+    }
     let overlay = crate::profile::span("conversation/overlay");
     // Message sequences are unique, and native_session_messages already returns them
     // newest-first by timestamp and sequence. Compute each full key only once.
