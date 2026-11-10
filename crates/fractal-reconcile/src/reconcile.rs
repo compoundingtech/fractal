@@ -43747,13 +43747,15 @@ subscription "comments" { observer "observer/repo"; on "comments"; to "agent/exa
             "closed",
         );
         // Polling again delivers nothing more.
-        let prior_claim = store.newest_claim_where("resource/repo/issue/1", "resource.observed", |_| true)
-            .unwrap().unwrap().id;
+        let observation_claims = || ["resource.observed", "vcs.item.state"].map(|kind|
+            store.newest_claim_where("resource/repo/issue/1", kind, |_| true)
+                .unwrap().map(|claim| claim.id));
+        let prior_claims = observation_claims();
         github.requests.lock().clear();
         poll(member_b).await;
         assert_eq!(delivered(), after);
-        assert_eq!(store.newest_claim_where("resource/repo/issue/1", "resource.observed", |_| true)
-            .unwrap().unwrap().id, prior_claim, "304-backed unchanged polls append no observation claim");
+        assert_eq!(observation_claims(), prior_claims,
+            "304-backed unchanged polls append no observation claim");
         assert!(github.requests.lock().iter().any(|request|
             request.to_ascii_lowercase().contains("if-none-match:")), "the idle REST poll revalidates");
     }
