@@ -22,7 +22,15 @@ pub struct ClientControlGrantLifecycleEvent {
     pub session: String,
     pub state: ClientControlGrantLifecycleState,
     pub reason: String,
+    #[serde(deserialize_with = "deserialize_lifecycle_sequence")]
     pub sequence: u64,
+}
+fn deserialize_lifecycle_sequence<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let sequence = u64::deserialize(deserializer)?;
+    if !(1..=(1_u64 << 53) - 1).contains(&sequence) {
+        return Err(serde::de::Error::custom("lifecycle sequence must be a positive JSON-safe integer"));
+    }
+    Ok(sequence)
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]

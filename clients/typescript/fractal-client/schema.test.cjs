@@ -1354,5 +1354,16 @@ test('commands Resource and CollectionFrame decode shared lifecycle vectors', as
         const rows = decoded.items ?? decoded.upserts;
         assert.equal(rows[0].kind, 'client-control-grant-lifecycle');
     }
+    for (const trace of fixture.traces) {
+        for (const step of trace.steps) {
+            if (step.expected === 'refuse-invalid-frame') {
+                assert.throws(() => Rich.decodeUnknownSync(Rich.Resource, 'strict')(step.resource));
+                assert.throws(() => Rich.decodeUnknownSync(Rich.CollectionFrame, 'strict')({ ...fixture.frames[0], items: [step.resource] }));
+            }
+        }
+    }
+    for (const sequence of [0, Number.MAX_SAFE_INTEGER + 1]) {
+        assert.throws(() => Rich.decodeUnknownSync(Rich.Resource, 'strict')({ ...fixture.resources[0], sequence }));
+    }
     assert.throws(() => Rich.decodeUnknownSync(Rich.Resource, 'strict')({ ...fixture.resources[0], state: 'future-state' }));
 });

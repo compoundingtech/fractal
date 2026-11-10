@@ -231,7 +231,9 @@ The existing session-scoped `commands` subscription carries generated
 same snapshot/changes frames and typed `Resource` decoder. Each lifecycle row
 has the ordinary resource header plus `grant_id`, optional `item_id`, `run_id`,
 `device`, `session`, `state` (`started`, `ended`, `revoked`), `reason` and a
-monotonic, positive JSON-safe integer `sequence`.
+monotonic integer `sequence` in `1...9007199254740991`. All client decoders
+reject zero or out-of-range sequences before lifecycle ordering checks; the
+shared zero-sequence trace expects `refuse-invalid-frame`, not a stale start.
 
 These rows drive the visible indicator and termination only. They do not carry
 verbs, screens or budget policy; policy remains in each
@@ -254,3 +256,6 @@ Pass it as the second argument to `visibleStateDigest` or
 `clientResultCanonicalBytes`; omitting it uses generated
 `defaultWebCryptoSha256`. Canonical encoding remains generated and unchanged;
 the injected implementation returns the raw 32 SHA-256 bytes, not hex or text.
+Invalid Unicode is refused with the exported TypeScript
+`ClientResultCanonicalizationError` and its `code: "invalid-unicode"`, including
+through `clientResultCanonicalBytes`; consumers must not match error messages.

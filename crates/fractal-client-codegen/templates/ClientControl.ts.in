@@ -14,14 +14,21 @@ export interface ClientControlGrant {
   verbs: string[]; screens: string[]; max_commands: number; expires_at: string; state: string;
   item_id?: string;
 }
+export class ClientResultCanonicalizationError extends Error {
+  readonly code = 'invalid-unicode' as const;
+  constructor() {
+    super('Invalid Unicode in client result');
+    this.name = 'ClientResultCanonicalizationError';
+  }
+}
 function quote(value: string): string {
   // RFC 8785 requires rejection of lone surrogates rather than replacement.
   for (let i = 0; i < value.length; i++) {
     const c = value.charCodeAt(i);
     if (c >= 0xd800 && c <= 0xdbff) {
       const next = value.charCodeAt(++i);
-      if (!(next >= 0xdc00 && next <= 0xdfff)) throw new Error('Invalid Unicode in client result');
-    } else if (c >= 0xdc00 && c <= 0xdfff) throw new Error('Invalid Unicode in client result');
+      if (!(next >= 0xdc00 && next <= 0xdfff)) throw new ClientResultCanonicalizationError();
+    } else if (c >= 0xdc00 && c <= 0xdfff) throw new ClientResultCanonicalizationError();
   }
   return JSON.stringify(value);
 }
