@@ -41,7 +41,7 @@ describe('client-control P-256 identity', () => {
     expect(await subtle.verify(algorithm, key, signature, new TextEncoder().encode('different bytes'))).toBe(false)
     const other = await generateClientControlKeyPair()
     expect(await subtle.verify(algorithm, other.publicKey, signature, bytes)).toBe(false)
-    // No signature length/serialization assertion: daemon canonical encoding is unresolved.
+    // Generated canonical signing/envelope conformance belongs to wire.unit.test.ts.
   })
 
   it('retains the committed identity across independent acquisitions without a key cache', async () => {
