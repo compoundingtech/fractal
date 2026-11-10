@@ -855,7 +855,7 @@ The command's exit status is its answer:
 | Exit | Answer | What Fractal does |
 |---|---|---|
 | 0 | pass | The boundary passes. |
-| 1 | not yet | The boundary waits. The gate checks again a minute later, then doubles the wait after each further not yet, up to every fifteen minutes. |
+| 1 | not yet | The boundary waits. The gate checks again five seconds later, then doubles the wait after each further not yet, up to every fifteen minutes. Nothing else wakes an exec gate, so a condition the graph observes (a resource, a claim, an exec's exit) belongs in a `field` or `exists` gate, which a change wakes at once. |
 | anything else | broken | The boundary waits for a revision, and the mission's publisher gets one attention item. |
 
 A check is also broken when it cannot start (its workspace is missing, for example), when something
