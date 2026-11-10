@@ -673,6 +673,13 @@ fn a_held_step_that_only_renews_its_lease_stalls() {
         fixture.passes(2);
         assert_eq!(stalled(), 1, "progress is a sign of life");
     }
+    // Keep the ten-minute lease alive through the next silence, as a driver does.
+    for minute in 14..=22 {
+        let _at = Clock::at(&fixture.store, claimed_at + minute * MINUTE);
+        act("renew", &format!("renew-quiet-{minute}"), None);
+        fixture.passes(1);
+        assert_eq!(stalled(), 1, "minute {minute} is inside the limit after progress");
+    }
     let _at = Clock::at(&fixture.store, claimed_at + 24 * MINUTE);
     act("renew", "renew-quiet-24", None);
     fixture.passes(2);

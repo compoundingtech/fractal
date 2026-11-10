@@ -63,7 +63,7 @@ pub fn run_activity(run: &MissionRunView) -> u128 {
 /// interval (its claim, or the end of its last wait), its last progress record, and a declared
 /// wait until that wait ends on its own.
 fn step_activity(step: &StepRunView) -> [Option<u128>; 3] {
-    let held = step.claimant.is_some() && matches!(step.status.as_str(), "claimed" | "working");
+    let held = is_held(step);
     let declared = [
         step.execution_started_at_unix_ms,
         step.execution_paused_until_unix_ms,
@@ -73,6 +73,11 @@ fn step_activity(step: &StepRunView) -> [Option<u128>; 3] {
     } else {
         [Some(step.updated_at_unix_ms), step.progress_at_unix_ms, None]
     }
+}
+
+/// Whether a worker holds the step, so that its driver renews the step's lease.
+fn is_held(step: &StepRunView) -> bool {
+    step.claimant.is_some() && matches!(step.status.as_str(), "claimed" | "working")
 }
 
 /// Whether a run is still working, so that silence means something. A run in cleanup is ending,
@@ -89,7 +94,7 @@ impl<R: RuntimeControl> Reconciler<R> {
     /// register every run and step read, including nested work, so progress moves the stall
     /// deadline on the next incremental evaluation rather than waiting for a scan.
     fn run_report_activity(&self, run: &MissionRunView) -> Result<u128> {
-        let mut activity = run_activity(run);
+        let mut activity = run_activity(run).max(self.held_progress(run)?);
         let mut pending = run
             .steps
             .iter()
@@ -101,11 +106,33 @@ impl<R: RuntimeControl> Reconciler<R> {
                 if !visited.insert(child.subject.clone()) {
                     continue;
                 }
-                activity = activity.max(run_activity(&child));
+                activity = activity
+                    .max(run_activity(&child))
+                    .max(self.held_progress(&child)?);
                 pending.extend(child.steps.into_iter().map(|step| step.subject));
             }
         }
         Ok(activity)
+    }
+
+    /// The last progress record of the steps a worker holds. A run read for evaluation does not
+    /// carry step progress, and a held step's last change cannot stand in for it because lease
+    /// renewals move it, so read each held step's own record.
+    fn held_progress(&self, run: &MissionRunView) -> Result<u128> {
+        let mut progress = 0;
+        for step in &run.steps {
+            if step.progress_at_unix_ms.is_some() || !is_held(step) {
+                continue;
+            }
+            if let Some(at) = self
+                .store
+                .step_run(&step.subject)?
+                .and_then(|step| step.progress_at_unix_ms)
+            {
+                progress = progress.max(at);
+            }
+        }
+        Ok(progress)
     }
 
     /// Who a run reports to: its latest `st missions report-to`, else what it was created with.
