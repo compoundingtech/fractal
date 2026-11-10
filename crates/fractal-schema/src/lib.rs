@@ -4974,6 +4974,7 @@ mod tests {
         current.subjects.remove("objective").unwrap();
         current.claims.get_mut("intent.desired").unwrap().source_kdl.retain(|kind| kind != "objective");
         current.claims.remove("message.expired").unwrap();
+        current.claims.remove("program.step").unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =
