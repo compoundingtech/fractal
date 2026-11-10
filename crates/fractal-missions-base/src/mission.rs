@@ -3330,7 +3330,7 @@ mod tests {
 
     fn authority_error(body: &str) -> String {
         let source = format!(r#"mission "land" state="ready" {{ goal "Land."; step "work" {{ agentless; }}; {body} }}"#);
-        super::parse_missions(&source.parse().unwrap(), "node").unwrap_err().code
+        super::parse_missions(&source.parse().unwrap(), "node").unwrap_err().code.to_string()
     }
 
     #[test]
