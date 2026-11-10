@@ -1802,6 +1802,19 @@ fn mark_standing(
     first.push(span(MARKER, theme::dim()));
 }
 
+/// The right of an agent's row: `•` first when it said something since the person last read its
+/// conversation here (st's `last_prose_at` against the read position), as the web and the phone
+/// mark it; then its harness and how long ago it was active.
+fn agent_row_right(world: &World, agent: &Agent) -> Vec<Span<'static>> {
+    let mut right = Vec::with_capacity(3);
+    if world.unread.contains(&agent.id) {
+        right.push(span("• ", theme::strong(theme::ACCENT)));
+    }
+    right.push(span(agent.harness.name(), theme::fg(harness_color(agent.harness))));
+    right.push(span(format!(" {:>4}", agent.activity), theme::dim()));
+    right
+}
+
 pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listing {
     let mut items = Vec::new();
     let mut ids = Vec::new();
@@ -1836,13 +1849,7 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
             span(format!(" {glyph} "), theme::strong(color)),
             span(agent.name.clone(), theme::bold()),
         ];
-        let right = vec![
-            span(
-                agent.harness.name(),
-                theme::fg(harness_color(agent.harness)),
-            ),
-            span(format!(" {:>4}", agent.activity), theme::dim()),
-        ];
+        let right = agent_row_right(world, agent);
         mark_standing(agent, &mut first, &right, width);
         items.push(Item::Row {
             index: ids.len(),
@@ -1874,6 +1881,7 @@ pub fn agents_list(world: &World, spinner: &'static str, width: usize) -> Listin
             ("✕", theme::FAULT, "broken"),
             ("○", theme::QUIET, "stopped"),
             ("?", theme::QUIET, "unmanaged"),
+            ("•", theme::ACCENT, "new since you read"),
         ])
         .into_iter()
         .chain(world.agents.items().iter().any(|agent| agent.reported.is_some()).then(|| {
@@ -3408,13 +3416,7 @@ pub fn agents_tree(world: &World, spinner: &'static str, width: usize) -> Listin
                     span(format!("{glyph} "), theme::strong(color)),
                     span(agent.name.clone(), theme::bold()),
                 ],
-                vec![
-                    span(
-                        agent.harness.name(),
-                        theme::fg(harness_color(agent.harness)),
-                    ),
-                    span(format!(" {:>4}", agent.activity), theme::dim()),
-                ],
+                agent_row_right(world, agent),
             )
         })
         .collect();

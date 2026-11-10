@@ -181,6 +181,9 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_glass_head_dirty",
         "local_directive_note_pending",
         "local_directive_note_dirty",
+        // Person read positions: an order-free max register refolded from replicated claims on
+        // open, repair and replay; the claims carry the shared digest coverage.
+        "read_positions",
         "local_custom_dirty",
         "identity_dirty",
         "graph_generation",

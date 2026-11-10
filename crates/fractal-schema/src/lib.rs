@@ -15,6 +15,7 @@ pub mod ordered_membership;
 pub mod harness_questions;
 pub mod owned_terminals;
 pub mod provenance;
+pub mod read_positions;
 pub mod private_notes;
 pub mod retention;
 pub mod slo_breaches;
@@ -640,6 +641,9 @@ impl Registry {
         if spec.family == "arrangement" {
             arrangements::owner(subject)?;
         }
+        if spec.family == read_positions::FAMILY {
+            read_positions::owner(subject)?;
+        }
         Ok(spec)
     }
 
@@ -778,6 +782,15 @@ impl Registry {
                 glasses::body_for_read(fields.get("body").unwrap_or(&Value::Null))?;
             }
         }
+        if subject_spec.family == read_positions::FAMILY {
+            if kind != read_positions::KIND {
+                return Err(error(
+                    "claim-write-forbidden",
+                    "a read position requires read-position.advanced",
+                ));
+            }
+            read_positions::validate_fields(subject, fields)?;
+        }
         Ok(spec)
     }
 
@@ -881,6 +894,7 @@ impl Registry {
         }
         let spec = self.validate_claim(subject, kind, fields)?;
         arrangements::validate_actor(subject, actor)?;
+        read_positions::validate_actor(subject, actor)?;
         directive_notes::validate_actor(subject, kind, actor)?;
         usage_limits::validate_actor(subject, kind, actor)?;
         let allowed = spec.write_policy == WritePolicy::OrdinaryClient
@@ -1117,6 +1131,12 @@ fn build_registry() -> Registry {
             "arrangement",
             "arrangement/person/NAME/UUIDv7",
             "A permanently person-owned shared folder arrangement.",
+            false,
+        ),
+        (
+            "read-position",
+            "read-position/person/NAME",
+            "One person's forward-only read positions across conversations.",
             false,
         ),
         (
@@ -1588,6 +1608,15 @@ fn claim_specs() -> BTreeMap<String, ClaimSpec> {
             WritePolicy::OrdinaryClient,
             Cardinality::Append,
             Some("ordered-memberships"),
+            false,
+            &[],
+        ),
+        (
+            read_positions::KIND,
+            &[read_positions::FAMILY],
+            WritePolicy::OrdinaryClient,
+            Cardinality::Append,
+            Some(read_positions::COLLECTION),
             false,
             &[],
         ),
@@ -3162,6 +3191,7 @@ fn claim_fields(kind: &str) -> BTreeMap<String, FieldSpec> {
         ],
         "arrangement.edited" => &[("owner", required_reference_to(&["person"])), ("operations", required_array()), ("version", integer()), ("action_id", string()), ("action_digest", string())],
         "ordered-membership.edited" => &[("owner", required_reference_to(&["person"])), ("operations", required_array()), ("action_id", string()), ("action_digest", string())],
+        read_positions::KIND => &[("owner", required_reference_to(&["person"])), ("conversation", required_string()), ("at_ms", required_integer())],
         "glass.upserted" => &[
             ("body", object()),
             ("base_revision", string()),
@@ -4885,10 +4915,12 @@ mod tests {
 
     #[test]
     fn assistant_principal_registry_digest_transition() {
-        // Reconstruct the registry at the principal transition, before usage observations.
+        // Reconstruct the principal-transition registry, before later additive claim families.
         let mut current = registry().clone();
         current.claims.remove(usage_limits::KIND).unwrap();
         current.claims.remove("client.operation-authorized").unwrap();
+        current.claims.remove(read_positions::KIND).unwrap();
+        current.subjects.remove(read_positions::FAMILY).unwrap();
         assert_eq!(current.subjects["assistant"].pattern, "assistant/{chatgpt|mcp}[/session/assistant-grant/ID]");
         let mut previous = current.clone();
         previous.subjects.get_mut("assistant").unwrap().pattern =

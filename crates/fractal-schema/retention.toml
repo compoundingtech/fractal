@@ -152,6 +152,9 @@
 "principal.key-granted" = { class = "durable" }
 "principal.key-revoked" = { class = "durable" }
 "publication.operation" = { class = "durable" }
+# Only each person's largest position per conversation matters, but a newest-per-slot rule could
+# drop a larger concurrent advance; claims stay whole until a keep-largest planner exists.
+"read-position.advanced" = { class = "current", pending = "needs a keep-largest at_ms rule; newest-per-slot could drop a larger concurrent advance" }
 "reconcile.fault" = { class = "transition", window = "7d", pending = "no reader audit yet" }
 "record.repaired" = { class = "durable" }
 # Only the node that made them reads render receipts and the readiness deadline, whose attention

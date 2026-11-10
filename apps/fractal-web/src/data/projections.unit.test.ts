@@ -402,6 +402,17 @@ test('agent roster preserves usage scope, requested checkout, workspace and huma
   })
 })
 
+test('the newest prose is kept apart from last activity, and an older daemon leaves it out', () => {
+  const observed = openAgent(decodeUnknownSync(Agent, 'strict')({
+    kind: 'agent', id: 'agent/prose', name: 'Prose', runtime_ids: [],
+    reachability: 'reachable', state: 'running', revision: '1', updated_at: '2026-10-04T12:00:00.000Z',
+    last_activity_at: '2026-10-04T11:59:00.000Z', last_prose_at: '2026-10-04T11:50:00.000Z',
+  } satisfies AgentEncoded))
+  const projected = fleetFromAgents([observed]).agents[0]!
+  expect(projected.lastProseAt).toEqual({ _tag: 'Known', value: Date.parse('2026-10-04T11:50:00.000Z') })
+  expect(fleetFromAgents([row]).agents[0]!.lastProseAt).toBeUndefined()
+})
+
 test('omitted Fractal roster facts remain Unknown, including session timestamps', () => {
   expect(fleetFromAgents([row]).agents[0]).toMatchObject({
     usage: { _tag: 'Unknown' }, checkout: { _tag: 'Unknown' }, workspace: { _tag: 'Unknown' },

@@ -22,6 +22,7 @@ export type ActionCommon = {
   "harness.answer"
   | "arrangement.edit"
   | "arrangement.membership.edit"
+  | "read-position.advance"
   | "custom.reply"
   | "private-notes.write"
   | "prompt.respond"
@@ -90,6 +91,7 @@ export type ActionResult = {
   membership_revision?: Revision;
   operation_id: Id;
   private_notes?: PrivateNotesFence;
+  read_position_at?: Timestamp;
   snapshot_id: Id;
   status: "accepted" | "completed" | "rejected";
   terminal_attachment?: (TerminalAttachment | null);
@@ -121,6 +123,7 @@ export type Agent = ResourceHeader & {
   incarnation_id?: string | null;
   kind: "agent";
   last_activity_at?: (Timestamp | null);
+  last_prose_at?: (Timestamp | null);
   launch_contract?: {
 
 } | null;
@@ -1421,6 +1424,13 @@ export type CollectionCommand = ((AgentsPublicationSubscribe & { actor?: never; 
   person: ArrangementPerson;
   subject: ArrangementId;
 } & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; terminal?: never; trace?: never; until_ms?: never; }) | ({
+  collection: "read-positions";
+  id: string;
+  kind: "subscribe";
+  limit?: number;
+  person: ArrangementPerson;
+  trace?: SubscribeTraceContext;
+} & { actor?: never; agent?: never; agents_publication_version?: never; capability?: never; conversation?: never; incarnation?: never; since_ms?: never; status?: never; subject?: never; terminal?: never; until_ms?: never; }) | ({
   capability: string;
   collection: "terminal";
   id: string;
@@ -1517,6 +1527,7 @@ export type CollectionName =
   | "glasses"
   | "arrangements"
   | "ordered-memberships"
+  | "read-positions"
   | "summary"
   | "clients"
   | "usage"
@@ -3260,6 +3271,33 @@ export type PushRegistrationStatus = ({
   registered: true;
 });
 
+export type ReadPosition = ResourceHeader & {
+  at: Timestamp;
+  conversation: ReadPositionConversation;
+  kind: "read-position";
+  owner: ArrangementPerson;
+};
+
+export type ReadPositionAdvanceParameters = {
+  at: Timestamp;
+  conversation: ReadPositionConversation;
+  owner: ArrangementPerson;
+};
+
+export type ReadPositionConversation = string;
+
+export type ReadPositionPage = {
+  collection: "read-positions";
+  filters: {
+  [key: string]: string;
+};
+  items: Array<ReadPosition>;
+  kind: "page";
+  page: PageInfo;
+  replicated?: ReplicatedNotice;
+  sync?: SyncNotice;
+};
+
 export type RelatedRunWait = {
   detail?: string;
   kind: string;
@@ -3321,6 +3359,7 @@ export type ResourceCollectionName =
   | "work"
   | "glasses"
   | "arrangements"
+  | "read-positions"
   | "summary"
   | "clients"
   | "usage"
@@ -4682,6 +4721,7 @@ export type ActionRequest =
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'pairing.revoke'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'private-notes.write'; parameters: PrivateNotesWriteParameters; fence: Fence & Required<Pick<Fence, 'private_notes'>> }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'prompt.respond'; parameters: PromptRespondParameters; fence: Fence }) |
+  (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'read-position.advance'; parameters: ReadPositionAdvanceParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.approve'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.reject'; parameters: TargetParameters; fence: Fence }) |
   (Omit<ActionCommon, 'type' | 'parameters' | 'fence'> & { type: 'review.request-changes'; parameters: TargetParameters; fence: Fence }) |

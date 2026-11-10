@@ -239,7 +239,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         .window_errors
         .iter()
         .filter(|(name, _)| loaded_windows.iter().any(|(window, loaded)| *loaded && window == &name.as_str())
-            || ["clients", "usage", "machines", "devices", "sessions", "terminals"].contains(&name.as_str()))
+            || ["clients", "usage", "machines", "devices", "sessions", "terminals", "ReadPositions", "ReadPositionsList"].contains(&name.as_str()))
         .map(|(name, why)| format!("{name}: {why}"))
         .chain(
             extras
@@ -257,6 +257,7 @@ pub(super) fn world_at(model: &Model, person: &str, extras: &Extras, now: &str) 
         behind,
         missions_followed: extras.missions_followed,
         settled: extras.attention_live && extras.agents_live,
+        unread: Default::default(),
         active_missions: extras.summary.as_ref().map(|(summary, _)| summary.active_missions as usize),
         inbox_alerts: extras.summary.as_ref()
             .filter(|(_, summary)| model.now.truncated && model.now.snapshot.as_ref().is_some_and(|attention| {
@@ -873,6 +874,7 @@ fn agents_at(model: &Model, missions: &[Mission], now: &str) -> Vec<Agent> {
                     .presentation
                     .is_none()
                     .then(|| agent.state.clone()),
+                last_prose_ms: agent.last_prose_at.as_deref().and_then(super::read_store::at_ms),
             }
         })
         .collect::<Vec<_>>();
@@ -910,6 +912,7 @@ fn agents_at(model: &Model, missions: &[Mission], now: &str) -> Vec<Agent> {
             terminal: false,
             subagents: Vec::new(),
             reported: None,
+            last_prose_ms: None,
         }
     }));
     agents

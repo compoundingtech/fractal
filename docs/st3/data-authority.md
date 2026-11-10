@@ -69,6 +69,20 @@ current marks; only its claims are cut at that index.
 are local in the same way, and the seat's conversation timeline on its own node still shows them.
 Its control codes stay claims.
 
+Agent-card prose frontiers seek assistant `message`/`content` entries through
+`local_observations_timeline_prose_index` and `claims_timeline_prose_time_index`,
+keyed by subject and incarnation. Tool traffic and user prompts never enter these partial
+indexes, including when the incarnation has no assistant prose. Local entries keep arrival
+order and their graph-cut fence; replicated entries keep numeric acceptance-time order and
+their store-index fence. Sent mail continues to use its existing sender/time index.
+Schema initialization installs the two indexes with `CREATE INDEX IF NOT EXISTS`, including
+on existing storage-version-20 databases, without changing claims, replication rules or
+projection digests. The first open builds them from retained rows before the store serves;
+its duration on large stores is unmeasured. Reopens reuse them, and normal SQLite mutations
+maintain them through local trimming and graph replay. No manual replay or state reset is
+required. Older builds can ignore the additive indexes; replacing the binary does not remove
+them.
+
 A kind of `system-local` retention is local when the system records it without an actor and a
 claim when a person or agent writes it as its actor. The reconciler's own `runtime.action.*`
 records, its starts, stop requests, deadlines and kills, stay on the node that runs the runtime,
@@ -373,6 +387,7 @@ order from the same admitted claims.
 | `projection_digest_repaired_claims` | Local | Repair exclusion cache over known original claim identities. Repair meaning and replacements are covered by shared claims; raw originals remain authenticated envelope history and do not contribute to source, operation or actual-state projections. Actual values, provenance, runtime origin and runtime-epoch reads use this durable repaired-ID membership even after local receipt cleanup. |
 | `projection_digest_state` | Local | Maintained shared projection digest state; the logical digest is shared, these rows are local maintenance. |
 | `projection_health` | Local | Local admission/projection/quarantine status, frontier, errors and observation timestamps. Deterministic shared degraded-state summaries must be separate from receipt health. |
+| `read_positions` | Rebuildable projection | Each person's largest `read-position.advanced` time per conversation (ties by canonical claim key), projected on append and replication and refolded from the claims on first open, repair and replay. Order-free, so outside projection digests; the claims carry the shared coverage. changed_index is a local arrival cursor. |
 | `replica_envelope_holds` | Local | Local validation/fencing hold state and observation time. |
 | `replica_envelope_signatures` | Shared storage, with stated local fields | Shared signed envelope identity/member-key/signature; stored_at is local receipt time. Authority/signature inventory is distinct from outcome projection digests. |
 | `replica_envelopes` | Shared storage, with stated local fields | Shared authenticated writer/sequence/hash/payload identity; relay, receipt_state/errors and received_at are local. Inventory hashes immutable envelope identity, not physical rows. |

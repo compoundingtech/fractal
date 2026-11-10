@@ -1098,6 +1098,7 @@ fn operation_manifest_is_launch_only_and_covers_v0_resources_and_actions() {
         "timeline.list",
         "events.list",
         "terminal.screen",
+        "read-positions.list",
     ] {
         assert!(
             read_ids.contains(required),
@@ -1149,6 +1150,7 @@ fn operation_manifest_is_launch_only_and_covers_v0_resources_and_actions() {
         "terminal.attach",
         "terminal.detach",
         "pairing.revoke",
+        "read-position.advance",
     ] {
         assert!(
             actions.contains_key(required),

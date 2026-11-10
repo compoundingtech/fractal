@@ -11512,6 +11512,8 @@ mission "agent-health" state="ready" {
     let resources = cards(store.index().unwrap());
     assert_eq!(resources[0]["delivery"]["state"], "legacy", "{}", resources[0]);
     assert_eq!(resources[0]["state"], "running", "{}", resources[0]);
+    // Readiness and a queued step are not words from the agent.
+    assert!(resources[0]["last_prose_at"].is_null(), "{}", resources[0]);
 
     let healthy_cut = store.index().unwrap();
     let harness = |driver: &str, incarnation: &str, key: &str| {
