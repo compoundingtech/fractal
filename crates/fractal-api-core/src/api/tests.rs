@@ -6558,6 +6558,32 @@ async fn preview_and_apply_with_bundles(
     (preview, status, applied)
 }
 
+/// A publication carries its program bundles as base64, so both caller guards buffer a body up to
+/// the publication route limit (32 MiB) and hand a body past 16 MiB on whole.
+#[tokio::test]
+async fn caller_guards_pass_a_publication_body_past_sixteen_mebibytes() {
+    let root = tempfile::tempdir().unwrap();
+    let state = state(root.path());
+    let padding = "a".repeat(20 * 1024 * 1024);
+    for (bound, body) in [
+        (Some("agent/example/publisher"), format!(r#"{{"actor":"agent/example/publisher","pad":"{padding}"}}"#)),
+        (None, format!(r#"{{"pad":"{padding}"}}"#)),
+    ] {
+        let mut request = Request::builder()
+            .method(axum::http::Method::POST)
+            .uri("/v1/intent/apply")
+            .header("content-type", "application/json")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        if bound.is_none() {
+            request.extensions_mut().insert(HarnessAncestry::Unavailable);
+        }
+        let passed = guard_bound_request(request, bound, &state.store).await.unwrap();
+        let bytes = to_bytes(passed.into_body(), PUBLICATION_BODY_LIMIT).await.unwrap();
+        assert_eq!(bytes.len(), body.len(), "{bound:?}");
+    }
+}
+
 #[tokio::test]
 async fn publication_stores_the_program_bundle_its_declaration_names() {
     use base64::Engine as _;

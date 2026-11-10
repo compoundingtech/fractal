@@ -938,6 +938,39 @@ pub struct DeclaredResourceReference {
     pub reason: Option<String>,
 }
 
+/// One rule of a mission's `authority` block: what its runs may do as `mission-run/RUN`
+/// (docs/st3/program-engine.md §3). Mission verbs take a mission ID pattern, `write` a subject
+/// pattern; either is exact or a terminal `/*` namespace.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct AuthorityGrant {
+    pub verb: AuthorityVerb,
+    pub pattern: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AuthorityVerb {
+    Publish,
+    Start,
+    Revise,
+    Cancel,
+    Write,
+}
+
+impl AuthorityVerb {
+    pub const ALL: [Self; 5] = [Self::Publish, Self::Start, Self::Revise, Self::Cancel, Self::Write];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Publish => "publish",
+            Self::Start => "start",
+            Self::Revise => "revise",
+            Self::Cancel => "cancel",
+            Self::Write => "write",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MissionSpec {
     pub id: String,
@@ -950,6 +983,10 @@ pub struct MissionSpec {
     pub system: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resources: Vec<DeclaredResourceReference>,
+    /// What runs of this mission may do as `mission-run/RUN`, in canonical order; empty grants
+    /// nothing. Omitted when empty, so an undeclared mission hashes as it did before the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authority: Vec<AuthorityGrant>,
     #[serde(default)]
     pub inputs: BTreeMap<String, MissionInputSpec>,
     #[serde(default = "default_mission_run_limit")]
