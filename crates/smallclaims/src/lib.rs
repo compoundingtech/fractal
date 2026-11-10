@@ -27,6 +27,7 @@ pub mod profile;
 pub mod task_cpu;
 pub mod read_budget;
 pub mod replication;
+pub mod replication_diagnostics;
 pub mod rules;
 pub mod shards;
 pub mod sqlite;
