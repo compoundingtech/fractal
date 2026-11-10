@@ -17,8 +17,52 @@ pub(super) const GATEWAY: Duration = Duration::from_secs(8);
 pub(super) const DEADLINE: Duration = Duration::from_secs(DISCOVERY.as_secs() + DIRECT.as_secs() + GATEWAY.as_secs() * 2 + 3);
 pub(super) const RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(2)];
 
+/// Only capability issuance is safe to repeat without a remote cancellation receipt:
+/// it creates an expiring capability, never an owner PTY attachment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SetupPhase {
+    Capability,
+    Upgrade,
+    FirstFrame,
+}
+
+impl SetupPhase {
+    pub(super) fn name(self) -> &'static str {
+        match self {
+            Self::Capability => "raw terminal capability",
+            // Authentication and owner-open happen before the server answers the upgrade.
+            Self::Upgrade => "raw terminal connect/upgrade (including auth and owner-open)",
+            Self::FirstFrame => "raw terminal first-frame",
+        }
+    }
+
+    pub(super) fn timeout(reason: &str) -> Option<Self> {
+        let name = reason.strip_suffix(" timed out")?;
+        [Self::Capability, Self::Upgrade, Self::FirstFrame]
+            .into_iter()
+            .find(|phase| name == phase.name())
+    }
+
+    pub(super) fn retry_safe(self) -> bool {
+        self == Self::Capability
+    }
+}
+
 pub(super) async fn phase<T>(name: &str, budget: Duration, future: impl Future<Output = Result<T, String>>) -> Result<T, String> {
-    tokio::time::timeout(budget, future).await.map_err(|_| format!("{name} timed out"))?
+    use tracing::Instrument as _;
+    let started = Instant::now();
+    let span = tracing::debug_span!("terminal_attach_setup", phase = name);
+    async {
+        tracing::debug!(event = "start", "terminal attach setup phase");
+        let result = tokio::time::timeout(budget, future).await;
+        tracing::debug!(
+            event = "end",
+            elapsed_ms = %started.elapsed().as_millis(),
+            timed_out = result.is_err(),
+            "terminal attach setup phase"
+        );
+        result.map_err(|_| format!("{name} timed out"))?
+    }.instrument(span).await
 }
 
 #[derive(Default)]
@@ -367,9 +411,9 @@ mod tests {
         let generation = state.generation;
         state.apply_fetched(&mut ui, Fetched::NativeFailed {
             agent: "agent/A".into(), generation, runtime_ids: vec!["runtime/A".into()],
-            reason: "raw terminal attachment timed out".into(),
+            reason: format!("{} timed out", SetupPhase::Upgrade.name()),
         }, &tx);
-        assert_eq!(ui.terminal.as_ref().unwrap().stale.as_deref(), Some("failed: raw terminal attachment timed out · Ctrl+R to retry"));
+        assert_eq!(ui.terminal.as_ref().unwrap().stale.as_deref(), Some("failed: raw terminal connect/upgrade (including auth and owner-open) timed out · Ctrl+R to retry"));
         assert!(state.started.is_none());
         assert!(state.note.is_none());
         assert!(rx.try_recv().is_err());

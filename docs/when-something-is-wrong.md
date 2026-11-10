@@ -39,6 +39,50 @@ fractal terminals peek agent/garden/worker
 
 The last terminal screen can explain a login, crash, or provider limit; the graph says whether the stop was requested, the owner ended, a suspension is active, or the runtime failed. A stopped agent can retain a historical terminal, and an agent with no recorded terminal may have nothing to peek.
 
+## Raw terminal setup stalls
+
+Raw terminal setup logs bounded DEBUG phase events, not terminal contents or
+capabilities. The API handler records its start timestamp (`started_at_unix_ms`)
+and monotonic `elapsed_ms` for `auth`, `lookup`, `capability`, `owner-open`, and
+`upgrade`; completed lookup, capability, and open phases also record
+`duration_ms`. Here `auth` is the handler's scope/person check, after transport
+authentication. For remote ATTACH, the owner peer separately records
+`peer-auth`, `owner-attachment`, `owner-open`, and `peer-upgrade`. PEEK uses its
+existing owner lease-admission path instead. A phase start without completion
+locates the unfinished or rejected operation; it does not prove a timeout cause.
+After upgrade, `first-frame` records the first successfully sent PTY byte chunk,
+with elapsed time measured from the splice's start and the terminal/incarnation
+in its `raw_terminal_stream` span. There are no per-frame debug events.
+
+The TUI's `terminal_attach_setup` DEBUG spans time capability issuance and the
+combined client connect/upgrade await, without increasing either 8-second budget.
+Only a capability-issuance timeout retries automatically, at most twice after
+1 and 2 seconds, keeping the selected incarnation. Each cancelled issuance
+future is dropped before retry; an unused capability opens no PTY and expires
+after 60 seconds. Upgrade timeouts name that phase and offer Ctrl-R, without an
+automatic retry. The overall setup deadline and single-flight guard still apply.
+
+Endpoint resolution, Unix connect, and WebSocket upgrade are private generated
+client boundaries: they are **not separable without codegen** from this caller.
+For remote connections the generated connector also combines DNS/TCP/TLS and
+upgrade. Separate client-side connect/upgrade and first-binary-arrival timing
+must be added at the next client regeneration; server `first-frame` is a send
+measurement, not proof that the TUI received or rendered a screen.
+
+The HTTP upgrade includes server authority checks, runtime lookup, and opening
+the owner's transport. A client-side upgrade timeout cannot identify which of
+these operations stalled. Runtime lookup and local PTY opening retain their
+incarnation fences: the local socket must prove the selected daemon PID and
+registry creation time before any PTY frame is sent.
+
+Dropping an in-progress HTTP upgrade closes the client's connection; it is not a
+remote cancellation acknowledgment. The remote request can still be opening its
+owner transport. Failed upgrades drop their captured transports, and established
+bridges propagate connector closure, but there is no acknowledgment that all
+remote cleanup completed before another attempt. Do not automatically retry an
+upgrade timeout on the assumption that dropping its future completed remote
+cleanup. Keep provider input out of setup diagnostics.
+
 ## Linux PID namespaces and procfs
 
 The runtime requires `/proc` to describe its own PID namespace. Entering a child
