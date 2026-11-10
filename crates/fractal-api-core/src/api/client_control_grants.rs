@@ -182,6 +182,13 @@ pub fn issue_grant(state: &AppState, session: &ClientSession, request: IssueGran
     let now = client_now_ms();
     let max_commands = request.max_commands.unwrap_or(DEFAULT_MAX_COMMANDS);
     validate_scope(&request.verbs, &request.screens, max_commands)?;
+    if request.screens.iter().any(|screen| screen == "Attention") {
+        let item = request.item_id.as_deref().filter(|item| !item.is_empty())
+            .ok_or_else(|| refusal("screen-not-granted"))?;
+        if state.store.claims_for_subject_kind_at(item, "work.person-asked", None, true, 1)
+            .map_err(ApiError::internal)?.claims.is_empty()
+        { return Err(refusal("screen-not-granted")); }
+    }
     let (binding, deadline) = live_claim(state, &request.run_id, &request.step_run, &request.actor_agent, now)?;
     let cap = now.saturating_add(MAX_GRANT_MS).min(deadline);
     let expires_at = request.expires_at.unwrap_or(cap);
@@ -233,7 +240,7 @@ pub fn check_screen(grant: &ControlGrant, screen: &str) -> Result<(), ApiError> 
 /// An item-bound grant can inspect or navigate only the seeded native ask. Parent
 /// result verification applies this same rule to the signed visible item's id.
 pub fn check_item(grant: &ControlGrant, item_id: &str) -> Result<(), ApiError> {
-    if grant.item_id.as_deref().is_some_and(|allowed| allowed != item_id) {
+    if grant.item_id.as_deref() != Some(item_id) {
         return Err(refusal("screen-not-granted"));
     }
     Ok(())
@@ -513,7 +520,7 @@ mod tests {
         ControlGrant { grant_id: "client-control-grant/test".into(), run_id: "mission-run/test".into(),
             device: "device/test".into(), session: "client-session/test".into(), actor_agent: "agent/test".into(),
             verbs: vec!["phone.inspect".into(), "phone.navigate".into()],
-            screens: vec!["NowRoot".into(), "Attention".into()], item_id: None, max_commands: DEFAULT_MAX_COMMANDS,
+            screens: vec!["NowRoot".into(), "Attention".into()], item_id: Some("step-run/ask-seed/ask".into()), max_commands: DEFAULT_MAX_COMMANDS,
             expires_at: 200, issued_at: 100, enrollment_id: "enrollment/test".into(),
             binding: ClaimBinding { step_run: "step-run/test".into(), generation: "generation/test".into(),
                 attempt: 1, incarnation: Some("incarnation/test".into()), claim_id: "claim/test".into() } }
@@ -638,6 +645,7 @@ mod mission_binding_tests {
 pub(crate) mod test_support {
     use super::*;
     use base64::Engine as _;
+    use crate::PersonWorkStore as _;
     use ring::signature::{EcdsaKeyPair, KeyPair as _, ECDSA_P256_SHA256_FIXED_SIGNING};
     use super::super::client_control_enrollment::{self as enrollment, EnrollRequest, FIXTURE_PERSON};
 
@@ -702,10 +710,20 @@ mission "client-control-test" state="ready" {
         }).unwrap();
         let issuer = ClientSession::local(Some("agent/node.test")).unwrap();
         reenroll(&state, &key, &issuer, "step-run/ask-control-test-one/ask");
+        let ask = state.store.ask_person(&crate::model::PersonAskRequest {
+            person: FIXTURE_PERSON.into(), actor: "agent/node.test".into(),
+            title: "Client-control seed".into(), reason: "Inspect this native ask without answering.".into(),
+            step: None, new_run: None, incarnation: None, legacy_request: None,
+            idempotency_key: "control-test-seed-ask".into(), deadline_ms: None, default_answer: None,
+            request: Some(json!({"version":1,"type":"decision","question":"Inspect the fixture?",
+                "why_person":"Only the owner may answer.","answers":[
+                    {"id":"approve","label":"Approve","outcome":"accept","consequence":"Record approval."},
+                    {"id":"deny","label":"Deny","outcome":"decline","consequence":"Record refusal."}]})),
+        }).unwrap();
         let grant = issue_grant(&state, &issuer, IssueGrantRequest {
             run_id: run.subject, step_run, device: "device/test".into(), actor_agent: issuer.actor.clone(),
             verbs: vec!["phone.inspect".into(), "phone.navigate".into()],
-            screens: vec!["NowRoot".into(), "Attention".into()], item_id: None, max_commands: None, expires_at: None,
+            screens: vec!["NowRoot".into(), "Attention".into()], item_id: Some(ask.subject), max_commands: None, expires_at: None,
         }).unwrap();
         (state, key, grant, issuer)
     }
@@ -869,22 +887,37 @@ mod durable_tests {
         assert_eq!(revoked["revision"], format!("{}:{revoked_sequence}", grant.grant_id));
     }
     #[test]
+    fn attention_requires_an_existing_bound_native_ask_but_root_does_not() {
+        let root = tempfile::tempdir().unwrap();
+        let (state, _, grant, issuer) = fixture(root.path());
+        let mut missing = request(&grant, 50);
+        missing.item_id = None;
+        assert_eq!(issue_grant(&state, &issuer, missing).unwrap_err().code, "screen-not-granted");
+        let mut unknown = request(&grant, 50);
+        unknown.item_id = Some("step-run/ask-unknown/ask".into());
+        assert_eq!(issue_grant(&state, &issuer, unknown).unwrap_err().code, "screen-not-granted");
+        let mut root_only = request(&grant, 50);
+        root_only.screens = vec!["NowRoot".into()];
+        root_only.item_id = None;
+        assert!(issue_grant(&state, &issuer, root_only).unwrap().item_id.is_none());
+        assert!(issue_grant(&state, &issuer, request(&grant, 50)).is_ok());
+    }
+    #[test]
     fn native_ask_item_binding_is_durable_and_conversation_is_never_granted() {
         let root = tempfile::tempdir().unwrap();
         let (state, _, grant, issuer) = fixture(root.path());
-        let mut bound_request = request(&grant, 50);
-        bound_request.item_id = Some("step-run/ask-seed/ask".into());
-        let bound = issue_grant(&state, &issuer, bound_request).unwrap();
+        let bound = issue_grant(&state, &issuer, request(&grant, 50)).unwrap();
+        let seed = grant.item_id.as_deref().unwrap();
         let loaded = lookup(&state, &bound.grant_id).unwrap();
-        assert_eq!(loaded.item_id.as_deref(), Some("step-run/ask-seed/ask"));
-        assert_eq!(loaded.resource("active")["item_id"], "step-run/ask-seed/ask");
+        assert_eq!(loaded.item_id.as_deref(), Some(seed));
+        assert_eq!(loaded.resource("active")["item_id"], seed);
         assert_eq!(loaded.wire("active").item_id, loaded.item_id);
-        assert!(check_item(&loaded, "step-run/ask-seed/ask").is_ok());
+        assert!(check_item(&loaded, seed).is_ok());
         assert_eq!(check_item(&loaded, "step-run/ask-other/ask").unwrap_err().code, "screen-not-granted");
         assert!(check_and_consume(&state, &bound.grant_id, &bound.run_id, &bound.device,
             &bound.actor_agent, "phone.navigate", &json!({"screen":"NowRoot"}), "command/root").is_ok());
         assert!(check_and_consume(&state, &bound.grant_id, &bound.run_id, &bound.device,
-            &bound.actor_agent, "phone.navigate", &json!({"screen":"Attention","params":{"id":"step-run/ask-seed/ask"}}), "command/seed").is_ok());
+            &bound.actor_agent, "phone.navigate", &json!({"screen":"Attention","params":{"id":seed}}), "command/seed").is_ok());
         assert_eq!(check_and_consume(&state, &bound.grant_id, &bound.run_id, &bound.device,
             &bound.actor_agent, "phone.navigate", &json!({"screen":"Attention","params":{"id":"step-run/ask-other/ask"}}), "command/other").unwrap_err().code, "screen-not-granted");
         assert_eq!(check_and_consume(&state, &bound.grant_id, &bound.run_id, &bound.device,
