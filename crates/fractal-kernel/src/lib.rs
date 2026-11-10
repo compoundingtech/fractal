@@ -42,3 +42,4 @@ pub mod terminal_binding;
 /// What a mission run waits on, and the fleet's blocked runs by cause.
 pub mod waiting_on;
 pub mod github_admission;
+pub mod github_webhook;

@@ -328,3 +328,65 @@ metrics. A missing observer refuses the request rather than silently dropping
 accounting. Resource wrappers do not recount the final response. Artifact URL
 invalidation clears every stable principal-qualified cache entry for that exact
 URL, retaining unrelated URLs.
+
+## Webhook delivery
+
+GitHub webhooks push freshness; polling remains the backstop. A daemon runs the
+receiver only when both keys are set:
+
+```toml
+[github]
+webhook_listen = "127.0.0.1:41871"
+webhook_secret_file = "/absolute/owner-only/secret"
+```
+
+`webhook_listen` must be a loopback address with a nonzero port, and
+`webhook_secret_file` must be absolute; one without the other is a configuration
+error. The receiver serves exactly `POST /fractal/github-webhook` and answers
+everything else 404. A public proxy forwards that path verbatim; the daemon never
+listens publicly. The webhook uses content type `application/json`.
+
+**Security.** Every delivery must carry `X-GitHub-Event`, `X-GitHub-Delivery`
+and `X-Hub-Signature-256`, the HMAC-SHA256 of the raw body under the shared
+secret, compared in constant time. A missing or wrong signature is 401. The
+secret file is read again for every delivery, under the same custody rules as
+token files (an owner-owned regular file with no group or other permissions,
+opened without following links), so it may appear or rotate after the daemon
+starts. While it is absent, unreadable, empty or too permissive, every delivery
+is 503: an unsigned delivery is never accepted. The secret's custody, the GitHub
+hook and the proxy are external to Fractal. Bodies over 5 MiB are 413.
+
+**Events.** `ping` is 200. `pull_request`, `pull_request_review`,
+`pull_request_review_comment`, `pull_request_review_thread`, `issue_comment`,
+`issues`, `push`, `status`, `merge_group`, `create`, `delete`, and
+`check_suite`, `check_run` and `workflow_run` once `completed`, refresh
+observers; every other event or action is 204. The receiver reads only
+`repository.full_name`, plus `ref` for `push` and `ref`/`ref_type` for
+`create`/`delete`; a refreshing event without a repository is 400.
+
+**Refresh.** For each active observer whose provider is `github.repository` with a
+locator equal to the repository in any case, and, for a `push`, `create` or
+`delete` of branch `B`, each `github.ref` observer of `OWNER/REPO@B`, the
+receiver writes an `observer.refresh-requested` claim with attempt
+`"github-webhook:" + hex(sha256("fractal.github-webhook.v1\0" + delivery + "\0" + observer))`,
+the same claim a declared `refresh` writes; the attempt prefix alone marks it as
+webhook-requested, since declared attempts are bare hex digests. An
+observer that still has a refresh pending is skipped: its poll reads what the
+delivery announced. The answer is 202 with `{"refreshed": n}`. Refresh claims
+replicate, so the member that polls the observer acts on a delivery any member
+received; a refresh poll bypasses the GraphQL floor, as a declared refresh does.
+
+**Backstop cadence.** A repository observer with a webhook refresh claim
+accepted within the last 30 minutes is webhook-covered. The member that polls it
+reads that from its own replicated claims, not from the receiving host's memory.
+While covered, the repository's GraphQL floor is the 15-minute settled interval
+instead of 5 minutes, and a quiet standing-observer poll goes straight to the
+10-minute ceiling instead of stepping through 6 minutes; a poll that sees a
+change still returns to the 3-minute active cadence. Without coverage nothing
+changes. The provider learns coverage through `ObservationRequest.webhook_covered`.
+
+**Observability.** `st.github.webhook.deliveries` is a monotonic OpenTelemetry
+counter labeled `github.event` (the event name, or `other` for unknown events)
+and `outcome` (`refreshed`, `ignored`, `unauthorized`, `unavailable`, `invalid`).
+Doctor shows a `github-webhook` line on a daemon that runs the receiver: its
+address, the last verified delivery time, and counts by outcome since start.

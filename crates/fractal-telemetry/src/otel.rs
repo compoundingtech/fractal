@@ -856,6 +856,27 @@ fn record_github_response_metric(
     ]);
 }
 
+static GITHUB_WEBHOOK_DELIVERIES: std::sync::LazyLock<opentelemetry::metrics::Counter<u64>> =
+    std::sync::LazyLock::new(|| {
+        opentelemetry::global::meter("st3.github")
+            .u64_counter("st.github.webhook.deliveries")
+            .with_description("GitHub webhook deliveries this daemon received, by event and outcome")
+            .with_unit("{delivery}")
+            .build()
+    });
+
+/// One webhook delivery. `event` is a bounded label (`other` for events the receiver does not
+/// know); `outcome` is `refreshed`, `ignored`, `unauthorized`, `unavailable` or `invalid`.
+pub fn github_webhook_delivery(event: &'static str, outcome: &'static str) {
+    if !metrics_enabled() {
+        return;
+    }
+    GITHUB_WEBHOOK_DELIVERIES.add(1, &[
+        KeyValue::new("github.event", event),
+        KeyValue::new("outcome", outcome),
+    ]);
+}
+
 #[cfg(test)]
 mod github_response_metrics {
     use super::*;
