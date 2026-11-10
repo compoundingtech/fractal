@@ -26,9 +26,10 @@ export interface ClientControlIdentity {
   /** DER SubjectPublicKeyInfo bytes; pairing's eventual representation is not decided here. */
   exportPublicKey(): Promise<ArrayBuffer>
   /**
-   * Signs caller-supplied canonical bytes, without encoding or constructing a device.result.
+   * Signs bytes supplied by the generated client-result canonical helper; never reconstruct fields here.
    * The caller must enforce enrollment, foreground, command and active-grant checks first.
-   * Returns WebCrypto's native signature bytes; no daemon serialization is assumed.
+   * Returns native P1363 signature bytes. The generated-contract adapter owns base64url/envelope
+   * serialization; #6274's source contract is known but its generated outputs are not consumer-ready.
    */
   signCanonicalBytes(bytes: Uint8Array<ArrayBuffer>): Promise<ArrayBuffer>
 }
