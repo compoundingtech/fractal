@@ -370,8 +370,10 @@ locator equal to the repository in any case, and, for a `push`, `create` or
 receiver writes an `observer.refresh-requested` claim with attempt
 `"github-webhook:" + hex(sha256("fractal.github-webhook.v1\0" + delivery + "\0" + observer))`,
 the same claim a declared `refresh` writes; the attempt prefix alone marks it as
-webhook-requested, since declared attempts are bare hex digests. An
-observer that still has a refresh pending is skipped: its poll reads what the
+webhook-requested, since declared attempts are bare hex digests. The poller
+answers refreshes oldest first, so the oldest unanswered one may already be
+polling, and a delivery then queues one more. An observer with two unanswered
+refreshes is skipped: the second has not started, so its poll reads what the
 delivery announced. The answer is 202 with `{"refreshed": n}`. Refresh claims
 replicate, so the member that polls the observer acts on a delivery any member
 received; a refresh poll bypasses the GraphQL floor, as a declared refresh does.
