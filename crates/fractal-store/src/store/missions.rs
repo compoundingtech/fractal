@@ -523,7 +523,9 @@ impl Store {
             None,
             &request.idempotency_key,
         )
-        .map_err(internal)?;
+        // A typed refusal, such as a starter without the authority to start this mission, keeps
+        // its code.
+        .map_err(smallclaims::error::typed)?;
         append_claim_tx(
             &transaction,
             &self.origin,
@@ -539,7 +541,7 @@ impl Store {
             &[],
             None,
         )
-        .map_err(internal)?;
+        .map_err(smallclaims::error::typed)?;
         stages.enter("view");
         let view = created_mission_run_view_tx(&transaction, &run_id).map_err(internal)?;
         stages.enter("idempotency-record");
