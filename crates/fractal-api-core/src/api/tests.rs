@@ -24,6 +24,20 @@ fn server_versions_emit_fractal_and_keep_legacy_requests_readable() {
 }
 
 #[test]
+fn launch_hash_inputs_keep_base_golden_bytes() {
+    assert_eq!(launch_preview_token_values("fixed", "default", 7, Some("generation/fixed"),
+        &json!({"title":"Versions","steps":[]}), &[]).unwrap(),
+        "lpv0:b7b6e7a32a9fb0a0fed198d3b6f3deadae46a5200abeb3f92c4df7d19afff357");
+    let old = json!({"visualization":{"version":"st3.visualization.v0"}});
+    let new = json!({"visualization":{"version":"fractal.visualization.v0"}});
+    for collection in ["launches", "launches/fixed/variants"] {
+        assert_eq!(client_items_digest(collection, &[new.clone()]).unwrap(),
+            hex::encode(Sha256::digest(serde_json::to_vec(&vec![old.clone()]).unwrap())));
+    }
+    assert_eq!(new["visualization"]["version"], "fractal.visualization.v0");
+}
+
+#[test]
 fn launch_visualizations_emit_fractal_for_drafts_and_previews() {
     let root = tempfile::tempdir().unwrap();
     let state = state(root.path());
