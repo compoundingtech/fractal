@@ -3497,20 +3497,171 @@ fn percent_encode_segment(value: &str) -> String {
 mod tests {
     #[test]
     fn pairing_native_exchange_models_match_approval_wait_wire_fields() {
-        let request = PairingExchangeRequest {
-            v: 1, request_id: "wait-1".into(), op: PairingExchangeOperation::ApprovalWait,
-            body: PairingApprovalWaitRequest { pairing_id: "pairing/example".into(), key_fingerprint: format!("sha256:{}", "A".repeat(43)) },
-        };
+        use serde::de::DeserializeOwned;
+        use serde::Serialize;
+
+        fn roundtrip<T: DeserializeOwned + Serialize>(value: &serde_json::Value) {
+            let decoded: T = serde_json::from_value(value.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), *value);
+        }
+        fn rejects<T: DeserializeOwned>(value: serde_json::Value) {
+            assert!(serde_json::from_value::<T>(value.clone()).is_err(), "{value}");
+        }
+        fn request_roundtrip<T>(request: PairingExchangeRequest<T>)
+        where
+            T: PairingExchangeRequestBody + DeserializeOwned + Serialize,
+        {
+            let value = serde_json::to_value(request).unwrap();
+            roundtrip::<PairingExchangeRequest<T>>(&value);
+            for op in ["capabilities", "claim", "approval-wait", "complete", "ack"] {
+                if value["op"] != op {
+                    let mut wrong = value.clone();
+                    wrong["op"] = serde_json::json!(op);
+                    rejects::<PairingExchangeRequest<T>>(wrong);
+                }
+            }
+            let mut wrong = value;
+            wrong["v"] = serde_json::json!(2);
+            rejects::<PairingExchangeRequest<T>>(wrong);
+        }
+
+        let request = PairingExchangeRequest::approval_wait(
+            "wait-1".into(),
+            PairingApprovalWaitRequest {
+                pairing_id: "pairing/example".into(),
+                key_fingerprint: format!("sha256:{}", "A".repeat(43)),
+            },
+        );
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
             "../../../docs/st3/client-v0/fixtures/pairing-approval-wait.json"
         )).unwrap();
-        assert_eq!(serde_json::to_value(request).unwrap(), fixture["cases"][0]["value"]);
+        assert_eq!(serde_json::to_value(&request).unwrap(), fixture["cases"][0]["value"]);
+        request_roundtrip(request);
+        request_roundtrip(PairingExchangeRequest::capabilities("cap-1".into(), PairingExchangeEmpty {}));
+        request_roundtrip(PairingExchangeRequest::claim("claim-1".into(), PairingKeyClaim {
+            api_version: "fractal.client.v0".into(), code: "ABCDEFGH".into(),
+            device_public_key: "key".into(), proof: "proof".into(),
+        }));
+        request_roundtrip(PairingExchangeRequest::complete("complete-1".into(), PairingComplete {
+            api_version: "fractal.client.v0".into(), code: "ABCDEFGH".into(),
+            device_public_key: "key".into(), proof: None, key_storage: None, fabric_node_id: None,
+        }));
+        request_roundtrip(PairingExchangeRequest::ack("ack-1".into(), PairingExchangeAck { request_id: "complete-1".into() }));
+        rejects::<PairingExchangeRequest<PairingApprovalWaitRequest>>(serde_json::json!({
+            "v": 1, "request_id": "wait-1", "op": "approval-wait", "body": {}
+        }));
+        let approved_value = fixture["cases"][6]["value"].clone();
+        let refused_value = fixture["cases"][9]["value"].clone();
         let approved: PairingExchangeReply<PairingApprovalWaitApproved> =
-            serde_json::from_value(fixture["cases"][6]["value"].clone()).unwrap();
-        assert_eq!(approved.body.unwrap().status, "approved");
+            serde_json::from_value(approved_value.clone()).unwrap();
+        assert!(matches!(approved.outcome, PairingExchangeOutcome::Ok(PairingApprovalWaitApproved {
+            status: PairingApprovalStatus::Approved, ..
+        })));
         let refused: PairingExchangeReply<PairingApprovalWaitApproved> =
-            serde_json::from_value(fixture["cases"][9]["value"].clone()).unwrap();
-        assert_eq!(refused.refusal.unwrap().code, ErrorCode::PairingRejected);
+            serde_json::from_value(refused_value.clone()).unwrap();
+        assert!(matches!(refused.outcome, PairingExchangeOutcome::Refused(PairingExchangeRefusal {
+            code: ErrorCode::PairingRejected, ..
+        })));
+        roundtrip::<PairingExchangeReply<PairingApprovalWaitApproved>>(&approved_value);
+        roundtrip::<PairingExchangeReply<PairingApprovalWaitApproved>>(&refused_value);
+        // Exercise every body/refusal presence combination with both ok values.
+        for ok in [false, true] {
+            for has_body in [false, true] {
+                for has_refusal in [false, true] {
+                    let mut value = serde_json::json!({"v": 1, "request_id": "reply-1", "ok": ok});
+                    if has_body { value["body"] = approved_value["body"].clone(); }
+                    if has_refusal { value["refusal"] = refused_value["refusal"].clone(); }
+                    if (ok && has_body && !has_refusal) || (!ok && !has_body && has_refusal) {
+                        roundtrip::<PairingExchangeReply<PairingApprovalWaitApproved>>(&value);
+                    } else {
+                        rejects::<PairingExchangeReply<PairingApprovalWaitApproved>>(value);
+                    }
+                }
+            }
+        }
+        for field in ["body", "refusal"] {
+            for base in [&approved_value, &refused_value] {
+                let mut value = base.clone();
+                value[field] = serde_json::Value::Null;
+                rejects::<PairingExchangeReply<PairingApprovalWaitApproved>>(value);
+            }
+        }
+        let mut wrong = approved_value.clone();
+        wrong["v"] = serde_json::json!(2);
+        rejects::<PairingExchangeReply<PairingApprovalWaitApproved>>(wrong);
+        let mut wrong = approved_value["body"].clone();
+        wrong["status"] = serde_json::json!("pending");
+        rejects::<PairingApprovalWaitApproved>(wrong);
+
+        let pending = serde_json::json!({"state": "admission-pending", "pairing_id": "pairing/example"});
+        roundtrip::<PairingAdmissionPending>(&pending);
+        let mut wrong = pending.clone();
+        wrong["state"] = serde_json::json!("granted");
+        rejects::<PairingAdmissionPending>(wrong);
+        roundtrip::<PairingExchangeReply<PairingAdmissionPending>>(&serde_json::json!({
+            "v": 1, "request_id": "complete-1", "ok": true, "body": pending
+        }));
+        let qr = serde_json::json!({
+            "_tag": "fractal.pairing", "version": 1, "gateway": "https://example.test",
+            "id": "pairing/example", "code": "ABCDEFGH", "expires_at_unix_ms": 1000
+        });
+        let permit = serde_json::json!({"node_id": "node", "attempt_id": "attempt", "secret": "secret"});
+        roundtrip::<PairingQrPayload>(&qr);
+        let mut qr_v2 = qr.clone();
+        qr_v2["version"] = serde_json::json!(2);
+        qr_v2["fabric"] = permit.clone();
+        roundtrip::<PairingQrPayload>(&qr_v2);
+        for (field, value) in [
+            ("_tag", serde_json::json!("other.pairing")),
+            ("version", serde_json::json!(0)),
+            ("version", serde_json::json!(3)),
+            ("fabric", permit),
+            ("fabric", serde_json::Value::Null),
+        ] {
+            let mut wrong = qr.clone();
+            wrong[field] = value;
+            rejects::<PairingQrPayload>(wrong);
+        }
+        let mut wrong = qr.clone();
+        wrong["version"] = serde_json::json!(2);
+        rejects::<PairingQrPayload>(wrong);
+        let mut wrong = qr_v2;
+        wrong["fabric"] = serde_json::Value::Null;
+        rejects::<PairingQrPayload>(wrong);
+
+        let capabilities = serde_json::json!([
+            {"id": "device-key-proofs", "version": 1, "state": "granted"},
+            {"id": "fabric-gateway-grant", "version": 1, "state": "granted"},
+            {"id": "pairing-key-binding", "version": 2, "state": "granted"}
+        ]);
+        let advertisement = serde_json::json!({"api_version": "fractal.client.v0", "capabilities": capabilities});
+        roundtrip::<PairingAdvertisement>(&advertisement);
+        roundtrip::<PairingExchangeReply<PairingAdvertisement>>(&serde_json::json!({
+            "v": 1, "request_id": "cap-1", "ok": true, "body": advertisement
+        }));
+        for capability in capabilities.as_array().unwrap() {
+            roundtrip::<PairingAdvertisedCapability>(capability);
+            for (field, value) in [
+                ("id", serde_json::json!("unknown")),
+                ("state", serde_json::json!("pending")),
+                ("version", serde_json::json!(0)),
+                ("version", serde_json::json!(3)),
+                ("version", serde_json::json!(if capability["version"] == 1 { 2 } else { 1 })),
+            ] {
+                let mut wrong = capability.clone();
+                wrong[field] = value;
+                rejects::<PairingAdvertisedCapability>(wrong);
+            }
+        }
+        for invalid in [
+            serde_json::json!([]),
+            serde_json::json!([capabilities[0], capabilities[0]]),
+            serde_json::json!([capabilities[0], capabilities[1], capabilities[2], capabilities[0]]),
+        ] {
+            rejects::<PairingAdvertisement>(serde_json::json!({
+                "api_version": "fractal.client.v0", "capabilities": invalid
+            }));
+        }
     }
 
     #[test]

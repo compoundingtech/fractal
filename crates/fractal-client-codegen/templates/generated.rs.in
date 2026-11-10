@@ -4339,31 +4339,145 @@ pub struct PairingFabricPermit {
     pub attempt_id: String,
     pub secret: String,
 }
+/// A numeric wire constant: callers cannot construct a different value.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PairingWireVersion<const V: u8>;
+impl<const V: u8> Serialize for PairingWireVersion<V> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_u8(V)
+    }
+}
+impl<'de, const V: u8> Deserialize<'de> for PairingWireVersion<V> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        if u8::deserialize(deserializer)? == V {
+            Ok(Self)
+        } else {
+            Err(serde::de::Error::custom("incorrect pairing wire version"))
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub enum PairingQrTag {
+    #[serde(rename = "fractal.pairing")]
+    Pairing,
+}
+/// Each variant enforces its version and presence (or absence) of a Fabric permit.
+#[derive(Clone, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum PairingQrPayload {
+    V1(PairingQrV1),
+    V2(PairingQrV2),
+}
+impl<'de> Deserialize<'de> for PairingQrPayload {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(rename = "_tag")]
+            tag: PairingQrTag,
+            version: u8,
+            gateway: String,
+            id: String,
+            code: String,
+            expires_at_unix_ms: i64,
+            #[serde(default)]
+            fabric: PairingExchangeField<PairingFabricPermit>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        match (wire.version, wire.fabric) {
+            (1, PairingExchangeField::Missing) => Ok(Self::V1(PairingQrV1 {
+                tag: wire.tag, version: PairingWireVersion, gateway: wire.gateway,
+                id: wire.id, code: wire.code, expires_at_unix_ms: wire.expires_at_unix_ms,
+            })),
+            (2, PairingExchangeField::Present(fabric)) => Ok(Self::V2(PairingQrV2 {
+                tag: wire.tag, version: PairingWireVersion, gateway: wire.gateway,
+                id: wire.id, code: wire.code, expires_at_unix_ms: wire.expires_at_unix_ms, fabric,
+            })),
+            _ => Err(serde::de::Error::custom("pairing QR version does not match Fabric permit presence")),
+        }
+    }
+}
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct PairingQrPayload {
+pub struct PairingQrV1 {
     #[serde(rename = "_tag")]
-    pub tag: String,
-    pub version: u8,
+    pub tag: PairingQrTag,
+    pub version: PairingWireVersion<1>,
     pub gateway: String,
     pub id: String,
     pub code: String,
     pub expires_at_unix_ms: i64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub fabric: Option<PairingFabricPermit>,
+}
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PairingQrV2 {
+    #[serde(rename = "_tag")]
+    pub tag: PairingQrTag,
+    pub version: PairingWireVersion<2>,
+    pub gateway: String,
+    pub id: String,
+    pub code: String,
+    pub expires_at_unix_ms: i64,
+    pub fabric: PairingFabricPermit,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "PairingAdvertisementWire")]
 pub struct PairingAdvertisement {
     pub api_version: String,
-    pub capabilities: Vec<PairingAdvertisedCapability>,
+    capabilities: Vec<PairingAdvertisedCapability>,
+}
+impl PairingAdvertisement {
+    pub fn new(api_version: String, capabilities: Vec<PairingAdvertisedCapability>) -> Result<Self, &'static str> {
+        if capabilities.is_empty() || capabilities.len() > 3 {
+            return Err("pairing advertisement requires one to three capabilities");
+        }
+        for (index, capability) in capabilities.iter().enumerate() {
+            if capabilities[..index].iter().any(|other| other.id() == capability.id()) {
+                return Err("duplicate pairing capability ID");
+            }
+        }
+        Ok(Self { api_version, capabilities })
+    }
+
+    pub fn capabilities(&self) -> &[PairingAdvertisedCapability] {
+        &self.capabilities
+    }
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PairingAdvertisementWire {
+    api_version: String,
+    capabilities: Vec<PairingAdvertisedCapability>,
+}
+impl TryFrom<PairingAdvertisementWire> for PairingAdvertisement {
+    type Error = &'static str;
+    fn try_from(wire: PairingAdvertisementWire) -> Result<Self, Self::Error> {
+        Self::new(wire.api_version, wire.capabilities)
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub enum PairingCapabilityState {
+    #[serde(rename = "granted")]
+    Granted,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct PairingAdvertisedCapability {
-    pub id: String,
-    pub version: u32,
-    pub state: String,
+#[serde(tag = "id", deny_unknown_fields)]
+pub enum PairingAdvertisedCapability {
+    #[serde(rename = "device-key-proofs")]
+    DeviceKeyProofs { version: PairingWireVersion<1>, state: PairingCapabilityState },
+    #[serde(rename = "fabric-gateway-grant")]
+    FabricGatewayGrant { version: PairingWireVersion<1>, state: PairingCapabilityState },
+    #[serde(rename = "pairing-key-binding")]
+    PairingKeyBinding { version: PairingWireVersion<2>, state: PairingCapabilityState },
+}
+impl PairingAdvertisedCapability {
+    pub fn id(&self) -> &'static str {
+        match self {
+            Self::DeviceKeyProofs { .. } => "device-key-proofs",
+            Self::FabricGatewayGrant { .. } => "fabric-gateway-grant",
+            Self::PairingKeyBinding { .. } => "pairing-key-binding",
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
@@ -4374,14 +4488,69 @@ pub enum PairingExchangeOperation {
     Complete,
     Ack,
 }
-/// Body is the canonical request model for op, not a handwritten JSON copy.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct PairingExchangeRequest<T> {
-    pub v: u8,
+mod pairing_request_body {
+    pub trait Sealed {}
+}
+/// Sealed to the five canonical operation bodies; downstream types cannot choose an opcode.
+pub trait PairingExchangeRequestBody: pairing_request_body::Sealed {
+    const OP: PairingExchangeOperation;
+}
+#[derive(Clone, Debug, PartialEq)]
+pub struct PairingExchangeRequest<T: PairingExchangeRequestBody> {
     pub request_id: String,
-    pub op: PairingExchangeOperation,
     pub body: T,
+}
+macro_rules! pairing_request_body {
+    ($body:ty, $op:ident, $constructor:ident) => {
+        impl pairing_request_body::Sealed for $body {}
+        impl PairingExchangeRequestBody for $body {
+            const OP: PairingExchangeOperation = PairingExchangeOperation::$op;
+        }
+        impl PairingExchangeRequest<$body> {
+            pub fn $constructor(request_id: String, body: $body) -> Self {
+                Self { request_id, body }
+            }
+        }
+    };
+}
+pairing_request_body!(PairingExchangeEmpty, Capabilities, capabilities);
+pairing_request_body!(PairingKeyClaim, Claim, claim);
+pairing_request_body!(PairingApprovalWaitRequest, ApprovalWait, approval_wait);
+pairing_request_body!(PairingComplete, Complete, complete);
+pairing_request_body!(PairingExchangeAck, Ack, ack);
+impl<T: PairingExchangeRequestBody> PairingExchangeRequest<T> {
+    pub fn op(&self) -> PairingExchangeOperation {
+        T::OP
+    }
+}
+impl<T: PairingExchangeRequestBody + Serialize> Serialize for PairingExchangeRequest<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut wire = serializer.serialize_struct("PairingExchangeRequest", 4)?;
+        wire.serialize_field("v", &1_u8)?;
+        wire.serialize_field("request_id", &self.request_id)?;
+        wire.serialize_field("op", &T::OP)?;
+        wire.serialize_field("body", &self.body)?;
+        wire.end()
+    }
+}
+impl<'de, T: PairingExchangeRequestBody + Deserialize<'de>> Deserialize<'de> for PairingExchangeRequest<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire<T> {
+            v: PairingWireVersion<1>,
+            request_id: String,
+            op: PairingExchangeOperation,
+            body: T,
+        }
+        let wire = Wire::<T>::deserialize(deserializer)?;
+        let _ = wire.v;
+        if wire.op != T::OP {
+            return Err(serde::de::Error::custom("pairing operation does not match body type"));
+        }
+        Ok(Self { request_id: wire.request_id, body: wire.body })
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -4389,17 +4558,73 @@ pub struct PairingExchangeRefusal {
     pub code: ErrorCode,
     pub message: String,
 }
-/// One reply envelope for every operation, with its typed success body.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+/// Native outcomes cannot represent contradictory success and refusal fields.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PairingExchangeOutcome<T> {
+    Ok(T),
+    Refused(PairingExchangeRefusal),
+}
+/// One reply envelope and refusal type for every operation.
+#[derive(Clone, Debug, PartialEq)]
 pub struct PairingExchangeReply<T> {
-    pub v: u8,
     pub request_id: String,
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub body: Option<T>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub refusal: Option<PairingExchangeRefusal>,
+    pub outcome: PairingExchangeOutcome<T>,
+}
+impl<T: Serialize> Serialize for PairingExchangeReply<T> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut wire = serializer.serialize_struct("PairingExchangeReply", 4)?;
+        wire.serialize_field("v", &1_u8)?;
+        wire.serialize_field("request_id", &self.request_id)?;
+        match &self.outcome {
+            PairingExchangeOutcome::Ok(body) => {
+                wire.serialize_field("ok", &true)?;
+                wire.serialize_field("body", body)?;
+            }
+            PairingExchangeOutcome::Refused(refusal) => {
+                wire.serialize_field("ok", &false)?;
+                wire.serialize_field("refusal", refusal)?;
+            }
+        }
+        wire.end()
+    }
+}
+// Unlike Option, this retains the distinction between a missing field and an
+// explicitly present null. Forbidden fields are rejected even when null.
+enum PairingExchangeField<T> {
+    Missing,
+    Present(T),
+}
+impl<T> Default for PairingExchangeField<T> {
+    fn default() -> Self { Self::Missing }
+}
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for PairingExchangeField<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        T::deserialize(deserializer).map(Self::Present)
+    }
+}
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for PairingExchangeReply<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields, bound(deserialize = "T: Deserialize<'de>"))]
+        struct Wire<T> {
+            v: PairingWireVersion<1>,
+            request_id: String,
+            ok: bool,
+            #[serde(default)]
+            body: PairingExchangeField<T>,
+            #[serde(default)]
+            refusal: PairingExchangeField<PairingExchangeRefusal>,
+        }
+        let wire = Wire::<T>::deserialize(deserializer)?;
+        let _ = wire.v;
+        let outcome = match (wire.ok, wire.body, wire.refusal) {
+            (true, PairingExchangeField::Present(body), PairingExchangeField::Missing) => PairingExchangeOutcome::Ok(body),
+            (false, PairingExchangeField::Missing, PairingExchangeField::Present(refusal)) => PairingExchangeOutcome::Refused(refusal),
+            _ => return Err(serde::de::Error::custom("inconsistent pairing reply outcome")),
+        };
+        Ok(Self { request_id: wire.request_id, outcome })
+    }
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -4410,9 +4635,14 @@ pub struct PairingApprovalWaitRequest {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PairingApprovalWaitApproved {
-    pub status: String,
+    pub status: PairingApprovalStatus,
     pub key_fingerprint: String,
     pub approved_at: String,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub enum PairingApprovalStatus {
+    #[serde(rename = "approved")]
+    Approved,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -4422,8 +4652,13 @@ pub struct PairingExchangeAck {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct PairingAdmissionPending {
-    pub state: String,
+    pub state: PairingAdmissionState,
     pub pairing_id: String,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+pub enum PairingAdmissionState {
+    #[serde(rename = "admission-pending")]
+    AdmissionPending,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
