@@ -1215,7 +1215,7 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           QUEUE_REF: ${{ github.event.merge_group.head_ref }}
           QUEUE_SHA: ${{ github.event.merge_group.head_sha }}
-          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-linux-clippy":[],"evidence-gate-linux-fleet-compat":[],"evidence-gate-typescript-client":[],"evidence-gate-genie-freshness":[],"evidence-gate-ci-script-tests":[],"evidence-gate-fractal-web":["fractal-web-changes"],"evidence-gate-rust-tests":[],"evidence-presign-notice":["evidence-gate-linux-gate","evidence-gate-linux-clippy","evidence-gate-linux-fleet-compat","evidence-gate-typescript-client","evidence-gate-genie-freshness","evidence-gate-ci-script-tests","evidence-gate-fractal-web","evidence-gate-rust-tests"],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"hm-module-eval":["pick-runner"],"ci-script-tests":["pick-runner","evidence-gate-ci-script-tests"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"swift-client-changes":[],"swift-client":["swift-client-changes"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-clippy":["pick-runner","evidence-gate-linux-gate","evidence-gate-linux-clippy"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate","evidence-gate-linux-fleet-compat","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","ci-script-tests","evidence-gate-ci-script-tests","hm-module-eval","evidence-gate-rust-tests","evidence-gate-linux-clippy","evidence-gate-linux-fleet-compat"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","genie-freshness","ci-script-tests","typescript-client","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-linux-clippy","evidence-gate-linux-fleet-compat","evidence-gate-genie-freshness","evidence-gate-ci-script-tests","evidence-gate-typescript-client","evidence-gate-fractal-web","evidence-gate-rust-tests"],"evidence-note-rust-tests":["linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","evidence-gate-linux-gate","evidence-gate-rust-tests"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"],"Prepare verified compatibility archives (x86_64-unknown-linux-gnu)":[]}'
+          QUEUE_DEPENDENCIES: '{"pick-runner":[],"evidence-source":[],"evidence-gate-linux-gate":[],"evidence-gate-linux-clippy":[],"evidence-gate-linux-fleet-compat":[],"evidence-gate-typescript-client":[],"evidence-gate-genie-freshness":[],"evidence-gate-ci-script-tests":[],"evidence-gate-fractal-web":["fractal-web-changes"],"evidence-gate-rust-tests":[],"evidence-presign-notice":["evidence-gate-linux-gate","evidence-gate-linux-clippy","evidence-gate-linux-fleet-compat","evidence-gate-typescript-client","evidence-gate-genie-freshness","evidence-gate-ci-script-tests","evidence-gate-fractal-web","evidence-gate-rust-tests"],"upgrade-impact":[],"namespace-capacity":[],"genie-freshness":["pick-runner","evidence-gate-genie-freshness"],"hm-module-eval":["pick-runner"],"ci-script-tests":["pick-runner","evidence-gate-ci-script-tests"],"typescript-client":["pick-runner","genie-freshness","evidence-gate-typescript-client"],"swift-client-changes":[],"swift-client":["swift-client-changes"],"nix-evidence-genie-freshness":["pick-runner"],"nix-evidence-typescript-client":["pick-runner"],"linux-test-build":["pick-runner","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests-shard-2":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests-shard-3":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-tests-shard-4":["pick-runner","linux-test-build","evidence-gate-linux-gate","evidence-gate-rust-tests","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-clippy":["pick-runner","evidence-gate-linux-gate","evidence-gate-linux-clippy"],"linux-fleet-compat":["pick-runner","evidence-gate-linux-gate","evidence-gate-linux-fleet-compat","Prepare verified compatibility archives (x86_64-unknown-linux-gnu)"],"linux-gate":["pick-runner","evidence-gate-linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","ci-script-tests","evidence-gate-ci-script-tests","hm-module-eval","evidence-gate-rust-tests","evidence-gate-linux-clippy","evidence-gate-linux-fleet-compat"],"evidence-note-linux-gate":["linux-gate","linux-test-build","upgrade-impact","linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","linux-clippy","linux-fleet-compat","genie-freshness","ci-script-tests","typescript-client","fractal-web-changes","fractal-web-execution","fractal-web","evidence-gate-linux-gate","evidence-gate-linux-clippy","evidence-gate-linux-fleet-compat","evidence-gate-genie-freshness","evidence-gate-ci-script-tests","evidence-gate-typescript-client","evidence-gate-fractal-web","evidence-gate-rust-tests"],"evidence-shadow-compare":["evidence-note-linux-gate"],"evidence-note-rust-tests":["linux-tests","linux-tests-shard-2","linux-tests-shard-3","linux-tests-shard-4","evidence-gate-linux-gate","evidence-gate-rust-tests"],"fractal-web-changes":[],"fractal-web-execution":["fractal-web-changes","genie-freshness","evidence-gate-fractal-web"],"fractal-web":["fractal-web-changes","fractal-web-execution","evidence-gate-fractal-web"],"Prepare verified compatibility archives (x86_64-unknown-linux-gnu)":[]}'
         run: |
           python3 - <<'QUEUE_WATCH_PY'
           #!/usr/bin/env python3
@@ -4329,6 +4329,61 @@ jobs:
         env:
           CACHE_REASON: Signs the aggregate gate result from workflow context; builds nothing.
         run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+  evidence-shadow-compare:
+    needs: [evidence-note-linux-gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    continue-on-error: true
+    env:
+      BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - # v3.24.1
+        name: Install Nix
+        uses: DeterminateSystems/determinate-nix-action@92957199488000b908fdad19f63711000965d8f3
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          extra-conf: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+            connect-timeout = 10
+            stalled-download-timeout = 60
+            download-attempts = 3
+            extra-substituters = https://overeng-effect-utils.cachix.org
+            extra-trusted-public-keys = overeng-effect-utils.cachix.org-1:KFmqYNF6Q7ZzVYPl2znpJYZGEolage9YNCA9res6vKc=
+            access-tokens = github.com=${{ github.token }}
+          summarize: true
+      - name: Compare live shadow decisions (not gate coverage)
+        run: |
+          mkdir -p "$RUNNER_TEMP/evidence-base"
+          git fetch --quiet origin "$BASE_SHA" && git archive "$BASE_SHA" scripts | tar -x -C "$RUNNER_TEMP/evidence-base"
+          key_path=.st/evidence-keys; [ -z "$(git ls-tree "$BASE_SHA" -- .fractal/evidence-keys)" ] || key_path=.fractal/evidence-keys
+          git show "$BASE_SHA:$key_path" > "$RUNNER_TEMP/evidence-keys"
+          shadow="$RUNNER_TEMP/evidence-base/scripts/ci-evidence-shadow"
+          grep -q -- --snapshot-tree "$shadow" || { echo "::notice::missing comparison coverage: accepted base predates C"; exit 1; }
+          mm=$(nix eval --raw --no-write-lock-file .#mergemasterSource)
+          python3 "$shadow" --snapshot-tree "$(git rev-parse 'HEAD^{tree}')" --keys "$RUNNER_TEMP/evidence-keys" --verifier "$RUNNER_TEMP/evidence-base/scripts/evidence-verify" \
+            --checks "linux-gate,linux-tests,linux-tests-shard-2,linux-tests-shard-3,linux-tests-shard-4,linux-clippy,linux-fleet-compat,genie-freshness,ci-script-tests,typescript-client,fractal-web" \
+            --compare-shadow "$mm/scripts/ci-evidence-shadow" --comparison-out "$RUNNER_TEMP/evidence-shadow-comparison"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: "evidence-shadow-comparison-${{ github.run_attempt }}"
+          path: "${{ runner.temp }}/evidence-shadow-comparison/"
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Report job cache coverage
+        if: always()
+        shell: bash
+        env:
+          CACHE_REASON: Fetches immutable source and evidence only; compiles nothing.
+        run: "printf 'Cache coverage: **not applicable** — %s\\n' \"$CACHE_REASON\" >> \"$GITHUB_STEP_SUMMARY\""
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.draft == false) && (success()) }}
   evidence-note-rust-tests:
     name: evidence-note-rust-tests
     needs:
