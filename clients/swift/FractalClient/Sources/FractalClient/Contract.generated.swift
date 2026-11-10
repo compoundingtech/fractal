@@ -91,6 +91,7 @@ public enum ReadOperation: String, CaseIterable, Sendable {
     case machinesList = "machines.list"
     case devicesList = "devices.list"
     case attentionList = "attention.list"
+    case attentionBudget = "attention-budget"
     case attentionGet = "attention.get"
     case messagesList = "messages.list"
     case messagesGet = "messages.get"
@@ -180,6 +181,7 @@ public let fractalClientReadPaths: [ReadOperation: String] = [
     .machinesList: "/v1/client/machines",
     .devicesList: "/v1/client/devices",
     .attentionList: "/v1/client/attention",
+    .attentionBudget: "/v1/client/attention-budget",
     .attentionGet: "/v1/client/attention/{id}",
     .messagesList: "/v1/client/messages",
     .messagesGet: "/v1/client/messages/{id}",

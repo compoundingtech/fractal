@@ -42,6 +42,8 @@ pub mod identities;
 pub(crate) mod agent_review_answer;
 #[allow(dead_code)]
 pub(crate) mod agent_review_decode;
+#[doc(hidden)]
+pub mod agent_review_transaction;
 mod rename_proof;
 #[cfg(test)]
 mod rename_proof_tests;
@@ -49,6 +51,7 @@ mod rename_proof_tests;
 mod observation_trim_tests;
 pub mod directive_notes;
 mod declared_admission;
+mod agent_charter;
 pub mod observer_subscription_detail;
 pub mod glass_heads;
 pub mod arrangements;
@@ -253,6 +256,8 @@ pub const API_READINESS_SLO_MISSED: &str = "fractal-api-readiness-slo-missed";
 pub mod person_rename;
 pub mod revision_seats;
 pub mod delegation;
+pub mod claim_pages;
+pub use claim_pages::ClaimsFilter;
 pub mod limits;
 pub mod database_size;
 pub mod answers_check;
@@ -3326,6 +3331,7 @@ impl Store {
         self.connection
             .batched(|transaction| -> Result<ApplyResponse, FractalError> {
                 declared_admission::validate_publication(transaction, &self.origin, intent)?;
+                agent_charter::validate_publication(transaction, &self.origin, intent)?;
                 let normalized_intent = identities::normalize_intent(transaction, intent)?;
                 let intent = normalized_intent.as_ref();
                 let mut normalized_expected = std::borrow::Cow::Borrowed(expected);
@@ -4273,8 +4279,25 @@ impl Store {
         descending: bool,
         limit: usize,
     ) -> Result<ClaimsPage> {
+        let filter = ClaimsFilter { subject, ..ClaimsFilter::default() };
+        self.claims_page_matching(filter, owner_run, after_index, before_index, descending, limit)
+    }
+
+    /// Claims after `after_index` (and before `before_index`) matching `filter`, at most `limit`
+    /// in store-index order; `next_cursor` is set when more remain. Each filter reads through a
+    /// claims index (see [`claims_page_query`]).
+    pub fn claims_page_matching(
+        &self,
+        filter: ClaimsFilter<'_>,
+        owner_run: Option<&str>,
+        after_index: u64,
+        before_index: Option<u64>,
+        descending: bool,
+        limit: usize,
+    ) -> Result<ClaimsPage> {
+        let (subject, lower, upper) = claim_pages::subject_match(filter)?;
         let connection = self.readers.get();
-        let query = claims_page_query(subject.is_some(), descending);
+        let query = claims_page_query(subject, filter.kind.is_some(), descending);
         let mut statement = connection.prepare(/* sqlite-large-value: allow-for-now lv-h2080eb040134 owner=fractal_store::store TODO=trace-statement-and-value-representation */ &query)?;
         // The owner filter is evaluated per subject below. Other pages can stop
         // in SQLite at one row past the requested bound, before decoding bodies.
@@ -4283,8 +4306,12 @@ impl Store {
         } else {
             i64::try_from(limit.saturating_add(1)).unwrap_or(i64::MAX)
         };
+        let values: [&dyn rusqlite::ToSql; 6] =
+            [&after_index, &before_index, &lower, &scan_limit, &filter.kind, &upper];
+        // Each query names its highest parameter; the unused ones below it stay NULL.
+        let bound = statement.parameter_count();
         let rows = statement.query_map(
-            params![after_index, before_index, subject, scan_limit],
+            rusqlite::params_from_iter(&values[..bound]),
             claim_from_row,
         )?;
         let mut claims = Vec::new();
@@ -11477,6 +11504,7 @@ pub fn append_claim_tx_with_assistant_answer(
 ) -> Result<ClaimRecord> {
     fractal_missions_base::declared_admission::validate_claim(kind, subject, body).map_err(anyhow::Error::new)?;
     declared_admission::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
+    agent_charter::validate_claim(transaction, origin, kind, body).map_err(anyhow::Error::new)?;
     if matches!(kind, "intent.desired" | "mission.published") {
         owned_sets::refuse_unmanaged(transaction, subject).map_err(anyhow::Error::new)?;
     }
@@ -15742,6 +15770,59 @@ pub fn a_large_page_is_admitted_in_chunks_that_release_the_writer() {
 
 #[cfg(any(test, feature = "test-support"))]
 #[test]
+pub fn catch_up_projection_distinguishes_inline_local_writes_from_new_admission_between_chunks() {
+    const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
+    for replicated in [false, true] {
+        let source = Store::open_memory("source").unwrap();
+        let target = Store::open_memory("target").unwrap();
+        source.bind_fleet(FLEET).unwrap();
+        target.bind_fleet(FLEET).unwrap();
+        let append = |store: &Store, index: usize| {
+            store.put_document(
+                &format!("doc/projection-watermark/{index}"),
+                b"An invented local write.",
+                &None,
+                &format!("projection-watermark-{index}"),
+            ).unwrap();
+        };
+        let admit = || {
+            let mut inventory = target.replication_inventory().unwrap();
+            inventory.accepts = None;
+            let exchange = source.export_replication_exchange(FLEET, &inventory).unwrap();
+            target.receive_replication_exchange("source", FLEET, &exchange).unwrap();
+            assert!(target.validate_replication_backlog().unwrap().changed);
+        };
+        for index in 0..=smallclaims::store::PROJECTION_CHUNK_CLAIMS {
+            append(&source, index);
+        }
+        admit();
+        let admitted = target.index().unwrap();
+        let mut yielded = false;
+        assert!(target.project_replication_backlog_with_yield(|| {
+            if !yielded {
+                yielded = true;
+                let next = smallclaims::store::PROJECTION_CHUNK_CLAIMS + 1;
+                if replicated {
+                    append(&source, next);
+                    admit();
+                } else {
+                    append(&target, next);
+                }
+            }
+        }).unwrap());
+        assert!(yielded, "the test must write between bounded chunks");
+        assert!(target.index().unwrap() > admitted);
+        assert!(target.projected_through() >= admitted);
+        assert_eq!(target.replication_projection_deferred(), replicated);
+        if replicated {
+            assert!(target.project_replication_backlog().unwrap());
+            assert!(!target.replication_projection_deferred());
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[test]
 pub fn catch_up_projection_cannot_clear_an_admission_deferred_after_its_index_read() {
     pub const FLEET: &str = "018f6f0d-4a5d-7b8c-9d0e-123456789abc";
     let source = Store::open_memory("source").unwrap();
@@ -15866,8 +15947,8 @@ pub fn catch_up_projection_commits_frontiers_and_serves_writes_between_them() {
     assert_eq!(FULL_REPLAYS.with(std::cell::Cell::get), 0);
     assert_eq!(target.projected_through(), admitted);
     assert!(
-        target.replication_projection_deferred(),
-        "later claims still need a pass"
+        !target.replication_projection_deferred(),
+        "inline local writes leave no admitted claim behind the pass"
     );
     assert!(target.project_replication_backlog().unwrap());
     assert!(!target.replication_projection_deferred());

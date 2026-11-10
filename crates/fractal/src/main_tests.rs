@@ -1082,6 +1082,116 @@ fn a_leave_is_confirmed_by_a_matching_digest_or_a_refusal_as_left() {
 }
 
 #[test]
+fn budgets_attention_requires_positional_mission_and_accepts_read_options() {
+    let missing = Cli::try_parse_from(["fractal", "budgets", "attention"])
+        .err()
+        .expect("attention budget requires a mission");
+    assert_eq!(missing.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    assert!(Cli::try_parse_from([
+        "fractal", "budgets", "attention", "--mission", "mission/example",
+    ]).is_err());
+
+    let cli = Cli::try_parse_from([
+        "fractal", "budgets", "attention", "mission/example",
+    ]).expect("positional mission parses without optional filters");
+    assert!(!cli.json);
+    let Command::Budgets {
+        command: BudgetsCommand::Attention { mission, actor: _, person, at },
+    } = cli.command else {
+        panic!("expected budgets attention");
+    };
+    assert_eq!(mission, "mission/example");
+    assert_eq!(person, None);
+    assert_eq!(at, None);
+
+    for arguments in [
+        vec![
+            "fractal", "budgets", "attention", "mission/example",
+            "--as", "agent/node.desk",
+            "--person", "person/operator", "--at", "1794182400000", "--json",
+        ],
+        vec![
+            "fractal", "--json", "budgets", "attention", "mission/example",
+            "--as", "agent/node.desk",
+            "--person", "person/operator", "--at", "1794182400000",
+        ],
+    ] {
+        let cli = Cli::try_parse_from(arguments)
+            .expect("attention budget filters and global JSON parse");
+        assert!(cli.json);
+        let Command::Budgets {
+            command: BudgetsCommand::Attention { mission, actor, person, at },
+        } = cli.command else {
+            panic!("expected budgets attention");
+        };
+        assert_eq!(mission, "mission/example");
+        assert_eq!(actor.as_deref(), Some("agent/node.desk"));
+        assert_eq!(person.as_deref(), Some("person/operator"));
+        assert_eq!(at, Some(1_794_182_400_000_u128));
+    }
+    for actor in ["person/operator", "agent/node.desk"] {
+        let cli = Cli::try_parse_from([
+            "fractal", "budgets", "attention", "mission/example", "--as", actor,
+        ]).expect("attention budget accepts a concrete acting person or agent");
+        let Command::Budgets {
+            command: BudgetsCommand::Attention { actor: parsed, person, .. },
+        } = cli.command else {
+            panic!("expected budgets attention");
+        };
+        assert_eq!(parsed.as_deref(), Some(actor));
+        assert_eq!(person, None, "acting identity is not the recipient filter");
+    }
+}
+
+#[tokio::test]
+async fn attention_budget_generated_unix_client_requires_an_acting_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = fractal_daemon::api::tests_shared::state(directory.path());
+    let source = r#"version 2
+agent "desk" { workspace "."; command "true"; restart always; }
+mission "example/budget" state="ready" {
+  goal "Gather decisions."
+  step "work" { assigned-to "agent/node.desk"; goal "Ask the recipient." }
+}
+"#;
+    let intent = fractal_daemon::graph::parse_intent(source, "node").unwrap();
+    let preview = state.store.mission(&intent, fractal_daemon::model::IntentInput {
+        kdl: source.into(), source_name: None,
+    }).unwrap();
+    state.store.apply_as(
+        &intent, &preview.subject_tokens, "budget-cli-fixture", Some("person/operator"),
+    ).unwrap();
+
+    let socket = directory.path().join("budget.sock");
+    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+    let app = fractal_daemon::api::router(state);
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let endpoint = Endpoint::Unix(socket);
+    let actor = fractal_drivers::contracts::env("ST_AGENT")
+        .filter(|actor| actor.starts_with("agent/"))
+        .unwrap_or_else(|| "agent/node.desk".into());
+    let response = attention_budget_client(
+        &endpoint, Some(&actor), Some("person/operator"),
+    ).unwrap()
+        .attention_budget("mission/example/budget", Some("person/operator"), Some(0))
+        .await.unwrap();
+    assert_eq!(response.value.mission, "mission/example/budget");
+    assert_eq!(response.value.person, "person/operator");
+    assert_eq!(response.value.inclusive, 0);
+
+    let error = generated_client(&endpoint, None).unwrap()
+        .attention_budget("mission/example/budget", Some("person/operator"), Some(0))
+        .await.unwrap_err();
+    let GeneratedClientError::Api(ClientErrorCode::Forbidden, message, envelope) = error else {
+        panic!("expected the actorless client's revalidation error, got {error:?}");
+    };
+    assert_eq!(message, "the client session grant is absent");
+    assert_eq!(envelope.code, ClientErrorCode::Forbidden);
+    server.abort();
+    let _ = server.await;
+}
+
+#[test]
 fn missions_tree_fixture_renders_all_sections() {
     let fixture: Value =
         serde_json::from_str(/* sqlite-large-value: allow-for-now lv-h5c4f751108a0 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("../tests/fixtures/missions-tree.json"))
@@ -2482,6 +2592,14 @@ fn declared_admission_human_output_is_explicitly_not_enforced() {
 }
 
 #[test]
+fn agent_charter_prints_every_line_without_terminal_controls() {
+    assert_eq!(
+        render_agent_charter("Keep main green.\n\nOwn \u{1b}[31mreleases\u{1b}[0m and notes."),
+        "Charter\n  Keep main green.\n\n  Own releases and notes.\n"
+    );
+}
+
+#[test]
 fn a_stopped_agent_says_why_who_and_when_in_show_and_ls() {
     let parked = stopped_agent(serde_json::json!({
         "kind": "parked", "actor": "daemon/runtime", "ended_at": "2026-10-21T04:37:42.469Z",
@@ -3399,12 +3517,15 @@ fn removed_legacy_handlers_are_absent_from_cli_and_server_sources() {
     const WAITING_ON_SOURCE: &str = include_str!("waiting_on_cli.rs");
     #[cfg(test)]
     const VALIDATE_SOURCE: &str = include_str!("validate_cli.rs");
+    #[cfg(test)]
+    const CLAIMS_SOURCE: &str = include_str!("claims_cli.rs");
     // The CLI's source is main.rs and the command files it declares (`mod NAME_cli;`); the
     // list must name every one, so a legacy handler cannot come back in a command file.
     let command_files = [
         ("agents", /* sqlite-large-value: allow-for-now lv-h98e4919fbef1 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("agents_cli.rs")),
         ("attention", /* sqlite-large-value: allow-for-now lv-he0a1bbcc913d owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("attention_cli.rs")),
         ("change", /* sqlite-large-value: allow-for-now lv-h6803953fef0f owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("change_cli.rs")),
+        ("claims", CLAIMS_SOURCE),
         ("conversations", /* sqlite-large-value: allow-for-now lv-hf902b7715eca owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("conversations_cli.rs")),
         ("deploy", DEPLOY_SOURCE),
         ("doctor", /* sqlite-large-value: allow-for-now lv-h85e4d7c741b2 owner=fractal::main_tests TODO=trace-statement-and-value-representation */ include_str!("doctor_cli.rs")),
