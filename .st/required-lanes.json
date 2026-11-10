@@ -2,7 +2,14 @@
   "version": 1,
   "lanes": {
     "fractal-web": {
-      "argv": ["nix", "develop", ".#web", "-c", "bash", "scripts/ci-local-web"],
+      "argv": [
+        "nix",
+        "develop",
+        ".#web",
+        "-c",
+        "bash",
+        "scripts/ci-local-web"
+      ],
       "definition_paths": [
         ".buckconfig",
         ".buckroot",
@@ -96,7 +103,14 @@
       ]
     },
     "genie-freshness": {
-      "argv": ["nix", "develop", ".#genie", "-c", "bash", "scripts/ci-genie-freshness"],
+      "argv": [
+        "nix",
+        "develop",
+        ".#genie",
+        "-c",
+        "bash",
+        "scripts/ci-genie-freshness"
+      ],
       "definition_paths": [
         ".buckconfig",
         ".buckroot",
@@ -120,10 +134,19 @@
         "pnpm-workspace.yaml",
         "scripts"
       ],
-      "tree_inputs": ["."]
+      "tree_inputs": [
+        "."
+      ]
     },
     "ci-script-tests": {
-      "argv": ["nix", "develop", ".#genie", "-c", "bash", "scripts/ci-script-tests"],
+      "argv": [
+        "nix",
+        "develop",
+        ".#genie",
+        "-c",
+        "bash",
+        "scripts/ci-script-tests"
+      ],
       "definition_paths": [
         ".st",
         "apps/fractal-web/scripts/devnet",
@@ -163,7 +186,16 @@
       ]
     },
     "linux-gate": {
-      "argv": ["nix", "develop", "-c", "bash", "scripts/ci-local", "tests", "clippy", "fleet-compat"],
+      "argv": [
+        "nix",
+        "develop",
+        "-c",
+        "bash",
+        "scripts/ci-local",
+        "tests",
+        "clippy",
+        "fleet-compat"
+      ],
       "definition_paths": [
         ".cargo/config.toml",
         ".config/daily-only.filterset",
@@ -260,7 +292,10 @@
       ]
     },
     "rust-tests": {
-      "argv": ["python3", "scripts/ci-rust-test-result"],
+      "argv": [
+        "python3",
+        "scripts/ci-rust-test-result"
+      ],
       "definition_paths": [
         ".cargo/config.toml",
         ".config/daily-only.filterset",
@@ -436,7 +471,10 @@
       ]
     },
     "linux-clippy": {
-      "argv": ["python3", "scripts/ci-clippy-result"],
+      "argv": [
+        "python3",
+        "scripts/ci-clippy-result"
+      ],
       "ci_inputs": [
         ".github/workflows/fleet.yml::jobs.evidence-gate-linux-clippy",
         ".github/workflows/fleet.yml::jobs.linux-clippy",
@@ -597,7 +635,10 @@
       ]
     },
     "linux-fleet-compat": {
-      "argv": ["python3", "scripts/ci-fleet-compat-result"],
+      "argv": [
+        "python3",
+        "scripts/ci-fleet-compat-result"
+      ],
       "ci_inputs": [
         ".github/workflows/fleet.yml::jobs.evidence-gate-linux-fleet-compat",
         ".github/workflows/fleet.yml::jobs.linux-fleet-compat",
