@@ -534,8 +534,9 @@ fn generic_visibility_probes_reserved_kinds_without_reading_runtime_history() {
         eprintln!("generic visibility {label} plan: {plan:?}");
         if label == "after" {
             assert!(!plan.iter().any(|line| line.contains("TEMP B-TREE")), "{plan:?}");
+            // Either existing subject/kind covering index can win a prefix probe.
             assert_eq!(plan.iter().filter(|line| line.contains(
-                "COVERING INDEX claims_subject_kind_index")).count(), 4, "{plan:?}");
+                "COVERING INDEX claims_subject_kind")).count(), 4, "{plan:?}");
         }
     }
     let scope = smallclaims::sqlite::work::SqliteWorkScope::start();
