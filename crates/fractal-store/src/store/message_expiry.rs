@@ -45,6 +45,18 @@ pub(super) fn exists(connection: &Connection, subject: &str) -> Result<bool> {
         [subject], |row| row.get(0))?)
 }
 
+/// Consumption supersedes expiry even when canonical field order leaves expiry last.
+pub(super) fn status(connection: &Connection, subject: &str) -> Result<Option<&'static str>> {
+    if !exists(connection, subject)? { return Ok(None); }
+    let rank: i64 = connection.prepare_cached(
+        "SELECT COALESCE(SUM(DISTINCT CASE kind WHEN 'message.delivered' THEN 1 WHEN 'message.read' THEN 2 WHEN 'message.closed' THEN 4 ELSE 0 END),0)
+         FROM (SELECT kind FROM claims WHERE subject=?1
+               UNION ALL SELECT kind FROM local_message_marks WHERE message=?1
+               UNION ALL SELECT kind FROM local_stream_lifecycle WHERE subject=?1)",
+    )?.query_row([subject], |row| row.get(0))?;
+    Ok(Some(if rank & 3 == 0 { "expired" } else if rank & 4 != 0 { "closed" } else if rank & 2 != 0 { "read" } else { "delivered" }))
+}
+
 /// Runtime admission holds ReceiptGate before entering the graph writer.
 pub(super) fn validate_shard(runtime: &FractalRuntime, connection: &Connection, subject: &str) -> Result<(), FractalError> {
     if exists(connection, subject).map_err(internal)? { return Ok(()); }
@@ -114,6 +126,41 @@ mod tests {
             messages_shard::record_lifecycle(store, &input.subject, kind, input.actor.as_deref(), &input.fields).unwrap();
             assert!(messages_shard::mailbox_reads::lifecycle_step(store, &input.subject, kind).unwrap().is_some());
         } else { store.append_claim(&input).unwrap(); }
+    }
+
+    #[test]
+    fn expiry_readers_exclude_terminal_mail_and_restore_consumed_paths() {
+        for storage in ["graph", "marks", "shard"] {
+            let (_directory, store, expiry) = fixture(storage);
+            let recipient = "agent/fixture.recipient";
+            let listed = || store.messages(Some(recipient), false).unwrap();
+            let summary = || store.mailbox_unread_summary(recipient, true, now_ms()).unwrap();
+            let client = || {
+                while store.maintain_client_message_selectors().unwrap() {}
+                store.read_snapshot(|through| store.client_messages_page(Some(recipient), None, false, through, None, 20)).unwrap()
+            };
+            assert_eq!(listed().len(), 1);
+            assert_eq!(client().len(), 1);
+            store.append_claim(&expiry).unwrap();
+            assert_eq!(store.message(&expiry.subject).unwrap().unwrap().status, "expired", "{storage}");
+            assert!(listed().is_empty(), "{storage}");
+            assert!(summary().is_empty(), "{storage}");
+            assert!(client().is_empty(), "{storage}");
+            if storage != "shard" {
+                assert!(store.offerable_messages_for_delivery_through(recipient, store.index().unwrap()).unwrap().is_empty());
+            } else {
+                assert!(messages_shard::mailbox_reads::delivery_items(&store, recipient).unwrap().is_empty());
+            }
+            receipt(&store, storage, "message.delivered", recipient);
+            stream_mirror::mirror(&store).unwrap();
+            assert_eq!(store.message(&expiry.subject).unwrap().unwrap().status, "delivered");
+            assert_eq!(summary().iter().map(|(_, _, count, _)| count).sum::<u64>(), 1, "{storage}");
+            assert_eq!(client().len(), 1, "{storage}");
+            receipt(&store, storage, "message.read", recipient);
+            stream_mirror::mirror(&store).unwrap();
+            assert_eq!(store.message(&expiry.subject).unwrap().unwrap().status, "read");
+            assert!(summary().is_empty());
+        }
     }
 
     #[test]

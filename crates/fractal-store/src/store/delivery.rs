@@ -66,7 +66,7 @@ impl Store {
         drop(statement);
         let mut states = BTreeMap::<(&str, &str), (u64, u128)>::new();
         let mut count = |message: &MessageView, accepted: u128| {
-            if message.to != recipient || matches!(message.status.as_str(), "read" | "closed") {
+            if message.to != recipient || matches!(message.status.as_str(), "read" | "closed" | "expired") {
                 return;
             }
             let state = if include_held && crate::silent::waits_for_turn(message) {
@@ -191,6 +191,10 @@ impl Store {
     }
 
     pub fn message(&self, subject: &str) -> Result<Option<MessageView>> {
+        if !super::messages_shard::graph_sent(self, subject)?
+            && let Some(message) = super::messages_shard::message_view(self, subject)? {
+            return Ok(Some(message));
+        }
         let connection = self.readers.get();
         let created_index = connection.query_row(
             "SELECT MIN(store_index) FROM claims WHERE subject=?1 AND subject LIKE 'message/%'",
@@ -243,6 +247,7 @@ impl Store {
                 let Some(message) = super::messages_shard::message_view(self, &subject)? else {
                     continue;
                 };
+                if filter.open_only && message.status == "expired" { continue; }
                 if keep.as_mut().is_some_and(|keep| !keep(&message)) {
                     continue;
                 }
@@ -437,6 +442,9 @@ impl Store {
                             SUM(COALESCE(meta.held,0)) OVER () held_total
                      FROM created LEFT JOIN coordination_sends meta ON meta.subject=created.subject
                      WHERE created_index<=?4
+                       AND NOT EXISTS (
+                         SELECT 1 FROM unread_mail_expired WHERE subject=created.subject
+                       )
                  )
                  SELECT subject, created_index, CASE WHEN ?7 THEN MAX(held_total-8,0) ELSE 0 END FROM ranked
                  WHERE created_index>?3 AND created_index<=?4
@@ -508,7 +516,7 @@ impl Store {
                     continue;
                 }
                 let mut message = self.message_view_cached(&connection, &subject, created_index)?;
-                if message.to == recipient && (include_closed || message.status != "closed") {
+                if message.to == recipient && (include_closed || !matches!(message.status.as_str(), "closed" | "expired")) {
                     if remaining > 0 && crate::silent::waits_for_turn(&message) {
                         message
                             .tags
@@ -568,7 +576,7 @@ impl Store {
             if recipient
                 .as_deref()
                 .is_none_or(|recipient| recipient == message.to)
-                && (include_closed || message.status != "closed")
+                && (include_closed || !matches!(message.status.as_str(), "closed" | "expired"))
             {
                 output.push(message);
             }
@@ -675,6 +683,9 @@ const MESSAGE_CACHE_LIMIT: usize = 4096;
 /// whose newest claim is its send.
 fn offerable_status(connection: &Connection, subject: &str) -> Result<bool> {
     use super::message_marks::rank;
+    if let Some(status) = super::message_expiry::status(connection, subject)? {
+        return Ok(matches!(status, "sent" | "staged" | "delivered"));
+    }
     let marked = super::message_marks::status(connection, subject)?;
     if marked.is_some_and(|marked| rank(marked) >= rank("read")) {
         return Ok(false);
@@ -742,7 +753,7 @@ mod mailbox_metrics_tests {
             .append_claim(&ClaimInput {
                 subject: subject.into(),
                 kind: format!("message.{status}"),
-                actor: Some("agent/example.old".into()),
+                actor: Some(if status == "expired" { "daemon/runtime" } else { "agent/example.old" }.into()),
                 fields,
                 evidence: Vec::new(),
                 expected_subject: None,
@@ -755,6 +766,31 @@ mod mailbox_metrics_tests {
         append(store, subject, "sent", json!({
             "to": to, "from": from, "tags": tags, "content": "example"
         }))
+    }
+
+    #[test]
+    fn expired_silent_mail_does_not_consume_held_batch_slots() {
+        let store = Store::open_memory("node").unwrap();
+        let recipient = "agent/example.worker";
+        for index in 0..18 {
+            let subject = format!("message/held-{index}");
+            sent(&store, &subject, recipient, "agent/example.sender", &["st3-silent"]);
+            if index >= 10 {
+                append(&store, &subject, "expired", json!({"reason": "cutoff-never-offered"}));
+            }
+        }
+        // An upgraded store can retain held flags computed before expiry was understood.
+        store.connection.write().execute("UPDATE coordination_sends SET held=1", []).unwrap();
+        sent(&store, "message/wake", recipient, "person/example", &[]);
+        let offered = store.offerable_messages_for_delivery_through(recipient, store.index().unwrap()).unwrap();
+        let expected: Vec<_> = (2..10).map(|index| format!("message/held-{index}"))
+            .chain(std::iter::once("message/wake".into())).collect();
+        assert_eq!(offered.iter().map(|message| &message.subject).collect::<Vec<_>>(), expected.iter().collect::<Vec<_>>());
+        for message in &offered[..8] {
+            assert!(message.tags.contains(&format!("{}2", crate::silent::REMAINING_PREFIX)));
+        }
+        assert_eq!(store.messages(Some(recipient), true).unwrap().iter()
+            .filter(|message| message.status == "expired").count(), 8);
     }
 
     #[test]

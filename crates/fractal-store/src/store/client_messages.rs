@@ -213,9 +213,10 @@ pub(super) fn create_schema(connection: &Connection) -> Result<()> {
     let trigger_generation: Option<String> = connection.query_row(
         "SELECT value FROM meta WHERE key=?1", [TRIGGER_MARKER], |row| row.get(0),
     ).optional()?;
-    if trigger_generation.as_deref() != Some("1") {
+    if trigger_generation.as_deref() != Some("2") {
         // Upgrade old source capture once, never churn SQLite's schema on reopen.
         connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hc0ebfddf4a2b owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "DROP TRIGGER IF EXISTS client_message_cut_repair;DROP TRIGGER IF EXISTS client_selector_claim_insert;DROP TRIGGER IF EXISTS client_selector_claim_delete;DROP TRIGGER IF EXISTS client_selector_claim_update;DROP TRIGGER IF EXISTS client_selector_repair;DROP TRIGGER IF EXISTS client_selector_desired_insert;DROP TRIGGER IF EXISTS client_selector_desired_update;DROP TRIGGER IF EXISTS client_selector_desired_delete;")?;
+        connection.execute_batch("DROP TRIGGER IF EXISTS local_stream_lifecycle_client_selector;")?;
     }
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hb6aa628a36c9 owner=fractal_store::store::client_messages TODO=chunk-or-reference-variable-columns */ r#"
 CREATE TABLE IF NOT EXISTS local_client_message_cut_epoch(id INTEGER PRIMARY KEY CHECK(id=1),epoch INTEGER NOT NULL);
@@ -236,7 +237,7 @@ END;
 "#)?;
     connection.execute_batch(/* sqlite-large-value: allow-for-now lv-hf3d82e91a912 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ SELECTOR_SCHEMA)?;
     connection.execute(
-        /* sqlite-large-value: allow-for-now lv-hb92e5d1ad214 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        /* sqlite-large-value: allow-for-now lv-hb92e5d1ad214 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO meta(key,value) VALUES(?1,'2') ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         [TRIGGER_MARKER],
     )?;
     // Older completed v1 caches acquire a conservative first-publication cohort.
@@ -244,6 +245,13 @@ END;
         /* sqlite-large-value: allow-for-now lv-h06b3f8910df0 owner=fractal_store::store::client_messages TODO=bound-or-reference-values-and-reclamation */ "INSERT INTO local_client_message_publications SELECT CAST(value AS INTEGER),?2 FROM meta WHERE key=?1 AND NOT EXISTS(SELECT 1 FROM local_client_message_publications)",
         params![MARKER,u64::try_from(crate::client_values::client_now_ms())?],
     )?;
+    if trigger_generation.as_deref() != Some("2") {
+        connection.execute(
+            "INSERT INTO local_client_message_selectors_v1(subject,born_index,created_index,dirty_flags)
+             SELECT DISTINCT subject,-1,1,1 FROM claims WHERE kind='message.expired'
+             ON CONFLICT(subject,born_index) DO UPDATE SET dirty_flags=dirty_flags|1,created_index=created_index+1", [],
+        )?;
+    }
     Ok(())
 }
 
@@ -340,6 +348,7 @@ fn stream_header(connection: &Connection, subject: &str) -> Result<Option<Header
           AND NOT EXISTS(SELECT 1 FROM claims WHERE subject=?1 AND kind='message.sent')",
     )?.query_row(/* sqlite-large-value: allow-for-now lv-h5a7e8f605584 owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [subject], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).optional()?;
     let Some((sent_ms,fields,stream_index,closed)) = row else { return Ok(None); };
+    let closed = closed || message_expiry::status(connection, subject)? == Some("expired");
     let fields: Value = serde_json::from_str(&fields)?;
     let to = fields["to"].as_str().unwrap_or_default();
     let sender = normalize_message_party(fields["from"].as_str().unwrap_or("requester"));
@@ -373,6 +382,7 @@ fn folded_header(connection: &Connection, work: &mut FoldWork) -> Result<Option<
         OR EXISTS(SELECT 1 FROM local_relayed_message_closes WHERE message=message_index.subject) FROM message_index WHERE subject=?1")?
         .query_row(/* sqlite-large-value: allow-for-now lv-h28ac822f10fc owner=fractal_store::store::client_messages TODO=trace-statement-and-value-representation */ [&work.subject],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
     let Some((created_index,index_closed)) = indexed else { return Ok(None); };
+    let index_closed = index_closed || message_expiry::status(connection, &work.subject)? == Some("expired");
     let [sender,recipient,tags,status] = std::mem::take(&mut work.values).map(|value| value.and_then(|(_, value)| value));
     let desired = match desired_selection(connection, &work.subject)? {
         DesiredSelection::Absent => None,
