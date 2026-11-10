@@ -127,6 +127,7 @@ pub fn install(connection: &Connection, local_origin: &str) -> Result<()> {
             claim_id TEXT NOT NULL DEFAULT '');
          CREATE INDEX IF NOT EXISTS assistant_grant_proof_invalidations_identity_index
             ON assistant_grant_proof_invalidations(writer,sequence,envelope_hash,member_key);
+         CREATE TABLE IF NOT EXISTS assistant_grant_proof_rechecks (claim_id TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS assistant_grant_dirty (claim_id TEXT PRIMARY KEY);
          CREATE TABLE IF NOT EXISTS assistant_grant_auth_cursor (
             claim_id TEXT PRIMARY KEY, position INTEGER NOT NULL, record_rowid INTEGER NOT NULL, member_key TEXT NOT NULL);
@@ -220,10 +221,11 @@ fn install_proof_invalidation_triggers(connection: &Connection) -> Result<()> {
               OR (OLD.state='valid' AND NEW.state<>'valid')) AND "
         } else { "" };
         connection.execute_batch(&format!(
-            "CREATE TRIGGER IF NOT EXISTS assistant_grant_proof_record_{event}
+            "DROP TRIGGER IF EXISTS assistant_grant_proof_record_{event};
+             CREATE TRIGGER assistant_grant_proof_record_{event}
              AFTER {event} ON replica_records WHEN {changed}EXISTS({dependent})
              BEGIN
-               INSERT OR IGNORE INTO assistant_grant_dirty {dependent};
+               INSERT OR IGNORE INTO assistant_grant_proof_rechecks {dependent};
                DELETE FROM assistant_grant_auth_cursor WHERE claim_id IN ({dependent});
              END;"
         ))?;
@@ -250,7 +252,8 @@ pub fn maintenance_pending(connection: &Connection) -> Result<bool, FractalError
             OR EXISTS(SELECT 1 FROM assistant_grant_membership_dirty)
             OR EXISTS(SELECT 1 FROM assistant_grant_retractions)
             OR EXISTS(SELECT 1 FROM assistant_grant_recompute)
-            OR EXISTS(SELECT 1 FROM assistant_grant_proof_invalidations)",
+            OR EXISTS(SELECT 1 FROM assistant_grant_proof_invalidations)
+            OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks)",
         [VERSION], |row| row.get(0),
     ).map_err(internal)?;
     Ok(pending)
@@ -267,6 +270,9 @@ fn subject_pending(connection: &Connection, subject: &str) -> Result<bool, Fract
             OR EXISTS(SELECT 1 FROM assistant_grant_pending
                 WHERE grant_subject=?1 AND authenticated=0)
             OR EXISTS(SELECT 1 FROM assistant_grant_recompute AS work
+                JOIN assistant_grant_pending AS pending ON pending.claim_id=work.claim_id
+                WHERE pending.grant_subject=?1)
+            OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks AS work
                 JOIN assistant_grant_pending AS pending ON pending.claim_id=work.claim_id
                 WHERE pending.grant_subject=?1)
             OR EXISTS(SELECT 1 FROM assistant_grant_pending AS pending
@@ -814,8 +820,9 @@ pub fn backfill_slice(connection: &Connection, budget: Duration) -> Result<bool>
 }
 
 // A destructive signature/envelope write queues one proof identity, not its
-// history-sized dependent set. Dispatch/authentication costs one shared unit.
-fn proof_invalidation_one(connection: &Connection, membership_current: bool) -> Result<bool> {
+// history-sized dependent set. Indexed dispatch and real authentication consume
+// separate shared budget units. Only the verifier may discharge the latter.
+fn proof_invalidation_one(connection: &Connection) -> Result<bool> {
     let task: Option<(i64,String,u64,String,String,String)> = connection.query_row(
         "SELECT id,writer,sequence,envelope_hash,member_key,claim_id
          FROM assistant_grant_proof_invalidations ORDER BY id LIMIT 1", [],
@@ -835,7 +842,7 @@ fn proof_invalidation_one(connection: &Connection, membership_current: bool) -> 
         |row| row.get(0)).optional()?;
     if let Some(claim) = claim {
         connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&claim])?;
-        refresh_claim_inner(connection,&claim,membership_current)?;
+        connection.execute("INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES(?1)", [&claim])?;
         connection.execute(
             "UPDATE assistant_grant_proof_invalidations SET claim_id=?2 WHERE id=?1",
             params![task,claim],
@@ -887,7 +894,28 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
             if remaining==0 || started.elapsed()>=budget { return Ok(false); }
             continue;
         }
-        if proof_invalidation_one(connection,membership_current)? {
+        let recheck: Option<String> = connection.query_row(
+            "SELECT claim_id FROM assistant_grant_proof_rechecks ORDER BY claim_id LIMIT 1",
+            [], |row| row.get(0),
+        ).optional()?;
+        if let Some(claim) = recheck {
+            if !membership_current { return Ok(false); }
+            // Non-verifying receipt refreshes cannot discharge this durable
+            // obligation, even if they retain the old authenticated snapshot.
+            // Resume its authentication cursor instead of restarting each page.
+            refresh_claim_inner(connection,&claim,true)?;
+            remaining -= 1;
+            let unfinished: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM assistant_grant_auth_cursor WHERE claim_id=?1)
+                     OR EXISTS(SELECT 1 FROM assistant_grant_dirty WHERE claim_id=?1)",
+                [&claim], |row| row.get(0),
+            )?;
+            if unfinished { return Ok(false); }
+            connection.execute("DELETE FROM assistant_grant_proof_rechecks WHERE claim_id=?1", [&claim])?;
+            if remaining==0 || started.elapsed()>=budget { return Ok(false); }
+            continue;
+        }
+        if proof_invalidation_one(connection)? {
             remaining -= 1;
             if remaining==0 || started.elapsed()>=budget { return Ok(false); }
             continue;
@@ -912,7 +940,7 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
             ).optional()?;
             if let Some((sequence,id)) = pending {
                 connection.execute("DELETE FROM assistant_grant_auth_cursor WHERE claim_id=?1", [&id])?;
-                refresh_claim_inner(connection,&id,membership_current)?;
+                connection.execute("INSERT OR IGNORE INTO assistant_grant_proof_rechecks VALUES(?1)", [&id])?;
                 connection.execute(
                     "UPDATE assistant_grant_retractions SET sequence=?2,claim_id=?3 WHERE id=?1",
                     params![task,sequence,id],
@@ -988,7 +1016,8 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
              OR EXISTS(SELECT 1 FROM assistant_grant_membership_dirty)
              OR EXISTS(SELECT 1 FROM assistant_grant_retractions)
              OR EXISTS(SELECT 1 FROM assistant_grant_recompute)
-             OR EXISTS(SELECT 1 FROM assistant_grant_proof_invalidations)", [], |row| row.get(0))?;
+             OR EXISTS(SELECT 1 FROM assistant_grant_proof_invalidations)
+             OR EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks)", [], |row| row.get(0))?;
     if dirty { return Ok(false); }
     connection.execute(/* sqlite-large-value: allow-for-now lv-h9b70e51e754e owner=smallclaims::store::assistant_grant_authority TODO=bound-or-reference-values-and-reclamation */ "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_authority_version',?1)",[VERSION])?;
     Ok(true)

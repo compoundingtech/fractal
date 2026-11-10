@@ -704,7 +704,7 @@ fn membership_retraction_reauthenticates_only_rows_using_the_lost_recorded_key()
 
 #[test]
 fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
-    for mutation in ["signature-delete", "signature-update", "record-invalid", "record-delete", "envelope-invalid", "envelope-delete", "claim-delete"] {
+    for mutation in ["signature-delete", "signature-update", "record-invalid", "record-delete", "record-invalid-refresh", "record-repaired-refresh", "envelope-invalid", "envelope-delete", "claim-delete"] {
         let (anchor, anchor_key) = source();
         let peer_key = Arc::new(MemberKey::generate().unwrap().0);
         let peer = node("peer", Some(anchor_key.public()));
@@ -725,7 +725,8 @@ fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
             [&grant.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
         ).unwrap();
         {
-            let connection = target.connection.write();
+            let mut writer = target.connection.write();
+            let connection = writer.transaction().unwrap();
             let query = match mutation {
                 "signature-delete" =>
                     "DELETE FROM replica_envelope_signatures
@@ -733,8 +734,11 @@ fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
                 "signature-update" =>
                     "UPDATE replica_envelope_signatures SET signature='invalid'
                      WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND member_key=?4",
-                "record-invalid" =>
+                "record-invalid" | "record-invalid-refresh" =>
                     "UPDATE replica_records SET state='invalid'
+                     WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND position=?4",
+                "record-repaired-refresh" =>
+                    "UPDATE replica_records SET state='repaired'
                      WHERE writer=?1 AND sequence=?2 AND envelope_hash=?3 AND position=?4",
                 "record-delete" =>
                     "DELETE FROM replica_records
@@ -759,10 +763,27 @@ fn sole_proof_withdrawal_survives_nonretracting_same_writer_window_addition() {
                 SqlValue::Integer(position as i64)
             };
             assert_eq!(connection.execute(query, params![grant.origin,sequence,hash,last]).unwrap(), 1);
+            if mutation.ends_with("-refresh") {
+                // Prepared-envelope revalidation changes evidence and invokes
+                // its non-verifying hook in the same writer transaction.
+                connection.execute(
+                    "INSERT OR IGNORE INTO assistant_grant_dirty VALUES(?1)", [&grant.id],
+                ).unwrap();
+                authority::refresh_envelope(&connection,&grant.origin,sequence,&hash).unwrap();
+                assert!(!connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM assistant_grant_dirty WHERE claim_id=?1)",
+                    [&grant.id], |row| row.get::<_,bool>(0),
+                ).unwrap(), "fixture must exercise receipt clearing ordinary dirty work");
+                assert!(connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
+                    [&grant.id], |row| row.get::<_,bool>(0),
+                ).unwrap(), "receipt must not discharge the real verification obligation");
+            }
             assert!(authority::subject_ready(&connection, &grant.subject).is_err(),
                 "withdrawal did not fence its dependent: {mutation}");
             assert!(!authority::contains(&connection, &grant.id).unwrap(),
                 "withdrawn proof still authorized its bearer: {mutation}");
+            connection.commit().unwrap();
         }
         // Keep the original key's coverage intact. This real new window on the
         // same writer must not hide the queued loss behind an authenticated flag.

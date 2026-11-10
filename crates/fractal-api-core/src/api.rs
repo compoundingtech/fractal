@@ -9550,6 +9550,10 @@ fn assistant_grant_subject_maintenance_checks(
          WHERE pending.claim_id>work.claim_id
            AND (work.member_key='' OR pending.auth_member_key=work.member_key)
          UNION
+         SELECT pending.grant_subject, 'authentication proof evidence changed'
+         FROM assistant_grant_proof_rechecks work
+         JOIN assistant_grant_pending pending ON pending.claim_id=work.claim_id
+         UNION
          SELECT pending.grant_subject, 'retracted authority effective-state recomputation'
          FROM assistant_grant_recompute work
          JOIN assistant_grant_pending pending ON pending.claim_id=work.claim_id

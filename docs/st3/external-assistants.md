@@ -240,6 +240,12 @@ maintenance visits one dependent claim per unit; an unrelated membership
 addition cannot hide proof withdrawal. Private doctor diagnostics include
 `authentication proof evidence changed`. Raw claims removed by checkpoint trim
 retire their cached authority through the same bounded demotion path.
+Proof withdrawal creates a separate durable verification obligation, not just an
+ordinary projection-dirty row. Non-verifying receipt/envelope refreshes cannot
+clear that obligation, including when revalidation changes a record to invalid
+or repaired and refreshes its envelope in the same transaction. Only maintenance
+using current membership can discharge it after verification finishes; partial
+authentication pages retain the obligation and subject fence.
 These details remain on trusted-local doctor only: paired clients with
 `read.projections` cannot retrieve the provenance check through either the
 operations collection or operation detail. Clients continue to receive generic
