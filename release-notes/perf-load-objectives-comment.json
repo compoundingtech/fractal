@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "The daily perf-load workflow source names slo/objectives.kdl, the file its targets now come from, instead of the removed slo/targets.toml",
+  "replay": {"status": "none", "detail": "No graph, claim or storage change."},
+  "schema": {"status": "none", "detail": "No schema change."},
+  "rules": {"status": "none", "detail": "No checkpoint rule change; a source comment only."},
+  "compatibility": {"status": "none", "detail": "A comment in .github/workflows/perf-load.ts; the generated workflow is unchanged."},
+  "downtime": {"status": "none", "detail": "No restart."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Revert this change."}
+}
