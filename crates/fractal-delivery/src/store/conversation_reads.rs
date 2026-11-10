@@ -959,11 +959,13 @@ pub use crate::store::conversation_reads_tests_shared_seats::{append};
         body: &Value,
         predecessors: &[String],
     ) -> Result<ClaimRecord> {
-        let mut claim = append_claim_tx(tx, origin, subject, "runtime.observed", None,
+        let scaffold_subject = if subject.starts_with("message/") { "agent/history-fixture" } else { subject };
+        let mut claim = append_claim_tx(tx, origin, scaffold_subject, "runtime.observed", None,
             &json!({"fields":{"status":"running","runtime_id":"pty/ada",
                 "incarnation_id":"ada-fixture"}}), predecessors, None)?;
-        tx.execute("UPDATE claims SET kind=?1,body=?2 WHERE id=?3",
-            params![kind, body.to_string(), claim.id])?;
+        tx.execute("UPDATE claims SET subject=?1,kind=?2,body=?3 WHERE id=?4",
+            params![subject, kind, body.to_string(), claim.id])?;
+        claim.subject = subject.into();
         claim.kind = kind.into();
         claim.body = body.clone();
         Ok(claim)

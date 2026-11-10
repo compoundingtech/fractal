@@ -1024,8 +1024,8 @@ mod identifier_agent_tests;
 
 fn deadline_projection<'a>(
     _state: &'a AppState, _snapshot: &'a ClientSnapshot, _projection: &'a str,
-    _parameters: &'a BTreeMap<String,String>, _max_bytes: usize, _binding: &'a str,
-    _principal: &'a str, _context: &'a response_body::Context,
+    _parameters: &'a BTreeMap<String,String>, _max_bytes: usize,
+    _authority: ProjectionAuthority<'a>, _context: &'a response_body::Context,
 ) -> ProjectFuture<'a> {
     Box::pin(async { Err(ApiError::bad(smallclaims::error::Error::new(
         "read-deadline","the read exceeded its deadline or was cancelled"))) })

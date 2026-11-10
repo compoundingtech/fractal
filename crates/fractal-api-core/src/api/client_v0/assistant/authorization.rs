@@ -244,14 +244,20 @@ pub fn verify(state: &AppState, session: &ClientSession, path: &str, parameters:
 /// The future of one assistant projection.
 pub type ProjectFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(ClientSnapshot, Value), ApiError>> + Send + 'a>>;
 
+/// Authenticated authority shared by projection cursors and content references.
+pub struct ProjectionAuthority<'a> {
+    pub binding: &'a str,
+    pub principal: &'a str,
+}
+
 /// Serves one named projection. fractal-api-core serves its own; the client-v0 layer above it passes one
 /// that also serves the projections which need the layer's search and conversation readers.
-pub type Projector = for<'a> fn(&'a AppState, &'a ClientSnapshot, &'a str, &'a BTreeMap<String, String>, usize, &'a str, &'a str, &'a response_body::Context) -> ProjectFuture<'a>;
+pub type Projector = for<'a> fn(&'a AppState, &'a ClientSnapshot, &'a str, &'a BTreeMap<String, String>, usize, ProjectionAuthority<'a>, &'a response_body::Context) -> ProjectFuture<'a>;
 
 fn lower_projector<'a>(state: &'a AppState, snapshot: &'a ClientSnapshot, projection: &'a str,
-                       parameters: &'a BTreeMap<String, String>, max_bytes: usize, binding: &'a str,
-                       _principal: &'a str, context: &'a response_body::Context) -> ProjectFuture<'a> {
-    Box::pin(super::reads::project_with_context(state, snapshot, projection, parameters, max_bytes, binding, context))
+                       parameters: &'a BTreeMap<String, String>, max_bytes: usize,
+                       authority: ProjectionAuthority<'a>, context: &'a response_body::Context) -> ProjectFuture<'a> {
+    Box::pin(super::reads::project_with_context(state, snapshot, projection, parameters, max_bytes, authority.binding, context))
 }
 
 pub async fn read(State(state): State<AppState>, Extension(session): Extension<ClientSession>,
@@ -331,7 +337,7 @@ async fn read_inner_with_cause(State(state): State<AppState>, Extension(session)
             grant_subject:grant_subject.into(), actor:current.actor, transport:session.transport,
             policy_revision:fields(&policy)?["policy_revision"].as_u64().unwrap_or(0),
             proof_expiry:fields(&policy)?["expires_at_unix_ms"].as_u64().unwrap_or(0), max_response_bytes:requested };
-        let (snapshot,value) = match project(&state,&snapshot,projection,&parameters,requested,&binding,&current.authority_actor,context).await {
+        let (snapshot,value) = match project(&state,&snapshot,projection,&parameters,requested,ProjectionAuthority { binding: &binding, principal: &current.authority_actor },context).await {
             Ok(result) => result,
             Err(error) => {
                 let space=state.assistant_receipts.reserve_for_read().await.map_err(|failure| match failure {
@@ -364,7 +370,7 @@ async fn read_inner_with_cause(State(state): State<AppState>, Extension(session)
     }),None).map_err(|error| if error.code=="stale-subject" {
         forbidden("the SCG read approval has already been consumed") } else {error})?;
     receipt.consumed_claim=consumed.id.clone();
-    let (snapshot,value) = match project(&state,&snapshot,&authorization.payload.projection,&parameters,receipt.max_response_bytes,&binding,&authorization.payload.assistant_id,context).await {
+    let (snapshot,value) = match project(&state,&snapshot,&authorization.payload.projection,&parameters,receipt.max_response_bytes,ProjectionAuthority { binding: &binding, principal: &authorization.payload.assistant_id },context).await {
         Ok(result) => result,
         Err(error) => {
             append(&state,receipt.subject.clone(),OUTCOME,&receipt.actor,json!({"version":1,

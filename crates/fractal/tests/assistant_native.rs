@@ -187,7 +187,9 @@ impl Harness {
 
     async fn mcp(&self, paired: &AssistantPairedSession) -> (Router, tokio::task::JoinHandle<()>) {
         use std::os::unix::fs::PermissionsExt as _;
-        let socket = self.root.path().join(format!("{}.sock", uuid::Uuid::new_v4()));
+        let directory = self.root.path().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir(&directory).unwrap();
+        let socket = directory.join("fractal-client.sock");
         let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let gateway = self.fabric.clone();
         let server = tokio::spawn(async move { axum::serve(listener, gateway).await.unwrap() });

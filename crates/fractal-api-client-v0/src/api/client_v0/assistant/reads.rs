@@ -72,8 +72,10 @@ pub async fn project(
 }
 
 pub fn projector<'a>(state: &'a AppState, snapshot: &'a ClientSnapshot, projection: &'a str,
-                     parameters: &'a BTreeMap<String, String>, max_bytes: usize, binding: &'a str,
-                     principal: &'a str, context: &'a response_body::Context) -> fractal_api_core::api::client_v0::assistant::authorization::ProjectFuture<'a> {
+                     parameters: &'a BTreeMap<String, String>, max_bytes: usize,
+                     authority: fractal_api_core::api::client_v0::assistant::authorization::ProjectionAuthority<'a>,
+                     context: &'a response_body::Context) -> fractal_api_core::api::client_v0::assistant::authorization::ProjectFuture<'a> {
+    let fractal_api_core::api::client_v0::assistant::authorization::ProjectionAuthority { binding, principal } = authority;
     Box::pin(async move {
         if projection == "conversations" && parameters.get("replies").is_some_and(|value| value == "true") {
             return replies::page(state, snapshot, parameters, max_bytes, binding, principal, context).await;
