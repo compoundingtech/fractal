@@ -278,17 +278,14 @@ mod tests {
         let document = plain.parse::<KdlDocument>().unwrap();
         let body = document.nodes()[1].children().unwrap();
         let tags = body.get("tags").unwrap();
-        assert_eq!(
-            tags.get("st3.cwd").unwrap().value().as_string(),
-            Some("home")
-        );
+        assert_eq!(tags.get("st3.cwd").unwrap().as_string(), Some("home"));
         let placed = terminal_document("person/example", "two", &args, "host", "/srv/work", "key");
         assert!(!placed.contains("HOME"), "{placed}");
         let document = placed.parse::<KdlDocument>().unwrap();
         let body = document.nodes()[1].children().unwrap();
         assert!(body.get("tags").unwrap().get("st3.cwd").is_none());
         assert_eq!(
-            body.get("workspace").unwrap().get(0).unwrap().value().as_string(),
+            body.get("workspace").unwrap().get(0).unwrap().as_string(),
             Some("/srv/work")
         );
     }
