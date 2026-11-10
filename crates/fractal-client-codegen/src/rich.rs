@@ -876,6 +876,15 @@ fn validate_condition_schema(value: &Value, cx: &Cx, depth: usize) -> Result<()>
                     validate_condition_schema(schema, cx, depth + 1)?;
                 }
             }
+            "anyOf" => {
+                for schema in part.as_array().context("conditional presence alternatives")? {
+                    let object = schema.as_object().context("conditional presence alternative")?;
+                    if object.len() != 1 || !object.contains_key("required") {
+                        bail!("conditional anyOf only supports presence predicates");
+                    }
+                    validate_condition_schema(schema, cx, depth + 1)?;
+                }
+            }
             "items" => validate_condition_schema(part, cx, depth + 1)?,
             "oneOf" | "allOf" => {
                 for schema in part.as_array().context("conditional alternatives")? {
@@ -907,7 +916,6 @@ fn validate_condition_fields(
                     let name = name.as_str().context("conditional required name")?;
                     let field = fields.get(name)
                         .with_context(|| format!("conditional field `{name}` is undeclared"))?;
-                    validate_condition_schema(field, cx, depth + 1)?;
                     if nullable_inner(field).is_some() {
                         bail!("conditional presence of nullable field `{name}` is not translated");
                     }
@@ -923,7 +931,7 @@ fn validate_condition_fields(
                     validate_condition_value(assertion, field, cx, depth + 1)?;
                 }
             }
-            "allOf" | "oneOf" => {
+            "allOf" | "oneOf" | "anyOf" => {
                 for part in value.as_array().context("conditional alternatives")? {
                     validate_condition_fields(part, fields, cx, depth + 1)?;
                 }
@@ -943,6 +951,10 @@ fn validate_condition_fields(
 fn validate_condition_value(assertion: &Value, field: &Value, cx: &Cx, depth: usize) -> Result<()> {
     if depth > 64 {
         bail!("recursive conditional fields are not translated");
+    }
+    // Boolean field assertions inspect only presence, not the decoded field value.
+    if assertion.is_boolean() {
+        return Ok(());
     }
     validate_condition_schema(field, cx, depth)?;
     if let Some(reference) = field.get("$ref").and_then(Value::as_str) {
@@ -1034,7 +1046,7 @@ fn condition_predicate(value: &Value, target: &str, cx: &mut Cx) -> Result<Strin
                     if key == "maxItems" { "<=" } else { ">=" }
                 ));
             }
-            "allOf" | "oneOf" => {
+            "allOf" | "oneOf" | "anyOf" => {
                 let parts = value
                     .as_array()
                     .context("conditional alternatives")?
@@ -1051,7 +1063,7 @@ fn condition_predicate(value: &Value, target: &str, cx: &mut Cx) -> Result<Strin
                         .iter()
                         .map(|part| format!("({part})"))
                         .collect::<Vec<_>>()
-                        .join(" && ")
+                        .join(if key == "anyOf" { " || " } else { " && " })
                 });
             }
             _ => bail!("unsupported conditional assertion `{key}`"),
@@ -1809,6 +1821,28 @@ fn emit_models(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_presence_conditions_do_not_validate_or_transform_field_values() {
+        let schema = json!({"x-st-integers":"json-safe", "$defs":{"Entry":{
+            "type":"object", "additionalProperties":false,
+            "properties":{"state":{"type":"string"},"refused":{"const":true},"receipt":{"type":"object","additionalProperties":true},"grant":{"type":"string"}},
+            "allOf":[
+                {"if":{"properties":{"state":{"const":"closed"}},"anyOf":[{"required":["receipt"]},{"required":["grant"]}]},"then":{"required":["receipt"]}},
+                {"if":{"required":["refused"],"properties":{"refused":{"const":true}}},"then":{"properties":{"receipt":false}}}
+            ]
+        }}});
+        let generated = models(&schema).unwrap();
+        assert!(generated.contains("Object.prototype.hasOwnProperty.call(o, \"receipt\")"));
+        assert!(generated.contains(" || "));
+        assert_eq!(generated.matches("conditional object relationship").count(), 2);
+        let mut invalid = schema.clone();
+        invalid["$defs"]["Entry"]["allOf"][0]["if"]["anyOf"][0] = json!({"properties":{"grant":{"const":"x"}}});
+        assert!(format!("{:#}", models(&invalid).unwrap_err()).contains("only supports presence predicates"));
+        let mut undeclared = schema;
+        undeclared["$defs"]["Entry"]["allOf"][0]["if"]["anyOf"][0] = json!({"required":["unknown"]});
+        assert!(format!("{:#}", models(&undeclared).unwrap_err()).contains("undeclared"));
+    }
 
     #[test]
     fn subject_references_keep_string_length_constraints() -> Result<()> {
