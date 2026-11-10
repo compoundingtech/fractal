@@ -883,6 +883,7 @@ fn restored_window_coverage_cancels_pending_retraction_fence() {
 enum AlternateProofCoverage {
     MidPage,
     AlreadyAdmitted,
+    AlreadyAdmittedOneUnit,
     AfterDemotion,
     FutureOnly,
 }
@@ -890,7 +891,8 @@ enum AlternateProofCoverage {
 // Use only real admitted keys and cryptographically valid signatures. The
 // alternate proof predates the cursor, so membership is the only late evidence.
 fn admitted_recheck_finds_alternate_proof(seed: u64, coverage: AlternateProofCoverage) {
-    let add_coverage = !matches!(coverage, AlternateProofCoverage::AlreadyAdmitted);
+    let add_coverage = !matches!(coverage,
+        AlternateProofCoverage::AlreadyAdmitted | AlternateProofCoverage::AlreadyAdmittedOneUnit);
     let key_pages = if matches!(coverage, AlternateProofCoverage::FutureOnly) { 4 } else { 1 };
     let (anchor, anchor_key) = source();
     let mut keys: Vec<_> = (0..authority::MEMBERSHIP_KEYS_PER_REFRESH * key_pages + 2)
@@ -959,6 +961,10 @@ fn admitted_recheck_finds_alternate_proof(seed: u64, coverage: AlternateProofCov
             "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
             [&grant.id], |row| row.get::<_,bool>(0),
         ).unwrap(), "mid-page retry lost its durable obligation");
+        assert!(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM assistant_grant_dirty WHERE claim_id=?1)",
+            [&grant.id], |row| row.get::<_,bool>(0),
+        ).unwrap(), "fixture must dispatch a dirty claim also owned by its recheck");
         assert!(authority::subject_ready(&connection, SUBJECT).is_err());
         assert!(!authority::contains(&connection, &grant.id).unwrap());
     }
@@ -1057,12 +1063,21 @@ fn admitted_recheck_finds_alternate_proof(seed: u64, coverage: AlternateProofCov
         }));
         receive_without_authority_maintenance(&target, &export(&anchor, &target));
     }
-    if matches!(coverage, AlternateProofCoverage::AlreadyAdmitted) {
+    if matches!(coverage, AlternateProofCoverage::AlreadyAdmitted | AlternateProofCoverage::AlreadyAdmittedOneUnit) {
         // A dirty refresh and the durable recheck must share one verifier.
         // Bound completion here so cursor restarts fail before the oracle's drain.
         let mut finished = false;
         for _ in 0..key_pages + 3 {
-            if target.advance_assistant_grant_authority_backfill().unwrap() {
+            let done = if matches!(coverage, AlternateProofCoverage::AlreadyAdmittedOneUnit) {
+                let mut connection = target.connection.write();
+                let transaction = connection.transaction().unwrap();
+                let done = authority::backfill_slice(&transaction,Duration::ZERO).unwrap();
+                transaction.commit().unwrap();
+                done
+            } else {
+                target.advance_assistant_grant_authority_backfill().unwrap()
+            };
+            if done {
                 finished = true;
                 break;
             }
@@ -1096,6 +1111,13 @@ fn newly_admitted_key_below_mid_page_cursor_reauthenticates_already_admitted_row
 fn same_row_dual_signed_proof_survives_recorded_key_removal_after_mid_page_recheck() {
     for seed in 1..=4 {
         admitted_recheck_finds_alternate_proof(seed, AlternateProofCoverage::AlreadyAdmitted);
+    }
+}
+
+#[test]
+fn dirty_owned_recheck_completes_with_one_unit_zero_duration_slices() {
+    for seed in 1..=4 {
+        admitted_recheck_finds_alternate_proof(seed,AlternateProofCoverage::AlreadyAdmittedOneUnit);
     }
 }
 

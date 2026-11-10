@@ -1094,6 +1094,21 @@ fn addition_one(connection: &Connection) -> Result<bool> {
     Ok(true)
 }
 
+// Both dispatch queues invoke the same owning verifier, including when a
+// one-unit slice encounters a dirty claim before reaching the recheck queue.
+fn refresh_recheck(connection: &Connection, claim: &str) -> Result<bool> {
+    refresh_claim_inner(connection,claim,true)?;
+    let unfinished: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM assistant_grant_auth_cursor WHERE claim_id=?1)
+             OR EXISTS(SELECT 1 FROM assistant_grant_dirty WHERE claim_id=?1)",
+        [claim], |row| row.get(0),
+    )?;
+    if !unfinished {
+        connection.execute("DELETE FROM assistant_grant_proof_rechecks WHERE claim_id=?1", [claim])?;
+    }
+    Ok(!unfinished)
+}
+
 fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut remaining: usize, membership_current: bool) -> Result<bool> {
     let started = Instant::now();
     if remaining==0 { return Ok(false); }
@@ -1124,19 +1139,22 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
                     "SELECT EXISTS(SELECT 1 FROM assistant_grant_proof_rechecks WHERE claim_id=?1)",
                     [&claim], |row| row.get(0),
                 )?;
-                // One verifier owns the cursor and discharges its obligation.
-                // A dirty refresh must not finish its page and clear the cursor
-                // only for the recheck phase to restart the same search.
-                if !recheck_owned {
+                // Dispatch to the owning verifier here, rather than spending a
+                // skip unit forever when every slice has only one unit/time.
+                let unfinished = if recheck_owned {
+                    if !membership_current { return Ok(false); }
+                    !refresh_recheck(connection,&claim)?
+                } else {
                     refresh_claim_inner(connection,&claim,membership_current)?;
-                }
+                    false
+                };
                 connection.execute(
                     "INSERT OR REPLACE INTO meta(key,value) VALUES('assistant_grant_dirty_cursor',?1)", [&claim],
                 )?;
                 dirty_after = claim;
                 dirty_visits += 1;
                 remaining -= 1;
-                if remaining==0 || started.elapsed()>=budget { return Ok(false); }
+                if unfinished || remaining==0 || started.elapsed()>=budget { return Ok(false); }
                 continue;
             }
             connection.execute("DELETE FROM meta WHERE key='assistant_grant_dirty_cursor'", [])?;
@@ -1154,18 +1172,11 @@ fn backfill_slice_with_limit(connection: &Connection, budget: Duration, mut rema
         ).optional()?;
         if let Some(claim) = recheck {
             if !membership_current { return Ok(false); }
-            // Non-verifying receipt refreshes cannot discharge this durable
-            // obligation, even if they retain the old authenticated snapshot.
-            // Resume its authentication cursor instead of restarting each page.
-            refresh_claim_inner(connection,&claim,true)?;
+            // A single owning verifier advances and discharges this obligation,
+            // regardless of which dispatch queue selected the claim.
+            let complete = refresh_recheck(connection,&claim)?;
             remaining -= 1;
-            let unfinished: bool = connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM assistant_grant_auth_cursor WHERE claim_id=?1)
-                     OR EXISTS(SELECT 1 FROM assistant_grant_dirty WHERE claim_id=?1)",
-                [&claim], |row| row.get(0),
-            )?;
-            if unfinished { return Ok(false); }
-            connection.execute("DELETE FROM assistant_grant_proof_rechecks WHERE claim_id=?1", [&claim])?;
+            if !complete { return Ok(false); }
             if remaining==0 || started.elapsed()>=budget { return Ok(false); }
             continue;
         }
