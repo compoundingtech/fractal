@@ -81,7 +81,7 @@ describe.each([240, 256, 320, 440])('sidebar chrome at %ipx', width => {
     expect(field.style.borderRadius).toBe('6px')
     expect(within(host).getByRole('button', { name: 'Filter agents' })).not.toBeNull()
     expect(within(host).getByRole('button', { name: 'Show' })).not.toBeNull()
-    expect(within(host).queryByRole('button', { name: 'Show finished agents' })).toBeNull()
+    expect(within(host).getByRole('button', { name: 'Show finished agents' }).getAttribute('aria-pressed')).toBe('true')
     expect(within(host).getByRole('button', { name: /Sort agents/ })).not.toBeNull()
     field.focus()
     expect(document.activeElement).toBe(field)
