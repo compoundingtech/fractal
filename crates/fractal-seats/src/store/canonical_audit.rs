@@ -106,6 +106,8 @@ fn every_persistent_table_has_a_projection_scope() {
         "local_client_message_fold_batches",
         "local_client_message_publications",
         "local_client_message_cut_epoch",
+        // Like message cut epochs, desired write generations invalidate local cursors.
+        "local_desired_write_witness",
         "local_idle_messages",
         // Member-local consumer marks: never replicated, outside every digest.
         "local_message_marks",

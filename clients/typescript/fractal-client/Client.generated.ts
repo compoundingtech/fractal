@@ -643,7 +643,15 @@ export class FractalClient {
             } catch (error) { end(error instanceof Error ? error : new Error(String(error))); socket.close(1000); }
         };
         socket.onclose = event => end(event.code === 1000 ? undefined : new Error(`The collections socket closed (${event.code}${event.reason ? ` ${event.reason}` : ''})`));
-        socket.onerror = () => end(new Error('The collections socket failed'));
+        socket.onerror = event => {
+            // Native carriers expose only NSError identity. Browser events remain generic;
+            // never copy message, localizedDescription, userInfo, or arbitrary event text.
+            const identity = typeof event === 'object' && event !== null
+                && 'domain' in event && typeof event.domain === 'string'
+                && 'code' in event && typeof event.code === 'number' && Number.isSafeInteger(event.code)
+                ? ` (${event.domain} ${event.code})` : '';
+            end(new Error(`The collections socket failed${identity}`));
+        };
         return {
             subscribeGlasses: id => send({kind: 'subscribe', id, collection: 'glasses', limit: 100}),
             subscribeAgentsPublication: id => send({kind: 'subscribe', id, collection: 'agents', agents_publication_version: 1}),
