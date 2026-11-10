@@ -11,7 +11,7 @@ const upsert = <A extends Keyed>(list: readonly A[], value: A): A[] => {
 }
 
 /** Complete client-v0 known-kind set; unsupported collections must not become future resources. */
-const COLLECTION_OF_KIND: Record<Resource['kind'], string> = {
+const COLLECTION_OF_KIND: Record<Resource['kind'], string | null> = {
   agent: 'agents',
   runtime: 'runtimes',
   machine: 'machines',
@@ -28,6 +28,7 @@ const COLLECTION_OF_KIND: Record<Resource['kind'], string> = {
   lane: 'lanes',
   device: 'devices',
   'device-command': 'deviceCommands',
+  'client-control-grant-lifecycle': null, // Control metadata is not visible scenario state.
   operation: 'operations',
   history: 'history',
   session: 'sessions',
@@ -41,9 +42,11 @@ const COLLECTION_OF_KIND: Record<Resource['kind'], string> = {
 }
 
 const applyChanges = <S extends object>(state: S, upserts: readonly WireResource[], removes: readonly string[], order: readonly string[] | undefined): S => {
+  if (upserts.length > 0 && removes.length === 0 && upserts.every((value) => value.kind === 'client-control-grant-lifecycle')) return state
   const next = { ...state } as Record<string, unknown>
   for (const value of upserts) {
     const key = Object.hasOwn(COLLECTION_OF_KIND, value.kind) ? COLLECTION_OF_KIND[value.kind as Resource['kind']] : undefined
+    if (key === null) continue
     if (key === undefined) next.resources = upsert((next.resources ?? []) as Keyed[], value)
     else {
       if (!Array.isArray(next[key])) throw new Error(`a ${value.kind} upsert has no place in this slice`)
