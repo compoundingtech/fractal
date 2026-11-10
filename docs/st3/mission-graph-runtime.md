@@ -1238,7 +1238,10 @@ To make one run wait without changing its mission, start it with `after`. See [S
 its sha256. The step is agentless and the program alone decides its outcome, so it cannot name
 an agent, gates, products, nested or used missions or `after-run`, and it cannot be a `finally`
 step. `fractal apply` sends the bundle's bytes with the publication; see [Program
-engine](program-engine.md).
+engine](program-engine.md). An older member would quarantine a revision with a program step (it
+hashes the mission without the field), so publication holds such a revision until every member
+advertises `mission_program=1` on its `daemon.started` (`mission-program-unavailable`, also an
+`apply --dry-run` blocker), as for `capacity` ([seat lanes](seat-lanes.md)).
 
 ## Run reports
 
