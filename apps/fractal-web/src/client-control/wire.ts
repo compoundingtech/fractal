@@ -2,6 +2,7 @@ import { Schema } from 'effect'
 import * as Wire from '@fractal/client/schema'
 import {
   CLIENT_RESULT_SIGNED_FIELDS,
+  ClientResultCanonicalizationError,
   clientResultCanonicalBytes,
   type ClientResultBinding as CanonicalBinding,
 } from '../../../../clients/typescript/fractal-client/ClientControl.generated.ts'
@@ -62,9 +63,7 @@ export const verifyClientResultBinding = async (binding: unknown, signature: str
   try {
     bytes = await clientResultCanonicalBytes(encoded as CanonicalBinding) as Uint8Array<ArrayBuffer>
   } catch (error) {
-    // The generated module exports no refusal class/predicate: its quote helper throws this
-    // exact plain Error. Translate only that refusal here, never duplicate Unicode validation.
-    if (error instanceof Error && error.constructor === Error && error.message === 'Invalid Unicode in client result') return false
+    if (error instanceof ClientResultCanonicalizationError && error.code === 'invalid-unicode') return false
     throw error
   }
   try {
