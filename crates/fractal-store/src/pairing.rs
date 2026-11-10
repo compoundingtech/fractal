@@ -21,7 +21,8 @@ pub fn is_client_operation_kind(kind: &str) -> bool {
         || kind.starts_with("custom.client.terminal")
         || matches!(kind, "custom.client.test-enrolled" | "custom.client.test-revoked"
             | "custom.client.control-granted" | "custom.client.control-revoked"
-            | "custom.client.control-consumed" | "custom.client.command-receipt")
+            | "custom.client.control-consumed" | "custom.client.control-ended"
+            | "custom.client.command-receipt")
 }
 
 /// Admission receipts use a separate subject so the operation's CAS head is unchanged.
@@ -347,7 +348,7 @@ mod tests {
         let path = root.path().join("control.db");
         for kind in ["custom.client.test-enrolled", "custom.client.test-revoked",
             "custom.client.control-granted", "custom.client.control-revoked",
-            "custom.client.control-consumed", "custom.client.command-receipt"]
+            "custom.client.control-consumed", "custom.client.control-ended", "custom.client.command-receipt"]
         {
             let store = Store::open(&path, "issuer").unwrap();
             let input = ClaimInput {
