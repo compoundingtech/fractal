@@ -7055,6 +7055,7 @@ fn open_daemon_store(
     config: &Config,
     identity: &fractal_daemon::node_identity::StateLock,
 ) -> Result<Store> {
+    config.validate_fixture_paths()?;
     let admitted = identity.admitted_store();
     let store = match &admitted {
         Some(admitted) => Store::open_admitted(admitted.clone(), &config.node)?,
@@ -7280,6 +7281,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     if !args.peer.is_empty() {
         config.peers = args.peer;
     }
+    config.network_policy().validate_config(&config)?;
     config.apply_fleet_file()?;
     let configured_node = config.node.clone();
     let identity_started = std::time::SystemTime::now();
@@ -7327,6 +7329,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     startup.phase("bind-listeners");
     let state_socket = config.state_dir.join("run/fractal.sock");
     state_identity.verify_store_directory(&config)?;
+    config.network_policy().validate_config(&config)?;
     let (local_reserved, gateway_reserved) = tokio::try_join!(
         fractal_daemon::api::reserve_unix_socket(&config.socket, Some(&state_socket)),
         fractal_daemon::api::reserve_unix_socket(&config.client_gateway_socket, None),

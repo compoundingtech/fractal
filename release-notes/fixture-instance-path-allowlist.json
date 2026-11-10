@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Reject reserved fixture state, store and client socket overrides outside the instance-derived paths before startup effects.",
+  "replay": { "status": "none", "detail": "Existing claims are not rewritten." },
+  "schema": { "status": "none", "detail": "No claim or protocol schema changes." },
+  "rules": { "status": "changed", "detail": "The reserved fixture accepts only its own instance-derived state, store, database and paired client socket paths without symlink aliases." },
+  "compatibility": { "status": "changed", "detail": "Reserved fixture path overrides are refused with local-only-fixture-path-refused; ordinary instance path configuration is unchanged." },
+  "downtime": { "status": "none", "detail": "No deployment, setup or restart is performed by this source change." },
+  "manual": { "status": "changed", "detail": "Fixture configuration must use its instance-derived paths before startup or exposure." },
+  "recovery": { "status": "none", "detail": "Refused paths are rejected before identity or database access and require no store recovery." }
+}

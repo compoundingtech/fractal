@@ -7325,9 +7325,12 @@ fn cli_fixture_fabric_exposes_only_paired_socket_and_preserves_normal_peers() {
     )).unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
     let config = root.path().join("config.toml");
-    let state = root.path().join("state");
-    let paired = root.path().join("paired.sock");
-    let privileged = root.path().join("privileged.sock");
+    let instance = fractal_daemon::instance::Instance::new(
+        &root.path().join("home"), "client-control-fixture",
+    ).unwrap();
+    let state = instance.state_home().join("st3");
+    let paired = instance.run_dir().join("fractal-client.sock");
+    let privileged = instance.run_dir().join("fractal.sock");
     let write_config = |socket: &std::path::Path| {
         std::fs::write(&config, format!(
             "state_dir = '{}'\nsocket = '{}'\nclient_gateway_socket = '{}'\n",
@@ -7346,7 +7349,7 @@ fn cli_fixture_fabric_exposes_only_paired_socket_and_preserves_normal_peers() {
         command.arg("--config").arg(&config).args(["--json", "devices", "fabric"]).args(arguments).output().unwrap()
     };
     assert!(!run(true, &["enable", "--service", "st3-client-v0"]).status.success());
-    assert!(!run(false, &["enable", "--service", "client-control-fixture"]).status.success());
+    assert!(!run(false, &["enable", "--service", "st3-client-v0"]).status.success());
     assert!(!calls.exists(), "rejected service changes never invoke Fabric");
     assert_eq!(cli_value(run(true, &["enable"])), json!({"service":"client-control-fixture","enabled":true}));
     let expose = std::fs::read_to_string(&calls).unwrap();
@@ -7364,4 +7367,52 @@ fn cli_fixture_fabric_exposes_only_paired_socket_and_preserves_normal_peers() {
     write_config(&privileged);
     assert!(!run(true, &["enable"]).status.success());
     assert_eq!(std::fs::read_to_string(&calls).unwrap(), recorded, "privileged sockets are never exposed");
+}
+
+#[test]
+fn cli_fixture_path_overrides_refused_before_identity_store_or_bind() {
+    if fractal_daemon::test_support::supervise_test() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path().join("home");
+    let fixture = fractal_daemon::instance::Instance::new(&home, "client-control-fixture").unwrap();
+    let other = root.path().join("other-instance");
+    std::fs::create_dir_all(&other).unwrap();
+    let database = other.join("claims.sqlite3");
+    std::fs::write(&database, "untouched other-instance database").unwrap();
+    let own_socket = fixture.run_dir().join("fractal-client.sock");
+    let run = |flag: &str, path: &std::path::Path| {
+        let mut command = fractal_daemon::test_support::command(test_bin!("fractal-fixture"));
+        command.env_remove("ST_AGENT").env_remove("ST_MISSION_RUN").env_remove("ST_INSTANCE")
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", root.path().join("config"))
+            .env("XDG_STATE_HOME", root.path().join("state"))
+            .env("XDG_RUNTIME_DIR", root.path().join("run"))
+            .args(["--instance", "client-control-fixture", "up", "--web-listen", "off"]);
+        if flag != "--client-gateway-socket" {
+            command.arg("--client-gateway-socket").arg(&own_socket);
+        }
+        let output = command.arg(flag).arg(path).output().unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("local-only-fixture-path-refused"),
+            "{}", String::from_utf8_lossy(&output.stderr));
+        assert_eq!(std::fs::read_to_string(&database).unwrap(), "untouched other-instance database");
+        assert!(!fixture.state_home().exists(), "refusal precedes identity and database effects");
+    };
+    for (flag, path) in [
+        ("--state-dir", other.clone()),
+        ("--store-dir", other.clone()),
+        ("--client-gateway-socket", root.path().join("run/fractal.sock")),
+        ("--client-gateway-socket", root.path().join("run/fractal-client.sock")),
+        ("--client-gateway-socket", other.join("fractal.sock")),
+        ("--client-gateway-socket", other.join("fractal-client.sock")),
+    ] {
+        run(flag, &path);
+        assert!(!fixture.root().exists());
+    }
+    std::fs::create_dir_all(fixture.run_dir()).unwrap();
+    std::os::unix::fs::symlink(&database, &own_socket).unwrap();
+    run("--client-gateway-socket", &own_socket);
+    assert!(std::fs::symlink_metadata(&own_socket).unwrap().file_type().is_symlink());
 }

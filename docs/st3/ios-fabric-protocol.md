@@ -121,9 +121,14 @@ it never grants anything but the one client gateway service. Each member grants 
 the phones paired with it: each member is paired on its own.
 
 The reserved `client-control-fixture` instance is separate: its `devices fabric enable`
-selects only the exact `client-control-fixture` service and its configured paired-client
-socket, never a privileged socket or production's legacy socket discovery. It refuses
-production service names; other instances refuse the reserved fixture service. Fixture
+selects only the exact `client-control-fixture` service and its own instance-derived
+`run/fractal-client.sock`, never arbitrary configured sockets, privileged sockets or
+production's legacy socket discovery. Its state and SQLite directory/database must
+also be the instance-derived paths: outside-root overrides and symlink aliases fail
+with `local-only-fixture-path-refused` before identity/store effects, at bind and at
+exposure. The active instance root comes from HOME, not a state-dir override; an
+explicit reserved state path is only a fallback when that instance is not active.
+It refuses production service names; other instances refuse the reserved fixture service. Fixture
 pairings use distinct `st-fixture-device-…` inbound-only peers with only that service.
 Status, revoke and disable scope cleanup to the instance's peer names, leaving normal
 `st-device-…` peers and `st3-client-v0` unchanged. Use fresh test-app Fabric identities:

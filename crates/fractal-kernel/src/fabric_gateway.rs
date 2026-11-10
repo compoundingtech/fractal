@@ -46,7 +46,7 @@ pub fn client_socket(config: &crate::config::Config) -> Result<PathBuf> {
     };
     let resolve = |path: &Path| fs::canonicalize(path).or_else(|_| std::path::absolute(path));
     let resolved = resolve(&socket)?;
-    for privileged in [&config.socket, &crate::config::state_socket(&config.state_dir)] {
+    for privileged in [&config.socket, &config.state_dir.join("run/fractal.sock")] {
         anyhow::ensure!(resolved != resolve(privileged)?, "Fabric must never expose a privileged socket");
     }
     Ok(socket)
@@ -288,16 +288,19 @@ mod tests {
     fn fixture_exposure_rejects_privileged_socket_aliases() {
         let root = tempfile::tempdir().unwrap();
         let mut config = crate::config::Config::default();
-        config.state_dir = root.path().join(".st-instance/client-control-fixture/state/st3");
-        config.socket = root.path().join("private.sock");
-        config.client_gateway_socket = root.path().join("paired.sock");
+        let fixture_root = root.path().join(".st-instance/client-control-fixture");
+        config.state_dir = fixture_root.join("state/st3");
+        config.socket = fixture_root.join("run/fractal.sock");
+        config.client_gateway_socket = fixture_root.join("run/fractal-client.sock");
         assert_eq!(client_socket(&config).unwrap(), config.client_gateway_socket);
+        fs::create_dir_all(config.socket.parent().unwrap()).unwrap();
         fs::write(&config.socket, "").unwrap();
         std::os::unix::fs::symlink(&config.socket, &config.client_gateway_socket).unwrap();
         assert!(client_socket(&config).is_err());
         fs::remove_file(&config.client_gateway_socket).unwrap();
         fs::create_dir_all(&config.state_dir).unwrap();
-        let state_socket = crate::config::state_socket(&config.state_dir);
+        let state_socket = config.state_dir.join("run/fractal.sock");
+        fs::create_dir_all(state_socket.parent().unwrap()).unwrap();
         fs::write(&state_socket, "").unwrap();
         std::os::unix::fs::symlink(&state_socket, &config.client_gateway_socket).unwrap();
         assert!(client_socket(&config).is_err());
