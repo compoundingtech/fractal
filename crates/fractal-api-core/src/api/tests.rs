@@ -173,7 +173,7 @@ async fn a_bound_run_is_held_to_its_identity_by_document_writes() {
     assert_eq!(refused["code"], "rule-denied", "{status} {refused}");
     let (status, written) = write("doc/runs/notes", "notes").await;
     assert_eq!(status, StatusCode::OK, "{written}");
-    assert_eq!(BoundActor::of(&Request::builder().extension(BoundAgent("agent/a".into())).body(()).unwrap().extensions()),
+    assert_eq!(BoundActor::of(Request::builder().extension(BoundAgent("agent/a".into())).body(()).unwrap().extensions()),
         Some(BoundActor::Agent("agent/a".into())));
 }
 
