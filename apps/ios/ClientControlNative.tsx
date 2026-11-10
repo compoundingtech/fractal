@@ -64,8 +64,8 @@ class CommandSubscription extends React.Component<SubscriptionProps> {
   private stop: (() => void) | undefined;
   private start = () => {
     const { binding, feed, granted, reportError } = this.props;
-    this.stop = feed.followCommands(true, granted, command => {
-      void binding.controller.handle(command).catch(error => reportError(String(error)));
+    this.stop = feed.followCommands(true, granted, (command, snapshot) => {
+      void binding.controller.handle(command, snapshot).catch(error => reportError(String(error)));
     }, binding.controller.suspend);
   };
   componentDidMount() { this.start(); }

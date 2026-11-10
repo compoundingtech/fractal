@@ -28,13 +28,14 @@ export class ClientControlController {
   };
   readonly dispose = (): void => { this.disposed = true; this.suspend(); this.listeners.clear(); };
   readonly revoke = async (): Promise<void> => { this.revoked = true; this.suspend(); await this.ports.revoke(); };
-  private lifecycle(row: ClientControlGrantLifecycle): void {
+  private lifecycle(row: ClientControlGrantLifecycle, snapshot: boolean): void {
     if (this.disposed || this.revoked || row.device !== this.ports.identity.device || row.session !== this.ports.identity.session) return;
     if (!Number.isSafeInteger(row.sequence) || row.sequence <= 0
       || !['started', 'ended', 'revoked'].includes(row.state)) { this.suspend(); return; }
     const previous = this.lifecycles.get(row.grant_id);
     if (previous && (row.run_id !== previous.run_id || row.item_id !== previous.item_id
-      || row.sequence <= previous.sequence || previous.state !== 'started')) return;
+      || row.sequence < previous.sequence || previous.state !== 'started'
+      || row.sequence === previous.sequence && (!snapshot || row.state !== 'started'))) return;
     this.lifecycles.set(row.grant_id, row);
     if (row.state === 'started') {
       this.suspend(); this.grant = row;
@@ -56,8 +57,8 @@ export class ClientControlController {
       && (command.command_kind !== 'phone.navigate' || v1Screen(command.args.screen) && grant.screens.includes(command.args.screen)
         && (!grant.item_id || command.args.screen !== 'Attention' || command.args.params.id === grant.item_id));
   }
-  readonly handle = (command: DeviceCommand | ClientControlGrantLifecycle): Promise<void> => {
-    if (command.kind === 'client-control-grant-lifecycle') { this.lifecycle(command); return Promise.resolve(); }
+  readonly handle = (command: DeviceCommand | ClientControlGrantLifecycle, snapshot = false): Promise<void> => {
+    if (command.kind === 'client-control-grant-lifecycle') { this.lifecycle(command, snapshot); return Promise.resolve(); }
     const epoch = this.epoch;
     const task = this.pending.then(() => epoch === this.epoch ? this.apply(command) : undefined);
     this.pending = task.catch(() => {});

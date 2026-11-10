@@ -22,11 +22,11 @@ for (const [testMode, granted] of [[undefined, true], [false, false], [false, tr
     const lifecycle = lifecycleFixture.resources[0];
     const frame = { kind: 'snapshot', id: 'commands', collection: 'commands', items: [command, lifecycle] };
     sockets[0].frame(frame);
-    assert.deepEqual(received, testMode === true && granted ? [command, lifecycle] : []);
+    assert.deepEqual(received, testMode === true && granted ? [lifecycle, command] : []);
     for (const resource of lifecycleFixture.resources.slice(1)) {
       sockets[0].frame({ ...frame, kind: 'changes', items: undefined, upserts: [resource], removes: [] });
     }
-    assert.deepEqual(received, testMode === true && granted ? [command, ...lifecycleFixture.resources] : []);
+    assert.deepEqual(received, testMode === true && granted ? [lifecycle, command, ...lifecycleFixture.resources.slice(1)] : []);
     foreground.update('background');
     assert.equal(sockets[0].closed, true);
     assert.equal(resets > 0, testMode === true && granted, 'background invalidates grant authority');
@@ -49,12 +49,17 @@ test('commands feed carries golden invalid sequence to the active controller', a
   const controller = new ClientControlController({ identity: { device: started.device, session: started.session },
     foreground: () => true, visible: () => undefined,
     navigate: async () => assert.fail('no navigation'), result: async () => assert.fail('no result'), revoke: async () => {} });
-  const feed = new Feed(client, { onWindow() {}, onConnection() {} }, new ForegroundGate('active'), () => 'action/test');
+  const foreground = new ForegroundGate('active');
+  const feed = new Feed(client, { onWindow() {}, onConnection() {} }, foreground, () => 'action/test');
   t.after(() => { feed.close(); controller.dispose(); });
   feed.followCommands(true, true, controller.handle, controller.suspend);
   await settle();
   sockets[0].frame(lifecycleFixture.frames[0]);
   assert.deepEqual(controller.getGrant(), started);
-  sockets[0].frame({ ...lifecycleFixture.frames[1], upserts: [invalid] });
+  foreground.update('background'); assert.equal(controller.getGrant(), undefined);
+  foreground.update('active'); await settle();
+  sockets.at(-1).frame(lifecycleFixture.frames[0]);
+  assert.deepEqual(controller.getGrant(), started, 'unchanged started snapshot restores the run indicator');
+  sockets.at(-1).frame({ ...lifecycleFixture.frames[1], upserts: [invalid] });
   assert.equal(controller.getGrant(), undefined, 'sequence zero fails closed through the shipped feed path');
 });

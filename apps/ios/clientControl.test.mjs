@@ -18,6 +18,17 @@ const harness = (t, changes = {}, started = lifecycle()) => {
   return { controller, effects, results };
 };
 
+for (const scenario of ['unchanged', 'revoked', 'stale']) test(`snapshot reconciliation after reset: ${scenario}`, async t => {
+  const started = lifecycle({ sequence: 10 }), { controller, effects, results } = harness(t, {}, started);
+  if (scenario === 'revoked') await controller.handle({ ...started, state: 'revoked', sequence: 11 });
+  controller.suspend();
+  await controller.handle({ ...started, sequence: scenario === 'stale' ? 9 : 10 }, true);
+  assert.equal(controller.getGrant()?.run_id, scenario === 'unchanged' ? started.run_id : undefined);
+  await controller.handle(command());
+  assert.equal(effects.length, scenario === 'unchanged' ? 1 : 0);
+  assert.equal(results.length, scenario === 'unchanged' ? 1 : 0);
+});
+
 for (const [name, change] of [
   ['no grant', row => { delete row.control_grant; }], ['wrong run', row => { row.run_id += '/wrong'; }], ['wrong device', row => { row.device_id += '/wrong'; }], ['wrong session', row => { row.session_actor += '/wrong'; }],
   ['wrong issuer', row => { row.issued_by += '/wrong'; }], ['non-granted screen', row => { row.control_grant.screens = ['NowRoot']; }], ['non-granted verb', row => { row.control_grant.verbs = ['phone.inspect']; }],
