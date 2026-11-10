@@ -144,7 +144,7 @@ fn operation_conflict_refuses_a_guard_requested_full_replay() {
 #[test]
 fn operation_conflict_github_event_observers_never_replay_during_receipt() {
     let subject = "github-event/github/acme/garden/pull-request/7/checks/abc/fail";
-    let sources = [Store::open_memory("dev5").unwrap(), Store::open_memory("dev3").unwrap()];
+    let sources = [Store::open_memory("node-a").unwrap(), Store::open_memory("node-b").unwrap()];
     let mut claims = Vec::new();
     for (number, source) in sources.iter().enumerate() {
         claims.push(source.append_claim(&ClaimInput {
