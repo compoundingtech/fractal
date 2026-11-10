@@ -269,7 +269,7 @@ const styles = stylex.create({
   // One clipped line, laid out from the right; see RowMeta. Huge shrink: the meta gives way before the title does.
   meta: {
     display: 'flex', flexDirection: 'row-reverse', flexWrap: 'wrap', alignItems: 'center', flexGrow: 0, flexShrink: 10000, flexBasis: 'auto', minWidth: 0,
-    height: t.metaLeading, overflow: 'hidden', marginInlineStart: 'auto', color: ink.fgMuted, fontSize: t.metaSize, lineHeight: t.metaLeading,
+    height: t.metaLeading, overflow: 'hidden', marginInlineStart: 'auto', color: ink.fgSoft, fontSize: t.metaSize, lineHeight: t.metaLeading,
   },
   metaSentinel: { width: 0, height: t.metaLeading, flexShrink: 0 },
   metaItem: { flexShrink: 0, whiteSpace: 'nowrap', marginInlineStart: s.md },
