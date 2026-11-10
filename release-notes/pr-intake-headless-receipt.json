@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Pull request intake requests a review for the first ready head observed after a head-less creation receipt, without repeating reviews for an already observed head",
+  "replay": {"status": "none", "detail": "No graph replay; subsequent observations use the corrected head-change decision."},
+  "schema": {"status": "none", "detail": "No database schema change."},
+  "rules": {"status": "none", "detail": "Checkpoint rules and digests are unchanged."},
+  "compatibility": {"status": "none", "detail": "Receipt, observation and subscription request formats are unchanged."},
+  "downtime": {"status": "none", "detail": "No service interruption."},
+  "manual": {"status": "none", "detail": "No manual step."},
+  "recovery": {"status": "none", "detail": "Reverting restores the earlier head-less receipt behavior."}
+}
