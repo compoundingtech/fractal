@@ -59,6 +59,15 @@ impl Store {
         ).unwrap();
     }
 
+    /// How many run credentials were ever minted for `step_run`.
+    pub fn run_credentials_issued_for_tests(&self, step_run: &str) -> usize {
+        self.readers.get().query_row(
+            "SELECT COUNT(*) FROM capabilities WHERE kind=?1 AND subject=?2",
+            params![RUN_CREDENTIAL_KIND, step_run],
+            |row| row.get(0),
+        ).unwrap()
+    }
+
     /// Publish a one-step mission that may write `custom/example/*` and `doc/runs/*`, start a run
     /// of it and put its step at attempt 1, working.
     pub fn start_program_step_for_tests(&self) -> StepRunView {
