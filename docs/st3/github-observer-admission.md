@@ -375,13 +375,19 @@ locator equal to the repository in any case, and, for a `push`, `create` or
 receiver writes an `observer.refresh-requested` claim with attempt
 `"github-webhook:" + hex(sha256("fractal.github-webhook.v1\0" + delivery + "\0" + observer))`,
 the same claim a declared `refresh` writes; the attempt prefix alone marks it as
-webhook-requested, since declared attempts are bare hex digests. The poller
-answers refreshes oldest first, so the oldest unanswered one may already be
-polling, and a delivery then queues one more. An observer with two unanswered
-refreshes is skipped: the second has not started, so its poll reads what the
-delivery announced. The answer is 202 with `{"refreshed": n}`. Refresh claims
-replicate, so the member that polls the observer acts on a delivery any member
-received; a refresh poll bypasses the GraphQL floor, as a declared refresh does.
+webhook-requested, since declared attempts are bare hex digests. A redelivery
+writes nothing more, since its attempt is already requested. The answer is 202
+with `{"refreshed": n}`. Refresh claims replicate, so the member that polls the
+observer acts on a delivery any member received; a refresh poll bypasses the
+GraphQL floor, as a declared refresh does.
+
+**Coalescing.** The poller decides, on its own replica, so a delivery that
+arrives while a poll runs is never lost to replication lag. Requests are taken
+oldest first. When the oldest pending request is a webhook refresh, the poll
+takes the newest pending webhook refresh written by the same member instead, and
+its answer also answers every earlier webhook refresh from that member: each was
+written after the change it announced and before the poll started. A burst of
+deliveries during one poll thus costs one more poll, not one per delivery.
 
 **Backstop cadence.** A repository observer with a webhook refresh claim
 accepted within the last 30 minutes is webhook-covered. The member that polls it
