@@ -233,8 +233,9 @@ incarnation remain authoritative: claim replacement, claim/run end, enrollment
 revocation and deadlines end the grant. The default budget is 50 commands, spent
 durably before admission; grants last at most two hours. Only `phone.inspect`
 and `phone.navigate` to `NowRoot` or `Attention` can be granted. The journey opens
-the seeded native ask using `Attention {params: {id}}`, then inspects it. Optional
-grant `item_id` binds that screen to the seed; another ask is `screen-not-granted`.
+the seeded native ask using `Attention {params: {id}}`, then inspects it. Required
+grant `item_id` binds Attention to that existing native ask; missing, unknown or
+different asks are `screen-not-granted`. NowRoot-only grants need no item.
 `Conversation` is always `screen-not-granted`. Answer, close, read-state and
 `message.send` verbs are `verb-not-granted`; no grant authorizes a mutation.
 

@@ -234,9 +234,7 @@ async fn all_admission_refusals_have_durable_fixture_receipt_ids() {
         request.kind = verb.into(); request.args = json!({});
         assert_rejected_receipt(&state, issue(&state, &issuer, request).unwrap_err(), "verb-not-granted");
     }
-    let mut bound_request = test_support::request(&grant, 2);
-    bound_request.item_id = Some("step-run/ask-seeded/ask".into());
-    let item_bound = issue_grant(&state, &issuer, bound_request).unwrap();
+    let item_bound = issue_grant(&state, &issuer, test_support::request(&grant, 2)).unwrap();
     let mut wrong_item = command_request(&item_bound);
     wrong_item.kind = "phone.navigate".into();
     wrong_item.args = json!({"screen":"Attention","params":{"id":"step-run/ask-other/ask"}});

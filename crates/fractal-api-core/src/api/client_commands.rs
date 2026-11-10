@@ -125,7 +125,7 @@ fn verify_result(state: &AppState, session: &ClientSession, row: &Command, reque
         || request.result.as_ref().is_some_and(|result| serde_json::to_value(&binding.visible_state).as_ref().ok() != Some(result))
     { return Err(forbidden("device result binding does not match its command")); }
     super::client_control_grants::check_screen(&grant, &binding.visible_state.screen)?;
-    if binding.visible_state.screen == "Attention" && grant.item_id.is_some() {
+    if binding.visible_state.screen == "Attention" {
         let item = binding.visible_state.opened_item.as_ref().ok_or_else(|| control_refusal("screen-not-granted"))?;
         super::client_control_grants::check_item(&grant, &item.id)?;
     }
