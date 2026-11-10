@@ -30,6 +30,9 @@ fn a_run_credential_binds_its_run_only_while_its_attempt_runs() {
     assert_eq!(store.run_binding(&secret).unwrap_err().code, "run-credential-ended");
     let retried = store.issue_run_credential(&step.subject, 2, 60_000).unwrap();
     assert_eq!(store.run_binding(&retried).unwrap().attempt, 2);
+    // A program waiting on a person's answer still runs.
+    set_step(&store, &step.subject, "waiting-person", 2);
+    assert_eq!(store.run_binding(&retried).unwrap().attempt, 2);
 
     // The attempt's end ends its credential.
     set_step(&store, &step.subject, "completed", 2);
