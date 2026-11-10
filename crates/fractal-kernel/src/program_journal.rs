@@ -7,6 +7,9 @@ use std::collections::HashMap;
 
 /// The claim kind of a program journal entry, on the program's `step-run` subject.
 pub const JOURNAL_KIND: &str = "program.step";
+/// The reserved journal key the daemon writes on `done` with the program's encoded success value.
+/// It is the program's result, not an inner step: replay and views skip it.
+pub const RESULT_KEY: &str = "$result";
 /// The fault on a program step whose journal shows no new entry within its `stalled-after`.
 pub const STALLED_FAULT_SCOPE: &str = "program/stalled";
 /// The fault on a program step whose host cannot run it, or whose worker stopped answering.
@@ -75,7 +78,7 @@ impl ProgramJournal {
         let mut keys = Vec::<(usize, ProgramEntry)>::new();
         for (seen, (fields, at)) in newest_first.into_iter().enumerate() {
             journal.last_entry_at_unix_ms.get_or_insert(at);
-            let Some(key) = fields.get("key").and_then(Value::as_str) else { continue };
+            let Some(key) = fields.get("key").and_then(Value::as_str).filter(|key| *key != RESULT_KEY) else { continue };
             let status = fields.get("status").and_then(Value::as_str).unwrap_or_default();
             let slot = *index.entry(key).or_insert_with(|| {
                 keys.push((
@@ -185,6 +188,19 @@ mod tests {
         let innermost = journal.innermost().unwrap();
         assert_eq!((innermost.key.as_str(), innermost.child.as_deref()), ("review", Some("mission-run/child")));
         assert_eq!(innermost.ended_at_unix_ms, None);
+    }
+
+    #[test]
+    fn the_program_result_is_not_an_inner_step() {
+        let rows = [
+            (json!({"key": RESULT_KEY, "status": "completed", "value": {"merged": true}}), 30),
+            (json!({"key": "merge", "status": "completed", "ms": 40}), 20),
+            (json!({"key": "merge", "status": "started"}), 10),
+        ];
+        let journal = ProgramJournal::fold(rows.iter().map(|(fields, at)| (fields, *at)), false);
+        let keys = journal.entries.iter().map(|entry| entry.key.as_str()).collect::<Vec<_>>();
+        assert_eq!(keys, ["merge"]);
+        assert_eq!(journal.last_entry_at_unix_ms, Some(30));
     }
 
     #[test]
