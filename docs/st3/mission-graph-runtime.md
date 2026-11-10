@@ -244,8 +244,33 @@ a mission ID without `mission/`; `write` takes a subject, or a registered family
 `/*`. A pattern is exact or ends in `/*`, which covers everything under it. Parsing refuses an empty
 block, a repeated block or rule, an unknown verb, any other `*`, and the block in a nested or loop
 mission. Rules are stored in canonical order, so reordering them is not a revision; any other change
-is. A mission without the block grants its runs nothing. The block is stored with the revision;
-the daemon does not yet bind a run actor or enforce it. An older member would quarantine a
+is. A mission without the block grants its runs nothing.
+
+Each claim written as `mission-run/RUN`, and each document a run binds, is decided at write
+admission; a run's message send stays on the graph append so the decision applies to it. The run
+holds the `authority` of its current generation's revision, intersected with its starter's: the
+actor of its `mission-run.created`, which is its requester, or `mission-run/PARENT` for a child a
+program starts (whose own effective authority is intersected in turn). A person, agent or daemon
+starter contributes everything free mode gives it, and the rules that restrict it decide each of
+the run's writes as well. The claim names the grant it needs: `mission.published` on `mission/ID`
+needs `publish ID`; a run's creation and a generation without a predecessor need `start ID`; a
+generation with a predecessor needs `revise ID`, as does everything a revision writes on the runs
+it changes, each on that run's mission; any other claim needs `write SUBJECT`. A run always
+journals `program.step` on its own step runs. `cancel` is reserved and grants nothing yet: setting
+another run's outcome, which is how a run is cancelled, takes a person or agent actor. A write
+outside the effective authority is recorded as `rule.audited` on `rule/run-authority` and
+proceeds, or is refused with `run-authority-denied`, as the daemon's `[programs] authority` says
+(`audit` by default).
+
+A request whose caller's ancestry carries a live run credential
+(`ST_RUN_CREDENTIAL`, one per program attempt) is bound to `mission-run/RUN`: like a bound agent, it
+may not call internal routes, send a person header or name another `actor` or `requester`, and its
+writes are attributed to the run. The credential binds only while its attempt is the step run's
+current, live attempt; one that no longer binds leaves the caller unverifiable, and an
+environment that carries both a credential and `ST_AGENT` binds neither. A bound run writes no
+seat's `doc/agents/…` document. The CLI defaults its actor to `mission-run/$ST_MISSION_RUN` when the
+credential is present; the daemon accepts that actor from the trusted Unix client only when the
+request's credential binds the same run. An older member would quarantine a
 revision that declares it (it hashes the mission without the field), so publication holds such a
 revision until every member advertises `mission_authority=1` on its `daemon.started`
 (`mission-authority-unavailable`, also an `apply --dry-run` blocker), as for `capacity`
@@ -380,6 +405,8 @@ A retry repeats one failed step attempt. It handles a bounded transient failure.
 `timeout` is an execution budget for one step attempt. It advances only while a worker holds a live claim in `claimed` or `working`; dependency waits, assignment waits, blocked gates, ready time, verification, and time after lease expiry do not consume it. Release and reclaim resume the same attempt's accumulated budget, while retry starts a new attempt with a fresh budget. Work projections expose the active interval start, accumulated execution milliseconds, and configured timeout so an operator can explain an expiry after restart or replication. A step cannot use a deadline gate because its timeout is its worker-execution budget.
 
 Waiting is not execution. A worker that holds a step while it waits for something outside the seat, such as a host build slot or GitHub's merge queue, declares it with `fractal work wait STEP --as AGENT --for 2h --reason "build slot"`. The wait is a `work.progress` claim with `clock: "paused"` and a `wait_until_unix_ms` deadline: it closes the running interval, and the attempt's execution clock stays stopped through the lease renewals and progress records that follow. `fractal work resume STEP` (a `work.progress` claim with `clock: "running"`) opens a new interval. A wait nobody resumes ends at its deadline, and the clock then runs again, so a seat that stopped answering cannot hide a hung step. Waits draw on one budget of 12 hours per step attempt, counted as time actually spent waiting: a wait that is resumed early gives back what it did not use, a wait that runs to its deadline spends its full length, and declaring again during a wait spends the time so far. A declaration larger than what is left is refused with `wait-budget-exhausted` and says how much remains, so a live seat that never finishes cannot chain waits past the execution timeout. A new claim in the same attempt keeps the spent budget; a retry is a new attempt with a fresh one. The lease still needs its renewals: a lapsed lease ends the interval as it always did, and a new claim ends any earlier holder's wait. `work show` prints the stopped clock with the time its wait ends and the wait budget used and left, and the wait's reason is the step's blocked reason until it resumes. A wait adds no time to the budget, so a step that waits two hours and then reviews for ten minutes has used ten minutes; `work extend` remains the way to give a step more work time.
+
+An agentless step has no worker and no lease, so the exec it declares waits for itself. Inside that exec, `fractal work wait "$ST_STEP_RUN" --for 2h --reason "build slot"` and `fractal work resume "$ST_STEP_RUN"` need no `--as`: the command acts as the exec (`ST3_SUBJECT`) under the launch its runtime gave it (`ST3_START_OPERATION`). The daemon accepts it only while that launch is the exec's live generation on the daemon's host, the exec was declared by that step for its current attempt, and the step is working. The launch is a fence against stale callers, as a seat's incarnation is, not a secret: a request under an earlier launch or attempt, or for a step with a worker, is refused, and an exec can do nothing else with the step. The record is the same `work.progress` claim with the exec as its actor and no claimant or lease, under the same deadline and 12-hour budget, so a hung exec that never resumes still runs into its timeout.
 
 A step with a worker does not fail when its budget runs out. Fractal raises one fault for the step, which arrives as a message to the agent assigned to it, and the step and its mission go on. The owner answers with `fractal work extend STEP --as AGENT --by 2h --reason TEXT`, which adds up to seven days to this attempt's budget and renews the lease, with `work complete` when the goals are met, or with `work fail`. An extension is a `work.extended` claim. The fault ends when the owner extends, completes, fails or releases the step. A step that runs out of the extended budget raises a new fault. Only a step with no worker, such as an agentless step, fails when its budget runs out, because nobody holds it to answer. A step submitted for verification has already used its time and is never timed out.
 
@@ -1319,8 +1346,12 @@ mission's policy; schedules retain their timers, catch-up and no-overlap behavio
 does not change schedule admission or schedule faults. `stalled-after` remains a positive
 duration even when stall reports are disabled.
 
-A stall is measured from the run's last sign of life: its last state change, any step's last
-change or progress record, and the end of any step's lease. Activity in child runs linked from its steps,
+A stall is measured from the run's last sign of life: its last state change and any step's last
+change or progress record. A step that a worker holds counts from the start of its current
+execution interval (its claim, or the end of its last wait), its last progress record, and a
+declared `work wait` until that wait ends. Lease renewals are not a sign of life: a live seat that
+holds a step and records no progress is reported like any other silence, so a worker on a long
+step records progress with `fractal work progress`. Activity in child runs linked from its steps,
 including loop rounds and nested work, counts too. A run in cleanup, and a run that
 still waits on `after`, cannot stall. A stalled run is not failed and can go on; if it makes progress and then goes
 quiet again, that is a new stall and a new message. The daemon keeps each run's stall limit as a

@@ -519,6 +519,12 @@ fn parse_mission(
                     format!("mission `{id}` cannot own an account"),
                 ));
             }
+            "objective" => {
+                return Err(FractalError::new(
+                    "objective-inside-mission",
+                    format!("mission `{id}` cannot own an objective"),
+                ));
+            }
             "capacity" => {
                 if capacity.is_some() {
                     return Err(FractalError::new(
@@ -1502,6 +1508,12 @@ fn parse_step(
                     return Err(FractalError::new(
                         "account-inside-mission",
                         format!("step `{path}` cannot own an account"),
+                    ));
+                }
+                "objective" => {
+                    return Err(FractalError::new(
+                        "objective-inside-mission",
+                        format!("step `{path}` cannot own an objective"),
                     ));
                 }
                 "lane" => {
@@ -3272,6 +3284,12 @@ fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Res
             "an account declaration must be at the root",
         ));
     }
+    if node.name().value() == "objective" {
+        return Err(FractalError::new(
+            "objective-inside-mission",
+            "an objective declaration must be at the root",
+        ));
+    }
     if node.name().value() == "env" {
         validate_string_map(node, true)?;
     }
@@ -3289,6 +3307,54 @@ fn validate_deferred_declaration_in(node: &KdlNode, parent: Option<&str>) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn assignees_retain_main_spelling_during_expansion() {
+        for (input, expected) in [
+            ("example/worker", "example/worker"),
+            ("agent/example/worker", "agent/example/worker"),
+            ("person/reviewer", "person/reviewer"),
+            ("daemon/scheduler", "daemon/scheduler"),
+            ("worker", "agent/host.worker"),
+            ("agent/worker", "agent/host.worker"),
+        ] {
+            assert_eq!(super::normalize_assignee(input, "host"), expected);
+        }
+    }
+
+    #[test]
+    fn declaration_assignees_qualify_host_relative_agent_names() {
+        let source = r#"mission "relative" state="ready" {
+          goal "Resolve host-relative declaration assignees.";
+          step "prefixed" { assigned-to "agent/worker"; }
+          step "bare" { assigned-to "worker"; }
+        }"#;
+        let missions = super::parse_missions(&source.parse().unwrap(), "host").unwrap();
+        for step in ["prefixed", "bare"] {
+            assert_eq!(
+                missions["relative"].steps[step].work_selector,
+                Some(super::WorkSelector::Assigned {
+                    agent: "agent/host.worker".into(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn stored_assignees_preserve_historical_malformed_normalization() {
+        for (input, expected) in [
+            ("agent/", "agent/host."),
+            ("", "agent/host."),
+            ("worker name", "agent/host.worker name"),
+            ("example/worker name", "example/worker name"),
+            ("agent/example/worker name", "agent/example/worker name"),
+            ("example/worker.name ", "agent/example/worker.name "),
+            ("person/reviewer name", "person/reviewer name"),
+            ("person/", "person/"),
+        ] {
+            assert_eq!(super::normalize_assignee(input, "host"), expected);
+        }
+    }
+
     #[test]
     fn nested_loop_paths_follow_their_distinct_owning_steps() {
         let source = r#"mission "collision" state="ready" { goal "Keep nested histories separate.";
