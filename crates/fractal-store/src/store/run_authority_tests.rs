@@ -139,12 +139,14 @@ fn a_run_writes_only_within_its_authority_intersected_with_its_starters() {
     write(&store, &land.subject, "custom/factory/again").unwrap();
     assert_eq!(store.rule_audits(Some("run-authority"), 10).unwrap().len(), 1);
     assert_eq!(run_authority_mode(), RunAuthorityMode::Audit);
+    set_run_authority_mode(RunAuthorityMode::Enforce);
 }
 
 #[test]
 fn writers_other_than_runs_are_untouched() {
     let _mode = MODE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    set_run_authority_mode(RunAuthorityMode::Enforce);
+    // Enforced by default, before any config sets the mode.
+    assert_eq!(run_authority_mode(), RunAuthorityMode::Enforce);
     let store = missions();
     write(&store, "person/operator", "custom/other/person").unwrap();
     store.append_claim(&ClaimInput {
@@ -156,5 +158,5 @@ fn writers_other_than_runs_are_untouched() {
         expected_subject: None,
         idempotency_key: None,
     }).unwrap();
-    set_run_authority_mode(RunAuthorityMode::Audit);
+    assert_eq!(run_authority_mode(), RunAuthorityMode::Enforce);
 }

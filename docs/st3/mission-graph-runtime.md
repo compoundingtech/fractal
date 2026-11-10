@@ -256,8 +256,8 @@ writes as well. The claim names the grant it needs: `mission.published` on `miss
 needs `revise ID`; any other claim needs `write SUBJECT`. A run always journals `program.step` on
 its own step runs. Setting another run's outcome, which is how a run is cancelled, takes a person or
 agent actor, so a run cannot cancel one whatever it declares. A write outside the effective authority is
-recorded as `rule.audited` on `rule/run-authority` and proceeds, or is refused with
-`run-authority-denied`, as the daemon's `[programs] authority` says (`audit` by default).
+refused with `run-authority-denied`, or, when the daemon's `[programs] authority` is `audit`,
+recorded as `rule.audited` on `rule/run-authority` and let through (`enforce` by default).
 
 A request whose caller's ancestry carries a live run credential
 (`ST_RUN_CREDENTIAL`, one per program attempt) is bound to `mission-run/RUN`: like a bound agent, it
