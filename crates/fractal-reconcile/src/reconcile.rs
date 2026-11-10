@@ -1712,6 +1712,20 @@ fn is_person_terminal(subject: &str) -> bool {
     )
 }
 
+/// An exec task, and a seat a mission run owns, ends when its work is done, so a person waits on
+/// it: it starts at normal priority. A standing seat keeps the install's `seat_priority`. Either
+/// keeps a priority it declares itself (`ST_SEAT_PRIORITY "background"`).
+fn default_finite_work_to_normal(subject: &DesiredSubject, member: &MemberSpec,
+    launch: &mut BTreeMap<String, String>) {
+    let finite = member.kind == MemberKind::Exec || subject.owner_run.is_some();
+    let mut declared = member.environment.clone();
+    crate::environment::normalize_aliases(&mut declared);
+    if finite && !declared.contains_key(fractal_runtime::PRIORITY_ENV) {
+        crate::environment::set(launch, fractal_runtime::PRIORITY_ENV,
+            fractal_runtime::SeatPriority::Normal.as_str().into());
+    }
+}
+
 impl<R: RuntimeControl> Reconciler<R> {
     /// An unticked setup box makes Codex ask: its seats launch with Codex's own approval defaults.
     pub fn with_codex_asks(mut self, asks: bool) -> Self {
@@ -1734,8 +1748,9 @@ impl<R: RuntimeControl> Reconciler<R> {
         self
     }
 
-    /// The priority every seat and exec task starts at unless it declares its own
-    /// `ST_SEAT_PRIORITY`. Applies to launches after this call.
+    /// The priority every standing seat starts at unless it declares its own
+    /// `ST_SEAT_PRIORITY`; exec tasks and run-owned seats start at normal instead. Applies to
+    /// launches after this call.
     pub fn with_seat_priority(mut self, priority: fractal_runtime::SeatPriority) -> Self {
         fractal_runtime::set_configured_seat_priority(priority);
         self.runtime_environment
@@ -8249,6 +8264,7 @@ impl<R: RuntimeControl> Reconciler<R> {
         let mut launch = member.clone();
         crate::environment::normalize_aliases(&mut launch.environment);
         overlay_runtime_environment(&subject.subject, &mut launch.environment, &self.runtime_environment);
+        default_finite_work_to_normal(subject, member, &mut launch.environment);
         if retain_choice { self.bind_account(subject, member, &mut launch)?; }
         else { self.bind_account_mode(subject, member, &mut launch, false)?; }
         if let Some(harness) = crate::accounts::harness_driver(&subject.desired)
@@ -21151,6 +21167,46 @@ pub mod tests {
             let mut environment = std::collections::BTreeMap::new();
             overlay_runtime_environment(&subject, &mut environment, &runtime);
             assert_eq!(environment[PRIORITY_ENV], "background", "{subject}");
+        }
+    }
+
+    #[test]
+    fn execs_and_run_seats_start_normal_and_standing_seats_keep_the_installs() {
+        use super::{default_finite_work_to_normal, overlay_runtime_environment};
+        use super::{DesiredSubject, LaunchSpec, MemberKind, MemberLifecycle, MemberSpec, RestartIntensity, RestartType};
+        use fractal_runtime::PRIORITY_ENV;
+        let runtime = BTreeMap::from([(PRIORITY_ENV.to_string(), "background".to_string())]);
+        let launch = |kind: MemberKind, subject: &str, owner_run: Option<&str>, declared: Option<(&str, &str)>| {
+            let member = MemberSpec {
+                kind, host: "h".into(), runtime_id: "r".into(), workspace: "/w".into(),
+                workspace_create: false, cwd: "/w".into(), terminal: false,
+                launch: LaunchSpec::Shell("true".into()),
+                environment: declared.map(|(k, v)| BTreeMap::from([(k.to_string(), v.to_string())])).unwrap_or_default(),
+                tags: BTreeMap::new(), display_name: None, lifecycle: MemberLifecycle::Service,
+                terminal_binding: None, one_shot: false, restart: RestartType::Never,
+                restart_intensity: RestartIntensity::default(), shutdown_timeout_ms: 5_000, driver: None,
+                terminal_size: None, capacity: None, declared_priority: None, declared_lane: None,
+                declared_budgets: None,
+            };
+            let desired = DesiredSubject {
+                accountable: None, subject: subject.into(), kind: "agent".into(), desired: serde_json::Value::Null,
+                member: Some(member.clone()), owner_run: owner_run.map(Into::into), owner_generation: None, owner_step: None,
+            };
+            let mut environment = member.environment.clone();
+            crate::environment::normalize_aliases(&mut environment);
+            overlay_runtime_environment(subject, &mut environment, &runtime);
+            default_finite_work_to_normal(&desired, &member, &mut environment);
+            environment[PRIORITY_ENV].clone()
+        };
+        let run = "run/019a0000-0000-7000-8000-000000000001";
+        assert_eq!(launch(MemberKind::Exec, "exec/garden/gate", None, None), "normal");
+        assert_eq!(launch(MemberKind::Agent, &format!("agent/{run}/step"), Some(run), None), "normal");
+        assert_eq!(launch(MemberKind::Agent, "agent/garden/builder", None, None), "background");
+        assert_eq!(launch(MemberKind::Pty, "pty/agent/garden/builder/x", None, None), "background");
+        // Background stays an opt-in for finite work, through either spelling.
+        for key in [PRIORITY_ENV, "FRACTAL_SEAT_PRIORITY"] {
+            assert_eq!(launch(MemberKind::Exec, "exec/garden/gate", None, Some((key, "background"))), "background");
+            assert_eq!(launch(MemberKind::Agent, &format!("agent/{run}/step"), Some(run), Some((key, "background"))), "background");
         }
     }
 
