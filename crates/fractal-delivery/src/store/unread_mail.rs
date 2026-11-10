@@ -21,12 +21,14 @@ fn flush_pending(connection: &Connection) -> Result<()> {
     }
     let mut remove = connection.prepare_cached(/* sqlite-large-value: allow-for-now lv-h3b5efa6a0e33 owner=fractal_delivery::store::unread_mail TODO=bound-or-reference-values-and-reclamation */ "DELETE FROM unread_mail WHERE subject=?1")?;
     let mut insert = connection.prepare_cached(
-        /* sqlite-large-value: allow-for-now lv-h66f4c5d68ad6 owner=fractal_delivery::store::unread_mail TODO=prepare-body-and-predecessor-values */ "INSERT INTO unread_mail(subject,sent_time)
+        /* sqlite-large-value: allow-for-now lv-h530faa15f55a owner=fractal_delivery::store::unread_mail TODO=prepare-body-and-predecessor-values */ "INSERT INTO unread_mail(subject,sent_time)
          SELECT ?1,MAX(sent_time) FROM (
              SELECT CAST(accepted_at_unix_ms AS INTEGER) AS sent_time FROM claims
              WHERE subject=?1 AND kind='message.sent'
              UNION ALL SELECT sent_ms FROM local_stream_sent WHERE subject=?1)
          WHERE NOT EXISTS (
+             SELECT 1 FROM unread_mail_expired WHERE subject=?1
+         ) AND NOT EXISTS (
              SELECT 1 FROM claims WHERE subject=?1
              AND kind IN ('message.read','message.closed')
          ) AND NOT EXISTS (
@@ -61,6 +63,7 @@ pub fn count_in_snapshot(connection: &Connection, before_unix_ms: u128) -> Resul
                            SELECT CAST(accepted_at_unix_ms AS INTEGER) AS sent_time FROM claims
                            WHERE subject=pending.subject AND kind='message.sent'
                            UNION ALL SELECT sent_ms FROM local_stream_sent WHERE subject=pending.subject)) < ?1
+                 AND NOT EXISTS (SELECT 1 FROM unread_mail_expired WHERE subject=pending.subject)
                  AND NOT EXISTS (SELECT 1 FROM claims WHERE subject=pending.subject
                                  AND kind IN ('message.read','message.closed'))
                  AND NOT EXISTS (SELECT 1 FROM local_message_marks WHERE message=pending.subject
@@ -152,7 +155,7 @@ mod tests {
                 &origin,
                 subject,
                 kind,
-                Some("person/operator"),
+                Some(if kind == "message.expired" { "daemon/runtime" } else { "person/operator" }),
                 &json!({"fields":{"status":kind.strip_prefix("message.").unwrap()}}),
                 &[],
                 None,
@@ -218,6 +221,20 @@ mod tests {
         append("message/prefix-0", "message.sent", 2);
         let mut expected = times.to_vec();
         expected[0] = 256;
+        check(&expected);
+        append("message/prefix-3", "message.expired", 600);
+        {
+            let connection = store.connection.write();
+            // An older build has the cached unread row but no expiry refold queued.
+            connection.execute_batch(
+                "DELETE FROM unread_mail_pending; DELETE FROM meta WHERE key='unread_mail_expiry_v1';",
+            ).unwrap();
+            create_schema(&connection).unwrap();
+        }
+        expected.retain(|time| *time != 257);
+        check(&expected);
+        append("message/prefix-3", "message.delivered", 601);
+        expected.push(257);
         check(&expected);
         append("message/prefix-1", "message.read", 600);
         append("message/prefix-2", "message.closed", 600);

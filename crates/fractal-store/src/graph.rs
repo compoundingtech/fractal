@@ -4437,7 +4437,10 @@ fn collect_document_refs(node: &KdlNode, output: &mut BTreeSet<String>) -> Resul
         let gate = node.name().value() == "gate";
         let mission = node.name().value() == "mission";
         for child in children.nodes() {
-            if !(gate && is_document_gate(child) || mission && child.name().value() == "provenance") {
+            // A mission's `authority` names subject patterns such as `doc/team/*`, not documents.
+            if !(gate && is_document_gate(child)
+                || mission && matches!(child.name().value(), "provenance" | "authority"))
+            {
                 collect_document_refs(child, output)?;
             }
         }

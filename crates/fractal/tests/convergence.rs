@@ -1878,6 +1878,8 @@ fn run_seeds(seeds: impl IntoIterator<Item = u64>) {
 /// burst run 42882912660 observed them trim once they no longer write one. That burst left seeds 55
 /// and 610 untrimmed: a lightly loaded runner diverges from hosted CI at the same commit (#6210).
 const NEVER_TRIMS: &[u64] = &[];
+// Growth beyond three non-trimming seeds needs review.
+const _: () = assert!(NEVER_TRIMS.len() <= 3);
 
 /// One fixed seed: it converges, and its checkpoints trim unless it is a seed that never does.
 fn seed_converges(seed: u64) {

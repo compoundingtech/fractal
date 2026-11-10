@@ -4226,9 +4226,12 @@ enum WorkCommand {
     /// A build slot or the merge queue is waiting, not execution: the step's timeout counts
     /// only the time it runs. The clock restarts at `work resume`, or after `--for` at the
     /// latest, so an agent that stops answering cannot hide behind a wait. The lease still
-    /// needs its renewals.
+    /// needs its renewals. A step's own exec, which has no agent, waits as itself without
+    /// `--as`: `fractal work wait "$ST_STEP_RUN" --for 2h --reason "build slot"`.
     Wait(WorkWaitArgs),
     /// Start the execution clock again after `work wait`.
+    ///
+    /// A step's own exec resumes as itself without `--as`.
     #[command(mut_arg("subject", |arg| arg.add(ArgValueCompleter::new(Complete(Entity::Work(WorkFilter::Claimed))))))]
     Resume(WorkActionArgs),
     /// Finish claimed work and attach its durable evidence.
@@ -10164,6 +10167,8 @@ fn execution_client(endpoint: &Endpoint, actor: String) -> Result<Client> {
     };
     let client = if actor.starts_with("agent/") {
         Client::unix_agent(socket.as_ref(), actor)?
+    } else if actor.starts_with("mission-run/") {
+        Client::unix_run(socket.as_ref(), actor)?
     } else {
         Client::unix_as(socket.as_ref(), actor)?
     };
@@ -10172,8 +10177,9 @@ fn execution_client(endpoint: &Endpoint, actor: String) -> Result<Client> {
         .with_outage_wait(DAEMON_WAIT.get().copied().unwrap_or_default(), true))
 }
 
-/// The actor of a terminal or client-v0 command: an explicit person or agent, else the harness's
-/// own seat, else the configured person. Free mode lets an agent act, always as itself.
+/// The actor of a terminal or client-v0 command: an explicit person, agent or run, else the
+/// harness's own seat, else the run a program effect acts as, else the configured person. Free
+/// mode lets an agent act, always as itself.
 fn configured_actor(
     explicit: Option<&str>,
     configured: Option<&str>,
@@ -10187,7 +10193,21 @@ fn configured_actor(
     {
         return Ok(own);
     }
+    if let Some(run) = run_actor(
+        fractal_drivers::contracts::env("ST_RUN_CREDENTIAL").as_deref(),
+        fractal_drivers::contracts::env("ST_MISSION_RUN").as_deref(),
+    ) {
+        return Ok(run);
+    }
     configured_human(None, configured, command)
+}
+
+/// A program effect carries its attempt's run credential and acts as its run
+/// (docs/st3/program-engine.md §3); the daemon binds the credential to the same run.
+fn run_actor(credential: Option<&str>, run: Option<&str>) -> Option<String> {
+    credential.filter(|credential| !credential.is_empty())?;
+    let run = run.map(|run| run.trim_start_matches("mission-run/")).filter(|run| !run.is_empty())?;
+    Some(format!("mission-run/{run}"))
 }
 
 fn configured_human(
@@ -16237,11 +16257,14 @@ fn planning_session_intent(
     publication_document(session)
 }
 
-/// A complete `person/NAME` or an agent. Free mode lets an agent do what its person may do, and
-/// the daemon still records the agent itself as the actor.
+/// A complete `person/NAME`, an agent, or a `mission-run/RUN` a program effect acts as. Free mode
+/// lets an agent do what its person may do, and the daemon still records the agent itself as the
+/// actor; a run is only what its credential binds.
 fn parse_actor_subject(actor: &str) -> std::result::Result<String, String> {
-    if actor.starts_with("agent/") && actor.len() > "agent/".len() {
-        return Ok(actor.to_owned());
+    for family in ["agent/", "mission-run/"] {
+        if actor.starts_with(family) && actor.len() > family.len() {
+            return Ok(actor.to_owned());
+        }
     }
     parse_person_subject(actor)
 }
@@ -20350,7 +20373,7 @@ async fn forward_projected_messages_reporting(
             None => break,
         }
     }
-    // A message can close between polls. The active page intentionally excludes
+    // A message can close or expire between polls. The active page intentionally excludes
     // history, so inspect only projected files still in the native inbox before
     // deciding whether to archive them. A failed lookup keeps the file in place.
     for file in fractal_drivers::message::list_dir(inbox)? {
@@ -20362,7 +20385,7 @@ async fn forward_projected_messages_reporting(
             }
             if let Ok(message) = read_message(client, reference).await
                 && message.to == subject
-                && matches!(message.status.as_str(), "read" | "closed")
+                && matches!(message.status.as_str(), "read" | "closed" | "expired")
             {
                 consumed_by_recipient.insert(reference.to_owned());
             }

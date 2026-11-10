@@ -224,8 +224,12 @@ beside `ST_AGENT`, nearest ancestor first; one environment carrying both binds n
 binds a request to `mission-run/RUN` only while the credential's attempt is its step run's current,
 live attempt, so the credential dies with its attempt and needs no revocation; one that no longer
 binds leaves the caller unverifiable. A run-bound request follows the bound-agent rules: no internal
-routes, no person headers, and `actor`/`requester` must be the run. The CLI defaults its actor to
-the run when the credential is present. The same-UID boundary is cooperative, as for agents.
+routes, no person headers other than its own run, and `actor`/`requester` must be the run. Handlers
+that hold a bound caller to itself read one bound identity (`BoundActor`) for agents and runs
+alike, so a run writes no seat's `doc/agents/…` document and is the writer its document writes
+name. The CLI defaults its actor to the run when the credential is present and names it on the
+trusted Unix client, which the daemon accepts only from a request its credential binds to that
+same run. The same-UID boundary is cooperative, as for agents.
 
 **Journal.** The engine writes `program.step` claims as `mission-run/RUN`; a run may always journal
 on its own step runs, whatever it declares.

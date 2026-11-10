@@ -73,6 +73,7 @@ pub mod seat_queue_plan_tests;
 pub mod schedule_standby;
 pub mod mission_capacity;
 mod program_bundles;
+pub mod run_credentials;
 pub mod marks_switch;
 pub mod glasses;
 pub mod mailbox_wakes;
@@ -351,6 +352,8 @@ mod wake_lookup_tests;
 mod status_summary_tests;
 #[cfg(test)]
 mod run_eta_tests;
+#[cfg(test)]
+mod run_credentials_tests;
 #[cfg(test)]
 mod run_eta_review_tests;
 pub mod client_summary;
@@ -7452,6 +7455,7 @@ impl Store {
                 | "resource.observed"
                 | "subscription.state"
                 | "message.closed"
+                | "message.expired"
                 | "message.delivered"
                 | "message.read"
                 | "message.sent"
@@ -11951,6 +11955,9 @@ fn message_view_at_with_desired(
             }
             actual["status"] = json!(marked);
         }
+    }
+    if let Some(status) = message_expiry::status(connection, subject)? {
+        actual["status"] = json!(status);
     }
     // Deletion of the current projection retires the declaration. A retained
     // intent.desired claim is not permission to resurrect it in a fresh page.
