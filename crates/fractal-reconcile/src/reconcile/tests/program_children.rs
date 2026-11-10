@@ -260,10 +260,10 @@ fn a_child_run_is_adopted_on_resume_and_its_result_is_journaled_and_replayed() {
     fixture.complete_child(&child);
     fixture.until("the child's end is journaled", || fixture.result(&parent.step, "publish", 1).is_some());
     let completed = json!({
-        "run": child,
+        "run": child.as_str(),
         "status": "completed",
         "products": {
-            format!("resource/{child}/published"): {"kind": "custom.st3.program-test", "head": "h1"},
+            (format!("resource/{child}/published")): {"kind": "custom.st3.program-test", "head": "h1"},
         },
     });
     assert_eq!(fixture.result(&parent.step, "publish", 1), Some(("completed".to_owned(), completed.clone())));
@@ -414,7 +414,7 @@ fn asks_are_answered_defaulted_or_withdrawn_and_their_answers_replay() {
     fixture.reconciler.evaluate_changed_mission_runs().unwrap();
     assert_eq!(
         fixture.result(&parent.step, "withdrawn", 1),
-        Some(("failed".to_owned(), json!({"_tag": "AskCancelled", "ask": withdrawn})))
+        Some(("failed".to_owned(), json!({"_tag": "AskCancelled", "ask": withdrawn.as_str()})))
     );
     // The deadline resolves the last ask with its default answer.
     fixture.store.reconcile_person_asks_at(now_ms() + 3 * 60_000).unwrap();
@@ -428,5 +428,5 @@ fn asks_are_answered_defaulted_or_withdrawn_and_their_answers_replay() {
     assert_eq!(fixture.result(&parent.step, "approve", 1), Some(("completed".to_owned(), defaulted.clone())));
     let (_, value) = fixture.result(&parent.step, RESULT_KEY, 1).unwrap();
     assert_eq!(value["asks"][0], json!({"_tag": "Success", "value": defaulted}));
-    assert_eq!(value["asks"][2], json!({"_tag": "Failure", "error": {"_tag": "AskCancelled", "ask": withdrawn}}));
+    assert_eq!(value["asks"][2], json!({"_tag": "Failure", "error": {"_tag": "AskCancelled", "ask": withdrawn.as_str()}}));
 }

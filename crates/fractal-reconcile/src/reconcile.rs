@@ -14533,7 +14533,7 @@ impl<R: RuntimeControl> Reconciler<R> {
 
     fn program_child_products(&self, child: &MissionRunView) -> Result<serde_json::Map<String, Value>> {
         let mut products = serde_json::Map::new();
-        let Some(spec) = self.store.mission_spec(&child.mission, Some(&child.revision))? else {
+        let Some(spec) = self.store.mission_spec(&child.mission, Some(child.revision.as_str()))? else {
             return Ok(products);
         };
         for step in flatten_mission_steps(&spec) {
