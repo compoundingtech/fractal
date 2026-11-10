@@ -17,6 +17,7 @@ macro_rules! message_desired_recipient_match {
 pub mod attention;
 pub mod delivery;
 pub mod message_expiry;
+pub mod staging_attempts;
 pub mod deploy;
 mod device_renewal;
 pub mod evidence;
@@ -22878,6 +22879,9 @@ pub fn append_claim_with_commit_context(
                 let claim = claim_by_id_tx(transaction, &canonical_claim).map_err(internal)?
                     .ok_or_else(|| FractalError::new("internal", "the operation claim is missing"))?;
                 identities::check_receipt(transaction, &claim)?;
+                if input.kind == "message.staged" {
+                    staging_attempts::record(transaction, &input.subject, now_ms()).map_err(internal)?;
+                }
                 return Ok((claim,false));
             }
             if let Some((operation_id, request_digest)) = &operation {
@@ -23020,7 +23024,11 @@ pub fn append_claim_with_commit_context(
                 );
                 stored_fields = Some(fields);
             }
-            if settled_receipt || validate_message_transition(transaction, input)? {
+            let settled = settled_receipt || validate_message_transition(transaction, input)?;
+            if input.kind == "message.staged" {
+                staging_attempts::record(transaction, &input.subject, now_ms()).map_err(internal)?;
+            }
+            if settled {
                 // A repeat of a step recorded as a mark answers that mark's receipt.
                 if let Some(receipt) = message_marks::recorded(transaction, &graph.origin, &input.subject, &input.kind).map_err(internal)? {
                     return Ok((receipt, false));

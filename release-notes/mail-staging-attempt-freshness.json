@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Track owner-local staging retries without enabling mail expiry",
+  "replay": {"status": "none", "detail": "Staging retries keep their first receipt and idempotent outcome; no replay or synthetic consumption receipt is introduced."},
+  "schema": {"status": "changed", "detail": "Each graph and messages shard gains an owner-local, non-replicated staging-attempt table with last_attempt_at. An atomic, once-only forward migration preserves existing receipts. No registry or wire format changes."},
+  "rules": {"status": "changed", "detail": "Admitted restaging advances last_attempt_at. Only old unresolved staged rows backfill max(recorded time, migration time), imposing a one-time delay of up to seven days on their eventual expiry. Resolved rows retain recorded times; never-offered and silent waits retain original acceptance times."},
+  "compatibility": {"status": "changed", "detail": "Readers tolerate absent freshness storage, which is not proof of no attempt. The future acceptor expiry writer must learn freshness only through an answered upgraded-owner read; old builds, timeout and unreachable owners hold mail. The table is not replicated. Existing binaries ignore it; do not enable a writer until all pinned hosts and TypeScript clients have the required readers."},
+  "downtime": {"status": "none", "detail": "No operator downtime is required."},
+  "manual": {"status": "none", "detail": "No expiry writer or activation switch is included."},
+  "recovery": {"status": "none", "detail": "The migration is forward-only and reopens do not reset attempt times."}
+}

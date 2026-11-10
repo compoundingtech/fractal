@@ -181,6 +181,9 @@ pub fn record_tx(
     }
     let fields = BTreeMap::from([("status".to_owned(), json!(kind.trim_start_matches("message.")))]);
     let receipt = super::messages_shard::lifecycle_receipt(origin, message, kind, Some(consumer), &fields);
+    if kind == STAGED {
+        super::staging_attempts::record(transaction, message, now_ms()).map_err(internal)?;
+    }
     let inserted = if kind == STAGED {
         transaction.execute(
             /* sqlite-large-value: allow-for-now lv-h2d30ef9f972a owner=fractal_store::store::message_marks TODO=bound-or-reference-values-and-reclamation */ "INSERT OR IGNORE INTO local_message_staged(message, consumer, recorded_at_unix_ms, receipt)
