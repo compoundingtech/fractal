@@ -2840,18 +2840,6 @@ mod tests {
                 fs::create_dir_all(selected.codex_home()).unwrap();
                 write_session(&native, "instance-only");
                 let home = Some(native.as_path());
-                // Inventory and search use these discovery entrypoints, including the cached history.
-                for discovery in [
-                    crate::external_sessions::discover_fresh(home, true).unwrap(),
-                    crate::external_sessions::discover(home, true).unwrap(),
-                ] {
-                    assert_eq!(discovery.sessions.len(), 1);
-                    assert_eq!(discovery.sessions[0].native_id, "instance-only");
-                }
-                let login_id = crate::external_sessions::external_session_id(
-                    crate::external_sessions::ExternalDriver::Codex, "login-only",
-                );
-                assert!(crate::external_sessions::find_conversation(home, &login_id).unwrap().is_none());
                 unsafe { instance::activate_native_session_home() }.unwrap();
                 assert_eq!(std::env::var_os("HOME").map(PathBuf::from), Some(native.clone()));
                 assert!(std::env::var_os("PI_CODING_AGENT_DIR").is_none());
@@ -2864,16 +2852,28 @@ mod tests {
                 unsafe { instance::activate("trial") }.unwrap();
                 assert_eq!(instance::current(), Some(selected));
                 assert_eq!(std::env::var_os("HOME").map(PathBuf::from), Some(login_home));
+                // Inventory and search use these discovery entrypoints, including the cached history.
+                for discovery in [
+                    crate::external_sessions::discover_fresh(home, true).unwrap(),
+                    crate::external_sessions::discover(home, true).unwrap(),
+                ] {
+                    assert_eq!(discovery.sessions.len(), 1);
+                    assert_eq!(discovery.sessions[0].native_id, "instance-only");
+                }
+                let login_id = crate::external_sessions::external_session_id(
+                    crate::external_sessions::ExternalDriver::Codex, "login-only",
+                );
+                assert!(crate::external_sessions::find_conversation(home, &login_id).unwrap().is_none());
             } else {
                 assert!(instance::current().is_none());
                 let native = instance::native_session_home().unwrap().unwrap();
                 assert_eq!(native, login_home);
-                let discovery = crate::external_sessions::discover_fresh(Some(&native), true).unwrap();
-                assert_eq!(discovery.sessions.len(), 1);
-                assert_eq!(discovery.sessions[0].native_id, "login-only");
                 let before: Vec<_> = std::env::vars_os().collect();
                 unsafe { instance::activate_native_session_home() }.unwrap();
                 assert_eq!(std::env::vars_os().collect::<Vec<_>>(), before);
+                let discovery = crate::external_sessions::discover_fresh(Some(&native), true).unwrap();
+                assert_eq!(discovery.sessions.len(), 1);
+                assert_eq!(discovery.sessions[0].native_id, "login-only");
             }
             return;
         }
