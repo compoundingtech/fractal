@@ -143,6 +143,9 @@ impl Control {
     pub fn allows(&self, command: &Value, current_screen: &str) -> bool {
         let Some(lifecycle) = self.active() else { return false; };
         let grant = &command["control_grant"];
+        if grant.get("item_id").is_some_and(|id| !id.is_null() && !id.is_string()) {
+            return false;
+        }
         let item_id = grant["item_id"].as_str();
         if grant["grant_id"] != lifecycle.grant_id || grant["run_id"] != lifecycle.run_id
             || grant["device"] != self.device.session.device_id
@@ -466,6 +469,13 @@ mod tests {
         assert!(control.result(&command, rendered).unwrap().unwrap().signature.is_some());
         let (mut control, mut command) = fixture();
         assert!(control.allows(&command, "NowRoot")); // both unbound
+        command["control_grant"]["item_id"] = json!(5);
+        let mut ui = native_asks();
+        let before = ui.control_visible();
+        assert!(!ui.control_apply(&control, &command));
+        assert_eq!(ui.control_visible(), before);
+        assert!(control.result(&command, visible()).unwrap().is_none());
+        command["control_grant"].as_object_mut().unwrap().remove("item_id");
         command["args"] = json!({"screen":"Attention","params":{"id":"attention/B"}});
         let mut ui = native_asks();
         let before = ui.control_visible();
