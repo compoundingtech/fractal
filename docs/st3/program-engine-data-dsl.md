@@ -108,6 +108,13 @@ construction for those parts and the parity tests concentrate on admission.
   engine without `release`. The in-body constructs raise the capability level: `settled-by` (§5)
   needs level 2 and a program gate (§6) needs level 3. A member below the level refuses the
   declaration.
+- `settled-by "program"` and `gate { program }` are allowed only on released nodes, because only
+  there does an orchestrator attempt exist to answer them. The loader and `apply` both refuse
+  them on the following, where they would wait until the step or mission timed out:
+  - final-phase steps;
+  - steps of nested missions and loop rounds;
+  - a loop's `until` gates;
+  - mission-level gates.
 
 ### 2. Release, resolution and the run outcome
 
@@ -251,8 +258,13 @@ step "check" timeout="10m" {
   ends, and the cancelled orchestrator ends the command's process group.
 - Dependents, completion frontiers and the `finally` guard an `onFailure` lowers to all keep naming
   the step, so no reference dangles. Their definitions are unchanged.
-- The settled step's own definition differs from its native form. A native run revised onto the
-  compiled revision therefore runs it again, which is idempotent by T01.
+- The settled step's own definition differs from its native form. Revising a native run onto the
+  compiled revision therefore restarts the settled step and every transitive dependent without
+  prior completion ([mission revisions](mission-graph-runtime.md#immutable-generations): a changed
+  step and every transitive dependent start again). In a landing-style mission whose settled
+  `check` precedes worker steps and `merge`, all of them run again; only steps that do not depend
+  on a settled step carry forward. Revise only runs whose settled steps have not completed, or
+  accept the rerun (idempotent by T01).
 - `work retry` on a failed settled step reopens the run as for any step. The new generation's
   program releases it again and runs the command. A completed settled step carries forward like any
   completed step, and its release resolves at once.
@@ -272,7 +284,7 @@ The capabilities the native graph cannot express, available only because the mis
   under `gate:PATH/NAME@STEP_ATTEMPT`. The reconciler reads that entry as the gate's result for
   that attempt. A false predicate therefore fails the attempt like any failed gate: native `retry`
   gives the worker another attempt, and `work retry` redoes the step. A replayed evaluation answers
-  from the journal.
+  from the journal. A program gate is allowed only on a released node (§1).
 - **Approval checkpoints as asks** (with Q3). An agentless step whose only gate is a human approve
   gate keeps its node, which becomes `settled-by "program"`. The program asks
   `Fractal.ask({ id: 'ask:PATH', for: reviewer, title, request: { review }, deadline, default })`
@@ -302,7 +314,7 @@ native side of that comparison shrinks to about 0.2 s per agentless hop.
 | Mission revisions published from KDL by hand | authoritative | unchanged; native orchestration keeps running them (DQ7) |
 | Revisions published from the data DSL before the cutover | authoritative | keep running natively until republished; a schedule pinned to `mission@revision` keeps starting that revision until re-pinned |
 | Revisions published from the data DSL after the cutover | authoritative, additive | a new revision of the same mission ID (`orchestrated-by` plus the orchestrator); new runs use the engine |
-| Runs in flight at the cutover | authoritative | finish on their revision (R05); `missions revise RUN` cuts one over, carrying completed steps forward because their definitions are identical (settled steps excepted, §5) |
+| Runs in flight at the cutover | authoritative | finish on their revision (R05); `missions revise RUN` cuts one over, carrying completed steps forward because their definitions are identical, except settled steps and their transitive dependents, which start again (§5) |
 | `program.step` journal entries (`step:`, `exec:`, `gate:`, `ask:` keys) | authoritative, additive | new keys under the existing claim kind; no reader arm |
 | Run view, `waiting-on` and `missions show` projections | rebuildable from claims | rebuilt; no migration |
 | Bundles | generated, content-addressed | a new hash is a new blob |
@@ -383,7 +395,13 @@ construct has one named normalization row, and parity is checked after normaliza
   - `work retry` of a settled step;
   - a false program gate under native `retry`;
   - daemon SIGKILL and host kill mid-run;
-  - an in-flight native run revised onto the compiled revision.
+  - an in-flight native run revised onto the compiled revision, in two variants. Without settled
+    steps, every completed step carries forward. With a completed settled `check` before a
+    completed worker step and a pending `merge`, the expected trace is: `check`, the worker step
+    and `merge` start again in the successor generation; steps independent of `check` carry
+    forward; the outcome is the native rendering's for that order.
+- **Refusals.** `settled-by` and `gate { program }` on a final, nested or round step, in a loop's
+  `until`, or as a mission gate are refused by the loader and by `apply` (§1).
 
 **Rendering parity (every PR).** The test runs over every fixture and a corpus of published
 data-DSL trees. The compiled KDL must equal the native KDL plus exactly two nodes, the
@@ -406,8 +424,8 @@ to describe what it shipped.
 | 4a | **Golden harness:** tier 2 on scratch daemons, the three fixtures and the seeded sample | ~250 | 3b |
 | 4b | **Scenarios and measurements:** the scenario cases of §9 for released steps, admission-hop and worker-memory measurements | ~200 | 4a |
 | 5 | **Cutover:** the loader always compiles data-DSL missions (the opt-in and the native-only rendering path removed); docs; consumers republish a canary mission, then every tree | ~150 | 4b green and the owner's go |
-| 6 | **Settled local execs** (§5): `settled-by` grammar and admission, `settle`, capability level 2, compile, normalization row and their scenarios | ~300 | 5 |
-| 7 | **Decisions over held values** (§6): program gates and `evaluate`, capability level 3, approval asks (with Q3), `env` into released steps, and their scenarios | ~300 | 5 |
+| 6 | **Settled local execs** (§5): `settled-by` grammar and admission, `settle`, capability level 2, compile, refusal outside released nodes, normalization row and their scenarios | ~300 | 5 |
+| 7 | **Decisions over held values** (§6): program gates and `evaluate`, capability level 3, refusal outside released nodes (final, nested and round steps, loop `until`, mission gates) in the loader and at `apply`, approval asks (with Q3), `env` into released steps, and their scenarios | ~300 | 5 |
 
 Slices 1 and 3a start at once. 2a and 2b follow 1, and 3b joins them. 4a and 4b follow, then the
 cutover. 6 and 7 are independent after 5.
