@@ -5,24 +5,9 @@ use axum::{body::Body, extract::Request, middleware::{Next, from_fn}, response::
 use std::sync::Arc;
 use crate::config::WorkerIngressGenerationCheck;
 
-type Observe = Arc<dyn Fn() -> anyhow::Result<u32> + Send + Sync>;
+type Observe = WorkerAuthority;
 
-fn worker_route(path: &str) -> bool {
-    path.starts_with("/v1/internal/replication/")
-        || matches!(path, "/v1/internal/seat-freshness" | "/v1/internal/seat-freshness/reads" | "/v1/internal/seat-snapshot")
-        || path == crate::peer::CLIENT_READ_FORWARD_PATH
-}
-
-fn authorize(peer: Option<&LocalPeer>, observe: &dyn Fn() -> anyhow::Result<u32>) -> anyhow::Result<()> {
-    let peer = peer.ok_or_else(|| anyhow::anyhow!("worker socket credentials missing"))?;
-    anyhow::ensure!(peer.ancestor.is_none(), "seat callers cannot act as the worker");
-    let generation = peer.peer_process.as_ref()
-        .ok_or_else(|| anyhow::anyhow!("worker process generation unavailable"))?;
-    generation.validate()?;
-    anyhow::ensure!(generation.pid() == peer.pid && observe()? == peer.pid,
-        "socket connector is not the supervised replication worker");
-    generation.validate()
-}
+use fractal_api_core::api::{WorkerAuthority, authorize_worker as authorize, worker_route};
 
 fn protect(app: Router, observe: Observe, mode: WorkerIngressGenerationCheck) -> Router {
     app.layer(from_fn(move |request: Request<Body>, next: Next| {
@@ -74,6 +59,23 @@ mod tests {
     fn process(pid: u32) -> LocalPeer {
         LocalPeer { pid, ancestor: None,
             peer_process: Some(fractal_runtime::PeerProcessIdentity::capture_pid(pid).unwrap()) }
+    }
+
+    #[test]
+    fn worker_authority_requires_generation_even_when_ingress_only_observes() {
+        let peer = process(std::process::id());
+        let observe = || Ok(peer.pid);
+        assert!(authorize(Some(&peer), &observe).is_ok());
+        let mut missing = peer.clone();
+        missing.peer_process = None;
+        assert!(authorize(Some(&missing), &observe).is_err());
+        let mut seat = peer.clone();
+        seat.ancestor = Some("agent/example".into());
+        assert!(authorize(Some(&seat), &observe).is_err());
+        let mut wrong_pid = peer.clone();
+        wrong_pid.pid += 1;
+        assert!(authorize(Some(&wrong_pid), &|| Ok(wrong_pid.pid)).is_err());
+        assert!(authorize(Some(&peer), &|| Ok(0)).is_err());
     }
 
     #[test]

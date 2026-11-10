@@ -15,7 +15,7 @@ repo = Path(__file__).resolve().parent.parent
 TARGETS = ('x86_64-unknown-linux-gnu', 'aarch64-apple-darwin')
 
 FAKE_GH = r'''#!/usr/bin/env python3
-import json, os, pathlib, sys
+import base64, json, os, pathlib, sys
 state_path = pathlib.Path(os.environ['FAKE_GH_STATE'])
 state = json.loads(state_path.read_text())
 args = sys.argv[1:]
@@ -41,11 +41,12 @@ if args[:2] == ['release', 'view']:
     print(json.dumps({'assets': [{'name': n} for n in state['release']['assets']]}))
 elif args[:2] == ['release', 'create']:
     if state['release'] is not None: fail('release already exists')
+    assert '--verify-tag' in args and state['tag'] == option('--target'), args
     files = [a for a in args[args.index('--notes-file') + 2:] if not a.startswith('--')]
     state['release'] = {'assets': {pathlib.Path(f).name: pathlib.Path(f).read_text(errors='replace')[:20] for f in files},
                         'prerelease': '--prerelease' in args, 'latest': option('--latest=false') is None and '--latest=false' not in args,
                         'notes': pathlib.Path(option('--notes-file')).read_text(), 'title': option('--title')}
-    state['tag'] = option('--target')
+    # A release create must use the tag already pushed through Git.
 elif args[:2] == ['release', 'upload']:
     files = [a for a in args[args.index('--clobber') + 1:]]
     for f in files: state['release']['assets'][pathlib.Path(f).name] = pathlib.Path(f).read_text(errors='replace')[:20]
@@ -56,17 +57,40 @@ elif args[:2] == ['release', 'edit']:
     state['release']['title'] = option('--title')
     state['release']['prerelease'] = '--prerelease' in args
     state['release']['latest'] = '--latest=false' not in args
-elif args[0] == 'api' and 'PATCH' in args:
-    assert any(a == 'force=true' for a in args), args
-    state['tag'] = [a for a in args if a.startswith('sha=')][0][4:]
+elif args[:2] == ['git', 'push']:
+    expected = state.get('tag_object', state['tag']) or ''
+    lease = f'--force-with-lease=refs/tags/edge:{expected}'
+    if args[2] != lease:
+        save(); fail('stale info: lease rejected')
+    assert args[3] == 'https://github.com/example/project.git', args
+    assert args[4].endswith(':refs/tags/edge'), args
+    index = int(os.environ['GIT_CONFIG_COUNT']) - 1
+    assert os.environ[f'GIT_CONFIG_KEY_{index}'] == 'http.https://github.com/.extraheader'
+    assert os.environ[f'GIT_CONFIG_VALUE_{index}'] == 'AUTHORIZATION: basic ' + base64.b64encode(
+        b'x-access-token:test-token').decode()
+    state['tag'] = args[4].split(':')[0]
+    state.pop('tag_object', None)
 elif args[0] == 'api':
     if state['tag'] is None: fail('Not Found')
-    print(json.dumps({'object': {'type': 'commit', 'sha': state['tag']}}))
+    if '/git/tags/' in args[1]:
+        print(json.dumps({'object': {'type': 'commit', 'sha': state['tag']}}))
+    else:
+        print(json.dumps({'object': {'type': 'tag' if 'tag_object' in state else 'commit',
+                                    'sha': state.get('tag_object', state['tag'])}}))
 else:
     fail('unexpected gh call: %r' % args)
 save()
 if late:
     fail(late)
+'''
+
+
+FAKE_GIT = r'''#!/usr/bin/env python3
+import os, pathlib, sys
+if sys.argv[1:2] == ['push']:
+    gh = str(pathlib.Path(__file__).with_name('gh'))
+    os.execv(gh, [gh, 'git', *sys.argv[1:]])
+os.execv(os.environ['REAL_GIT'], ['git', *sys.argv[1:]])
 '''
 
 
@@ -118,9 +142,10 @@ with tempfile.TemporaryDirectory() as temporary:
     for name in ('release-fractal-edge', 'release-fractal-manifest.py', 'release_gh.py'):
         shutil.copy(repo / 'scripts' / name, checkout / 'scripts' / name)
     sh('git', 'init', '-q', '-b', 'main', cwd=checkout)
-    # Fixture history must not depend on the account's interactive signing agent.
+    # Fixture history must not depend on account signing or identity hooks.
     sh('git', 'config', '--local', 'commit.gpgsign', 'false', cwd=checkout)
     sh('git', 'config', '--local', 'tag.gpgsign', 'false', cwd=checkout)
+    sh('git', 'config', '--local', 'core.hooksPath', '/dev/null', cwd=checkout)
     sh('git', 'config', 'user.name', 'Fixture', cwd=checkout)
     sh('git', 'config', 'user.email', 'fixture@example.invalid', cwd=checkout)
     commits = []
@@ -133,10 +158,12 @@ with tempfile.TemporaryDirectory() as temporary:
     tools.mkdir()
     (tools / 'gh').write_text(FAKE_GH)
     (tools / 'gh').chmod(0o755)
+    (tools / 'git').write_text(FAKE_GIT)
+    (tools / 'git').chmod(0o755)
     state = root / 'state.json'
     state.write_text(json.dumps({'release': None, 'tag': None, 'calls': []}))
     env = dict(os.environ, PATH=f'{tools}:{os.environ["PATH"]}', FAKE_GH_STATE=str(state), GH_REPO='example/project',
-               RELEASE_GH_RETRY_DELAYS='0,0,0')
+               RELEASE_GH_RETRY_DELAYS='0,0,0', REAL_GIT=shutil.which('git'), GH_TOKEN='test-token')
 
     def publish(source, marker, *extra):
         dist = root / f'dist-{marker}'
@@ -174,10 +201,17 @@ with tempfile.TemporaryDirectory() as temporary:
     notes = second['release']['notes']
     assert 'second change' in notes and 'third change' in notes and 'first change' not in notes, notes
     assert sum(1 for call in second['calls'] if call[:2] == ['release', 'create']) == 1, 'one release, not one per commit'
+    mutations = [call[:2] for call in second['calls'] if call[:2] in (
+        ['release', 'upload'], ['git', 'push'], ['release', 'edit'])]
+    assert mutations[-3:] == [['git', 'push'], ['release', 'upload'], ['release', 'edit']], mutations
+    pushes = [call for call in second['calls'] if call[:2] == ['git', 'push']]
+    assert pushes[0][2] == '--force-with-lease=refs/tags/edge:'
+    assert pushes[-1][2] == f'--force-with-lease=refs/tags/edge:{commits[0]}'
 
     # Rerunning the same commit is harmless; a run for an older commit changes nothing at all.
     checkout_tags()
     assert publish(commits[2], 'three-again').returncode == 0
+    assert sum(call[:2] == ['git', 'push'] for call in current()['calls']) == len(pushes), 'same source skips push'
     before = current()
     checkout_tags()
     done = publish(commits[1], 'two')
@@ -250,10 +284,20 @@ with tempfile.TemporaryDirectory() as temporary:
     # A read that times out is read again, not taken for "no release".
     done = from_scratch((['release', 'view'], False, 1, 'Get "https://api.github.com/...": net/http: TLS handshake timeout'))
     assert done.returncode == 0 and complete(), (done, current())
-    # A tag move that took effect and then timed out is not repeated.
+    # Existing assets with an old annotated tag converge using the raw ref's lease.
     older = {'assets': {}, 'prerelease': True, 'latest': False, 'notes': '', 'title': 'older'}
-    done = from_scratch((['api', '--method', 'PATCH'], True, 1, timeout), release=older, tag=commits[1])
-    assert done.returncode == 0 and complete() and calls(['api', '--method', 'PATCH']) == 1, (done, current())
+    state.write_text(json.dumps({'release': older, 'tag': commits[1],
+                                'tag_object': 'a' * 40, 'calls': []}))
+    done = publish(commits[2], 'annotated')
+    assert done.returncode == 0 and complete() and calls(['git', 'push']) == 1, (done, current())
+    push = next(call for call in current()['calls'] if call[:2] == ['git', 'push'])
+    assert push[2] == '--force-with-lease=refs/tags/edge:' + 'a' * 40, push
+    # A rejected lease stops before renaming; never force over a concurrent tag update.
+    done = from_scratch((['git', 'push'], False, 1, 'stale info: lease rejected'),
+                        release=older, tag=commits[1])
+    assert done.returncode != 0 and calls(['git', 'push']) == 1, (done, current())
+    assert current()['tag'] == commits[1] and calls(['release', 'edit']) == 0, current()
+    assert calls(['release', 'upload']) == 0 and calls(['release', 'create']) == 0, current()
     # Anything but a 5xx or a timeout fails at once.
     done = from_scratch((['release', 'edit'], False, 1, 'HTTP 422: Validation Failed'))
     assert done.returncode != 0 and calls(['release', 'edit']) == 1 and '422' in done.stderr, (done, current())

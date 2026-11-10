@@ -358,6 +358,11 @@ enum Command {
         #[command(subcommand)]
         command: AttentionCommand,
     },
+    /// Inspect mission budgets.
+    Budgets {
+        #[command(subcommand)]
+        command: BudgetsCommand,
+    },
     /// Assess fleet machines, health, and capacity.
     Machines(MachinesArgs),
     /// Inspect current agents or explicit agent history.
@@ -2131,6 +2136,20 @@ const ASSISTANT_GRANT_MAX_SECONDS: u64 = 2_592_000;
 enum DevicesCommand {
     /// List paired devices visible to the authenticated person.
     Ls,
+    /// Stage renewal of an audited device grant over the trusted local Unix socket.
+    RenewStage {
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Device)))]
+        device_id: String,
+        /// Migration epoch authorized for this renewal.
+        #[arg(long)]
+        migration_epoch: String,
+        /// Explicit audited historical grant digest.
+        #[arg(long = "allow", value_name = "SHA256")]
+        allow_digest: String,
+        /// Renewal approval window in hours (maximum 168).
+        #[arg(long, default_value_t = 72, value_parser = clap::value_parser!(u64).range(1..=168))]
+        expires_in_hours: u64,
+    },
     /// Begin local pairing for one named person and device, or one assistant grant.
     Pair {
         /// Device name; optional only for `--assistant`, which defaults to the assistant name.
@@ -2285,9 +2304,9 @@ enum AssistantGrantCommand {
 
 #[derive(Args)]
 struct DevicesArgs {
-    /// Concrete human authority carried over the trusted local Unix boundary.
+    /// Local caller attribution; ordinary device administration requires a person.
     #[arg(add = ArgValueCompleter::new(Complete(Entity::Person)))]
-    #[arg(long = "as", value_parser = parse_person_subject, global = true)]
+    #[arg(long = "as", value_parser = parse_actor_subject, global = true)]
     person: Option<String>,
     /// Include expired and revoked device history.
     #[arg(long)]
@@ -2362,6 +2381,8 @@ enum SubjectCommand {
         #[arg(long = "kind", required = true)]
         kinds: Vec<String>,
     },
+    /// Fold the complete immutable decision.tree history without creating asks.
+    Decisions { subject: String },
 
     /// Show one typed subject card.
     Show(SubjectShowArgs),
@@ -3949,6 +3970,26 @@ struct SubscriptionRequestArgs {
     actor: String,
     #[arg(long)]
     reason: String,
+}
+
+#[derive(Subcommand)]
+enum BudgetsCommand {
+    /// Read a mission's attention budget without charging it.
+    Attention {
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Mission)))]
+        mission: String,
+        /// Act as this person or agent; defaults to the harness agent or configured person.
+        #[arg(long = "as", env = "ST_AGENT", value_parser = parse_actor_subject)]
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Actor)))]
+        actor: Option<String>,
+        /// Person whose attention budget to read; required for agent callers.
+        #[arg(long, value_parser = parse_person_subject)]
+        #[arg(add = ArgValueCompleter::new(Complete(Entity::Person)))]
+        person: Option<String>,
+        /// Evaluate the budget at this Unix timestamp in milliseconds.
+        #[arg(long, value_name = "UNIX_MS")]
+        at: Option<u128>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -5973,6 +6014,16 @@ async fn run(cli: Cli) -> Result<()> {
             )
             .await
         }
+        Command::Budgets {
+            command: BudgetsCommand::Attention { mission, actor, person, at },
+        } => {
+            let response = attention_budget_client(
+                &endpoint, actor.as_deref(), config.person.as_deref(),
+            )?
+                .attention_budget(&mission, person.as_deref(), at)
+                .await?;
+            print_client_value(&response, cli.json)
+        }
         Command::Machines(args) => run_machines(&endpoint, args, cli.json).await,
         Command::Agents { command } => {
             run_agents(&endpoint, config.person.as_deref(), command, cli.json).await
@@ -6381,6 +6432,9 @@ fn guard_mutating_cli_actor(
         Command::Devices(args) => match args.command.as_ref() {
             Some(DevicesCommand::Pair { assistant: Some(_), .. })
             | Some(DevicesCommand::Grant { .. }) => Some(args.person.as_deref().unwrap_or("requester")),
+            Some(DevicesCommand::RenewStage { .. }) => Some(args.person.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("renewal staging needs explicit --as {own}")
+            })?),
             _ => None,
         },
         _ => None,
@@ -6982,6 +7036,7 @@ fn open_daemon_store(
         Some(admitted) => Store::open_admitted(admitted.clone(), &config.node)?,
         None => Store::open(&config.store_path(), &config.node)?,
     };
+    store.configure_pairing_legacy_allowances(&config.pairing_legacy_allowances)?;
     store.set_usage_limits_writers(config.usage_limits.as_ref().map(|usage| usage.writers.clone()).unwrap_or_default())?;
     if let Some(person) = &config.person {
         let _ = store.question_principal_default.set(person.clone());
@@ -7404,7 +7459,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
         fields: BTreeMap::from([
             (
                 "features".into(),
-                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
+                serde_json::json!({"owned_sets":1,"seat_rollout":1,"seat_rollout_manual":1,"person_directive_note":1,"declared_admission":1,"declared_attention":1,"schedule_standby":1,"github_plugin":2,"seat_freshness":1,"seat_freshness_reads":1,"message_offsets":1,"message_view_reads":1,"message_staged_reads":1,"mission_capacity":1,
                     "harness_access_auto": u8::from(config.active_access_mode() == fractal_drivers::access::AccessMode::Auto),
                     "messages_stream": u8::from(messages_shard.is_ok()),
                     // Counts its stream mail in its idle, unread, held and usage indexes. It
@@ -7477,6 +7532,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     store.install_git_change_registry(Arc::new(fractal_daemon::changes::service::Registry::new(&config.changes, &config.node)?))?;
     let state = AppState {
         owning_person: config.person.clone(),
+        browser_pairing_login: config.browser_pairing_login.clone(),
         store: store.clone(),
         seat_admission: Arc::default(),
         notify: notify.clone(),
@@ -7695,8 +7751,17 @@ async fn run_up(args: UpArgs) -> Result<()> {
         }
     };
     let bound = std::sync::atomic::AtomicUsize::new(0);
+    let agents_request_slo = std::sync::OnceLock::new();
     let ready = || {
         if bound.fetch_add(1, std::sync::atomic::Ordering::AcqRel) == 1 {
+            agents_request_slo.get_or_init(|| fractal_daemon::api::start_agents_request_slo(
+                config.state_dir.clone(),
+                config.node.clone(),
+                // Measurement stays on everywhere; native delivery requires this exact member's opt-in.
+                config.agents_request_slo_fault.as_ref()
+                    .filter(|fault| fault.member == store.origin())
+                    .map(|fault| (store.clone(), fault.reviewer.clone())),
+            ));
             let activation_store = store.clone();
             // A member that trims locally still runs the pass, which only finishes a trim it had
             // already committed.
@@ -7770,25 +7835,44 @@ async fn run_up(args: UpArgs) -> Result<()> {
     // then ends the process by that signal as it did before the daemon handled it.
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let stop_agents_request_slo = || {
+        if let Some(slo) = agents_request_slo.get() {
+            slo.stop();
+        }
+    };
     let serving = async {
-        tokio::try_join!(
+        let served = tokio::try_join!(
             fractal_daemon::api::serve_reserved_unix_with_ready(
                 local_reserved,
-                fractal_daemon::api::worker_authenticated(router(state.clone()), worker_observer, config.worker_ingress_generation_check.unwrap_or_default()).layer(web_status.clone()),
+                fractal_daemon::api::worker_authenticated(router(state.clone()), worker_observer.clone(), config.worker_ingress_generation_check.unwrap_or_default()).layer(web_status.clone()),
                 Some(state.store.clone()),
+                Some(worker_observer),
                 ready
             ),
             fractal_daemon::api::serve_reserved_unix_with_ready(
-                gateway_reserved, fabric_router(state).layer(web_status), None, ready,
+                gateway_reserved, fabric_router(state).layer(web_status), None, None, ready,
             ),
-            web.serve(web_state, config.worker_ingress_generation_check.unwrap_or_default()),
-        )
+            async {
+                let result = web.serve(web_state, config.worker_ingress_generation_check.unwrap_or_default()).await;
+                // Stop before try_join drops the native listeners on a web error.
+                if result.is_err() {
+                    stop_agents_request_slo();
+                }
+                result
+            },
+        );
+        Err(served)
     };
-    let stopped = tokio::select! {
-        served = serving => Err(served),
-        _ = terminate.recv() => Ok(libc::SIGTERM),
-        _ = interrupt.recv() => Ok(libc::SIGINT),
+    let shutdown = async {
+        tokio::select! {
+            _ = terminate.recv() => Ok(libc::SIGTERM),
+            _ = interrupt.recv() => Ok(libc::SIGINT),
+        }
     };
+    let stopped = fractal_daemon::api::stop_before_listener_drop(
+        serving, shutdown, stop_agents_request_slo,
+    ).await;
+    drop(agents_request_slo);
     // Shutdown refuses receipts from connections still being served, then waits for the writer
     // to commit every admitted one however long it takes. Only a second stop signal, an
     // explicit forced stop, ends the daemon before they commit.
@@ -7816,6 +7900,7 @@ async fn run_up(args: UpArgs) -> Result<()> {
     let telemetry_started = Instant::now();
     telemetry.shutdown();
     stderr_message("fractal", format_args!("shutdown: telemetry stage finished in {} ms", telemetry_started.elapsed().as_millis()));
+    fractal_daemon::api::flush_ancestry_diagnostics();
     match stopped {
         Ok(signal) => end_by_signal(signal),
         Err(served) => served.map(|_| ()),
@@ -9131,6 +9216,22 @@ fn trace_scalar(value: &Value) -> String {
         .unwrap_or_else(|| value.to_string())
 }
 
+/// Keep the Unix acting identity separate from the report's recipient filter.
+/// Fabric credentials establish their own authority and need no local actor.
+fn attention_budget_client(
+    endpoint: &Endpoint,
+    explicit_actor: Option<&str>,
+    configured_person: Option<&str>,
+) -> Result<GeneratedClient> {
+    if matches!(endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)) {
+        let actor = configured_actor(explicit_actor, configured_person, "budgets attention")?;
+        reject_foreign_agent_actor(&actor)?;
+        generated_client(endpoint, Some(&actor))
+    } else {
+        generated_client(endpoint, None)
+    }
+}
+
 fn generated_client(endpoint: &Endpoint, person: Option<&str>) -> Result<GeneratedClient> {
     let socket = match endpoint {
         Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_) => endpoint.unix_socket().expect("Unix endpoint"),
@@ -9432,6 +9533,38 @@ async fn run_devices_fabric(
     Ok(())
 }
 
+#[derive(serde::Serialize)]
+struct DeviceRenewalStageRequest {
+    api_version: &'static str,
+    device_id: String,
+    migration_epoch: String,
+    allow_digest: String,
+    expires_in_hours: u64,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct DeviceRenewalStageReceipt {
+    kind: String,
+    renewal_id: String,
+    expires_at: String,
+    allow_digest: String,
+}
+
+async fn stage_device_renewal(
+    endpoint: &Endpoint,
+    actor: &str,
+    request: DeviceRenewalStageRequest,
+) -> Result<DeviceRenewalStageReceipt> {
+    anyhow::ensure!(
+        matches!(endpoint, Endpoint::Unix(_) | Endpoint::DiscoveredUnix(_)),
+        "device renewal staging requires the trusted local Unix socket"
+    );
+    let client = execution_client(endpoint, actor.to_owned())?;
+    client
+        .post("/v1/client/pairings/renewals/stage", &request)
+        .await
+}
+
 async fn run_devices(
     endpoint: Endpoint,
     config: &Config,
@@ -9446,11 +9579,40 @@ async fn run_devices(
         command,
     } = args;
     let configured_person = config.person.as_deref();
+    // Refuse nonlocal staging before constructing a product client or issuing any request.
+    if let Some(DevicesCommand::RenewStage {
+        device_id,
+        migration_epoch,
+        allow_digest,
+        expires_in_hours,
+    }) = command {
+        let actor = configured_actor(person.as_deref(), configured_person, "devices renew-stage")?;
+        let receipt = stage_device_renewal(
+            &endpoint,
+            &actor,
+            DeviceRenewalStageRequest {
+                api_version: CLIENT_V0_API_VERSION,
+                device_id,
+                migration_epoch,
+                allow_digest,
+                expires_in_hours,
+            },
+        )
+        .await?;
+        if json_output {
+            print_value(&receipt, true)?;
+        } else {
+            println!("Renewal staged: {}", receipt.renewal_id);
+            println!("Expires at: {}", receipt.expires_at);
+        }
+        return Ok(());
+    }
     let person = configured_human(person.as_deref(), configured_person, "devices")?;
     let client = generated_client(&endpoint, Some(&person))?;
     match command.unwrap_or(DevicesCommand::Ls) {
         DevicesCommand::Complete { .. } => unreachable!("handled before loading local config"),
         DevicesCommand::Fabric { .. } => unreachable!("handled without a client"),
+        DevicesCommand::RenewStage { .. } => unreachable!("handled before product client requests"),
         DevicesCommand::Ls => {
             anyhow::ensure!(
                 limit > 0 && limit <= 200,
@@ -11518,6 +11680,21 @@ async fn run_subject(client: &Client, command: SubjectCommand, json_output: bool
                 ))
                 .await?;
             print_value(&result, json_output)
+        }
+        SubjectCommand::Decisions { subject } => {
+            let snapshot: fractal_daemon::store::custom::DecisionInputs = client.get(&format!(
+                "/v1/custom/decision-inputs?subject={}", urlencoding::encode(&subject),
+            )).await?;
+            let basis = snapshot.basis;
+            let inputs = snapshot.claims.into_iter().enumerate().map(|(order, claim)| {
+                fractal_schema::custom::decisions::Claim {
+                    id: claim.id, kind: claim.kind, actor: claim.actor,
+                    order: order as u64,
+                    fields: claim.body.get("fields").unwrap_or(&claim.body).clone(),
+                }
+            }).collect::<Vec<_>>();
+            let folded = fractal_schema::custom::decisions::fold(&subject, &inputs, basis);
+            print_value(&serde_json::to_value(folded)?, json_output)
         }
         SubjectCommand::Show(args) => {
             if args.references {

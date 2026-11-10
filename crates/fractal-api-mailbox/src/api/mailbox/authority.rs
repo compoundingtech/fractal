@@ -783,20 +783,30 @@ fn validate_observed_physical(
     runtime: &PhysicalRuntime,
     physical: &fractal_runtime::PtyObservation,
 ) -> Result<(), FractalError> {
-    if physical.name != runtime.id
-        || physical.status != "running"
-        || physical
-            .pid
-            .zip(physical.created_at.as_deref())
-            .is_none_or(|(pid, stamp)| format!("{pid}:{stamp}") != runtime.incarnation)
-        || runtime
-            .required_subject_tag
-            .as_ref()
-            .is_some_and(|subject| physical.tags.get("st3.subject") != Some(subject))
+    let generation = runtime.incarnation.split_once(':');
+    let difference = if physical.name != runtime.id {
+        Some("name")
+    } else if physical.status != "running" {
+        Some("status")
+    } else if physical.pid.is_none()
+        || physical.pid != generation.and_then(|(pid, _)| pid.parse().ok())
     {
-        return Err(refused(
-            "the exact physical runtime generation or binding was replaced",
-        ));
+        Some("pid")
+    } else if physical.created_at.is_none()
+        || physical.created_at.as_deref() != generation.map(|(_, stamp)| stamp)
+    {
+        Some("created_at")
+    } else if runtime
+        .required_subject_tag
+        .as_ref()
+        .is_some_and(|subject| physical.tags.get("st3.subject") != Some(subject))
+    {
+        Some("st3.subject")
+    } else {
+        None
+    };
+    if let Some(field) = difference {
+        return Err(physical_identity_refusal(field));
     }
     Ok(())
 }
@@ -810,9 +820,9 @@ fn validate_authority_identity(
             "the daemon boot identity is unavailable",
         )),
         pty_core::registry::DaemonIdentityCheck::Mismatch
-        | pty_core::registry::DaemonIdentityCheck::Gone => Err(refused(
-            "the exact physical runtime process identity was replaced or ended",
-        )),
+        | pty_core::registry::DaemonIdentityCheck::Gone => {
+            Err(physical_identity_refusal("process_identity"))
+        }
     }
 }
 
@@ -843,21 +853,57 @@ fn observe_physical_runtime(
     Ok(physical)
 }
 
+/// Compare custody, not presentation: harnesses publish session tags and renderers
+/// rename titles after launch. Only the PTY session/generation, root process,
+/// launch binding, isolation/scope and peer ancestry establish physical ownership.
+/// Other tags, display names and exit diagnostics are not custody identity.
+fn physical_identity_difference(
+    captured: &fractal_runtime::PtyObservation,
+    current: &fractal_runtime::PtyObservation,
+    peer_belongs: bool,
+) -> Option<&'static str> {
+    [
+        ("name", captured.name != current.name),
+        ("pid", captured.pid != current.pid),
+        ("created_at", captured.created_at != current.created_at),
+        (
+            "st3.start-operation",
+            captured.tags.get("st3.start-operation") != current.tags.get("st3.start-operation"),
+        ),
+        (
+            "st3.subject",
+            captured.tags.get("st3.subject") != current.tags.get("st3.subject"),
+        ),
+        (
+            "st3.isolation",
+            captured.tags.get("st3.isolation") != current.tags.get("st3.isolation"),
+        ),
+        (
+            "st3.scope-unit",
+            captured.tags.get("st3.scope-unit") != current.tags.get("st3.scope-unit"),
+        ),
+        ("peer_ancestry", !peer_belongs),
+    ]
+    .into_iter()
+    .find_map(|(field, differs)| differs.then_some(field))
+}
+
+fn physical_identity_refusal(field: &'static str) -> FractalError {
+    tracing::warn!(identity_field = field, "mailbox physical runtime fence refused");
+    refused(format!(
+        "the channel left or replaced the exact physical runtime: {field} differed"
+    ))
+}
+
 fn validate_reobserved_physical(
     captured: &fractal_runtime::PtyObservation,
     current: &fractal_runtime::PtyObservation,
     peer_belongs: bool,
 ) -> Result<(), FractalError> {
-    // The title driver renames this label independently of channel binding. Keep
-    // every identity and binding field fenced, but allow that presentation change.
-    let expected = fractal_runtime::PtyObservation {
-        display_name: current.display_name.clone(),
-        ..captured.clone()
-    };
-    if current != &expected || !peer_belongs {
-        return Err(refused(
-            "the channel left or replaced the exact physical runtime",
-        ));
+    let difference = physical_identity_difference(captured, current, peer_belongs)
+        .or_else(|| (current.status != "running").then_some("status"));
+    if let Some(field) = difference {
+        return Err(physical_identity_refusal(field));
     }
     Ok(())
 }
@@ -1654,62 +1700,77 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
             pid: Some(42),
             created_at: Some("created".into()),
             display_name: Some("original".into()),
-            tags: BTreeMap::from([("st3.subject".into(), "agent/example".into())]),
+            tags: BTreeMap::from([
+                ("st3.subject".into(), "agent/example".into()),
+                ("st3.start-operation".into(), "original-operation".into()),
+                ("st3.isolation".into(), "scope".into()),
+                ("st3.scope-unit".into(), "original-scope".into()),
+            ]),
         }
     }
 
-    fn assert_reobservation_refused(change: impl FnOnce(&mut fractal_runtime::PtyObservation)) {
+    fn assert_reobservation_refused(
+        field: &str,
+        change: impl FnOnce(&mut fractal_runtime::PtyObservation),
+    ) {
         let captured = captured_physical();
         let mut current = captured.clone();
         // A replacement that also changes its label must still be refused.
         current.display_name = Some("renamed".into());
         change(&mut current);
+        let error = validate_reobserved_physical(&captured, &current, true).unwrap_err();
+        assert_eq!(error.code, "stale-mailbox-session");
         assert_eq!(
-            validate_reobserved_physical(&captured, &current, true)
-                .unwrap_err()
-                .code,
-            "stale-mailbox-session"
+            error.message,
+            format!("the channel left or replaced the exact physical runtime: {field} differed")
         );
     }
 
     #[test]
     fn reobserved_canonical_name_change_is_refused() {
-        assert_reobservation_refused(|current| current.name = "replacement".into());
+        assert_reobservation_refused("name", |current| current.name = "replacement".into());
     }
 
     #[test]
     fn reobserved_pid_change_is_refused() {
-        assert_reobservation_refused(|current| current.pid = Some(43));
-        assert_reobservation_refused(|current| current.pid = None);
+        assert_reobservation_refused("pid", |current| current.pid = Some(43));
+        assert_reobservation_refused("pid", |current| current.pid = None);
     }
 
     #[test]
     fn reobserved_generation_change_with_reused_pid_is_refused() {
-        assert_reobservation_refused(|current| current.created_at = Some("replacement".into()));
-        assert_reobservation_refused(|current| current.created_at = None);
+        assert_reobservation_refused("created_at", |current| {
+            current.created_at = Some("replacement".into());
+        });
+        assert_reobservation_refused("created_at", |current| current.created_at = None);
     }
 
     #[test]
     fn reobserved_ended_status_is_refused() {
-        assert_reobservation_refused(|current| current.status = "exited".into());
+        assert_reobservation_refused("status", |current| current.status = "exited".into());
     }
 
     #[test]
-    fn reobserved_exit_code_change_is_refused() {
-        assert_reobservation_refused(|current| current.exit_code = Some(0));
+    fn reobserved_descriptive_metadata_changes_preserve_custody() {
+        let captured = captured_physical();
+        let mut current = captured.clone();
+        current.exit_code = Some(0);
+        current.tags.insert("agent.harness.session.id".into(), "session".into());
+        validate_reobserved_physical(&captured, &current, true).unwrap();
+        current.tags.insert("agent.harness.session.id".into(), "updated".into());
+        validate_reobserved_physical(&captured, &current, true).unwrap();
     }
 
     #[test]
     fn reobserved_binding_tag_change_is_refused() {
-        assert_reobservation_refused(|current| {
-            current
-                .tags
-                .insert("st3.subject".into(), "agent/replacement".into());
-        });
-        assert_reobservation_refused(|current| current.tags.clear());
-        assert_reobservation_refused(|current| {
-            current.tags.insert("other".into(), "changed".into());
-        });
+        for field in ["st3.subject", "st3.start-operation", "st3.isolation", "st3.scope-unit"] {
+            assert_reobservation_refused(field, |current| {
+                current.tags.insert(field.into(), "replacement".into());
+            });
+            assert_reobservation_refused(field, |current| {
+                current.tags.remove(field);
+            });
+        }
     }
 
     #[test]
@@ -1717,12 +1778,9 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
         let captured = captured_physical();
         let mut current = captured.clone();
         current.display_name = Some("renamed".into());
-        assert_eq!(
-            validate_reobserved_physical(&captured, &current, false)
-                .unwrap_err()
-                .code,
-            "stale-mailbox-session"
-        );
+        let error = validate_reobserved_physical(&captured, &current, false).unwrap_err();
+        assert_eq!(error.code, "stale-mailbox-session");
+        assert!(error.message.contains("peer_ancestry differed"));
     }
 
     #[test]
@@ -2032,6 +2090,7 @@ pub fn fixture_stats() -> pty_core::stats::StatsResult {
             .unwrap();
         crate::store::mailbox_tests::ready(&store, "current");
         let state = AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),

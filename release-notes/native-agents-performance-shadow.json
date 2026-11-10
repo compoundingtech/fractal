@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "summary": "Observe the share of local GET agents requests that succeed within 100 ms in a process-local seven-day window.",
+  "replay": { "status": "none", "detail": "The observer has no durable state. A restart leaves the affected minutes unknown." },
+  "schema": { "status": "none", "detail": "No persisted data or schema changes." },
+  "rules": { "status": "none", "detail": "The observer measures requests without changing admission, fault routing or fleet coordination." },
+  "compatibility": { "status": "none", "detail": "Existing requests and telemetry keep their behavior. Doctor performance output gains an optional agentsRequestSloShadow field." },
+  "downtime": { "status": "none", "detail": "No additional interruption beyond the normal binary rollout." },
+  "manual": { "status": "none", "detail": "No migration or configuration change is required." },
+  "recovery": { "status": "none", "detail": "An ordinary binary rollback removes the observer without changing durable state." }
+}

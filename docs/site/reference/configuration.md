@@ -16,6 +16,37 @@ Setup owns the ordinary configuration and user-service installation. Home Manage
 
 Agents inherit the daemon user's environment and account access. A provider permission mode is not sandboxing. Never silently switch the user to unrestricted execution while troubleshooting.
 
+Browser pairing is opt-in through the daemon's optional top-level
+`browser_pairing_login` setting, alongside `person`:
+
+```toml
+person = "person/ada"
+browser_pairing_login = "ada@example.com"
+```
+
+Leaving `browser_pairing_login` unset disables browser pairing. When configured,
+the login must match the identity admitted by the tailnet for the pairing request.
+
+The publisher creates a five-minute browser request with a random request-key
+digest. The owning person receives an ordinary decision ask showing the device,
+login, request ID, and display code, with **Approve** and **Deny** answers in the
+TUI and native inbox. Approval requires a paired device with `control.pairing`,
+checked at the completion boundary. The existing paired native inbox can answer
+the ask. Local-owner Unix sessions and the embedded local browser cannot approve;
+neither can an agent, assistant, attention-only device, or browser grant.
+The person must compare the display code with the browser they are using:
+device labels and login text are requester-supplied metadata, not identity proof.
+
+Approval permits one redemption into a 30-day device grant with
+`read.projections`, `read.declarations`, `read.glasses`, `read.arrangements`,
+`terminal.read`, and `control.messages`. The declaration, glass, arrangement,
+and terminal scopes preserve the web's existing detail views. No other control
+scope is granted. The normal device-pairing limited scope list is unchanged.
+Browser grants use the existing bearer-device path, with no device signing key;
+only devices presenting a real signing public key enroll one. Devices can be
+revoked through the existing device revocation action, and a browser can revoke
+its own grant through `POST /v1/client/pairing/browser-requests/revoke-current`.
+
 ## KDL documents
 
 Every declaration file starts with `version 2`. Declarations follow directly:

@@ -89,6 +89,7 @@ impl Drop for ScratchRawPty {
 
 fn raw_app(root: &Path, node: &str) -> crate::api::AppState {
     crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
@@ -304,10 +305,10 @@ async fn membership_only_gateway_holds_raw_writers_and_fences_capabilities() {
     let credential = "scratch-raw-paired-credential";
     gateway
         .store
-        .append_claim(&ClaimInput {
+        .append_client_operation_claim(&ClaimInput {
             subject: "custom/client/pairing-raw-fixture".into(),
             kind: "custom.client.pairing-completed".into(),
-            actor: None,
+            actor: Some("person/avery".into()),
             fields: BTreeMap::from([
                 (
                     "credential_hash".into(),
@@ -463,6 +464,7 @@ async fn stale_dial_out_links_never_offer_reverse_routes() {
         store.pin_fleet_anchor(keys[0].public()).unwrap();
         store.set_member_key(Some(keys[i].clone())).unwrap();
         crate::api::AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store,
@@ -871,11 +873,11 @@ impl Drop for LeasePair {
 }
 
 fn lease_claim(store: &Store, subject: &str, kind: &str, fields: Value) {
-    store
-        .append_claim(&ClaimInput {
+    let input = ClaimInput {
             subject: subject.into(),
             kind: kind.into(),
-            actor: None,
+            actor: fields.get("person_id").and_then(Value::as_str)
+                .map(str::to_owned).or_else(|| (kind == "custom.client.pairing-revoked").then(|| "person/avery".into())),
             fields: fields
                 .as_object()
                 .unwrap()
@@ -885,8 +887,12 @@ fn lease_claim(store: &Store, subject: &str, kind: &str, fields: Value) {
             evidence: Vec::new(),
             expected_subject: None,
             idempotency_key: None,
-        })
-        .unwrap();
+        };
+    if kind.starts_with("custom.client.pairing") {
+        store.append_client_operation_claim(&input)
+    } else {
+        store.append_claim(&input)
+    }.unwrap();
 }
 
 async fn socket_ready(socket: &Path) {
@@ -1319,6 +1325,7 @@ async fn a_gateway_streams_a_remote_terminal_through_owner_long_polls() {
     let owner_root = tempfile::tempdir().unwrap();
     let gateway_root = tempfile::tempdir().unwrap();
     let app_state = |root: &Path, node: &str| crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
@@ -1493,6 +1500,7 @@ async fn a_cli_attach_from_another_host_paints_screens_and_delivers_input() {
     let owner_root = tempfile::tempdir().unwrap();
     let gateway_root = tempfile::tempdir().unwrap();
     let app_state = |root: &Path, node: &str| crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
@@ -1710,6 +1718,7 @@ async fn the_owning_host_names_a_new_agents_default_workspace() {
     let owner_root = tempfile::tempdir().unwrap();
     let gateway_root = tempfile::tempdir().unwrap();
     let app_state = |root: &Path, node: &str| crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
@@ -1807,6 +1816,7 @@ async fn an_attachment_travels_from_the_member_that_took_it_and_never_through_sy
     let owner_root = tempfile::tempdir().unwrap();
     let gateway_root = tempfile::tempdir().unwrap();
     let app_state = |root: &Path, node: &str| crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
@@ -1995,6 +2005,7 @@ async fn a_long_body_is_read_from_its_owner_per_request_and_kept_nowhere_else() 
     let owner_root = tempfile::tempdir().unwrap();
     let gateway_root = tempfile::tempdir().unwrap();
     let app_state = |root: &Path, node: &str| crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
@@ -2237,6 +2248,7 @@ async fn a_read_reaches_an_owner_through_a_peer_that_can_dial_it() {
     // replicated transport observation.
     let roots = [(); 3].map(|()| tempfile::tempdir().unwrap());
     let make_state = |root: &Path, node: &str| crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
@@ -2490,6 +2502,7 @@ async fn a_read_reaches_an_owner_through_a_peer_that_can_dial_it() {
 async fn a_gateway_lists_a_remote_agents_messages_from_its_owner_and_says_when_it_cannot() {
     let roots = [(); 2].map(|()| tempfile::tempdir().unwrap());
     let make_state = |root: &Path, node: &str| crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
@@ -2677,6 +2690,7 @@ async fn a_relaying_worker_refuses_a_forged_path_and_a_spent_hop_limit() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("st3.sock");
     let main = crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("middle").unwrap()),
@@ -2794,6 +2808,7 @@ async fn a_followed_conversation_says_why_while_its_owner_cannot_be_reached() {
     let owner_root = tempfile::tempdir().unwrap();
     let gateway_root = tempfile::tempdir().unwrap();
     let make_state = |root: &Path, node: &str| crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
@@ -2906,6 +2921,7 @@ async fn gateway_fetches_authenticated_owner_record_chunks_and_propagates_invali
     let owner_root = tempfile::tempdir().unwrap();
     let gateway_root = tempfile::tempdir().unwrap();
     let make_state = |root: &Path, node: &str| crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
@@ -3100,6 +3116,7 @@ async fn a_gateway_receives_remote_conversation_changes_without_idle_data() {
     let owner_root = tempfile::tempdir().unwrap();
     let gateway_root = tempfile::tempdir().unwrap();
     let make_state = |root: &Path, node: &str| crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open(&root.join("graph.db"), node).unwrap()),
@@ -3319,6 +3336,7 @@ async fn signed_client_read_returns_an_owner_local_native_timeline() {
         .unwrap();
     let socket = root.path().join("st3.sock");
     let main = crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: Arc::new(Store::open_memory("owner").unwrap()),
@@ -3463,6 +3481,7 @@ async fn the_worker_uses_the_main_daemon_as_the_only_database_writer() {
     let store = Arc::new(Store::open(&root.path().join("claims.sqlite3"), "target").unwrap());
     store.bind_fleet(fleet).unwrap();
     let app = crate::api::router(crate::api::AppState {
+        browser_pairing_login: None,
         seat_admission: Default::default(),
         owning_person: None,
         store: store.clone(),
@@ -3613,6 +3632,7 @@ async fn inbound_only_peer_syncs_both_ways_between_isolated_daemons() {
         store.bind_fleet(fleet).unwrap();
         let socket = root.join("main.sock");
         let app = crate::api::router(crate::api::AppState {
+            browser_pairing_login: None,
             seat_admission: Default::default(),
             owning_person: None,
             store: store.clone(),
@@ -3750,7 +3770,7 @@ async fn signed_inventory_read_preserves_owner_unavailable_http_status() {
     fs::create_dir_all(&observations).unwrap();
     fs::write(observations.join(fractal_drivers::harness_events::DATABASE), "invalid native spool").unwrap();
     let socket = root.path().join("st3.sock");
-    let main = crate::api::AppState { seat_admission: Default::default(), owning_person: None,
+    let main = crate::api::AppState { browser_pairing_login: None, seat_admission: Default::default(), owning_person: None,
         store, notify: Arc::new(tokio::sync::Notify::new()), event_notify: watch::channel(0_u64).0,
         node: "owner".into(), state_dir: root.path().to_path_buf(),
         pty_root: root.path().join("pty"), pty_binary: PathBuf::from("pty"),
